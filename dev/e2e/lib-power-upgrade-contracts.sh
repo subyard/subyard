@@ -209,7 +209,7 @@ assert_v2_transition() {
     .domains["owner-registration"] == {
       "epoch": 3, "applied": ["canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"]
     } and
-    .domains["power-metadata"] == {"epoch": 3, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]} and
+    .domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]} and
     .domains["project-state"] == {"epoch": 1, "applied": []} and
     .domains.settings == {
       "epoch": 3, "applied": ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]

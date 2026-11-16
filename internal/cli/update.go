@@ -303,7 +303,8 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 	} else if success && execution.prepared.RepairCurrent && !execution.followup {
 		fmt.Fprintln(output, "  Next: run yard update again to check for and install a newer release")
 	}
-	if success && hostruntime.LocalNetworkManagerRebootPending() {
+	// A migrated guard waits for its reboot even when a later update stage failed.
+	if hostruntime.LocalNetworkManagerRebootPending() {
 		fmt.Fprintf(output, "  Next: %s\n", hostruntime.NetworkManagerRebootReminder)
 	}
 	if newer := execution.newerRelease; !success && newer.Command != "" {

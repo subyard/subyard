@@ -62,7 +62,9 @@ func (cli *CLI) networkService(yards []domain.Context) *yardnetwork.Service {
 				bridges = append(bridges, y.IncusBridge)
 			}
 		}
-		service = &yardnetwork.Service{Host: host, Lock: networkruntime.HostLock{}, Guard: func(ctx context.Context) error { return (hostruntime.NetworkGuard{}).Check(ctx, bridges) }}
+		service = &yardnetwork.Service{Host: host, Lock: networkruntime.HostLock{}, Guard: func(ctx context.Context) error {
+			return (hostruntime.NetworkGuard{RebootPending: hostruntime.LocalNetworkManagerRebootPending}).Check(ctx, bridges)
+		}}
 	}
 	if service.ContractSource != nil {
 		return service

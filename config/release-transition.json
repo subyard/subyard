@@ -8,7 +8,7 @@
   },
   "currentEpochs": {
     "owner-registration": 3,
-    "power-metadata": 3,
+    "power-metadata": 4,
     "project-state": 1,
     "settings": 3
   },
@@ -68,6 +68,16 @@
       "dependsOn": [
         "register-existing-local-yards-v3",
         "introduce-owner-publication-state-v1"
+      ]
+    },
+    {
+      "id": "introduce-nm-device-guard-v4",
+      "domain": "power-metadata",
+      "fromEpoch": 3,
+      "toEpoch": 4,
+      "kind": "nm-device-guard-v1",
+      "dependsOn": [
+        "complete-registered-guest-disk-tmp-v3"
       ]
     }
   ]

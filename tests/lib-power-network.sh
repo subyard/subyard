@@ -171,13 +171,19 @@ cat > "$tmp/bin/nmcli" <<'SH'
 printf '%s\n' "$*" >> "$MOCK_NMCLI_LOG"
 case "$*" in
   "-t -f DEVICE,STATE device"|"-t -f DEVICE,TYPE,STATE device")
+    [ "${MOCK_NMCLI_READ_RC:-0}" = 0 ] || exit "$MOCK_NMCLI_READ_RC"
     devices="${MOCK_NM_DEVICES:-}"
-    [ ! -e "$MOCK_NMCLI_RELOADED" ] || [ -z "${MOCK_NM_DEVICES_AFTER:-}" ] || devices="$MOCK_NM_DEVICES_AFTER"
+    if [ -e "$MOCK_NMCLI_RELOADED" ]; then
+      [ "${MOCK_NM_DEVICES_AFTER_RC:-0}" = 0 ] || exit "$MOCK_NM_DEVICES_AFTER_RC"
+      [ -z "${MOCK_NM_DEVICES_AFTER:-}" ] || devices="$MOCK_NM_DEVICES_AFTER"
+    fi
     if [ "$3" = DEVICE,STATE ]; then awk -F: '{ print $1 ":" $3 }' <<< "$devices"; else printf '%s\n' "$devices"; fi ;;
   "general reload conf")
     [ "${MOCK_NMCLI_RC:-1}" != 0 ] || : > "$MOCK_NMCLI_RELOADED"
     exit "${MOCK_NMCLI_RC:-1}" ;;
   "device set "*) exit 0 ;;
+  "-g GENERAL.REASON device show "*)
+    awk -F'|' -v d="$5" '$1 == d { print $2; found = 1 } END { if (!found) print "0 (No reason given)" }' <<< "${MOCK_NM_REASONS:-}" ;;
   *) exit 90 ;;
 esac
 SH
@@ -211,7 +217,8 @@ reset_case() {
     MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1 MOCK_INCUS_EXEC_HANG=0 \
     MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS='[]' MOCK_NM_CONF_DIR='' MOCK_NM_REQUIRE_ROOT=1 \
     MOCK_NM_PROPOSED_RC=0 MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nincusbr0:bridge:unmanaged' \
-    MOCK_VETHS='' MOCK_DEFAULT_ROUTES='' MOCK_NM_INVOCATION=invocation-1 MOCK_NM_DEVICES_AFTER=''
+    MOCK_VETHS='' MOCK_DEFAULT_ROUTES='' MOCK_NM_INVOCATION=invocation-1 MOCK_NM_DEVICES_AFTER='' \
+    MOCK_NMCLI_READ_RC=0 MOCK_NM_DEVICES_AFTER_RC=0 MOCK_NM_REASONS=''
 }
 
 reset_case
@@ -482,10 +489,12 @@ guard_conf="$conf_dir/zz-subyard-unmanaged.conf"
 legacy_conf="$conf_dir/99-subyard-unmanaged.conf"
 mkdir -p "$conf_dir" "$tmp/run"
 NM_GUARD_RECORD="$tmp/run/nm-guard.record"
-NM_GUARD_REBOOT_PENDING="$tmp/run/nm-guard-reboot-pending"
+POWER_NM_REBOOT_PENDING="$tmp/run/nm-guard-reboot-pending"
+NM_OTHER_CONFIG_FILES=''
+NM_GUARD_REBOOT_PENDING="$POWER_NM_REBOOT_PENDING"
 NM_GUARD_SETTLE_SECONDS=0
 printf 'boot-1\n' > "$tmp/boot_id"
-nm_boot_id() { cat "$tmp/boot_id"; }
+power_nm_boot_id() { cat "$tmp/boot_id"; }
 incus_networks='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true},{"name":"br0","type":"bridge","managed":false},{"name":"docker0","type":"bridge","managed":false},{"name":"incusnet1","type":"ovn","managed":true}]'
 guard_case() {
   reset_case
@@ -594,6 +603,7 @@ write_released() {
     "$released_spec" "$released_spec" "${released_spec//;/,}" > "$guard_conf"
   printf '[keyfile]\nunmanaged-devices=interface-name:legacybr0\n' > "$legacy_conf"
 }
+rm -f "$NM_GUARD_REBOOT_PENDING"
 write_released
 printf '[keyfile]\nunmanaged-devices=interface-name:enp6s0\n' > "$conf_dir/00-admin.conf"
 nm_guard_released "$guard_conf" || fail "the released guard was not detected"
@@ -605,7 +615,7 @@ if (MOCK_NM_PROPOSED_RC=7 POWER_NM_GUARD_COMMAND='yard update' nm_unmanaged_guar
   fail "migration applied with a hijacked device"
 fi
 MOCK_NM_PROPOSED_RC=0 POWER_NM_GUARD_COMMAND='yard update' nm_guard_apply "$guard_conf" write incusbr0 >/dev/null || true
-for expected in "NetworkManager manages enp6s0, which the administrator's unmanaged-devices list marks unmanaged" \
+for expected in "NetworkManager manages enp6s0, which the unmanaged-devices list in $conf_dir/00-admin.conf marks unmanaged" \
   "'sudo nmcli device set enp6s0 managed no' (or the administrator's own way)" 'then rerun yard update'; do
   case "$POWER_ERROR" in *"$expected"*) ;; *) fail "hijack refusal lacks '$expected': $POWER_ERROR" ;; esac
 done
@@ -614,34 +624,98 @@ MOCK_NM_DEVICES=$'enp6s0:ethernet:connected\nincusbr0:bridge:connected (external
 case "$POWER_ERROR" in *'manages incusbr0, which the guard covers'*'manages enp6s0'*) ;; *) fail "refusals were not reported together: $POWER_ERROR" ;; esac
 [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ -e "$legacy_conf" ] && [ "$(reloads)" = 0 ] \
   || fail "a refused migration changed the host"
-printf '[keyfile]\nunmanaged-devices=except:type:wifi\n' > "$conf_dir/00-admin.conf"
+# Ubuntu's stock list keeps everything but wifi and modems unmanaged: decided from nmcli's TYPE.
+printf '[keyfile]\nunmanaged-devices=*,except:type:wifi,except:type:gsm,except:type:cdma\n' > "$conf_dir/00-admin.conf"
 nm_guard_apply "$guard_conf" write incusbr0 >/dev/null || true
-case "$POWER_ERROR" in *"enp6s0, which the administrator's unmanaged-devices list may mark unmanaged"*) ;; *) fail "may-match refusal: $POWER_ERROR" ;; esac
-# An exact exception keeps its device managed, so it is no reason to refuse.
-for selection in 'except:interface-name:enp6s0|1' 'except:interface-name:br0|0' 'interface-name:en*|2' '*|0' 'interface-name:enp6s0,except:interface-name:enp6s0|1'; do
-  if nm_list_selects "${selection%|*}" enp6s0; then got=0; else got=$?; fi
-  [ "$got" = "${selection##*|}" ] || fail "nm_list_selects '${selection%|*}' enp6s0 returned $got"
-done
+case "$POWER_ERROR" in *"enp6s0, which the unmanaged-devices list in $conf_dir/00-admin.conf marks unmanaged"*) ;; *) fail "stock-list refusal: $POWER_ERROR" ;; esac
+printf '[keyfile]\nunmanaged-devices=interface-name:en*\n' > "$conf_dir/00-admin.conf"
+nm_guard_apply "$guard_conf" write incusbr0 >/dev/null || true
+case "$POWER_ERROR" in *"enp6s0, which the unmanaged-devices list in $conf_dir/00-admin.conf may mark unmanaged"*) ;; *) fail "may-match refusal: $POWER_ERROR" ;; esac
+printf '[keyfile]\nunmanaged-devices=*,except:interface-name:enp6s0\n' > "$conf_dir/00-admin.conf"
+if ! nm_guard_apply "$guard_conf" write incusbr0 >/dev/null; then
+  case "$POWER_ERROR" in *'manages enp6s0'*) fail "an excepted device blocked the migration: $POWER_ERROR" ;; esac
+fi
+write_released
+printf '[keyfile]\nunmanaged-devices=interface-name:enp6s0\n' > "$conf_dir/00-admin.conf"
+# NetworkManager device-list semantics: order-independent, exceptions win, types from nmcli.
+while IFS='|' read -r list device type want; do
+  [ -n "$device" ] || continue
+  if nm_list_selects "$list" "$device" "$type"; then got=0; else got=$?; fi
+  [ "$got" = "$want" ] || fail "nm_list_selects '$list' $device $type returned $got, want $want"
+done < "$ROOT/tests/fixtures/nm-list-selects.txt"
 
 # After the hand-back the migration rewrites the guard without a reload and asks for a reboot.
 MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp6s0:ethernet:unmanaged\nincusbr0:bridge:unmanaged'
 nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out"
 nm_guard_format_current "$guard_conf" && [ ! -e "$legacy_conf" ] || fail "migration did not rewrite the guard"
 [ "$(reloads)" = 0 ] && [ ! -s "$MOCK_SYSTEMCTL_LOG" ] || fail "migration reloaded NetworkManager"
-[ "$(cat "$NM_GUARD_REBOOT_PENDING")" = boot-1 ] || fail "migration did not record the pending reboot"
+[ "$(cat "$NM_GUARD_REBOOT_PENDING")" = 'boot-1 invocation-1' ] || fail "migration did not record the pending reboot"
 grep -Fq 'reboot the host once' "$tmp/migrate.out" || fail "migration did not ask for the reboot"
 grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "migration pinned a device"
 nm_guard_file_current "$guard_conf" incusbr0 || fail "planning wanted a reload before the reboot"
-MOCK_NM_INVOCATION=invocation-9 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
+nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
 [ "$(reloads)" = 0 ] || fail "init reloaded NetworkManager before the pending reboot"
 nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out"
 grep -Fq 'no released form' "$tmp/migrate.out" || fail "a repeated migration was not a no-op"
+MOCK_NM_INVOCATION=invocation-1 nm_guard_reboot_pending || fail "the pending reboot was not reported"
+MOCK_NM_INVOCATION=invocation-2 nm_guard_reboot_pending && fail "a NetworkManager restart did not apply the migrated guard"
 printf 'boot-2\n' > "$tmp/boot_id"
 nm_guard_reboot_pending && fail "the reboot reminder survived a new boot"
 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
 [ "$(reloads)" = 1 ] || fail "after the reboot the stale record did not reload once"
 printf 'boot-1\n' > "$tmp/boot_id"
 rm -f "$NM_GUARD_REBOOT_PENDING" "$conf_dir/00-admin.conf"
+
+# An administrator file nobody has applied yet: a reload would deconfigure the device it marks
+# unmanaged, so the change refuses, naming the device and the file, and changes nothing.
+guard_case
+nm_guard_write_file "$guard_conf" "$(nm_guard_render $'incusbr0\nnestedbr0')"
+rm -f "$NM_GUARD_RECORD"
+printf '[keyfile]\nunmanaged-devices=interface-name:enp5s0\n' > "$conf_dir/10-later-admin.conf"
+MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp5s0:ethernet:connected\nincusbr0:bridge:unmanaged'
+before_hash="$(hash_of "$guard_conf")"
+if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "a reload would have deconfigured enp5s0"; fi
+nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null || true
+case "$POWER_ERROR" in
+  *"NetworkManager manages enp5s0, which the unmanaged-devices list in $conf_dir/10-later-admin.conf marks unmanaged"*"sudo nmcli general reload conf"*) ;;
+  *) fail "unapplied admin file refusal: $POWER_ERROR" ;;
+esac
+[ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ "$(reloads)" = 0 ] || fail "the refusal changed the host"
+rm -f "$conf_dir/10-later-admin.conf"
+# A device only a list kept unmanaged would be taken once the list is gone; own devices are not.
+MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\neno2:ethernet:unmanaged\nincusbr0:bridge:unmanaged'
+MOCK_NM_REASONS=$'eno2|76 (The device is unmanaged by user decision via settings plugin ("unmanaged-devices" for keyfile))\nincusbr0|76 ("unmanaged-devices")'
+nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null || true
+case "$POWER_ERROR" in
+  *'eno2 is unmanaged only by an unmanaged-devices list'*) ;;
+  *) fail "a device the reload would take was not reported: $POWER_ERROR" ;;
+esac
+case "$POWER_ERROR" in *incusbr0\ is\ unmanaged*) fail "an own device was reported as taken" ;; esac
+MOCK_NM_REASONS=$'eno2|10 (No reason given)'
+nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null || fail "an externally unmanaged device blocked the change: $POWER_ERROR"
+MOCK_NM_REASONS=''
+
+# Failed nmcli reads refuse; they never stand for an empty inventory.
+guard_case
+rm -f "$NM_GUARD_RECORD"
+before_hash="$(hash_of "$guard_conf")"
+if (MOCK_NMCLI_READ_RC=10 nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null 2>&1); then fail "a failed device read was accepted"; fi
+MOCK_NMCLI_READ_RC=10 nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null || true
+case "$POWER_ERROR" in *"cannot read NetworkManager's devices"*) ;; *) fail "failed read unreported: $POWER_ERROR" ;; esac
+[ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ "$(reloads)" = 0 ] || fail "a failed read changed the host"
+if MOCK_NMCLI_READ_RC=10 power_nm_guard_effective incusbr0; then fail "the validator accepted a failed device read"; fi
+case "$POWER_ERROR" in *"cannot read NetworkManager's devices"*) ;; *) fail "validator read failure unreported: $POWER_ERROR" ;; esac
+MOCK_NM_DEVICES='' nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null && fail "an empty device list was accepted"
+MOCK_NM_DEVICES_AFTER_RC=10 nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null && fail "a failed read after the reload was accepted"
+case "$POWER_ERROR" in *'could not be read after the reload'*'previous guard was restored'*) ;; *) fail "after-read failure: $POWER_ERROR" ;; esac
+[ "$(hash_of "$guard_conf")" = "$before_hash" ] || fail "a failed after-read kept the new guard"
+
+# Guard format classification matches the Go fixtures.
+while IFS=' ' read -r name want; do
+  cp "$ROOT/tests/fixtures/nm-guard-formats/$name.conf" "$tmp/format.conf"
+  if nm_guard_format_current "$tmp/format.conf"; then got=current; else got=released; fi
+  [ "$got" = "$want" ] || fail "guard format $name classified $got, want $want"
+done < "$ROOT/tests/fixtures/nm-guard-formats/expected"
 
 # A dangling legacy link, an inactive NetworkManager and an empty bridge inventory.
 guard_case

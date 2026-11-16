@@ -66,8 +66,8 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 				if kind == "newer-checkpoint" {
 					// A newer producer compacts a completed prefix without rewriting
 					// the legacy projection. The exact older target reads that proof.
-					registry.CurrentEpochs["power-metadata"] = 4
-					registry.Migrations = append(registry.Migrations, releasetransition.MigrationDefinitionV2{ID: "future-publication-ledger-v4", Domain: "power-metadata", FromEpoch: 3, ToEpoch: 4, Kind: "owner-publication-state-v1"})
+					registry.CurrentEpochs["power-metadata"] = 5
+					registry.Migrations = append(registry.Migrations, releasetransition.MigrationDefinitionV2{ID: "future-publication-ledger-v5", Domain: "power-metadata", FromEpoch: 4, ToEpoch: 5, Kind: "owner-publication-state-v1"})
 					newer, err := json.Marshal(registry)
 					if err != nil {
 						t.Fatal(err)

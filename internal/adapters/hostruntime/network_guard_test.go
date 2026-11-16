@@ -162,20 +162,71 @@ func TestRouteDevicesAreSubyardsOwn(t *testing.T) {
 	}
 }
 
-func TestNetworkManagerRebootPendingFollowsTheBootID(t *testing.T) {
+func TestNetworkManagerRebootPendingFollowsTheBootAndNetworkManager(t *testing.T) {
 	directory := testkit.TempDir(t)
 	pending, boot := filepath.Join(directory, "pending"), filepath.Join(directory, "boot_id")
-	if NetworkManagerRebootPending(pending, boot) {
+	invocation := "nm-1"
+	current := func() string { return invocation }
+	if NetworkManagerRebootPending(pending, boot, current) {
 		t.Fatal("absent record reported a pending reboot")
 	}
 	testkit.WriteFile(t, boot, []byte("boot-a\n"), 0o644)
-	testkit.WriteFile(t, pending, []byte("boot-a\n"), 0o644)
-	if !NetworkManagerRebootPending(pending, boot) {
-		t.Fatal("same boot did not report the pending reboot")
+	testkit.WriteFile(t, pending, []byte("boot-a nm-1\n"), 0o644)
+	if !NetworkManagerRebootPending(pending, boot, current) {
+		t.Fatal("same boot and NetworkManager did not report the pending reboot")
+	}
+	invocation = "nm-2"
+	if NetworkManagerRebootPending(pending, boot, current) {
+		t.Fatal("a NetworkManager restart did not apply the migrated guard")
+	}
+	testkit.WriteFile(t, pending, []byte("boot-a unknown\n"), 0o644)
+	if !NetworkManagerRebootPending(pending, boot, current) {
+		t.Fatal("an inactive NetworkManager at migration did not keep the boot ID rule")
 	}
 	testkit.WriteFile(t, boot, []byte("boot-b\n"), 0o644)
-	if NetworkManagerRebootPending(pending, boot) {
+	if NetworkManagerRebootPending(pending, boot, current) {
 		t.Fatal("a new boot still reported the pending reboot")
+	}
+}
+
+// The shell classifier in scripts/lib/host.sh reads the same fixtures in tests/lib-power-network.sh.
+func TestNetworkManagerGuardFormatSharedFixtures(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "tests", "fixtures", "nm-guard-formats")
+	expected, err := os.ReadFile(filepath.Join(root, "expected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(expected)), "\n") {
+		name, want, _ := strings.Cut(line, " ")
+		directory := testkit.TempDir(t)
+		conf := filepath.Join(directory, "zz-subyard-unmanaged.conf")
+		contents, err := os.ReadFile(filepath.Join(root, name+".conf"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, conf, contents, 0o644)
+		got, err := NetworkManagerGuardCurrent(conf)
+		if err != nil || got != (want == "current") {
+			t.Errorf("%s: current=%v err=%v, want %s", name, got, err, want)
+		}
+	}
+}
+
+func TestNetworkGuardNamesThePendingReboot(t *testing.T) {
+	config := strings.Replace(currentGuardConfig, ",interface-name:incusbr0", "", 1)
+	guard := activeGuard(config, "incusbr0:unmanaged\n", `[]`)
+	guard.RebootPending = func() bool { return true }
+	err := guard.Check(context.Background(), []string{"incusbr0"})
+	if err == nil || !strings.Contains(err.Error(), "waits for a host reboot: reboot the host once") {
+		t.Fatalf("expected the pending reboot in %v", err)
+	}
+}
+
+func TestNetworkGuardRefusesAFailedDeviceRead(t *testing.T) {
+	guard := activeGuard(currentGuardConfig, "", `[]`)
+	err := guard.Check(context.Background(), []string{"incusbr0"})
+	if err == nil || !strings.Contains(err.Error(), "cannot read NetworkManager's devices") {
+		t.Fatalf("an empty device read was accepted: %v", err)
 	}
 }
 

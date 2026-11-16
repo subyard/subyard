@@ -1910,6 +1910,14 @@ restarting the yard. Explicit start schedules this retry after committing runnin
 Publication restore failures do not enter the security-critical running-runtime failure
 path. Host network and policy guards continue to fail closed.
 
+The compiled `nm-device-guard-v1` capability advances `power-metadata` from epoch 3 to 4. It
+is the reader boundary of the `[device-subyard]` NetworkManager guard; the
+`host-network-guard` activation owner rewrites a released guard file without reloading
+NetworkManager and records one pending host reboot. Released power readers reject the new
+guard, and their init would rewrite the released guard and reload NetworkManager, so
+rollback to a release below this epoch is refused before activation as `rollback-incompatible`.
+`yard update --rollback` does not cross this boundary.
+
 The compiled `owner-publication-state-v1` capability advances `power-metadata` from epoch 1
 to 2 before runtime activation. Existing canonical power and ownership values retain their
 formats. The protected capture/apply/verify ledger establishes the reader boundary; explicit

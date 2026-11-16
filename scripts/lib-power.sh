@@ -197,23 +197,47 @@ power_nm_config_violations() { # <bridge...>; stdin: NetworkManager --print-conf
   '
 }
 
-# Existing yard bridges that NetworkManager manages, one per line.
+# Existing yard bridges that NetworkManager manages, one per line. A failed or empty nmcli
+# read fails: it never stands for an empty device list.
 power_nm_managed_bridges() { # <bridge...>
-  local device state bridge
-  command -v nmcli >/dev/null 2>&1 || { printf 'nmcli\n'; return 1; }
+  local devices device state bridge
+  command -v nmcli >/dev/null 2>&1 || return 1
+  devices="$(nmcli -t -f DEVICE,STATE device 2>/dev/null)" || return 1
+  [ -n "$devices" ] || return 1
   while IFS=: read -r device state; do
     for bridge in "$@"; do
-      [ "$device" = "$bridge" ] && [ "$state" != unmanaged ] && printf '%s\n' "$device"
+      if [ "$device" = "$bridge" ] && [ "$state" != unmanaged ]; then printf '%s\n' "$device"; fi
     done
-  done < <(nmcli -t -f DEVICE,STATE device 2>/dev/null)
-  return 0
+  done <<< "$devices"
 }
 
 POWER_NM_GUARD_COMMAND="${POWER_NM_GUARD_COMMAND:-yard init}"
+# A migrated guard waits for one host reboot. The record holds the boot ID and NetworkManager's
+# invocation at migration; a new boot, or a NetworkManager restart (which reads every file
+# again), applies the migrated guard.
+POWER_NM_REBOOT_PENDING=/run/subyard/nm-guard-reboot-pending
+
+power_nm_boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
+
+power_nm_reboot_pending() {
+  local boot invocation current
+  [ -r "$POWER_NM_REBOOT_PENDING" ] || return 1
+  read -r boot invocation < "$POWER_NM_REBOOT_PENDING" || [ -n "${boot:-}" ] || return 1
+  [ -n "$boot" ] && [ "$boot" = "$(power_nm_boot_id)" ] || return 1
+  [ -n "${invocation:-}" ] && [ "$invocation" != unknown ] || return 0
+  current="$(systemctl show -p InvocationID --value NetworkManager 2>/dev/null)" || return 0
+  [ -z "$current" ] || [ "$current" = "$invocation" ]
+}
 
 power_join() { # stdin lines -> one "; "-separated line
   local out='' line
   while IFS= read -r line; do [ -z "$line" ] || out+="${out:+; }$line"; done
+  printf '%s' "$out"
+}
+
+power_join_comma() { # stdin lines -> one ", "-separated line
+  local out='' line
+  while IFS= read -r line; do [ -z "$line" ] || out+="${out:+, }$line"; done
   printf '%s' "$out"
 }
 
@@ -233,13 +257,17 @@ power_nm_guard_effective() { # <bridge...>
   }
   violations="$(printf '%s\n' "$config" | power_nm_config_violations "$@")"
   if ! managed="$(power_nm_managed_bridges "$@")"; then
-    violations+="${violations:+$'\n'}nmcli is required to inspect yard bridges"
+    violations+="${violations:+$'\n'}cannot read NetworkManager's devices with nmcli"
   elif [ -n "$managed" ]; then
     while IFS= read -r rc; do
       violations+="${violations:+$'\n'}NetworkManager manages yard bridge $rc"
     done <<< "$managed"
   fi
   [ -z "$violations" ] && return 0
+  if power_nm_reboot_pending; then
+    power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — a migrated NetworkManager guard waits for a host reboot: reboot the host once, then rerun $POWER_NM_GUARD_COMMAND"
+    return 1
+  fi
   power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — correct the NetworkManager configuration, then rerun $POWER_NM_GUARD_COMMAND"
 }
 

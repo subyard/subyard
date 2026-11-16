@@ -287,9 +287,10 @@ prepare)
   [ "$(device_state "$UP")" = unmanaged ] && [ "$(address_of "$UP")" = "$UP_ADDRESS" ] || die 'the hand-back lost the uplink'
   before_table="$(managedness)"
   since="$(date +%s)"
-  owner env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" \
-    "$launcher" update --version "$CANDIDATE_VERSION" --yes >"$STATE/update.log" 2>&1 \
-    || { owner "$launcher" update --yes >>"$STATE/update.log" 2>&1 || die 'the update failed after the hand-back'; }
+  # The refused update left the candidate active and its transition recovering; one plain
+  # update finishes it, and that single run must succeed on its own.
+  owner "$launcher" update --yes >"$STATE/update.log" 2>&1 || die 'the update failed after the hand-back'
+  grep -Fq 'Next: reboot the host once' "$STATE/update.log" || die 'the update did not ask for the reboot'
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'candidate is not active'
   settle 3
   grep -q '^unmanaged-devices' "$guard" && die 'the update kept the released guard'
@@ -299,7 +300,13 @@ prepare)
   [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the update restarted NetworkManager'
   [ "$(nm_reloads_since "$since")" = 0 ] || die "the update reloaded NetworkManager: $(sudo -n journalctl -u NetworkManager --since "@$since" -q | tail -5)"
   [ "$(managedness)" = "$before_table" ] || die 'the update changed a device managed state'
-  grep -Fq 'reboot the host once' "$STATE/update.log" || evidence 'update output has no reboot Next line (the published runtime printed it)'
+  if owner "$launcher" update --rollback --yes >"$STATE/rollback.log" 2>&1; then
+    die 'rollback to the released guard was accepted'
+  fi
+  grep -Eq 'rollback-incompatible|cannot safely accept the current migration ledger' "$STATE/rollback.log" \
+    || die 'the rollback refusal did not name the incompatible release'
+  [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
+  pass 'rollback to the published release is refused before activation'
   owner "$launcher" status >"$STATE/status.log" 2>&1 || true
   grep -Fq 'Reminder: reboot the host once' "$STATE/status.log" || die 'yard status shows no reboot reminder'
   owner "$launcher" check >"$STATE/check.log" 2>&1 || true
@@ -435,6 +442,18 @@ fresh)
   grep -Eq 'interface-name:(br0|br-0123456789ab)(,|$)' "$guard" && die 'the guard lists a bridge Incus does not manage'
   yard_devices_unmanaged 'running yard'
   pass 'except-only list, NM-managed br0 and a Docker-style bridge are untouched by install, init and start'
+
+  # An administrator file nobody has applied yet: a guard reload would deconfigure br0.
+  printf '[keyfile]\nunmanaged-devices=interface-name:br0\n' | sudo -n tee "$conf_dir/50-e2e-later.conf" >/dev/null
+  sudo -n rm -f /run/subyard/nm-guard.record
+  if yard init --yes >"$STATE/init-refused.log" 2>&1; then die 'init reloaded over an unapplied administrator file'; fi
+  grep -Fq "NetworkManager manages br0, which the unmanaged-devices list in $conf_dir/50-e2e-later.conf marks unmanaged" \
+    "$STATE/init-refused.log" || die 'the init refusal did not name br0 and the administrator file'
+  [ "$(device_state br0)" = connected ] && [ "$(address_of br0)" = 198.19.0.1/24 ] || die 'the refused init touched br0'
+  sudo -n rm -f "$conf_dir/50-e2e-later.conf"
+  yard init --yes >"$STATE/init-again.log" 2>&1 || die 'init failed after removing the administrator file'
+  [ "$(device_state br0)" = connected ] || die 'the guard reload touched br0'
+  pass 'init refuses a reload that would apply an unapplied administrator file, naming br0 and the file'
   yard teardown --yes >"$STATE/teardown.log" 2>&1 || die 'teardown failed'
   settle
   [ -f "$admin_conf" ] || die 'teardown removed the administrator file'

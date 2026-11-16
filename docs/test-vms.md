@@ -809,10 +809,12 @@ SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
 The NetworkManager guard lane owns its lease and reboots the VM itself. `--lane upgrade` runs a
 published 0.29.0 init that stops after writing its guard, which lets NetworkManager take the
 administrator's uplink; the candidate update must refuse and name the hand-back, then rewrite the
-guard without a reload and ask for one reboot. It records a NetworkManager restart experiment,
+guard without a reload and ask for one reboot, and rollback to the published release must be
+refused. It records a NetworkManager restart experiment,
 reboots, runs candidate init and start, checks new veth and tap devices and a later `managed=1`
 section, runs teardown and reboots again. `--lane fresh` installs the candidate behind an
-except-only administrator list with an NM-managed `br0` and a Docker-style bridge:
+except-only administrator list with an NM-managed `br0` and a Docker-style bridge, then checks
+that init refuses a reload that would apply an administrator file nobody has applied yet:
 
 ```sh
 bash dev/e2e/nm-admin-uplink.sh --preflight

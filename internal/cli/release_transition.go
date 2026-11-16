@@ -896,10 +896,9 @@ func (cli *CLI) networkGuardActivationReconciler(
 			if err != nil {
 				return activationApplicability{}, fmt.Errorf("inspect the NetworkManager guard: %w", err)
 			}
-			if current {
-				return activationApplicability{state: "current"}, nil
-			}
-			return activationApplicability{state: "released", applies: true}, nil
+			// The state stays the same across the rewrite, so the authorized Desired
+			// fingerprint is stable through reconciliation and resume.
+			return activationApplicability{state: "network-guard", applies: !current}, nil
 		},
 		platform:  power.platform,
 		authorize: cli.releaseTransitionPrivilegeAuthorization,

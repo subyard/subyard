@@ -234,6 +234,7 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 				"localize-ssh-port-settings-v3":         "settings",
 				"register-existing-local-yards-v3":      "owner-registration",
 				"complete-registered-guest-disk-tmp-v3": "power-metadata",
+				"introduce-nm-device-guard-v4":          "power-metadata",
 			}
 			if len(journal.Steps) != len(ledgerMigrations) {
 				t.Fatalf("expected only shipped ledger steps: %#v", journal.Steps)
@@ -257,7 +258,7 @@ func TestLedgerOnlyForwardActivationIncludesNamedConfig(t *testing.T) {
 			for domain, expected := range map[string]releasetransition.DomainLedgerV2{
 				"settings":           {Epoch: 3, Applied: []string{"canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"}},
 				"owner-registration": {Epoch: 3, Applied: []string{"canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"}},
-				"power-metadata":     {Epoch: 3, Applied: []string{"introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"}},
+				"power-metadata":     {Epoch: 4, Applied: []string{"introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"}},
 			} {
 				state := ledger.Domains[domain]
 				if !reflect.DeepEqual(state, expected) {
@@ -383,8 +384,8 @@ func assertNativeSSHPins(t *testing.T, f *sourceScopeFixture) {
 		}
 	}
 	journal := f.journal()
-	if len(journal.Steps) != 5 {
-		t.Fatalf("expected two actual pin CAS steps and three declared ledger CAS steps: steps=%d", len(journal.Steps))
+	if len(journal.Steps) != 6 {
+		t.Fatalf("expected two actual pin CAS steps and four declared ledger CAS steps: steps=%d", len(journal.Steps))
 	}
 	for _, step := range journal.Steps {
 		if step.Checkpoint != releasetransition.StepVerified {
