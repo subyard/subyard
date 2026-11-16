@@ -55,7 +55,6 @@ case "$*" in
       *) printf '%s\n' "$MOCK_NM_STATE"; exit 3 ;;
     esac
     ;;
-  "show -p InvocationID --value NetworkManager") printf 'nm-1\n' ;;
   *) exit 90 ;;
 esac
 SH
@@ -165,11 +164,11 @@ MOCK_INSTANCE_EXISTS=0 bash "$ROOT/scripts/06-network.sh" --verify \
 # Planning treats a released guard, a missing bridge or a guard NetworkManager has not read as
 # drift, even while NetworkManager's configuration passes the guard rule, so init repairs it.
 nm_root="$TMP/nm-root"
-mkdir -p "$nm_root/etc/NetworkManager/conf.d" "$nm_root/run"
+mkdir -p "$nm_root/etc/NetworkManager/conf.d" "$nm_root/state"
 cp -r "$ROOT/scripts" "$nm_root/scripts"
 ln -s "$ROOT/config" "$nm_root/config"
-sed -i "s|/etc/NetworkManager/|$nm_root/etc/NetworkManager/|g; s|/run/subyard/|$nm_root/run/|g" "$nm_root/scripts/lib/host.sh"
-sed -i "s|/usr/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/usr/bin/NetworkManager|$TMP/bin/NetworkManager|g; s|/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/run/subyard/|$nm_root/run/|g; s|/etc/NetworkManager/|$nm_root/etc/NetworkManager/|g" \
+sed -i "s|/etc/NetworkManager/|$nm_root/etc/NetworkManager/|g; s|/var/lib/subyard/|$nm_root/state/|g" "$nm_root/scripts/lib/host.sh"
+sed -i "s|/usr/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/usr/bin/NetworkManager|$TMP/bin/NetworkManager|g; s|/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/var/lib/subyard/|$nm_root/state/|g; s|/etc/NetworkManager/|$nm_root/etc/NetworkManager/|g" \
   "$nm_root/scripts/lib-power.sh"
 nm_guard="$nm_root/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
 cat > "$TMP/bin/NetworkManager" <<SH
@@ -194,17 +193,21 @@ if bash "$nm_root/scripts/06-network.sh" --check; then
 fi
 printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
   'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' > "$nm_guard"
-guard_id="$(stat -c '%i:%.9Z' "$nm_guard")"
+guard_hash="$(bash -c '. "$1"; power_nm_guard_static_hash "$2"' _ "$ROOT/scripts/lib-power.sh" "$nm_guard")"
 boot_id="$(cat /proc/sys/kernel/random/boot_id)"
-printf '%s %s nm-1 unread init\n' "$boot_id" "$guard_id" > "$nm_root/run/nm-guard-state"
+printf '%s %s unread init\n' "$boot_id" "$guard_hash" > "$nm_root/state/nm-guard-state"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
   fail "network planning accepted a guard NetworkManager has not read"
 fi
-rm -f "$nm_root/run/nm-guard-state"
+rm -f "$nm_root/state/nm-guard-state"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
-  fail "network planning accepted a guard newer than NetworkManager without a record"
+  fail "network planning accepted a guard without a record"
 fi
-printf '%s %s nm-1 held init\n' "$boot_id" "$guard_id" > "$nm_root/run/nm-guard-state"
+printf 'earlier-boot %s held init\n' "$(printf 'other\n' | sha256sum | cut -d ' ' -f1)" > "$nm_root/state/nm-guard-state"
+if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
+  fail "network planning accepted a record for other guard content"
+fi
+printf 'earlier-boot %s unread init\n' "$guard_hash" > "$nm_root/state/nm-guard-state"
 MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check \
   || fail "network planning rejected the current guard NetworkManager has read"
 bash "$nm_root/scripts/06-network.sh" --check \

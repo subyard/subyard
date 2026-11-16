@@ -2,17 +2,17 @@ package hostruntime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
-	"strconv"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -51,28 +51,33 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 	if !ok {
 		return errors.New("NetworkManager is active but its binary is unavailable")
 	}
-	output, err := guard.run(ctx, binary, "--print-config")
-	if err != nil {
-		return fmt.Errorf("read NetworkManager effective configuration: %w", err)
-	}
-	violations := networkManagerConfigViolations(string(output), bridges)
-	remedy := "correct the NetworkManager configuration, then restart NetworkManager or reboot so it drops what it still holds, then rerun yard start"
-	for _, violation := range violations {
-		if strings.Contains(violation, "no [device-subyard]") || strings.Contains(violation, "match-device lacks") {
-			remedy = "run yard init"
+	// Each read is independent: a failed --print-config never hides the read state or the
+	// bridges nmcli reports. The next steps are joined in order.
+	var violations, remedies []string
+	reboot := false
+	if output, err := guard.run(ctx, binary, "--print-config"); err != nil {
+		violations = append(violations, fmt.Sprintf("cannot read NetworkManager's effective configuration (%v)", err))
+		remedies = append(remedies, "fix 'NetworkManager --print-config' (run 'sudo -v' when it needs root)")
+	} else if violations = networkManagerConfigViolations(string(output), bridges); len(violations) > 0 {
+		remedies = append(remedies, "correct the NetworkManager configuration")
+		reboot = true
+		for _, violation := range violations {
+			if strings.Contains(violation, "no [device-subyard]") || strings.Contains(violation, "match-device lacks") {
+				remedies[len(remedies)-1], reboot = "run yard init", false
+				break
+			}
 		}
 	}
 	state := "loaded"
 	if guard.State != nil {
 		state = guard.State()
 	}
-	switch state {
-	case "unread-init":
-		violations = append(violations, "NetworkManager has not read the Subyard guard since it was written")
-		remedy = "reboot the host or restart NetworkManager ('sudo systemctl restart NetworkManager'), then rerun yard start"
-	case "unread-migration":
-		violations = append(violations, "NetworkManager has not read the migrated Subyard guard")
-		remedy = "reboot the host once, then rerun yard start"
+	if state == "unread-init" || state == "unread-migration" {
+		violations = append(violations, "NetworkManager has not read the Subyard guard on disk since this boot began")
+		reboot = true
+	}
+	if reboot {
+		remedies = append(remedies, "reboot the host once")
 	}
 	nmcli, ok := guard.lookup("nmcli")
 	if !ok {
@@ -90,7 +95,8 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 	if len(violations) == 0 {
 		return nil
 	}
-	return fmt.Errorf("NetworkManager guard is not effective: %s — %s", strings.Join(violations, "; "), remedy)
+	return fmt.Errorf("NetworkManager guard is not effective: %s — %s", strings.Join(violations, "; "),
+		strings.Join(append(remedies, "rerun yard start"), ", then "))
 }
 
 func (guard NetworkGuard) networkManagerActive(ctx context.Context) (bool, error) {
@@ -295,41 +301,75 @@ const NetworkManagerGuardPath = "/etc/NetworkManager/conf.d/zz-subyard-unmanaged
 // as POWER_NM_GUARD_STATIC in scripts/lib-power.sh.
 var NetworkManagerGuardStaticEntries = []string{"type:veth", "driver:veth", "interface-name:tap????????"}
 
-// NetworkManagerGuardStatePath records which guard NetworkManager has read (scripts/lib/host.sh).
-const NetworkManagerGuardStatePath = "/run/subyard/nm-guard-state"
+// NetworkManagerGuardStatePath records which guard NetworkManager has read (scripts/lib/host.sh):
+// boot ID, sha256 of the guard's static content, held|unread and init|migration. It persists
+// across boots, so losing it can only refuse starts.
+const NetworkManagerGuardStatePath = "/var/lib/subyard/nm-guard-state"
 
 const bootIDPath = "/proc/sys/kernel/random/boot_id"
 
 // NetworkManagerRebootReminder is the one next step after a guard migration.
 const NetworkManagerRebootReminder = "reboot the host once so NetworkManager applies the migrated Subyard guard safely; NetworkManager keeps its previous configuration until then"
 
-// NetworkManagerUnreadReminder names the start NetworkManager needs before any yard starts.
-const NetworkManagerUnreadReminder = "NetworkManager has not read the Subyard guard yet: reboot the host or restart NetworkManager before starting a yard"
+// NetworkManagerUnreadReminder names the reboot NetworkManager needs before any yard starts.
+const NetworkManagerUnreadReminder = "NetworkManager has not read the Subyard guard yet: reboot the host once before starting a yard"
+
+var exactInterfaceEntry = regexp.MustCompile(`^interface-name:[A-Za-z0-9_.:-]+$`)
+
+// NetworkManagerGuardStatic is the guard's static content, as power_nm_guard_static_text in
+// scripts/lib-power.sh (shared vectors in tests/fixtures/nm-guard-static): trimmed lines without
+// comments or blank lines, each ending in a newline, and match-device without exact interface
+// names (the Incus bridges, which need no reboot because each one is pinned unmanaged).
+func NetworkManagerGuardStatic(contents string) string {
+	var static strings.Builder
+	for _, line := range strings.Split(contents, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if key, value, found := strings.Cut(line, "="); found && strings.TrimSpace(key) == "match-device" {
+			var kept []string
+			for _, entry := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' }) {
+				entry = strings.TrimSpace(entry)
+				if entry != "" && !exactInterfaceEntry.MatchString(entry) {
+					kept = append(kept, entry)
+				}
+			}
+			line = "match-device=" + strings.Join(kept, ",")
+		}
+		static.WriteString(line + "\n")
+	}
+	return static.String()
+}
+
+// NetworkManagerGuardStaticHash is the record's hash of the guard's static content.
+func NetworkManagerGuardStaticHash(contents string) string {
+	sum := sha256.Sum256([]byte(NetworkManagerGuardStatic(contents)))
+	return hex.EncodeToString(sum[:])
+}
 
 // NetworkManagerGuardState is the pure read-state rule shared with power_nm_guard_state_rule in
-// scripts/lib-power.sh and checked on tests/fixtures/nm-guard-state.txt. The record applies only
-// with five fields, the same boot, the same guard file ID and a readable invocation: "held", or
-// another NetworkManager invocation since, is loaded; "unread" is not. Anything else falls back
-// to the age test. It returns loaded, loaded-reboot, unread-init or unread-migration.
-func NetworkManagerGuardState(record, boot, fileID, invocation string, ageLoaded bool) string {
+// scripts/lib-power.sh and checked on tests/fixtures/nm-guard-state.txt. Loaded only when the
+// record names this static content and is "held", or names another boot (NetworkManager read
+// the file when it started). A missing or malformed record, or another content, is not loaded.
+// It returns loaded, loaded-reboot (a held migration waiting for the reboot), unread-init or
+// unread-migration.
+func NetworkManagerGuardState(record, boot, hash string) string {
 	fields := strings.Fields(record)
-	if len(fields) == 5 && fields[0] == boot && fileID != "" && fields[1] == fileID && invocation != "" &&
-		(fields[3] == "held" || fields[3] == "unread") && (fields[4] == "init" || fields[4] == "migration") {
-		switch {
-		case fields[2] != invocation:
-			return "loaded"
-		case fields[3] == "held" && fields[4] == "migration":
-			return "loaded-reboot"
-		case fields[3] == "held":
-			return "loaded"
-		default:
-			return "unread-" + fields[4]
-		}
+	if len(fields) != 4 || fields[0] == "" || boot == "" || hash == "" || fields[1] != hash ||
+		(fields[2] != "held" && fields[2] != "unread") || (fields[3] != "init" && fields[3] != "migration") {
+		return "unread-init"
 	}
-	if ageLoaded {
+	switch {
+	case fields[0] != boot:
 		return "loaded"
+	case fields[2] == "held" && fields[3] == "migration":
+		return "loaded-reboot"
+	case fields[2] == "held":
+		return "loaded"
+	default:
+		return "unread-" + fields[3]
 	}
-	return "unread-init"
 }
 
 func localNetworkManagerShow(property string) string {
@@ -340,68 +380,20 @@ func localNetworkManagerShow(property string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// networkManagerFileID matches `stat -c '%i:%.9Z'`.
-func networkManagerFileID(path string) string {
-	var stat syscall.Stat_t
-	if err := syscall.Stat(path, &stat); err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%d:%d.%09d", stat.Ino, stat.Ctim.Sec, stat.Ctim.Nsec)
-}
-
-// networkManagerGuardAgeLoaded: NetworkManager's main process started at least 2 s after the
-// guard file's ctime. Any failed read means not loaded.
-func networkManagerGuardAgeLoaded(path string) bool {
-	var stat syscall.Stat_t
-	if syscall.Stat(path, &stat) != nil {
-		return false
-	}
-	pid := localNetworkManagerShow("MainPID")
-	if pid == "" || pid == "0" {
-		return false
-	}
-	processStat, err := os.ReadFile(filepath.Join("/proc", pid, "stat"))
-	if err != nil {
-		return false
-	}
-	_, rest, found := strings.Cut(string(processStat), ") ")
-	fields := strings.Fields(rest)
-	if !found || len(fields) < 20 {
-		return false
-	}
-	startTicks, err := strconv.ParseFloat(fields[19], 64)
-	if err != nil {
-		return false
-	}
-	uptimeBytes, err := os.ReadFile("/proc/uptime")
-	if err != nil {
-		return false
-	}
-	uptimeFields := strings.Fields(string(uptimeBytes))
-	if len(uptimeFields) == 0 {
-		return false
-	}
-	uptime, err := strconv.ParseFloat(uptimeFields[0], 64)
-	if err != nil {
-		return false
-	}
-	const ticksPerSecond = 100 // USER_HZ on Linux, as getconf CLK_TCK reports
-	now := float64(time.Now().UnixNano()) / 1e9
-	ctime := float64(stat.Ctim.Sec) + float64(stat.Ctim.Nsec)/1e9
-	return now-ctime >= uptime-startTicks/ticksPerSecond+2
-}
-
 // LocalNetworkManagerGuardState reports this host's guard read state.
 func LocalNetworkManagerGuardState() string {
-	return networkManagerGuardStateAt(NetworkManagerGuardStatePath, NetworkManagerGuardPath, bootIDPath,
-		localNetworkManagerShow("InvocationID"), networkManagerGuardAgeLoaded)
+	return networkManagerGuardStateAt(NetworkManagerGuardStatePath, NetworkManagerGuardPath, bootIDPath)
 }
 
-// networkManagerGuardStateAt reads the record and facts; an unreadable record or boot ID never
-// yields loaded.
-func networkManagerGuardStateAt(statePath, guardPath, bootPath, invocation string, ageLoaded func(string) bool) string {
+// networkManagerGuardStateAt reads the guard through any symlink, the record and the boot ID; any
+// failed read never yields loaded.
+func networkManagerGuardStateAt(statePath, guardPath, bootPath string) string {
+	guard, err := os.ReadFile(guardPath)
+	if err != nil {
+		return "unread-init"
+	}
 	record, err := os.ReadFile(statePath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		return "unread-init"
 	}
 	boot, err := os.ReadFile(bootPath)
@@ -409,7 +401,7 @@ func networkManagerGuardStateAt(statePath, guardPath, bootPath, invocation strin
 		return "unread-init"
 	}
 	firstLine, _, _ := strings.Cut(string(record), "\n")
-	return NetworkManagerGuardState(firstLine, strings.TrimSpace(string(boot)), networkManagerFileID(guardPath), invocation, ageLoaded(guardPath))
+	return NetworkManagerGuardState(firstLine, strings.TrimSpace(string(boot)), NetworkManagerGuardStaticHash(string(guard)))
 }
 
 func networkManagerActiveLocally() bool {

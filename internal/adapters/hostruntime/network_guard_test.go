@@ -171,8 +171,55 @@ func TestNetworkManagerGuardStateSharedVectors(t *testing.T) {
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(vectors)), "\n") {
 		fields := strings.Split(line, "|")
-		if got := NetworkManagerGuardState(fields[0], fields[1], fields[2], fields[3], fields[4] == "1"); got != fields[5] {
-			t.Errorf("%q: state %q, want %q", line, got, fields[5])
+		if got := NetworkManagerGuardState(fields[0], fields[1], fields[2]); got != fields[3] {
+			t.Errorf("%q: state %q, want %q", line, got, fields[3])
+		}
+	}
+}
+
+// power_nm_guard_static_text reads the same fixtures in tests/lib-power-network.sh.
+func TestNetworkManagerGuardStaticSharedFixtures(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "tests", "fixtures", "nm-guard-static")
+	confs, err := filepath.Glob(filepath.Join(root, "*.conf"))
+	if err != nil || len(confs) == 0 {
+		t.Fatalf("no static fixtures: %v", err)
+	}
+	for _, conf := range confs {
+		contents, err := os.ReadFile(conf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := os.ReadFile(strings.TrimSuffix(conf, ".conf") + ".static")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := NetworkManagerGuardStatic(string(contents)); got != string(want) {
+			t.Errorf("%s: static %q, want %q", filepath.Base(conf), got, want)
+		}
+	}
+}
+
+func TestNetworkGuardReportsTheReadStateWhenPrintConfigFails(t *testing.T) {
+	guard := testNetworkGuard(map[string]bool{"systemctl": true, "NetworkManager": true, "nmcli": true, "ip": true},
+		func(name string, arguments ...string) ([]byte, error) {
+			switch name {
+			case "systemctl":
+				return []byte("active\n"), nil
+			case "NetworkManager":
+				return nil, errors.New("permission denied")
+			case "nmcli":
+				return []byte("incusbr0:connected\n"), nil
+			case "ip":
+				return []byte(`[]`), nil
+			}
+			return nil, errors.New("unexpected command")
+		})
+	guard.State = func() string { return "unread-init" }
+	err := guard.Check(context.Background(), []string{"incusbr0"})
+	for _, want := range []string{"cannot read NetworkManager's effective configuration", "has not read the Subyard guard",
+		"manages yard bridge incusbr0", "fix 'NetworkManager --print-config'", "reboot the host once, then rerun yard start"} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in %v", want, err)
 		}
 	}
 }
@@ -262,7 +309,7 @@ func TestNetworkGuardRefusesAnUnreadGuard(t *testing.T) {
 	guard.State = func() string { return "unread-init" }
 	err := guard.Check(context.Background(), []string{"incusbr0"})
 	if err == nil || !strings.Contains(err.Error(), "has not read the Subyard guard") ||
-		!strings.Contains(err.Error(), "restart NetworkManager") {
+		!strings.Contains(err.Error(), "reboot the host once") || strings.Contains(err.Error(), "restart NetworkManager") {
 		t.Fatalf("an unread guard did not refuse the start: %v", err)
 	}
 	guard.State = func() string { return "loaded-reboot" }
@@ -294,6 +341,51 @@ func TestNetworkManagerGuardRuleRequiresEveryRenderedEntry(t *testing.T) {
 	}
 }
 
+func TestLocalNetworkManagerGuardStateReadsContentThroughSymlinks(t *testing.T) {
+	directory := testkit.TempDir(t)
+	target, guard := filepath.Join(directory, "target.conf"), filepath.Join(directory, "zz.conf")
+	boot, record := filepath.Join(directory, "boot_id"), filepath.Join(directory, "state")
+	rendered := "[device-subyard]\nmatch-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0\nmanaged=0\n"
+	testkit.WriteFile(t, target, []byte(rendered), 0o644)
+	if err := os.Symlink(target, guard); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, boot, []byte("b1\n"), 0o644)
+	testkit.WriteFile(t, record, []byte("b1 "+NetworkManagerGuardStaticHash(rendered)+" held init\n"), 0o644)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "loaded" {
+		t.Fatalf("a held record for the linked content gave %q", got)
+	}
+	// A new bridge name keeps the static content; managed=1 changes it.
+	testkit.WriteFile(t, target, []byte(strings.Replace(rendered, "incusbr0", "incusbr0,interface-name:yardbr1", 1)), 0o644)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "loaded" {
+		t.Fatalf("an added bridge name gave %q", got)
+	}
+	testkit.WriteFile(t, target, []byte(strings.Replace(rendered, "managed=0", "managed=1", 1)), 0o644)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "unread-init" {
+		t.Fatalf("changed static content behind the link gave %q", got)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "unread-init" {
+		t.Fatalf("a dangling guard link gave %q", got)
+	}
+}
+
+func TestLocalNetworkManagerGuardStateNeverLoadsWithoutTheRecord(t *testing.T) {
+	directory := testkit.TempDir(t)
+	guard, boot, record := filepath.Join(directory, "zz.conf"), filepath.Join(directory, "boot_id"), filepath.Join(directory, "state")
+	testkit.WriteFile(t, guard, []byte("[device-subyard]\n"), 0o644)
+	testkit.WriteFile(t, boot, []byte("b2\n"), 0o644)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "unread-init" {
+		t.Fatalf("a missing record gave %q", got)
+	}
+	testkit.WriteFile(t, record, []byte("b1 "+NetworkManagerGuardStaticHash("[device-subyard]\nmanaged=1\n")+" held init\n"), 0o644)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "unread-init" {
+		t.Fatalf("a record for other content gave %q", got)
+	}
+}
+
 func TestLocalNetworkManagerGuardStateNeverLoadsFromAnUnreadableRecord(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a mode-000 file")
@@ -302,15 +394,14 @@ func TestLocalNetworkManagerGuardStateNeverLoadsFromAnUnreadableRecord(t *testin
 	guard, boot, record := filepath.Join(directory, "zz.conf"), filepath.Join(directory, "boot_id"), filepath.Join(directory, "state")
 	testkit.WriteFile(t, guard, []byte("[device-subyard]\n"), 0o644)
 	testkit.WriteFile(t, boot, []byte("b1\n"), 0o644)
-	fileID := networkManagerFileID(guard)
-	testkit.WriteFile(t, record, []byte("b1 "+fileID+" nm1 held init\n"), 0o000)
-	if got := networkManagerGuardStateAt(record, guard, boot, "nm1", func(string) bool { return true }); got != "unread-init" {
+	testkit.WriteFile(t, record, []byte("b0 "+NetworkManagerGuardStaticHash("[device-subyard]\n")+" unread init\n"), 0o000)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "unread-init" {
 		t.Fatalf("an unreadable record gave %q", got)
 	}
 	if err := os.Chmod(record, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := networkManagerGuardStateAt(record, guard, boot, "nm1", func(string) bool { return false }); got != "loaded" {
-		t.Fatalf("a readable held record gave %q", got)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "loaded" {
+		t.Fatalf("a readable record from another boot gave %q", got)
 	}
 }

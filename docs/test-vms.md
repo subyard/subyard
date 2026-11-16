@@ -813,8 +813,9 @@ guard without touching NetworkManager, give a notice for an undecidable `docker*
 ask for one reboot, and rollback across the device-guard ledger boundary must be refused. Init,
 start and stop work before the reboot; after it the boot reconciler restores the yard. `--lane
 fresh` installs the candidate behind an except-only administrator list, an NM-managed `br0` and an
-administrator file nobody has applied: the first init writes the guard and stops without touching
-NetworkManager; after the reboot init completes, new `eth9` veth and `tap` devices and a restarted
+administrator file nobody has applied: the first init writes the guard and stops for a reboot
+without touching NetworkManager, and a NetworkManager restart does not release it; after the
+reboot init completes, new `eth9` veth and `tap` devices and a restarted
 guest stay unmanaged, a second Incus bridge is listed and unmanaged, and the boot reconciler
 restores the yard after another reboot:
 

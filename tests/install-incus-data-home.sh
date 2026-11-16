@@ -86,7 +86,6 @@ case "${1:-}" in
     fi
     printf '%s\n' "${TEST_NM_STATE:-inactive}"
     ;;
-  show) [ "$*" != 'show -p InvocationID --value NetworkManager' ] || printf 'nm-fixture\n' ;;
   try-restart)
     if [ "${TEST_RESTART_RC:-0}" != 0 ]; then
       printf 'fixture restart refused: injected service failure\n' >&2
@@ -145,15 +144,16 @@ cat > "$TMP/bin/dispatcher" <<'SH'
 SH
 chmod 0755 "$TMP/bin"/*
 
-# NetworkManager already read this guard (a held record), so active-NetworkManager cases continue
-# instead of stopping for the first NetworkManager start, which tests/lib-power-network.sh covers.
+# NetworkManager read this guard when it started in an earlier boot, so active-NetworkManager cases
+# continue instead of stopping for the first reboot, which tests/lib-power-network.sh covers.
 seed_read_guard() {
-  mkdir -p "$TMP/etc/NetworkManager/conf.d" "$TMP/run/subyard"
+  mkdir -p "$TMP/etc/NetworkManager/conf.d" "$TMP/var/lib/subyard"
   printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
     'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' \
     > "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
-  printf '%s %s nm-fixture held init\n' "$(cat /proc/sys/kernel/random/boot_id)" \
-    "$(stat -c '%i:%.9Z' "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf")" > "$TMP/run/subyard/nm-guard-state"
+  printf 'earlier-boot %s held init\n' \
+    "$(bash -c '. "$1"; power_nm_guard_static_hash "$2"' _ "$ROOT/scripts/lib-power.sh" "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf")" \
+    > "$TMP/var/lib/subyard/nm-guard-state"
 }
 
 run_installer() (
@@ -450,7 +450,7 @@ if [ "${1:-}" = --config-dir ]; then dir="$2"; shift 2; fi
 cat "$dir/zz-subyard-unmanaged.conf"
 SH
 # Retain the real reader/guard logic, redirecting only its absolute binary peer.
-sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/run/subyard/|$TMP/run/subyard/|g; s|/etc/NetworkManager/|$TMP/etc/NetworkManager/|g" \
+sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/var/lib/subyard/|$TMP/var/lib/subyard/|g; s|/etc/NetworkManager/|$TMP/etc/NetworkManager/|g" \
   "$TMP/version-scripts/lib-power.sh"
 # The package replaces the initial executable, keeping installed and final
 # versions separate without making package effects implicit in --version.

@@ -48,7 +48,7 @@ if [ "$mode" != apply ]; then
   fi
   command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1 || exit 1
   power_host_safe "$BRIDGE" || exit 1
-  # A released guard, a missing bridge or an unfinished reload is drift for the apply below.
+  # A released guard, a missing bridge or a guard NetworkManager has not read is drift for the apply below.
   nm_guard_file_current "$NM_GUARD_CONF" "$BRIDGE" || exit 1
   [ "$ufw_active" = 0 ] || ufw_yard_rules_present "$BRIDGE" || exit 1
   instance_exists=0

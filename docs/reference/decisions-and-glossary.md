@@ -158,9 +158,10 @@ creation/start and rerun during setup. The guard is a self-contained `[device-su
 with `managed=0` for Subyard's own devices only: veths, Incus `tap` devices and Incus-managed
 bridges. It never writes the administrator's `unmanaged-devices` or `no-auto-default` lists and
 reads them only to refuse an unsafe migration. Subyard never reloads or restarts NetworkManager,
-and no yard starts until NetworkManager has provably read the guard (its file's ctime is older
-than NetworkManager's start): on a host where it runs, the first init writes the guard and stops
-for a host reboot or NetworkManager restart. Bridge names come only from the Incus-managed bridges
+and no yard starts until NetworkManager has provably read the guard: a persistent record ties the
+guard's static content to the boot that wrote it, and only a later boot (or NetworkManager being
+inactive across the write) proves the read. On a host where it runs, the first init and a
+migration without evidence wait for one host reboot. Bridge names come only from the Incus-managed bridges
 of the same run, and the only state-changing NetworkManager call marks such a bridge unmanaged. A
 guard written by a released version is rewritten during update, refusing while NetworkManager
 provably manages a device the administrator's list marks unmanaged; the host then reboots once.

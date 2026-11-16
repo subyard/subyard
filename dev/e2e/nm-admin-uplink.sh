@@ -7,7 +7,9 @@
 #            bridges, a restart experiment, the reboot, candidate init and start, a new veth,
 #            a later managed=1 section, teardown and a final reboot follow.
 #   fresh:   an except-only administrator list, an NM-managed br0 and a Docker-style bridge
-#            through a fresh candidate install, init, start and teardown, without a reboot.
+#            through a fresh candidate install whose first init stops for a reboot (a
+#            NetworkManager restart does not count), then init, start, a repair that waits for
+#            another reboot, the boot restore and teardown.
 # A watchdog restores the uplink address if it changes and fails the lane.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -96,7 +98,7 @@ conf_dir=/etc/NetworkManager/conf.d
 guard="$conf_dir/zz-subyard-unmanaged.conf"
 admin_conf="$conf_dir/00-keep-uplink.conf"
 pin=/etc/udev/rules.d/00-subyard-e2e-uplink-pin.rules
-state_record=/run/subyard/nm-guard-state
+state_record=/var/lib/subyard/nm-guard-state
 launcher="$STATE/bin/yard"
 export SUBYARD_OPERATOR_HOME="$STATE/home" SUBYARD_CONFIG_HOME="$STATE/config" SUBYARD_HOME="$STATE/data"
 export YARD_RUNTIME_ROOT="$STATE/runtime" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
@@ -304,12 +306,22 @@ prepare)
   # Every up Incus bridge the released guard named was unmanaged: evidence that NetworkManager held
   # an adequate guard, so the migration is `held` and only waits for the reboot.
   [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
-    && [ "$(cut -d ' ' -f4,5 "$state_record")" = 'held migration' ] || die "the update record: $(cat "$state_record" 2>/dev/null)"
+    && [ "$(cut -d ' ' -f3,4 "$state_record")" = 'held migration' ] || die "the update record: $(cat "$state_record" 2>/dev/null)"
   [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the update restarted NetworkManager'
   [ "$(nm_reloads_since "$since")" = 0 ] || die "the update reloaded NetworkManager: $(sudo -n journalctl -u NetworkManager --since "@$since" -q | tail -5)"
   [ "$(managedness)" = "$before_table" ] || die 'the update changed a device managed state'
   if owner "$launcher" update --rollback --yes >"$STATE/rollback.log" 2>&1; then
     die 'rollback to the released guard was accepted'
+  fi
+  # Which check refused: the epoch blocker, or the source provenance check that runs before it.
+  # The CLI exposes no rollback check that reaches the epoch past provenance, so that case is a
+  # stated limit: the epoch gate itself is then proven host-free only (go:releasetransition).
+  if grep -Eq 'rollback-incompatible|cannot safely accept the current migration ledger' "$STATE/rollback.log"; then
+    evidence 'rollback refused by the device-guard epoch'
+  elif grep -Fq 'source release has invalid or foreign V2 registry provenance' "$STATE/rollback.log"; then
+    evidence 'LIMIT: rollback refused by the source registry provenance check, which runs before the epoch check; the epoch refusal is proven host-free only'
+  else
+    die "rollback refused for an unexpected reason: $(tail -5 "$STATE/rollback.log")"
   fi
   # The installed 0.29.0 and the candidate registries differ only by the NetworkManager device
   # guard migration and power-metadata 3 -> 4.
@@ -322,8 +334,6 @@ prepare)
     || die "the registries differ beyond the device guard boundary: $(diff "$STATE/installed-registry.json" "$STATE/candidate-registry.json" | head -20)"
   jq -e '.currentEpochs["power-metadata"] == 4 and ([.migrations[] | select(.id == "introduce-nm-device-guard-v4" and .fromEpoch == 3 and .toEpoch == 4)] | length == 1)' \
     "$ROOT/config/release-transition.json" >/dev/null || die 'the candidate registry lacks the device guard boundary'
-  # The CLI reports no blocker resource for a rollback (`--rollback` takes no --check), so the
-  # registry difference above is what binds the refusal to the boundary.
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
   pass 'rollback to the published release is refused before activation'
   owner "$launcher" status >"$STATE/status.log" 2>&1 || true
@@ -369,7 +379,8 @@ prepare)
 resume)
   load_uplink
   watchdog_start
-  [ ! -e "$state_record" ] || [ "$(cut -d ' ' -f1 "$state_record")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the reminder pending'
+  [ -e "$state_record" ] && [ "$(cut -d ' ' -f1 "$state_record")" != "$(cat /proc/sys/kernel/random/boot_id)" ] \
+    || die "the persistent record did not survive the reboot or names this boot: $(cat "$state_record" 2>/dev/null)"
   owner "$launcher" status >"$STATE/status-after.log" 2>&1 || true
   ! grep -Fq 'Reminder: reboot the host once' "$STATE/status-after.log" || die 'yard status still asks for a reboot'
   uplink_admins 'after the reboot'
@@ -480,26 +491,36 @@ fresh-prepare)
   invocation="$(systemctl show -p InvocationID --value NetworkManager)"
   before_table="$(managedness)"
   if yard init --yes >"$STATE/init-first.log" 2>&1; then die 'the first init continued before NetworkManager read the guard'; fi
-  grep -Fq 'Reboot the host or restart NetworkManager' "$STATE/init-first.log" \
-    || die "the first init did not ask for a reboot or NetworkManager restart: $(tail -5 "$STATE/init-first.log")"
+  grep -Fq 'Reboot the host once' "$STATE/init-first.log" && ! grep -Fq 'restart NetworkManager (' "$STATE/init-first.log" \
+    || die "the first init did not ask for a reboot only: $(tail -5 "$STATE/init-first.log")"
   [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the first init restarted NetworkManager'
   [ "$(managedness)" = "$before_table" ] || die 'the first init changed a device managed state'
   [ "$(address_of "$UP")" = "$UP_ADDRESS" ] && [ "$(device_state br0)" = connected ] || die 'the first init touched the uplink or br0'
-  [ "$(cut -d ' ' -f4,5 "$state_record")" = 'unread init' ] || die "the first init record: $(cat "$state_record" 2>/dev/null)"
+  [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
+    && [ "$(cut -d ' ' -f3,4 "$state_record")" = 'unread init' ] || die "the first init record: $(cat "$state_record" 2>/dev/null)"
+  [ "$(stat -c '%U %a' "$state_record")" = 'root 644' ] || die "record ownership: $(stat -c '%U %a' "$state_record")"
   grep -q '^\[device-subyard\]' "$guard" || die 'the first init wrote no guard'
-  # Without the record the guard is still provably unread: it is newer than NetworkManager.
+  # Losing the record opens nothing.
   sudo -n rm -f "$state_record"
   if yard init --yes >"$STATE/init-no-record.log" 2>&1; then die 'init continued after the unread record was deleted'; fi
-  grep -Fq 'Reboot the host or restart NetworkManager' "$STATE/init-no-record.log" || die 'init without the record did not ask for the NetworkManager start'
+  grep -Fq 'Reboot the host once' "$STATE/init-no-record.log" || die "init without the record: $(tail -5 "$STATE/init-no-record.log")"
   sudo -n rm -f "$conf_dir/50-e2e-later.conf"
-  pass 'the first init writes the guard and stops without touching NetworkManager, devices or the uplink'
+  pass 'the first init writes the guard and stops for a reboot without touching NetworkManager, devices or the uplink'
+  # A NetworkManager restart reads the guard, but only a reboot counts as proof.
+  sudo -n systemctl restart NetworkManager
+  settle
+  uplink_admins 'NetworkManager restart before the reboot'
+  if yard init --yes >"$STATE/init-after-restart.log" 2>&1; then die 'a NetworkManager restart released the first init'; fi
+  grep -Fq 'Reboot the host once' "$STATE/init-after-restart.log" || die "init after the restart: $(tail -5 "$STATE/init-after-restart.log")"
+  pass 'a NetworkManager restart does not count as reading the guard'
   ;;
 
 fresh-resume)
   load_uplink
   watchdog_start
   launcher="$STATE/bin/yard"
-  [ ! -e "$state_record" ] || [ "$(cut -d ' ' -f1 "$state_record")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the guard unread'
+  [ -e "$state_record" ] && [ "$(cut -d ' ' -f1 "$state_record")" != "$(cat /proc/sys/kernel/random/boot_id)" ] \
+    || die "the persistent record did not survive the reboot or names this boot: $(cat "$state_record" 2>/dev/null)"
   yard init --yes >"$STATE/init.log" 2>&1 || die 'init failed after the reboot'
   yard start --yes >"$STATE/start.log" 2>&1 || die 'start failed after the reboot'
   settle
@@ -526,8 +547,10 @@ fresh-resume)
   sudo -n /usr/bin/incus network create e2ebr1 ipv4.address=198.18.9.1/24 ipv4.nat=false ipv6.address=none >/dev/null
   settle 4
   evidence "new Incus bridge e2ebr1 is $(device_state e2ebr1) before init"
-  yard init --yes >"$STATE/init-bridge.log" 2>&1 || die 'init failed with a second bridge'
+  record_before="$(cat "$state_record")"
+  yard init --yes >"$STATE/init-bridge.log" 2>&1 || die 'init failed with a second bridge (no reboot is needed for bridge names)'
   grep -Fq 'interface-name:e2ebr1' "$guard" || die 'the guard does not list the second bridge'
+  [ "$(cat "$state_record")" = "$record_before" ] || die "a bridge name changed the record: $(cat "$state_record")"
   [ "$(device_state e2ebr1)" = unmanaged ] && [ "$(address_of e2ebr1)" = 198.18.9.1/24 ] \
     || die "the second bridge is $(device_state e2ebr1) with $(address_of e2ebr1)"
   pass 'a second Incus bridge is listed and unmanaged with its address intact'
@@ -550,19 +573,16 @@ fresh-resume)
   sudo -n /usr/bin/incus project delete "subyard-$other" >/dev/null 2>&1 || true
   pass 'INCUS_BRIDGE=br0 refuses and leaves the administrator bridge untouched'
 
-  # A guard whose veth entries were edited out, read by a restarted NetworkManager: init repairs
-  # the file and stops again until NetworkManager reads the repair.
+  # A guard whose veth entries were edited out: whatever NetworkManager holds now is unknown, so
+  # init repairs the file, records it unread and stops for a reboot (fresh-final resumes).
   sudo -n sed -i 's/type:veth,driver:veth,//' "$guard"
-  sudo -n systemctl restart NetworkManager
-  settle
-  if yard init --yes >"$STATE/init-repair.log" 2>&1; then die 'init continued after repairing an unread guard'; fi
-  grep -Fq 'Reboot the host or restart NetworkManager' "$STATE/init-repair.log" || die "repair stop: $(tail -5 "$STATE/init-repair.log")"
+  if yard init --yes >"$STATE/init-repair.log" 2>&1; then die 'init continued after repairing the guard'; fi
+  grep -Fq 'Reboot the host once' "$STATE/init-repair.log" || die "repair stop: $(tail -5 "$STATE/init-repair.log")"
   grep -Fq 'type:veth,driver:veth' "$guard" || die 'init did not repair the veth entries'
-  sudo -n systemctl restart NetworkManager
-  settle
-  yard init --yes >"$STATE/init-repaired.log" 2>&1 || die 'init failed after NetworkManager read the repaired guard'
+  [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
+    && [ "$(cut -d ' ' -f3,4 "$state_record")" = 'unread init' ] || die "repair record: $(cat "$state_record")"
   uplink_admins 'after the repair'
-  pass 'an edited-out guard is repaired and init waits for NetworkManager to read it'
+  pass 'an edited-out guard is repaired and init waits for a reboot'
   watchdog_clean
   ;;
 
@@ -579,6 +599,8 @@ fresh-final)
   uplink_admins 'after the final reboot'
   [ "$(device_state br0)" = connected ] && [ "$(device_state e2ebr1)" = unmanaged ] || die 'the reboot changed br0 or e2ebr1'
   pass 'the boot reconciler restored the running yard; its veth and both bridges keep their state'
+  yard init --yes >"$STATE/init-repaired.log" 2>&1 || die "init failed after the reboot read the repaired guard: $(tail -5 "$STATE/init-repaired.log")"
+  pass 'after the reboot init accepts the repaired guard'
   sudo -n /usr/bin/incus network delete e2ebr1 >/dev/null 2>&1 || true
   yard teardown --yes >"$STATE/teardown.log" 2>&1 || die 'teardown failed'
   settle

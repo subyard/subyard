@@ -1914,12 +1914,16 @@ The compiled `nm-device-guard-v1` capability advances `power-metadata` from epoc
 is the reader boundary of the `[device-subyard]` NetworkManager guard; the
 `host-network-guard` activation owner rewrites a released guard file without reloading
 NetworkManager and records one pending host reboot. Subyard never reloads or restarts
-NetworkManager. Whether NetworkManager read the guard is proven by order: the guard file's ctime
-is at least 2 s older than the start of NetworkManager's main process. `/run/subyard/nm-guard-state`
-(`boot_id inode:ctime invocation held|unread init|migration`) describes one guard file and one
-NetworkManager invocation, written after each publish; anything it does not describe falls back to
-that age test, and any failed read means "not read". No yard starts while the guard is unread: init
-stops for a reboot or NetworkManager restart, a migration waits for the reboot. Released power readers reject the new
+NetworkManager. Whether NetworkManager read the guard is proven only by a boot: the root-owned
+record `/var/lib/subyard/nm-guard-state` (`boot_id sha256 held|unread init|migration`) names the
+SHA-256 of the guard's static content (the file read through any symlink, without comments, blank
+lines or the exact Incus bridge names, which are pinned unmanaged one by one instead). The guard
+counts as read when that hash matches the file and the record is `held` or names another boot.
+Changed static content while NetworkManager runs, a repair included, records `unread` for this
+boot; `held` needs NetworkManager inactive across the write, or a migration with evidence that it
+holds the released guard. A missing, unreadable or foreign record, a hash mismatch or any failed
+read means "not read"; a NetworkManager restart never counts. No yard starts while the guard is
+unread: init stops for a host reboot, a migration waits for it. Released power readers reject the new
 guard, and their init would rewrite the released guard and reload NetworkManager, so
 rollback to a release below this epoch is refused before activation as `rollback-incompatible`.
 `yard update --rollback` does not cross this boundary.
