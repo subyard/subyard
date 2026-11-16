@@ -120,6 +120,7 @@ func (service PowerService) Set(
 	})
 }
 
+// Commit records the desired power of a finished init and marks the yard initialized.
 func (service PowerService) Commit(
 	ctx context.Context,
 	yard domain.Context,
@@ -166,7 +167,10 @@ func (runner LifecycleRunner) Run(
 	if !strings.EqualFold(observed.Status, string(desired)) {
 		return result, diagnostics, fmt.Errorf("physical %s did not establish %s before desired power commit", request.Action, desired)
 	}
-	if err := runner.Power.Commit(ctx, runner.Yard, desired); err != nil {
+	// Only init's finalize stage marks a yard initialized; start and stop keep
+	// the mark, so a failed init stays visible until the yard's next init.
+	initialized := parsePowerMetadata(observed).Initialized
+	if err := runner.Power.Set(ctx, runner.Yard, desired, initialized.State == fieldValid && initialized.Value); err != nil {
 		return result, diagnostics, fmt.Errorf("physical %s succeeded but desired power was not committed: %w",
 			request.Action, err)
 	}

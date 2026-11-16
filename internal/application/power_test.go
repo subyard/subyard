@@ -253,6 +253,39 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 	}
 }
 
+// Start and stop keep the initialized mark as it is: only init's finalize
+// stage marks a yard initialized.
+func TestLifecycleRunnerPreservesInitializedMark(t *testing.T) {
+	yard := domain.Context{YardName: "named", IncusProject: "subyard-named", YardInstanceName: "yard-named"}
+	for _, action := range []string{"start", "stop"} {
+		for _, initialized := range []string{"false", "true"} {
+			t.Run(action+"-"+initialized, func(t *testing.T) {
+				status := map[string]string{"start": "Running", "stop": "Stopped"}[action]
+				incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-named/yard-named": {
+					Name: "yard-named", Project: "subyard-named", Status: status, Config: map[string]string{
+						"user.subyard.managed": "true", "user.subyard.initialized": initialized,
+						"user.subyard.desired_power": string(domain.PowerRunning), "user.subyard.name": "named",
+						"user.subyard.bridge": "incusbr0", "boot.autostart": "false",
+					},
+				}}}
+				physical := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, OperationID: "operation-lifecycle", Status: "ok"}}}}
+				runner := LifecycleRunner{Power: PowerService{Instances: incus, Config: incus}, Physical: physical, Yard: yard}
+				request := domain.AdapterRequest{Schema: 1, OperationID: "operation-lifecycle", Adapter: "lifecycle", Action: action}
+				if _, _, err := runner.Run(context.Background(), request, nil); err != nil {
+					t.Fatal(err)
+				}
+				config := incus.Instances["subyard-named/yard-named"].Config
+				if config["user.subyard.initialized"] != initialized {
+					t.Fatalf("%s changed initialized %s to %q", action, initialized, config["user.subyard.initialized"])
+				}
+				if want := map[string]string{"start": "running", "stop": "stopped"}[action]; config["user.subyard.desired_power"] != want {
+					t.Fatalf("%s committed desired power %q", action, config["user.subyard.desired_power"])
+				}
+			})
+		}
+	}
+}
+
 func TestPowerRefusesForeignMarkerBeforeMutation(t *testing.T) {
 	for _, operation := range []string{"set", "ensure-managed", "ensure-unmanaged"} {
 		t.Run(operation, func(t *testing.T) {

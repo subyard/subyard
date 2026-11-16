@@ -648,6 +648,19 @@ history, locks and rechecks that evidence, then writes only the desired selectio
 no activation or historical recovery authority. Drift beside a pending finding is ordinary drift
 for selection reduction and its repair permit.
 
+A yard whose last init did not finish is left to that init. Init's instance stage writes
+`user.subyard.initialized=false` and only its finalize stage writes `true`; `start` and `stop`
+keep the value. Like a stopped yard, such a yard is neither observed nor applied by the profile
+runtime, core guest runtime and materialized-config owners or the test-VM broker stage, so a
+failed first init leaves the release ready and other yards' commands open. Each engine process
+decides this once per yard and may only narrow it: a yard init enters during a transaction stays
+out of that transaction. The yard gets one release warning naming `yard -Y NAME init`; after that
+init finishes, release work observes the yard again and its failures block as before. Host key
+tools are never deferred. An engine without this rule observes the yard and fails closed.
+The boot power reconciler never starts or stops such a yard, in any state, except for its
+fail-closed stop of every running yard after a host network policy failure; it reports the yard
+as not initialized with `yard -Y NAME init` as the next step and restores the other yards.
+
 Declared persist directories are adopted by a separate guest program
 (`internal/adapters/reconcileruntime/integration_persist.py`), not by the artifact
 inventory. It drops to the developer account, uses descriptor-relative no-follow

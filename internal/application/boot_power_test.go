@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -81,7 +82,9 @@ func TestBootPowerMetadataPhaseMatrix(t *testing.T) {
 		value     string
 		delete    bool
 		wantCount int
-		wantErr   bool
+		// wantUninitialized counts yards whose init did not finish.
+		wantUninitialized int
+		wantErr           bool
 	}{
 		{name: "valid", wantCount: 1},
 		{name: "managed absent", key: "user.subyard.managed", delete: true},
@@ -90,7 +93,7 @@ func TestBootPowerMetadataPhaseMatrix(t *testing.T) {
 		{name: "managed malformed", key: "user.subyard.managed", value: "yes", wantErr: true},
 		{name: "initialized absent", key: "user.subyard.initialized", delete: true, wantErr: true},
 		{name: "initialized empty", key: "user.subyard.initialized", wantErr: true},
-		{name: "initialized false", key: "user.subyard.initialized", value: "false", wantErr: true},
+		{name: "initialized false", key: "user.subyard.initialized", value: "false", wantUninitialized: 1},
 		{name: "desired absent", key: "user.subyard.desired_power", delete: true, wantErr: true},
 		{name: "desired malformed", key: "user.subyard.desired_power", value: "paused", wantErr: true},
 		{name: "name absent is ignored", key: "user.subyard.name", delete: true, wantCount: 1},
@@ -109,10 +112,10 @@ func TestBootPowerMetadataPhaseMatrix(t *testing.T) {
 					instance.Config[test.key] = test.value
 				}
 			}
-			managed, err := filterManagedInstances([]ports.InstanceInfo{instance}, true)
-			if len(managed) != test.wantCount || (err != nil) != test.wantErr {
-				t.Fatalf("managed=%#v error=%v, want count=%d error=%v",
-					managed, err, test.wantCount, test.wantErr)
+			managed, uninitialized, err := filterManagedInstances([]ports.InstanceInfo{instance}, true)
+			if len(managed) != test.wantCount || len(uninitialized) != test.wantUninitialized || (err != nil) != test.wantErr {
+				t.Fatalf("managed=%#v uninitialized=%#v error=%v, want count=%d uninitialized=%d error=%v",
+					managed, uninitialized, err, test.wantCount, test.wantUninitialized, test.wantErr)
 			}
 		})
 	}
@@ -164,6 +167,74 @@ func TestBootPowerReconcilerRestoresDesiredState(t *testing.T) {
 	}
 	if policyChecks != 2 {
 		t.Fatalf("boot policy checks = %d, want both running-intent yards", policyChecks)
+	}
+}
+
+// A yard whose init did not finish is never powered, in any state and with
+// any desired power, and the other yards are still restored.
+func TestBootPowerSkipsUninitializedYardsAndRestoresOthers(t *testing.T) {
+	instances := map[string]ports.InstanceInfo{
+		"p/start": managedPowerInstance("p", "start", "Stopped", domain.PowerRunning),
+		"p/stop":  managedPowerInstance("p", "stop", "Running", domain.PowerStopped),
+	}
+	var want []BootUninitialized
+	for _, state := range []string{"Stopped", "Running", "Starting", "Stopping", "Frozen"} {
+		for _, desired := range []domain.DesiredPower{domain.PowerRunning, domain.PowerStopped} {
+			name := strings.ToLower(state) + "-" + string(desired)
+			instance := managedPowerInstance("p", name, state, desired)
+			instance.Config["user.subyard.initialized"] = "false"
+			instances["p/"+name] = instance
+			want = append(want, BootUninitialized{Instance: "p/" + name, Yard: name})
+		}
+	}
+	sort.Slice(want, func(left, right int) bool { return want[left].Instance < want[right].Instance })
+	fake := &testkit.Incus{Instances: instances}
+	reconciler := BootPowerReconciler{
+		Inventory: fake, Instances: fake, Power: fake,
+		NetworkPolicy: bootNetworkPolicyFunc(allowBootNetworkPolicy), EnsureNetworkLock: ensureBootNetworkLock,
+		Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
+	}
+	result, err := reconciler.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.Started, []string{"p/start"}) || !reflect.DeepEqual(result.Stopped, []string{"p/stop"}) ||
+		!reflect.DeepEqual(result.Uninitialized, want) {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	wantUpdates := []testkit.InstancePowerUpdate{
+		{Project: "p", Name: "stop", Action: "stop"},
+		{Project: "p", Name: "start", Action: "start"},
+	}
+	if !reflect.DeepEqual(fake.PowerUpdates, wantUpdates) {
+		t.Fatalf("unexpected power updates: %#v", fake.PowerUpdates)
+	}
+}
+
+// Init's instance stage marks a yard uninitialized before its other effects; a
+// yard that init entered after the listing is left to it, not powered.
+func TestBootPowerLeavesYardThatEnteredInitAfterListing(t *testing.T) {
+	for _, desired := range []domain.DesiredPower{domain.PowerRunning, domain.PowerStopped} {
+		t.Run(string(desired), func(t *testing.T) {
+			status := map[domain.DesiredPower]string{domain.PowerRunning: "Stopped", domain.PowerStopped: "Running"}[desired]
+			listed := managedPowerInstance("p", "entering", status, desired)
+			entered := managedPowerInstance("p", "entering", status, desired)
+			entered.Config["user.subyard.initialized"] = "false"
+			inventory := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/entering": listed}}
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/entering": entered}}
+			reconciler := BootPowerReconciler{
+				Inventory: inventory, Instances: fake, Power: fake,
+				NetworkPolicy: bootNetworkPolicyFunc(allowBootNetworkPolicy), EnsureNetworkLock: ensureBootNetworkLock,
+				Network: networkGuardFunc(func(context.Context, []string) error { return nil }),
+			}
+			result, err := reconciler.Run(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.PowerUpdates) != 0 || !reflect.DeepEqual(result.Uninitialized, []BootUninitialized{{Instance: "p/entering", Yard: "entering"}}) {
+				t.Fatalf("result=%#v updates=%#v", result, fake.PowerUpdates)
+			}
+		})
 	}
 }
 

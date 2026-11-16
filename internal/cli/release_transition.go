@@ -2314,7 +2314,7 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 	if err != nil {
 		return err
 	}
-	if strings.EqualFold(instance.Status, "stopped") {
+	if strings.EqualFold(instance.Status, "stopped") || operation.noteYardUninitialized(target, instance) {
 		return nil
 	}
 
