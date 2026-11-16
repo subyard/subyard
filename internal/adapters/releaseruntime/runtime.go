@@ -731,7 +731,7 @@ func (runtime *Runtime) PrepareTransition(
 	if installed, newer := installedVersionNewerThan(
 		releaseLinksFromRuntimeSnapshot(linksBefore).Active, parsed.version,
 	); discovered && newer {
-		return runtime.prepareInstalledNewer(parsed, linksBefore, installed, originalProtected), nil
+		return runtime.prepareInstalledNewer(parsed, linksBefore, installed, originalProtected, originalErr)
 	}
 	parsed.expectedLinks = &linksBefore
 	rootBefore, err := os.Lstat(parsed.root)

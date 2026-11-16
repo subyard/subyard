@@ -3,13 +3,17 @@ package releaseruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/blang/semver/v4"
 )
 
 func TestInstalledVersionNewerThanUsesSemverOrder(t *testing.T) {
@@ -39,7 +43,7 @@ func readyCompletedFixture(t *testing.T) protectedRuntimeTransitionFixture {
 	t.Helper()
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalComplete)
 	ready := fmt.Sprintf(
-		`{"schemaVersion":1,"inspection":{"plan":"plan-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":"release-a","target":%q,"code":"ready","message":"the target release is active and the transition is verified","transaction":%q}}}`,
+		`{"schemaVersion":1,"inspection":{"plan":"plan-v1-%s","assessment":{"action":"release.transition.v2","effect":"mutation","changed":false,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible"},"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":"release-a","target":%q,"code":"ready","message":"the target release is active and the transition is verified","transaction":%q,"warnings":["recovery cleanup is pending"]}}}`,
 		strings.Repeat("a", 64), fixture.target, fixture.target, fixture.transaction,
 	)
 	writeProtectedRuntimeFixtureEngine(t, fixture, fmt.Sprintf(`#!/bin/sh
@@ -59,7 +63,9 @@ func TestPlainUpdateNeverSelectsAnOlderLatestRelease(t *testing.T) {
 		status    string
 	}{
 		"update":            {journal: true, arguments: []string{"--yes"}, status: "ready"},
+		"forced update":     {journal: true, arguments: []string{"--yes", "--force"}, status: "ready"},
 		"check":             {journal: true, arguments: []string{"--check"}, status: "ready"},
+		"check json":        {journal: true, arguments: []string{"--check", "--json"}, status: "ready"},
 		"update no journal": {arguments: []string{"--yes"}, status: "migration-required"},
 		"check no journal":  {arguments: []string{"--check", "--json"}, status: "migration-required"},
 	} {
@@ -89,13 +95,33 @@ func TestPlainUpdateNeverSelectsAnOlderLatestRelease(t *testing.T) {
 				t.Fatal(err)
 			}
 			output := stdout.String()
-			if !strings.Contains(output, "installed version 1.2.3 is newer than the latest published release 1.2.2; nothing to update") ||
-				!strings.Contains(output, test.status) || !strings.Contains(output, fixture.target) {
-				t.Fatalf("installed-newer report = %q", output)
+			want := []string{
+				"installed version 1.2.3 is newer than the latest published release 1.2.2; no release was selected",
+				test.status, fixture.target,
+				"yard update --version 1.2.2 --runtime-root " + fixture.runtimeRoot + " --check",
 			}
-			if strings.Contains(test.arguments[0], "--yes") &&
-				!strings.Contains(output, "yard update --version 1.2.2 --runtime-root "+fixture.runtimeRoot) {
-				t.Fatalf("installed-newer report has no explicit downgrade command: %q", output)
+			if test.journal {
+				want = append(want, "the target release is active and the transition is verified", "recovery cleanup is pending")
+			} else {
+				want = append(want, "run yard migrate --check")
+			}
+			for _, expected := range want {
+				if !strings.Contains(output, expected) {
+					t.Fatalf("installed-newer report lacks %q: %q", expected, output)
+				}
+			}
+			if slices.Contains(test.arguments, "--check") {
+				var report struct {
+					Outcome        releasetransition.Outcome `json:"outcome"`
+					InstalledNewer InstalledNewer            `json:"installedNewer"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil ||
+					string(report.Outcome.Status) != test.status || report.InstalledNewer.LatestVersion != "1.2.2" ||
+					len(report.InstalledNewer.Downgrade) != 2 {
+					t.Fatalf("installed-newer check report = %#v, %v", report, err)
+				}
+			} else if !strings.Contains(output, "[ ok ] No update installed") || !strings.Contains(output, "Warning: recovery cleanup is pending") && test.journal {
+				t.Fatalf("installed-newer update report = %q", output)
 			}
 			if calls == 0 {
 				t.Fatal("plain update did not discover the latest release")
@@ -117,20 +143,26 @@ func TestPlainUpdateNeverSelectsAnOlderLatestRelease(t *testing.T) {
 // the ordinary verified download path; the fixture has no assets to download.
 func TestUpdateKeepsOrdinarySelectionUnlessDiscoveryIsOlder(t *testing.T) {
 	for name, test := range map[string]struct {
-		latest    string
-		arguments []string
-		lookups   bool
+		latest      string
+		arguments   []string
+		environment map[string]string
+		lookups     bool
 	}{
 		"equal latest":       {latest: "v1.2.3", lookups: true},
 		"newer latest":       {latest: "v1.3.0", lookups: true},
 		"explicit downgrade": {latest: "v1.2.3", arguments: []string{"--version", "1.2.2"}},
+		"environment downgrade": {
+			latest: "v1.2.3", environment: map[string]string{"YARD_RELEASE_VERSION": "1.2.2"},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := readyCompletedFixture(t)
+			environment := fixture.environment()
+			maps.Copy(environment, test.environment)
 			calls := 0
 			var stdout bytes.Buffer
 			runtime := New(Config{
-				Inputs: fixtureCommandInputs(fixture.environment()), Installer: fixture.installer,
+				Inputs: fixtureCommandInputs(environment), Installer: fixture.installer,
 				Stdout: &stdout, Stderr: &bytes.Buffer{},
 				HTTPClient: latestReleaseClient(t, test.latest, &calls),
 			})
@@ -150,6 +182,61 @@ func TestUpdateKeepsOrdinarySelectionUnlessDiscoveryIsOlder(t *testing.T) {
 			}
 			if _, statErr := os.Lstat(fixture.cache); statErr != nil {
 				t.Fatalf("selection did not reach the release download: %v (prepare: %v)", statErr, err)
+			}
+		})
+	}
+}
+
+// Only a ready protected inspection, or no journal at all, is a no-op success.
+// Other inspection results keep their own report and never select the older release.
+func TestInstalledNewerKeepsUnreadyInspectionResults(t *testing.T) {
+	transaction := releasetransition.TransactionID("tx-0123456789abcdef")
+	blocked := releasetransition.Outcome{
+		Status: releasetransition.StatusOperatorActionRequired, Active: "1.2.3-aaaaaaaaaaaa",
+		Target: "1.2.3-aaaaaaaaaaaa", Code: releasetransition.CodePlanStale,
+		Message: "the complete journal bindings do not match the verified release",
+		Retry:   "run yard update --check", Transaction: &transaction,
+	}
+	installed := semver.MustParse("1.2.3")
+	links := runtimeLinkSnapshot{current: runtimeLinkState{present: true, target: "releases/1.2.3-aaaaaaaaaaaa"}}
+	for name, test := range map[string]struct {
+		protected *protectedTransitionInspection
+		err       error
+	}{
+		"operator action required": {protected: &protectedTransitionInspection{inspection: releasetransition.Inspection{Outcome: &blocked}}},
+		"failed public inspection": {err: publicReleaseInspectionError{cause: errors.New("journal unreadable"), outcome: blocked}},
+		"failed inspection":        {err: errors.New("owner crashed")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, check := range []bool{false, true} {
+				var stdout bytes.Buffer
+				runtime := New(Config{Stdout: &stdout})
+				parsed := options{version: "1.2.2", check: check}
+				prepared, err := runtime.prepareInstalledNewer(parsed, links, installed, test.protected, test.err)
+				if !check || name == "failed inspection" {
+					if err == nil || !strings.Contains(err.Error(), "newer than the latest published release 1.2.2") {
+						t.Fatalf("check=%v: unready inspection prepared %#v, %v", check, prepared, err)
+					}
+					if outcome, public := TransitionOutcome(err); name != "failed inspection" && (!public || outcome.Code != blocked.Code) {
+						t.Fatalf("check=%v: unready inspection lost its outcome: %v", check, err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := prepared.Execute(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				var report struct {
+					Outcome        releasetransition.Outcome `json:"outcome"`
+					InstalledNewer InstalledNewer            `json:"installedNewer"`
+				}
+				if err := json.Unmarshal(stdout.Bytes(), &report); err != nil ||
+					report.Outcome.Status != blocked.Status || report.Outcome.Message != blocked.Message ||
+					report.InstalledNewer.Downgrade[1] != "yard update --version 1.2.2" {
+					t.Fatalf("unready check report = %q, %v", stdout.String(), err)
+				}
 			}
 		})
 	}
