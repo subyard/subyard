@@ -1417,8 +1417,11 @@ or without any journal, update and `--check` succeed and report that the install
 than the latest published release, the active release's readiness, warnings and next step, and the
 explicit downgrade commands; the `--check --json` report adds them as `installedNewer`. Any other
 inspection result keeps its ordinary report or refusal, with the same note. Re-running the
-installer without `--version` follows the same rule before it downloads anything: it exits
-successfully and names the same commands. Only an explicit `--version VERSION` or
+installer without `--version` follows the same rule before it downloads anything. It exits
+successfully and names the same commands only for a complete installation: a canonical `current`
+link to a present runtime, a complete journal, the installation inventory, the `yard` and `sy`
+entrypoints and the startup-file lines. Otherwise, including an invalid or dangling `current`
+link, it refuses and names the repairing re-run, `subyard-install.sh --version <installed>`. Only an explicit `--version VERSION` or
 `YARD_RELEASE_VERSION` selects an older release, under the ordinary candidate inspection. An equal
 version keeps the ordinary same-release inspection.
 
