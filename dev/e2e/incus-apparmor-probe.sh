@@ -12,6 +12,7 @@ APPARMOR_DROPIN=''
 DROPIN_ACTIVE=0
 HOST_RUNTIME_CHANGED=0
 SYSTEMCTL_BIN=''
+LAUNCHER=''
 
 die() { printf 'incus-apparmor-probe-e2e: %s\n' "$*" >&2; exit 2; }
 info() { printf '  [ .. ] %s\n' "$*"; }
@@ -32,7 +33,7 @@ incus() {
     /usr/bin/incus "$@"
   fi
 }
-yard() { "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"; }
+yard() { "$LAUNCHER" -Y "$YARD_NAME" "$@"; }
 guest() { incus exec "$INSTANCE" --project "$PROJECT" -- "$@"; }
 
 incus_apparmor_is_disabled() {
@@ -218,6 +219,11 @@ export MIN_DISK_GIB=1
 export HOST_CLAUDE_MD=
 export HOST_CODEX_AGENTS_MD=
 export HOST_OPENCODE_AGENTS_MD=
+export YARD_RUNTIME_ROOT="$STATE/candidate/runtime"
+# A fresh fixture needs the same committed release epochs as an ordinary installation.
+# shellcheck source=tests/helpers/release-candidate.sh
+. "$ROOT/tests/helpers/release-candidate.sh"
+LAUNCHER="$(release_candidate_install "$ROOT" "$STATE/candidate")"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 
 ssh_port=$((36000 + ($$ % 12000)))
@@ -240,8 +246,7 @@ FORWARD_SSH_AGENT=0
 EOF
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
 
-info 'building the current candidate and initializing a restored-AppArmor container yard'
-"$ROOT/dev/build-engine.sh" --force
+info 'initializing a restored-AppArmor container yard with the installed candidate'
 yard init --yes
 yard start --yes
 
@@ -376,7 +381,7 @@ assert_failed_probe_preserves_runtime() {
   local label="$1" before after
   before="$(instance_snapshot)"
   run_failed_probe "$STATE/$label-init.out" \
-    "$ROOT/.build/yard" -Y "$YARD_NAME" init --yes
+    "$LAUNCHER" -Y "$YARD_NAME" init --yes
   after="$(instance_snapshot)"
   [ "$after" = "$before" ] || die "yard init mutated the $label fixture"
 

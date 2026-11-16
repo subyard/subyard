@@ -821,13 +821,21 @@ SUBYARD_E2E_LEGACY_FIXTURE=1 \
 
 This fixture is restricted to disposable VM1 candidate yards.
 
-The focused AppArmor regression creates a temporary container yard on VM1, exercises failed
-capability probes and both real Incus AppArmor transitions, and verifies Docker and runtime
+The focused AppArmor regression installs the current packaged candidate through the supported
+installer (including its committed release-transition ledger), then creates a temporary container
+yard on VM1, exercises failed capability probes and both real Incus AppArmor transitions, and verifies Docker and runtime
 preservation. It restores its marked systemd override and tears down its yard. Run it on a free
-slot whose inner Incus starts with AppArmor enabled; it is targeted evidence, not a full P0:
+slot whose inner Incus starts with AppArmor enabled; a disabled baseline is refused. It runs in
+Periodic E2E as `vm:incus-apparmor-probe`, outside the release catalog, and provides targeted
+evidence, not a full P0. To use a frozen candidate, prepare and transport it as follows; without
+candidate metadata, the fixture packages the transported current source inside the guest:
 
 ```sh
-dev/agent-e2e.sh --slot "$slot" --purpose apparmor-probe --vm 1 -- \
+python3 dev/release-acceptance.py prepare --version 1.0.0-apparmor.e2e --output .build/apparmor-candidate
+export SUBYARD_E2E_CANDIDATE_BUNDLE="$PWD/.build/apparmor-candidate/candidate-bundle.tar.gz"
+export SUBYARD_E2E_CANDIDATE_SHA256
+SUBYARD_E2E_CANDIDATE_SHA256="$(sha256sum "$SUBYARD_E2E_CANDIDATE_BUNDLE" | awk '{print $1}')"
+dev/agent-e2e.sh --slot "$slot" --vm-count 1 --purpose apparmor-probe --vm 1 -- \
   bash dev/e2e/incus-apparmor-probe.sh
 ```
 

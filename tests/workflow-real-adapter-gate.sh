@@ -335,9 +335,16 @@ release_entries += json.loads((root / a.CORE_VM_CATALOG).read_text())["checks"]
 assert not any(entry["id"].split(":")[-1] == "config-sync" or
                any(Path(arg).name == "config-sync-acceptance.sh" for arg in entry["command"])
                for entry in release_entries), "config sync leaked into release acceptance"
+apparmor_id = "vm:incus-apparmor-probe"
+apparmor = [entry for group in plan.values() for entry in group["include"] if entry["id"] == apparmor_id]
+assert apparmor == [{"id": apparmor_id, "command": [
+    "dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
+    "--purpose", "apparmor-probe", "--", "bash", "dev/e2e/incus-apparmor-probe.sh"]}]
+assert apparmor[0] in plan["checks"]["include"]  # Containers need no Intel-only nested VM job.
+assert apparmor_id not in commands  # Periodic-only; no new release acceptance gate.
 # Adding periodic-only checks must preserve every existing matrix entry, including Veranda.
 p.PERIODIC_ONLY = []
-assert {kind: {"include": [entry for entry in group["include"] if entry != config_sync]}
+assert {kind: {"include": [entry for entry in group["include"] if entry not in (config_sync, apparmor[0])]}
         for kind, group in plan.items()} == p.plan(root)
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
 workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
