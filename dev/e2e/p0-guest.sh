@@ -1042,6 +1042,10 @@ ensure_owner_incus() {
 }
 ensure_peer_incus() {
   ensure_incus "$PEER_STATE_ROOT/incus-home" "$PEER_INCUS_MARKER" peer-prepare-resume
+  peer_incus_ready
+}
+# A group re-exec resumes peer preparation after ensure_incus; it must pass the same checks.
+peer_incus_ready() {
   reconcile_p0_incus_apparmor_compat
   assert_incus_daemon_line
 }
@@ -2029,7 +2033,7 @@ capacity_verify_cleanup() {
   owner-migration) owner_migration ;;
   broker-recovery-owner) broker_recovery_owner ;;
   peer-prepare) peer_prepare ;;
-  peer-prepare-resume) peer_prepare_finish ;;
+  peer-prepare-resume) peer_incus_ready; peer_prepare_finish ;;
   peer-info) peer_info ;;
   peer-authorize) peer_authorize ;;
   peer-probe) peer_probe ;;
