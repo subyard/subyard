@@ -3,6 +3,7 @@ package reconcileruntime
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -121,6 +122,57 @@ func TestProfileRuntimesOfNeverProvisionedGuestAreDeferred(t *testing.T) {
 			}
 			if err == nil {
 				t.Fatalf("a re-initialized yard skipped its runtime handler: %#v", observations)
+			}
+		})
+	}
+}
+
+// Init plans the project hooks of a guest it never provisioned conditionally,
+// without observing them, and its check before writes accepts that plan. A
+// working yard whose re-init failed is observed and refuses on the failure.
+func TestProjectHooksOfNeverProvisionedGuestArePlannedConditionally(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		ever  string
+		never bool
+	}{
+		{name: "never initialized", never: true},
+		{name: "re-init of a working yard", ever: "true"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := map[string]string{"user.subyard.managed": "true", "user.subyard.name": "y8", "user.subyard.initialized": "false"}
+			if test.ever != "" {
+				config["user.subyard.ever_initialized"] = test.ever
+			}
+			instance := ports.InstanceInfo{Name: "yard-y8", Project: "subyard-y8", Status: "Running", Config: config}
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-y8/yard-y8": instance},
+				Reconcile: ports.ReconcileState{InstanceFound: true, Instance: instance}}
+			root := testkit.TempDir(t)
+			if err := os.MkdirAll(root+"/config", 0o700); err != nil {
+				t.Fatal(err)
+			}
+			testkit.WriteFile(t, root+"/config/projects-changed.sh", []byte("#!/bin/sh\n"), 0o600)
+			guest := &neverInitializedGuest{}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: guest, Integrations: []profile.IntegrationDefinition{},
+				Yard: domain.Context{YardName: "y8", IncusProject: "subyard-y8", YardInstanceName: "yard-y8", DevUser: "dev", DevUID: 1000}}
+			plan, err := runtime.PrepareProjectHooks(context.Background(), false)
+			if !test.never {
+				if err == nil {
+					t.Fatal("a re-initialized yard skipped its project hook observation")
+				}
+				return
+			}
+			if err != nil || !plan.conditional {
+				t.Fatalf("never-provisioned guest: plan=%#v err=%v", plan, err)
+			}
+			runtime.HookPlan = plan
+			if err := runtime.CheckProjectHookPlan(context.Background(), true); err != nil {
+				t.Fatalf("check before writes: %v", err)
+			}
+			for _, command := range guest.requests {
+				if command[0] == "bash" {
+					t.Fatalf("project hooks were observed in a never-provisioned guest: %v", command)
+				}
 			}
 		})
 	}

@@ -666,7 +666,8 @@ yard that has never finished init has no installed owner services: its `stop` an
 keep the SSH listener fence and an all-user SSH session check but skip the profile owner-service
 pause, and teardown stops that instance before the owners' cleanup. When its guest also lacks
 the substrate provisioning installs first (python3, the developer account and `/srv/agents`),
-`init` defers its profile runtimes like a stopped yard's and reads its applied integration state
+`init` defers its profile runtimes like a stopped yard's, plans its project hooks conditionally
+and reads its applied integration state
 as absent only if no integration inventory exists. A working yard whose re-init failed keeps the
 strict checks.
 
