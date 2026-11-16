@@ -749,14 +749,16 @@ its original attempt logs/events and applicable PASS results from the same candi
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
-and ordered `lanes` entries containing `id` and runner `arguments`. A schema-version-1
+and ordered `lanes` entries containing `id` and runner `arguments`. A lane marked
+`"periodic_only": true` runs only in Periodic E2E: it is not a release check, so release
+acceptance neither runs nor requires it. A schema-version-1
 `acceptance-lanes.json` may declare nonempty `lanes`, a host-free `preflight` command array, or both.
 A preflight-only declaration preserves the unsplit profile acceptance check. Full collector runs
 execute declared preflights after successful local gates and collect results in profile-name order
 before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfinished `running`
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
-every runnable lane; `--only profile:NAME/ID` requests one lane. Available approved slots take the
+every runnable release lane; `--only profile:NAME/ID` requests one lane. Available approved slots take the
 next queued check after their controller exits. A typed `blocked/capacity_memory` or
 `blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
 next independent check. After all first-pass controllers finish, capacity-blocked checks are

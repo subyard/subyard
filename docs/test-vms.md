@@ -1434,7 +1434,8 @@ Live account/service checks follow the [external-check contract](reference/relea
 Required synthetic VM fixtures, including OpenClaw staging safety/lifecycle, establish their own
 boundaries; they do not prove real service behavior.
 
-The `stuck-recovery` lane (`profile:orca/stuck-recovery`) starts from the published anchor with
+The `stuck-recovery` lane (`profile:orca/stuck-recovery`) is periodic-only: it runs in Periodic
+E2E and never gates a release. It starts from the published anchor with
 Orca running, then gives a project a saved tab that survives an Orca restart, an agent-session
 tab and a live terminal, plus a neighbour project with an agent-session tab and a live terminal,
 and removes the first project. Updating to published 0.29.0 must stop in `recovery-ambiguous`,
