@@ -503,8 +503,11 @@ if [ "$run_transition" = 1 ] && [ -z "$SOURCE_INGRESS_ROOT" ] &&
   current_release="$(readlink -- "$RUNTIME_ROOT/current")" || current_release=''
   # The publisher names each release <version>-<first 12 hex digits of its digest>.
   # A prerelease identifier is numeric without leading zeros or contains a non-digit.
-  prerelease_identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
-  release_pattern="^releases/((0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-$prerelease_identifier(\\.$prerelease_identifier)*)?)-[0-9a-f]{12}\$"
+  # Numbers are limited to nine digits so shell arithmetic cannot overflow; longer
+  # versions skip this step and keep the engine's own refusal.
+  number='(0|[1-9][0-9]{0,8})'
+  prerelease_identifier="($number|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+  release_pattern="^releases/($number\\.$number\\.$number(-$prerelease_identifier(\\.$prerelease_identifier)*)?)-[0-9a-f]{12}\$"
   if [[ "$current_release" =~ $release_pattern ]]; then
     current_version="${BASH_REMATCH[1]}" current_major="${BASH_REMATCH[2]}"
     current_minor="${BASH_REMATCH[3]}" current_patch="${BASH_REMATCH[4]}" current_prerelease="${BASH_REMATCH[5]}"

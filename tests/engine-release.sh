@@ -948,7 +948,7 @@ final_release="$TMP/final-release"
     || fail 'prerelease current did not finish before the release update'
 )
 # An unparsable installed version never runs its migrate before the update refusal.
-for malformed_version in 1.0.bad 1.0.0-rc.01; do
+for malformed_version in 1.0.bad 1.0.0-rc.01 1.0.0-rc.99999999999999999999; do
   malformed_release="$TMP/malformed-release-$malformed_version"
   "$ROOT/dev/package-engine.sh" --output-dir "$malformed_release" --version "$malformed_version" \
     --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" >/dev/null
