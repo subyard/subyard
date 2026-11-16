@@ -7,6 +7,8 @@ import (
 
 const migrationLedgerCheckpointName = "history-checkpoint.json"
 
+var ErrMigrationLedgerAbsent error = migrationBlockerError{Blocker{Code: CodeRecoveryAmbiguous, Resource: "migration-history", Message: "protected migration history is absent: ledger.json and history-checkpoint.json are missing", Retry: "restore the missing protected files before retrying"}}
+
 func (store *POSIXV2Store) ReadMigrationLedger(
 	registry RegistryV2,
 	registryDigest Fingerprint,
@@ -79,13 +81,12 @@ func ParseMigrationLedger(
 			Checkpointed: true,
 		}, nil
 	}
-	ledger := BaselineLedgerV2(registry)
-	if projection.Exists {
-		var err error
-		ledger, _, err = ParseLedgerV2(projection.Payload, registry)
-		if err != nil {
-			return MigrationLedgerSnapshot{}, err
-		}
+	if !projection.Exists {
+		return MigrationLedgerSnapshot{}, ErrMigrationLedgerAbsent
+	}
+	ledger, _, err := ParseLedgerV2(projection.Payload, registry)
+	if err != nil {
+		return MigrationLedgerSnapshot{}, err
 	}
 	if err := registry.requireMinimumLedger(ledger); err != nil {
 		return MigrationLedgerSnapshot{}, err

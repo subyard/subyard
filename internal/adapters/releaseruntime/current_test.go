@@ -235,7 +235,7 @@ func TestCurrentTransitionCatchesUpInstalledReleaseWithoutSelection(t *testing.T
 	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Current != string(fixture.candidate.release) || report.Outcome.Status != releasetransition.StatusMigrationRequired || len(report.Domains) == 0 {
+	if report.Current != string(fixture.candidate.release) || report.Outcome.Status != releasetransition.StatusMigrationRequired || len(report.Domains) != 0 {
 		t.Fatalf("check report = %s", stdout.String())
 	}
 	var pending []string
@@ -401,7 +401,7 @@ func TestCurrentDomainsReportsCheckpointAuthorityBeyondPinnedProjection(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseline := releasetransition.BaselineLedgerV2(registry)
+	baseline := releasetransition.FreshBootstrapLedgerV2(registry)
 	payload, _, err := releasetransition.MarshalLedgerV2(baseline, registry)
 	if err != nil {
 		t.Fatal(err)
@@ -458,6 +458,19 @@ func TestCurrentDomainsReportsCheckpointAuthorityBeyondPinnedProjection(t *testi
 	}
 	if !bytes.Equal(snapshot.ledger.Payload, payload) {
 		t.Fatal("reporting checkpoint state changed pinned legacy projection")
+	}
+	for _, name := range []string{"ledger.json", "history-checkpoint.json"} {
+		if err := os.Remove(filepath.Join(fixture.configHome, "release-transition/v2", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err = runtime.readCurrentSnapshot(fixture.runtimeRoot, fixture.configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domains, err = runtime.currentDomains(context.Background(), fixture.runtimeRoot, verification, snapshot)
+	if err != nil || len(domains) != 0 {
+		t.Fatalf("absent history reported top epochs: %#v %v", domains, err)
 	}
 }
 
@@ -567,7 +580,7 @@ func TestCurrentTransitionReportsPartialLedgerAndHumanNextAction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
 	if err != nil {
 		t.Fatal(err)
 	}

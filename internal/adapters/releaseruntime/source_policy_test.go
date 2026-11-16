@@ -198,7 +198,7 @@ func TestSourcePolicyUnfinishedAnchorHop(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
+						ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
 						if err != nil {
 							t.Fatal(err)
 						}
@@ -558,7 +558,7 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			baseline := releasetransition.BaselineLedgerV2(registry)
+			baseline := releasetransition.FreshBootstrapLedgerV2(registry)
 			complete := baseline
 			pending, err := registry.PendingPath(complete)
 			if err != nil {
@@ -616,7 +616,11 @@ func TestActivatedTakeoverRequiresCompleteOriginalAuthority(t *testing.T) {
 			if (err == nil) != allowed {
 				t.Fatalf("authority %s allowed=%t: %v", state, allowed, err)
 			}
-			if !allowed && !errors.Is(err, releasetransition.ErrRetiredMigrationRepair) {
+			if state == "contradictory" {
+				if !errors.Is(err, releasetransition.ErrInvalid) {
+					t.Fatalf("corrupt history was hidden: %v", err)
+				}
+			} else if !allowed && !errors.Is(err, releasetransition.ErrRetiredMigrationRepair) {
 				if strings.Contains(err.Error(), "uninstall --full") || strings.Contains(err.Error(), "next:") ||
 					!strings.HasPrefix(err.Error(), "replacement-authority-required: ") || !strings.Contains(err.Error(), "known-good backup") {
 					t.Fatalf("unsafe damaged-history guidance: %v", err)
@@ -727,7 +731,7 @@ func TestRetiredHistoryAdmissionDistinguishesFreshRegistryBaseline(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			pathToCurrent, pathErr := registry.PendingPath(releasetransition.BaselineLedgerV2(registry))
+			pathToCurrent, pathErr := registry.PendingPath(releasetransition.FreshBootstrapLedgerV2(registry))
 			fresh := pathErr == nil && len(pathToCurrent) == 0
 			if fresh == original {
 				t.Fatal("absent history was interpreted without its source registry")
@@ -738,7 +742,9 @@ func TestRetiredHistoryAdmissionDistinguishesFreshRegistryBaseline(t *testing.T)
 				t.Fatal(err)
 			}
 			err = store.RequireRetiredMigrationCompletion(registry, digest)
-			if original && !errors.Is(err, releasetransition.ErrRetiredMigrationRepair) || !original && err != nil {
+			// Absence is classified by observe using the journal and bootstrap state,
+			// never inferred complete from the selected registry baseline here.
+			if err != nil {
 				t.Fatalf("baseline admission: %v", err)
 			}
 			entries, err := os.ReadDir(home)

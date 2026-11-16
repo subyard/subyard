@@ -406,7 +406,7 @@ func seedExistingCurrentLedger(t *testing.T, home string, payload []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 	pending, err := registry.PendingPath(ledger)
 	if err != nil || len(pending) != 0 {
 		t.Fatal("fixture requires completed current epochs", err)

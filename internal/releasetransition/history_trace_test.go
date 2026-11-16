@@ -6,7 +6,7 @@ import (
 
 func TestV2HistoricalDomainFrontierResumesAtDurableCuts(t *testing.T) {
 	registry := v2TestRegistry(t)
-	ledger := BaselineLedgerV2(registry)
+	ledger := FrozenHistoryBaselineV2(registry)
 	var steps []JournalStep
 	var frontiers []LedgerV2
 	for _, migration := range registry.Migrations {
@@ -36,7 +36,7 @@ func TestV2HistoricalDomainFrontierResumesAtDurableCuts(t *testing.T) {
 
 func TestLedgerTraceRejectsChangedPinsAndUnprovenHistory(t *testing.T) {
 	registry := v2TestRegistry(t)
-	ledger := BaselineLedgerV2(registry)
+	ledger := FrozenHistoryBaselineV2(registry)
 	migration := registry.Migrations[0]
 	edge, err := nextLedgerEdge(registry, ledger, migration)
 	if err != nil {
@@ -67,7 +67,7 @@ func TestHistoryAdaptersRejectZeroRegistryAndForeignEdge(t *testing.T) {
 	registry := v2TestRegistry(t)
 	foreign := registry.Migrations[0]
 	foreign.Kind = "foreign-kind"
-	if _, err := nextLedgerEdge(registry, BaselineLedgerV2(registry), foreign); err == nil {
+	if _, err := nextLedgerEdge(registry, FrozenHistoryBaselineV2(registry), foreign); err == nil {
 		t.Fatal("foreign definition accepted")
 	}
 }

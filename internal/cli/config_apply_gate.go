@@ -231,8 +231,11 @@ func (cli *CLI) prepareActivationRepair(
 		return nil, nil
 	}
 	ledgerState, err := store.ReadMigrationLedger(registry, registryDigest)
-	if err != nil || !ledgerState.AuthoritySnapshot.Exists {
+	if errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) {
 		return nil, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	ledgerSnapshot := ledgerState.AuthoritySnapshot
 	pending, err := registry.PendingPath(ledgerState.Ledger)

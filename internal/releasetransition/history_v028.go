@@ -99,20 +99,18 @@ func (store *POSIXV2Store) RequireRetiredMigrationCompletion(registry RegistryV2
 		}
 	}
 	state, err := store.ReadMigrationLedger(registry, digest)
+	if errors.Is(err, ErrMigrationLedgerAbsent) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	pending, err := registry.PendingPath(BaselineLedgerV2(registry))
-	if err != nil {
-		return err
-	}
-	if state.AuthoritySnapshot.Exists || len(pending) != 0 {
-		for domain, top := range historyV028.CurrentEpochs {
-			if state.Ledger.Domains[domain].Epoch < top {
-				return retiredMigrationRepairError()
-			}
+	for domain, top := range historyV028.CurrentEpochs {
+		if state.Ledger.Domains[domain].Epoch < top {
+			return retiredMigrationRepairError()
 		}
 	}
+
 	return nil
 }
 

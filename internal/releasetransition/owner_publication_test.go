@@ -58,7 +58,7 @@ func TestOwnerPublicationOrderPreservesCompletedHistoricalOwnerPrefix(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := BaselineLedgerV2(historical)
+	ledger := FrozenHistoryBaselineV2(historical)
 	for _, domain := range []string{"settings", "owner-registration"} {
 		for _, migration := range historical.Migrations {
 			if migration.Domain == domain {

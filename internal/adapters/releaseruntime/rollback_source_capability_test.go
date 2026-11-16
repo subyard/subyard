@@ -47,7 +47,7 @@ case "$1" in --version) echo 'yard-engine 0.28.1';; *) exit 71;; esac
 			if err != nil {
 				t.Fatal(err)
 			}
-			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
+			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
 			if err != nil {
 				t.Fatal(err)
 			}

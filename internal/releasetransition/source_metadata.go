@@ -77,7 +77,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 		proof.Journal = &journal
 	}
 	proof.Ledger, err = store.ReadMigrationLedger(registry, digest)
-	if err != nil {
+	if err != nil && !(errors.Is(err, ErrMigrationLedgerAbsent) && proof.Journal == nil) {
 		return proof, err
 	}
 	if proof.Journal != nil {
@@ -89,7 +89,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 			return proof, err
 		}
 		_, completionErr := owner.Complete(authority)
-		if completionErr != nil || !proof.Ledger.AuthoritySnapshot.Exists {
+		if completionErr != nil {
 			return proof, errors.New("source repair requires the complete original migration ledger")
 		}
 		if proof.Journal.Checkpoint == JournalComplete {
@@ -426,7 +426,7 @@ func (store *POSIXV2Store) sourceRetainedTerminalEvidence(transaction Transactio
 		bound.Steps = append(bound.Steps, step)
 		delete(verified, baselineLedgerStep)
 	}
-	path, err := registry.historyData().PendingPath(BaselineLedgerV2(registry.historyData()))
+	path, err := registry.historyData().PendingPath(FrozenHistoryBaselineV2(registry))
 	if err != nil {
 		return bound, err
 	}

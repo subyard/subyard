@@ -121,8 +121,9 @@ if [ "$1" = --version ]; then printf 'yard-engine 1.2.3\n'; exit; fi
 UPDATE_FOLLOWUP_HELPER=1 exec "$UPDATE_FOLLOWUP_BINARY" -test.run='^TestUpdateCompletesFreshActivationRepairInOneCommand$' --
 `
 	writeCLIFile(t, filepath.Join(root, "followup-engine"), engine, 0o700)
-	registry := `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`
+	registry := string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "release-transition.json")))
 	writeCLIFile(t, filepath.Join(root, "config", "release-transition.json"), registry, 0o600)
+	seedRegistryLedgerFixture(t, configHome, []byte(registry))
 	installer := `#!/bin/sh
 set -eu
 while [ "$#" -gt 0 ]; do

@@ -260,7 +260,10 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		if historyErr == nil {
 			pending, historyErr = registry.PendingPath(history.Ledger)
 		}
-		if historyErr != nil || !history.AuthoritySnapshot.Exists || len(pending) != 0 {
+		if historyErr != nil && !errors.Is(historyErr, releasetransition.ErrMigrationLedgerAbsent) {
+			return historyErr
+		}
+		if errors.Is(historyErr, releasetransition.ErrMigrationLedgerAbsent) || len(pending) != 0 {
 			return errors.New("replacement-authority-required: the activated release's migration history is missing, inconsistent, or incomplete; this release cannot replace its unfinished transition. Restore the exact protected history from a known-good backup, or use a fix release of the activated series; do not uninstall")
 		}
 	}

@@ -2972,6 +2972,7 @@ func installUnfinishedV2MutationGateFixture(
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	seedRegistryLedgerFixture(t, configHome, registry)
 	capture := filepath.Join(root, "v2-candidate-inspections")
 	engine := filepath.Join(runtimeRoot, "releases", target, "bin", "yard-engine")
 	enginePayload := `#!/bin/sh

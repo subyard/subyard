@@ -61,7 +61,7 @@ func TestLocalSSHMigrationHasNoLegacyRollbackCompatibility(t *testing.T) {
 		fixture := newV2RollbackBoundaryFixtureWithLedger(t, "0.18.6", "", registryPayload, "absent")
 		if applied {
 			registry := fixture.transition.registry
-			ledger := BaselineLedgerV2(registry)
+			ledger := FrozenHistoryBaselineV2(registry)
 			for _, migration := range registry.Migrations {
 				ledger, err = ledger.Advance(registry, migration)
 				if err != nil {

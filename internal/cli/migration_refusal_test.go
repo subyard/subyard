@@ -170,7 +170,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsedRegistry), parsedRegistry)
+			ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(parsedRegistry), parsedRegistry)
 			if err != nil {
 				t.Fatal(err)
 			}

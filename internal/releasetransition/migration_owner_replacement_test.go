@@ -178,7 +178,7 @@ func TestMigrationOwnerReplacementBindsRetainedTerminalHistory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ledger := BaselineLedgerV2(original)
+			ledger := FrozenHistoryBaselineV2(original)
 			path, err := original.PendingPath(ledger)
 			if err != nil {
 				t.Fatal(err)

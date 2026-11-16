@@ -1335,49 +1335,35 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	if err != nil {
 		return v2Observation{}, err
 	}
-	ledger := BaselineLedgerV2(transition.registry)
-	migrationLedgerSnapshot := MigrationLedgerSnapshot{
-		Ledger: ledger, AuthoritySnapshot: ledgerSnapshot,
-		ProjectionSnapshot: ledgerSnapshot,
-	}
 	checkpointSnapshot, err := transition.store.ReadMigrationCheckpoint()
 	if err != nil {
 		return v2Observation{}, err
 	}
 	checkpointAuthority := checkpointSnapshot.Exists
-	if transition.options.MigrationCheckpoint || checkpointAuthority {
-		migrationLedgerSnapshot, err = ParseMigrationLedger(
-			ledgerSnapshot, checkpointSnapshot, transition.registry, transition.registryDigest,
-		)
+	var rollbackBlocker *Blocker
+	if transition.options.Direction == DirectionActivatePrevious &&
+		(transition.options.RollbackTarget == nil || transition.options.RollbackTarget.RegistryDigest != "" && transition.options.RollbackTarget.RegistryDigest != transition.registryDigest) {
+		rollbackBlocker = rollbackIncompatibleBlocker()
+	}
+	migrationLedgerSnapshot, ledgerErr := ParseMigrationLedger(ledgerSnapshot, checkpointSnapshot, transition.registry, transition.registryDigest)
+	if ledgerErr != nil && !errors.Is(ledgerErr, ErrMigrationLedgerAbsent) {
+		if transition.options.MigrationCheckpoint || checkpointAuthority || transition.options.Direction != DirectionActivatePrevious || transition.options.RollbackTarget == nil || transition.options.RollbackTarget.RegistryDigest == "" {
+			return v2Observation{}, ledgerErr
+		}
+		// Preserve the existing refusal when a retained registry cannot read
+		// the newer ledger. No ledger value is inferred from the failed read.
+		rollbackBlocker = rollbackIncompatibleBlocker()
+	}
+	ledger := migrationLedgerSnapshot.Ledger
+	if ledgerErr != nil {
+		migrationLedgerSnapshot = MigrationLedgerSnapshot{AuthoritySnapshot: ledgerSnapshot, ProjectionSnapshot: ledgerSnapshot}
+	}
+	if migrationLedgerSnapshot.Checkpointed {
+		payload, _, err := MarshalLedgerV2(ledger, transition.registry)
 		if err != nil {
 			return v2Observation{}, err
 		}
-		ledger = migrationLedgerSnapshot.Ledger
-		if migrationLedgerSnapshot.Checkpointed {
-			payload, _, marshalErr := MarshalLedgerV2(ledger, transition.registry)
-			if marshalErr != nil {
-				return v2Observation{}, marshalErr
-			}
-			ledgerSnapshot = protectedSnapshotFromPayload(payload)
-		}
-	}
-	var rollbackBlocker *Blocker
-	if transition.options.Direction == DirectionActivatePrevious &&
-		(transition.options.RollbackTarget == nil ||
-			(transition.options.RollbackTarget.RegistryDigest != "" &&
-				transition.options.RollbackTarget.RegistryDigest != transition.registryDigest)) {
-		rollbackBlocker = rollbackIncompatibleBlocker()
-	}
-	if !checkpointAuthority && !transition.options.MigrationCheckpoint && ledgerSnapshot.Exists && rollbackBlocker == nil {
-		ledger, _, err = ParseLedgerV2(ledgerSnapshot.Payload, transition.registry)
-		if err != nil {
-			if transition.options.Direction != DirectionActivatePrevious ||
-				transition.options.RollbackTarget == nil ||
-				transition.options.RollbackTarget.RegistryDigest == "" {
-				return v2Observation{}, err
-			}
-			rollbackBlocker = rollbackIncompatibleBlocker()
-		}
+		ledgerSnapshot = protectedSnapshotFromPayload(payload)
 	}
 	journalSnapshot, err := transition.store.ReadCurrentJournal()
 	if err != nil {
@@ -1408,6 +1394,9 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 	}
 	if rollbackBlocker == nil {
 		rollbackBlocker = transition.rollbackCompatibilityBlocker(journal == nil || journal.Goal != goal)
+	}
+	if errors.Is(ledgerErr, ErrMigrationLedgerAbsent) && rollbackBlocker == nil && !transition.observeBootstrapLedger(&observation) {
+		return v2Observation{}, ledgerErr
 	}
 	if rollbackBlocker != nil {
 		observation.blockers = []Blocker{*rollbackBlocker}
@@ -1799,8 +1788,6 @@ func (transition *V2Transition) observeFresh(ctx context.Context, observation *v
 		if err := transition.appendBaselineWork(observation, nil); err != nil {
 			return err
 		}
-	} else if len(transition.registry.RetiredPrefixes) != 0 && !observation.migrationLedgerSnapshot.AuthoritySnapshot.Exists {
-		return retiredMigrationRepairError()
 	}
 	if transition.options.Ingress != nil {
 		ingress, err := transition.options.Ingress.Inspect(ctx, nil)
@@ -2225,9 +2212,6 @@ func (transition *V2Transition) ingressStepForWork(work v2Work) (V2IngressStep, 
 }
 
 func (transition *V2Transition) fixedPoint(observation v2Observation) bool {
-	if len(transition.registry.RetiredPrefixes) != 0 && !observation.migrationLedgerSnapshot.AuthoritySnapshot.Exists {
-		return false
-	}
 	if pendingSourceActivationWork(observation) {
 		return false
 	}
@@ -3118,24 +3102,6 @@ func (transition *V2Transition) evaluateCurrent(
 // authority is active. Thereafter it returns the canonical V2 semantic view
 // used by frozen journal ledger-step bindings.
 func (transition *V2Transition) readLedgerSemanticSnapshot() (ProtectedSnapshot, LedgerV2, error) {
-	checkpoint, err := transition.store.ReadMigrationCheckpoint()
-	if err != nil {
-		return ProtectedSnapshot{}, LedgerV2{}, err
-	}
-	if !transition.options.MigrationCheckpoint && !checkpoint.Exists {
-		snapshot, err := transition.store.ReadLedger()
-		if err != nil {
-			return ProtectedSnapshot{}, LedgerV2{}, err
-		}
-		ledger := BaselineLedgerV2(transition.registry)
-		if snapshot.Exists {
-			ledger, _, err = ParseLedgerV2(snapshot.Payload, transition.registry)
-			if err != nil {
-				return ProtectedSnapshot{}, LedgerV2{}, err
-			}
-		}
-		return snapshot, ledger, nil
-	}
 	actual, err := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
 	if err != nil {
 		return ProtectedSnapshot{}, LedgerV2{}, err

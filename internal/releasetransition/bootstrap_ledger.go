@@ -11,7 +11,7 @@ const baselineLedgerMigration = "initialize-ledger-v2"
 // This is a ledger publication, not a retired registry migration. Its exact
 // intent fits the existing V2 journal/evidence grammar, including older codecs.
 func baselineLedgerIntent(registry RegistryV2) (PlannerStepIntent, []byte, error) {
-	payload, digest, err := MarshalLedgerV2(BaselineLedgerV2(registry), registry)
+	payload, digest, err := MarshalLedgerV2(FreshBootstrapLedgerV2(registry), registry)
 	return PlannerStepIntent{ID: baselineLedgerStep, Migration: baselineLedgerMigration, Resource: "ledger.bootstrap", Decision: DecisionTransform, Expected: absentProtectedSnapshot().Fingerprint, Desired: digest}, payload, err
 }
 
@@ -97,4 +97,18 @@ func validateTerminalBaseline(journal JournalRecord, step JournalStep, registry 
 		return invalid("terminal baseline ledger evidence differs from initial bootstrap")
 	}
 	return nil
+}
+
+// Only observe may admit absence, before any completeness check.
+func (transition *V2Transition) observeBootstrapLedger(observation *v2Observation) bool {
+	allowed := transition.initialLedgerBootstrap(*observation)
+	if journal := observation.journal; journal != nil && journal.Checkpoint != JournalComplete {
+		for _, step := range journal.Steps {
+			allowed = allowed || step.ID == baselineLedgerStep && step.Checkpoint != StepVerified
+		}
+	}
+	if allowed {
+		observation.ledger = FreshBootstrapLedgerV2(transition.registry)
+	}
+	return allowed
 }

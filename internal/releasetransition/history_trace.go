@@ -69,7 +69,7 @@ func encodeLedgerTrace(registry RegistryV2, trace migrationhistory.Trace, steps 
 		if !ok {
 			return nil, invalid("journaled ledger edge is missing")
 		}
-		initialAbsent := sameLedgerV2(ledgerFromAuthority(edge.witness.Before()), BaselineLedgerV2(registry.historyData())) && step.Expected == absentProtectedSnapshot().Fingerprint
+		initialAbsent := sameLedgerV2(ledgerFromAuthority(edge.witness.Before()), FrozenHistoryBaselineV2(registry)) && step.Expected == absentProtectedSnapshot().Fingerprint
 		if step.Desired != edge.after || step.Expected != edge.before && !initialAbsent {
 			return nil, invalid("journaled ledger transition does not bind its historical frontier")
 		}

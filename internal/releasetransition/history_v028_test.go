@@ -198,7 +198,7 @@ func TestFreshHistoryStartsAtTopWithoutHistoricalMigrations(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			baseline := BaselineLedgerV2(candidate.registry)
+			baseline := FreshBootstrapLedgerV2(candidate.registry)
 			if pending, err := candidate.registry.PendingPath(baseline); err != nil || len(pending) != 0 {
 				t.Fatalf("fresh pending: %#v %v", pending, err)
 			}
@@ -287,7 +287,7 @@ func TestRetiredMigrationAdmissionRefusesBeforeWrites(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				payload, _, err := MarshalLedgerV2(BaselineLedgerV2(historyV028), historyV028)
+				payload, _, err := MarshalLedgerV2(FreshBootstrapLedgerV2(historyV028), historyV028)
 				if err != nil {
 					t.Fatal(err)
 				}

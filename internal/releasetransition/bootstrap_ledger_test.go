@@ -38,7 +38,7 @@ func (c *bootstrapAuthorityConsumer) Reconcile(context.Context, ReleaseLinks) er
 	if !state.AuthoritySnapshot.Exists {
 		return errors.New("activation requires committed ledger authority")
 	}
-	if !sameLedgerV2(state.Ledger, BaselineLedgerV2(c.registry)) {
+	if !sameLedgerV2(state.Ledger, FreshBootstrapLedgerV2(c.registry)) {
 		return errors.New("bootstrap ledger differs from canonical baseline")
 	}
 	c.ready = true
@@ -219,7 +219,7 @@ func TestInitialLedgerBootstrapRequiresNoPriorState(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "checkpoint":
-				cp, err := newLedgerCheckpointV1(BaselineLedgerV2(r), r, d, absentProtectedSnapshot(), cloneEpochs(r.MinimumEpochs))
+				cp, err := newLedgerCheckpointV1(FreshBootstrapLedgerV2(r), r, d, absentProtectedSnapshot(), cloneEpochs(r.MinimumEpochs))
 				if err != nil {
 					t.Fatal(err)
 				}

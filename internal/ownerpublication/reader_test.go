@@ -34,7 +34,7 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 	path := filepath.Join(home, "release-transition", "v2", "ledger.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(futureRoot, "config/release-transition.json"), futurePayload, 0600)
-	futurePayload, _, err = releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(future), future)
+	futurePayload, _, err = releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(future), future)
 	if err != nil {
 		t.Fatal(err)
 	}

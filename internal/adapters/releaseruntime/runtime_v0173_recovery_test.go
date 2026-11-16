@@ -169,7 +169,7 @@ func newV0173RecoveryFixture(t *testing.T) v0111ProcessFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	completedLedger := releasetransition.BaselineLedgerV2(registry)
+	completedLedger := releasetransition.FreshBootstrapLedgerV2(registry)
 	for _, migration := range registry.Migrations {
 		completedLedger, err = completedLedger.Advance(registry, migration)
 		if err != nil {

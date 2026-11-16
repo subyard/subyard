@@ -184,7 +184,7 @@ func (checkpoint LedgerCheckpointV1) ledgerView(registry RegistryV2, minimums ma
 	if checkpoint.SchemaVersion != LedgerCheckpointSchemaV1 {
 		return LedgerV2{}, invalid("unsupported migration ledger checkpoint schema %d", checkpoint.SchemaVersion)
 	}
-	ledger := BaselineLedgerV2(registry)
+	ledger := LedgerV2{SchemaVersion: LedgerSchemaV2, Domains: make(map[string]DomainLedgerV2, len(checkpoint.Domains))}
 	for domain, state := range checkpoint.Domains {
 		if _, exists := registry.MinimumEpochs[domain]; !exists {
 			return LedgerV2{}, invalid("migration checkpoint contains unknown domain %q", domain)

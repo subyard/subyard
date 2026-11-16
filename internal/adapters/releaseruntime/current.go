@@ -386,6 +386,9 @@ func (runtime *Runtime) currentDomains(ctx context.Context, root string, owner c
 		return nil, err
 	}
 	state, err := releasetransition.ParseMigrationLedger(snapshot.ledger, snapshot.checkpoint, registry, digest)
+	if errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

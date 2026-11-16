@@ -105,6 +105,7 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 			authorizations++
 			return false
 		}}
+	seedRegistryLedgerFixture(t, configHome, registry)
 	stateBefore := nativeTreeSnapshot(t, root)
 	transition, err := releasetransition.NewV2Transition(options)
 	if err != nil {
@@ -694,6 +695,20 @@ func TestProfileRuntimeActivationDefersLegacyYardLoadingUntilSourceMigrationsCom
 	}
 }
 
+// An installed synthetic owner has real ledger authority even with no migrations.
+func seedRegistryLedgerFixture(t *testing.T, configHome string, payload []byte) {
+	t.Helper()
+	registry, _, err := releasetransition.ParseRegistryV2(payload, releasetransition.BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), ledger, 0600)
+}
+
 func seedCurrentReleaseLedger(t *testing.T, root, configHome string) {
 	t.Helper()
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
@@ -710,7 +725,7 @@ func seedCurrentReleaseLedger(t *testing.T, root, configHome string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 	for _, migration := range registry.Migrations {
 		ledger, err = ledger.Advance(registry, migration)
 		if err != nil {
@@ -1250,7 +1265,7 @@ func TestCandidateProcessBlocksLegacyRollbackBelowCompiledHorizon(t *testing.T) 
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 	for _, migration := range registry.Migrations {
 		ledger, err = ledger.Advance(registry, migration)
 		if err != nil {
@@ -2253,6 +2268,7 @@ func TestSourceBootstrapMaterializedScopePublishesCheckpointWithOneConsent(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
+			seedRegistryLedgerFixture(t, configHome, registry)
 			writeSealedRollbackTarget(t, runtimeRoot, "release-a", "0.19.0", registry)
 			releaseRoot := filepath.Join(runtimeRoot, "releases", "release-a")
 			capability, err := os.ReadFile(filepath.Join(root, "config", "release-checkpoint.json"))
@@ -2409,7 +2425,7 @@ func TestCompletedMaterializedConfigReadinessDoesNotDependOnSelectedYard(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedLedgerPayload, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsed), parsed)
+	seedLedgerPayload, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(parsed), parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3299,6 +3315,7 @@ func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
 	if err := os.MkdirAll(configHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	seedRegistryLedgerFixture(t, configHome, registry)
 	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Yard: "default", Target: releasetransition.ReleaseID(target), Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(manifest)))}
 	actor := &processDriftReconciler{}
 	invoke := func() releasetransition.ProcessResponse {
@@ -3325,7 +3342,7 @@ func TestCurrentReadyReportPreservesCompletedSourceMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(parsedRegistry), parsedRegistry)
+	ledger, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(parsedRegistry), parsedRegistry)
 	if err != nil {
 		t.Fatal(err)
 	}

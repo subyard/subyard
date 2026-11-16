@@ -26,6 +26,7 @@ exact UTF-8 contents; all identities and owner values are synthetic.
 
 ## Completed installation retention fixtures
 
+`v0.28.0-completed-install-{plain,checkpointed}.json`,
 `v0.28.1-completed-install-{plain,checkpointed}.json` and
 `v0.29.0-completed-install-{plain,checkpointed}.json` contain complete protected
 state produced by the unmodified tag engines, not just a synthesized ledger.
@@ -35,6 +36,7 @@ and a checkpoint only in the checkpointed variant.
 
 Production sources came from `git archive` of these commits:
 
+- `v0.28.0`: `82692884d87d5d1522c4731a49c14c41c89922ba`;
 - `v0.28.1`: `58e3d8e2ec1cf187dbdf23d79d9ed9564b340a9e`;
 - `v0.29.0`: `53f7bccbddea72417ee222b0b7843fabeb0800c9`.
 
@@ -47,8 +49,8 @@ TMPDIR=/tmp GOFLAGS=-p=2 FIXTURE_VERSION=0.28.1 FIXTURE_OUTPUT=/tmp/completed-in
   go test -p 2 -count=1 ./internal/releasetransition -run '^TestExportCompletedInstallation$' -v
 ```
 
-Create `/tmp/completed-install-output` beforehand; use `FIXTURE_VERSION=0.29.0`
-for the other tag. The harness runs each first transition to Ready with no
+Create `/tmp/completed-install-output` beforehand; use `FIXTURE_VERSION=0.28.0`
+or `FIXTURE_VERSION=0.29.0` for the other tags. The harness runs each first transition to Ready with no
 warnings, once with `MigrationCheckpoint=false` and once with it enabled, then
 exports the exact file contents without editing them. The only added tag file
 is the test harness; no production source or handler is patched. These are
@@ -63,6 +65,8 @@ deleting required history.
 
 SHA256 of the exported JSON containers:
 
+- `v0.28.0-completed-install-checkpointed.json`: `6fffc92bfd22caa7a4ebdbebda8c0cbf7480763ce4673dd2dd6d1c225f0dd3db`;
+- `v0.28.0-completed-install-plain.json`: `c007d03817ca709ea4982c60f79f81bb9de0a1c8eacb3b677e0e0e4f1e7acfd5`;
 - `v0.28.1-completed-install-checkpointed.json`: `815f64ae682450fb4d27df5d6b8fc705cdb47b01df1bd7ecc997626378c92eb9`;
 - `v0.28.1-completed-install-plain.json`: `025a05c05aa0be56715ce6e8cea51247b91bb6bf97c5291e9126571bde992499`;
 - `v0.29.0-completed-install-checkpointed.json`: `cbeaa8d51eb1754fa358d55950f752299230abd54f161169c479f98d012ee3d0`;

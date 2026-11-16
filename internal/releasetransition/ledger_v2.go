@@ -43,7 +43,15 @@ func MarshalLedgerV2(ledger LedgerV2, registry RegistryV2) ([]byte, Fingerprint,
 	return payload, fingerprintPayload(payload), nil
 }
 
-func BaselineLedgerV2(registry RegistryV2) LedgerV2 {
+func FreshBootstrapLedgerV2(registry RegistryV2) LedgerV2 {
+	return ledgerAtMinimumEpochs(registry)
+}
+
+func FrozenHistoryBaselineV2(registry RegistryV2) LedgerV2 {
+	return ledgerAtMinimumEpochs(registry.historyData())
+}
+
+func ledgerAtMinimumEpochs(registry RegistryV2) LedgerV2 {
 	ledger := LedgerV2{
 		SchemaVersion: LedgerSchemaV2,
 		Domains:       make(map[string]DomainLedgerV2, len(registry.MinimumEpochs)),

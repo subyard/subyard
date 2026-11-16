@@ -67,7 +67,10 @@ func (cli *CLI) prepareResourceShutdownRepair(ctx context.Context, yard string, 
 		return nil, nil
 	}
 	ledger, err := store.ReadMigrationLedger(registry, digest)
-	if err != nil || !ledger.AuthoritySnapshot.Exists {
+	if errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) {
+		return nil, nil
+	}
+	if err != nil {
 		return nil, err
 	}
 	pending, err := registry.PendingPath(ledger.Ledger)

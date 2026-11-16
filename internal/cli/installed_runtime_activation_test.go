@@ -219,8 +219,10 @@ func TestCurrentInstalledSelectionFactsKeepReleasePlanReadyAndStable(t *testing.
 	fixture.cli.options.InitPlatform = platform
 	owner := (fixture.cli.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: fixture.cli.env["SUBYARD_CONFIG_HOME"]}, "core-guest-runtime").(*profileRuntimeActivationReconciler))
 	links := releasetransition.ReleaseLinks{Active: "release-current"}
+	home := testkit.TempDir(t)
+	seedRegistryLedgerFixture(t, home, []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`))
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
-		ConfigHome: testkit.TempDir(t), Releases: releasetransition.ReleasePair{From: "release-current", Target: "release-current"},
+		ConfigHome: home, Releases: releasetransition.ReleasePair{From: "release-current", Target: "release-current"},
 		RegistryPayload:     []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`),
 		ArtifactDigest:      releasetransition.Fingerprint(strings.Repeat("d", 64)),
 		Reconcilers:         []releasetransition.V2ActivationReconciler{owner},

@@ -298,7 +298,7 @@ func completedRuntimeSourceAuthoringFixture(t *testing.T, migrateSSH bool, extra
 		seedCompletedSSHCheckpoint(t, home, registry, registryDigest)
 		seedNativeSSHPins(t, home)
 	} else {
-		payload, _, err := releasetransition.MarshalLedgerV2(releasetransition.BaselineLedgerV2(registry), registry)
+		payload, _, err := releasetransition.MarshalLedgerV2(releasetransition.FreshBootstrapLedgerV2(registry), registry)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -597,7 +597,7 @@ func seedCompletedSSHCheckpoint(t *testing.T, home string, registry releasetrans
 	if err != nil {
 		t.Fatal(err)
 	}
-	before := releasetransition.BaselineLedgerV2(old)
+	before := releasetransition.FreshBootstrapLedgerV2(old)
 	for _, m := range old.Migrations {
 		if m.Kind == "local-ssh-port-settings-v2-to-v3" {
 			break

@@ -217,7 +217,7 @@ func seedAppliedV2Ledger(t *testing.T, configHome string) {
 func seedV2LedgerPrefix(t *testing.T, configHome string, count int) {
 	t.Helper()
 	registry := v2TestRegistry(t)
-	ledger := BaselineLedgerV2(registry)
+	ledger := FreshBootstrapLedgerV2(registry)
 	var err error
 	for _, migration := range registry.Migrations[:count] {
 		ledger, err = ledger.Advance(registry, migration)
@@ -587,7 +587,7 @@ func seedV0111PostActivationJournal(
 ) (JournalRecord, ProtectedSnapshot, []byte) {
 	t.Helper()
 	pair := transition.options.Releases
-	ledger := BaselineLedgerV2(transition.registry)
+	ledger := FreshBootstrapLedgerV2(transition.registry)
 	ledgerSnapshot := absentProtectedSnapshot()
 	steps := make([]JournalStep, 0, len(transition.registry.Migrations))
 	for _, migration := range transition.registry.Migrations {

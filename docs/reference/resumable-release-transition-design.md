@@ -481,7 +481,7 @@ in `history_v028.json`; their exact registry digest is checked before use. Catal
 per-domain prefix proofs, typed recovery and step/evidence validators remain data-reader
 contracts. There is no executable work recipe or effect dispatch for these historical kinds.
 
-Live admission enforces the raised floor. Fresh `BaselineLedgerV2` starts at the top with empty
+Live admission enforces the raised floor. `FreshBootstrapLedgerV2` starts at the top with empty
 `Applied`; existing historical `Applied` prefixes retain their original interpretation. Readers
 select the declared baseline for a pinned fresh projection, and the frozen vocabulary for old
 projections and journal traces, without rewriting either projection.
@@ -509,9 +509,14 @@ its bytes and completed effects, records no migration steps, and preserves tag-r
 A changed live registry digest is not substituted for the original journal's sealed owner binding.
 
 A below-floor ledger or an unfinished historical step other than `StepVerified` refuses before
-writes with `migration-manual-repair-required`. A missing ledger on a source whose sealed registry
-still starts below the floor has that older baseline and also requires repair. A fresh current
-runtime is distinguished by its verified top-epoch registry, rather than by absent files alone.
+writes with `migration-manual-repair-required`. Missing protected history is a typed read error
+(`ErrMigrationLedgerAbsent`), never a completed baseline value. Only observation of initial
+bootstrap, an unfinished baseline publication step, or an already determined rollback refusal
+can admit that absence. Other transitions report: `protected migration history is absent:
+ledger.json and history-checkpoint.json are missing`. Corrupt files remain read errors. A pinned
+projection without a checkpoint remains valid plain history; a checkpoint without its required
+projection is invalid. `FrozenHistoryBaselineV2` supplies the historical initial state only for
+retained traces, independently of the fresh constructor.
 Protected data and foreign resources remain untouched; full uninstall is a separate confirmed
 operation for every source version.
 

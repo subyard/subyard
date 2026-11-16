@@ -56,7 +56,7 @@ func activationSelectionRepairFixture(t *testing.T, extraAssets ...map[string]st
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledger := releasetransition.BaselineLedgerV2(registry)
+	ledger := releasetransition.FreshBootstrapLedgerV2(registry)
 	for _, migration := range registry.Migrations {
 		ledger, err = ledger.Advance(registry, migration)
 		if err != nil {
