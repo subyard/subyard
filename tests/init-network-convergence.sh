@@ -193,7 +193,7 @@ if bash "$nm_root/scripts/06-network.sh" --check; then
 fi
 printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
   'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' > "$nm_guard"
-guard_hash="$(bash -c '. "$1"; power_nm_guard_static_hash "$2"' _ "$ROOT/scripts/lib-power.sh" "$nm_guard")"
+guard_hash="$(bash -c '. "$1"; printf "%s %s" "$(power_nm_file_id "$2")" "$(power_nm_guard_static_hash "$2")"' _ "$ROOT/scripts/lib-power.sh" "$nm_guard")"
 boot_id="$(cat /proc/sys/kernel/random/boot_id)"
 printf '%s %s unread init\n' "$boot_id" "$guard_hash" > "$nm_root/state/nm-guard-state"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
@@ -203,7 +203,7 @@ rm -f "$nm_root/state/nm-guard-state"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
   fail "network planning accepted a guard without a record"
 fi
-printf 'earlier-boot %s held init\n' "$(printf 'other\n' | sha256sum | cut -d ' ' -f1)" > "$nm_root/state/nm-guard-state"
+printf 'earlier-boot %s %s held init\n' "${guard_hash%% *}" "$(printf 'other\n' | sha256sum | cut -d ' ' -f1)" > "$nm_root/state/nm-guard-state"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
   fail "network planning accepted a record for other guard content"
 fi

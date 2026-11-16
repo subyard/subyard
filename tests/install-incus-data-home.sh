@@ -151,8 +151,8 @@ seed_read_guard() {
   printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
     'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' \
     > "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
-  printf 'earlier-boot %s held init\n' \
-    "$(bash -c '. "$1"; power_nm_guard_static_hash "$2"' _ "$ROOT/scripts/lib-power.sh" "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf")" \
+  bash -c '. "$1"; printf "earlier-boot %s %s held init\n" "$(power_nm_file_id "$2")" "$(power_nm_guard_static_hash "$2")"' \
+    _ "$ROOT/scripts/lib-power.sh" "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf" \
     > "$TMP/var/lib/subyard/nm-guard-state"
 }
 
@@ -392,7 +392,7 @@ printf 'VERSION_CODENAME=test\n' > "$TMP/etc/os-release"
 printf 'fixture-key\n' > "$TMP/etc/apt/keyrings/zabbly.asc"
 version_bin="$TMP/version-bin"
 mkdir "$version_bin"
-for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir mv sha256sum join; do
+for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir mv sha256sum join sync; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
 for command_name in getent id systemctl sudo; do

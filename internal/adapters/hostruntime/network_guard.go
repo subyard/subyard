@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -72,8 +73,16 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 	if guard.State != nil {
 		state = guard.State()
 	}
-	if state == "unread-init" || state == "unread-migration" {
+	switch state {
+	case "unread-init", "unread-migration":
 		violations = append(violations, "NetworkManager has not read the Subyard guard on disk since this boot began")
+		reboot = true
+	case "unbound":
+		// Only init can tell what NetworkManager holds: it records the guard as unread.
+		violations = append(violations, "no Subyard record binds the guard on disk to what NetworkManager read")
+		if !slices.Contains(remedies, "run yard init") {
+			remedies = append(remedies, "run yard init")
+		}
 		reboot = true
 	}
 	if reboot {
@@ -302,8 +311,9 @@ const NetworkManagerGuardPath = "/etc/NetworkManager/conf.d/zz-subyard-unmanaged
 var NetworkManagerGuardStaticEntries = []string{"type:veth", "driver:veth", "interface-name:tap????????"}
 
 // NetworkManagerGuardStatePath records which guard NetworkManager has read (scripts/lib/host.sh):
-// boot ID, sha256 of the guard's static content, held|unread and init|migration. It persists
-// across boots, so losing it can only refuse starts.
+// boot ID, the guard file's identity (inode:ctime, compared only for equality), sha256 of its
+// static content, held|unread and init|migration. It persists across boots, so losing it can only
+// refuse starts.
 const NetworkManagerGuardStatePath = "/var/lib/subyard/nm-guard-state"
 
 const bootIDPath = "/proc/sys/kernel/random/boot_id"
@@ -313,6 +323,9 @@ const NetworkManagerRebootReminder = "reboot the host once so NetworkManager app
 
 // NetworkManagerUnreadReminder names the reboot NetworkManager needs before any yard starts.
 const NetworkManagerUnreadReminder = "NetworkManager has not read the Subyard guard yet: reboot the host once before starting a yard"
+
+// NetworkManagerUnboundReminder: no record binds the guard on disk, so init must record it first.
+const NetworkManagerUnboundReminder = "no Subyard record binds the NetworkManager guard on disk: run yard init, then reboot the host once before starting a yard"
 
 var exactInterfaceEntry = regexp.MustCompile(`^interface-name:[A-Za-z0-9_.:-]+$`)
 
@@ -349,27 +362,40 @@ func NetworkManagerGuardStaticHash(contents string) string {
 }
 
 // NetworkManagerGuardState is the pure read-state rule shared with power_nm_guard_state_rule in
-// scripts/lib-power.sh and checked on tests/fixtures/nm-guard-state.txt. Loaded only when the
-// record names this static content and is "held", or names another boot (NetworkManager read
-// the file when it started). A missing or malformed record, or another content, is not loaded.
-// It returns loaded, loaded-reboot (a held migration waiting for the reboot), unread-init or
-// unread-migration.
-func NetworkManagerGuardState(record, boot, hash string) string {
-	fields := strings.Fields(record)
-	if len(fields) != 4 || fields[0] == "" || boot == "" || hash == "" || fields[1] != hash ||
-		(fields[2] != "held" && fields[2] != "unread") || (fields[3] != "init" && fields[3] != "migration") {
+// scripts/lib-power.sh and checked on tests/fixtures/nm-guard-state.txt. A record binds one guard
+// file (its identity) and its static content; without that binding the state is "unbound", which
+// init repairs by recording the file as unread. A bound record is loaded when it is "held" or
+// names another boot (NetworkManager read the file when it started). It returns loaded,
+// loaded-reboot (a held migration waiting for the reboot), unread-init, unread-migration or
+// unbound.
+func NetworkManagerGuardState(record, boot, fileID, hash string) string {
+	if boot == "" {
 		return "unread-init"
+	}
+	fields := strings.Fields(record)
+	if len(fields) != 5 || fileID == "" || fields[1] != fileID || hash == "" || fields[2] != hash ||
+		(fields[3] != "held" && fields[3] != "unread") || (fields[4] != "init" && fields[4] != "migration") {
+		return "unbound"
 	}
 	switch {
 	case fields[0] != boot:
 		return "loaded"
-	case fields[2] == "held" && fields[3] == "migration":
+	case fields[3] == "held" && fields[4] == "migration":
 		return "loaded-reboot"
-	case fields[2] == "held":
+	case fields[3] == "held":
 		return "loaded"
 	default:
-		return "unread-" + fields[3]
+		return "unread-" + fields[4]
 	}
+}
+
+// networkManagerFileID matches `stat -L -c '%i:%.9Z'`: the guard's identity through any symlink.
+func networkManagerFileID(path string) string {
+	var stat syscall.Stat_t
+	if err := syscall.Stat(path, &stat); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d:%d.%09d", stat.Ino, stat.Ctim.Sec, stat.Ctim.Nsec)
 }
 
 func localNetworkManagerShow(property string) string {
@@ -385,23 +411,25 @@ func LocalNetworkManagerGuardState() string {
 	return networkManagerGuardStateAt(NetworkManagerGuardStatePath, NetworkManagerGuardPath, bootIDPath)
 }
 
-// networkManagerGuardStateAt reads the guard through any symlink, the record and the boot ID; any
-// failed read never yields loaded.
+// networkManagerGuardStateAt reads the boot ID, the guard's identity and content through any
+// symlink, and the record; any failed read never yields loaded.
 func networkManagerGuardStateAt(statePath, guardPath, bootPath string) string {
-	guard, err := os.ReadFile(guardPath)
-	if err != nil {
+	boot, err := os.ReadFile(bootPath)
+	if err != nil || strings.TrimSpace(string(boot)) == "" {
 		return "unread-init"
+	}
+	fileID := networkManagerFileID(guardPath)
+	guard, err := os.ReadFile(guardPath)
+	// The identity is read again after the content: a concurrent rewrite changes it.
+	if fileID == "" || err != nil || networkManagerFileID(guardPath) != fileID {
+		return "unbound"
 	}
 	record, err := os.ReadFile(statePath)
-	if err != nil {
-		return "unread-init"
-	}
-	boot, err := os.ReadFile(bootPath)
-	if err != nil {
-		return "unread-init"
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "unbound"
 	}
 	firstLine, _, _ := strings.Cut(string(record), "\n")
-	return NetworkManagerGuardState(firstLine, strings.TrimSpace(string(boot)), NetworkManagerGuardStaticHash(string(guard)))
+	return NetworkManagerGuardState(firstLine, strings.TrimSpace(string(boot)), fileID, NetworkManagerGuardStaticHash(string(guard)))
 }
 
 func networkManagerActiveLocally() bool {

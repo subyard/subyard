@@ -1617,6 +1617,8 @@ func (cli *CLI) printNetworkManagerRebootReminder() {
 		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerRebootReminder)
 	case "unread-init":
 		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerUnreadReminder)
+	case "unbound":
+		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerUnboundReminder)
 	}
 }
 

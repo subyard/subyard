@@ -133,8 +133,9 @@ power_nm_print_config() {
 # them and both validators require them (hostruntime.NetworkManagerGuardStaticEntries).
 POWER_NM_GUARD_STATIC="type:veth driver:veth interface-name:tap????????"
 POWER_NM_GUARD_CONF=/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf
-# Which guard NetworkManager has read: boot ID, sha256 of the guard's static content and
-# held|unread init|migration. It persists across boots, so losing it can only refuse starts.
+# Which guard NetworkManager has read: boot ID, the guard file's identity (inode:ctime, compared
+# only for equality), sha256 of its static content and held|unread init|migration. It persists
+# across boots, so losing it can only refuse starts.
 POWER_NM_GUARD_STATE=/var/lib/subyard/nm-guard-state
 
 # Guard rule, shared with internal/adapters/hostruntime and the vectors in
@@ -237,15 +238,21 @@ power_nm_guard_static_hash() { # <conf>: fails when the guard cannot be read
   power_nm_guard_text_hash "$content"
 }
 
+# The guard file's identity through any symlink, as hostruntime.networkManagerFileID.
+power_nm_file_id() { stat -L -c '%i:%.9Z' -- "$1" 2>/dev/null; }
+
 # The pure read-state rule, shared with hostruntime.NetworkManagerGuardState and checked on
-# tests/fixtures/nm-guard-state.txt. Loaded only when the record names this static content and
-# is `held`, or names another boot (NetworkManager read the file when it started). A missing or
-# malformed record, or another content, is not loaded. Prints loaded, loaded-reboot (a held
-# migration waiting for the reboot), unread-init or unread-migration.
-power_nm_guard_state_rule() { # <record> <current boot> <static hash>
-  local boot hash state kind extra
-  read -r boot hash state kind extra <<< "$1"
-  if [ -n "$kind" ] && [ -z "$extra" ] && [ -n "$boot" ] && [ -n "$2" ] && [ -n "$3" ] && [ "$hash" = "$3" ] \
+# tests/fixtures/nm-guard-state.txt. A record binds one guard file (its identity) and its static
+# content; without that binding the state is `unbound`, which init repairs by recording the file
+# as unread. A bound record is loaded when it is `held` or names another boot (NetworkManager read
+# the file when it started). Prints loaded, loaded-reboot (a held migration waiting for the
+# reboot), unread-init, unread-migration or unbound.
+power_nm_guard_state_rule() { # <record> <current boot> <file identity> <static hash>
+  local boot file hash state kind extra
+  read -r boot file hash state kind extra <<< "$1"
+  [ -n "$2" ] || { printf 'unread-init\n'; return; }
+  if [ -n "$kind" ] && [ -z "$extra" ] && [ -n "$boot" ] && [ -n "$3" ] && [ "$file" = "$3" ] \
+    && [ -n "$4" ] && [ "$hash" = "$4" ] \
     && { [ "$state" = held ] || [ "$state" = unread ]; } && { [ "$kind" = init ] || [ "$kind" = migration ]; }; then
     if [ "$boot" != "$2" ]; then printf 'loaded\n'; return; fi
     if [ "$state" = held ]; then
@@ -255,19 +262,22 @@ power_nm_guard_state_rule() { # <record> <current boot> <static hash>
     fi
     return
   fi
-  printf 'unread-init\n'
+  printf 'unbound\n'
 }
 
 # shellcheck disable=SC2120 # callers name another conf only in tests
 power_nm_guard_state() { # [conf]: the read state of the guard on disk
-  local conf="${1:-$POWER_NM_GUARD_CONF}" record='' hash boot
-  hash="$(power_nm_guard_static_hash "$conf")" || { printf 'unread-init\n'; return; }
+  local conf="${1:-$POWER_NM_GUARD_CONF}" record='' hash boot file
   boot="$(power_nm_boot_id)" || boot=''
   [ -n "$boot" ] || { printf 'unread-init\n'; return; }
+  file="$(power_nm_file_id "$conf")" || { printf 'unbound\n'; return; }
+  hash="$(power_nm_guard_static_hash "$conf")" || { printf 'unbound\n'; return; }
+  # The identity read after the content: a concurrent rewrite changes it, never the reverse.
+  [ "$(power_nm_file_id "$conf")" = "$file" ] || { printf 'unbound\n'; return; }
   if [ -e "$POWER_NM_GUARD_STATE" ] || [ -L "$POWER_NM_GUARD_STATE" ]; then
-    { IFS= read -r record < "$POWER_NM_GUARD_STATE"; } 2>/dev/null || [ -n "$record" ] || { printf 'unread-init\n'; return; }
+    { IFS= read -r record < "$POWER_NM_GUARD_STATE"; } 2>/dev/null || [ -n "$record" ] || { printf 'unbound\n'; return; }
   fi
-  power_nm_guard_state_rule "$record" "$boot" "$hash"
+  power_nm_guard_state_rule "$record" "$boot" "$file" "$hash"
 }
 
 power_nm_reboot_pending() { # a migrated guard waits for the host reboot
@@ -311,6 +321,11 @@ power_nm_guard_effective() { # <bridge...>: every independent finding, next step
   case "$(power_nm_guard_state)" in
     unread-init|unread-migration)
       violations+="${violations:+$'\n'}NetworkManager has not read the Subyard guard on disk since this boot began"
+      reboot=1 ;;
+    unbound)
+      # Only init can tell what NetworkManager holds: it records the guard as unread.
+      violations+="${violations:+$'\n'}no Subyard record binds the guard on disk to what NetworkManager read"
+      case "$remedy" in *'run yard init'*) ;; *) remedy+="run yard init, then " ;; esac
       reboot=1 ;;
   esac
   [ "$reboot" = 0 ] || remedy+="reboot the host once, then "
