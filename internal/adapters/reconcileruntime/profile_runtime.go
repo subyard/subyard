@@ -184,13 +184,13 @@ func (runtime Runtime) ObserveProfileRuntime(ctx context.Context, id string) (po
 	return ports.RuntimeObservation{}, errors.New("profile runtime owner is unavailable")
 }
 
-// ProfileRuntimeObservedConverged reports whether a fresh observation of one
-// profile runtime is current or absent. A deferred runtime (a stopped yard) was
-// not observed, so it never counts as converged.
-func (runtime Runtime) ProfileRuntimeObservedConverged(ctx context.Context, activationID string) (bool, error) {
+// ProfileRuntimeObservation observes one profile runtime afresh. An Incus that
+// cannot be reached (not installed, not running or not yet permitted) leaves the
+// runtime deferred, as profile runtime planning does: it was not observed.
+func (runtime Runtime) ProfileRuntimeObservation(ctx context.Context, activationID string) (ports.RuntimeObservation, error) {
 	definitions, err := runtime.profileRuntimeDefinitions()
 	if err != nil {
-		return false, err
+		return ports.RuntimeObservation{}, err
 	}
 	for _, definition := range definitions {
 		if definition.Runtime == nil || definition.Runtime.ActivationID != activationID {
@@ -198,12 +198,14 @@ func (runtime Runtime) ProfileRuntimeObservedConverged(ctx context.Context, acti
 		}
 		observations, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})
 		if err != nil {
-			return false, err
+			if runtime.nativeObservationUnavailable(err) {
+				return ports.RuntimeObservation{State: ports.RuntimeStateDeferred}, nil
+			}
+			return ports.RuntimeObservation{}, err
 		}
-		state := observations[activationID].State
-		return state == ports.RuntimeStateCurrent || state == ports.RuntimeStateAbsent, nil
+		return observations[activationID], nil
 	}
-	return false, nil
+	return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
 }
 
 func (runtime Runtime) observeProfileRuntimes(

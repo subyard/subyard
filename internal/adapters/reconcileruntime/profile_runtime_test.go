@@ -1018,3 +1018,18 @@ esac
 		})
 	}
 }
+
+// A fresh single-runtime observation tolerates an Incus that is not installed
+// as planning does: the runtime is deferred, never converged and never an error.
+func TestProfileRuntimeObservationDefersAnUnavailableIncus(t *testing.T) {
+	runtime := profileRuntimeFixture(t, "#!/bin/sh\nexit 9\n")
+	root := testkit.TempDir(t)
+	t.Setenv("PATH", root)
+	t.Setenv("INCUS_DIR", filepath.Join(root, "incus-state"))
+	t.Setenv("INCUS_SOCKET", "")
+	runtime.Incus = incusclient.New("")
+	observation, err := runtime.ProfileRuntimeObservation(context.Background(), "synthetic-runtime")
+	if err != nil || observation.State != ports.RuntimeStateDeferred {
+		t.Fatalf("an uninstalled Incus was not a deferred runtime: %#v %v", observation, err)
+	}
+}

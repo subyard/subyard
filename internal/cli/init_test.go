@@ -108,10 +108,26 @@ type initPlatformFixture struct {
 	// convergeOnRefresh marks these stages converged on the first execution-time
 	// recheck, as if another init finished them while this plan awaited approval.
 	convergeOnRefresh []ports.ReconcileStageID
+	// runtimeObserveErr fails every fresh profile runtime observation;
+	// observeAfterIncus clears it once the Incus stage is applied, and
+	// failObserveAfterRuntime sets it once the profile runtime stage is applied.
+	runtimeObserveErr       error
+	observeAfterIncus       bool
+	failObserveAfterRuntime bool
 }
 
-func (fixture *initPlatformFixture) ProfileRuntimeObservedConverged(context.Context, string) (bool, error) {
-	return !fixture.runtimeDeferred && fixture.converged[ports.ReconcileStageProfileRuntimes], nil
+func (fixture *initPlatformFixture) ProfileRuntimeObservation(context.Context, string) (ports.RuntimeObservation, error) {
+	if fixture.runtimeObserveErr != nil {
+		return ports.RuntimeObservation{}, fixture.runtimeObserveErr
+	}
+	switch {
+	case fixture.runtimeDeferred:
+		return ports.RuntimeObservation{State: ports.RuntimeStateDeferred}, nil
+	case fixture.converged[ports.ReconcileStageProfileRuntimes]:
+		return ports.RuntimeObservation{State: ports.RuntimeStateCurrent}, nil
+	default:
+		return ports.RuntimeObservation{State: ports.RuntimeStateStale}, nil
+	}
 }
 
 func (fixture *initPlatformFixture) InstanceExists(context.Context) (bool, error) {
@@ -889,6 +905,13 @@ func (fixture *initPlatformFixture) ApplyStage(_ context.Context, stage ports.Re
 	}
 	fixture.applied = append(fixture.applied, stage)
 	fixture.converged[stage] = true
+	// A repaired Incus makes profile runtimes observable again.
+	if stage == ports.ReconcileStageIncus && fixture.observeAfterIncus {
+		fixture.runtimeObserveErr = nil
+	}
+	if stage == ports.ReconcileStageProfileRuntimes && fixture.failObserveAfterRuntime {
+		fixture.runtimeObserveErr = errors.New("injected profile runtime observation failure")
+	}
 	if stage == ports.ReconcileStageProfileRuntimes && fixture.readyOnProfileRuntime != "" {
 		if err := os.WriteFile(fixture.readyOnProfileRuntime, []byte("ready\n"), 0o600); err != nil {
 			return err
@@ -1372,7 +1395,11 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 	// example after the profile removed itself), which is otherwise a no-op init.
 	// "stopped" and "stopped-full": a stopped yard defers its runtimes, so
 	// neither the hooks-only nor the full path may retire the record.
-	for _, scenario := range []string{"repair", "converged", "converged-no-hooks", "stopped", "stopped-full", "failure", "declined"} {
+	// "incus-repair": Incus is unreachable until this init repairs it; planning
+	// observes no runtime and the record is retired only after the repair.
+	// "observe-after-repair-fails": the refreshed runtime cannot be observed;
+	// the record stays, hooks and finalize still run, and init reports it.
+	for _, scenario := range []string{"repair", "converged", "converged-no-hooks", "stopped", "stopped-full", "incus-repair", "observe-after-repair-fails", "failure", "declined"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			// A recorded yard-scoped runtime failure of this yard.
@@ -1397,7 +1424,18 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				platform.converged[stage] = true
 			}
 			platform.converged[ports.ReconcileStageFinalize] = true
-			platform.converged[ports.ReconcileStageProfileRuntimes] = scenario != "repair" && scenario != "failure" && scenario != "declined"
+			platform.converged[ports.ReconcileStageProfileRuntimes] = scenario != "repair" && scenario != "failure" && scenario != "declined" &&
+				scenario != "observe-after-repair-fails"
+			if scenario == "incus-repair" {
+				platform.converged[ports.ReconcileStageIncus] = false
+				platform.runtimeObserveErr = errors.New("injected unreachable Incus")
+				platform.observeAfterIncus = true
+			}
+			platform.failObserveAfterRuntime = scenario == "observe-after-repair-fails"
+			if scenario == "observe-after-repair-fails" {
+				// Finalize has work, so it shows it ran after the failed retirement.
+				platform.converged[ports.ReconcileStageFinalize] = false
+			}
 			platform.hooksApplicable = scenario != "converged-no-hooks" && scenario != "stopped"
 			platform.runtimeDeferred = scenario == "stopped" || scenario == "stopped-full"
 			if scenario == "stopped-full" {
@@ -1420,7 +1458,30 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 			}
 			code := program.Run(context.Background())
 			// Only a converged init resolves the recorded failure.
-			resolved := scenario == "repair" || scenario == "converged" || scenario == "converged-no-hooks"
+			resolved := scenario == "repair" || scenario == "converged" || scenario == "converged-no-hooks" || scenario == "incus-repair"
+			if scenario == "repair" && !strings.Contains(output.String(), "init.pending-records.refreshed") {
+				t.Fatalf("the plan did not show the conditional record retirement of a refreshed runtime: %s", output.String())
+			}
+			if scenario == "incus-repair" {
+				if code != 0 || !slices.Contains(platform.applied, ports.ReconcileStageIncus) {
+					t.Fatalf("an unreachable Incus failed the init plan of a yard with a pending record: code=%d applied=%v output=%s", code, platform.applied, output.String())
+				}
+				if _, err := os.Stat(record); !os.IsNotExist(err) {
+					t.Fatalf("the record survived the init that repaired Incus: %v", err)
+				}
+				return
+			}
+			if scenario == "observe-after-repair-fails" {
+				if _, err := os.Stat(record); err != nil {
+					t.Fatalf("an unobservable refreshed runtime lost its record: %v", err)
+				}
+				if code == 0 || platform.projectHooks != 1 || !slices.Contains(platform.applied, ports.ReconcileStageFinalize) ||
+					!strings.Contains(output.String(), "pending activation records were kept") {
+					t.Fatalf("a failed retirement skipped hooks or finalize or went unreported: code=%d hooks=%d applied=%v output=%s",
+						code, platform.projectHooks, platform.applied, output.String())
+				}
+				return
+			}
 			if scenario == "stopped" || scenario == "stopped-full" {
 				if _, err := os.Stat(record); err != nil || code != 0 {
 					t.Fatalf("a stopped yard's init retired the record of an unobserved runtime: code=%d err=%v output=%s", code, err, output.String())
@@ -2104,5 +2165,51 @@ func TestInitShrinkingToHooksOnlyStillRetiresResolvedRecord(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "Everything is already set up") {
 		t.Fatalf("a shrunk init that retired a record reported nothing to do: %s", output.String())
+	}
+}
+
+// Every owner whose pending record cannot be checked is reported, not only the
+// first, and init does not plan past the failed reads.
+func TestInitReportsEveryUnobservablePendingRecordOwner(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
+	for _, name := range []string{"sample", "second"} {
+		directory := filepath.Join(root, "config", "profiles", name)
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(directory, "runtime.sh"), "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"absent\",\"actual\":\"\",\"desired\":\"\"}'\n", 0o700)
+		writeCLIFile(t, filepath.Join(directory, "profile.json"),
+			`{"schema_version":1,"runtime":{"activation_id":"`+name+`-runtime","handler":"runtime.sh","failure_scope":"yard"}}`, 0o600)
+	}
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []string{"sample-runtime", "second-runtime"} {
+		if err := writeActivationPendingRecord(configHome, activationPendingRecord{Yard: "default", Project: "p", Instance: "i", Owner: owner,
+			Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "x"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCLIFile(t, filepath.Join(configHome, "host-id"), "owner-a\n", 0o600)
+	platform := newInitPlatformFixture()
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	platform.runtimeObserveErr = errors.New("injected observation failure")
+	var output bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
+		Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output, InitPlatform: platform, Stdin: strings.NewReader("")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code == 0 {
+		t.Fatalf("init planned past unobservable pending record owners: %s", output.String())
+	}
+	for _, owner := range []string{"sample-runtime", "second-runtime"} {
+		if !strings.Contains(output.String(), "observe profile runtime "+owner+" for its pending activation record") {
+			t.Fatalf("the refusal omitted %s: %s", owner, output.String())
+		}
 	}
 }

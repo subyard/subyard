@@ -163,11 +163,18 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		}
 	}
 	steps = append(steps, execution.runtimePlan.OperationSteps(target)...)
-	// Retirement runs after the runtimes converge and before the hook retry.
+	// Retirement runs after the runtimes converge and before the hook retry. A
+	// record of a runtime this init refreshes goes only if that runtime then
+	// converges, which retirement checks afresh.
 	if len(execution.pendingRecords) != 0 {
 		appendStep("init.pending-records", target, "no recorded yard-scoped runtime failure remains for this yard",
 			"the yard's pending activation records are absent after its converged runtimes",
 			"retire the yard's resolved local pending activation records: "+strings.Join(execution.pendingRecords, " "), false, false)
+	}
+	if len(execution.refreshingRecords) != 0 {
+		appendStep("init.pending-records.refreshed", target, "no recorded yard-scoped runtime failure remains for this yard",
+			"the refreshed runtime is observed converged before its record is retired",
+			"retire each local pending activation record whose refreshed runtime converges: "+strings.Join(execution.refreshingRecords, " "), false, true)
 	}
 	// Hooks and final power may become observable only after approved stages.
 	// They stay in the original step set even if those stages converge meanwhile.
