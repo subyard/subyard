@@ -57,6 +57,82 @@ fi
 STORAGE_POOL="${STORAGE_POOL:-default}"
 INCUS_BRIDGE="${INCUS_BRIDGE:-incusbr0}"
 
+_iver()    { incus --version 2>/dev/null || echo '?'; }
+_irecent() { local v; v="$(_iver)"; [ "$v" != '?' ] && command -v dpkg >/dev/null 2>&1 \
+               && dpkg --compare-versions "$v" ge "$MIN_INCUS_VER"; }
+
+# Pure selection: callers supply observations; planning never changes the host.
+plan_incus_source() { # <installed version or empty> <selector> <distro candidate or empty>
+  local installed="$1" selector="$2" candidate="$3"
+  if [ -n "$installed" ]; then
+    if [ "$installed" != '?' ] && command -v dpkg >/dev/null 2>&1 \
+      && dpkg --compare-versions "$installed" ge "$MIN_INCUS_VER"; then
+      printf 'none\n'
+    else
+      printf 'zabbly-upgrade\n'
+    fi
+  elif [ "$selector" = auto ] && [ -n "$candidate" ] && [ "$candidate" != '(none)' ] \
+    && command -v dpkg >/dev/null 2>&1 \
+    && dpkg --compare-versions "$candidate" ge "$MIN_INCUS_VER"; then
+    printf 'distro\n'
+  else
+    printf 'zabbly\n'
+  fi
+}
+
+_iserver() (
+  local version client_state
+  # A pre-consent read must not activate a dormant daemon through its socket.
+  command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet incus.service || return 1
+  if [ "${1:-}" = --pre-consent ]; then
+    # Even a version query initializes the client. Keep its config/cache private
+    # and disposable until consent; local: needs no caller configuration.
+    client_state="$(mktemp -d /tmp/subyard-incus-plan.XXXXXXXX)" || return
+    trap 'rm -rf -- "$client_state"' EXIT
+    export INCUS_CONF="$client_state/config" INCUS_CACHE="$client_state/cache"
+  fi
+  version="$(LC_ALL=C incus version local: 2>/dev/null \
+    | awk '/^Server version:/ && !seen {print $3; seen=1}')" || return
+  [ -n "$version" ] && dpkg --validate-version "$version" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$version"
+)
+
+incus_server_below_minimum() { # <known server version or empty>
+  [ -n "$1" ] && dpkg --compare-versions "$1" lt "$MIN_INCUS_VER"
+}
+
+installed_version='' candidate=''
+if command -v incus >/dev/null 2>&1; then
+  installed_version="$(_iver)"
+  [ -n "$installed_version" ] || installed_version='?'
+elif [ "$USE_ZABBLY" = auto ] && command -v apt-cache >/dev/null 2>&1 \
+  && command -v dpkg >/dev/null 2>&1; then
+  # Read all input: under pipefail, an early awk exit can fail apt-cache with SIGPIPE (exit 141).
+  candidate="$(apt-cache policy incus 2>/dev/null | awk '/Candidate:/ && !seen {print $2; seen=1}')"
+fi
+incus_source="$(plan_incus_source "$installed_version" "$USE_ZABBLY" "$candidate")"
+restart_plan=none
+restart_notes=()
+if [ "$incus_source" = zabbly-upgrade ]; then
+  restart_plan=upgrade
+  restart_notes+=("upgrade incus from the Zabbly LTS-6.0 repository and restart the Incus daemon (below the supported minimum $MIN_INCUS_VER)")
+elif [ "$incus_source" = none ]; then
+  server_version="$(_iserver --pre-consent)" || server_version=''
+  if incus_server_below_minimum "$server_version"; then
+    restart_plan=required
+    restart_notes+=("restart the Incus daemon to finish the required upgrade")
+  elif [ -z "$server_version" ] && [ "$(id -u)" -ne 0 ] \
+    && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet incus.service; then
+    # Root re-entry may be able to inspect a daemon this caller cannot read.
+    restart_plan=conditional
+    restart_notes+=("restart the Incus daemon if it still runs a version below $MIN_INCUS_VER")
+  fi
+fi
+if [ "$restart_plan" != none ] && command -v systemctl >/dev/null 2>&1 \
+  && systemctl is-active --quiet NetworkManager; then
+  restart_notes+=("mark Incus devices unmanaged in NetworkManager before the change")
+fi
+
 prepare_operator_data_home() {
   subyard_home_validate_root "$SUBYARD_HOME" \
     || die "Subyard data home must be an absolute, non-broad directory"
@@ -78,14 +154,11 @@ prepare_operator_data_home() {
 if [ "$UPGRADE_ONLY" = 1 ]; then
   announce "Subyard — upgrade Incus to >= $MIN_INCUS_VER (Zabbly LTS-6.0)" \
     "Add the Zabbly LTS-6.0 apt repo (keyring + source), if not already present." \
-    "apt-get install the newer 'incus' package and restart the daemon." \
+    "apt-get install the newer 'incus' package." \
+    "${restart_notes[@]}" \
     "Reversible: delete /etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources and downgrade."
   proceed_or_die
-  require_root "adding an apt repo and upgrading the incus package needs root"
-  # Guard host networking BEFORE the daemon restart in the upgrade below: restarting
-  # incusd with NetworkManager unguarded is how a veth got hijacked and killed the
-  # host's internet once. The install path runs this guard too (step 5 below).
-  nm_unmanaged_guard "$INCUS_BRIDGE"
+  root_reason="adding an apt repo and upgrading the incus package needs root"
 else
   vm_qemu_note=()
   if [ "${YARD_KIND:-container}" = vm ]; then
@@ -93,6 +166,7 @@ else
   fi
   announce "Subyard Phase 1 — install & initialize Incus" \
     "Install the 'incus' package if missing (apt)." \
+    "${restart_notes[@]}" \
     "${vm_qemu_note[@]}" \
     "Add user '$OPERATOR_USER' to group 'incus-admin' — this grants Incus access ≈ root on this host." \
     "Activate captured-parent access on the current default socket; standalone callers need a fresh group session." \
@@ -100,8 +174,12 @@ else
     "Run 'incus admin init': dir pool '$STORAGE_POOL' + bridge '$INCUS_BRIDGE' (only if not already initialized)."
   proceed_or_die
   prepare_operator_data_home
-  require_root "the steps above install packages, edit group membership, and initialize Incus"
+  root_reason="the steps above install packages, edit group membership, and initialize Incus"
 fi
+require_root "$root_reason"
+# Package installation can restart incusd too. Protect host networking before
+# any package/repository changes, then reconcile again after init (step 5).
+nm_unmanaged_guard "$INCUS_BRIDGE"
 
 # Elevated Incus commands use root's HOME. Older Subyard runs could preserve the
 # operator's HOME across sudo and leave the Incus client directory root-owned,
@@ -124,60 +202,59 @@ fi
 # Auto-selection uses the Zabbly LTS-6.0 repository when the installed version or
 # distro candidate cannot meet the floor; --zabbly forces it. Every path verifies it.
 echo "Dependency: incus"
-_iver()    { incus --version 2>/dev/null || echo '?'; }
-_irecent() { local v; v="$(_iver)"; [ "$v" != '?' ] && command -v dpkg >/dev/null 2>&1 \
-               && dpkg --compare-versions "$v" ge "$MIN_INCUS_VER"; }
-incus_ready=
-
-if [ "$USE_ZABBLY" = auto ]; then
-  USE_ZABBLY=0
-  if command -v incus >/dev/null 2>&1; then
-    _irecent || USE_ZABBLY=1
-  elif ! command -v apt-cache >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
-    USE_ZABBLY=1
-  else
-    # Read all input: under pipefail, an early awk exit can fail apt-cache with SIGPIPE (exit 141).
-    candidate="$(apt-cache policy incus 2>/dev/null | awk '/Candidate:/ && !seen {print $2; seen=1}')"
-    [ -n "$candidate" ] && [ "$candidate" != '(none)' ] \
-      && dpkg --compare-versions "$candidate" ge "$MIN_INCUS_VER" \
-      || USE_ZABBLY=1
-  fi
-fi
-
-if command -v incus >/dev/null 2>&1; then
-  if _irecent; then
+apply_incus_source() { # <plan>
+  local plan="$1" incus_ready install_error server_version restart=0
+  if [ "$plan" = none ]; then
     incus_ready="incus present ($(_iver)) >= $MIN_INCUS_VER"
-  elif [ "$USE_ZABBLY" = 1 ]; then
-    warn "incus $(_iver) < $MIN_INCUS_VER — upgrading from the Zabbly LTS-6.0 repo"
-    add_zabbly_lts_repo || die "could not set up the Zabbly LTS-6.0 repo"
-    info "apt-get install incus (Zabbly)"
+    # Finish only our required upgrade. A supported daemon may intentionally
+    # lag the installed package; its restart belongs to the operator.
+    if [ "$restart_plan" = required ] || [ "$restart_plan" = conditional ]; then
+      server_version="$(_iserver)" || server_version=''
+      if incus_server_below_minimum "$server_version"; then restart=1; fi
+    fi
+  else
+    install_error="incus install failed (the distro repos may carry it; Zabbly LTS-6.0 is the >= $MIN_INCUS_VER source)"
+    if [ "$plan" = zabbly-upgrade ]; then
+      warn "incus $(_iver) < $MIN_INCUS_VER — upgrading from the Zabbly LTS-6.0 repo"
+      install_error="incus upgrade failed"
+    else
+      command -v apt-get >/dev/null 2>&1 \
+        || die "no apt-get; install Incus manually (linuxcontainers.org/incus) and re-run"
+      if [ "$plan" = zabbly ]; then
+        warn "missing dependency: incus — installing from the Zabbly LTS-6.0 repo"
+      else
+        warn "missing dependency: incus — installing (sudo apt-get install incus)"
+      fi
+    fi
+    if [ "$plan" = distro ]; then
+      info "apt-get update"
+      apt-get update -qq || die "apt-get update failed"
+    else
+      add_zabbly_lts_repo || die "could not set up the Zabbly LTS-6.0 repo"
+    fi
+    if [ "$plan" = zabbly-upgrade ]; then
+      info "apt-get install incus (Zabbly)"
+    else
+      info "installing incus"
+    fi
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends incus \
-      || die "incus upgrade failed"
-    systemctl try-restart incus.service 2>/dev/null || true
-    incus_ready="incus upgraded ($(_iver))"
-  else
-    warn "incus $(_iver) < $MIN_INCUS_VER — nested Docker (project-env boxes) will fail (re-run with --zabbly to upgrade)"
+      || die "$install_error"
+    if [ "$plan" = zabbly-upgrade ]; then
+      restart=1
+      incus_ready="incus upgraded ($(_iver))"
+    else
+      incus_ready="incus installed ($(_iver))"
+    fi
   fi
-else
-  command -v apt-get >/dev/null 2>&1 \
-    || die "no apt-get; install Incus manually (linuxcontainers.org/incus) and re-run"
-  if [ "$USE_ZABBLY" = 1 ]; then
-    warn "missing dependency: incus — installing from the Zabbly LTS-6.0 repo"
-    add_zabbly_lts_repo || die "could not set up the Zabbly LTS-6.0 repo"
-  else
-    warn "missing dependency: incus — installing (sudo apt-get install incus)"
-    info "apt-get update"
-    apt-get update -qq
+  if [ "$restart" = 1 ]; then
+    systemctl try-restart incus.service || die "incus restart failed"
   fi
-  info "installing incus"
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends incus \
-    || die "incus install failed (the distro repos may carry it; Zabbly LTS-6.0 is the >= $MIN_INCUS_VER source)"
-  incus_ready="incus installed ($(_iver))"
-fi
+  _irecent \
+    || die "incus $(_iver) < $MIN_INCUS_VER after installation/upgrade — check 'apt-cache policy incus'"
+  ok "$incus_ready"
+}
 
-_irecent \
-  || die "incus $(_iver) < $MIN_INCUS_VER after installation/upgrade — check 'apt-cache policy incus'"
-ok "$incus_ready"
+apply_incus_source "$incus_source"
 
 # --upgrade-only: ensuring the version is all this run does — group/storage/init are 'yard init's job.
 if [ "$UPGRADE_ONLY" = 1 ]; then

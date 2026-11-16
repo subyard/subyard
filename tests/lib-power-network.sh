@@ -419,8 +419,22 @@ if nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null 2>&1; then
 fi
 [ "$(sha256sum "$guard_conf" | awk '{print $1}')" = "$guard_before" ] \
   || fail "failed inventory changed the fail-closed guard"
+nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard-inventory.out" 2>&1
+grep -Fq 'could not list existing Incus bridges' "$tmp/guard-inventory.out" \
+  || fail "setup hid a failed inventory from an installed Incus"
+[ "$(sha256sum "$guard_conf" | awk '{print $1}')" = "$guard_before" ] \
+  || fail "failed setup inventory removed existing guard entries"
 mv "$tmp/bin/incus" "$tmp/bin/incus.off"
-if nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null 2>&1; then
+# An installed host client must not leak into this missing-command fixture.
+for tool in bash awk sed sort install dirname rm cmp chmod cat tail grep; do
+  ln -s "$(command -v "$tool")" "$tmp/bin/$tool"
+done
+PATH="$tmp/bin" nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard-inventory.out" 2>&1
+! grep -Fq 'could not list existing Incus bridges' "$tmp/guard-inventory.out" \
+  || fail "setup warned about Incus inventory before Incus was installed"
+[ "$(sha256sum "$guard_conf" | awk '{print $1}')" = "$guard_before" ] \
+  || fail "setup without Incus removed existing guard entries"
+if PATH="$tmp/bin" nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null 2>&1; then
   fail "reconcile accepted a missing Incus inventory command"
 fi
 [ "$(sha256sum "$guard_conf" | awk '{print $1}')" = "$guard_before" ] \

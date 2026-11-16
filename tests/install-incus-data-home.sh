@@ -33,6 +33,7 @@ esac
 SH
 cat > "$TMP/bin/incus" <<'SH'
 #!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'incus %s\n' "$*" >> "$TEST_EFFECT_LOG"
 case "${1:-}" in
   --version)
     if [ "${TEST_UID:-1000}" = 0 ] && [ "${TEST_SWAP_AFTER_VALIDATION:-0}" = 1 ]; then
@@ -41,14 +42,54 @@ case "${1:-}" in
     fi
     printf '%s\n' "${TEST_INCUS_VERSION:-6.0.6}"
     ;;
+  version)
+    # The installer must query the local daemon, not the caller's default remote.
+    [ "${2:-}" = local: ] || exit 97
+    if [ "${TEST_CLIENT_INIT:-0}" = 1 ]; then
+      # Model Incus 6.0.6 PreRun: config and cache initialize even if the
+      # subsequent server query fails; both have independent environment knobs.
+      conf="${INCUS_CONF:-$HOME/.config/incus}"
+      cache="${INCUS_CACHE:-$HOME/.cache/incus}"
+      printf '%s|%s|%s\n' "$conf" "$cache" "$(stat -c '%a' "$(dirname "$conf")")" >> "$TEST_CLIENT_PATH_LOG"
+      mkdir -p "$conf" "$cache"
+      printf 'initialized\n' > "$conf/config.yml"
+      printf 'initialized\n' > "$cache/cache-marker"
+    fi
+    [ "${TEST_SERVER_ROOT_ONLY:-0}" != 1 ] || [ "${TEST_UID:-1000}" = 0 ] || exit 7
+    server="${TEST_INCUS_SERVER_VERSION-${TEST_INCUS_VERSION:-6.0.6}}"
+    [ -z "${TEST_SERVER_VERSION_FILE:-}" ] || server="$(cat "$TEST_SERVER_VERSION_FILE")"
+    printf 'Client version: %s\nServer version: %s\n' "${TEST_INCUS_VERSION:-6.0.6}" "$server"
+    exit "${TEST_SERVER_QUERY_RC:-0}"
+    ;;
   storage|network) exit 0 ;;
   *) exit 0 ;;
 esac
 SH
 cat > "$TMP/bin/systemctl" <<'SH'
 #!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'systemctl %s\n' "$*" >> "$TEST_EFFECT_LOG"
+if [ "${TEST_EFFECT_STDOUT:-0}" = 1 ] && [ "$*" != 'is-active --quiet NetworkManager' ] \
+  && [ "$*" != 'is-active --quiet incus.service' ]; then
+  printf 'TEST_EFFECT systemctl %s\n' "$*" >&3
+fi
 case "${1:-}" in
-  is-active) printf 'inactive\n' ;;
+  is-active)
+    if [ "${2:-}" = --quiet ]; then
+      case "${3:-}" in
+        NetworkManager) [ "${TEST_NM_STATE:-inactive}" = active ]; exit $? ;;
+        incus.service) [ "${TEST_INCUS_SERVICE_STATE:-active}" = active ]; exit $? ;;
+        *) exit 99 ;;
+      esac
+    fi
+    printf '%s\n' "${TEST_NM_STATE:-inactive}"
+    ;;
+  try-restart)
+    if [ "${TEST_RESTART_RC:-0}" != 0 ]; then
+      printf 'fixture restart refused: injected service failure\n' >&2
+      exit "$TEST_RESTART_RC"
+    fi
+    [ -z "${TEST_SERVER_VERSION_FILE:-}" ] || printf '%s\n' "$TEST_INCUS_VERSION" > "$TEST_SERVER_VERSION_FILE"
+    ;;
 esac
 exit 0
 SH
@@ -151,8 +192,45 @@ run_installer() (
   elif [ "${TEST_WITHOUT_INSTALLATION_CONTEXT:-0}" = 2 ]; then
     export SUBYARD_INSTALLATION_CONTEXT=''
   fi
-  "$installer_path" --yes "$@"
+  if [ "${TEST_DECLINE:-0}" = 1 ]; then
+    export ASSUME_YES=0
+    local command_line
+    printf -v command_line '%q ' "$installer_path" "$@"
+    printf 'n\n' | SHELL=/bin/bash script --echo never -qefc "$command_line 3>&1" /dev/null
+  else
+    "$installer_path" --yes "$@" 3>&1
+  fi
 )
+
+# Assert the actual announce block, including --yes retention and absence of
+# misleading restart lines. Effect markers bypass command-substitution stdout.
+assert_restart_plan() { # <output> <none|upgrade|required|conditional> <NM state>
+  local output="$1" kind="$2" nm_state="$3" line expected='' plan last_plan first_effect prompt
+  plan="$(sed -n '/This will:/,/^\r*$/p' "$output" | tr -d '\r')"
+  [ -n "$plan" ] || fail 'installer omitted its plan'
+  case "$kind" in
+    upgrade) expected='upgrade incus from the Zabbly LTS-6.0 repository and restart the Incus daemon (below the supported minimum 6.0.6)' ;;
+    required) expected='restart the Incus daemon to finish the required upgrade' ;;
+    conditional) expected='restart the Incus daemon if it still runs a version below 6.0.6' ;;
+  esac
+  if [ -n "$expected" ]; then
+    grep -Fxq "  • $expected" <<< "$plan" || fail "$kind plan omitted its exact restart line"
+    [ "$(grep -c '  • .*restart.*daemon' <<< "$plan")" -eq 1 ] || fail "$kind plan added misleading restart lines"
+  else
+    ! grep -q '  • .*restart.*daemon' <<< "$plan" || fail 'steady/fresh plan promised a daemon restart'
+  fi
+  line='  • mark Incus devices unmanaged in NetworkManager before the change'
+  if [ "$kind" != none ] && [ "$nm_state" = active ]; then
+    grep -Fxq "$line" <<< "$plan" || fail "$kind plan omitted the active NetworkManager guard"
+  else
+    ! grep -Fq "$line" <<< "$plan" || fail "$kind plan added an unnecessary NetworkManager guard line"
+  fi
+  last_plan="$(grep -n '^  • ' "$output" | tail -n 1 | cut -d: -f1)"
+  first_effect="$(sed -n '/^TEST_EFFECT /=' "$output" | sed -n '1p')"
+  [ -z "$first_effect" ] || [ "$last_plan" -lt "$first_effect" ] || fail 'plan followed a guard/package/restart effect'
+  prompt="$(grep -n 'Proceed?' "$output" | cut -d: -f1 | sed -n '1p' || true)"
+  [ -z "$prompt" ] || [ "$last_plan" -lt "$prompt" ] || fail 'plan followed consent'
+}
 
 # Every shared broad root and the exact operator home must be rejected before host operations.
 for broad_home in / /boot /dev /etc /home /opt /proc /root /run /srv /sys /usr /var "$TMP/operator"; do
@@ -290,34 +368,71 @@ done
 
 # A successful package command must not let an Incus version below the required floor continue.
 cp -R "$ROOT/scripts" "$TMP/version-scripts"
-cat > "$TMP/version-scripts/lib/host.sh" <<'SH'
-#!/usr/bin/env bash
-require_root() { [ "$(id -u)" -eq 0 ]; }
-nm_unmanaged_guard() { :; }
-add_zabbly_lts_repo() { :; }
-subyard_home_validate_root() {
-  SUBYARD_VALIDATED_HOME="$1"
-}
-SH
+# Execute the real host adapter, relocating only its absolute /etc paths into
+# the fixture. No host functions are replaced; PATH peers cannot mutate the host.
+sed -i "s|/etc/|$TMP/etc/|g" "$TMP/version-scripts/lib/host.sh"
+mkdir -p "$TMP/etc/apt/"{keyrings,sources.list.d,preferences.d}
+printf 'VERSION_CODENAME=test\n' > "$TMP/etc/os-release"
+printf 'fixture-key\n' > "$TMP/etc/apt/keyrings/zabbly.asc"
 version_bin="$TMP/version-bin"
 mkdir "$version_bin"
-for command_name in bash dirname cut realpath awk dpkg find stat cp sed sort grep tr install cat python3; do
+for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
-for command_name in getent id systemctl; do
+for command_name in getent id systemctl sudo; do
   ln -s "$TMP/bin/$command_name" "$version_bin/$command_name"
 done
 cat > "$version_bin/apt-cache" <<'SH'
 #!/usr/bin/env bash
-printf '  Candidate: 6.0.6\n'
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'apt-cache %s\n' "$*" >> "$TEST_EFFECT_LOG"
+printf '  Candidate: %s\n' "${TEST_DISTRO_CANDIDATE-6.0.6}"
 SH
 cat > "$version_bin/apt-get" <<'SH'
 #!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'apt-get %s\n' "$*" >> "$TEST_EFFECT_LOG"
+[ "${TEST_EFFECT_STDOUT:-0}" != 1 ] || printf 'TEST_EFFECT apt-get %s\n' "$*" >&3
+if [ "${1:-}" = "${TEST_APT_FAIL_COMMAND:-install}" ]; then
+  [ "${TEST_APT_RC:-0}" = 0 ] || exit "$TEST_APT_RC"
+fi
 case " $* " in
   *' install '*) cp "$TEST_INCUS_FIXTURE" "$TEST_FAKE_BIN/incus" ;;
 esac
 SH
-chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get"
+cat > "$version_bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected signing-key download\n' >&2
+exit 99
+SH
+cat > "$version_bin/dpkg" <<'SH'
+#!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'dpkg %s\n' "$*" >> "$TEST_EFFECT_LOG"
+exec /usr/bin/dpkg "$@"
+SH
+cat > "$version_bin/install" <<'SH'
+#!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'install %s\n' "$*" >> "$TEST_EFFECT_LOG"
+[ "${TEST_EFFECT_STDOUT:-0}" != 1 ] || printf 'TEST_EFFECT install %s\n' "$*" >&3
+case "${*: -1}" in "$TEST_FIXTURE_ROOT"/*) ;; *) exit 99 ;; esac
+exec /usr/bin/install "$@"
+SH
+cat > "$version_bin/NetworkManager" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = --print-config ] || exit 99
+cat "$TEST_FIXTURE_ROOT/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
+SH
+# Retain the real reader/guard logic, redirecting only its absolute binary peer.
+sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g" \
+  "$TMP/version-scripts/lib-power.sh"
+# The package replaces the initial executable, keeping installed and final
+# versions separate without making package effects implicit in --version.
+cat > "$TMP/incus-initial" <<'SH'
+#!/usr/bin/env bash
+[ -z "${TEST_EFFECT_LOG:-}" ] || printf 'incus %s\n' "$*" >> "$TEST_EFFECT_LOG"
+if [ "${1:-}" = --version ]; then printf '%s\n' "${TEST_INITIAL_INCUS_VERSION:-6.0.5}"; fi
+SH
+chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get" "$version_bin/curl" \
+  "$version_bin/dpkg" "$version_bin/install" "$version_bin/NetworkManager" "$TMP/incus-initial"
+export TEST_FIXTURE_ROOT="$TMP"
 
 for package_path in upgrade install; do
   for mode in normal upgrade-only; do
@@ -359,6 +474,281 @@ for package_path in upgrade install; do
     done
   done
 done
+
+# Every source-selection row runs in both modes, including selector/candidate
+# combinations ignored for an installed version. All physical peers share one log.
+source_case=0
+for installed in 6.0.6 7.0.0 6.0.5 none; do
+  for selector in auto zabbly; do
+    for distro_candidate in 6.0.5 6.0.6 '(none)' ''; do
+      case "$installed:$selector:$distro_candidate" in
+        6.0.6:*|7.0.0:*) expected=none ;;
+        6.0.5:*) expected=zabbly-upgrade ;;
+        none:auto:6.0.6) expected=distro ;;
+        *) expected=zabbly ;;
+      esac
+      for mode in normal upgrade-only; do
+        for nm_state in inactive active; do
+          source_case=$((source_case + 1))
+          label="$installed/$selector/$distro_candidate/$mode/$nm_state"
+          source_home="$TMP/source-$source_case/.subyard"
+          mkdir -p "$source_home/incus/storage"
+          rm -f "$version_bin/incus" "$TMP/etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources"
+          [ "$installed" = none ] || cp "$TMP/incus-initial" "$version_bin/incus"
+          source_args=()
+          [ "$selector" = auto ] || source_args+=(--zabbly)
+          [ "$mode" = normal ] || source_args+=(--upgrade-only)
+          effect_log="$TMP/source-$source_case.effects"
+          : > "$effect_log"
+          source_output="$TMP/source-$source_case.out"
+          run_source_case() {
+            TEST_UID=0 TEST_INITIAL_INCUS_VERSION="$installed" TEST_INCUS_VERSION=6.0.6 \
+              TEST_DISTRO_CANDIDATE="$distro_candidate" TEST_NM_STATE="$nm_state" TEST_EFFECT_STDOUT=1 \
+              TEST_INCUS_FIXTURE="$TMP/bin/incus" TEST_FAKE_BIN="$version_bin" \
+              TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+              TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+              run_installer "$source_home" "${source_args[@]}"
+          }
+          plan_kind=none
+          [ "$expected" != zabbly-upgrade ] || plan_kind=upgrade
+          if TEST_DECLINE=1 run_source_case >"$source_output" 2>&1; then
+            fail "$label ignored declined consent"
+          fi
+          assert_restart_plan "$source_output" "$plan_kind" "$nm_state"
+          grep -Fq 'Proceed?' "$source_output" || fail "$label did not request consent"
+          ! grep -Eq '^systemctl (is-active NetworkManager|try-restart)|^apt-get |^install ' "$effect_log" \
+            || fail "$label ran a guard/package/restart effect before consent"
+          : > "$effect_log"
+          if ! run_source_case >"$source_output" 2>&1; then
+            cat "$source_output" >&2
+            fail "$label source selection failed"
+          fi
+          assert_restart_plan "$source_output" "$plan_kind" "$nm_state"
+          guard_line="$(sed -n '/^systemctl is-active NetworkManager$/=' "$effect_log" | sed -n '1p')"
+          [ -n "$guard_line" ] || fail "$label did not run the real NetworkManager guard"
+          package_line="$(sed -n '/^apt-get /=' "$effect_log" | sed -n '1p')"
+          restart_line="$(sed -n '/^systemctl try-restart incus.service$/=' "$effect_log")"
+          install_line="$(sed -n '/^apt-get install /=' "$effect_log")"
+          repo_line="$(sed -n '/^install -d -m 0755 .*\/apt\/keyrings$/=' "$effect_log" | sed -n '1p')"
+          if [ "$expected" = none ]; then
+            [ -z "$package_line$restart_line" ] || fail "$label changed packages for a sufficient Incus version"
+            grep -Fq "incus present ($installed) >= 6.0.6" "$source_output" \
+              || fail "$label did not select the present version"
+          else
+            [ -n "$package_line" ] && [ "$guard_line" -lt "$package_line" ] \
+              || fail "$label package effect preceded NetworkManager guard"
+            [ -n "$install_line" ] || fail "$label did not install Incus"
+          fi
+          if [ "$expected" = zabbly-upgrade ]; then
+            [ -n "$restart_line" ] && [ "$install_line" -lt "$restart_line" ] \
+              && [ "$guard_line" -lt "$restart_line" ] \
+              || fail "$label restart did not follow guarded installation"
+            grep -Fq 'incus upgraded (6.0.6)' "$source_output" || fail "$label did not select upgrade"
+          else
+            [ -z "$restart_line" ] || fail "$label unexpectedly restarted Incus"
+          fi
+          case "$expected" in
+            zabbly*)
+              [ -n "$repo_line" ] && [ "$guard_line" -lt "$repo_line" ] \
+                || fail "$label repository effect preceded NetworkManager guard"
+              grep -Fq 'URIs: https://pkgs.zabbly.com/incus/lts-6.0' \
+                "$TMP/etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources" \
+                || fail "$label did not select Zabbly"
+              ;;
+            *)
+              [ ! -e "$TMP/etc/apt/sources.list.d/zabbly-incus-lts-6.0.sources" ] \
+                || fail "$label unexpectedly added Zabbly"
+              ;;
+          esac
+          ! grep -Fq 'could not list existing Incus bridges' "$source_output" \
+            || fail "$label emitted a spurious Incus inventory warning"
+          guard_count="$(grep -c '^systemctl is-active NetworkManager$' "$effect_log")"
+          expected_guards=1
+          [ "$mode" != normal ] || expected_guards=2
+          [ "$nm_state" != active ] || expected_guards=$((expected_guards * 2))
+          [ "$guard_count" -eq "$expected_guards" ] || fail "$label omitted or repeated a guard reconcile"
+        done
+      done
+    done
+  done
+done
+printf 'ok: %s Incus source/mode cases preserve guarded package ordering\n' "$source_case"
+
+# Package and restart failures must stop at the operation boundary in both modes.
+for mode in normal upgrade-only; do
+  for failure in repo install restart; do
+    failure_home="$TMP/failure-$mode-$failure/.subyard"
+    mkdir -p "$failure_home/incus/storage"
+    cp "$TMP/incus-initial" "$version_bin/incus"
+    failure_args=()
+    [ "$mode" = normal ] || failure_args+=(--upgrade-only)
+    apt_rc=0 restart_rc=0 apt_command=install
+    case "$failure" in
+      repo) apt_rc=9; apt_command=update; expected_error='could not set up the Zabbly LTS-6.0 repo' ;;
+      install) apt_rc=9; expected_error='incus upgrade failed' ;;
+      restart) restart_rc=9; expected_error='incus restart failed' ;;
+    esac
+    if TEST_UID=0 TEST_INCUS_VERSION=6.0.6 TEST_APT_RC="$apt_rc" TEST_RESTART_RC="$restart_rc" \
+      TEST_APT_FAIL_COMMAND="$apt_command" \
+      TEST_INCUS_FIXTURE="$TMP/bin/incus" TEST_FAKE_BIN="$version_bin" \
+      TEST_COMMAND_PATH="$version_bin" TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+      run_installer "$failure_home" "${failure_args[@]}" >"$TMP/failure.out" 2>&1; then
+      fail "$mode accepted $failure failure"
+    fi
+    grep -Fq "$expected_error" "$TMP/failure.out" || fail "$mode omitted the $failure failure diagnostic"
+    ! grep -Eq 'Phase 1 done|Incus is|incus upgraded' "$TMP/failure.out" \
+      || fail "$mode printed success after $failure failure"
+    if [ "$failure" = restart ]; then
+      grep -Fq 'fixture restart refused: injected service failure' "$TMP/failure.out" \
+        || fail "$mode hid the daemon restart failure reason"
+      printf '6.0.5\n' > "$TMP/server-version"
+      effect_log="$TMP/retry-$mode.effects"
+      # The package was already replaced by the failed attempt. A fresh run must
+      # finish the stale daemon restart, then leave the equal version alone.
+      for attempt in retry completed; do
+        : > "$effect_log"
+        if ! TEST_UID=0 TEST_INCUS_VERSION=6.0.6 TEST_SERVER_VERSION_FILE="$TMP/server-version" \
+          TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+          TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+          run_installer "$failure_home" "${failure_args[@]}" >"$TMP/retry.out" 2>&1; then
+          cat "$TMP/retry.out" >&2
+          fail "$mode $attempt after a failed daemon restart did not succeed"
+        fi
+        ! grep -q '^apt-get ' "$effect_log" || fail "$mode $attempt reinstalled the package"
+        if [ "$attempt" = retry ]; then
+          [ "$(grep -c '^systemctl try-restart incus.service$' "$effect_log")" -eq 1 ] \
+            || fail "$mode rerun did not restart the stale daemon exactly once"
+          guard_line="$(sed -n '/^systemctl is-active NetworkManager$/=' "$effect_log" | sed -n '1p')"
+          restart_line="$(sed -n '/^systemctl try-restart incus.service$/=' "$effect_log")"
+          [ "$guard_line" -lt "$restart_line" ] || fail "$mode rerun restarted before NetworkManager guard"
+          [ "$(cat "$TMP/server-version")" = 6.0.6 ] || fail "$mode rerun left the old daemon running"
+        else
+          ! grep -q '^systemctl try-restart ' "$effect_log" || fail "$mode restarted the current daemon"
+        fi
+      done
+    fi
+  done
+done
+
+# Daemon plans in both modes, with exact consent/--yes text and real active-NM
+# guard effects. Supported daemons may lag a newer package without restarting.
+daemon_case=0
+while IFS='|' read -r client server plan_kind query_rc root_only service_state; do
+  [ "$server" != empty ] || server=''
+  for mode in normal upgrade-only; do
+    for nm_state in inactive active; do
+      daemon_case=$((daemon_case + 1))
+      label="$client/$server/$mode/$nm_state/root-only=$root_only/query=$query_rc"
+      server_home="$TMP/server-$daemon_case/.subyard"
+      mkdir -p "$server_home/incus/storage"
+      server_args=()
+      [ "$mode" = normal ] || server_args+=(--upgrade-only)
+      cp "$TMP/bin/incus" "$version_bin/incus"
+      effect_log="$TMP/server-$daemon_case.effects"
+      server_output="$TMP/server-$daemon_case.out"
+      : > "$effect_log"
+      uid=0
+      [ "$root_only" != 1 ] || uid=1000
+      run_daemon_case() {
+        TEST_UID="$uid" TEST_INCUS_VERSION="$client" TEST_INCUS_SERVER_VERSION="$server" \
+          TEST_SERVER_QUERY_RC="$query_rc" TEST_SERVER_ROOT_ONLY="$root_only" TEST_SUDO_MODE=reexec \
+          TEST_INCUS_SERVICE_STATE="${service_state:-active}" \
+          TEST_NM_STATE="$nm_state" TEST_EFFECT_STDOUT=1 TEST_COMMAND_PATH="$version_bin" \
+          TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+          TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+          run_installer "$server_home" "${server_args[@]}"
+      }
+      if TEST_DECLINE=1 run_daemon_case >"$server_output" 2>&1; then fail "$label ignored declined consent"; fi
+      assert_restart_plan "$server_output" "$plan_kind" "$nm_state"
+      grep -Fq 'Proceed?' "$server_output" || fail "$label did not request consent"
+      ! grep -Eq '^systemctl (is-active NetworkManager|try-restart)|^apt-get |^install ' "$effect_log" \
+        || fail "$label ran a guard/package/restart effect before consent"
+      : > "$effect_log"
+      if ! run_daemon_case >"$server_output" 2>&1; then
+        cat "$server_output" >&2
+        fail "$label daemon plan failed"
+      fi
+      assert_restart_plan "$server_output" "$plan_kind" "$nm_state"
+      ! grep -q '^apt-get ' "$effect_log" || fail "$label changed packages"
+      if [ "$service_state" = inactive ]; then
+        ! grep -q '^incus version local:$' "$effect_log" || fail "$label queried a dormant daemon socket"
+      fi
+      if [ "$plan_kind" = required ] || { [ "$plan_kind" = conditional ] && [ "$server" = 6.0.5 ]; }; then
+        [ "$(grep -c '^systemctl try-restart incus.service$' "$effect_log")" -eq 1 ] \
+          || fail "$label did not restart the unsupported daemon exactly once"
+      else
+        ! grep -q '^systemctl try-restart ' "$effect_log" \
+          || fail "$label restarted a supported/unknown daemon"
+      fi
+    done
+  done
+done <<'CASES'
+6.0.6|6.0.5|required|0|0
+6.0.7|6.0.5|required|0|0
+6.0.7|6.0.6|none|0|0
+6.0.7|6.0.7|none|0|0
+6.0.7|7.0.0|none|0|0
+6.0.7|unreachable|none|0|0
+6.0.7|empty|none|0|0
+6.0.7|6.0.5|none|9|0
+6.0.7|6.0.5|conditional|0|1
+6.0.7|6.0.6|conditional|0|1
+6.0.7|unreachable|conditional|0|1
+6.0.7|6.0.5|none|0|0|inactive
+6.0.7|6.0.5|none|0|1|inactive
+CASES
+printf 'ok: %s daemon/mode/NM cases disclose only required restarts before consent/effects\n' "$daemon_case"
+
+# Refusing consent must not initialize the caller's Incus config/cache, including
+# custom existing paths. Verify the temporary state is private and already gone
+# after both successful and failed version reads.
+client_case=0
+for mode in normal upgrade-only; do
+  for layout in default custom; do
+    for query_rc in 0 9; do
+      client_case=$((client_case + 1))
+      client_home="$TMP/client-$client_case/home"
+      mkdir -p "$client_home"
+      if [ "$layout" = custom ]; then
+        mkdir -p "$client_home/settings" "$client_home/cache"
+        printf 'retain\n' > "$client_home/settings/sentinel"
+        printf 'retain\n' > "$client_home/cache/sentinel"
+      fi
+      find "$client_home" -printf '%P %y\n' | sort > "$TMP/client-before"
+      client_paths="$TMP/client-$client_case.paths"
+      client_output="$TMP/client-$client_case.out"
+      client_args=()
+      [ "$mode" = normal ] || client_args+=(--upgrade-only)
+      cp "$TMP/bin/incus" "$version_bin/incus"
+      if (
+        unset INCUS_CONF INCUS_CACHE
+        export HOME="$client_home"
+        if [ "$layout" = custom ]; then
+          export INCUS_CONF="$client_home/settings" INCUS_CACHE="$client_home/cache"
+        fi
+        TEST_UID=1000 TEST_DECLINE=1 TEST_CLIENT_INIT=1 TEST_CLIENT_PATH_LOG="$client_paths" \
+          TEST_INCUS_VERSION=6.0.7 TEST_INCUS_SERVER_VERSION=6.0.5 TEST_SERVER_QUERY_RC="$query_rc" \
+          TEST_COMMAND_PATH="$version_bin" TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
+          run_installer "$TMP/client-$client_case/data" "${client_args[@]}"
+      ) >"$client_output" 2>&1; then
+        fail "$mode $layout query=$query_rc ignored declined consent"
+      fi
+      plan_kind=required
+      [ "$query_rc" = 0 ] || plan_kind=conditional
+      assert_restart_plan "$client_output" "$plan_kind" inactive
+      grep -Fq 'aborted by user' "$client_output" || fail 'client probe did not reach consent refusal'
+      find "$client_home" -printf '%P %y\n' | sort > "$TMP/client-after"
+      cmp -s "$TMP/client-before" "$TMP/client-after" || fail 'declined plan initialized caller client state'
+      [ "$(wc -l < "$client_paths")" -eq 1 ] || fail 'client-initialization fixture did not exercise the probe'
+      IFS='|' read -r conf cache private_mode < "$client_paths"
+      case "$conf" in /tmp/subyard-incus-plan.*/config) ;; *) fail 'probe used caller configuration' ;; esac
+      [ "$cache" = "${conf%/config}/cache" ] || fail 'probe used caller cache'
+      [ "$private_mode" = 700 ] || fail 'probe client state was not private'
+      [ ! -e "${conf%/config}" ] || fail 'probe leaked temporary client state'
+    done
+  done
+done
+printf 'ok: %s refused plans preserve caller config/cache and remove private probe state\n' "$client_case"
 
 # The distro candidate check must read apt-cache to the end: output beyond the pipe buffer after the
 # Candidate line would otherwise end apt-cache with SIGPIPE and fail the installer with 141.

@@ -254,7 +254,7 @@ nm_unmanaged_guard() {
   local live='' existing bridges
   [[ "$bridge" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "unsafe Incus bridge name: $bridge"
   existing="$(nm_existing_guard_bridges "$conf")"
-  if ! live="$(nm_incus_bridge_names)"; then
+  if command -v incus >/dev/null 2>&1 && ! live="$(nm_incus_bridge_names)"; then
     warn "could not list existing Incus bridges — preserving the current NetworkManager guard entries"
     live=''
   fi
