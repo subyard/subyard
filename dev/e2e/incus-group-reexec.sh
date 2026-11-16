@@ -310,7 +310,8 @@ ensure_incus_platform() {
 }
 
 STATE="$(mktemp -d /var/tmp/subyard-group-reexec.XXXXXX)"
-chmod 0711 "$STATE"
+# The installer pins and reads every ancestor of the operator home.
+chmod 0755 "$STATE"
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
 MARKER="subyard-group-reexec-e2e-v1-$token"
 printf '%s\n' "$MARKER" > "$STATE/.marker"
