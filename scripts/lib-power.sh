@@ -129,28 +129,96 @@ power_nm_print_config() {
   fi
 }
 
-# The effective [keyfile] unmanaged-devices entries, one per line. NetworkManager joins values
-# merged through "+=" with commas, so both list separators are accepted.
-power_nm_unmanaged_entries() { # stdin: NetworkManager --print-config
-  awk '
-    /^[[:space:]]*\[/ { section = $0; gsub(/[[:space:]]/, "", section); next }
-    section == "[keyfile]" && /^[[:space:]]*unmanaged-devices[[:space:]]*=/ {
-      value = $0; sub(/^[^=]*=/, "", value); last = value
+# Guard rule, shared with internal/adapters/hostruntime and the vectors in
+# tests/fixtures/nm-guard-vectors: NetworkManager prints [device*] sections in priority order,
+# except the plain [device] section, which it always considers last. [device-subyard] must set
+# managed=0 for type:veth, driver:veth and every bridge without except: entries, and no section
+# printed before it may set managed=1 or stop-match for devices the guard covers. Each violation
+# is printed on its own line; nothing is printed when the configuration is safe.
+power_nm_config_violations() { # <bridge...>; stdin: NetworkManager --print-config
+  awk -v bridge_list="$*" '
+    function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
+    function truthy(value) { value = tolower(value); return value == "1" || value == "true" || value == "yes" || value == "on" }
+    function falsy(value) { value = tolower(value); return value == "0" || value == "false" || value == "no" || value == "off" }
+    function related(name,    index_) {
+      if (name ~ /^veth/ || name ~ /^tap........$/) return 1
+      for (index_ = 1; index_ <= bridge_count; index_++) if (name == bridges[index_]) return 1
+      return 0
+    }
+    # A section only reaches unrelated devices when every entry is an exact, unrelated name.
+    function unrelated_only(list,    count, entries, index_, entry, name) {
+      count = split(list, entries, /[,;]/)
+      if (trim(list) == "") return 0
+      for (index_ = 1; index_ <= count; index_++) {
+        entry = trim(entries[index_])
+        if (entry == "") continue
+        if (entry ~ /^interface-name:=/) name = substr(entry, 17)
+        else if (entry ~ /^interface-name:~/) name = substr(entry, 17)
+        else if (entry ~ /^interface-name:/) name = substr(entry, 16)
+        else if (entry !~ /:/) name = entry
+        else return 0
+        if (entry !~ /^interface-name:=/ && name ~ /[*?]/) return 0
+        if (name == "" || related(name)) return 0
+      }
+      return 1
+    }
+    BEGIN { bridge_count = split(bridge_list, bridges, " "); current = 0 }
+    /^[[:space:]]*\[/ {
+      name = trim($0); gsub(/^\[|\]$/, "", name)
+      sections[++section_count] = name; current = section_count
+      next
+    }
+    current && /=/ {
+      key = trim(substr($0, 1, index($0, "=") - 1)); value = trim(substr($0, index($0, "=") + 1))
+      values[current, key] = value; present[current, key] = 1
     }
     END {
-      count = split(last, entries, /[;,]/)
-      for (entry_index = 1; entry_index <= count; entry_index++) {
-        entry = entries[entry_index]
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", entry)
-        if (entry != "") print entry
+      for (index_ = 1; index_ <= section_count; index_++) if (sections[index_] == "device-subyard") { guard = index_; break }
+      if (!guard) { print "NetworkManager has no [device-subyard] guard section"; exit }
+      if (!falsy(values[guard, "managed"])) print "[device-subyard] does not set managed=0"
+      list = values[guard, "match-device"]
+      count = split(list, entries, /[,;]/)
+      for (index_ = 1; index_ <= count; index_++) {
+        entry = trim(entries[index_]); if (entry != "") listed[entry] = 1
+        if (entry ~ /^except:/) print "[device-subyard] match-device has the exception " entry
+      }
+      required_count = split("type:veth driver:veth", required, " ")
+      for (index_ = 1; index_ <= bridge_count; index_++) required[++required_count] = "interface-name:" bridges[index_]
+      for (index_ = 1; index_ <= required_count; index_++)
+        if (!(required[index_] in listed)) print "[device-subyard] match-device lacks " required[index_]
+      for (index_ = 1; index_ < guard; index_++) {
+        name = sections[index_]
+        if (name !~ /^device/ || name == "device") continue
+        if (!truthy(values[index_, "managed"]) && !truthy(values[index_, "stop-match"])) continue
+        if (unrelated_only(values[index_, "match-device"])) continue
+        print "[" name "] has priority over [device-subyard] and sets " (truthy(values[index_, "managed"]) ? "managed=1" : "stop-match") " for devices the guard covers"
       }
     }
   '
 }
 
+# Existing yard bridges that NetworkManager manages, one per line.
+power_nm_managed_bridges() { # <bridge...>
+  local device state bridge
+  command -v nmcli >/dev/null 2>&1 || { printf 'nmcli\n'; return 1; }
+  while IFS=: read -r device state; do
+    for bridge in "$@"; do
+      [ "$device" = "$bridge" ] && [ "$state" != unmanaged ] && printf '%s\n' "$device"
+    done
+  done < <(nmcli -t -f DEVICE,STATE device 2>/dev/null)
+  return 0
+}
+
+POWER_NM_GUARD_COMMAND="${POWER_NM_GUARD_COMMAND:-yard init}"
+
+power_join() { # stdin lines -> one "; "-separated line
+  local out='' line
+  while IFS= read -r line; do [ -z "$line" ] || out+="${out:+; }$line"; done
+  printf '%s' "$out"
+}
+
 power_nm_guard_effective() { # <bridge...>
-  local config entries required rc
-  local -a missing=()
+  local config violations managed rc
   if power_nm_active; then :; else
     rc=$?; [ "$rc" -eq 1 ] && return 0
     return "$rc"
@@ -163,22 +231,25 @@ power_nm_guard_effective() { # <bridge...>
     fi
     return 1
   }
-  entries="$(printf '%s\n' "$config" | power_nm_unmanaged_entries)"
-  for required in type:veth driver:veth "${@/#/interface-name:}"; do
-    grep -Fxq -- "$required" <<< "$entries" || missing+=("$required")
-  done
-  [ "${#missing[@]}" -eq 0 ] && return 0
-  local IFS=,
-  power_fail "NM effective [keyfile] unmanaged-devices lacks ${missing[*]}; a NetworkManager conf.d file that sets unmanaged-devices= replaces the Subyard guard list — use unmanaged-devices+= there, then rerun yard init"
+  violations="$(printf '%s\n' "$config" | power_nm_config_violations "$@")"
+  if ! managed="$(power_nm_managed_bridges "$@")"; then
+    violations+="${violations:+$'\n'}nmcli is required to inspect yard bridges"
+  elif [ -n "$managed" ]; then
+    while IFS= read -r rc; do
+      violations+="${violations:+$'\n'}NetworkManager manages yard bridge $rc"
+    done <<< "$managed"
+  fi
+  [ -z "$violations" ] && return 0
+  power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — correct the NetworkManager configuration, then rerun $POWER_NM_GUARD_COMMAND"
 }
 
+# Subyard's own devices only: yard bridges, veths and Incus tap devices.
 power_route_device_unsafe() { # <device> [bridge...]
   local dev="$1" bridge details
   shift
   for bridge in "$@"; do [ "$dev" = "$bridge" ] && return 0; done
-  case "$dev" in veth*|tap*|macvtap*|vnet*|docker*|virbr*) return 0 ;; esac
-  # Docker's own bridges only: an admin bridge such as br-lan may carry the host uplink.
-  [[ "$dev" =~ ^br-[0-9a-f]{12}$ ]] && return 0
+  case "$dev" in veth*) return 0 ;; esac
+  [[ "$dev" =~ ^tap.{8}$ ]] && return 0
   details="$(ip -d link show dev "$dev" 2>/dev/null)" || details=
   case " $details " in *' veth '*|*' veth@'*) return 0 ;; esac
   return 1
@@ -210,10 +281,14 @@ power_routes_safe() { # [bridge...]
   return 0
 }
 
+# Both guards always run, so a refusal names every independent problem.
 power_host_safe() { # <bridge...>
+  local errors=()
   [ "$#" -gt 0 ] || { power_fail "power_host_safe needs at least one managed bridge"; return 1; }
-  power_nm_guard_effective "$@" || return 1
-  power_routes_safe "$@"
+  power_nm_guard_effective "$@" || errors+=("$POWER_ERROR")
+  power_routes_safe "$@" || errors+=("$POWER_ERROR")
+  [ "${#errors[@]}" -eq 0 ] && return 0
+  power_fail "$(printf '%s\n' "${errors[@]}" | power_join)"
 }
 
 power_start_guarded() { # <project> <instance> <bridge...>

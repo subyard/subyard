@@ -806,18 +806,19 @@ SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
   bash dev/e2e/operator-extras-upgrade.sh
 ```
 
-The NetworkManager admin-uplink lane installs NetworkManager behind an administrator conf.d file
-that keeps the VM uplink unmanaged, then published 0.29.0, whose guard replaced that list. A
-temporary udev pin and a restoring watchdog keep the uplink reachable until the candidate update
-rewrites the guard; afterwards the administrator's file alone must keep the uplink unmanaged across
-reload, restart, start, repeat init and teardown, with yard bridges and veths strictly unmanaged:
+The NetworkManager guard lane owns its lease and reboots the VM itself. `--lane upgrade` runs a
+published 0.29.0 init that stops after writing its guard, which lets NetworkManager take the
+administrator's uplink; the candidate update must refuse and name the hand-back, then rewrite the
+guard without a reload and ask for one reboot. It records a NetworkManager restart experiment,
+reboots, runs candidate init and start, checks new veth and tap devices and a later `managed=1`
+section, runs full teardown and reboots again. `--lane fresh` installs the candidate behind an
+except-only administrator list with an NM-managed `br0` and a Docker-style bridge:
 
 ```sh
 bash dev/e2e/nm-admin-uplink.sh --preflight
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
-  dev/agent-e2e.sh --slot "$slot" --purpose nm-admin-uplink --vm-count 1 --vm 1 -- \
-  bash dev/e2e/nm-admin-uplink.sh
+  dev/e2e/nm-admin-uplink.sh --slot "$slot" --lane upgrade
 ```
 
 `dev/e2e/p0-acceptance.sh --slot N` runs the release smoke; `--lane full` runs the exhaustive

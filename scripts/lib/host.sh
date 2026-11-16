@@ -175,177 +175,378 @@ incus_project_has_isolated_images() {
   [ "$(incus project get "$1" features.images 2>/dev/null)" != false ]
 }
 
+# --- NetworkManager guard --------------------------------------------------------------------
+# A self-contained [device-subyard] section marks Subyard's own devices unmanaged: veths, Incus
+# tap devices and Incus-managed bridges. NetworkManager applies a device section only when a
+# device appears or it starts, never on reload, and the section is matched against its own list,
+# so writing or removing it cannot change an existing device or the administrator's lists.
+# Released versions instead replaced [main] no-auto-default and [keyfile] unmanaged-devices.
+NM_GUARD_CONF=/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf
+NM_GUARD_RECORD=/run/subyard/nm-guard.record
+# A migrated guard waits for one host reboot: it holds the boot ID that must change.
+NM_GUARD_REBOOT_PENDING=/run/subyard/nm-guard-reboot-pending
+NM_GUARD_OWN="type:veth,driver:veth,interface-name:tap????????"
+
+nm_path_exists() { [ -e "$1" ] || [ -L "$1" ]; }
+nm_legacy_guard() { printf '%s/99-subyard-unmanaged.conf\n' "${1%/*}"; } # <conf>
+
+# Incus-managed bridges only: the default-project list also shows host bridges such as an
+# administrator's br0, docker0 or virbr0, which are never Subyard's to guard.
 nm_incus_bridge_names() {
   local inventory
   command -v incus >/dev/null 2>&1 || return 1
-  inventory="$(incus network list --project default --format csv -c n,t 2>/dev/null)" \
-    || return 1
-  printf '%s\n' "$inventory" | awk -F, '
-    tolower($2) == "bridge" && $1 ~ /^[A-Za-z0-9_.:-]+$/ { print $1 }
-  '
+  inventory="$(incus network list --project default --format json 2>/dev/null)" || return 1
+  python3 -I -c '
+import json, re, sys
+for network in json.loads(sys.stdin.read().strip() or "[]") or []:
+    name = network.get("name", "")
+    if network.get("managed") is True and network.get("type") == "bridge" and re.fullmatch(r"[A-Za-z0-9_.:-]+", name):
+        print(name)
+' <<< "$inventory" 2>/dev/null
 }
 
-# One appending [keyfile] key keeps yard bridges and veth/tap devices strictly unmanaged. "+="
-# extends the lists of earlier conf.d files; released guards replaced them with "=".
-NM_GUARD_CONF=/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf
-# Docker names user-defined bridges "br-" plus 12 network-ID characters; NM globbing has
-# only "*" and "?", so other "br-" names, such as an admin's br-lan, stay untouched.
-NM_GUARD_PATTERNS="type:veth;driver:veth;interface-name:veth*;interface-name:docker*;interface-name:br-????????????;interface-name:virbr*;interface-name:vnet*;interface-name:tap*;interface-name:macvtap*"
+# A guard written by a released version: any guard file that is not the current section alone,
+# or the legacy 99- file (a dangling symlink included).
+nm_guard_released() { # <conf>
+  nm_path_exists "$(nm_legacy_guard "$1")" && return 0
+  nm_path_exists "$1" || return 1
+  ! nm_guard_format_current "$1"
+}
 
-nm_legacy_guard() { printf '%s/99-subyard-unmanaged.conf\n' "$(dirname "$1")"; } # <conf>
-
-nm_existing_guard_bridges() { # <conf>: exact bridge names in the current or a released guard
-  local conf="$1" file
-  for file in "$conf" "$(nm_legacy_guard "$conf")"; do
-    [ -r "$file" ] || continue
-    awk '
-      /^[[:space:]]*unmanaged-devices[[:space:]]*[+]?=/ {
-        value = $0
-        sub(/^[^=]*=/, "", value)
-        count = split(value, values, /[;,]/)
-        for (entry_index = 1; entry_index <= count; entry_index++) {
-          entry = values[entry_index]
-          gsub(/^[[:space:]]+|[[:space:]]+$/, "", entry)
-          if (entry ~ /^interface-name:[A-Za-z0-9_.:-]+$/) {
-            sub(/^interface-name:/, "", entry)
-            print entry
-          }
-        }
+nm_guard_bridges_in() { # <conf>: bridges a current-format guard lists
+  [ -r "$1" ] || return 0
+  awk '
+    /^[[:space:]]*match-device[[:space:]]*=/ {
+      value = $0; sub(/^[^=]*=/, "", value)
+      count = split(value, entries, /[,;]/)
+      for (index_ = 1; index_ <= count; index_++) {
+        entry = entries[index_]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", entry)
+        if (entry ~ /^interface-name:[A-Za-z0-9_.:-]+$/) { sub(/^interface-name:/, "", entry); print entry }
       }
-    ' "$file"
-  done | LC_ALL=C sort -u
+    }
+  ' "$1" | LC_ALL=C sort -u
 }
 
 nm_guard_render() { # <newline-separated bridges>
-  local bridges="$1" bridge spec="$NM_GUARD_PATTERNS"
+  local bridge spec="$NM_GUARD_OWN"
   while IFS= read -r bridge; do
     [ -n "$bridge" ] || continue
     [[ "$bridge" =~ ^[A-Za-z0-9_.:-]+$ ]] || return 1
-    spec="$spec;interface-name:$bridge"
-  done <<< "$(printf '%s\n' "$bridges" | sed '/^$/d' | LC_ALL=C sort -u)"
+    spec="$spec,interface-name:$bridge"
+  done <<< "$(printf '%s\n' "$1" | sed '/^$/d' | LC_ALL=C sort -u)"
   printf '%s\n' \
-    '# Subyard: keep yard bridges and veth/tap devices unmanaged. "+=" keeps other conf.d lists.' \
-    '[keyfile]' \
-    "unmanaged-devices+=$spec"
+    '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' \
+    '[device-subyard]' \
+    "match-device=$spec" \
+    'managed=0'
 }
 
-# Succeeds when no released guard format remains and, given a bridge, the guard lists it.
+nm_guard_format_current() { # <conf>
+  [ -f "$1" ] && nm_guard_render "$(nm_guard_bridges_in "$1")" | cmp -s - "$1"
+}
+
+nm_guard_record_value() { # <conf>: guard hash and NetworkManager invocation
+  local hash=absent invocation
+  [ ! -f "$1" ] || hash="$(sha256sum "$1" | cut -d ' ' -f1)"
+  invocation="$(systemctl show -p InvocationID --value NetworkManager 2>/dev/null)" || invocation=''
+  printf '%s %s\n' "$hash" "${invocation:-unknown}"
+}
+
+nm_guard_record_fresh() { # <conf>: NetworkManager loaded this exact guard
+  [ -r "$NM_GUARD_RECORD" ] && [ "$(cat "$NM_GUARD_RECORD")" = "$(nm_guard_record_value "$1")" ]
+}
+
+nm_boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
+
+# The migrated guard is on disk while NetworkManager still runs the released configuration
+# until the host reboots; nothing may reload NetworkManager before that.
+nm_guard_reboot_pending() {
+  [ -r "$NM_GUARD_REBOOT_PENDING" ] && [ "$(cat "$NM_GUARD_REBOOT_PENDING")" = "$(nm_boot_id)" ]
+}
+
+# Planning: no released guard remains, the guard lists the bridge, and an active NetworkManager
+# loaded it. A missing or stale record means the last reload did not complete.
 nm_guard_file_current() { # <conf> [bridge]
-  local conf="$1" bridge="${2:-}" bridges
-  [ ! -e "$(nm_legacy_guard "$conf")" ] || return 1
-  if [ ! -e "$conf" ]; then
-    [ -z "$bridge" ]
+  local conf="$1" bridge="${2:-}"
+  nm_guard_released "$conf" && return 1
+  if ! nm_path_exists "$conf"; then
+    [ -z "$bridge" ] || ! power_nm_binary >/dev/null
     return
   fi
-  bridges="$(nm_existing_guard_bridges "$conf")"
   if [ -n "$bridge" ]; then
-    grep -Fxq -- "$bridge" <<< "$bridges" || return 1
+    nm_guard_bridges_in "$conf" | grep -Fxq -- "$bridge" || return 1
   fi
-  nm_guard_render "$bridges" | cmp -s - "$conf"
+  nm_guard_reboot_pending && return 0
+  if power_nm_active; then nm_guard_record_fresh "$conf"; else [ "$?" -eq 1 ]; fi
 }
 
-nm_write_unmanaged_guard() { # <newline-separated bridges> <conf>
-  local bridges="$1" conf="$2" legacy want changed=0 nm_rc bridge
-  local -a verify=()
+nm_device_is_veth() { ip -d -o link show dev "$1" 2>/dev/null | grep -Eq ' veth( |@|$)'; }
+
+nm_device_is_own() { # <device> <newline-separated bridges>
+  grep -Fxq -- "$1" <<< "$2" && return 0
+  [[ "$1" =~ ^tap.{8}$ ]] && return 0
+  nm_device_is_veth "$1"
+}
+
+nm_guard_write_file() { # <path> <contents>: atomic; the temporary name never ends in .conf
+  local temporary
+  temporary="${1%/*}/.${1##*/}.$$.tmp"
+  printf '%s\n' "$2" > "$temporary" && chmod 0644 "$temporary" && mv -f "$temporary" "$1" \
+    || { rm -f "$temporary"; return 1; }
+}
+
+nm_reload_conf() {
+  nmcli general reload conf 2>/dev/null || systemctl reload NetworkManager 2>/dev/null
+}
+
+nm_device_managedness() { # DEVICE:managed|unmanaged per line
+  nmcli -t -f DEVICE,STATE device 2>/dev/null \
+    | awk -F: '$1 != "" { print $1 ":" ($2 == "unmanaged" ? "unmanaged" : "managed") }' | LC_ALL=C sort
+}
+
+# Apply one guard change for install, init, setup, migration and teardown. The proposed
+# configuration is checked before anything changes; every refusal is reported together and
+# leaves the host untouched. After a reload, any change in a device's managed state restores
+# the previous files. POWER_NM_GUARD_COMMAND names the command to rerun.
+nm_guard_apply() { # <conf> <write|remove> <newline-separated bridges>
+  local conf="$1" mode="$2" bridges="$3" legacy desired='' binary active=0 rc work device state
+  local proposed_config='' current_config='' before after released=0 deferred=0
+  local -a refusals=() bridge_args=()
   legacy="$(nm_legacy_guard "$conf")"
-  while IFS= read -r bridge; do
-    [ -z "$bridge" ] || [[ "$bridge" =~ ^[A-Za-z0-9_.:-]+$ ]] \
-      || die "unsafe Incus bridge name in NetworkManager guard: $bridge"
+  while IFS= read -r device; do
+    [ -z "$device" ] && continue
+    [[ "$device" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "unsafe Incus bridge name in NetworkManager guard: $device"
+    bridge_args+=("$device")
   done <<< "$bridges"
-  want="$(nm_guard_render "$bridges")"
-  if power_nm_active; then :; else
-    nm_rc=$?
-    [ "$nm_rc" -eq 1 ] || die "$POWER_ERROR"
-    if [ -e "$conf" ] || [ -e "$legacy" ]; then
-      # Keep an inactive host's guard in the current form for a later NetworkManager start.
-      printf '%s\n' "$want" > "$conf"
-      chmod 0644 "$conf"
-      rm -f "$legacy"
-      ok "NetworkManager not active — kept the guard in its appending form ($conf)"
-    else
-      ok "NetworkManager not active — no route-hijack guard needed"
+  [ "$mode" = remove ] || desired="$(nm_guard_render "$bridges")"
+  ! nm_guard_released "$conf" || released=1
+  # A released guard is rewritten without a reload; the host reboots once to apply it.
+  if [ "$released" = 1 ] || nm_guard_reboot_pending; then deferred=1; fi
+  if power_nm_active; then active=1; else
+    rc=$?; [ "$rc" -eq 1 ] || { power_fail "$POWER_ERROR"; return 1; }
+  fi
+  binary="$(power_nm_binary)" || binary=''
+  if [ -z "$binary" ] && ! nm_path_exists "$conf" && ! nm_path_exists "$legacy"; then
+    ok "NetworkManager is not installed — no guard needed"
+    return 0
+  fi
+  if [ "$mode" = write ] && [ -f "$conf" ] && [ "$(cat "$conf")" = "$desired" ] && ! nm_path_exists "$legacy" \
+    && { [ "$active" = 0 ] || [ "$deferred" = 1 ] || nm_guard_record_fresh "$conf"; }; then
+    [ "$active" = 0 ] || power_nm_guard_effective "${bridge_args[@]}" || return 1
+    ok "NetworkManager guard already current ($conf)"
+    return 0
+  fi
+  if [ "$mode" = remove ] && ! nm_path_exists "$conf" && ! nm_path_exists "$legacy"; then
+    ok "NetworkManager guard already absent"
+    return 0
+  fi
+  work="$(mktemp -d)" || { power_fail "cannot create a private NetworkManager work directory"; return 1; }
+  chmod 0700 "$work"
+  mkdir -p "$work/proposed" "$work/backup"
+  [ ! -d "${conf%/*}" ] || cp -a "${conf%/*}/." "$work/proposed/"
+  rm -f "$work/proposed/${legacy##*/}" "$work/proposed/${conf##*/}"
+  [ "$mode" = remove ] || printf '%s\n' "$desired" > "$work/proposed/${conf##*/}"
+  if [ -n "$binary" ]; then
+    if ! proposed_config="$("$binary" --config-dir "$work/proposed" --print-config 2>/dev/null)"; then
+      refusals+=("NetworkManager rejects the proposed configuration")
+    elif [ "$mode" = write ]; then
+      while IFS= read -r device; do
+        [ -z "$device" ] || refusals+=("proposed guard: $device")
+      done < <(printf '%s\n' "$proposed_config" | power_nm_config_violations "${bridge_args[@]}")
     fi
-    return 0
   fi
-  install -d -m 0755 "$(dirname "$conf")"
-  [ ! -e "$legacy" ] || { rm -f "$legacy"; changed=1; }
-  if [ ! -f "$conf" ] || ! printf '%s\n' "$want" | cmp -s - "$conf"; then
-    printf '%s\n' "$want" > "$conf"
-    changed=1
+  if [ "$active" = 1 ]; then
+    if ! current_config="$(power_nm_print_config 2>/dev/null)"; then
+      rm -rf "$work"; power_fail "cannot read NetworkManager's effective configuration"; return 1
+    fi
+    command -v nmcli >/dev/null 2>&1 || { rm -rf "$work"; power_fail "nmcli is required to change the NetworkManager guard"; return 1; }
+    local routes
+    routes="$(ip -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1) }')"
+    local type
+    while IFS=: read -r device type state; do
+      [ -n "$device" ] && [ "$type" != loopback ] || continue
+      if [ "$mode" = write ] && nm_device_is_own "$device" "$bridges"; then
+        [ "$state" = unmanaged ] \
+          || refusals+=("NetworkManager manages $device, which the guard covers; release it first: sudo nmcli device set $device managed no")
+        grep -Fxq -- "$device" <<< "$routes" \
+          && refusals+=("the host default route uses $device, which the guard covers")
+      fi
+    done < <(nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null)
+    if [ "$released" = 1 ]; then
+      while IFS= read -r device; do
+        [ -z "$device" ] || refusals+=("$device")
+      done < <(nm_guard_migration_refusals "$current_config" "$proposed_config")
+    fi
   fi
-  chmod 0644 "$conf"
-  systemctl reload NetworkManager 2>/dev/null \
-    || { command -v nmcli >/dev/null 2>&1 && nmcli general reload 2>/dev/null; } \
-    || die "could not reload NetworkManager after updating $conf"
-  if [ "$changed" = 1 ]; then
-    ok "NetworkManager guard reconciled for all Incus bridges + veth/tap/docker/virbr ($conf)"
+  if [ "${#refusals[@]}" -ne 0 ]; then
+    rm -rf "$work"
+    power_fail "NetworkManager guard unchanged: $(printf '%s\n' "${refusals[@]}" | power_join) — then rerun $POWER_NM_GUARD_COMMAND"
+    return 1
+  fi
+  if [ "$active" = 1 ] && [ "$deferred" = 0 ]; then
+    before="$(nm_device_managedness)"
+  fi
+  # Record the pending reboot first: without it a later run would reload the migrated guard.
+  if [ "$deferred" = 1 ] && [ -n "$binary" ]; then
+    { install -d -m 0755 "${NM_GUARD_REBOOT_PENDING%/*}" \
+      && nm_guard_write_file "$NM_GUARD_REBOOT_PENDING" "$(nm_boot_id)"; } 2>/dev/null \
+      || { rm -rf "$work"; power_fail "could not record the pending host reboot for the NetworkManager guard; nothing was changed"; return 1; }
+  fi
+  for device in "$conf" "$legacy"; do
+    ! nm_path_exists "$device" || cp -a "$device" "$work/backup/" \
+      || { rm -rf "$work"; power_fail "could not back up $device"; return 1; }
+  done
+  install -d -m 0755 "${conf%/*}" || { rm -rf "$work"; power_fail "could not create ${conf%/*}"; return 1; }
+  if [ "$mode" = remove ]; then
+    rm -f "$conf" || { rm -rf "$work"; power_fail "could not remove $conf"; return 1; }
   else
-    ok "NetworkManager already protects all Incus bridges + veth/tap/docker/virbr"
+    nm_guard_write_file "$conf" "$desired" || { rm -rf "$work"; power_fail "could not write $conf"; return 1; }
   fi
-  while IFS= read -r bridge; do
-    [ -z "$bridge" ] || verify+=("$bridge")
-  done <<< "$bridges"
-  [ "${#verify[@]}" -eq 0 ] || power_nm_guard_effective "${verify[@]}" \
-    || die "$POWER_ERROR (check: sudo NetworkManager --print-config)"
-  ok "verified: NM effective config protects every Incus bridge and veth device"
+  rm -f "$legacy"
+  if [ "$deferred" = 1 ]; then
+    rm -rf "$work"
+    ok "NetworkManager guard rewritten ($conf); NetworkManager was not reloaded — reboot the host once to apply it safely"
+    return 0
+  fi
+  if [ "$active" = 1 ]; then
+    if ! nm_reload_conf; then
+      rm -rf "$work"
+      power_fail "could not reload NetworkManager after updating $conf; rerun $POWER_NM_GUARD_COMMAND to retry"
+      return 1
+    fi
+    sleep "${NM_GUARD_SETTLE_SECONDS:-2}"
+    after="$(nm_device_managedness)"
+    local changed file
+    printf '%s\n' "$before" > "$work/before"
+    printf '%s\n' "$after" > "$work/after"
+    changed="$(LC_ALL=C join -t: "$work/before" "$work/after" | awk -F: '$2 != $3 { print $1 }' | power_join)"
+    if [ -n "$changed" ]; then
+      rm -f "$conf" "$legacy"
+      for file in "$conf" "$legacy"; do
+        ! nm_path_exists "$work/backup/${file##*/}" || cp -a "$work/backup/${file##*/}" "$file"
+      done
+      nm_reload_conf || true
+      rm -rf "$work"
+      power_fail "NetworkManager changed the managed state of $changed after the guard reload; the previous guard was restored — inspect those devices, then rerun $POWER_NM_GUARD_COMMAND"
+      return 1
+    fi
+    if [ "$mode" = write ] && ! power_nm_guard_effective "${bridge_args[@]}"; then
+      rm -rf "$work"; return 1
+    fi
+    # Without the record the next run reloads again; that is safe, so it is not an error.
+    { install -d -m 0755 "${NM_GUARD_RECORD%/*}" \
+      && nm_guard_write_file "$NM_GUARD_RECORD" "$(nm_guard_record_value "$conf")"; } 2>/dev/null || true
+  fi
+  rm -rf "$work"
+  if [ "$mode" = remove ]; then ok "removed the NetworkManager guard ($conf)"
+  else ok "NetworkManager guard reconciled for veths, Incus tap devices and Incus bridges ($conf)"; fi
 }
 
-nm_unmanaged_guard() {
-  local bridge="${1:-incusbr0}" conf="${2:-$NM_GUARD_CONF}"
-  local live='' existing bridges
+# Install, init and setup: the yard's bridge plus every Incus-managed bridge.
+nm_unmanaged_guard() { # [bridge] [conf]
+  local bridge="${1:-incusbr0}" conf="${2:-$NM_GUARD_CONF}" live='' bridges
   [[ "$bridge" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "unsafe Incus bridge name: $bridge"
-  existing="$(nm_existing_guard_bridges "$conf")"
-  if command -v incus >/dev/null 2>&1 && ! live="$(nm_incus_bridge_names)"; then
-    warn "could not list existing Incus bridges — preserving the current NetworkManager guard entries"
-    live=''
+  if command -v incus >/dev/null 2>&1 && live="$(nm_incus_bridge_names)"; then :; else
+    command -v incus >/dev/null 2>&1 \
+      && warn "could not list Incus-managed bridges — keeping the bridges the current guard lists"
+    live="$(nm_guard_bridges_in "$conf")"
+    nm_guard_format_current "$conf" || live=''
   fi
-  bridges="$(printf '%s\n%s\n%s\n' "$bridge" "$existing" "$live" | sed '/^$/d' | sort -u)"
-  nm_write_unmanaged_guard "$bridges" "$conf"
+  bridges="$(printf '%s\n%s\n' "$bridge" "$live" | sed '/^$/d' | LC_ALL=C sort -u)"
+  if nm_guard_released "$conf"; then
+    nm_unmanaged_guard_migrate "$conf" "$bridge"
+    return
+  fi
+  nm_guard_apply "$conf" write "$bridges" || die "$POWER_ERROR"
 }
 
-# Rewrite a guard left by a released version (replacing "=" keys, [device-subyard], the legacy
-# 99- file) in place, keeping every bridge it listed. Without a guard there is nothing to migrate.
-nm_unmanaged_guard_migrate() { # [conf]
-  local conf="${1:-$NM_GUARD_CONF}" live='' bridges
-  if [ ! -e "$conf" ] && [ ! -e "$(nm_legacy_guard "$conf")" ]; then
-    return 0
-  fi
-  if nm_guard_file_current "$conf"; then
-    ok "NetworkManager guard already uses its appending form"
-    return 0
-  fi
-  if command -v incus >/dev/null 2>&1 && ! live="$(nm_incus_bridge_names)"; then
-    warn "could not list existing Incus bridges — keeping the bridges the released guard lists"
-    live=''
-  fi
-  bridges="$(printf '%s\n%s\n' "$(nm_existing_guard_bridges "$conf")" "$live" | sed '/^$/d' | sort -u)"
-  nm_write_unmanaged_guard "$bridges" "$conf"
+# The [keyfile] unmanaged-devices value of a printed configuration.
+nm_keyfile_unmanaged() {
+  awk '
+    /^[[:space:]]*\[/ { section = $0; gsub(/[[:space:]]/, "", section); next }
+    section == "[keyfile]" && /^[[:space:]]*unmanaged-devices[[:space:]]*=/ { value = $0; sub(/^[^=]*=/, "", value) }
+    END { print value }
+  '
 }
 
+# Whether a device list selects a device: 0 yes, 2 maybe, 1 no. "*", exact interface names and
+# exact except: names are decided exactly (an except-only list selects every other device);
+# globs, MACs, types and drivers are "maybe".
+nm_list_selects() { # <list> <device>
+  local entry name negative positives=0 result=1
+  local -a entries
+  IFS=',;' read -r -a entries <<< "$1"
+  for entry in "${entries[@]}"; do
+    entry="${entry#"${entry%%[![:space:]]*}"}"; entry="${entry%"${entry##*[![:space:]]}"}"
+    [ -n "$entry" ] || continue
+    negative=0
+    case "$entry" in except:*) negative=1; entry="${entry#except:}" ;; *) positives=1 ;; esac
+    case "$entry" in
+      '*') name='*' ;;
+      interface-name:=*) name="=${entry#interface-name:=}" ;;
+      interface-name:*) name="${entry#interface-name:}"; name="${name#\~}" ;;
+      *:*) result=2; continue ;;
+      *) name="$entry" ;;
+    esac
+    case "$name" in
+      '*') [ "$negative" = 1 ] && return 1; return 0 ;;
+      =*) name="${name#=}" ;;
+      *[*?]*) result=2; continue ;;
+    esac
+    if [ "$name" = "$2" ]; then
+      [ "$negative" = 1 ] && return 1
+      [ "$result" = 2 ] || result=0
+    fi
+  done
+  # Negative matches win; a list of only exceptions selects every device it does not except.
+  [ "$positives" = 1 ] || { [ "$result" = 2 ] && return 2; [ "${#entries[@]}" -gt 0 ] && return 0; return 1; }
+  return "$result"
+}
+
+# Released guards replaced the administrator's unmanaged-devices list, so NetworkManager may
+# manage a device that list marks unmanaged. Restoring the list would make NetworkManager
+# deconfigure it at reload: refuse, naming the device and its manual hand-back.
+nm_guard_migration_refusals() { # <current config> <proposed config>
+  local current proposed device type state rc verb
+  current="$(printf '%s\n' "$1" | nm_keyfile_unmanaged)"
+  proposed="$(printf '%s\n' "$2" | nm_keyfile_unmanaged)"
+  [ "$current" != "$proposed" ] || return 0
+  while IFS=: read -r device type state; do
+    [ -n "$device" ] && [ "$type" != loopback ] && [ "$state" != unmanaged ] || continue
+    if nm_list_selects "$proposed" "$device"; then rc=0; else rc=$?; fi
+    [ "$rc" != 1 ] || continue
+    verb=marks; [ "$rc" = 0 ] || verb='may mark'
+    printf '%s\n' "NetworkManager manages $device, which the administrator's unmanaged-devices list $verb unmanaged; the released Subyard guard replaced that list, and restoring it would make NetworkManager deconfigure $device at reload. Hand $device back first with 'sudo nmcli device set $device managed no' (or the administrator's own way)"
+  done < <(nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null)
+}
+
+# The one migration step for a guard written by a released version (replacing [main] and
+# [keyfile] lists, or the legacy 99- file). The checked apply adds nm_guard_migration_refusals,
+# writes the new guard without reloading NetworkManager and records one pending host reboot:
+# a reload or restart would re-evaluate every device against the restored administrator lists.
+nm_unmanaged_guard_migrate() { # [conf] [bridge]
+  local conf="${1:-$NM_GUARD_CONF}" bridges
+  if ! nm_guard_released "$conf"; then
+    ok "NetworkManager guard has no released form to migrate"
+    return 0
+  fi
+  bridges="$(nm_incus_bridge_names)" \
+    || die "could not list Incus-managed bridges to migrate the released NetworkManager guard; rerun $POWER_NM_GUARD_COMMAND once incus network list works"
+  bridges="$(printf '%s\n%s\n' "${2:-}" "$bridges" | sed '/^$/d' | LC_ALL=C sort -u)"
+  nm_guard_apply "$conf" write "$bridges" || die "$POWER_ERROR"
+}
+
+# Teardown: keep the guard for surviving Incus bridges, remove it after the last one.
 nm_unmanaged_guard_reconcile() { # [conf]
-  local conf="${1:-$NM_GUARD_CONF}"
-  local bridges nm_rc
+  local conf="${1:-$NM_GUARD_CONF}" bridges
   if ! bridges="$(nm_incus_bridge_names)"; then
     warn "could not inventory surviving Incus bridges — keeping the NetworkManager guard fail-closed"
     return 1
   fi
-  bridges="$(printf '%s\n' "$bridges" | sed '/^$/d' | sort -u)"
   if [ -n "$bridges" ]; then
-    nm_write_unmanaged_guard "$bridges" "$conf"
-    return
-  fi
-  if power_nm_active; then :; else
-    nm_rc=$?
-    [ "$nm_rc" -eq 1 ] || { warn "$POWER_ERROR"; return 1; }
-  fi
-  rm -f "$conf" "$(nm_legacy_guard "$conf")" 2>/dev/null || true
-  if power_nm_active; then
-    systemctl reload NetworkManager 2>/dev/null \
-      || { command -v nmcli >/dev/null 2>&1 && nmcli general reload 2>/dev/null; } \
-      || { warn "could not reload NetworkManager after removing $conf"; return 1; }
-    ok "removed NetworkManager guard after the final Incus bridge disappeared"
+    nm_guard_apply "$conf" write "$bridges" || { warn "$POWER_ERROR"; return 1; }
   else
-    ok "removed NetworkManager guard file (NetworkManager not active)"
+    nm_guard_apply "$conf" remove '' || { warn "$POWER_ERROR"; return 1; }
   fi
 }
 

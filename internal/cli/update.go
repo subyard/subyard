@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
@@ -301,6 +302,9 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 		fmt.Fprintf(output, "  Next: %s\n", outcome.Retry)
 	} else if success && execution.prepared.RepairCurrent && !execution.followup {
 		fmt.Fprintln(output, "  Next: run yard update again to check for and install a newer release")
+	}
+	if success && hostruntime.LocalNetworkManagerRebootPending() {
+		fmt.Fprintf(output, "  Next: %s\n", hostruntime.NetworkManagerRebootReminder)
 	}
 	if newer := execution.newerRelease; !success && newer.Command != "" {
 		fmt.Fprintf(output, "  Newer release %s is available. A plain yard update resumes only the unfinished target;\n", newer.Version)

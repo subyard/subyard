@@ -160,23 +160,28 @@ fi
 MOCK_INSTANCE_EXISTS=0 bash "$ROOT/scripts/06-network.sh" --verify \
   || fail "fresh-init network verify rejected an instance created by a later stage"
 
-# Planning treats a guard left by a released version as drift, even while NetworkManager's
-# effective list is complete, so init rewrites it. Redirect only the guard and reader paths.
+# Planning treats a released guard, a missing bridge or an unfinished reload as drift, even while
+# NetworkManager's configuration passes the guard rule, so init rewrites and reloads it.
 nm_root="$TMP/nm-root"
-mkdir -p "$nm_root/etc/NetworkManager/conf.d"
+mkdir -p "$nm_root/etc/NetworkManager/conf.d" "$nm_root/run"
 cp -r "$ROOT/scripts" "$nm_root/scripts"
 ln -s "$ROOT/config" "$nm_root/config"
-sed -i "s|/etc/NetworkManager/|$nm_root/etc/NetworkManager/|g" "$nm_root/scripts/lib/host.sh"
+sed -i "s|/etc/NetworkManager/|$nm_root/etc/NetworkManager/|g; s|/run/subyard/|$nm_root/run/|g" "$nm_root/scripts/lib/host.sh"
 sed -i "s|/usr/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/usr/bin/NetworkManager|$TMP/bin/NetworkManager|g; s|/sbin/NetworkManager|$TMP/bin/NetworkManager|g" \
   "$nm_root/scripts/lib-power.sh"
 nm_guard="$nm_root/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
 cat > "$TMP/bin/NetworkManager" <<SH
 #!/usr/bin/env bash
 [ "\$*" = --print-config ] || exit 90
-sed 's/^unmanaged-devices+=/unmanaged-devices=/' "$nm_guard"
+cat "$nm_guard"
 SH
-chmod +x "$TMP/bin/NetworkManager"
-spec='type:veth;driver:veth;interface-name:veth*;interface-name:docker*;interface-name:br-????????????;interface-name:virbr*;interface-name:vnet*;interface-name:tap*;interface-name:macvtap*;interface-name:incusbr0'
+cat > "$TMP/bin/nmcli" <<'SH'
+#!/usr/bin/env bash
+[ "$*" = '-t -f DEVICE,STATE device' ] || exit 90
+printf 'incusbr0:unmanaged\n'
+SH
+chmod +x "$TMP/bin/NetworkManager" "$TMP/bin/nmcli"
+spec='type:veth;driver:veth;interface-name:veth*;interface-name:docker*;interface-name:br-*;interface-name:virbr*;interface-name:vnet*;interface-name:tap*;interface-name:macvtap*;interface-name:incusbr0'
 printf '[main]\nno-auto-default=%s\n\n[keyfile]\nunmanaged-devices=%s\n\n[device-subyard]\nmatch-device=%s\nmanaged=0\n' \
   "$spec" "$spec" "${spec//;/,}" > "$nm_guard"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
@@ -185,15 +190,21 @@ fi
 if bash "$nm_root/scripts/06-network.sh" --check; then
   fail "network planning accepted a released guard while NetworkManager is inactive"
 fi
-printf '%s\n' '# Subyard: keep yard bridges and veth/tap devices unmanaged. "+=" keeps other conf.d lists.' \
-  '[keyfile]' "unmanaged-devices+=$spec" > "$nm_guard"
+printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
+  'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' > "$nm_guard"
+if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
+  fail "network planning accepted a guard NetworkManager has not reloaded"
+fi
+printf '%s unknown\n' "$(sha256sum "$nm_guard" | cut -d ' ' -f1)" > "$nm_root/run/nm-guard.record"
 MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check \
-  || fail "network planning rejected the current NetworkManager guard"
+  || fail "network planning rejected the current, reloaded NetworkManager guard"
+bash "$nm_root/scripts/06-network.sh" --check \
+  || fail "network planning rejected the current guard while NetworkManager is inactive"
 printf '[keyfile]\nunmanaged-devices=interface-name:legacybr0\n' > "$nm_root/etc/NetworkManager/conf.d/99-subyard-unmanaged.conf"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
   fail "network planning accepted a legacy 99- NetworkManager guard"
 fi
-rm -f "$TMP/bin/NetworkManager"
+rm -f "$TMP/bin/NetworkManager" "$TMP/bin/nmcli"
 
 # Model stale group credentials at the filesystem permission port. The real
 # leaf and require_root execute unchanged; the sudo port performs its exact env/argv retry.

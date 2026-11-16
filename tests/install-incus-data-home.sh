@@ -376,7 +376,7 @@ printf 'VERSION_CODENAME=test\n' > "$TMP/etc/os-release"
 printf 'fixture-key\n' > "$TMP/etc/apt/keyrings/zabbly.asc"
 version_bin="$TMP/version-bin"
 mkdir "$version_bin"
-for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir; do
+for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir mv sha256sum join; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
 for command_name in getent id systemctl sudo; do
@@ -415,11 +415,21 @@ cat > "$version_bin/install" <<'SH'
 case "${*: -1}" in "$TEST_FIXTURE_ROOT"/*) ;; *) exit 99 ;; esac
 exec /usr/bin/install "$@"
 SH
+cat > "$version_bin/nmcli" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-t -f DEVICE,STATE device") printf 'incusbr0:unmanaged\n' ;;
+  "-t -f DEVICE,TYPE,STATE device") printf 'incusbr0:bridge:unmanaged\n' ;;
+  "general reload conf") [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'nmcli %s\n' "$*" >> "$TEST_EFFECT_LOG" ;;
+  *) exit 99 ;;
+esac
+SH
 cat > "$version_bin/NetworkManager" <<'SH'
 #!/usr/bin/env bash
+dir="$TEST_FIXTURE_ROOT/etc/NetworkManager/conf.d"
+if [ "${1:-}" = --config-dir ]; then dir="$2"; shift 2; fi
 [ "$*" = --print-config ] || exit 99
-# NetworkManager prints "+=" values merged, as one "=" key.
-sed 's/^unmanaged-devices+=/unmanaged-devices=/' "$TEST_FIXTURE_ROOT/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
+cat "$dir/zz-subyard-unmanaged.conf"
 SH
 # Retain the real reader/guard logic, redirecting only its absolute binary peer.
 sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g" \
@@ -432,7 +442,7 @@ cat > "$TMP/incus-initial" <<'SH'
 if [ "${1:-}" = --version ]; then printf '%s\n' "${TEST_INITIAL_INCUS_VERSION:-6.0.5}"; fi
 SH
 chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get" "$version_bin/curl" \
-  "$version_bin/dpkg" "$version_bin/install" "$version_bin/NetworkManager" "$TMP/incus-initial"
+  "$version_bin/dpkg" "$version_bin/install" "$version_bin/NetworkManager" "$version_bin/nmcli" "$TMP/incus-initial"
 export TEST_FIXTURE_ROOT="$TMP"
 
 for package_path in upgrade install; do

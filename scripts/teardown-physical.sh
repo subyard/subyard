@@ -13,6 +13,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 # shellcheck source=scripts/lib/ssh-config.sh
 . "$SCRIPT_DIR/lib/ssh-config.sh"
+# shellcheck disable=SC2034 # read by lib-power.sh diagnostics
+POWER_NM_GUARD_COMMAND="yard teardown"
 
 # The same physical owner handles the aggregate full-cleanup phases. Parsing,
 # exact inventory and the single authorization stay at the prepared boundary.

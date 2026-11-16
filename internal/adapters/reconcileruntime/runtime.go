@@ -158,6 +158,8 @@ func (runtime Runtime) CheckStage(ctx context.Context, stage ports.ReconcileStag
 		return err == nil && !drift, routeErr
 	case ports.ReconcileStagePower, ports.ReconcileStageFinalize:
 		return runtime.powerReadyForFinalize(ctx)
+	case ports.ReconcileStageNetworkGuard:
+		return hostruntime.NetworkManagerGuardCurrent(networkManagerGuardPath)
 	case ports.ReconcileStageTestVMs:
 		return runtime.testVMsConverged(ctx)
 	case ports.ReconcileStageKeys:
@@ -280,6 +282,12 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		return runtime.NetworkPolicy.Ensure(ctx, runtime.networkPolicyYard())
 	case ports.ReconcileStagePower:
 		return runtime.ApplyHostPowerRuntime(ctx)
+	case ports.ReconcileStageNetworkGuard:
+		operator, err := runtime.operatorIdentity()
+		if err != nil {
+			return err
+		}
+		return runtime.runScriptEnvironment(ctx, runtime.Stderr, map[string]string{"SUBYARD_USER": operator.Username}, "install-power-reconciler.sh", "--guard-only", "--yes")
 	case ports.ReconcileStageFinalize:
 		return runtime.finalizePowerState(ctx)
 	case ports.ReconcileStageTestVMs:
@@ -366,6 +374,8 @@ func (runtime Runtime) VerifyStage(ctx context.Context, stage ports.ReconcileSta
 		return runtime.provisionConverged(ctx)
 	case ports.ReconcileStagePower:
 		return runtime.verifyPowerReconciler(ctx)
+	case ports.ReconcileStageNetworkGuard:
+		return hostruntime.NetworkManagerGuardCurrent(networkManagerGuardPath)
 	case ports.ReconcileStageFinalize:
 		return runtime.powerReadyForFinalize(ctx)
 	default:
@@ -2318,11 +2328,6 @@ func (runtime Runtime) powerReadyForFinalize(ctx context.Context) (bool, error) 
 var networkManagerGuardPath = hostruntime.NetworkManagerGuardPath
 
 func (runtime Runtime) powerReconcilerConverged(ctx context.Context) bool {
-	// The host-power helper also rewrites a guard left by a released version, so
-	// update activation migrates it through this stage.
-	if current, err := hostruntime.NetworkManagerGuardCurrent(networkManagerGuardPath); err != nil || !current {
-		return false
-	}
 	reconciler := runtime.environmentDefault("SUBYARD_POWER_RECONCILER_PATH",
 		"/usr/local/libexec/subyard/yard-boot-reconcile")
 	engineSource := runtime.environmentValue("SUBYARD_POWER_ENGINE_SOURCE")

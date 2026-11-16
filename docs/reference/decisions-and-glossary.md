@@ -154,14 +154,17 @@ that agents can change Incus device configuration.
 
 Host NetworkManager must leave managed bridges/veth/tap devices unmanaged. Match type/driver as
 well as interface naming and verify effective configuration; guards must precede instance
-creation/start and rerun during setup. The guard is one strict `[keyfile] unmanaged-devices+=`
-list that extends, never replaces, the administrator's NetworkManager configuration. Of `br-`
-names it matches only Docker's 15-character `br-<network ID>` form, so `br-lan` stays the
-administrator's. Update activation and init rewrite guards left by released versions.
+creation/start and rerun during setup. The guard is a self-contained `[device-subyard]` section
+with `managed=0` for Subyard's own devices only: veths, Incus `tap` devices and Incus-managed
+bridges. It never reads or writes the administrator's `unmanaged-devices` or `no-auto-default`
+lists. Every change checks the proposed configuration and the devices NetworkManager manages
+before writing, and reports every refusal together. A guard written by a released version is
+rewritten during update without a NetworkManager reload, refusing while NetworkManager manages a
+device the administrator's list marks unmanaged; the host then reboots once to apply it.
 Bridge-scoped DHCP/DNS and forwarding rules coexist with UFW/host Docker, without broad host
 input openings or hardcoded subnets. Package installation/upgrade and networking must be
-reproducible through product reconciliation, not unexplained manual host repair. Install optional dependencies only at the point of need, through
-detect/advise/offer.
+reproducible through product reconciliation, not unexplained manual host repair. Install
+optional dependencies only at the point of need, through detect/advise/offer.
 
 Init is idempotent/resumable ordered check/plan/apply/verify. Desired configuration converges
 add/update/remove, rather than merely adding. Potentially disruptive yard changes appear in the

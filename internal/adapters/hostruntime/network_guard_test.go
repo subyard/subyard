@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -47,42 +48,73 @@ func TestNetworkGuardAcceptsSafeRoutesWithoutNetworkManager(t *testing.T) {
 	}
 }
 
-func TestNetworkGuardValidatesEffectiveNetworkManagerConfig(t *testing.T) {
-	guard := testNetworkGuard(map[string]bool{"systemctl": true, "NetworkManager": true, "ip": true},
+const currentGuardConfig = "[keyfile]\nunmanaged-devices=except:type:wifi\n[device-subyard]\n" +
+	"match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0\nmanaged=0\n"
+
+func activeGuard(config, devices, routes string) NetworkGuard {
+	return testNetworkGuard(map[string]bool{"systemctl": true, "NetworkManager": true, "nmcli": true, "ip": true},
 		func(name string, arguments ...string) ([]byte, error) {
 			switch name {
 			case "systemctl":
 				return []byte("active\n"), nil
 			case "NetworkManager":
-				// "+=" values merged onto an admin list are comma-joined.
-				return []byte("[main]\nno-auto-default=interface-name:enp5s0\n[keyfile]\n" +
-					"unmanaged-devices=interface-name:enp5s0,type:veth,driver:veth,interface-name:incusbr0\n"), nil
+				return []byte(config), nil
+			case "nmcli":
+				return []byte(devices), nil
 			case "ip":
 				if len(arguments) > 1 && arguments[1] == "-4" {
-					return []byte(`[]`), nil
+					return []byte(routes), nil
 				}
+				return []byte(`[{}]`), nil
 			}
 			return nil, errors.New("unexpected command")
 		})
+}
+
+func TestNetworkGuardValidatesEffectiveNetworkManagerConfig(t *testing.T) {
+	guard := activeGuard(currentGuardConfig, "lo:connected (externally)\nincusbr0:unmanaged\n", `[]`)
 	if err := guard.Check(context.Background(), []string{"incusbr0"}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestNetworkGuardRejectsIncompleteNetworkManagerConfig(t *testing.T) {
-	guard := testNetworkGuard(map[string]bool{"systemctl": true, "NetworkManager": true, "ip": true},
-		func(name string, _ ...string) ([]byte, error) {
-			if name == "systemctl" {
-				return []byte("active\n"), nil
-			}
-			if name == "NetworkManager" {
-				return []byte("[keyfile]\nunmanaged-devices=type:veth;driver:veth\n"), nil
-			}
-			return []byte(`[]`), nil
-		})
+func TestNetworkGuardReportsConfigBridgeStateAndRouteTogether(t *testing.T) {
+	config := strings.Replace(currentGuardConfig, ",interface-name:incusbr0", "", 1)
+	guard := activeGuard(config, "incusbr0:connected (externally)\n", `[{"dev":"veth1234"}]`)
 	err := guard.Check(context.Background(), []string{"incusbr0"})
-	if err == nil || !strings.Contains(err.Error(), "lacks interface-name:incusbr0;") {
-		t.Fatalf("expected missing bridge guard, got %v", err)
+	for _, want := range []string{
+		"[device-subyard] match-device lacks interface-name:incusbr0",
+		"NetworkManager manages yard bridge incusbr0",
+		"then rerun yard start",
+		`unsafe host default route uses "veth1234"`,
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected %q in %v", want, err)
+		}
+	}
+}
+
+// The shell rule in scripts/lib-power.sh runs the same vectors in tests/lib-power-network.sh.
+func TestNetworkManagerConfigViolationsSharedVectors(t *testing.T) {
+	root := filepath.Join("..", "..", "..", "tests", "fixtures", "nm-guard-vectors")
+	cases, err := os.ReadDir(root)
+	if err != nil || len(cases) == 0 {
+		t.Fatalf("read shared vectors: %v", err)
+	}
+	for _, entry := range cases {
+		t.Run(entry.Name(), func(t *testing.T) {
+			read := func(name string) string {
+				contents, err := os.ReadFile(filepath.Join(root, entry.Name(), name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(contents)
+			}
+			got := strings.Join(networkManagerConfigViolations(read("config"), strings.Fields(read("bridges"))), "\n")
+			if want := strings.TrimSuffix(read("violations"), "\n"); got != want {
+				t.Fatalf("violations:\n%s\nwant:\n%s", got, want)
+			}
+		})
 	}
 }
 
@@ -119,20 +151,10 @@ func TestNetworkGuardRejectsUnsafeBridgeName(t *testing.T) {
 	}
 }
 
-func TestNetworkManagerConfigReportsEveryMissingEntryAndTheNextStep(t *testing.T) {
-	// A later plain "=" replaced the Subyard list; a key outside [keyfile] does not count.
-	config := "[main]\nunmanaged-devices=type:veth;driver:veth;interface-name:incusbr0\n" +
-		"[keyfile]\nunmanaged-devices=interface-name:enp5s0\n"
-	err := validateNetworkManagerConfig(config, []string{"incusbr0", "nestedbr0"})
-	want := "lacks type:veth,driver:veth,interface-name:incusbr0,interface-name:nestedbr0;"
-	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "use unmanaged-devices+= there") {
-		t.Fatalf("expected every missing entry and the += next step, got %v", err)
-	}
-}
-
-func TestDockerBridgeRouteNamesExcludeAdminBridges(t *testing.T) {
+func TestRouteDevicesAreSubyardsOwn(t *testing.T) {
 	for device, unsafe := range map[string]bool{
-		"br-0123456789ab": true, "br-lan": false, "br-0123456789AB": false, "br-0123456789abc": false, "incusbr0": true,
+		"incusbr0": true, "veth1234": true, "tap1234abcd": true,
+		"tap0": false, "br-0123456789ab": false, "docker0": false, "virbr0": false, "vnet3": false, "enp5s0": false,
 	} {
 		if got := unsafeDeviceName(device, []string{"incusbr0"}); got != unsafe {
 			t.Errorf("unsafeDeviceName(%q) = %v, want %v", device, got, unsafe)
@@ -140,8 +162,25 @@ func TestDockerBridgeRouteNamesExcludeAdminBridges(t *testing.T) {
 	}
 }
 
+func TestNetworkManagerRebootPendingFollowsTheBootID(t *testing.T) {
+	directory := testkit.TempDir(t)
+	pending, boot := filepath.Join(directory, "pending"), filepath.Join(directory, "boot_id")
+	if NetworkManagerRebootPending(pending, boot) {
+		t.Fatal("absent record reported a pending reboot")
+	}
+	testkit.WriteFile(t, boot, []byte("boot-a\n"), 0o644)
+	testkit.WriteFile(t, pending, []byte("boot-a\n"), 0o644)
+	if !NetworkManagerRebootPending(pending, boot) {
+		t.Fatal("same boot did not report the pending reboot")
+	}
+	testkit.WriteFile(t, boot, []byte("boot-b\n"), 0o644)
+	if NetworkManagerRebootPending(pending, boot) {
+		t.Fatal("a new boot still reported the pending reboot")
+	}
+}
+
 func TestNetworkManagerGuardCurrentRejectsReleasedForms(t *testing.T) {
-	current := "# Subyard\n[keyfile]\nunmanaged-devices+=type:veth;driver:veth;interface-name:incusbr0\n"
+	current := "# Subyard\n[device-subyard]\nmatch-device=type:veth,driver:veth,interface-name:incusbr0\nmanaged=0\n"
 	released := "[main]\nno-auto-default=type:veth\n\n[keyfile]\nunmanaged-devices=type:veth\n\n" +
 		"[device-subyard]\nmatch-device=type:veth\nmanaged=0\n"
 	for name, test := range map[string]struct {
@@ -149,7 +188,7 @@ func TestNetworkManagerGuardCurrentRejectsReleasedForms(t *testing.T) {
 		want          bool
 	}{
 		"absent": {want: true}, "current": {guard: current, want: true},
-		"released": {guard: released}, "plain key": {guard: "[keyfile]\nunmanaged-devices=type:veth\n"},
+		"released": {guard: released}, "appending key": {guard: "[keyfile]\nunmanaged-devices+=type:veth\n"},
 		"legacy":      {guard: current, legacy: "[keyfile]\nunmanaged-devices=type:veth\n"},
 		"legacy only": {legacy: "[keyfile]\nunmanaged-devices=type:veth\n"},
 	} {
@@ -166,5 +205,15 @@ func TestNetworkManagerGuardCurrentRejectsReleasedForms(t *testing.T) {
 				t.Fatalf("NetworkManagerGuardCurrent = %v, %v; want %v", got, err, test.want)
 			}
 		})
+	}
+}
+
+func TestNetworkManagerGuardCurrentCountsADanglingLegacyLink(t *testing.T) {
+	directory := testkit.TempDir(t)
+	if err := os.Symlink(filepath.Join(directory, "missing"), filepath.Join(directory, "99-subyard-unmanaged.conf")); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := NetworkManagerGuardCurrent(filepath.Join(directory, "zz-subyard-unmanaged.conf")); err != nil || current {
+		t.Fatalf("dangling legacy link: current=%v err=%v", current, err)
 	}
 }

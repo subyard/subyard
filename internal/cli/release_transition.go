@@ -183,6 +183,7 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 		cli.profileActivationReconciler(request, "key-tools-runtime"),
 		cli.brokerActivationReconciler(request),
 		cli.routeConsumerActivationReconciler(request),
+		cli.networkGuardActivationReconciler(request),
 		cli.powerActivationReconciler(request),
 	}...)
 }
@@ -877,16 +878,38 @@ func (cli *CLI) powerActivationReconciler(
 			), nil
 		},
 		authorize: cli.releaseTransitionPrivilegeAuthorization,
-		planned:   plannedNetworkManagerGuardMigration,
 	}
 }
 
-// The host-power stage rewrites a guard left by a released version; disclose that host change.
-func plannedNetworkManagerGuardMigration() []string {
-	if current, err := hostruntime.NetworkManagerGuardCurrent(hostruntime.NetworkManagerGuardPath); err == nil && current {
-		return nil
+// networkGuardActivationReconciler migrates a guard written by a released version. It applies
+// whenever such a guard exists, even where the boot reconciler was never installed, and runs
+// only the host-power helper's guard-only action, which installs nothing else.
+func (cli *CLI) networkGuardActivationReconciler(
+	request releasetransition.ProcessRequest,
+) releasetransition.V2ActivationReconciler {
+	power := cli.powerActivationReconciler(request).(*activationStageReconciler)
+	return &activationStageReconciler{
+		configuration: cli,
+		id:            "host-network-guard", stage: ports.ReconcileStageNetworkGuard,
+		inspectApplicability: func(context.Context) (activationApplicability, error) {
+			current, err := hostruntime.NetworkManagerGuardCurrent(hostruntime.NetworkManagerGuardPath)
+			if err != nil {
+				return activationApplicability{}, fmt.Errorf("inspect the NetworkManager guard: %w", err)
+			}
+			if current {
+				return activationApplicability{state: "current"}, nil
+			}
+			return activationApplicability{state: "released", applies: true}, nil
+		},
+		platform:  power.platform,
+		authorize: cli.releaseTransitionPrivilegeAuthorization,
+		planned: func() []string {
+			if current, err := hostruntime.NetworkManagerGuardCurrent(hostruntime.NetworkManagerGuardPath); err == nil && current {
+				return nil
+			}
+			return []string{"rewrite the released Subyard NetworkManager guard without reloading NetworkManager; reboot the host once afterwards to apply it safely"}
+		},
 	}
-	return []string{"rewrite the released Subyard NetworkManager guard to append to other unmanaged-devices lists, keeping its bridges, and reload NetworkManager"}
 }
 
 func (cli *CLI) releaseTransitionPrivilegeAuthorization(ctx context.Context) error {

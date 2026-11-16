@@ -27,19 +27,29 @@ for arg in "$@"; do
   case "$arg" in
     --remove-if-unused) action=remove-if-unused ;;
     --native-fence) action=native-fence ;;
+    --guard-only) action="guard-only" ;;
     -y|--yes) ;;
     -*) die "unknown option '$arg'" ;;
   esac
 done
 
+if [ "$action" = guard-only ]; then
+  # Update activation: rewrite a released NetworkManager guard, with or without this unit.
+  POWER_NM_GUARD_COMMAND="yard update"
+  announce "Subyard — migrate the released NetworkManager guard" \
+    "Replace the released guard, which replaced the administrator's NetworkManager device lists, with a [device-subyard] section for veths, Incus tap devices and Incus bridges." \
+    "Refuse without changes if NetworkManager manages a device the administrator's lists mark unmanaged." \
+    "Do not reload NetworkManager: reboot the host once afterwards to apply the guard safely."
+  proceed_or_die
+  require_root "rewriting the host NetworkManager guard needs root"
+  nm_unmanaged_guard_migrate
+  exit 0
+fi
+
 if [ "$action" = install ]; then
-  power_notes=()
-  nm_guard_file_current "$NM_GUARD_CONF" \
-    || power_notes+=("Rewrite the released Subyard NetworkManager guard to append to other unmanaged-devices lists, keeping its bridges, and reload NetworkManager.")
   announce "Subyard — install guarded yard boot reconciliation" \
     "Install a root-owned systemd service that restores only yards with desired=running after Incus/network guards are ready." \
-    "Keep Incus boot.autostart=false; validate NetworkManager and host default routes before and after every yard start." \
-    "${power_notes[@]}"
+    "Keep Incus boot.autostart=false; validate NetworkManager and host default routes before and after every yard start."
 else
   announce "Subyard — remove unused yard boot reconciliation" \
     "Disable and remove the host boot reconciler only when no managed local yard remains."
@@ -108,9 +118,6 @@ exec {publication_engine_fd}<&-
 # Managed starts and teardown must work before the next host reboot.
 "$RECONCILER_PATH" _network-lock ensure \
   || die "could not initialize the host network policy lock"
-# Released guards replaced the admin's NetworkManager lists; the boot reconciler validates
-# the guard, so update activation migrates it here, keeping every bridge it listed.
-nm_unmanaged_guard_migrate
 
 tmp="$(mktemp)"
 subyard_result=0
