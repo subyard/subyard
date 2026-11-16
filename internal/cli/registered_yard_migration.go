@@ -147,7 +147,7 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 		return -1, nil
 	}
 	if errors.Is(err, domain.ErrIncusAccessDenied) {
-		return -1, cli.localYardAccessRefusals(ctx, options.ConfigHome, native)
+		return -1, cli.localYardAccessRefusals(ctx, options.ConfigHome, native, yard, err)
 	}
 	if err != nil {
 		return -1, err
@@ -173,10 +173,12 @@ func (cli *CLI) nativeAccessRefusal(ctx context.Context, yard string) error {
 }
 
 // localYardAccessRefusals reports every local yard whose native state this
-// account cannot read, in YardNames order (default first, then by name).
+// account cannot read, in YardNames order (default first, then by name). When
+// no local yard reports a denial (for example a remote selected yard), the
+// selected yard's own denial still fails closed.
 func (cli *CLI) localYardAccessRefusals(ctx context.Context, configHome string, native interface {
 	Instance(context.Context, string, string) (ports.InstanceInfo, error)
-}) error {
+}, selected string, denied error) error {
 	names, err := config.YardNames(cli.options.RepositoryRoot+"/config", configHome)
 	if err != nil {
 		return err
@@ -195,6 +197,9 @@ func (cli *CLI) localYardAccessRefusals(ctx context.Context, configHome string, 
 		if errors.Is(err, domain.ErrIncusAccessDenied) {
 			refusals = append(refusals, domain.IncusAccessRefusal(name, err))
 		}
+	}
+	if !slices.ContainsFunc(refusals, func(err error) bool { return errors.Is(err, domain.ErrIncusAccessDenied) }) {
+		refusals = append(refusals, domain.IncusAccessRefusal(selected, denied))
 	}
 	return domain.CollectOrderedRefusals(refusals...)
 }

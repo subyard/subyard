@@ -36,10 +36,13 @@ func (cli *CLI) observeNativeOwner(ctx context.Context, loaded config.Loaded) (m
 	return map[string]string{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: instance.Config["user.subyard.name"]}, domain.NativeTargetOwnership(loaded.Context, instance.Config)
 }
 
-// observeInitNativeOwner lets only init plan before socket access exists: a cold
-// installation's approved Incus stage grants it, and checkBeforeInitWrites then
-// repeats the strict owner and collision checks before any yard state is written.
-// Other init modes run no Incus stage, so they never defer.
+// observeInitNativeOwner lets only reconcile-mode init plan before socket access
+// exists: a cold installation's approved Incus stage grants it, and run() then
+// repeats the strict owner and collision checks explicitly, right after that
+// stage and before any instance stage or yard state is written. --adopt and
+// --continue-legacy are reconcile mode too: they defer here, and their own
+// native assessments refuse later without access. --configs and --reset run no
+// Incus stage, so they never defer.
 func (cli *CLI) observeInitNativeOwner(ctx context.Context, loaded config.Loaded, arguments []string) (map[string]string, error) {
 	owners, err := cli.observeNativeOwner(ctx, loaded)
 	if request, parseErr := parseInitArguments(arguments); parseErr == nil && request.mode == initReconcile &&

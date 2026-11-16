@@ -363,3 +363,35 @@ func TestPlainInitMigrationProbeReportsEveryDeniedYard(t *testing.T) {
 		t.Fatalf("refusals are not in YardNames order: %s", text)
 	}
 }
+
+// denyFirstRead denies only the selected yard's probe, as for a selected yard
+// that no local listing covers.
+type denyFirstRead struct {
+	*testkit.Incus
+	reads int
+}
+
+func (native *denyFirstRead) Instance(context.Context, string, string) (ports.InstanceInfo, error) {
+	native.reads++
+	if native.reads == 1 {
+		return ports.InstanceInfo{}, fmt.Errorf("get instance: %w: %w", domain.ErrIncusAccessDenied, os.ErrPermission)
+	}
+	return ports.InstanceInfo{}, ports.ErrInstanceNotFound
+}
+
+// A denied selected yard fails closed even when no local yard reports a denial.
+func TestPlainInitMigrationProbeFailsClosedForTheSelectedYard(t *testing.T) {
+	root, environment, _ := migrateCLIFixture(t, true)
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedOwnerHostID(t, program.env["SUBYARD_CONFIG_HOME"])
+	native := &denyFirstRead{Incus: &testkit.Incus{}}
+	program.options.Incus, program.options.Executor = native, native
+	code, err := program.finishRegisteredInitMigrations(context.Background(), "default", nil, true)
+	if code != -1 || !errors.Is(err, domain.ErrIncusAccessDenied) ||
+		!strings.Contains(err.Error(), "yard default: native state cannot be inspected") {
+		t.Fatalf("selected yard denial did not fail closed: %d %v", code, err)
+	}
+}
