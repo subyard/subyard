@@ -3999,6 +3999,10 @@ func activationObservationBlocker(ctx context.Context, id string, err error) Blo
 		code = CodeActivationAmbiguous
 		message = fmt.Sprintf("activation reconciler %q reports ambiguous activation topology", id)
 	}
+	if errors.Is(err, domain.ErrIncusAccessDenied) {
+		message = fmt.Sprintf("activation reconciler %q cannot inspect native state: %v", id, domain.ErrIncusAccessDenied)
+		retry = domain.IncusAccessNextStep
+	}
 	message, retry = publicActivationDiagnostic(err, message, retry)
 	resource := "activation." + id
 	if nativeTargetRefusalsOnly(err) {

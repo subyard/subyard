@@ -1042,6 +1042,9 @@ func (err materializedConfigActivationError) appendTo(refusals []error) []error 
 }
 
 func (err materializedConfigActivationError) ActivationDiagnostic() (string, string) {
+	if errors.Is(err.cause, domain.ErrIncusAccessDenied) {
+		return domain.IncusAccessDiagnostic(err.yard)
+	}
 	retry := fmt.Sprintf("run yard -Y %s %s", err.yard, err.command)
 	// Preserve more specific, explicitly public diagnostics from the adapter.
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
@@ -1118,6 +1121,20 @@ func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
 	return reconciler.cli.releaseActivationOperation()
 }
 
+// coldInstallation is the single native-scope decision of release activation:
+// it is recomputed for every operation because init can warm the installation.
+func (cli *CLI) coldInstallation() bool {
+	if cli.activation != nil {
+		request := cli.activation.request
+		return coldInstallation(request.ConfigHome, request.RuntimeRoot)
+	}
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return false
+	}
+	return coldInstallation(options.ConfigHome, options.RuntimeRoot)
+}
+
 func (cli *CLI) releaseActivationOperation(requests ...releasetransition.ProcessRequest) *CLI {
 	operation := *cli
 	if len(requests) != 0 {
@@ -1129,10 +1146,12 @@ func (cli *CLI) releaseActivationOperation(requests ...releasetransition.Process
 			checkpoint := activeReleaseRepairCheckpoint(request)
 			operation.activation = &releaseConfiguration{request: request, repair: checkpoint != "", complete: checkpoint == releasetransition.JournalComplete, yards: map[string]releaseYardConfiguration{}}
 		}
+		operation.coldNative = operation.coldInstallation()
 		// Binding owners must preserve their ordinary applicability inputs.
 		// Yard loaders below already discard resolved caller settings.
 		return &operation
 	}
+	operation.coldNative = operation.coldInstallation()
 	environment := operation.freshMigrationEnvironment(
 		cli.baseEnv,
 		cli.options.RepositoryRoot,

@@ -812,6 +812,23 @@ consent includes this boundary. An interrupted first installation retains protec
 evidence; rerunning the installer uses the existing-runtime transition to resume it before
 publishing entrypoints. Publication-only staging leaves migration state untouched.
 
+Release activation reads Incus only for an installation that can own native yards. A cold
+installation keeps nothing in its configuration home except first-install release bookkeeping
+and host-wide settings (`config.env`, `overrides/shared`, `overrides/host`): no owner HostID,
+yard registration or config file, Git settings, applied-state record, retained previous
+release or upgraded history. Init writes the HostID before it creates any native yard, so
+such an installation owns none, and its release activation observes an absent server
+(`coldInstallation` in `internal/cli/release_native_scope.go`, applied in
+`releaseActivationOperation`). Installing, updating and the first `yard init` therefore work
+when Incus is installed but this account cannot open its socket. Init's approved Incus stage
+then grants access, and its own stages inspect native state. A native yard left behind by
+another installation is foreign until init adopts it. Any unreadable or unexpected fact makes
+the installation warm. A warm installation without socket access fails closed: each local
+yard reports its own typed `domain.IncusAccessRefusal` with one next step (a new login
+session or `newgrp incus-admin`, after `sudo usermod -aG incus-admin "$USER"` when the account
+is not a member). The Incus client types the socket's permission error as
+`domain.ErrIncusAccessDenied`.
+
 Schema-1 installation identity and protected metadata publication are shared by bootstrap,
 runtime publication, candidate activation and ownership consumers. The candidate advertises
 `installation-runtime-v1` and assesses missing runtime inventory as an activation step,

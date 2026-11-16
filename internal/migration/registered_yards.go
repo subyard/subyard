@@ -80,12 +80,15 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 		if loaded.Context.YardName != m.Yard {
 			continue
 		}
-		if native, ok := runtime.Incus.(interface{ LocalInstallationAbsent() bool }); ok && native.LocalInstallationAbsent() {
+		if ports.LocalInstallationAbsent(runtime.Incus) {
 			continue
 		}
 		instance, err := runtime.Incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 		if errors.Is(err, ports.ErrInstanceNotFound) {
 			continue
+		}
+		if errors.Is(err, domain.ErrIncusAccessDenied) {
+			return nil, domain.IncusAccessRefusal(loaded.Context.YardName, err)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("yard %s: %w", loaded.Context.YardName, err)
@@ -288,6 +291,9 @@ func (m *RegisteredYardMigration) ResumeIdentity(ctx context.Context, view relea
 	for _, target := range targets {
 		yard := target.Loaded.Context
 		instance, err := target.Runtime.Incus.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
+		if errors.Is(err, domain.ErrIncusAccessDenied) {
+			return "", domain.IncusAccessRefusal(yard.YardName, err)
+		}
 		if err != nil && !errors.Is(err, ports.ErrInstanceNotFound) {
 			return "", fmt.Errorf("yard %s: %w", yard.YardName, err)
 		}

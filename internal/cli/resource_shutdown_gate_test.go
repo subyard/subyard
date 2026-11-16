@@ -472,6 +472,7 @@ func TestProfileRuntimeActivationUnavailableGuestRetainsDeselectedObservation(t 
 			writeRuntimeProfileFixture(t, root)
 			home := filepath.Join(root, "state")
 			seedCurrentReleaseLedger(t, root, home)
+			seedOwnerHostID(t, home)
 			selection := ""
 			if selected {
 				selection = "sample"

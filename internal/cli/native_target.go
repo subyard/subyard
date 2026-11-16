@@ -23,11 +23,16 @@ func (cli *CLI) observeNativeOwner(ctx context.Context, loaded config.Loaded) (m
 		return nil, nil
 	}
 	native, _ := cli.statusPorts()
-	if absent, ok := native.(interface{ LocalInstallationAbsent() bool }); ok && absent.LocalInstallationAbsent() {
+	if ports.LocalInstallationAbsent(native) {
 		return nil, nil
 	}
 	instance, err := native.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) || errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	// A cold installation's first init grants socket access in its approved
+	// Incus stage; its project and instance stages then observe for real.
+	if errors.Is(err, domain.ErrIncusAccessDenied) && cli.coldInstallation() {
 		return nil, nil
 	}
 	if err != nil {

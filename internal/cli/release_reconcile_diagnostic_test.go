@@ -39,6 +39,7 @@ func TestMaterializedConfigReconcileIdentifiesFailedYard(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
+			seedOwnerHostID(t, configHome)
 			fake := &testkit.Incus{Err: test.cause}
 			var stdout, stderr bytes.Buffer
 			program, err := New(Options{RepositoryRoot: root, Environment: environment,

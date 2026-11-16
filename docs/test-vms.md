@@ -831,11 +831,13 @@ dev/agent-e2e.sh --slot "$slot" --purpose apparmor-probe --vm 1 -- \
   bash dev/e2e/incus-apparmor-probe.sh
 ```
 
-The Incus group regression uses a temporary operator to exercise the first named `init` before
-`incus-admin` membership is active. It verifies native named socket and policy-lock ACL activation
-in the original prepared process, retained lock identity, explicit command overrides, independent
-yard SSH ports and an idempotent retry. It removes the marked operator ACLs, account and yard
-after the check:
+The Incus group regression uses a temporary operator whose Incus socket is unreachable:
+it has no `incus-admin` membership. It installs the packaged candidate through the public
+installer, which must publish the entrypoints and a ready release without touching socket
+access, then runs the first `init` of the default yard with host-wide settings. It verifies
+native named socket and policy-lock ACL activation in the original prepared process, retained
+lock identity, an explicit command override that is not persisted, and an idempotent retry.
+It removes the marked operator ACLs, account and yard after the check:
 
 ```sh
 dev/agent-e2e.sh --slot "$slot" --purpose incus-group-reexec --vm 1 -- \

@@ -75,7 +75,7 @@ func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Contex
 	// absent local installation has none; raw runtime observation still reports
 	// unavailable transport so init can retain its approved prerequisite slots.
 	incus, _ := operation.statusPorts()
-	if probe, ok := incus.(interface{ LocalInstallationAbsent() bool }); reconciler.id != "key-tools-runtime" && ok && probe.LocalInstallationAbsent() {
+	if reconciler.id != "key-tools-runtime" && ports.LocalInstallationAbsent(incus) {
 		targets = nil
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })

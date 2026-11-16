@@ -128,13 +128,17 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 	if err != nil {
 		return -1, err
 	}
-	native, _ := cli.statusPorts()
-	if absent, ok := native.(interface{ LocalInstallationAbsent() bool }); ok && absent.LocalInstallationAbsent() {
+	// A cold installation has no yard to migrate, with or without socket access.
+	native, _ := cli.releaseActivationOperation().statusPorts()
+	if ports.LocalInstallationAbsent(native) {
 		return -1, nil
 	}
 	_, err = native.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		return -1, nil
+	}
+	if errors.Is(err, domain.ErrIncusAccessDenied) {
+		return -1, domain.IncusAccessRefusal(yard, err)
 	}
 	if err != nil {
 		return -1, err

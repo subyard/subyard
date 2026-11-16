@@ -668,6 +668,50 @@ cp "$TMP/full-inventory.before" "$full_inventory"
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
   [ -x "$YARD_BIN_DIR/yard" ] || fail 'cold bootstrap did not publish entrypoints'
 )
+# An installed Incus this account cannot reach (no incus-admin, or membership not
+# active in this session) does not block a cold installation: it owns no yard
+# state, so its transition never reads Incus. A warm installation instead
+# refuses with one typed repair per local yard and keeps entrypoints withheld.
+if [ "$(id -u)" != 0 ]; then
+  denied_socket="$TMP/bootstrap-denied-incus.socket"
+  python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$denied_socket"
+  chmod 0 "$denied_socket"
+  for denied_case in cold warm; do
+  (
+    export HOME="$TMP/bootstrap-denied-$denied_case-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-denied-$denied_case-home"
+    export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+    export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+    export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.0.0-test
+    export SUBYARD_INCUS_SOCKET='' INCUS_SOCKET="$denied_socket"
+    log="$TMP/bootstrap-denied-$denied_case.log"
+    if [ "$denied_case" = cold ]; then
+      "$release/subyard-install.sh" --yes > "$log" 2>&1 \
+        || { cat "$log" >&2; fail 'cold bootstrap required Incus socket access'; }
+      [ -x "$YARD_BIN_DIR/yard" ] || fail 'cold bootstrap without Incus access withheld entrypoints'
+      "$YARD_BIN_DIR/yard" migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null \
+        || fail 'cold installation without Incus access is not ready'
+      "$release/subyard-install.sh" --yes > "$log.retry" 2>&1 \
+        || { cat "$log.retry" >&2; fail 'cold bootstrap retry required Incus socket access'; }
+      exit 0
+    fi
+    install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/alpha"
+    printf 'host-a\n' > "$SUBYARD_CONFIG_HOME/host-id"
+    printf 'SSH_PORT=2301\n' > "$SUBYARD_CONFIG_HOME/yards/alpha/config.env"
+    chmod 0600 "$SUBYARD_CONFIG_HOME/host-id" "$SUBYARD_CONFIG_HOME/yards/alpha/config.env"
+    if "$release/subyard-install.sh" --yes > "$log" 2>&1; then
+      fail 'warm bootstrap accepted uninspected native yard state'
+    fi
+    [ ! -e "$YARD_BIN_DIR/yard" ] || fail 'warm bootstrap without Incus access published entrypoints'
+    for yard in alpha default; do
+      grep -Fq "yard $yard: native state cannot be inspected: this account cannot access the Incus socket" "$log" \
+        || { cat "$log" >&2; fail "warm bootstrap did not name yard $yard's socket access"; }
+    done
+    grep -Fq 'next: open a new login session or run newgrp incus-admin' "$log" \
+      && ! grep -Fq 'compatible release' "$log" && ! grep -Fq "$denied_socket" "$log" \
+      || { cat "$log" >&2; fail 'warm bootstrap gave a misleading or raw access diagnostic'; }
+  )
+  done
+fi
 [ "$(grep -cF 'Subyard CLI login PATH' "$standalone_home/.profile")" -eq 1 ] \
   && [ "$(grep -cF 'Subyard CLI interactive PATH' "$standalone_home/.bashrc")" -eq 1 ] \
   && [ "$(grep -cF 'Subyard CLI completion' "$standalone_home/.bashrc")" -eq 1 ] \

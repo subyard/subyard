@@ -31,16 +31,28 @@ type Client struct {
 
 	socket             string
 	requiredExtensions []string
+	// absent reports a cold installation: it owns no native state, so no
+	// connection is attempted and every read observes nothing.
+	absent bool
 }
 
 func New(socket string, requiredExtensions ...string) *Client {
 	return &Client{socket: socket, requiredExtensions: slices.Clone(requiredExtensions)}
 }
 
+// NewAbsent returns a client for an installation that provably owns no native
+// state. It never dials and answers exactly like a host without Incus.
+func NewAbsent() *Client {
+	return &Client{absent: true}
+}
+
 // LocalInstallationAbsent proves a cold local install, not merely an unavailable
 // daemon. Package removal can leave its database behind. Custom sockets do not
 // establish where the server keeps that database, so they remain inconclusive.
 func (client *Client) LocalInstallationAbsent() bool {
+	if client.absent {
+		return true
+	}
 	if client.socket != "" || os.Getenv("INCUS_SOCKET") != "" {
 		return false
 	}
@@ -558,6 +570,9 @@ func publicEventData(source map[string]any) map[string]any {
 }
 
 func (client *Client) connect(ctx context.Context, skipEvents bool) (incus.InstanceServer, error) {
+	if client.absent {
+		return nil, fmt.Errorf("connect to Incus: %w", os.ErrNotExist)
+	}
 	server, err := incus.ConnectIncusUnixWithContext(ctx, client.socket, &incus.ConnectionArgs{
 		SkipGetEvents: skipEvents,
 		SkipGetServer: true,
@@ -603,6 +618,10 @@ func (client *Client) validateExtensions(info *api.Server) error {
 func normalizeError(operation string, err error) error {
 	if api.StatusErrorCheck(err, http.StatusServiceUnavailable) {
 		return fmt.Errorf("%s: %w: %w", operation, ports.ErrIncusUnavailable, err)
+	}
+	// A socket this account cannot open is not a missing or busy server.
+	if errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("%s: %w: %w", operation, domain.ErrIncusAccessDenied, err)
 	}
 	return fmt.Errorf("%s: %w", operation, err)
 }
