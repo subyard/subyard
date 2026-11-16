@@ -390,9 +390,9 @@ func TestRunAdmissionSelectorPaths(t *testing.T) {
 		}{
 			{[]string{"logs", "--updates", "-n", "bogus"}, 2, "yard: logs: -n needs a number from 1 to 1000\n"},
 			{[]string{"-Y", "admission-missing", "logs", "--updates", "-n", "bogus"}, 2,
-				"yard: yard admission-missing, config inspection: an input is invalid or unavailable; run config validate for scoped schema diagnostics\n"},
+				"yard: yard admission-missing, config inspection: unknown yard\n"},
 			{[]string{"--yard", "admission-missing", "logs", "--audit"}, 2,
-				"yard: yard admission-missing, config inspection: an input is invalid or unavailable; run config validate for scoped schema diagnostics\n"},
+				"yard: yard admission-missing, config inspection: unknown yard\n"},
 			// Without a registered configuration source, host rename is gated.
 			{[]string{"host", "rename", "next"}, 1, "yard: inspect release transition: mutation gate runtime root"},
 		} {
