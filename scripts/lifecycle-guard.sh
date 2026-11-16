@@ -52,13 +52,13 @@ fi
 
 # A container stop cannot gracefully close desktop windows or SSH shells. Refuse to cross an active
 # session after closing the SSH listener to new connections.
-# A yard whose init never finished may lack the developer account; it gets the
-# all-user SSH session check that teardown uses before that account exists.
-NEVER_INITIALIZED=0
+# A guest that init never provisioned may lack the developer account; it gets
+# the all-user SSH session check that teardown uses before that account exists.
+NEVER_PROVISIONED=0
 vscode_remote_state() {
   local result
   local -a probe=(--env VSCODE_USER="$DEV_USER" -- sh -s -- check-active)
-  [ "$NEVER_INITIALIZED" = 0 ] || probe=(-- sh -s -- check-ssh)
+  [ "$NEVER_PROVISIONED" = 0 ] || probe=(-- sh -s -- check-ssh)
   if result="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${probe[@]}" \
       < "$SCRIPT_DIR/vscode-remote-maintenance.sh" 2>/dev/null)"; then
     result="${result##*$'\n'}"
@@ -109,16 +109,15 @@ case "$action" in
           2) die "cannot safely pause new SSH connections: ssh.service KillMode is not 'process'; use '$(yard_cmd_hint) stop --force' only for emergency shutdown" ;;
           *) die "could not pause new SSH connections before checking VS Code; retry, or use '$(yard_cmd_hint) stop --force' for emergency shutdown" ;;
         esac
-        # A yard whose init never finished has no installed owner services to
-        # pause; its guest may lack what their handlers need. The SSH listener
-        # fence above and an all-user session check below still apply.
-        paused_profiles=
-        if power_never_initialized "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
-          NEVER_INITIALIZED=1
-        else
-          paused_profiles="$("$SCRIPT_DIR/profile-services.sh" --pause)" \
-            || die 'could not pause profile owner services before checking SSH sessions'
+        # A failed first init can already have installed owner services, so
+        # every installed one is paused. In a guest init never provisioned, an
+        # owner whose state lives only in the guest has nothing to pause there.
+        if power_guest_never_provisioned "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "${DEV_USER:-}"; then
+          NEVER_PROVISIONED=1
+          export SUBYARD_GUEST_NEVER_PROVISIONED=1
         fi
+        paused_profiles="$("$SCRIPT_DIR/profile-services.sh" --pause)" \
+          || die 'could not pause profile owner services before checking SSH sessions'
         [ -z "$paused_profiles" ] || PROFILE_RESTORE_NEEDED=1
         vcstate="$(vscode_remote_state)"
         # Remote sshd children can briefly outlive the closed transport.

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -249,5 +251,43 @@ func TestStartRefusesNeverInitializedYardBeforePower(t *testing.T) {
 				t.Fatalf("refused start changed power: requests=%v updates=%v instance=%#v", runner.Requests, native.PowerUpdates, after)
 			}
 		})
+	}
+}
+
+// deadAgentExecutor answers like a guest whose agent is gone for one instance.
+type deadAgentExecutor struct {
+	base ports.InstanceExecutor
+	dead string
+	hits *int
+}
+
+func (executor deadAgentExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if instance == executor.dead {
+		*executor.hits++
+		return ports.InstanceExecResult{}, errors.New("guest agent is not available")
+	}
+	return executor.base.Exec(ctx, project, instance, request)
+}
+
+// Release repair decides that a yard is left to its init before reading its
+// installed context from the guest, so a running uninitialized yard whose
+// agent is gone never blocks repair of the other yards.
+func TestReleaseRepairDefersUninitializedYardWithDeadAgent(t *testing.T) {
+	scenario := newYardFailureScenario(t, false, false, "default", "named")
+	markYard(t, scenario.fixture, "default", "true")
+	markYard(t, scenario.fixture, "named", "false")
+	hits := 0
+	scenario.fixture.cli.options.Executor = deadAgentExecutor{base: scenario.fixture.cli.options.Executor,
+		dead: scenario.fixture.instanceName(t, "named"), hits: &hits}
+	outcome := scenario.converge(t)
+	if outcome.Status != releasetransition.StatusReady ||
+		!strings.Contains(strings.Join(outcome.Warnings, "\n"), uninitializedYardWarning("named")) {
+		t.Fatalf("repair beside an uninitialized yard with a dead agent: %#v", outcome)
+	}
+	if applies := scenario.runtime.applies(t); len(applies) != 1 || applies[0] != "default" {
+		t.Fatalf("hook applies: %v", applies)
+	}
+	if hits != 0 {
+		t.Fatalf("release work entered the uninitialized yard's guest %d times", hits)
 	}
 }

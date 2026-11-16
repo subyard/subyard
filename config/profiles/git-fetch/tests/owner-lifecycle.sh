@@ -58,11 +58,20 @@ python3 - "$state/calls" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))==['apply','0','dev','0']
 PY
-# Removal from a guest that init never provisioned has nothing in the yard to remove.
+# A guest that init never provisioned has no fetch timer to remove, pause or resume.
+for action in --remove --pause --resume; do
+  rm -f "$state/calls"
+  SUBYARD_GUEST_NEVER_PROVISIONED=1 bash "$root/config/profiles/git-fetch/owner.sh" "$action"
+  [ ! -e "$state/calls" ] || { printf 'never-provisioned %s entered the guest\n' "$action" >&2; exit 1; }
+done
+# An unselected apply is not a removal: it still reaches the guest.
 rm -f "$state/calls"
-SUBYARD_GUEST_NEVER_PROVISIONED=1 bash "$root/config/profiles/git-fetch/owner.sh" --remove
-[ ! -e "$state/calls" ] || { printf 'never-provisioned removal entered the guest\n' >&2; exit 1; }
-# Only removal is skipped: other modes still reach the guest.
+SUBYARD_GUEST_NEVER_PROVISIONED=1 SUBYARD_PROFILE_SELECTED=0 bash "$root/config/profiles/git-fetch/owner.sh" --yes
+python3 - "$state/calls" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))==['apply','0','dev','0']
+PY
+# Other modes still reach the guest.
 SUBYARD_GUEST_NEVER_PROVISIONED=1 bash "$root/config/profiles/git-fetch/owner.sh" --yes
 python3 - "$state/calls" <<'PY'
 import json,sys

@@ -124,7 +124,10 @@ func (source *releaseConfiguration) load(ctx context.Context, cli *CLI, yard, ho
 	entry, exists := source.yards[key]
 	if !exists {
 		entry.loaded, entry.err = cli.resolveInstalledReleaseContext(ctx, yard, home)
-		if entry.err == nil && entry.loaded.Context.AccessKind != domain.AccessRemote {
+		// A yard left to its init is decided before any guest-dependent read,
+		// so an unanswering guest of that yard never blocks the other yards.
+		if entry.err == nil && entry.loaded.Context.AccessKind != domain.AccessRemote &&
+			!source.uninitializedLocked(ctx, cli, configTarget{Name: yard, Loaded: entry.loaded}) {
 			var target configTarget
 			readiness := source.request.Mode == releasetransition.ProcessInspect
 			target, _, entry.err = cli.observeInstalledReleaseTarget(ctx, configTarget{Name: yard, Loaded: entry.loaded}, readiness)
@@ -282,3 +285,25 @@ func (r *materializedConfigActivationReconciler) activationConfiguration() *CLI 
 func (r *installationActivationReconciler) activationConfiguration() *CLI       { return r.cli }
 func (r *activationStageReconciler) activationConfiguration() *CLI              { return r.configuration }
 func (r *routeConsumerActivationReconciler) activationConfiguration() *CLI      { return r.configuration }
+
+// uninitializedLocked is releaseYardUninitialized for a caller that holds the
+// mutex. It reads only the instance, never the guest; a failed read leaves the
+// decision to the owners' own observation.
+func (source *releaseConfiguration) uninitializedLocked(ctx context.Context, cli *CLI, target configTarget) bool {
+	if source.uninitialized[target.Name] {
+		return true
+	}
+	incus, _ := cli.statusPorts()
+	if incus == nil || ports.LocalInstallationAbsent(incus) {
+		return false
+	}
+	instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)
+	if err != nil || !instanceUninitialized(target, instance) {
+		return false
+	}
+	if source.uninitialized == nil {
+		source.uninitialized = map[string]bool{}
+	}
+	source.uninitialized[target.Name] = true
+	return true
+}

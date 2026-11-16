@@ -10,13 +10,14 @@ root="$(cd "$profile/../../.." && pwd)"
 subyard_require_engine_context || exit 2
 selected=${SUBYARD_PROFILE_SELECTED:-0}
 mode=apply
+removal=0
 extra=()
 [ "$#" -ge 1 ] || exit 2
 case "$1" in
   --yes) ;;
   --check) mode=check ;;
   --startup-check) mode=startup ;;
-  --remove) selected=0 ;;
+  --remove) selected=0; removal=1 ;;
   --pause) mode=pause ;;
   --resume) mode=resume ;;
   --observe) [ "$#" = 2 ] || exit 2; mode=observe; extra=("$2") ;;
@@ -41,8 +42,9 @@ case "$state" in
     exit 0 ;;
   *) printf 'git-fetch: yard is not ready for profile reconciliation\n' >&2; exit 2 ;;
 esac
-# The fetch timer lives only in the yard; a guest init never provisioned has none.
-if [ "${SUBYARD_GUEST_NEVER_PROVISIONED:-0}" = 1 ] && [ "$mode" = apply ] && [ "$selected" = 0 ]; then
+# The fetch timer lives only in the yard; a guest init never provisioned has
+# none to remove, pause or resume.
+if [ "${SUBYARD_GUEST_NEVER_PROVISIONED:-0}" = 1 ] && { [ "$removal" = 1 ] || [ "$mode" = pause ] || [ "$mode" = resume ]; }; then
   exit 0
 fi
 startup_environment=()

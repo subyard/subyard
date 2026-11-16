@@ -622,7 +622,7 @@ func TestBrokerRuntimeDefersUninitializedYardBeforeGuestProbe(t *testing.T) {
 	for _, status := range []string{"RUNNING", "STOPPED", "STARTING"} {
 		for _, desired := range []string{"running", "stopped"} {
 			options, state := brokerRuntimeFixtureForYardWithDesiredPower(t, CurrentYard, status, "agent-lost", "loaded", desired)
-			options.Environment = append(options.Environment, `BROKER_EXTRA_CONFIG=,"user.subyard.managed":"true","user.subyard.initialized":"false"`)
+			options.Environment = append(options.Environment, `BROKER_EXTRA_CONFIG=,"user.subyard.managed":"true","user.subyard.name":"`+CurrentYard+`","user.subyard.initialized":"false"`)
 			got, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
 			if err != nil || got != stoppedState {
 				t.Fatalf("uninitialized %s broker yard with %s intent: state=%q err=%v, want %q", status, desired, got, err, stoppedState)
@@ -633,8 +633,14 @@ func TestBrokerRuntimeDefersUninitializedYardBeforeGuestProbe(t *testing.T) {
 		}
 	}
 	initialized, _ := brokerRuntimeFixtureForYardWithDesiredPower(t, CurrentYard, "RUNNING", "agent-lost", "loaded", "running")
-	initialized.Environment = append(initialized.Environment, `BROKER_EXTRA_CONFIG=,"user.subyard.managed":"true","user.subyard.initialized":"true"`)
+	initialized.Environment = append(initialized.Environment, `BROKER_EXTRA_CONFIG=,"user.subyard.managed":"true","user.subyard.name":"`+CurrentYard+`","user.subyard.initialized":"true"`)
 	if _, _, err := PrepareBrokerRuntimeTarget(context.Background(), initialized); err == nil {
 		t.Fatal("an initialized broker yard with a lost guest agent was not refused")
+	}
+	// Another yard's uninitialized mark on this instance is not this yard's.
+	foreign, _ := brokerRuntimeFixtureForYardWithDesiredPower(t, CurrentYard, "RUNNING", "agent-lost", "loaded", "running")
+	foreign.Environment = append(foreign.Environment, `BROKER_EXTRA_CONFIG=,"user.subyard.managed":"true","user.subyard.name":"other","user.subyard.initialized":"false"`)
+	if _, _, err := PrepareBrokerRuntimeTarget(context.Background(), foreign); err == nil {
+		t.Fatal("a foreign uninitialized mark deferred the broker yard")
 	}
 }

@@ -125,7 +125,11 @@ func (cli *CLI) observeLifecycleExecution(
 		if name == "" {
 			name = "default"
 		}
-		return fmt.Errorf("yard %s has not completed its first init; run yard -Y %s init", name, name)
+		next := "yard init"
+		if domain.SafeName(name) {
+			next = "yard -Y " + name + " init"
+		}
+		return fmt.Errorf("yard %s has not completed its first init; run %s", name, next)
 	}
 	metadata := instance
 	metadata.Status = ""

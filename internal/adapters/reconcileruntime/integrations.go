@@ -363,8 +363,13 @@ func (runtime Runtime) guestNeverProvisioned(ctx context.Context, instance ports
 	if runtime.Executor == nil || !strings.EqualFold(instance.Status, "running") || !application.InstanceNeverInitialized(instance) {
 		return false, nil
 	}
-	substrate, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()})
-	return err == nil && !substrate, err
+	// Only an explicit answer counts: a transport failure or any other exit
+	// status, such as an out-of-memory kill, is not evidence of absence.
+	result, answered, err := runtime.guestObserve(ctx, []string{"sh", "-c", `if command -v python3 >/dev/null && id "$1" >/dev/null 2>&1 && test -d /srv/agents; then echo provisioned; else echo unprovisioned; fi`, "subyard", runtime.devUser()})
+	if err != nil || !answered {
+		return false, err
+	}
+	return strings.TrimSpace(string(result.Stdout)) == "unprovisioned", nil
 }
 
 // integrationStateNeverInstalled reports that a yard has no applied integration

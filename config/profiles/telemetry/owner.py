@@ -104,8 +104,9 @@ def main():
         return 0
     if status != 'RUNNING':
         raise ValueError('yard unavailable')
-    # The collector lives only in the yard; a guest init never provisioned has none.
-    if os.environ.get('SUBYARD_GUEST_NEVER_PROVISIONED') == '1' and arguments == ['--remove']:
+    # The collector lives only in the yard; a guest init never provisioned has
+    # none to remove, pause or resume.
+    if os.environ.get('SUBYARD_GUEST_NEVER_PROVISIONED') == '1' and arguments in (['--remove'], ['--pause'], ['--resume']):
         return 0
     source = Path(__file__).resolve().parent
     binary, refusals = collector_binary(source, selected and operation != 'startup')

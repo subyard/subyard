@@ -17,7 +17,9 @@ import (
 // unprovisioned guest; any other command fails like a guest without python3.
 type neverInitializedGuest struct {
 	substrate, inventory bool
-	requests             [][]string
+	// killed makes the substrate probe exit like an out-of-memory kill.
+	killed   bool
+	requests [][]string
 }
 
 func (guest *neverInitializedGuest) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
@@ -26,10 +28,13 @@ func (guest *neverInitializedGuest) Exec(_ context.Context, _, _ string, request
 	failed := ports.InstanceExecResult{ExitCode: 1}
 	switch {
 	case strings.Contains(command, "command -v python3"):
-		if guest.substrate {
-			return ports.InstanceExecResult{}, nil
+		if guest.killed {
+			return ports.InstanceExecResult{ExitCode: 137}, errors.New("exit status 137")
 		}
-		return failed, errors.New("exit status 1")
+		if guest.substrate {
+			return ports.InstanceExecResult{Stdout: []byte("provisioned\n")}, nil
+		}
+		return ports.InstanceExecResult{Stdout: []byte("unprovisioned\n")}, nil
 	case strings.Contains(command, "test ! -e"):
 		if guest.inventory {
 			return failed, errors.New("exit status 1")
@@ -48,6 +53,7 @@ func TestAppliedIntegrationStateOfNeverInitializedYardIsAbsent(t *testing.T) {
 		name                 string
 		initialized, ever    string
 		substrate, inventory bool
+		killed               bool
 		absent               bool
 	}{
 		{name: "never initialized", initialized: "false", absent: true},
@@ -55,6 +61,7 @@ func TestAppliedIntegrationStateOfNeverInitializedYardIsAbsent(t *testing.T) {
 		{name: "upgraded initialized yard", initialized: "true"},
 		{name: "never initialized with substrate", initialized: "false", substrate: true},
 		{name: "never initialized with inventory", initialized: "false", inventory: true},
+		{name: "never initialized with a killed probe", initialized: "false", killed: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			config := map[string]string{"user.subyard.managed": "true", "user.subyard.name": "y8", "user.subyard.initialized": test.initialized}
@@ -64,7 +71,7 @@ func TestAppliedIntegrationStateOfNeverInitializedYardIsAbsent(t *testing.T) {
 			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-y8/yard-y8": {
 				Name: "yard-y8", Project: "subyard-y8", Status: "Running", Config: config,
 			}}}
-			guest := &neverInitializedGuest{substrate: test.substrate, inventory: test.inventory}
+			guest := &neverInitializedGuest{substrate: test.substrate, inventory: test.inventory, killed: test.killed}
 			runtime := Runtime{RepositoryRoot: testkit.TempDir(t), Incus: incus, Executor: guest, Integrations: []profile.IntegrationDefinition{},
 				Yard: domain.Context{YardName: "y8", IncusProject: "subyard-y8", YardInstanceName: "yard-y8", DevUser: "dev", DevUID: 1000}}
 			applied, err := runtime.AppliedIntegrationConfiguration(context.Background())

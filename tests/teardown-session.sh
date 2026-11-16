@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Teardown pauses profile owner services around its SSH session check, except
-# in a yard whose init never finished: that guest has no installed owner
-# services and may lack what their handlers need.
+# Teardown pauses every installed profile owner service around its SSH session
+# check, including after a failed first init. Only in a guest init never
+# provisioned does a guest-only owner have nothing to pause.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,6 +16,7 @@ cat > "$TMP/bin/incus" <<'SH'
 set -euo pipefail
 case "$1 ${2:-}" in
   "list "*) printf '%s,RUNNING\n' "$2" ;;
+  "exec "*) printf '%s\n' "${MOCK_PROVISIONED:-provisioned}" ;;
   "config get")
     # MOCK_INCUS_CONFIG is "managed initialized ever_initialized"; "-" is unset.
     [ -n "${MOCK_INCUS_CONFIG:-}" ] || exit 1
@@ -33,6 +34,8 @@ esac
 SH
 cat > "$TMP/scripts/profile-services.sh" <<'SH'
 #!/usr/bin/env bash
+# A guest-only owner has nothing to pause in a guest init never provisioned.
+[ "${MOCK_OWNER_GUEST_ONLY:-0}" = 1 ] && [ "${SUBYARD_GUEST_NEVER_PROVISIONED:-0}" = 1 ] && exit 0
 printf 'profile %s\n' "$1" >> "$MOCK_LOG"
 [ "$1" != --pause ] || exit "${MOCK_PAUSE_RC:-0}"
 SH
@@ -43,7 +46,7 @@ run_guard() {
   : > "$MOCK_LOG"
   (
     die() { printf '%s\n' "$*" >&2; exit 1; }
-    have_incus=1 INCUS_PROJECT=subyard-y8
+    have_incus=1 INCUS_PROJECT=subyard-y8 DEV_USER=dev
     SCRIPT_DIR="$ROOT/scripts"
     # shellcheck source=scripts/lib/teardown-session.sh
     . "$ROOT/scripts/lib/teardown-session.sh"
@@ -57,21 +60,25 @@ run_guard() {
   ) > "$TMP/out" 2>&1
 }
 
-export MOCK_INCUS_CONFIG="true false -" MOCK_PAUSE_RC=2
-run_guard || fail "never-initialized teardown refused: $(tr '\n' ' ' < "$TMP/out")"
-grep -Fxq fence "$MOCK_LOG" || fail "never-initialized teardown skipped the SSH fence"
-grep -Fxq session-check "$MOCK_LOG" || fail "never-initialized teardown skipped the session check"
-if grep -Fq 'profile --pause' "$MOCK_LOG"; then fail "never-initialized teardown paused owner services"; fi
+# A failed first init may have installed a host owner (the broker): it is paused.
+export MOCK_INCUS_CONFIG="true false -" MOCK_PROVISIONED=unprovisioned MOCK_PAUSE_RC=0 MOCK_OWNER_GUEST_ONLY=0
+run_guard || fail "never-provisioned teardown with an installed owner refused: $(tr '\n' ' ' < "$TMP/out")"
+grep -Fxq 'profile --pause' "$MOCK_LOG" || fail "never-provisioned teardown did not pause the installed owner"
+grep -Fxq fence "$MOCK_LOG" || fail "never-provisioned teardown skipped the SSH fence"
+grep -Fxq session-check "$MOCK_LOG" || fail "never-provisioned teardown skipped the session check"
 
-for config in "true false true" "true true -" ""; do
-  export MOCK_INCUS_CONFIG="$config" MOCK_PAUSE_RC=2
+# A guest-only owner, which may fail in the unprovisioned guest, is not entered.
+export MOCK_INCUS_CONFIG="true false -" MOCK_PROVISIONED=unprovisioned MOCK_PAUSE_RC=2 MOCK_OWNER_GUEST_ONLY=1
+run_guard || fail "never-provisioned teardown with a guest-only owner refused: $(tr '\n' ' ' < "$TMP/out")"
+if grep -Fq 'profile --pause' "$MOCK_LOG"; then fail "guest-only owner paused in a never-provisioned guest"; fi
+
+# A provisioned guest, a working yard whose re-init failed, a yard from a release
+# before the completion mark and an unreadable state all pause strictly.
+for config in "true false -:provisioned" "true false true:unprovisioned" "true true -:unprovisioned" ":unprovisioned"; do
+  export MOCK_INCUS_CONFIG="${config%%:*}" MOCK_PROVISIONED="${config#*:}" MOCK_PAUSE_RC=2 MOCK_OWNER_GUEST_ONLY=1
   if run_guard; then fail "teardown with '$config' accepted a failed owner-service pause"; fi
   grep -Fq 'could not pause profile owner services before teardown' "$TMP/out" \
     || fail "pause failure with '$config' is unclear: $(tr '\n' ' ' < "$TMP/out")"
 done
 
-export MOCK_INCUS_CONFIG="true false true" MOCK_PAUSE_RC=0
-run_guard || fail "re-initialized teardown refused: $(tr '\n' ' ' < "$TMP/out")"
-grep -Fxq 'profile --pause' "$MOCK_LOG" || fail "re-initialized teardown did not pause owner services"
-
-printf 'ok: teardown pauses owner services except in a yard whose init never finished\n'
+printf 'ok: teardown pauses installed owner services, also after a failed first init\n'

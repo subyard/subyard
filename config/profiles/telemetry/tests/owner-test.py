@@ -136,9 +136,11 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             refusal = next(json.loads(line[len(prefix):]) for line in result.stderr.decode().splitlines() if line.startswith(prefix))
             self.assertEqual(refusal['retry'], 'run yard -Y secondary config paths')
             self.assertEqual((root/'applied').read_text(),'1')
-            # Removal from a guest that init never provisioned does not enter it.
-            self.assertEqual(invoke('--remove', SUBYARD_GUEST_NEVER_PROVISIONED='1').returncode,0)
-            self.assertEqual((root/'applied').read_text(),'1')
+            # A guest that init never provisioned is not entered for removal,
+            # pause or resume.
+            for action in ('--remove', '--pause', '--resume'):
+                self.assertEqual(invoke(action, SUBYARD_GUEST_NEVER_PROVISIONED='1').returncode,0)
+                self.assertEqual((root/'applied').read_text(),'1')
             self.assertEqual(invoke('--remove').returncode,0)
             self.assertEqual((root/'applied').read_text(),'0')
 

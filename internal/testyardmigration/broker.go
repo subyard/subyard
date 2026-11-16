@@ -224,7 +224,8 @@ func inspectBrokerRuntimeLoaded(ctx context.Context, options Options, yard strin
 	// A broker yard whose last init did not finish is left to that init in any
 	// power state, before any guest probe: it reports what a stopped yard with
 	// stopped intent reports, so release work proceeds without it.
-	if instances[0].Config["user.subyard.managed"] == "true" && instances[0].Config["user.subyard.initialized"] == "false" {
+	if instances[0].Config["user.subyard.managed"] == "true" && instances[0].Config["user.subyard.name"] == result.yard &&
+		instances[0].Config["user.subyard.initialized"] == "false" {
 		return result, nil
 	}
 	switch strings.ToUpper(instances[0].Status) {
