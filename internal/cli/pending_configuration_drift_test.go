@@ -222,6 +222,9 @@ func TestSourceActivationKeepsPendingYardRefusal(t *testing.T) {
 // gateRefusal reports whether payload is the public mutation-gate outcome a
 // refused command writes, rather than the command's own result or failure.
 func gateRefusal(payload []byte) bool {
+	if bytes.Contains(payload, []byte(mutationGateRefusalPrefix)) {
+		return true // the CLI's text refusal
+	}
 	var refused mutationGateOutcome
 	return json.Unmarshal(bytes.TrimSpace(payload), &refused) == nil && refused.Status != ""
 }
@@ -249,9 +252,9 @@ func (fixture pendingDriftFixture) rpcGateRefusal(t *testing.T, yard, params str
 	return errors.As(err, &fault) && gateRefusal([]byte(fault.Message)), err
 }
 
-// An ordinary command is admitted the same way by the direct CLI and by RPC:
-// when completed history is blocked only by pending configuration, and never
-// while another yard's materialized activation drift remains unrepaired.
+// A command is admitted the same way by the direct CLI and by RPC, by the
+// selected yard alone: another yard's unrepaired drift never closes it, and a
+// drifted yard still starts, as start is one of its repair commands.
 func TestOrdinaryCommandAdmissionDuringPendingConfiguration(t *testing.T) {
 	for _, scenario := range []struct {
 		name               string
@@ -259,8 +262,8 @@ func TestOrdinaryCommandAdmissionDuringPendingConfiguration(t *testing.T) {
 		admitted           bool
 	}{
 		{"pending-only", []string{"default"}, []string{"named"}, true},
-		{"pending-beside-drift", []string{"default"}, nil, false},
-		{"drift-only", nil, []string{"default"}, false},
+		{"pending-beside-drift", []string{"default"}, nil, true},
+		{"drift-only", nil, []string{"default"}, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			fixture := newPendingDriftFixture(t, scenario.pending, scenario.converged)
@@ -287,12 +290,12 @@ func TestOrdinaryCommandAdmissionDuringPendingConfiguration(t *testing.T) {
 func TestPendingConfigurationLeavesNoReleaseRepairDeadEnd(t *testing.T) {
 	t.Run("pending-beside-drift", func(t *testing.T) {
 		fixture := newPendingDriftFixture(t, []string{"default"}, nil)
-		// The pending yard's init waits until the repair of the other yard.
-		if code, stderr := fixture.run(t, "-Y", "default", "init", "--yes"); code == 0 || !gateRefusal(stderr) {
-			t.Fatalf("init admitted beside unrepaired drift: code=%d stderr=%s", code, stderr)
+		// The pending yard's init does not wait for the repair of another yard.
+		if code, stderr := fixture.run(t, "-Y", "default", "init", "--yes"); code != 0 && gateRefusal(stderr) {
+			t.Fatalf("init refused beside another yard's drift: code=%d stderr=%s", code, stderr)
 		}
-		if refused, err := fixture.rpcGateRefusal(t, "default", `{"command":"init","arguments":[]}`); !refused {
-			t.Fatalf("RPC init admitted beside unrepaired drift: %v", err)
+		if refused, err := fixture.rpcGateRefusal(t, "default", `{"command":"init","arguments":[]}`); refused {
+			t.Fatalf("RPC init refused beside another yard's drift: %v", err)
 		}
 		code, stderr := fixture.run(t, "migrate", "--yes")
 		if _, err := os.Stat(fixture.converges); err != nil {

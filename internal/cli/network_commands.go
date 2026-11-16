@@ -174,6 +174,15 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 		if link.A == link.B {
 			return networkArgumentError("a link needs two distinct local yards")
 		}
+		// A link changes both yards; neither may be one limited to its repair.
+		// The admission that opened this host command is decided once, at prepare.
+		if blocked := prepared.CLI.repairOnlyYards(names); len(blocked) != 0 {
+			refusals := make([]error, 0, len(blocked))
+			for _, name := range blocked {
+				refusals = append(refusals, fmt.Errorf("yard %s needs repair first; next: %s", name, prepared.CLI.repairNextStep(name)))
+			}
+			return domain.CollectRefusals(refusals...)
+		}
 		if args[0] == "link" {
 			change.Link = link
 		} else {
@@ -194,8 +203,17 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 		return errors.New("Incus network policy adapter is unavailable")
 	}
 	yards := []yardnetwork.Yard{}
+	names := []string{}
 	for _, y := range contexts {
 		yards = append(yards, networkYard(y))
+		names = append(names, y.YardName)
+	}
+	if args[0] == "isolation" {
+		// Isolation is one host policy over every yard and is applied to all of
+		// them; a yard limited to its repair is named so its repair follows.
+		for _, name := range prepared.CLI.repairOnlyYards(names) {
+			fmt.Fprintf(prepared.CLI.options.Stderr, "yard: yard %s needs repair; it receives the policy as it stands; next: %s\n", name, prepared.CLI.repairNextStep(name))
+		}
 	}
 	if args[0] == "status" {
 		status, err := service.Status(ctx, yards)

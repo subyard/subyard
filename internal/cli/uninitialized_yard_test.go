@@ -72,7 +72,7 @@ func gateRefused(t *testing.T, scenario yardFailureScenario, arguments ...string
 	program, _, stdout, stderr := scenario.fixture.program(t, arguments, nil, func(nestedCall, io.Writer) int { return 0 })
 	code := program.Run(context.Background())
 	t.Logf("yard %s => %d\n%s%s", strings.Join(arguments, " "), code, stdout, stderr)
-	return strings.Contains(stderr.String(), `"code":"dependency-unavailable"`)
+	return strings.Contains(stderr.String(), "release gate:")
 }
 
 // A failed first init leaves a running guest that is not provisioned. That
@@ -116,8 +116,13 @@ func TestUninitializedYardIsLeftToItsInit(t *testing.T) {
 		payload, _ := json.Marshal(readiness)
 		t.Fatalf("an initialized yard's failure was hidden: %s", payload)
 	}
-	if !gateRefused(t, scenario, "-Y", "default", "init", "--reset", "--yes") {
-		t.Fatal("an initialized yard's failure left the release gate open")
+	// That failure is the yard's own: it admits only its repair commands, and
+	// the other yards stay open.
+	if !gateRefused(t, scenario, "-Y", "named", "provision", "--yes") {
+		t.Fatal("an initialized yard's failure left its non-repair commands open")
+	}
+	if gateRefused(t, scenario, "-Y", "default", "init", "--reset", "--yes") {
+		t.Fatal("an initialized yard's failure closed another yard")
 	}
 	observeFailing(t, scenario, "named", false)
 	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady {

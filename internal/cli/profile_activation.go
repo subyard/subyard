@@ -64,12 +64,26 @@ func (reconciler *profileRuntimeActivationReconciler) failure(yard, phase string
 	return materializedConfigActivationError{cause, yard, owner, "config status", phase, reconciler.request.ConfigHome}
 }
 
+// hostFailure is a refusal of the local yard set rather than of one yard; only
+// the yard findings it wraps are attributed.
+func (reconciler *profileRuntimeActivationReconciler) hostFailure(cause error) error {
+	return materializedConfigActivationError{cause, "default", "local yard configurations", "config status --all-local", "inspect", reconciler.request.ConfigHome}
+}
+
 func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Context) (*CLI, []configTarget, error) {
+	operation, targets, yardRefusals, err := reconciler.observedTargets(ctx)
+	return operation, targets, domain.CollectRefusals(yardRefusals, err)
+}
+
+// observedTargets separates yards whose own configuration cannot be loaded
+// from refusals of the local yard set. Observation reports those yards and
+// still observes the others; any other refusal keeps no target.
+func (reconciler *profileRuntimeActivationReconciler) observedTargets(ctx context.Context) (*CLI, []configTarget, error, error) {
 	operation := reconciler.cli.releaseActivationOperation()
 	// Host-wide inventory must not require the caller's yard to exist.
-	_, targets, err := operation.releaseActivationTargets(ctx, "default", reconciler.request.ConfigHome, true, nil)
+	_, targets, yardRefusals, err := operation.tolerantActivationTargets(ctx, "default", reconciler.request.ConfigHome, true, nil, true)
 	if err != nil {
-		return operation, nil, err
+		return operation, nil, nil, err
 	}
 	// Only installed local yard runtimes belong to release activation. A verified
 	// absent local installation has none; raw runtime observation still reports
@@ -85,7 +99,16 @@ func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Contex
 		deferred := activation.pending.decided(ctx, reconciler.releases)
 		targets = slices.DeleteFunc(targets, func(target configTarget) bool { return deferred[target.Name] })
 	}
-	return operation, targets, nil
+	return operation, targets, yardRefusals, nil
+}
+
+// probedFailure re-probes the guest after a handler failure: a lost guest agent
+// becomes that yard's typed finding, keeping the handler's public diagnostic.
+func (reconciler *profileRuntimeActivationReconciler) probedFailure(ctx context.Context, operation *CLI, target configTarget, err error) error {
+	if reconciler.id != "key-tools-runtime" && operation.guestAgentLost(ctx, target) {
+		return guestAgentLostError{target.Name, err}
+	}
+	return err
 }
 
 // splitUninitialized leaves out the yards whose last init did not finish, as
@@ -159,14 +182,14 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 			Actual: actual, Desired: desiredDigest, Converged: false,
 		}, err
 	}
-	operation, targets, err := reconciler.targets(ctx)
+	operation, targets, yardRefusals, err := reconciler.observedTargets(ctx)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
+		return releasetransition.V2ActivationObservation{}, reconciler.hostFailure(err)
 	}
 	targets, uninitialized, failures := reconciler.splitUninitialized(ctx, operation, targets)
 	deferred, err := operation.deferredDiskTmpTargets(ctx, targets, reconciler.id == "core-guest-runtime" || slices.Contains(reconciler.cli.profileRuntimeIDs(), reconciler.id))
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
+		return releasetransition.V2ActivationObservation{}, reconciler.hostFailure(err)
 	}
 	warnings := uninitializedYardWarnings(uninitialized)
 	if reconciler.id == "core-guest-runtime" {
@@ -184,12 +207,19 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	pendingInputs := false
 	var diagnostics []releasetransition.RedactedDecision
 	disclosed, order := map[string][]string{}, []string{}
+	// A yard whose own configuration is invalid is reported by each yard-scoped
+	// owner; host key tools address only the yards that load.
+	if yardRefusals != nil && reconciler.id != "key-tools-runtime" {
+		failures = append(failures, reconciler.hostFailure(yardRefusals))
+	}
+	var yards []releasetransition.V2YardAttribution
 	for _, target := range targets {
 		if _, ok := deferred[target.Name]; ok {
 			continue
 		}
 		state, err := reconciler.observeTarget(ctx, operation, target)
 		if err != nil {
+			err = reconciler.probedFailure(ctx, operation, target, err)
 			failures = append(failures, reconciler.failure(target.Name, "inspect", err))
 			continue
 		}
@@ -200,6 +230,7 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 				continue
 			}
 			if pending != nil {
+				yards = append(yards, releasetransition.V2YardAttribution{Yard: target.Name, Kind: releasetransition.YardFindingPending})
 				pendingYards = append(pendingYards, pending.finding())
 				actual = append(actual, observation{Yard: target.Name, Project: target.Loaded.Context.IncusProject,
 					Instance: target.Loaded.Context.YardInstanceName, State: "pending-configuration", Digest: state.Actual, Desired: state.Desired})
@@ -214,6 +245,9 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual, Desired: state.Desired}
 		actual = append(actual, entry)
 		converged = converged && state.State != "stale" && state.State != ports.RuntimeStatePending
+		if state.State == "stale" || state.State == ports.RuntimeStatePending {
+			yards = append(yards, releasetransition.V2YardAttribution{Yard: target.Name, Kind: releasetransition.YardFindingDrift})
+		}
 		if state.State == ports.RuntimeStatePending {
 			pendingInputs = true
 			if state.Diagnostics != nil {
@@ -230,13 +264,21 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		}
 	}
 	if err := domain.CollectRefusals(failures...); err != nil {
-		return releasetransition.V2ActivationObservation{}, err
+		if reconciler.id == "key-tools-runtime" {
+			return releasetransition.V2ActivationObservation{}, err
+		}
+		return releasetransition.V2ActivationObservation{}, observedYardsError{err, reconciler.request.ConfigHome, yards}
 	}
+	slices.Sort(warnings)
+	warnings = slices.Compact(warnings)
 	actualDigest := desiredDigest
 	if !converged {
 		actualDigest, err = activationStageFingerprint(actual)
 	}
-	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, PendingInputs: pendingInputs, Diagnostics: diagnostics, Consequences: runtimeConsequences(order, disclosed), Warnings: warnings, Pending: pendingYards}, err
+	if reconciler.id == "key-tools-runtime" {
+		yards = nil // one host installation: its drift is never one yard's
+	}
+	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, PendingInputs: pendingInputs, Diagnostics: diagnostics, Consequences: runtimeConsequences(order, disclosed), Warnings: warnings, Pending: pendingYards, Yards: yards}, err
 }
 
 // runtimeConsequences states each owner consequence once with its yards, within the
@@ -297,6 +339,26 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		} else if len(uninitialized) != 0 {
 			continue
 		}
+		// Hold the yard lock init holds, so yard init and release repair of the
+		// same yard never interleave their applies. Host key tools are not a yard's.
+		unlock := func() {}
+		if reconciler.id != "key-tools-runtime" {
+			var lockErr error
+			if unlock, lockErr = lockIntegrationYard(ctx, target.Loaded); lockErr != nil {
+				return reconciler.failure(target.Name, "apply", lockErr)
+			}
+		}
+		err := reconciler.reconcileTarget(ctx, operation, target)
+		unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (reconciler *profileRuntimeActivationReconciler) reconcileTarget(ctx context.Context, operation *CLI, target configTarget) error {
+	for range 1 { // continue ends this target
 		platform := profileActivationPlatform(operation, target)
 		observe := func() (ports.RuntimeObservation, error) { return observeProfileRuntime(ctx, platform, reconciler.id) }
 		apply := platform.ApplyProfileRuntime
@@ -306,7 +368,7 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		}
 		state, err := observe()
 		if err != nil {
-			return reconciler.failure(target.Name, "inspect", err)
+			return reconciler.failure(target.Name, "inspect", reconciler.probedFailure(ctx, operation, target, err))
 		}
 		if reconciler.recovery != nil {
 			if _, exists := reconciler.recovery[target.Name]; !exists {
@@ -351,7 +413,7 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 		if err := apply(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
 			var yardFailure *reconcileruntime.ProfileRuntimeYardFailure
 			if !errors.As(err, &yardFailure) || yardFailure.Yard != target.Name {
-				return reconciler.failure(target.Name, "apply", err)
+				return reconciler.failure(target.Name, "apply", reconciler.probedFailure(ctx, operation, target, err))
 			}
 			if recordErr := reconciler.recordPending(target, observe, yardFailure); recordErr != nil {
 				// Without its record the failure stays blocking; both causes are reported.

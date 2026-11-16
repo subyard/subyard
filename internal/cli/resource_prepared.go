@@ -120,8 +120,12 @@ func (prepared *preparedCommand) prepareResourceInvocation(ctx context.Context, 
 }
 
 func (prepared *preparedCommand) attachResourceExecution(runner *resourceApplyRunner, baseline config.Loaded, native resource.PrepareResult) error {
-	if err := prepared.CLI.validateResourceShutdownRepair(runner.definition, runner.verb, baseline, native); err != nil {
-		return err
+	// On a yard that needs repair only a reversible shutdown without persistent
+	// data or external effects runs, as for an orphaned ingress.
+	if admission := prepared.CLI.gateAdmitted; admission != nil && admission.repair {
+		if err := validateOrphanShutdown(runner.definition, native.Assessment); err != nil {
+			return err
+		}
 	}
 	handler, err := os.ReadFile(runner.definition.HandlerPath())
 	if err != nil {

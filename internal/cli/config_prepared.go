@@ -102,12 +102,21 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 		return prepared.prepareConfigScalar(ctx, arguments[0], arguments[1:])
 	case "apply":
 		_, allLocal := configApplyInvocation(arguments)
+		selected := prepared.Loaded.Context.YardName
 		targets, err := prepared.CLI.localConfigTargets(prepared.Loaded, allLocal)
+		if allLocal {
+			targets, err = prepared.CLI.skipInvalidYards(targets, err, prepared.Loaded, true)
+		}
 		if err != nil {
 			return err
 		}
+		targets = prepared.CLI.skipGatedYards(targets, selected, true)
 		execution, err := prepared.CLI.prepareConfigApply(ctx, targets, func() ([]configTarget, error) {
-			return prepared.CLI.refreshLocalConfigTargets(prepared.Loaded, allLocal)
+			refreshed, err := prepared.CLI.refreshLocalConfigTargets(prepared.Loaded, allLocal)
+			if allLocal {
+				refreshed, err = prepared.CLI.skipInvalidYards(refreshed, err, prepared.Loaded, false)
+			}
+			return prepared.CLI.skipGatedYards(refreshed, selected, false), err
 		})
 		if err != nil {
 			return err
@@ -512,7 +521,11 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		}
 	}
 	applier := cli.options.Config
-	if applier == nil && cli.permits.configApply != nil {
+	// A repair on a yard that needs repair applies in this process, with the
+	// migration child's ownership semantics, under the barrier its recheck
+	// holds: one admission per operator command. Every other apply runs the
+	// ordinary child, which is admitted on its own as on a ready release.
+	if applier == nil && (cli.permits.configApply != nil || cli.gateAdmitted != nil && cli.gateAdmitted.repair) {
 		applier = releaseTransitionConfigApplier{cli: &copyCLI}
 	}
 	if applier == nil {

@@ -859,13 +859,15 @@ func (cli *CLI) powerActivationReconciler(
 			if cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
 				operation.env["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
 			}
-			loaded, targets, err := operation.releaseActivationTargets(ctx, "default", request.ConfigHome, true, nil)
+			// Host power serves the yards that load. A yard whose own configuration
+			// is invalid is reported by the yard-scoped owners, not here.
+			loaded, targets, _, err := operation.tolerantActivationTargets(ctx, "default", request.ConfigHome, true, nil, false)
+			if err != nil {
+				return nil, err
+			}
 			powerYards := make([]domain.Context, 0, len(targets))
 			for _, target := range targets {
 				powerYards = append(powerYards, target.Loaded.Context)
-			}
-			if err != nil {
-				return nil, err
 			}
 			return operation.initPlatformWithDispatcher(
 				loaded,
@@ -1224,7 +1226,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		yard = "default"
 	}
 	operation := reconciler.operation()
-	_, targets, err := operation.releaseActivationTargets(ctx, yard, reconciler.configHome, reconciler.allLocal, files)
+	_, targets, yardRefusals, err := operation.tolerantActivationTargets(ctx, yard, reconciler.configHome, reconciler.allLocal, files, true)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, (materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}).collected()
 	}
@@ -1236,7 +1238,12 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	}
 	// Each yard is observed independently. A refusal skips only that yard's
 	// findings that depend on the failed read; every refusal is reported together.
+	// A yard whose configuration cannot load is a refusal outside every yard span,
+	// so it stays blocking, while the other yards keep their observed drift.
 	var refusals []error
+	if yardRefusals != nil {
+		refusals = materializedConfigActivationError{yardRefusals, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}.appendTo(refusals)
+	}
 	spans := make([]yardObservationSpan, 0, len(targets))
 	for _, target := range targets {
 		spans = append(spans, yardObservationSpan{name: target.Name, refusals: len(refusals), consequences: len(consequences)})
@@ -1324,12 +1331,32 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	deferring := reconciler.cli.activation != nil && reconciler.cli.activation.repair && files == nil
 	pending, err := reconciler.deferPendingYards(refusals, spans, &activationTargets, &consequences, deferring)
 	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
+		// The yards observed beside the refused ones keep their drift.
+		var observed []releasetransition.V2YardAttribution
+		for _, target := range activationTargets {
+			if target.Assessment.Changed || target.Assessment.State == "drift" || target.IntegrationChanged {
+				observed = append(observed, releasetransition.V2YardAttribution{Yard: target.Name, Kind: releasetransition.YardFindingDrift})
+			}
+		}
+		return releasetransition.V2ActivationObservation{}, observedYardsError{err, reconciler.configHome, observed}
 	}
 	assessed := config.AssessMaterializationActivation(activationTargets)
 	// The frozen protocol requires a sorted warning list.
 	slices.Sort(warnings)
-	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings), Pending: pending}, nil
+	var yards []releasetransition.V2YardAttribution
+	for _, target := range activationTargets {
+		kind := ""
+		switch {
+		case target.Assessment.State == "deferred" && reconciler.pendingDeferral().deferred(target.Name):
+			kind = releasetransition.YardFindingPending
+		case target.Assessment.Changed || target.Assessment.State == "drift" || target.IntegrationChanged:
+			kind = releasetransition.YardFindingDrift
+		}
+		if kind != "" {
+			yards = append(yards, releasetransition.V2YardAttribution{Yard: target.Name, Kind: kind})
+		}
+	}
+	return releasetransition.V2ActivationObservation{Actual: releasetransition.Fingerprint(assessed.Actual), Desired: releasetransition.Fingerprint(assessed.Desired), Converged: assessed.Converged, Consequences: consequences, Warnings: slices.Compact(warnings), Pending: pending, Yards: yards}, nil
 }
 
 // yardObservationSpan marks where one yard's refusals and consequences begin,
@@ -1354,6 +1381,11 @@ func (reconciler *materializedConfigActivationReconciler) deferPendingYards(
 			reconciler.pendingDeferral().record(nil)
 		}
 		return nil, nil
+	}
+	// A refusal before the first yard's span belongs to no yard: it is never
+	// pending configuration, so it keeps the observation refused.
+	if len(spans) == 0 || spans[0].refusals > 0 {
+		return nil, collectActivationRefusals(refusals)
 	}
 	var findings []releasetransition.V2PendingConfiguration
 	deferred := map[string]*config.MaterializationActivationTarget{}

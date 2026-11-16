@@ -195,13 +195,12 @@ CLI / operation.plan → manifest → resolveCoreCommand → prepareCommand
 ```
 
 Before context loading, `internal/cli/admission.go` classifies each CLI invocation once: teardown
-pre-admission, the manifest effect refined by verb-level readers, early dispatch, the release-gate
-policy and the bounded recovery that may replace a blocked gate. `Run` keeps developer-identity
-admission, the pending hard-cleanup fence and init migrations. The gate returns recovery permits
-as one value that the invocation installs before dispatch; it does not decide policy itself.
-`operation.plan` and `operation.execute` share one operation admission in the same file:
-hard-cleanup and developer-identity recovery, then the release gate. Beyond the ordinary admission
-shared with the CLI, a blocked gate admits only init through its bounded profile-init permit.
+pre-admission, the manifest effect refined by verb-level readers, early dispatch and the
+release-gate policy. `Run` keeps developer-identity admission, the pending hard-cleanup fence and
+init migrations. A non-ready gate admits by the selected yard
+([yard-scoped release gate](#yard-scoped-release-gate)); the admission is one value the invocation
+installs before dispatch. `operation.plan` and `operation.execute` share one operation admission in
+the same file: hard-cleanup and developer-identity recovery, then the same release gate.
 
 The handler-family resolver binds preparation and physical leaves in one place. Startup rejects
 unknown internal handlers. A prepared command owns canonical arguments, resolved context, the
@@ -579,7 +578,8 @@ also prints its restart consequence immediately before stopping each yard, inclu
 when a released caller omits plan output with `--yes`.
 If an update retry reveals runtime drift, its existing activation follow-up prints a fresh
 repair plan and obtains that plan's ordinary confirmation. After an explicit start,
-`yard migrate` provides that guarded repair instead; readiness remains strict until it completes.
+`yard migrate` provides that guarded repair instead, or the yard's own `yard -Y NAME init`; until
+one of them completes only that yard is limited to its repair commands.
 Persistent data and instance identity are retained. Read-only checks never retry.
 
 A repair of the active release by `yard migrate` or `yard update` uses recorded installed
@@ -632,16 +632,8 @@ the active, completed release has no other work, each finding is its own
 outcome. Recorded [yard-scoped runtime failures](#yard-scoped-runtime-failures)
 of a profile runtime that declares that scope use the same shape, as
 `activation.<owner>.pending-configuration` blockers; no other owner's pending configuration is
-admitted. Only then does pending configuration not block unrelated commands such as SSH-agent
-unlock: the direct CLI and RPC share one admission, and `init`, `config`, `integration`,
-`profile`, `provision`, `update`, `migrate` and release transitions keep their own gates. Plain
-`yard -Y NAME init` of a yard such a blocker names is admitted when every blocker names a yard's
-init as its next step; the other named yards are deferred for that init, and it returns them as
-still pending instead of failing; the CLI prints them, and RPC writes them to the operation's
-diagnostics. A config apply or integration retry repair permit likewise finishes with the
-remaining pending items when each of them names a yard's init as its next step, and otherwise
-fails as before; it also finishes when its own yard turned pending meanwhile, a known
-limitation. Invalid history, unfinished
+admitted. Admission of commands around such findings follows the
+[yard-scoped release gate](#yard-scoped-release-gate). Invalid history, unfinished
 transactions and unclassified materialization failures still block mutation. A local typed
 selection reduction in this state validates the sealed original source and complete protected
 history, locks and rechecks that evidence, then writes only the desired selection; it grants
@@ -1399,11 +1391,9 @@ message stays generic. Orca names `yard -Y NAME orca remove` and then `yard -Y N
 resource verb is a profile resource mutation, so the pending-configuration admission below admits
 it, and once Orca is removed the runtime observes `absent` and the yard is ready again.
 
-These findings share the pending-configuration admission of materialized configuration: when every
-blocker is such a finding and no owner is unconverged, the direct CLI and RPC admit unrelated
-commands, teardown and each named yard's init even while other yards are pending. Init, config,
-profile and integration commands on other yards stay gated. A successful init of one yard reports
-the other yards' findings and succeeds. While other release work remains, findings are one
+Commands around these findings follow the [yard-scoped release gate](#yard-scoped-release-gate);
+a yard with only such findings keeps unrelated commands, its plain init and profile resource verbs.
+While other release work remains, findings are one
 bounded warning. A successful init of the yard, a converged or
 re-applied owner for that yard and teardown of the yard remove the record through its known owner
 path; other entries of the record directory are never touched.
@@ -1423,6 +1413,80 @@ X.Y.Z core is greater than the latest release: it changes nothing and names two 
 install; an unpublished build needs its own assets) and `--version <latest>` to downgrade.
 Only an explicit `--version VERSION` or `YARD_RELEASE_VERSION` selects an older release, under the
 ordinary candidate inspection. An equal version keeps the ordinary same-release inspection.
+
+### Yard-scoped release gate
+
+Mutating commands consult the release gate (`internal/cli/admission.go`,
+`internal/cli/yard_scoped_gate.go`). It is host-wide only for host causes: an unfinished, invalid or
+unmatched journal, pending migrations, links, protected-inspection failures, host owners (installation,
+host key tools, test-VM broker, test-yard route consumers, host power), native target collisions and
+ambiguous topology. Every such refusal is text: the release state with active and target releases,
+one deduplicated cause and one next step. RPC keeps the structured outcome; `yard migrate --check`
+and `--json` report every finding and keep their exit codes.
+
+When the journal of the active release is complete and every remaining cause belongs to yards, the
+gate decides by the selected yard alone. The engine reports those causes in one closed grammar,
+after plan binding and only for completed history: decisions with scope `yard-attribution`, resource
+`activation.<owner>` and result `<kind> <yard>`, where the kind is `drift`, `failed`, `pending`,
+`config` or `unreachable`. It emits all of them or none; the existing activation decisions are
+unchanged, so an older CLI stays closed. The CLI accepts only its own yard-scoped owners (profile
+runtimes, core guest runtime, materialized configuration), reads the journal and ledger itself, and
+treats anything outside the grammar as host-wide. A yard that is not converged admits only its
+repair commands: plain `init` and `init --reset` (other init modes change what the yard is or do
+only part of its convergence), `teardown`, `start`, `stop`, `shell`, `config`, `profile` or
+`integration disable` and profile resource shutdown verbs; the refusal names its next step, usually its own init. A yard
+with only typed pending findings keeps unrelated commands, its plain init and resource verbs. Other
+yards and host commands stay open. `config apply --all-local` skips and reports yards limited to
+repair, yards with pending findings and yards whose own configuration cannot be loaded; a host or
+shared setting waits while any yard has pending findings; `network link` refuses a yard limited to
+repair at prepare, naming each such endpoint, and `network isolation` names such yards. An owner's
+failure in one yard carries what it observed in the others, and a named yard whose configuration or
+installed context cannot be loaded is that yard's finding, so one failed yard never hides another's
+finding. The direct CLI and RPC share this admission.
+
+A repair admission, of a member of the repair set with a confirmation step on a yard that needs
+repair or of the bounded stop below, records the release history (journal, ledger projection and
+checkpoint) it inspected, read before and after the inspection. `preparedCommand.Execute` rechecks
+it once, right after it acquires the owner barrier that every journal writer holds: the history must
+be unchanged and a fresh inspection, which binds the installed source and runtime links to that
+history, must admit the command again; otherwise it is refused as plan-stale before any effect.
+Still under the barrier, the history must be unchanged after the effect, and a repair other than
+init and teardown names what its yard still needs. Every other admission is decided once, as on a
+ready release; `start` and `shell` have no confirmation step, so their admission is their only
+check. Configuration admits only its prepared verbs and a resource only its declared shutdown with a
+prepared plan whose assessment is a reversible shutdown without persistent data or external effects;
+an older resource handler on such a yard is refused before consent. An adapter never runs for a
+repair admission that has not passed its recheck. Admission never takes the release update lock; the
+lock order stays owner barrier, release update lock (converge and bounded in-handler configuration
+repairs), per-yard lock. A `config apply` admitted as a repair applies in its own process with the
+migration child's integration ownership checks; on an open yard it runs the ordinary child, which
+inherits the owner barrier and is admitted on its own. An init succeeds when its own yard converged
+and reports the other yards' findings. The default yard's own invalid configuration underlies every
+yard, so then every yard admits only its repair commands. An invalid configuration of another yard
+is that yard's finding; host power and host key tools serve the yards that load. `yard status`
+states the release once, as `release active and complete; yard NAME needs attention`, and each
+finding under its yard; it never prints the protocol word `ready` for a non-ready status.
+
+A yard whose last init did not finish is left to that init, as described under
+[release migrations](#release-migrations); release repair of a yard holds the per-yard lock init
+holds, so release repair and init of one yard never interleave.
+
+After a failed observation or apply in a running yard, the core probes its guest agent: when Incus
+reports the yard running but a trivial command cannot run or does not finish, the yard's finding is
+`unreachable`, keeps the handler's public diagnostic and names the next steps: retry `yard migrate`,
+and if the agent stays unreachable run `yard -Y NAME stop --force`, `yard -Y NAME start` and `yard
+migrate`. A guest exit status is an answer, not agent loss. Ordinary updates still refuse before
+activation for a yard with invalid configuration, an unreachable agent or an unknown failure; they
+proceed without a stopped, absent or uninitialized yard. The guest temporary-storage step keeps its
+own rules above.
+While an activation of the active release is unfinished, including when its inspection is refused
+by an observation such as a lost guest agent, `yard -Y NAME stop` and `stop --force` of a local yard
+are admitted, so the activation can finish without it; teardown is not.
+
+Releases before this gate could lock a host after a failed first init of a new yard: every command
+was refused until the broken yard stopped. On such a host, stop that yard's instance once with
+`incus stop <instance> --project <project>`; readiness then returns and `yard update` installs a
+release with this gate.
 
 ### Interrupted release recovery
 
@@ -2164,12 +2228,13 @@ cannot silently reopen the service. Guest data is preserved. Stop the resource b
 files manually; invalid configuration or ambiguous ownership fails closed and requires correction
 before reconciliation.
 
-When completed release history is blocked by unavailable runtime observation, the local owner can
-still assess and confirm the exact declared public-ingress shutdown. Its private admission permit
-binds the installed source, completed journal, ledger, links, configuration and native cleanup plan;
-these are rechecked under the release lock after consent. Bring-up, unfinished history, unrelated
-blockers and changed bindings remain gated. This authorizes only resource cleanup and preserves
-unverified guest cleanup; it never resumes or applies release activation.
+When completed release history leaves a yard limited to its repair commands, for example after its
+runtime observation failed, the local owner can still assess and confirm that yard's declared
+shutdown when its handler prepares a v2 plan with a reversible shutdown assessment. The repair
+admission is rechecked under the owner barrier after consent against the same history and a fresh
+inspection, which binds the installed source and links; bring-up, unfinished history, host causes
+and changed history remain gated. This authorizes only resource cleanup and preserves unverified
+guest cleanup; it never resumes or applies release activation.
 
 ## Test topology
 
@@ -2415,8 +2480,8 @@ fingerprints and nonempty, validated `diagnostics`. This state is not converged 
 not a stopped-yard deferral. Config status renders those parameters. Release activation
 postpones pending owners once, runs the other approved owners, then revisits them with
 unchanged desired bindings. Remaining pending input returns an executable config-apply
-step. A config-only repair permit admits pending input only in its selected targets,
-with all other owners current; it never grants that profile mutation authority.
+step. A config apply on a yard limited to its repair commands applies pending input only in its
+selected targets; it never grants that profile mutation authority.
 After successful materialization, remaining profile drift names one fresh
 `yard migrate` step and does not make config apply fail.
 Missing input that the hook can safely create remains ordinary stale work.

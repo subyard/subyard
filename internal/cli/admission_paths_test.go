@@ -19,6 +19,10 @@ import (
 // that newConfigApplyRepairFixture installs.
 const blockedGateRefusal = `{"status":"migration-required","code":"transition-required","active":"1.2.3-aaaaaaaaaaaa","previous":"release-a","target":"1.2.3-aaaaaaaaaaaa","transaction":null,"message":"activation drift","action":"run yard migrate"}`
 
+// blockedGateTextRefusal is the direct CLI's text rendering of the same gate.
+const blockedGateTextRefusal = "yard: release gate: release migration-required (transition-required): active 1.2.3-aaaaaaaaaaaa, target 1.2.3-aaaaaaaaaaaa; this command is not run\n" +
+	"yard: cause: activation drift\nyard: next: run yard migrate\n"
+
 const sealedSourceRefusal = "release source admission: sealed original assets are unavailable or inconsistent; restore the exact original release without changing protected history\n"
 
 // blockedGateAdmissionFixture is a blocked release gate with the shipped config,
@@ -59,7 +63,7 @@ func operationSession(t *testing.T, fixture configApplyRepairFixture) *rpcHandle
 // replaces a blocked release gate, the fallback repairs tried before the refusal, the
 // deferred teardown gate and the gate skip of a release-transition child.
 func TestRunAdmissionBlockedGateRecovery(t *testing.T) {
-	refusal := blockedGateRefusal + "\n"
+	refusal := blockedGateTextRefusal
 	planned := "yard: plan config: testkit prompt answers exhausted\n"
 	sealedSource := "yard: config set: " + sealedSourceRefusal
 	cases := []struct {
@@ -70,11 +74,10 @@ func TestRunAdmissionBlockedGateRecovery(t *testing.T) {
 	}{
 		// No recovery and no fallback applies.
 		{[]string{"start"}, false, 1, refusal},
-		// Profile-init recovery leaves the gate blocked.
+		// An unattributed gate admits no repair: init and config apply wait for migrate.
 		{[]string{"init"}, false, 1, refusal},
-		// The config-apply permit replaces the gate; the handler plans and prompts.
-		{[]string{"config", "apply"}, false, 1, planned},
-		{[]string{"config", "apply", "--all-local"}, false, 1, planned},
+		{[]string{"config", "apply"}, false, 1, refusal},
+		{[]string{"config", "apply", "--all-local"}, false, 1, refusal},
 		// Fallbacks: completed scalar authoring handles local scalars; activation
 		// selection repair handles selection reductions, which scalar authoring excludes.
 		{[]string{"config", "set", "--scope", "yard", "--local", "SSH_PORT", "2224"}, false, 1, sealedSource},
@@ -83,7 +86,6 @@ func TestRunAdmissionBlockedGateRecovery(t *testing.T) {
 		{[]string{"profile", "disable", "sample"}, false, 1, sealedSource},
 		// Scalar authoring requires explicit local storage; otherwise the gate refuses.
 		{[]string{"config", "set", "--scope", "yard", "SSH_PORT", "2224"}, false, 1, refusal},
-		// Integration retry recovery does not apply to this gate.
 		{[]string{"integration", "enable", "codex"}, false, 1, refusal},
 		// The deferred teardown gate after scope selection.
 		{[]string{"teardown", "--yes"}, false, 1, refusal},
@@ -204,7 +206,7 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 		name                        string
 		command                     string
 		arguments                   []string
-		setup                       string // identity: pending developer identity; permit: retained init permit
+		setup                       string // identity: pending developer identity
 		planCode, planMessage       string
 		executeCode, executeMessage string
 	}{
@@ -212,8 +214,6 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 		{"cleanup-soft", "cleanup", nil, "", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
 		{"identity-init", "init", nil, "identity", "plan_failed", "EOF", "confirmation_failed", confirmed},
 		{"init", "init", nil, "", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
-		{"permit-init", "init", nil, "permit", "transition-required", blockedGateRefusal, "confirmation_failed", confirmed},
-		{"permit-start", "start", nil, "permit", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
 		{"teardown-keep-data", "teardown", []string{"--keep-data"}, "", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
 	}
 	for _, test := range cases {
@@ -254,13 +254,6 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 			t.Cleanup(func() { planned.lifecycle = lifecycle; _ = planned.Close() })
 			if test.setup == "identity" {
 				pendingIdentity(t, handler)
-			}
-			if test.setup == "permit" {
-				outcome, _, err := planned.CLI.inspectCommandMutationGate(context.Background(), planned.Loaded.Context.YardName, "@init", nil)
-				if err != nil || outcome == nil {
-					t.Fatal("blocked gate", outcome, err)
-				}
-				planned.CLI.permits.profileInit = &configApplyRepairPermit{gate: *outcome}
 			}
 			_, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: id,
 				Params: json.RawMessage(`{"confirmed":true}`)}, func(string, any) (uint64, error) { return 0, nil })

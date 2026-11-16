@@ -98,7 +98,6 @@ func (cli *CLI) runResourceCommand(
 		cli.printResourceEndpoint(loaded, definition)
 	}
 
-	desired := loaded
 	loaded = cli.resourceShutdownContext(ctx, loaded, definition, invocation.verb)
 	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
@@ -113,10 +112,6 @@ func (cli *CLI) runResourceCommand(
 	)
 	if err != nil {
 		cli.errorf("%s: %v", definition.Command, err)
-		return 1
-	}
-	if err := cli.validateResourceShutdownRepair(definition, invocation.verb, desired, native); err != nil {
-		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
 		return 1
 	}
 	exact := native.Schema == resource.PrepareAssessmentSchemaV2 && cli.resourceExactInvocation(definition, arguments)
@@ -175,6 +170,12 @@ func (cli *CLI) runResourceCommand(
 		return cli.runPreparedCommand(ctx, prepared, globalAssumeYes || invocation.assumeYes || cli.env["ASSUME_YES"] == "1")
 	}
 
+	// A yard that needs repair runs only a shutdown with a prepared plan, which
+	// is rechecked after consent; this older path has no such plan.
+	if admission := cli.gateAdmitted; admission != nil && admission.repair {
+		cli.errorf("%s: yard %s needs repair; its handler has no prepared shutdown plan; run yard -Y %s stop or teardown", definition.Command, loaded.Context.YardName, loaded.Context.YardName)
+		return 1
+	}
 	operationID := cli.env["SUBYARD_OPERATION_ID"]
 	orchestrator := cli.operationOrchestrator(operationID, loaded, nil, nil)
 	plan, err := orchestrator.PlanAction(
@@ -200,13 +201,6 @@ func (cli *CLI) runResourceCommand(
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		return 0
 	}
-	unlockShutdown, err := cli.lockResourceShutdownRepair(ctx)
-	if err != nil {
-		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
-		return 1
-	}
-	defer unlockShutdown()
-	runner.shutdownLocked = true
 	if assessment.Changed &&
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		if err := bootstrap.refresh(ctx, cli); err != nil {
@@ -498,21 +492,20 @@ func localResourceAction(definition resource.Definition, action domain.ActionID)
 }
 
 type resourceApplyRunner struct {
-	cli            *CLI
-	loaded         config.Loaded
-	definition     resource.Definition
-	verb           string
-	localAction    string
-	effect         domain.ActionEffect
-	arguments      []string
-	bootstrap      *profileBootstrap
-	consequences   []string
-	ingress        *resourceIngress
-	startupIntent  *resourceStartupIntent
-	exact          *resourceExecution
-	verify         *resourceExecution
-	skipHandler    bool
-	shutdownLocked bool
+	cli           *CLI
+	loaded        config.Loaded
+	definition    resource.Definition
+	verb          string
+	localAction   string
+	effect        domain.ActionEffect
+	arguments     []string
+	bootstrap     *profileBootstrap
+	consequences  []string
+	ingress       *resourceIngress
+	startupIntent *resourceStartupIntent
+	exact         *resourceExecution
+	verify        *resourceExecution
+	skipHandler   bool
 }
 
 type resourceSessionExitError struct{ code int }
@@ -536,27 +529,6 @@ func (runner *resourceApplyRunner) Run(
 	}
 	if err := validateResourceHandler(runner.definition.HandlerPath()); err != nil {
 		return result, "", err
-	}
-	if !runner.shutdownLocked {
-		unlock, err := runner.cli.lockResourceShutdownRepair(ctx)
-		if err != nil {
-			return result, "", err
-		}
-		defer unlock()
-		runner.shutdownLocked = true
-		defer func() { runner.shutdownLocked = false }()
-	}
-	if runner.cli.permits.resourceShutdown != nil {
-		defer func() {
-			if checkErr := runner.cli.finishResourceShutdownRepair(ctx); checkErr != nil {
-				result.Status = "error"
-				if err == nil {
-					err = checkErr
-				} else {
-					err = fmt.Errorf("%w; shutdown release binding changed: %v", err, checkErr)
-				}
-			}
-		}()
 	}
 	if runner.exact != nil {
 		return runner.runExactResource(ctx, request)

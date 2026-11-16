@@ -2,8 +2,8 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,17 +39,6 @@ const (
 	gateAfterScope
 )
 
-// gateRecovery is the bounded repair that may admit an invocation behind a blocked gate.
-type gateRecovery int
-
-const (
-	recoveryNone gateRecovery = iota
-	recoveryConfigApply
-	recoveryProfileInit
-	recoveryIntegrationRetry
-	recoveryResourceShutdown
-)
-
 // earlyPath is a dispatch that completes before the release gate.
 type earlyPath int
 
@@ -77,8 +66,6 @@ type invocationAdmission struct {
 	readOnly           bool
 	registrationRepair bool
 	gate               gatePolicy
-	recovery           gateRecovery
-	configApplyAll     bool // config apply --all-local, for recoveryConfigApply
 	// Fallback repairs tried, in order, when the gate remains blocked.
 	completedScalarAuthoring  bool
 	activationSelectionRepair bool
@@ -93,6 +80,8 @@ type invocationAdmission struct {
 	configSync    bool
 	syncCheck     bool
 	syncStatus    bool
+	// name is the core command name the release gate decides by.
+	name string
 }
 
 // handlerAdmission refines manifest policy for one core handler.
@@ -101,7 +90,6 @@ type handlerAdmission struct {
 	readOnly func(command.Definition, []string) bool
 	// readOnlyOnly makes readOnly the whole classification, ignoring help and manifest effect.
 	readOnlyOnly bool
-	recovery     gateRecovery
 	// ownsRecovery skips generic owner recovery; the handler performs its own.
 	ownsRecovery bool
 	// readOnlyRoute resolves remote canonical selectors without owner writes.
@@ -117,13 +105,11 @@ var handlerAdmissions = map[string]handlerAdmission{
 			_, check, status := configSyncInvocation(arguments)
 			return configReadOnlyInvocation(arguments) || check || status
 		},
-		recovery: recoveryConfigApply,
 	},
 	"@test-vms": {readOnly: argumentsOnly(func(arguments []string) bool {
 		return testVMStatusInvocation(arguments) || testVMLogsInvocation(arguments)
 	})},
 	"@integration": {
-		recovery:     recoveryIntegrationRetry,
 		readOnly:     argumentsOnly(integrationReadOnlyInvocation),
 		ownsRecovery: true, readOnlyRoute: true,
 	},
@@ -147,7 +133,6 @@ var handlerAdmissions = map[string]handlerAdmission{
 		invocation, err := parseSSHAgentArguments(arguments)
 		return err != nil || invocation.verb != "unlock" || invocation.help
 	})},
-	"@init":     {recovery: recoveryProfileInit},
 	"@teardown": {ownsRecovery: true, readOnlyRoute: true},
 	"@cleanup":  {ownsRecovery: true, readOnlyRoute: true},
 	"@project":  {readOnlyRoute: true},
@@ -217,20 +202,13 @@ func (cli *CLI) admission(
 		result.gate = gateRequired
 	}
 	if result.gate == gateRequired && core {
-		result.recovery = policy.recovery
-		if result.recovery == recoveryConfigApply {
-			apply, allLocal := configApplyInvocation(arguments)
-			if !apply {
-				result.recovery = recoveryNone
-			}
-			result.configApplyAll = allLocal
-		}
 		result.completedScalarAuthoring = definition.Handler == "@config"
 		result.activationSelectionRepair = true
-	} else if result.gate == gateRequired && profileResource {
-		result.recovery = recoveryResourceShutdown
 	}
 
+	if core {
+		result.name = definition.Name
+	}
 	result.teardownScope = core && definition.Handler == "@teardown" && !help
 	result.ownerRecovery = !result.readOnly && !result.registrationRepair && !(core && policy.ownsRecovery)
 	result.readOnlyRoute = result.readOnly || result.registrationRepair || (core && policy.readOnlyRoute)
@@ -286,16 +264,14 @@ func earlyDispatch(definition command.Definition, arguments []string, explicit, 
 // handlers read through their CLI. RPC operations and release-transition children copy
 // the CLI and clear the grants that do not apply to them.
 type recoveryPermits struct {
-	configApply      *configApplyRepairPermit
-	profileInit      *configApplyRepairPermit
-	integrationRetry *configApplyRepairPermit
-	teardown         *configApplyRepairPermit
-	resourceShutdown *resourceShutdownPermit
+	// configApply is installed by a bounded configuration repair inside its
+	// handler (config sync consumers, completed scalar authoring), never by admission.
+	configApply *configApplyRepairPermit
 }
 
 // admitReleaseGate consults the release mutation gate for an invocation that requires it.
-// A blocked gate may be replaced by the invocation's bounded recovery permit, or completed
-// by a fallback repair. When done is true, Run returns code without dispatch.
+// A non-ready gate admits by the selected yard, or a fallback repair completes the
+// invocation. When done is true, Run returns code without dispatch.
 func (cli *CLI) admitReleaseGate(
 	ctx context.Context,
 	yard string,
@@ -304,56 +280,25 @@ func (cli *CLI) admitReleaseGate(
 	arguments []string,
 	yes bool,
 ) (permits recoveryPermits, code int, done bool) {
-	outcome, gateInspection, gateErr := cli.inspectCommandMutationGate(ctx, yard, admission.handler, arguments)
+	request := gateRequest{yard: yard, handler: admission.handler, name: admission.name, arguments: arguments,
+		definition: resourceDefinition, profileResource: admission.handler == ""}
+	admitted, outcome, gateInspection, gate, scoped, gateErr := cli.admitGate(ctx, request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+		return cli.inspectCommandMutationGate(ctx, yard, admission.handler, arguments)
+	})
 	if gateErr != nil {
 		cli.errorf("inspect release transition: %v", gateErr)
 		return permits, 1, true
 	}
-	if outcome == nil || cli.ordinaryCommandAdmitted(admission.handler, outcome, gateInspection) {
-		return permits, 0, false
-	}
-	switch admission.recovery {
-	case recoveryConfigApply:
-		permit, err := cli.prepareConfigApplyRepair(ctx, yard, admission.configApplyAll, *outcome)
-		if err != nil {
-			cli.errorf("config apply: %v", err)
-			return permits, 1, true
-		}
-		permits.configApply = permit
-		if permit != nil {
-			outcome = nil
-		}
-	case recoveryProfileInit:
-		permit, remaining, err := cli.prepareInitAdmission(ctx, yard, arguments, *outcome)
-		permits.profileInit = permit
-		if err != nil {
-			cli.errorf("init release repair: %v", err)
-			return permits, 1, true
-		}
-		outcome = remaining
-	case recoveryIntegrationRetry:
-		permit, err := cli.prepareIntegrationRetryRepair(ctx, yard, arguments, *outcome)
-		if err != nil {
-			cli.errorf("integration retry release repair: %v", err)
-			return permits, 1, true
-		}
-		permits.integrationRetry = permit
-		if permit != nil {
-			outcome = nil
-		}
-	case recoveryResourceShutdown:
-		permit, err := cli.prepareResourceShutdownRepair(ctx, yard, resourceDefinition, arguments, *outcome)
-		if err != nil {
-			cli.errorf("resource shutdown recovery: %v", err)
-			return permits, 1, true
-		}
-		permits.resourceShutdown = permit
-		if permit != nil {
-			outcome = nil
-		}
-	}
 	if outcome == nil {
 		return permits, 0, false
+	}
+	if admitted != nil {
+		cli.gateAdmitted = admitted
+		return permits, 0, false
+	}
+	if scoped {
+		cli.writeYardGateRefusal(yard, gate)
+		return permits, 1, true
 	}
 	if admission.completedScalarAuthoring {
 		if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, arguments, yes, *outcome, gateInspection); handled {
@@ -369,37 +314,78 @@ func (cli *CLI) admitReleaseGate(
 	return permits, 1, true
 }
 
+// writeMutationGateRefusal renders a host-wide refusal as text: the release
+// state, one deduplicated cause and one next step. RPC keeps the structured
+// outcome; migrate --check reports every finding.
 func (cli *CLI) writeMutationGateRefusal(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) {
-	if err := json.NewEncoder(cli.options.Stderr).Encode(publicInspectedMutationGateOutcome(outcome, inspection)); err != nil {
-		cli.errorf("write release transition outcome: %v", err)
+	fmt.Fprint(cli.options.Stderr, mutationGateRefusalText(outcome, inspection))
+}
+
+func (cli *CLI) writeYardGateRefusal(yard string, gate yardGate) {
+	for _, line := range strings.Split(yardGateRefusal(yard, gate), "\n") {
+		cli.errorf("%s", line)
 	}
 }
 
+func mutationGateRefusalText(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) string {
+	public := publicInspectedMutationGateOutcome(outcome, inspection)
+	causes := []string{}
+	retry := public.Action
+	for _, blocker := range public.Blockers {
+		if !slices.Contains(causes, blocker.Message) {
+			causes = append(causes, blocker.Message)
+		}
+		if retry == "" {
+			retry = blocker.Retry
+		}
+	}
+	if len(causes) == 0 && public.Message != "" {
+		causes = append(causes, public.Message)
+	}
+	var text strings.Builder
+	transaction := ""
+	if public.Transaction != nil {
+		transaction = ", transaction " + string(*public.Transaction)
+	}
+	fmt.Fprintf(&text, "%s release %s (%s): active %s, target %s%s; this command is not run\n",
+		mutationGateRefusalPrefix, public.Status, public.Code, firstNonempty(string(public.Active), "unknown"), firstNonempty(string(public.Target), "unknown"), transaction)
+	if len(causes) != 0 {
+		cause := causes[0]
+		if len(causes) > 1 {
+			cause += fmt.Sprintf(" (and %d more; yard migrate --check)", len(causes)-1)
+		}
+		fmt.Fprintf(&text, "yard: cause: %s\n", cause)
+	}
+	if retry != "" {
+		fmt.Fprintf(&text, "yard: next: %s\n", retry)
+	}
+	return text.String()
+}
+
+// mutationGateRefusalPrefix opens every gate refusal on stderr.
+const mutationGateRefusalPrefix = "yard: release gate:"
+
 // admitTeardownGate consults the deferred teardown gate after scope selection.
-func (cli *CLI) admitTeardownGate(
-	ctx context.Context,
-	yard string,
-	loaded config.Loaded,
-	arguments []string,
-) (*configApplyRepairPermit, int, bool) {
-	outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
-	if gateErr != nil {
+func (cli *CLI) admitTeardownGate(ctx context.Context, yard string, arguments []string) (int, bool) {
+	request := gateRequest{yard: yard, handler: "@teardown", name: "teardown", arguments: arguments}
+	admitted, outcome, gateInspection, gate, scoped, gateErr := cli.admitGate(ctx, request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+		return cli.inspectMutationGateInspection(ctx, yard)
+	})
+	switch {
+	case gateErr != nil:
 		cli.errorf("inspect release transition: %v", gateErr)
-		return nil, 1, true
+		return 1, true
+	case outcome == nil:
+		return 0, false
+	case admitted != nil:
+		cli.gateAdmitted = admitted
+		return 0, false
+	case scoped:
+		cli.writeYardGateRefusal(yard, gate)
+		return 1, true
 	}
-	if outcome == nil || cli.ordinaryCommandAdmitted("@teardown", outcome, gateInspection) {
-		return nil, 0, false
-	}
-	permit, err := cli.prepareTeardownRepair(ctx, loaded, arguments, *outcome)
-	if err != nil {
-		cli.errorf("teardown release admission: %v", err)
-		return nil, 1, true
-	}
-	if permit == nil {
-		cli.writeMutationGateRefusal(outcome, gateInspection)
-		return nil, 1, true
-	}
-	return permit, 0, false
+	cli.writeMutationGateRefusal(outcome, gateInspection)
+	return 1, true
 }
 
 // admitTeardownInvocation is teardown pre-admission, before service selection: argument
@@ -443,9 +429,9 @@ func (cli *CLI) admitTeardownInvocation(ctx context.Context, definition command.
 
 // admitRPCOperation is the admission of operation.plan and, on its retained CLI,
 // operation.execute: hard-cleanup and developer-identity recovery, then the release gate,
-// which release recovery commands and recovered operations skip. Beyond ordinary admission,
-// a blocked gate admits only init: plan prepares its bounded profile-init permit, and
-// execute requires that retained permit to bind the same gate.
+// which release recovery commands and recovered operations skip. A non-ready gate admits
+// by the selected yard as for the direct CLI. Execute decides again; its admission is the
+// one of record, and a repair admission is rechecked once more after the owner barrier.
 func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string, execute bool) *rpc.Error {
 	yard := loaded.Context.YardName
 	cleanupRecovery := false
@@ -463,27 +449,19 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 	if definition.Handler == "@update" || definition.Handler == "@current-migration" || cleanupRecovery || identityRecovery {
 		return nil
 	}
-	outcome, gateInspection, err := cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
+	cli.gateAdmitted = nil
+	admitted, outcome, gateInspection, _, _, err := cli.admitGate(ctx, cli.rpcGateRequest(yard, definition, arguments), func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+		return cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
+	})
 	if err != nil {
 		return operationRPCError(rpcMutationGateFailedCode, err)
 	}
-	if outcome == nil || cli.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
+	if outcome == nil {
 		return nil
 	}
-	switch {
-	case definition.Handler != "@init":
-	case execute:
-		if cli.permits.profileInit != nil && sameConfigApplyGate(cli.permits.profileInit.gate, *outcome) {
-			return nil
-		}
-	default:
-		cli.permits.profileInit, outcome, err = cli.prepareInitAdmission(ctx, yard, arguments, *outcome)
-		if err != nil {
-			return operationRPCError(rpcMutationGateFailedCode, err)
-		}
-		if outcome == nil {
-			return nil
-		}
+	if admitted == nil {
+		return mutationGateRPCError(outcome, gateInspection)
 	}
-	return mutationGateRPCError(outcome, gateInspection)
+	cli.gateAdmitted = admitted
+	return nil
 }
