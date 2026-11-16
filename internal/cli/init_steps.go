@@ -173,8 +173,8 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 	}
 	if len(execution.refreshingRecords) != 0 {
 		appendStep("init.pending-records.refreshed", target, "no recorded yard-scoped runtime failure remains for this yard",
-			"the refreshed runtime is observed converged before its record is retired",
-			"retire each local pending activation record whose refreshed runtime converges: "+strings.Join(execution.refreshingRecords, " "), false, true)
+			"the runtime is observed converged afresh before its record is retired",
+			"retire each local pending activation record whose runtime is then observed converged: "+strings.Join(execution.refreshingRecords, " "), false, true)
 	}
 	// Hooks and final power may become observable only after approved stages.
 	// They stay in the original step set even if those stages converge meanwhile.

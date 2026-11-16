@@ -1463,6 +1463,9 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				t.Fatalf("the plan did not show the conditional record retirement of a refreshed runtime: %s", output.String())
 			}
 			if scenario == "incus-repair" {
+				if !strings.Contains(output.String(), "init.pending-records.refreshed") {
+					t.Fatalf("the plan did not show the conditional record retirement while Incus needs repair: %s", output.String())
+				}
 				if code != 0 || !slices.Contains(platform.applied, ports.ReconcileStageIncus) {
 					t.Fatalf("an unreachable Incus failed the init plan of a yard with a pending record: code=%d applied=%v output=%s", code, platform.applied, output.String())
 				}

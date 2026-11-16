@@ -668,13 +668,16 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 		}
 		execution.platform = runtime
 	}
-	// While the Incus stage needs repair no runtime can be observed; every
-	// record stays and is no init work of its own.
+	// While the Incus stage needs repair no runtime is observed now; every
+	// recorded owner is planned for conditional retirement, which observes it
+	// afresh after the repair.
 	if len(execution.plan.Steps) == 0 || execution.plan.Steps[0].Converged {
 		execution.pendingRecords, execution.refreshingRecords, err = execution.pendingRecordStates(ctx, cli)
-		if err != nil {
-			return nil, err
-		}
+	} else if loaded.Context.AccessKind == domain.AccessLocal {
+		execution.refreshingRecords, err = yardActivationPendingRecords(loaded.Context.Paths.ConfigHome, loaded.Context.YardName, cli.yardScopedRuntimeIDs())
+	}
+	if err != nil {
+		return nil, err
 	}
 	if execution.hooksOnly() {
 		execution.hooksApplicable, err = execution.projectHooksApplicable(ctx, cli, true)
