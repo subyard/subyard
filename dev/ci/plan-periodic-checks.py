@@ -54,6 +54,23 @@ def plan(root=ROOT):
     full = [line.split("\t", 1)[1].split() for line in lanes if line.startswith("full\t")]
     if len(full) != 1 or not full[0]:
         raise SystemExit("plan-periodic-checks: P0 full lane inventory is missing")
+    # Release acceptance runs these full lanes as their own catalog checks; here they keep their p0: lane run.
+    split = [line.split("\t", 1)[1].split() for line in lanes if line.startswith("split-covered\t")]
+    split_lanes = split[0] if len(split) == 1 else []
+    split_checks = {}
+    catalog = module.core_vm_catalog(root)
+    for entry in catalog:
+        command = entry["command"]
+        if command[:3] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane"] and len(command) == 4 and command[3] in split_lanes:
+            split_checks.setdefault(command[3], []).append("vm:" + entry["id"])
+    # The collector counts the split-covered full run only together with exactly these checks.
+    owners = [set(required) for name, required in module.core_vm_requirements(root).items()]
+    if (not split_lanes or not set(split_lanes) <= set(full[0])
+            or any(len(split_checks.get(lane, [])) != 1 for lane in split_lanes)
+            or owners != [{checks[0] for checks in split_checks.values()}]):
+        raise SystemExit("plan-periodic-checks: each P0 split lane needs exactly one release catalog check, "
+                         "all required by the split-covered full check")
+    include = [check for check in include if [check["id"]] not in split_checks.values()]
     # The workflow's pool gate already runs boundary. The cleanup lane verifies a previous
     # lane's leftovers, and a fresh runner has none.
     include += [{"id": "p0:" + lane, "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, *SLOT]}

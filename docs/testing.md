@@ -690,9 +690,11 @@ python3 dev/release-acceptance.py run --output .build/release-acceptance
 Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke, core and profile checks,
 or use `run --only p0-release-smoke --slots 1` for one check. `--slots` alone does not
 request VM execution. Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
-(full P0, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
+(full P0 and its split lanes, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
 and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
-selects one family. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
+selects one family. A catalog entry's optional `requires` lists sibling checks that must also pass
+whenever that check is requested or recorded; preparation records them in the receipt and the
+candidate's catalog must still match. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
 runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
 the next check; a refusal, interruption, timeout, cleanup failure or attempt without a lease stops the slot,
 so an unusable slot cannot turn later checks into failures. One collector owns a candidate's receipt
@@ -740,7 +742,13 @@ its original attempt logs/events and applicable PASS results from the same candi
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
-and ordered `lanes` entries containing `id` and runner `arguments`. Explicit `--with-vms` requests
+and ordered `lanes` entries containing `id` and runner `arguments`. A schema-version-1
+`acceptance-lanes.json` may declare nonempty `lanes`, a host-free `preflight` command array, or both.
+A preflight-only declaration preserves the unsplit profile acceptance check. Full collector runs
+execute declared preflights after successful local gates and collect results in profile-name order
+before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfinished `running`
+preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
+remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
 every runnable lane; `--only profile:NAME/ID` requests one lane. Available approved slots take the
 next queued check after their controller exits. A typed `blocked/capacity_memory` or
 `blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
@@ -1019,6 +1027,9 @@ receipt stays incomplete while other checks are unrequested. `accept` waits up t
 with `--ci-wait-seconds`, including `0`), counts verified successful jobs as `ci-hosted`, and runs only
 the remaining requested checks. Wrong SHA, failed jobs, unknown workflow policies, foreign candidates,
 stale attempts and missing cleanup refuse import. Publication rechecks GitHub execution facts.
+Nested-VM stages keep `vm:p0-full` local; its non-nested source-upgrade, power-systemd and
+legacy-continuation lanes are the hosted `vm:p0-source-upgrade`, `vm:p0-power-systemd` and
+`vm:p0-legacy-continuation` checks, which its `--split-covered` matrix does not repeat.
 See [release publication](reference/release-publication.md) for identity and policy rules. The local
 contracts are `tests/release-acceptance.sh`, `tests/release-publication.sh` and
 `tests/workflow-real-adapter-gate.sh`; they do not establish native hosted VM acceptance.
@@ -1100,7 +1111,8 @@ profile lanes, smoke check and core VM catalog (`dev/e2e/release-vm-checks.json`
 use the TSV's `direct`/`refusal` expectation (`anchor` and `hop` rows are direct) and the catalog's
 exact agent selection; uncatalogued direct rows run agent-free and refusal rows run the refusal
 scenario as `published:VERSION`. The catalog's full P0 check runs as its separate lanes,
-except `boundary` and `cleanup`. The `pool` job first installs the candidate's `test-vms` service on a
+except `boundary` and `cleanup`; a lane that the catalog also declares as its own check (the
+`split-covered` line of `--list-lanes`) keeps this `p0:` run instead of a duplicate `vm:` check. The `pool` job first installs the candidate's `test-vms` service on a
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
 becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it.
@@ -1234,10 +1246,16 @@ singleton. Commands and exact coverage are documented in
 | T1 | Affected host-free package, race, shell, CLI, frontend, or Rust checks. Typical target: at most 3 minutes; broader owning checks may take longer. |
 | T2 | The full host-free suite, `./tests/run.sh`. Veranda retains its separate host-free checks. |
 | T3 | Existing targeted E2E lanes or real-host checks for affected physical boundaries. |
-| T4 | A fresh full P0 of a frozen candidate: `dev/e2e/p0-acceptance.sh --slot N --lane full` with `SUBYARD_E2E_CANDIDATE_BUNDLE` and `SUBYARD_E2E_CANDIDATE_SHA256` from `dev/release-acceptance.py prepare`; release acceptance runs it as `vm:p0-full`. |
+| T4 | A fresh full P0 of a frozen candidate: `dev/e2e/p0-acceptance.sh --slot N --lane full` with `SUBYARD_E2E_CANDIDATE_BUNDLE` and `SUBYARD_E2E_CANDIDATE_SHA256` from `dev/release-acceptance.py prepare`; release acceptance runs it as `vm:p0-full` with `--split-covered` plus the separate `vm:p0-source-upgrade`, `vm:p0-power-systemd` and `vm:p0-legacy-continuation` checks. |
 
-A fresh full pass also satisfies its contained T3 lanes: smoke, boundary, transport, nested teardown,
-real Incus, release, source upgrade, power/systemd (including reboot verification), peer and cleanup.
+A fresh standalone full pass also satisfies its contained T3 lanes: smoke, boundary, transport, nested
+teardown, real Incus, release, source upgrade, power/systemd (including reboot verification), legacy
+continuation, peer and cleanup. In release acceptance, full P0 is a fresh `vm:p0-full --split-covered`
+plus its split lane checks (`vm:p0-source-upgrade`, `vm:p0-power-systemd`, `vm:p0-legacy-continuation`)
+of the same frozen candidate. The catalog's `requires` field on `p0-full` declares them: once
+`vm:p0-full` is requested or has any recorded result (run, imported or transferred), the aggregate is
+not `passed` until each of them passes. Each runs the full pass's final home, cache, capacity and
+boundary verification.
 Cold dependencies, profile-resource's bind fixture and Orca acceptance are not covered by that matrix.
 See the skill for when local, VM and publication checks apply; the tiers describe evidence scope,
 not a ladder that every change must climb.

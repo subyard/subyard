@@ -155,6 +155,28 @@ class ProfilePreflightTests(unittest.TestCase):
         ])
         self.assertEqual((invocation["state"], invocation["selected_status"]), ("finished", "failed"))
 
+    def test_no_vm_preflight_refusal_retains_acceptance_summary(self):
+        code, calls, stdout, _ = self.run_collector({"profile-preflight:alpha": 17}, with_vms=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [("verify", None), ("profile-preflight:alpha", None), ("profile-preflight:zeta", None)])
+        self.assertIn("INCOMPLETE: profile preflights refused: profile-preflight:alpha", stdout)
+        self.assertEqual([line for line in stdout.splitlines() if line.startswith("ACCEPTANCE ")], [
+            "ACCEPTANCE vm_optional_not_run=profile:plain status=not-run",
+            f"ACCEPTANCE reproducible=failed overall=failed receipt={self.root / 'receipt.json'}",
+        ])
+
+    def test_excluded_local_gate_names_why_no_vm_preflights_did_not_run(self):
+        code, calls, stdout, _ = self.run_collector({}, excluded=["verify"], with_vms=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [])
+        self.assertIn("INCOMPLETE: profile preflights await successful local gates; not passed: verify", stdout)
+        self.assertIn(f"ACCEPTANCE reproducible=incomplete overall=incomplete receipt={self.root / 'receipt.json'}", stdout)
+        invocation = json.loads(next((self.root / "runs").glob("*.json")).read_text())
+        self.assertEqual(invocation["not_started"], [
+            {"check": name, "reason": "prerequisite-stop"}
+            for name in ("profile-preflight:alpha", "profile-preflight:zeta")
+        ])
+
     def test_preflight_dependency_cannot_be_excluded_for_full_live_selection(self):
         with self.assertRaisesRegex(ValueError, "cannot be excluded"):
             self.run_collector({}, excluded=["profile-preflight:alpha"])

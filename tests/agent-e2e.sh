@@ -896,6 +896,17 @@ run_p0_cli_fixture --slot 1 --lane smoke --smoke-covered
   && grep -Fq -- '--smoke-covered applies only to --lane full' "$cli_output" \
   && [ ! -s "$cli_mktemp_log" ] \
   || fail 'P0 accepted --smoke-covered outside the full lane'
+run_p0_cli_fixture --slot 1 --lane source-upgrade --split-covered
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--split-covered applies only to --lane full' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'P0 accepted --split-covered outside the full lane'
+SUBYARD_E2E_CANDIDATE_BUNDLE="$TMP/standalone-bundle.tar.gz" SUBYARD_E2E_LOCAL_EVIDENCE='' \
+  run_p0_cli_fixture --slot 1 --lane full --split-covered
+[ "$P0_CLI_RC" = 2 ] \
+  && grep -Fq -- '--split-covered runs only under the release collector' "$cli_output" \
+  && [ ! -s "$cli_mktemp_log" ] \
+  || fail 'standalone full P0 accepted --split-covered without the release collector'
 
 run_p0_cli_fixture --slot
 [ "$P0_CLI_RC" = 2 ] \
@@ -1612,12 +1623,15 @@ while IFS= read -r lane; do
   case "$lane" in
     full$'\t'*) continue ;;
     producer-reboot$'\t'diagnostic-only) continue ;;
+    split-covered$'\t'*) continue ;;
   esac
   grep -Fq "\`$lane\`" <<<"$lane_table" \
     || fail "public P0 lane table omitted $lane"
 done <<<"$lane_inventory"
 grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power-systemd legacy-continuation newer-release release-smoke peer cleanup' <<<"$lane_inventory" \
   || fail 'continuous P0 gate lost a mandatory public-contract phase'
+grep -Fxq $'split-covered\tsource-upgrade power-systemd legacy-continuation' <<<"$lane_inventory" \
+  || fail 'P0 lane listing lost the lanes release acceptance runs as separate checks'
 
 (
   eval "$(sed -n '/^p0_monotonic_seconds() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
@@ -4400,7 +4414,7 @@ reboot_lane_dispatch="$(awk '
 # only the later phases that use it. The first failure status is preserved.
 p0_independent_functions="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" \
   record_phase_failure record_phase_blocked recover_phase_vms phase_blocker \
-  run_independent_phase finish_independent_phases full_final_verify)"
+  run_independent_phase finish_independent_phases full_final_verify capture_final_baseline)"
 full_dispatch_case() { # <name> <failing phases> <VMs whose recovery fails> <expected status> <expected output>
   local name="$1" failing="$2" dirty="$3" expected_rc="$4" expected="$5" log capacity rc
   log="$TMP/full-dispatch-$name.log"
@@ -4466,18 +4480,22 @@ grep -Fq 'full P0 failed=newer-release(48),release-smoke(47) blocked=' "$TMP/ful
 p0_matrix_functions="$p0_independent_functions
 $(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" start_runner_child stop_runner_children \
   arm_full_fixture run_full_aux_stage full_aux_cleanup full_aux_exit full_parallel_matrix \
-  record_full_matrix_results run_full_matrix_phase)
+  record_full_matrix_results run_full_matrix_phase assert_split_lanes)
 $(sed -n '/^full_aux_lane() (/,/^)$/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
+# The script's own VM2 chain and lane lists, so the passing case catches drift from full_aux_lane.
+p0_matrix_lists="$(sed -n '/^FULL_P0_LANES=/p;/^FULL_AUX_STAGES=/p;/^FULL_SPLIT_LANES=/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
+eval "$p0_matrix_lists"
 full_matrix_case() { # <name> <failing stages> <VMs whose recovery fails> <expected calls> <expected evidence> <expected failures>
   local name="$1" dir="$TMP/full-matrix-$1" rc
   mkdir "$dir"
   set +e
-  P0_FUNCTIONS="$p0_matrix_functions" FAILING=" $2 " DIRTY=" $3 " CALLS="$dir/calls" LOCAL_TEMP="$dir" bash -c '
+  P0_FUNCTIONS="$p0_matrix_functions" P0_MATRIX_LISTS="$p0_matrix_lists" FAILING=" $2 " DIRTY=" $3 " CALLS="$dir/calls" LOCAL_TEMP="$dir" \
+    P0_SPLIT_COVERED="${P0_SPLIT_COVERED:-0}" bash -c '
     set -euo pipefail
     FULL_MATRIX_TIMEOUT_SECONDS=120 RUNNER_STOP_GRACE_SECONDS=1 RUNNER_KILL_GRACE_SECONDS=1
-    P0_BUNDLE_HASH=fixture FULL_OWNER_DURATION=0 FULL_AUX_DURATION=0
+    P0_BUNDLE_HASH=fixture FULL_OWNER_DURATION=0 FULL_AUX_DURATION=0 FULL_SOURCE_ARM_FILE="" FULL_POWER_ARM_FILE=""
     P0_FAILED_PHASES=() P0_BLOCKED_PHASES=() P0_FAILURE_LOG_MODE=truncate P0_ACTIVE_PHASE_VMS="" P0_CHILD_PIDS=()
-    FULL_AUX_STAGES=(nested-teardown fixture-platform source-upgrade power-systemd legacy-continuation)
+    eval "$P0_MATRIX_LISTS"
     declare -A P0_DIRTY_VM=()
     eval "$P0_FUNCTIONS"
     step() { printf "%s\n" "$1" >> "$CALLS"; case "$FAILING" in *" $1 "*) return "$2" ;; esac; }
@@ -4505,7 +4523,7 @@ full_matrix_case() { # <name> <failing stages> <VMs whose recovery fails> <expec
     && [ "$(cat "$dir/evidence")" = "$5" ] && [ "$(sed '/^$/d' "$dir/failures")" = "$6" ] \
     || fail "full matrix $name: calls=$(cat "$dir/calls") evidence=$(cat "$dir/evidence") failures=$(cat "$dir/failures") log=$(cat "$dir/log")"
 }
-full_matrix_case passing '' '' $'nested-teardown\nfixture-platform\nsource-upgrade\npower-systemd\nlegacy-continuation' \
+full_matrix_case passing '' '' "$(printf '%s\n' "${FULL_AUX_STAGES[@]}")" \
   $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation passed 0\nparallel-matrix passed 0' ''
 [ ! -e "$TMP/full-matrix-passing/full-source-vm" ] && [ ! -e "$TMP/full-matrix-passing/full-power-vm" ] \
   || fail 'passing full matrix retained an armed fixture'
@@ -4541,9 +4559,79 @@ full_matrix_case unrecovered-last legacy-continuation 2 \
   $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation failed 34\nparallel-matrix failed 1' \
   'parallel-matrix/legacy-continuation:34'
 [ "$(cat "$TMP/full-matrix-unrecovered-last/dirty")" = 2 ] || fail 'unverified VM2 after the last stage did not block later phases'
+# Release acceptance runs the VM2 upgrade stages as separate checks: only nested teardown remains, unarmed.
+P0_SPLIT_COVERED=1 full_matrix_case split-covered '' '' 'nested-teardown' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix passed 0' ''
+[ -z "$(find "$TMP/full-matrix-split-covered" -name 'full-*-vm')" ] \
+  || fail 'split-covered full matrix armed an upgrade fixture it does not run'
+P0_SPLIT_COVERED=1 full_matrix_case split-covered-unrecovered nested-teardown 2 $'nested-teardown\nrecover-vm2' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown failed 31\nparallel-matrix failed 1' \
+  'parallel-matrix/nested-teardown:31'
+[ "$(cat "$TMP/full-matrix-split-covered-unrecovered/dirty")" = 2 ] \
+  || fail 'split-covered full matrix lost the unverified VM2 blocker'
+# The split lanes must be exactly the VM2 tail; a new VM2 stage or a renamed lane refuses.
+for split_mutation in none extra-stage missing-split foreign-lane; do
+  split_rc=0
+  (
+    eval "$p0_matrix_lists"
+    eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" assert_split_lanes)"
+    die() { exit 2; }
+    # shellcheck disable=SC2034 # read by the evaluated assert_split_lanes
+    case "$split_mutation" in
+      extra-stage) FULL_AUX_STAGES+=(future-stage) ;;
+      missing-split) FULL_SPLIT_LANES=(source-upgrade power-systemd) ;;
+      foreign-lane) FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd) ;;
+    esac
+    assert_split_lanes
+  ) || split_rc=$?
+  if [ "$split_mutation" = none ]; then expected_split_rc=0; else expected_split_rc=2; fi
+  [ "$split_rc" = "$expected_split_rc" ] || fail "split lane assertion mutation $split_mutation returned $split_rc"
+done
+# Each standalone split lane keeps the full run's monitors and final verification.
+(
+  run_phase() { printf '%s\n' "$*"; }
+  split_lane() { printf 'split_lane %s\n' "$*"; }
+  for split_entry in source-upgrade:source_upgrade_lane power-systemd:power_systemd_lane legacy-continuation:legacy_continuation_lane; do
+    split_name="${split_entry%%:*}"
+    dispatch="$(sed -n "s/^  $split_name) \(.*\) ;;\$/\1/p" "$ROOT/dev/e2e/p0-acceptance.sh")"
+    [ "$(eval "$dispatch")" = "split_lane $split_name ${split_entry#*:}" ] \
+      || fail "standalone $split_name lost its split-lane final verification"
+  done
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" split_lane)"
+  capture_final_baseline() { printf 'baseline\n'; }
+  start_capacity_monitors() { printf 'monitors\n'; }
+  find() { printf 'remove %s\n' "$1"; }
+  CAPACITY_LOG_DIR='capacity-logs'
+  [ "$(split_lane power-systemd power_systemd_lane)" = $'baseline\ncapacity-preflight run_vm 1 capacity-preflight\nmonitors\npower-systemd-platform run_vm 1 fixture-platform\npower-systemd power_systemd_lane 1\ncleanup cleanup_lane\nfinal-verify full_final_verify\nremove capacity-logs' ] \
+    || fail 'split lane changed its baseline, monitor, cleanup or final verification order'
+) || fail 'split lane final verification contract failed'
+# --split-covered is bound to the release collector's receipt for the same frozen bundle.
+split_evidence="$TMP/split-collector"
+install -d -m 0700 "$split_evidence"
+split_sha="$(printf '%064d' 7)"
+for split_binding in bound no-evidence other-bundle other-sha missing-check; do
+  jq -n --arg sha "$split_sha" --arg missing "$split_binding" \
+    '{candidate_bundle_sha256: $sha, checks: ({"vm:p0-full": {}, "vm:p0-source-upgrade": {}, "vm:p0-power-systemd": {}, "vm:p0-legacy-continuation": {}}
+      | if $missing == "missing-check" then del(.["vm:p0-power-systemd"]) else . end)}' > "$split_evidence/receipt.json"
+  split_rc=0
+  (
+    eval "$p0_matrix_lists"
+    eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" split_covered_by_collector)"
+    export SUBYARD_E2E_LOCAL_EVIDENCE="$split_evidence" SUBYARD_E2E_CANDIDATE_BUNDLE="$split_evidence/candidate-bundle.tar.gz" \
+      SUBYARD_E2E_CANDIDATE_SHA256="$split_sha"
+    case "$split_binding" in
+      no-evidence) SUBYARD_E2E_LOCAL_EVIDENCE='' ;;
+      other-bundle) SUBYARD_E2E_CANDIDATE_BUNDLE="$TMP/other-bundle.tar.gz" ;;
+      other-sha) SUBYARD_E2E_CANDIDATE_SHA256="$(printf '%064d' 8)" ;;
+    esac
+    split_covered_by_collector
+  ) || split_rc=$?
+  if [ "$split_binding" = bound ]; then [ "$split_rc" = 0 ]; else [ "$split_rc" != 0 ]; fi \
+    || fail "split-covered collector binding $split_binding returned $split_rc"
+done
 reboot_lane_function="$(sed -n '/^reboot_verify_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
 power_systemd_lane_body="$(sed -n '/^power_systemd_lane() {/,/^}/p' "$ROOT/dev/e2e/p0-acceptance.sh")"
-legacy_continuation_lane_function="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" legacy_continuation_lane)"
+legacy_continuation_lane_function="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" legacy_continuation_lane split_lane)"
 for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation:none reboot-verify:prepare reboot-verify:reboot reboot-verify:resume reboot-verify:finish legacy-continuation:prepare legacy-continuation:reboot legacy-continuation:resume legacy-continuation:finish; do
   reboot_failure="${reboot_scenario#*:}"
   reboot_fixture_log="$TMP/reboot-fixture-$reboot_scenario.log"
@@ -4597,6 +4685,11 @@ for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation
         [ "$fixture" = restored ] && [ "$POWER_SYSTEMD_STARTED" = 0 ] || exit 48
         printf "cleanup\n"
       }
+      capture_final_baseline() { :; }
+      start_capacity_monitors() { :; }
+      full_final_verify() { printf "final-verify\n"; }
+      find() { [ "$*" = "capacity-logs -depth -delete" ] || exit 49; }
+      CAPACITY_LOG_DIR=capacity-logs
       trap '\''printf "exit=%s armed=%s\n" "$?" "$POWER_SYSTEMD_STARTED"'\'' EXIT
       eval "$LEGACY_CONTINUATION_LANE_FUNCTION"
       eval "$REBOOT_LANE_FUNCTION"
@@ -4610,7 +4703,9 @@ for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation
       || fail 'standalone reboot lane did not prepare its own power fixture before rebooting'
     reboot_expected=$'capacity\nplatform\n'
     [ "${reboot_scenario%%:*}" != power-systemd ] || reboot_expected+=$'systemd255\nsystemd\n'
-    reboot_expected+=$'prepare\nreboot\nresume\nreboot\nfinish\ncleanup\nexit=0 armed=0'
+    reboot_expected+=$'prepare\nreboot\nresume\nreboot\nfinish\ncleanup\n'
+    [ "${reboot_scenario%%:*}" = reboot-verify ] || reboot_expected+=$'final-verify\n'
+    reboot_expected+='exit=0 armed=0'
     [ "$(cat "$reboot_fixture_log")" = "$reboot_expected" ] \
       || fail 'standalone reboot lane lost ordered preparation, two reboots, or runtime restoration'
   else

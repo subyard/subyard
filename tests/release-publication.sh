@@ -31,8 +31,15 @@ spec.loader.exec_module(m)
 
 
 def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
-            manifest_sources=False):
+            manifest_sources=False, split_catalog=False):
     root = directory / "source"
+    if split_catalog:
+        # A split-covered full check that requires one sibling check of the same candidate.
+        (root / "dev/e2e").mkdir(parents=True)
+        (root / "dev/e2e/release-vm-checks.json").write_text(json.dumps({"schema_version": 1, "checks": [
+            {"id": "p0-full", "command": ["bash", "dev/e2e/release-vm-check.sh", "--split-covered"],
+             "requires": ["p0-split"], "timeout_seconds": 60},
+            {"id": "p0-split", "command": ["bash", "dev/e2e/release-vm-check.sh"], "timeout_seconds": 60}]}))
     for name in ("dev/agent-e2e.sh", "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -558,6 +565,45 @@ class Contracts(unittest.TestCase):
             invalid["extra"] = "x" * m.ATTESTATION_BYTE_LIMIT
             with self.assertRaisesRegex(ValueError, "byte limit"):
                 m.validate_attestation(invalid, identity, root)
+
+    def split_candidate(self, directory, with_vms):
+        _, prepared, identity = fixture(directory, optional_vms=True, split_catalog=True)
+        output, root, _ = accepted(directory, prepared, identity, with_vms=with_vms)
+        return output, root, identity
+
+    def test_split_requirement_refuses_unrun_required_check_in_attestation(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output, root, identity = self.split_candidate(Path(temporary), with_vms=True)
+            document = m.attestation(output, identity)
+            m.validate_attestation(document, identity, root)
+            forged = copy.deepcopy(document)
+            forged["checks"]["vm:p0-split"] = m.a.OPTIONAL_VM_NOT_RUN.copy()
+            with self.assertRaisesRegex(ValueError, "vm:p0-split is required by vm:p0-full but was not run"):
+                m.validate_attestation(forged, identity, root)
+            # Without the passed owner, the same not-run check stays optional.
+            forged["checks"]["vm:p0-full"] = m.a.OPTIONAL_VM_NOT_RUN.copy()
+            m.validate_attestation(forged, identity, root)
+            with redirect_stdout(io.StringIO()) as printed:
+                m.report_unrun_checks({**document, "checks": {**document["checks"], "vm:p0-split": m.a.OPTIONAL_VM_NOT_RUN.copy()}}, root)
+            self.assertNotIn("vm:p0-split", printed.getvalue())
+
+    def test_split_requirement_survives_profile_deferral(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output, root, identity = self.split_candidate(Path(temporary), with_vms=False)
+            _, receipt = m.a.load_bound(output)
+            log = output / "vm-p0-full.log"
+            log.write_text("synthetic passing evidence fixture\n")
+            receipt["checks"]["vm:p0-full"] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
+                "command": m.a.command_identity(m.a.commands(root, identity["version"], receipt["profiles"])["vm:p0-full"], root),
+                "execution_environment": receipt["environment"],
+                "environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]}
+            receipt["checks"]["profile:sample"] = {"status": "pending"}
+            m.a.save(output, receipt)
+            self.assertEqual(receipt["result"], "incomplete")
+            with self.assertRaisesRegex(ValueError, "complete passing"):
+                m.attestation(output, identity)
+            with self.assertRaisesRegex(ValueError, "vm:p0-split is required by vm:p0-full but was not run"):
+                m.attestation(output, identity, (), ["profile:sample"], "Known fixture issue", "operator:fixture")
 
     def test_v5_preserves_legacy_transfer_and_profile_deferral(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

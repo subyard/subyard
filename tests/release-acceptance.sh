@@ -2270,7 +2270,9 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             checks = {name: ['true'] for name in ('verify', 'compatibility', 'p0-release-smoke', 'profile:sample')}
-            receipt = {'version':'test', 'profiles':{}, 'checks':{name:{'status':'pending'} for name in checks}}
+            receipt = {'version':'test', 'profiles':{}, 'external_obligations':{},
+                       'checks':{name:{'status':'pending'} for name in checks}}
+            m.update_result(receipt)  # save is patched; the stop summary reads the initial result.
             executed = []
             def execute(name, command, root, output, env, slot=None):
                 self.assertIsNone(slot, 'local failure reached VM allocation')
@@ -3252,10 +3254,202 @@ while True: time.sleep(1)
             self.assertEqual((output / "collector.lock").stat().st_mode & 0o777, 0o600)
 
 
+def split_catalog_checkout(directory):
+    """A synthetic catalog whose split-covered full check requires one sibling check."""
+    checkout = fixture_checkout(directory, optional_vms=True)
+    (checkout / "dev/e2e/release-vm-check.sh").write_text(
+        "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
+        "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
+    (checkout / m.CORE_VM_CATALOG).write_text(json.dumps({"schema_version": 1, "checks": [
+        {"id": "p0-full", "command": ["bash", "dev/e2e/release-vm-check.sh", "--split-covered"],
+         "requires": ["p0-split"], "timeout_seconds": 60},
+        {"id": "p0-split", "command": ["bash", "dev/e2e/release-vm-check.sh"], "timeout_seconds": 60}]}))
+    return checkout
+
+
+def run_live(output, root, receipt, name):
+    result = m.execute(name, m.commands(root, "test", receipt["profiles"])[name], root, output, m.clean_environment(), slot=1)
+    assert result["status"] == "passed", result
+    result["execution_environment"] = receipt["environment"]
+    result["original_attempt"] = m.completed_attempt(output, root, receipt, name, result)
+    receipt["checks"][name] = result
+    m.save(output, receipt)
+
+
+class FullSplitRequirement(unittest.TestCase):
+    def assert_requires_split(self, receipt, owner="vm:p0-full", split=("vm:p0-split",)):
+        # Every other check passes: the aggregate then depends only on the split checks.
+        forged = copy.deepcopy(receipt)
+        for name in forged["checks"]:
+            if name not in split:
+                forged["checks"][name] = {"status": "passed"}
+        m.update_result(forged)
+        self.assertEqual(forged["result"], "incomplete")
+        for name in split:
+            forged["checks"][name] = {"status": "passed"}
+        m.update_result(forged)
+        self.assertEqual(forged["result"], "passed")
+
+    def test_shipped_requirements_match_the_p0_split_lanes(self):
+        # Independent of the collector: the P0 script's split lanes and the raw catalog commands.
+        lanes = subprocess.check_output(["bash", "dev/e2e/p0-acceptance.sh", "--list-lanes"], cwd=root, text=True)
+        split = next(line.split("\t", 1)[1].split() for line in lanes.splitlines() if line.startswith("split-covered\t"))
+        catalog = json.loads((root / "dev/e2e/release-vm-checks.json").read_text())["checks"]
+        owner = [entry["id"] for entry in catalog if "--split-covered" in entry["command"]]
+        lane_checks = {entry["command"][3]: entry["id"] for entry in catalog
+                       if entry["command"][1:3] == ["dev/e2e/p0-acceptance.sh", "--lane"] and len(entry["command"]) == 4}
+        self.assertEqual(len(owner), 1)
+        self.assertEqual({name: set(required) for name, required in m.core_vm_requirements(root).items()},
+                         {"vm:" + owner[0]: {"vm:" + lane_checks[lane] for lane in split}})
+
+    def test_catalog_requirements_fail_loudly(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            checkout = split_catalog_checkout(Path(temporary))
+            path = checkout / m.CORE_VM_CATALOG
+            document = json.loads(path.read_text())
+            for change, message in ((lambda d: d["checks"][0].pop("requires"), "needs the checks that run its split lanes"),
+                                    (lambda d: d["checks"][0].update(requires=["absent"]), "distinct other catalog checks"),
+                                    (lambda d: d["checks"][1].update(requires=["p0-full"]), "only to a --split-covered")):
+                mutated = copy.deepcopy(document)
+                change(mutated)
+                path.write_text(json.dumps(mutated))
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    m.core_vm_requirements(checkout)
+
+    def test_aggregate_counts_requirements_of_any_recorded_owner_state(self):
+        base = {"version": "test", "external_obligations": {}, "requirements": {"vm:p0-full": ["vm:p0-split"]},
+                "checks": {"verify": {"status": "passed"}, "vm:p0-full": m.OPTIONAL_VM_NOT_RUN.copy(),
+                           "vm:p0-split": m.OPTIONAL_VM_NOT_RUN.copy()}}
+        for owner, expected in ((m.OPTIONAL_VM_NOT_RUN.copy(), "passed"), ({"status": "passed"}, "incomplete"),
+                                ({"status": "failed"}, "failed"), ({"status": "pending"}, "incomplete")):
+            receipt = copy.deepcopy(base)
+            receipt["checks"]["vm:p0-full"] = owner
+            m.update_result(receipt)
+            self.assertEqual(receipt["result"], expected, owner)
+        receipt = copy.deepcopy(base)
+        receipt["checks"]["vm:p0-full"] = {"status": "passed"}
+        del receipt["checks"]["vm:p0-split"]
+        m.update_result(receipt)
+        self.assertEqual(receipt["result"], "incomplete")
+
+    def test_prepare_records_and_binds_requirements(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            output = directory / "candidate"
+            _, receipt = prepare_fixture(split_catalog_checkout(directory), output)
+            self.assertEqual(receipt["requirements"], {"vm:p0-full": ["vm:p0-split"]})
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                report = m.preflight(output, only=["vm:p0-full"], with_vms=True)
+            rows = {item["id"]: item for item in report["checks"]}
+            self.assertTrue(rows["vm:p0-split"]["required"] and not rows["vm:p0-split"]["selected"])
+            # A recorded but unselected owner still makes its split check required.
+            recorded = copy.deepcopy(receipt)
+            recorded["checks"]["vm:p0-full"] = {"status": "pending"}
+            m.save(output, recorded)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                report = m.preflight(output)
+            rows = {item["id"]: item for item in report["checks"]}
+            self.assertTrue(rows["vm:p0-split"]["required"] and not rows["vm:p0-split"]["selected"])
+            forged = copy.deepcopy(receipt)
+            forged["requirements"] = {}
+            m.save(output, forged)
+            with self.assertRaisesRegex(ValueError, "check requirements changed"):
+                m.load_bound(output)
+
+    def test_summary_and_worktree_preflight_report_required_split_checks(self):
+        receipt = {"external_obligations": {}, "requirements": {"vm:p0-full": ["vm:p0-split"]},
+                   "reproducible_result": "incomplete", "result": "incomplete",
+                   "checks": {"vm:p0-full": {"status": "passed"}, "vm:p0-split": m.OPTIONAL_VM_NOT_RUN.copy(),
+                              "vm:other": m.OPTIONAL_VM_NOT_RUN.copy()}}
+        with redirect_stdout(io.StringIO()) as printed:
+            m.print_acceptance_summary(Path("/output"), receipt)
+        lines = printed.getvalue().splitlines()
+        self.assertIn("ACCEPTANCE vm_optional_not_run=vm:other status=not-run", lines)
+        self.assertIn("ACCEPTANCE vm_required=vm:p0-split status=not-run reason=required-by-vm:p0-full", lines)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            report = m.preflight(only=["vm:p0-full"], with_vms=True)
+        rows = {item["id"]: item for item in report["checks"]}
+        for name in m.core_vm_requirements(root)["vm:p0-full"]:
+            self.assertTrue(rows[name]["required"] and not rows[name]["selected"], name)
+
+    def test_run_only_full_requires_split_checks(self):
+        # Synthetic receipt: an otherwise passing candidate with optional VM checks not run.
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            checks = {name: ["true"] for name in ("verify", "p0-release-smoke", "vm:p0-full", "vm:p0-split")}
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "requirements": {"vm:p0-full": ["vm:p0-split"]},
+                       "checks": {name: {"status": "passed"} if name in ("verify", "p0-release-smoke")
+                                  else m.OPTIONAL_VM_NOT_RUN.copy() for name in checks}}
+            calls, stdout = [], io.StringIO()
+            def execute(name, *args, **kwargs):
+                calls.append(name)
+                return {"status": "passed", "exit_code": 0}
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "execution_environment", return_value={}), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                 patch.object(m, "execute", side_effect=execute), redirect_stdout(stdout):
+                self.assertEqual(m.run_checks(output, [1], ["vm:p0-full"], False), 1)
+            self.assertEqual(calls, ["vm:p0-full"])
+            self.assertEqual(receipt["checks"]["vm:p0-split"]["status"], "pending")
+            self.assertEqual(receipt["result"], "incomplete")
+            self.assertIn("overall=incomplete", stdout.getvalue())
+            invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+            self.assertEqual((invocation["selected"], invocation["requested"]), (["vm:p0-full"], ["vm:p0-full", "vm:p0-split"]))
+            self.assert_requires_split(receipt)
+
+    def test_imported_full_requires_split_checks(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = split_catalog_checkout(directory)
+            source, target = directory / "source", directory / "target"
+            source_root, old = prepare_fixture(checkout, source)
+            run_live(source, source_root, old, "vm:p0-full")
+            prepare_fixture(checkout, target)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.import_evidence(target, source, ["vm:p0-full"]), 0)
+            _, receipt = m.load_bound(target)
+            self.assertTrue(receipt["checks"]["vm:p0-full"]["inherited"])
+            self.assertEqual(receipt["checks"]["vm:p0-split"], m.OPTIONAL_VM_NOT_RUN)
+            self.assert_requires_split(receipt)
+
+    def test_transferred_full_requires_split_checks(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = split_catalog_checkout(directory)
+            source, target, name = directory / "source", directory / "target", "vm:p0-full"
+            source_root, old = prepare_fixture(checkout, source)
+            run_live(source, source_root, old, name)
+            (checkout / "reviewed-document.txt").write_text("Unrelated reviewed fixture documentation\n")
+            with patch.dict(os.environ, {"SUBYARD_FIXTURE_GENERATED_AT": "2026-01-02T00:00:00Z"}):
+                _, current = prepare_fixture(checkout, target)
+            request = {"schema_version": 1, "target": m.transfer_candidate(current), "checks": [
+                {"check": name, "source": str(source), "attempt": old["checks"][name]["original_attempt"], "review": None}]}
+            path = directory / "batch.json"
+            path.write_text(json.dumps(request))
+            with redirect_stdout(io.StringIO()):
+                review = m.transfer_batch(target, path, plan=True)["checks"][0]["review_draft"]
+            review["review"] = {"unchanged_scope": "Only synthetic documentation changed", "reason": "Reviewed fixture delta",
+                                "authorization_reference": "operator:batch-fixture"}
+            review_path = directory / "review.json"
+            review_path.write_text(json.dumps(review))
+            request["checks"][0]["review"] = {"path": str(review_path), "sha256": m.digest(review_path)}
+            path.write_text(json.dumps(request))
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(m.transfer_batch(target, path), 0)
+            _, receipt = m.load_bound(target)
+            self.assertTrue(receipt["checks"][name]["inherited"])
+            self.assertEqual(receipt["checks"]["vm:p0-split"], m.OPTIONAL_VM_NOT_RUN)
+            self.assert_requires_split(receipt)
+
+
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 22)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 25)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):

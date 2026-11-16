@@ -865,9 +865,13 @@ def validate_attestation(document, identity, root):
     if set(document["checks"]) != set(required):
         raise ValueError("acceptance attestation check inventory mismatch")
     optional_vms = a.vm_checks_optional(root)
+    # The ordinary-release gate even when failure acceptance or profile deferral bypasses the aggregate.
+    required_vms = a.required_vm_checks(document["checks"], a.core_vm_requirements(root))
     for name, command in required.items():
         result = document["checks"][name]
         if optional_vms and command and a.optional_vm_not_run(name, result):
+            if name in required_vms:
+                raise ValueError(f"{name} is required by {required_vms[name]} but was not run")
             continue
         if command is None or (name == "process-coverage" and result == {"status": "not-applicable"}):
             if result != {"status": "not-applicable"}:
@@ -1131,8 +1135,9 @@ def report_ci_checks(document):
         print("PUBLICATION ci_hosted=" + ",".join(hosted) + " execution=ci-hosted", flush=True)
 
 
-def report_unrun_checks(document):
-    optional_vms = [name for name, result in document["checks"].items() if a.optional_vm_not_run(name, result)]
+def report_unrun_checks(document, root):
+    required = a.required_vm_checks(document["checks"], a.core_vm_requirements(root))
+    optional_vms = [name for name, result in document["checks"].items() if a.optional_vm_unrequired(name, result, required)]
     if optional_vms:
         print("PUBLICATION vm_optional_not_run=" + ",".join(optional_vms) + " status=not-run", flush=True)
     optional = [name for name, result in document["external_obligations"].items() if result == {"status": "not-run"}]
@@ -1156,7 +1161,7 @@ def publish_remote(github, prepared, document, root):
     for name, result in document["checks"].items():
         if result.get("execution") == "ci-hosted":
             hosted_run_job(github, identity, name, result["ci_hosted"])
-    report_unrun_checks(document)
+    report_unrun_checks(document, root)
     report_inherited_checks(document)
     report_ci_checks(document)
     for name in document.get("operator_acceptances", []):
@@ -1832,7 +1837,7 @@ def main():
             validate_attestation(document, identity, output / "source")
         if level:
             print(f"PUBLICATION release_level={level['level']} reason={level['reason']}", flush=True)
-        report_unrun_checks(document)
+        report_unrun_checks(document, output / "source")
         report_inherited_checks(document)
         report_ci_checks(document)
         deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]

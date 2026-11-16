@@ -52,7 +52,7 @@ are counted from the successful preparation jobs and not repeated; `release-acce
 `--only NAME --rerun` replaces a counted result with a local run. A locally prepared candidate runs them.
 
 After downloading the preparation artifact, `prepare` also dispatches `release-vm.yml` asynchronously
-for the 24 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
+for the 25 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
 commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`; otherwise it reports the refusal and
 leaves those checks open. It downloads the exact preparation run/attempt artifact, uses the shared
 hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to
@@ -112,6 +112,9 @@ python3 dev/release-acceptance.py run --output .build/release-local \
 `--slots` alone does not request local VM execution. Checks without counted hosted evidence or an
 explicit local request remain `not-run` in acceptance and publication; they are not passing physical evidence. Once requested, incomplete or failed
 checks block the candidate, including after interruption or a later default invocation.
+A catalog check's `requires` (the split lanes of `vm:p0-full`) must also pass once that check is requested
+or recorded, imported or transferred; acceptance stays incomplete and publication refuses otherwise,
+including under failure acceptance or profile deferral.
 
 `prepare` pins a full lowercase 40-character commit SHA and stable version. Release preparation
 runs native ARM64 and host-free verification in parallel after input validation.

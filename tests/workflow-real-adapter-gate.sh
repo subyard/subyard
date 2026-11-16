@@ -332,5 +332,24 @@ baselines = [(fields[0], fields[3]) for line in (root / "dev/e2e/published-upgra
 assert {name for name in entries if name.startswith("published:")} == {
     "published:" + version for version, role in baselines
     if "vm:published-upgrade/" + (role if role in ("anchor", "hop") else version) not in commands}
+# Full P0 lanes that release acceptance runs as separate hosted checks keep one periodic lane run each.
+for lane in ("source-upgrade", "power-systemd", "legacy-continuation"):
+    assert "vm:p0-" + lane in a.CI_HOSTED_CHECKS and "vm:p0-" + lane not in entries
+    assert entries["p0:" + lane] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, "--slot", "1"]
+import subprocess
+from unittest.mock import patch
+lanes_command = ["bash", "dev/e2e/p0-acceptance.sh", "--list-lanes"]
+listing = subprocess.check_output(lanes_command, cwd=root, text=True)
+native_output = subprocess.check_output
+for broken in (listing.replace("split-covered\t", "split-covered\tboundary "),
+               "".join(line for line in listing.splitlines(True) if not line.startswith("split-covered\t"))):
+    with patch.object(p.subprocess, "check_output",
+                      side_effect=lambda command, *args, **kwargs: broken if command == lanes_command else native_output(command, *args, **kwargs)):
+        try:
+            p.plan(root)
+        except SystemExit as error:
+            assert "split lane" in str(error)
+        else:
+            raise AssertionError("periodic plan accepted a split lane without exactly one release catalog check")
 PY
 printf 'ok: hosted VM workflow binds exact candidates and periodic upgrades retain catalog coverage\n'
