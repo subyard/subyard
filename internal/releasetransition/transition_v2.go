@@ -2638,11 +2638,21 @@ func (transition *V2Transition) observeResume(
 			found := slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID && step.Resource == owner.ID() })
 			if !found {
 				actual, err := owner.Observe(ctx, transition.options.Releases, observation.links)
+				// A typed per-yard verdict of a yard without a journal row stays
+				// one blocker; the blockers already collected are kept.
+				if hasMigrationRefusal(err) {
+					observation.blockers = append(observation.blockers, nativeRefusalBlocker(owner.ID(), err, ctx))
+					continue
+				}
 				if err != nil {
 					return err
 				}
 				if !actual.Converged {
 					retired, err := transition.retiredNativeBinding(ctx, migration, owner.ID(), *journal)
+					if hasMigrationRefusal(err) {
+						observation.blockers = append(observation.blockers, nativeRefusalBlocker(owner.ID(), err, ctx))
+						continue
+					}
 					if err != nil {
 						return err
 					}
