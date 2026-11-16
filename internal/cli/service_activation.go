@@ -107,15 +107,9 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 							continue
 						}
 						if cli.unobservedReleaseYard(name, request.ConfigHome) {
-							// Its installed role is unread while it waits for its init.
-							// Withhold registration only when the yard may hold this
-							// service: its desired selection names it, or it finished
-							// an init before; otherwise it is not a candidate.
-							incus, _ := cli.statusPorts()
-							instance, readErr := incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
-							if service.Matches(loaded.Environment) || readErr != nil || instance.Config["user.subyard.ever_initialized"] == "true" {
-								findings = append(findings, fmt.Errorf("yard %s: not initialized; registration waits for yard -Y %s init", name, name))
-							}
+							// Its installed role is unread while it waits for its init;
+							// withhold registration rather than guess a candidate.
+							findings = append(findings, fmt.Errorf("yard %s: not initialized; registration waits for yard -Y %s init", name, name))
 							continue
 						}
 						if loaded.Context.AccessKind != domain.AccessLocal || !service.Matches(loaded.Environment) {

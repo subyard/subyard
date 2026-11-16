@@ -675,7 +675,7 @@ applied integration state as absent only if no integration inventory exists. Rel
 decides that a yard is left to its init from a context loaded without any guest read, before
 every part of context resolution that can read the guest. Host key tools and registered-yard
 migrations, which change only host state, are not deferred and use that desired context; service
-registration withholds itself while such a yard may hold the service. A working yard whose
+registration withholds itself while any such yard waits for its init. A working yard whose
 re-init failed keeps the strict checks. Boot rechecks each yard under the host network policy
 lock right before every power or runtime effect, holding only the lock for a stop so a policy
 failure never blocks it, and init marks an existing yard uninitialized under that lock. Boot's
