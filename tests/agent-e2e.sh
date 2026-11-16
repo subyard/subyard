@@ -5004,12 +5004,24 @@ power_rollback_fixture_contract() {
               history-change) printf 'foreign\n' > "$OPERATOR_HOME/.config/subyard/migrations/state.json" ;;
               native-change) jq '.config["security.privileged"]="true"' "$STATE_ROOT/instance" > "$STATE_ROOT/instance.next"; mv "$STATE_ROOT/instance.next" "$STATE_ROOT/instance" ;;
             esac
-            printf 'operator-action-required: code=rollback-incompatible\n' >&2
+            if [ "$scenario" = other-blocker ]; then
+              printf 'release transition operator-action-required: code=rollback-incompatible; the VM QEMU policy cannot roll back\n' >&2
+            else
+              printf 'release transition operator-action-required: code=rollback-incompatible; the retained release cannot safely accept the current migration ledger\n' >&2
+            fi
             return 1
           fi
           [ "$previous" = "$expected_compatible" ] || die 'wrong compatible rollback'
           [ "$scenario" != rollback-fail ] || return 45
           next="$expected_compatible" ;;
+        'update --version compatible --check --json')
+          jq -n --arg target "${expected_compatible#releases/}" --arg active "${current#releases/}" --arg scenario "$scenario" '
+            {plan:"plan-v1-fixture",blockers:[],outcome:{target:$target,active:$active}} |
+            if $scenario == "blocked-check" then .blockers=[{code:"blocked"}]
+            elif $scenario == "wrong-target" then .outcome.target="foreign"
+            elif $scenario == "no-plan" then del(.plan)
+            else . end'
+          return ;;
         'update --version compatible --yes')
           next="$expected_compatible"
           [ "$scenario" != compatible-noop ] || next="$current" ;;
@@ -5035,7 +5047,7 @@ power_rollback_fixture_contract() {
   )
 }
 for power_rollback_scenario in success unexpected-accept wrong-reason links-change ledger-change journal-change \
-  checkpoint-change history-change native-change compatible-noop \
+  checkpoint-change history-change native-change compatible-noop other-blocker blocked-check wrong-target no-plan \
   compatible-policy-change rollback-fail rollforward-fail continuation-success continuation-grant-change \
   continuation-mode-change continuation-rollback-fail continuation-rollforward-fail; do
   power_rollback_log="$TMP/power-rollback-$power_rollback_scenario.log"

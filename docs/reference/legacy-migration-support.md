@@ -47,7 +47,8 @@ refusal never authorizes deletion. There is no automatic update chain or new bri
 
 Retirement removes fresh V1 upgrades and journal imports, including unfinished source V1
 recovery. Source-version admission must refuse before changing the active installation and explain the full
-data removal and clean-install path. New rollback targets below v0.28.0 also refuse, but keep
+data removal and clean-install path. New rollback targets below the current migration epochs
+(v0.29.0 and older since `power-metadata` epoch 4) also refuse, but keep
 the current release active and offer no uninstall path. Refusal never deletes evidence. An installation that already completed its transition to supported V2 state
 remains supported, including necessary historical evidence and recovery bindings with legacy
 provenance. The source version, authoritative state and retained bindings must be assessed

@@ -418,7 +418,8 @@ Already accepted V2 history with legacy provenance remains readable. Process V1,
 supported V2 recovery and checkpoint-reader contracts remain independent; see the
 [support policy](legacy-migration-support.md).
 
-For releases above 0.28.x, direct update and new rollback targets require v0.28.0 or newer.
+For releases above 0.28.x, direct update requires v0.28.0 or newer; new rollback targets must be
+at the current migration epochs, which since `power-metadata` epoch 4 excludes v0.29.0 and older.
 Sources from v0.11.0 to below that anchor first run `yard update --version 0.28.1`, then
 `yard update` again. The hop is a separate fix release of the anchor series because published
 0.28.0 can stop with a running VM yard; installs completed on 0.28.0 stay accepted. The published

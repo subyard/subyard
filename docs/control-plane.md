@@ -1282,7 +1282,9 @@ Current code carries migrations only for direct updates from the anchor release
 older sources must first take the hop below. Direct updates, the installer over an existing installation and offline update require installed
 **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0 refuse before any change and print
 `yard update --version 0.28.1 && yard update`: the hop is the v0.28.1 fix release, because the
-anchor itself can stop with a running VM yard (see below). Rollback targets below v0.28.0 refuse. The
+anchor itself can stop with a running VM yard (see below). Rollback targets must be at the current
+migration epochs: since the NetworkManager device guard (`power-metadata` epoch 4) that excludes
+v0.29.0 and every older release. The
 [approved support boundary](reference/legacy-migration-support.md#approved-support-boundary)
 owns the complete rules, including unfinished transitions below the anchor.
 

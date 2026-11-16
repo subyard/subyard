@@ -1018,7 +1018,7 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | optional Periodic-only `p0:source-upgrade`; runnable on demand, outside full P0 and release acceptance |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-power-systemd` |
-| `reboot-verify` | VM1, real Incus and cached image preparation; published v0.28.0 upgrade, incompatible rollback refusal and authentic v0.28.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
+| `reboot-verify` | VM1, real Incus and cached image preparation; published-anchor upgrade, refused anchor rollback and a candidate-built compatible rollback/roll-forward fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full; release acceptance runs it as `vm:p0-legacy-continuation` |
 | `yard-maintenance` | VM1, frozen candidate and pinned published 0.21.3 → 0.28.1 hop; one container and two bounded VMs, one weighted | VM yards left pending by guest preflight refusals through the hop, upfront restart disclosure and decline of the candidate's current-release retry, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
 | `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
@@ -1512,15 +1512,16 @@ the inclusive direct-update anchor, remains the published upgrade baseline.
 Its verified update registers the local yard through the release journal, so repeated plain
 init and both reboots must retain that ownership without a legacy continuation grant. The
 first-release chains use staged candidate tooling to refuse their retained pre-anchor rollback
-without changing links or protected state. The power lane preserves checkpoint/history, ledger,
-native identity and retained V1 evidence through compatible anchor rollback and forward retry.
-Fresh sources below v0.11.0 remain refused; accepted completed V2 history and recovery
-retain their separate supported contracts.
-The guest verifies checksum-pinned official v0.28.0 assets, the newest published runtime at the
-candidate's migration epochs, and compiled activation capabilities before creating the cold
-legacy baseline. Public update checks must identify the exact unblocked target before installing
-v0.28.0, restoring the candidate, then performing a real compatible rollback and candidate
-roll-forward. Both passages preserve native policy and the registered ownership.
+without changing links or protected state. Published releases sit below the candidate's
+`power-metadata` epoch, so rollback to the anchor must be refused by the rollback-compatibility
+blocker without changing links, checkpoint/history, ledger, native identity or retained V1
+evidence. The same-epoch cycle uses a compatible release built from the candidate source: a
+public `update --check --json` names its exact target with a plan and no blockers, then the lane
+updates to it, returns to the candidate, performs a real rollback to it and rolls forward again.
+Both passages preserve native policy and the registered ownership. Fresh sources below v0.11.0
+remain refused; accepted completed V2 history and recovery retain their separate supported
+contracts. The guest verifies checksum-pinned official anchor assets before creating the cold
+legacy baseline.
 
 List or run one lane:
 

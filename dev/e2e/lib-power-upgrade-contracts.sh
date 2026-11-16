@@ -368,7 +368,9 @@ verify_legacy_rollback_refusal() {
   if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
     die "incompatible published v$OLD_VERSION rollback unexpectedly succeeded"
   fi
+  # The rollback-compatibility blocker (the device-guard epoch), not another rollback-incompatible one.
   grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
+    && grep -Fq 'the retained release cannot safely accept the current migration ledger' "$STATE_ROOT/predecessor-rollback.log" \
     || die 'published predecessor rollback failed for an unexpected reason'
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   index=0
@@ -389,16 +391,25 @@ verify_legacy_rollback_refusal() {
 # Rollback to the published anchor crosses the candidate's power-metadata epoch and is refused
 # without mutation; the rollback cycle then runs against a candidate-built compatible release.
 finish_candidate_flow() {
-  local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
+  local rollback_catalog rollback_ledger checked_target runtime="$OPERATOR_HOME/.subyard/runtime"
   load_release_targets
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   verify_legacy_rollback_refusal
   info "updating to the candidate-built compatible $COMPATIBLE_VERSION through verified public updates"
+  # A same-epoch target: the public inspection names it exactly, with a plan and no blockers.
+  operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --check --json \
+    > "$STATE_ROOT/compatible-check.json"
+  checked_target="$(jq -er --arg version "$COMPATIBLE_VERSION" --arg active "${CANDIDATE_RELEASE_TARGET#releases/}" '
+    select(.outcome.active == $active and (.outcome.target | type == "string" and startswith($version + "-")) and
+      (.plan | type == "string" and startswith("plan-v1-")) and ((.blockers // []) | length == 0)) | .outcome.target
+  ' "$STATE_ROOT/compatible-check.json")" \
+    || die 'public update inspection did not name the exact unblocked compatible target'
   operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --yes
   COMPATIBLE_RELEASE_TARGET="$(operator_env readlink "$runtime/current")"
-  [[ "$COMPATIBLE_RELEASE_TARGET" = releases/* ]] && [ "$COMPATIBLE_RELEASE_TARGET" != "$CANDIDATE_RELEASE_TARGET" ] \
-    || die 'the compatible update activated no separate release'
+  [ "$COMPATIBLE_RELEASE_TARGET" = "releases/$checked_target" ] \
+    || die "the compatible update activated $COMPATIBLE_RELEASE_TARGET, not the inspected releases/$checked_target"
   assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_state "$COMPATIBLE_VERSION" \
     "$runtime/$COMPATIBLE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
@@ -434,14 +445,3 @@ finish_candidate_flow() {
   ok 'refused anchor rollback, compatible rollback and candidate roll-forward retained upgrade ownership'
 }
 
-verify_compatible_capabilities() {
-  local response="$1"
-  [ "$(wc -c < "$response")" -le 65536 ] \
-    && jq -e 'keys == ["activationOwners", "activationReconciliationOwned", "schemaVersion"] and
-      .activationReconciliationOwned == false and .schemaVersion == 2 and
-      (.activationOwners | sort) == ["core-guest-runtime", "git-fetch-runtime", "github-runtime",
-        "host-power", "installation-runtime-v1", "key-tools-runtime", "openlit-runtime", "orca-runtime",
-        "telemetry-runtime", "test-vm-broker", "test-yard-route-consumers"]' \
-      "$response" >/dev/null \
-    || die 'published compatible runtime lacks exact activation capabilities'
-}
