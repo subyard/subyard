@@ -230,7 +230,7 @@ prepare)
   # The administrator keeps the uplink out of NetworkManager; a static profile with the uplink's own
   # address lets the released guard's takeover keep the VM reachable.
   sudo -n install -d -m 0755 "$conf_dir"
-  # The list also has a glob Subyard cannot decide for the NM-managed br0 (the docker* variant).
+  # The list also has a glob Subyard cannot decide for an NM-managed device (the docker* variant).
   printf '[keyfile]\nunmanaged-devices=interface-name:%s;interface-name:docker*\n' "$UP" | sudo -n tee "$admin_conf" >/dev/null
   # The fixture platform runs before NetworkManager exists, so it writes no guard.
   bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
@@ -239,11 +239,13 @@ prepare)
   uplink_admins 'NetworkManager install'
   sudo -n nmcli connection add type ethernet ifname "$UP" con-name e2e-uplink autoconnect yes \
     ipv4.method manual ipv4.addresses "$UP_ADDRESS" ipv4.gateway "$UP_GATEWAY" ipv6.method ignore >/dev/null
-  sudo -n nmcli connection add type bridge ifname br0 con-name e2e-br0 autoconnect yes bridge.stp no \
-    ipv4.method manual ipv4.addresses 198.19.0.1/24 ipv6.method ignore >/dev/null
+  # The released guard listed every host bridge, so the undecidable case needs a non-bridge
+  # device NetworkManager runs: a dummy.
+  sudo -n nmcli connection add type dummy ifname dum0 con-name e2e-dum0 autoconnect yes \
+    ipv4.method manual ipv4.addresses 198.19.5.1/24 ipv6.method ignore >/dev/null
   settle
-  [ "$(device_state br0)" = connected ] || die "NetworkManager did not run br0 ($(device_state br0))"
-  pass "NetworkManager leaves the administrator's uplink $UP unmanaged and runs br0"
+  [ "$(device_state dum0)" = connected ] || die "NetworkManager did not run dum0 ($(device_state dum0))"
+  pass "NetworkManager leaves the administrator's uplink $UP unmanaged and runs dum0"
 
   export STORAGE_PATH
   STORAGE_PATH="$(sudo -n /usr/bin/incus storage get default source)"
@@ -320,11 +322,11 @@ prepare)
   owner "$launcher" check >"$STATE/check.log" 2>&1 || true
   grep -Fq 'reboot the host once' "$STATE/check.log" || die 'yard check shows no reboot reminder'
   grep -Fq "cannot decide whether the administrator's unmanaged-devices list" "$STATE/update.log" \
-    && grep -Eq 'manages: ([^ ]+, )*br0' "$STATE/update.log" \
+    && grep -Eq 'manages: ([^ ]+, )*dum0' "$STATE/update.log" \
     && grep -Fq 'Do not reload or restart NetworkManager before the reboot' "$STATE/update.log" \
-    || die "the update gave no notice for the docker* list and the NM-managed br0; devices before the update: $before_table; now: $(nmcli -t -f DEVICE,TYPE,STATE device | tr '\n' ' '); list: $(effective_unmanaged)"
-  [ "$(device_state br0)" = connected ] || die 'the migration touched br0'
-  pass 'after the hand-back the update rewrote the guard without a reload or restart; status and check ask for a reboot; the docker* list gave a notice'
+    || die "the update gave no notice for the docker* list and the NM-managed dum0; devices before the update: $before_table; now: $(nmcli -t -f DEVICE,TYPE,STATE device | tr '\n' ' '); list: $(effective_unmanaged)"
+  [ "$(device_state dum0)" = connected ] || die 'the migration touched dum0'
+  pass 'after the hand-back the update rewrote the guard without a reload or restart; status and check ask for a reboot; the docker* list gave a notice for dum0'
 
   # Waiting for the reboot blocks nothing: the released section in memory covers the yard.
   write_yard_config images:debian/13/cloud
@@ -376,7 +378,7 @@ resume)
   done
   sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -q ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
   yard_devices_unmanaged 'yard restored at boot'
-  [ "$(device_state br0)" = connected ] || die 'the reboot lost br0'
+  [ "$(device_state dum0)" = connected ] || die 'the reboot lost dum0'
   pass 'the boot reconciler restored the running yard with its veth unmanaged'
   before_table="$(managedness)"
   yard init --yes >"$STATE/candidate-init.log" 2>&1 || die 'candidate init failed'
