@@ -153,7 +153,8 @@ coordinator, and do not create or close shared task files or start another full 
 - Every lease gets disposable VMs. Never infer progress or reuse fixtures from a released VM.
   Run remaining independent `--lane` segments with their own fresh setup. P0 rejects cross-lease
   `--resume`; reboot continuation is valid only within the same active lease.
-- Required full P0 gates remain one fresh run; targeted passes cannot substitute for them.
+- A required full P0 gate is one fresh `vm:p0-full` run plus its split checks on the same candidate;
+  targeted passes cannot substitute for them.
 
 ## Test execution and delegation
 
