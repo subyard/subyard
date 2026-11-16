@@ -784,13 +784,13 @@ daemon_line_check() { # <client> <daemon> -> rc
     assert_incus_daemon_line
   ) >/dev/null 2>&1
 }
-for accepted in 6.0.6 6.0.7 6.0.12; do
+for accepted in 6.0.7 6.0.12; do
   daemon_line_check 6.0.7 "$accepted" || fail "P0 refused the LTS 6.0 daemon $accepted"
 done
-for refused in 6.0.5 6.21 7.0.0 bogus; do
+for refused in 6.0.6 6.21 7.0.0 bogus; do
   ! daemon_line_check 6.0.7 "$refused" || fail "P0 accepted the unsupported daemon $refused"
 done
-! daemon_line_check 6.0.7 6.0.5 || fail 'P0 trusted the client version over a stale daemon'
+! daemon_line_check 6.0.7 6.0.6 || fail 'P0 trusted the client version over a stale daemon'
 grep -Fq 'peer-prepare-resume) peer_incus_ready; peer_prepare_finish ;;' "$ROOT/dev/e2e/p0-guest.sh" \
   || fail 'P0 peer group re-exec skips the daemon-line check'
 
