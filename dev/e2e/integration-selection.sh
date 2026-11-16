@@ -298,33 +298,15 @@ guest sh -eu -c '
   printf "%s\n" synthetic-history > "$1"
   python3 -c '\''import json; p="/home/dev/.claude/settings.json"; x=json.load(open(p)); x["permissions"]["defaultMode"]="plan"; open(p,"w").write(json.dumps(x))'\''
 ' subyard "$history_path"
-# Installed completed history permits only a source reduction here. The changed
-# owned field no longer proves Subyard's values: init releases its ownership and
-# leaves the document unchanged; the release repair must not restore it first.
-guest sha256sum /home/dev/.claude/settings.json /var/lib/subyard/integrations/inventory.json \
-  /home/dev/.claude/auth.json "$history_path" > "$STATE/drift-guest.before"
+# The changed owned field is this yard's drift, so the yard admits only its
+# repair commands, and integration disable is one of them: it releases the
+# ownership the changed field no longer proves and leaves the document
+# unchanged.
 guest sha256sum /home/dev/.claude/settings.json > "$STATE/drift-settings.before"
 guest sha256sum /home/dev/.claude/auth.json "$preserved_history" > "$STATE/retained-data.before"
-yard integration disable claude --yes > "$STATE/drift.log" 2>&1
-yard integration status --json > "$STATE/drift-status.json"
-jq -e '.selection.requested == [] and .selection.effective == [] and .observed == "pending" and
-  (.detail | contains("retiring claude releases ownership of /home/dev/.claude/settings.json: owned fields changed after Subyard applied them"))' \
-  "$STATE/drift-status.json" >/dev/null || die 'source-only disable did not preview the ownership release'
-guest sha256sum -c - < "$STATE/drift-guest.before" >/dev/null \
-  || die 'source-only disable changed guest settings, inventory, auth or history'
-before="$(sha256sum "$config")"
-if host_yard migrate --yes > "$STATE/drift-migrate.log" 2>&1; then die 'release repair restored changed owned fields'; fi
-host_yard migrate --check --json > "$STATE/drift-migrate.json"
-jq -e --arg retry "'yard' '-Y' '$YARD_NAME' 'init'" '.outcome.status == "operator-action-required" and
-  .outcome.code == "dependency-unavailable" and
-  any(.blockers[]?; .resource == "activation.materialized-config.pending-configuration" and .retry == $retry)' \
-  "$STATE/drift-migrate.json" >/dev/null || die 'release repair did not leave the ownership release to init'
-[ "$(sha256sum "$config")" = "$before" ] || die 'refused repair changed desired selection'
-guest sha256sum -c - < "$STATE/drift-guest.before" >/dev/null \
-  || die 'refused repair changed guest settings, inventory, auth or history'
-yard init --yes > "$STATE/drift-init.log" 2>&1 || { tail -n 20 "$STATE/drift-init.log" >&2; die 'init did not release changed owned fields'; }
-grep -Fq "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" "$STATE/drift-init.log" \
-  || die 'init did not report the ownership release'
+yard integration disable claude --yes > "$STATE/drift.log" 2>&1 || { tail -n 20 "$STATE/drift.log" >&2; die 'disable did not repair the yard'; }
+grep -Fq "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" "$STATE/drift.log" \
+  || die 'disable did not report the ownership release'
 guest sha256sum -c - < "$STATE/drift-settings.before" >/dev/null || die 'ownership release changed the document'
 host_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null || die 'released yard is not release-ready'
 yard integration status --json | jq -e '.observed == "ready" and .selection.requested == [] and .selection.effective == []' >/dev/null \
@@ -335,14 +317,17 @@ yard integration disable claude --yes
 guest sha256sum -c - < "$STATE/retained-data.before" >/dev/null \
   || die 'repeated disable changed auth or history'
 guest sha256sum -c - < "$STATE/drift-settings.before" >/dev/null || die 'repeated disable changed released fields'
-# Init first: a fresh enable owns the shipped fields again; after another change
-# and source-only disable, plain init releases them without a migrate.
+# Init first: a fresh enable owns the shipped fields again; after another change,
+# disable and plain init release them without a migrate.
 yard integration enable claude --yes
 guest python3 -c 'import json; p="/home/dev/.claude/settings.json"; x=json.load(open(p)); x["permissions"]["defaultMode"]="plan"; open(p,"w").write(json.dumps(x))'
 guest sha256sum /home/dev/.claude/settings.json > "$STATE/drift-settings.before"
 yard integration disable claude --yes > "$STATE/drift-disable-init-first.log" 2>&1
 yard init --yes > "$STATE/drift-init-first.log" 2>&1 || { tail -n 20 "$STATE/drift-init-first.log" >&2; die 'init-first release failed'; }
-grep -Fq "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" "$STATE/drift-init-first.log" \
+# The disable releases the ownership itself when the change already made the
+# yard one that needs repair; otherwise the following init does.
+cat "$STATE/drift-disable-init-first.log" "$STATE/drift-init-first.log" \
+  | grep -Fq "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" \
   || die 'init-first release was not reported'
 guest sha256sum -c - < "$STATE/drift-settings.before" >/dev/null || die 'init-first release changed the document'
 host_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null || die 'init-first released yard is not release-ready'
