@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -168,18 +170,26 @@ func (cli *CLI) yardScopedGate(outcome *releasetransition.Outcome, inspection *r
 	if index := slices.Index(gate.order, "default"); index > 0 {
 		gate.order = append([]string{"default"}, slices.Delete(gate.order, index, index+1)...)
 	}
+	// An aggregate blocker joins its yards' findings; each yard shows its own
+	// part. The text only groups messages for display, never for admission.
 	for _, blocker := range inspection.Blockers {
-		for _, yard := range gate.order {
-			if strings.HasPrefix(blocker.Message, "yard "+yard+":") || strings.HasPrefix(blocker.Message, "yard "+yard+",") ||
-				strings.HasPrefix(blocker.Message, "yard "+yard+" ") {
-				state := gate.yards[yard]
-				if !slices.Contains(state.messages, blocker.Message) {
-					state.messages = append(state.messages, blocker.Message)
+		parts := strings.Split(blocker.Message, "; yard ")
+		for index := 1; index < len(parts); index++ {
+			parts[index] = "yard " + parts[index]
+		}
+		for _, part := range parts {
+			for _, yard := range gate.order {
+				if strings.HasPrefix(part, "yard "+yard+":") || strings.HasPrefix(part, "yard "+yard+",") ||
+					strings.HasPrefix(part, "yard "+yard+" ") {
+					state := gate.yards[yard]
+					if !slices.Contains(state.messages, part) {
+						state.messages = append(state.messages, part)
+					}
+					if state.retry == "" && strings.HasSuffix(blocker.Resource, ".pending-configuration") {
+						state.retry = blocker.Retry
+					}
+					break
 				}
-				if state.retry == "" && strings.HasSuffix(blocker.Resource, ".pending-configuration") {
-					state.retry = blocker.Retry
-				}
-				break
 			}
 		}
 	}
@@ -349,8 +359,11 @@ type gateAdmission struct {
 	gate    *yardGate
 	repair  bool
 	// bounded marks the stop admitted over an unfinished activation.
-	bounded   bool
-	history   releaseHistoryToken
+	bounded bool
+	history releaseHistoryToken
+	// sources binds the running tooling to the installed source of the
+	// completed release, for every repair but the bounded stop.
+	sources   *repairSourceBinding
 	rechecked bool
 }
 
@@ -397,14 +410,19 @@ func (cli *CLI) admitGate(
 		return nil, outcome, inspection, gate, scoped, fmt.Errorf("%w: the release changed during admission; rerun the command", domain.ErrPlanStale)
 	}
 	admitted.history = *after
+	if !admitted.bounded {
+		if admitted.sources, err = cli.repairSources(ctx); err != nil {
+			return nil, outcome, inspection, gate, scoped, err
+		}
+	}
 	return admitted, outcome, inspection, gate, scoped, nil
 }
 
 // yardRepairEntry is one member of the repair set of a yard that is not
-// converged. A member with consent runs its effects after a confirmation
-// through preparedCommand.Execute, which rechecks its admission; one without
-// a confirmation step (start, shell) runs at once, so its gate admission is
-// its only check.
+// converged. A member with consent runs its effects through
+// preparedCommand.Execute, which rechecks its admission under the owner
+// barrier; shell has no prepared execution, so its gate admission is its only
+// check.
 type yardRepairEntry struct {
 	name    string
 	consent bool
@@ -421,7 +439,7 @@ var yardRepairSet = []yardRepairEntry{
 	{"init", true, func(_ *CLI, request gateRequest) bool { return initRepairMode(request, initReconcile) }},
 	{"init --reset", true, func(_ *CLI, request gateRequest) bool { return initRepairMode(request, initReset) }},
 	{"teardown", true, func(_ *CLI, request gateRequest) bool { return request.handler == "@teardown" }},
-	{"start", false, func(_ *CLI, request gateRequest) bool {
+	{"start", true, func(_ *CLI, request gateRequest) bool {
 		return request.handler == "@lifecycle" && request.name == "start"
 	}},
 	{"stop", true, func(_ *CLI, request gateRequest) bool {
@@ -429,7 +447,7 @@ var yardRepairSet = []yardRepairEntry{
 	}},
 	{"shell", false, func(_ *CLI, request gateRequest) bool { return request.handler == "@shell" }},
 	{"config", true, func(cli *CLI, request gateRequest) bool {
-		return request.handler == "@config" && configExactInvocation(config.Loaded{Catalog: cli.catalog}, request.arguments)
+		return request.handler == "@config" && configRepairInvocation(cli, request.arguments)
 	}},
 	{"profile disable", true, func(_ *CLI, request gateRequest) bool {
 		return request.handler == "@profile" && firstVerb(request.arguments) == "disable"
@@ -442,6 +460,24 @@ var yardRepairSet = []yardRepairEntry{
 		return request.profileResource && err == nil && request.definition.Shutdown != "" && invocation.verb == request.definition.Shutdown &&
 			cli.resourceExactInvocation(request.definition, request.arguments)
 	}},
+}
+
+// configRepairInvocation is a configuration verb that runs as a prepared
+// command: exact apply and sync, and local set, unset, import and edit. Git
+// authoring and the other verbs stay refused on a yard that needs repair.
+func configRepairInvocation(cli *CLI, arguments []string) bool {
+	if configExactInvocation(config.Loaded{Catalog: cli.catalog}, arguments) {
+		return true
+	}
+	arguments = configArguments(arguments)
+	if len(arguments) == 0 || commandHelpRequested(arguments) || !slices.Contains([]string{"set", "unset", "import", "edit"}, arguments[0]) {
+		return false
+	}
+	requests, err := parseConfigAuthoringRequests(arguments[0], arguments[1:], false)
+	if err != nil || len(requests) != 1 {
+		return false
+	}
+	return !requests[0].git
 }
 
 func initRepairMode(request gateRequest, mode initMode) bool {
@@ -512,6 +548,62 @@ func (cli *CLI) readReleaseHistory() (*releaseHistoryToken, error) {
 		checkpoint: string(checkpoint.Fingerprint), checkpointed: checkpoint.Exists}, nil
 }
 
+// repairSourceBinding is the installed source authority and tooling a repair
+// runs with: the running CLI is the published runtime of the completed
+// journal's target, and its source proof names that journal's transaction and
+// artifact. A development build or another staged or retained runtime with
+// the same registry and catalog is not that source.
+type repairSourceBinding struct{ source, tooling string }
+
+func (cli *CLI) repairSources(ctx context.Context) (*repairSourceBinding, error) {
+	refused := fmt.Errorf("%w: a repair behind the release gate runs only with the installed release's own tooling; run it with the installed yard command", domain.ErrPlanStale)
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return nil, refused
+	}
+	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
+	if err != nil {
+		return nil, refused
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return nil, refused
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Checkpoint != releasetransition.JournalComplete {
+		return nil, refused
+	}
+	bind := cli.sourceBinding
+	if bind == nil {
+		bind = cli.completedSourceBindings
+	}
+	source, tooling, err := bind(ctx, journal)
+	if err != nil {
+		return nil, refused
+	}
+	return &repairSourceBinding{source: source, tooling: tooling}, nil
+}
+
+// completedSourceBindings binds the current source authority and tooling to a completed journal.
+func (cli *CLI) completedSourceBindings(ctx context.Context, journal releasetransition.JournalRecord) (string, string, error) {
+	options, available, err := cli.mutationGateReleaseOptions()
+	if err != nil || !available {
+		return "", "", domain.ErrPlanStale
+	}
+	inspector := releaseruntime.NewSourceInspector(cli.options.RepositoryRoot, cli.options.Stderr)
+	defer inspector.Close()
+	dir, tooling, err := inspector.InspectSourceTooling(ctx, options.RuntimeRoot, cli.options.RepositoryRoot)
+	if err != nil || dir != filepath.Join(options.RuntimeRoot, "releases", string(journal.Goal.Target), "config") {
+		return "", "", domain.ErrPlanStale
+	}
+	proof, err := cli.inspectConfigSourceAdmission(ctx, inspector)
+	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete ||
+		proof.Metadata.Journal.Transaction != journal.Transaction || proof.Metadata.Journal.ArtifactDigest != journal.ArtifactDigest {
+		return "", "", domain.ErrPlanStale
+	}
+	return proof.Binding, tooling, nil
+}
+
 // recheck is the one post-consent check of a repair admission. It runs in
 // preparedCommand.Execute right after the owner barrier is acquired, which
 // every release journal writer holds: the history must be the one admitted,
@@ -530,6 +622,12 @@ func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
 	}
 	if current == nil || *current != admission.history {
 		return fmt.Errorf("%w: the release changed after confirmation; rerun the command", domain.ErrPlanStale)
+	}
+	if admission.sources != nil {
+		sources, err := cli.repairSources(ctx)
+		if err != nil || *sources != *admission.sources {
+			return fmt.Errorf("%w: the installed release source changed after confirmation; rerun the command", domain.ErrPlanStale)
+		}
 	}
 	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, admission.request.yard)
 	if err != nil {
@@ -577,6 +675,38 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 		}
 	}
 	return nil
+}
+
+// configConsumerAdmission admits the refresh a published configuration change
+// needs on its own target yards when the gate is yard-scoped: each target is
+// open or limited to repair only by drift, which this refresh repairs, and
+// other yards' findings wait for their own repair. The admission applies in
+// this process under the owner barrier the publishing command holds. It is
+// nil when the gate is not yard-scoped or a target has another finding.
+func (cli *CLI) configConsumerAdmission(ctx context.Context, yard string, names []string) (*gateAdmission, error) {
+	if cli.ownerMutationLock == nil {
+		return nil, nil
+	}
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
+	if err != nil || outcome == nil {
+		return nil, err
+	}
+	gate, ok := cli.yardScopedGate(outcome, inspection)
+	if !ok {
+		return nil, nil
+	}
+	for _, name := range names {
+		state := gate.state(name)
+		if state.failed || state.config || state.unreachable || state.pending {
+			return nil, nil
+		}
+	}
+	history, err := cli.readReleaseHistory()
+	if err != nil || history == nil {
+		return nil, err
+	}
+	return &gateAdmission{request: gateRequest{yard: yard, handler: "@config", name: "config"}, gate: &gate,
+		repair: true, history: *history, rechecked: true}, nil
 }
 
 // guardEffects refuses an adapter while a repair admission has not passed its

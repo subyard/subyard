@@ -104,6 +104,20 @@ func (consumers *configSyncConsumers) apply(ctx context.Context, cli *CLI, loade
 		if err != nil {
 			return err
 		}
+		// Behind a yard-scoped gate the refresh follows that gate: other yards'
+		// findings do not hold back these targets.
+		if outcome != nil {
+			admission, err := cli.configConsumerAdmission(ctx, loaded.Context.YardName, names)
+			if err != nil {
+				return err
+			}
+			if admission != nil {
+				previous := cli.gateAdmitted
+				cli.gateAdmitted = admission
+				defer func() { cli.gateAdmitted = previous }()
+				outcome = nil
+			}
+		}
 		if outcome != nil {
 			permit, err := cli.prepareActivationRepair(ctx, loaded.Context.YardName, false, *outcome, activationRepairMode{requireDrift: true, selectedNames: names})
 			if err != nil {

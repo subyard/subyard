@@ -94,6 +94,10 @@ type repairHarness struct {
 	platform *effectPlatform
 	// configs are the yards' desired configuration files before any run.
 	configs map[string]string
+	// sourceDrift changes the bound installed source, as another runtime would.
+	sourceDrift string
+	// admittedSignal, when set, is told when a repair admission binds its source.
+	admittedSignal func()
 }
 
 func newRepairHarness(t *testing.T) *repairHarness {
@@ -214,8 +218,21 @@ func (harness *repairHarness) runWith(t *testing.T, environment []string, during
 		t.Fatal(err)
 	}
 	program.nestedCommand = func(context.Context, []string, io.Writer) int { return 0 }
+	program.sourceBinding = harness.bindSources
 	code := program.Run(context.Background())
 	return code, stdout.String() + stderr.String()
+}
+
+// bindSources stands in for the installed-source proof, which a fixture CLI
+// outside runtime/releases cannot give; TestRepairNeedsTheInstalledReleaseTooling
+// runs the real one.
+func (harness *repairHarness) bindSources(context.Context, releasetransition.JournalRecord) (string, string, error) {
+	if signal := harness.admittedSignal; signal != nil {
+		signal() // the admission binds the source as its last step
+	}
+	harness.platform.mu.Lock()
+	defer harness.platform.mu.Unlock()
+	return "installed-source" + harness.sourceDrift, "installed-tooling", nil
 }
 
 // flippedJournal is the journal of another transaction, as a migrate in
@@ -283,6 +300,9 @@ func (harness *repairHarness) installIncusCLI(t *testing.T) (string, []string) {
 
 type repairRow struct {
 	arguments []string
+	// underBarrier flips the journal from a writer holding the owner barrier
+	// while the admitted command waits for it, for a command without a prompt.
+	underBarrier bool
 	// prepare adapts the harness and returns extra effects and environment.
 	prepare func(*testing.T, *repairHarness) (func() int, []string)
 }
@@ -299,7 +319,7 @@ func TestRepairSetTable(t *testing.T) {
 			harness.scenario.fixture.cli.options.Incus.(*testkit.Incus).Reconcile.InstanceFound = true
 			return nil, nil
 		}},
-		"start": {arguments: []string{"-Y", "named", "start"}, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
+		"start": {arguments: []string{"-Y", "named", "start"}, underBarrier: true, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
 			harness.scenario.fixture.setPower(t, "named", "Stopped")
 			return nil, nil
 		}},
@@ -354,7 +374,14 @@ func TestRepairSetTable(t *testing.T) {
 			harness, effects, environment := setup(t)
 			flipped := harness.flippedJournal(t)
 			before := effects()
-			code, output := harness.runWith(t, environment, func() { testkit.WriteFile(t, harness.scenario.fixture.journalPath, flipped, 0o600) }, row.arguments...)
+			write := func() { testkit.WriteFile(t, harness.scenario.fixture.journalPath, flipped, 0o600) }
+			var code int
+			var output string
+			if row.underBarrier {
+				code, output = harness.runWhileWriterHoldsBarrier(t, environment, write, row.arguments...)
+			} else {
+				code, output = harness.runWith(t, environment, write, row.arguments...)
+			}
 			if code == 0 || !strings.Contains(output, "the release changed after confirmation") || effects() != before {
 				t.Fatalf("flipped history: code=%d effects %d->%d\n%s", code, before, effects(), output)
 			}
@@ -906,6 +933,12 @@ func TestObservationMatrixAcrossYardScopedOwners(t *testing.T) {
 					baseline = append(baseline, finding)
 				}
 			}
+			// The core guest runtime has no installed guest helpers in this
+			// fixture, so it observes nothing in default; it runs the profile
+			// runtime owner's Observe, whose row proves the sibling finding.
+			if len(baseline) == 0 && owner != "core-guest-runtime" {
+				t.Fatalf("%s observes no finding in default, so the matrix proves nothing", owner)
+			}
 			for _, kind := range []string{"observe-error", "invalid-config", "unreachable-agent"} {
 				findings := observe(t, owner, kind)
 				for _, finding := range baseline {
@@ -957,6 +990,7 @@ func TestRPCRepairIsRecheckedAtExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	program.sourceBinding = harness.bindSources
 	loaded, err := program.loadContext("named")
 	if err != nil {
 		t.Fatal(err)
@@ -985,5 +1019,145 @@ func TestRPCRepairIsRecheckedAtExecute(t *testing.T) {
 	plan("current")
 	if err := execute("current"); err != nil || harness.effects() == 0 {
 		t.Fatalf("RPC repair: %v effects=%d", err, harness.effects())
+	}
+}
+
+// A repair runs only with the installed release's own tooling: the real
+// source proof refuses this fixture CLI, which is not the published runtime
+// of the journal's target, before any effect. A bound source that changes
+// while the operator confirms refuses the repair under the owner barrier.
+func TestRepairNeedsTheInstalledReleaseTooling(t *testing.T) {
+	harness := newRepairHarness(t)
+	for _, arguments := range [][]string{{"-Y", "named", "init"}, {"-Y", "named", "teardown"}, {"-Y", "named", "stop"}} {
+		var stdout, stderr bytes.Buffer
+		options := harness.scenario.fixture.cli.options
+		options.Arguments, options.Stdout, options.Stderr = arguments, &stdout, &stderr
+		options.Prompt = confirmingPrompt{during: func() { t.Errorf("%v reached consent", arguments) }}
+		options.AdapterRunner, options.InitPlatform, options.NetworkPolicy = harness.adapter, harness.platform, allowTestNetworkPolicy()
+		program, err := New(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "runs only with the installed release's own tooling") ||
+			harness.effects() != 0 {
+			t.Fatalf("%v outside the installed runtime: code=%d effects=%d\n%s%s", arguments, code, harness.effects(), stdout.String(), stderr.String())
+		}
+	}
+	code, output := harness.run(t, func() {
+		harness.platform.mu.Lock()
+		harness.sourceDrift = "-other-runtime"
+		harness.platform.mu.Unlock()
+	}, "-Y", "named", "stop")
+	if code == 0 || !strings.Contains(output, "the installed release source changed after confirmation") || harness.effects() != 0 {
+		t.Fatalf("stop over a changed source: code=%d effects=%d\n%s", code, harness.effects(), output)
+	}
+}
+
+// runWhileWriterHoldsBarrier runs an admitted command while a journal writer
+// holds the owner barrier: once the command is admitted, the writer writes and
+// releases the barrier the command waits for in Execute.
+func (harness *repairHarness) runWhileWriterHoldsBarrier(t *testing.T, environment []string, write func(), arguments ...string) (int, string) {
+	t.Helper()
+	_, unlock, err := uninstall.OwnerLock(context.Background(), harness.scenario.fixture.cli.env["SUBYARD_HOME"], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admitted := make(chan struct{})
+	var once sync.Once
+	harness.admittedSignal = func() { once.Do(func() { close(admitted) }) }
+	defer func() { harness.admittedSignal = nil }()
+	go func() {
+		<-admitted
+		time.Sleep(200 * time.Millisecond)
+		write()
+		unlock()
+	}()
+	return harness.runWith(t, environment, func() {}, arguments...)
+}
+
+// Local file settings are repaired through their prepared command on a yard
+// that needs repair: import reaches its file and is rechecked after consent.
+// Git authoring stays refused and names the manual repair.
+func TestLocalConfigFileRepairOnARepairOnlyYard(t *testing.T) {
+	arguments := func(source string) []string {
+		return []string{"-Y", "named", "config", "import", "AGENT_codex_RULES", source, "--scope", "yard", "--local"}
+	}
+	source := filepath.Join(testkit.TempDir(t), "rules")
+	testkit.WriteFile(t, source, []byte("repaired_rule()\n"), 0o600)
+	harness := newRepairHarness(t)
+	// The shipped default of the rules file lives in the package tree, which
+	// gives it a persistent mapping.
+	root := harness.scenario.fixture.cli.options.RepositoryRoot
+	if err := os.MkdirAll(filepath.Join(root, "config/agents/codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/agents/codex/repo.rules"), []byte("allow_rule()\n"), 0o600)
+	agents := filepath.Join(root, "config/agents.env")
+	testkit.WriteFile(t, agents, []byte(strings.Replace(string(mustReadConfigFixture(t, agents)), "AGENT_codex_RULES="+filepath.Join(root, "repo.rules"),
+		"AGENT_codex_RULES="+filepath.Join(root, "config/agents/codex/repo.rules"), 1)), 0o600)
+	target := filepath.Join(harness.scenario.request.ConfigHome, "yards", "named", "overrides", "agents")
+	flipped := harness.flippedJournal(t)
+	journal := mustReadConfigFixture(t, harness.scenario.fixture.journalPath)
+	code, output := harness.run(t, func() { testkit.WriteFile(t, harness.scenario.fixture.journalPath, flipped, 0o600) }, arguments(source)...)
+	if code == 0 || !strings.Contains(output, "the release changed after confirmation") || len(filesUnder(t, target)) != 0 {
+		t.Fatalf("import over a changed journal: code=%d files=%v\n%s", code, filesUnder(t, target), output)
+	}
+	testkit.WriteFile(t, harness.scenario.fixture.journalPath, journal, 0o600)
+	code, output = harness.run(t, func() {}, arguments(source)...)
+	if code != 0 || len(filesUnder(t, target)) == 0 {
+		t.Fatalf("local import on a repair-only yard: code=%d\n%s", code, output)
+	}
+	code, output = harness.run(t, func() { t.Error("git authoring reached consent") }, "-Y", "named", "config", "import", "AGENT_codex_RULES", source, "--scope", "yard", "--git")
+	if code == 0 || !strings.Contains(output, "release gate: yard named needs repair") || !strings.Contains(output, "yard -Y named config validate") {
+		t.Fatalf("git import on a repair-only yard: code=%d\n%s", code, output)
+	}
+}
+
+func filesUnder(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && !entry.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files
+}
+
+// After config sync publishes a change for a healthy yard beside one that
+// needs repair, the refresh of that yard follows the yard-scoped gate: its own
+// drift is what the refresh repairs, in this process, while the broken yard and
+// any host cause keep it refused.
+func TestConfigSyncConsumersFollowTheYardScopedGate(t *testing.T) {
+	harness := newRepairHarnessWith(t, func(scenario yardFailureScenario, _ string) {
+		observeFailing(t, scenario, "named", true)
+		// The published change leaves the healthy yard drifted.
+		testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("d", 64)), 0o600)
+	})
+	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
+	program.ownerMutationLock = &uninstall.Tree{} // held by the publishing command
+	admission, err := program.configConsumerAdmission(context.Background(), "default", []string{"default"})
+	if err != nil || admission == nil || !admission.repair || !admission.rechecked {
+		t.Fatalf("refresh of the drifted healthy yard: %#v %v", admission, err)
+	}
+	if admission, err := program.configConsumerAdmission(context.Background(), "default", []string{"default", "named"}); err != nil || admission != nil {
+		t.Fatalf("refresh including the failed yard: %#v %v", admission, err)
+	}
+	var response releasetransition.ProcessResponse
+	if err := json.Unmarshal(mustReadConfigFixture(t, harness.inspect), &response); err != nil {
+		t.Fatal(err)
+	}
+	inspection := *response.Inspection
+	inspection.Blockers = append(slices.Clone(inspection.Blockers), releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable,
+		Resource: "activation.host-power", Message: "host power reconciler failed", Retry: "run yard migrate"})
+	response.Inspection = &inspection
+	payload, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, harness.inspect, payload, 0o600)
+	if admission, err := program.configConsumerAdmission(context.Background(), "default", []string{"default"}); err != nil || admission != nil {
+		t.Fatalf("refresh over a host cause: %#v %v", admission, err)
 	}
 }

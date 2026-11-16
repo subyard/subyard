@@ -131,7 +131,10 @@ type CLI struct {
 	permits                      recoveryPermits
 	// gateAdmitted records how a non-ready release gate admitted this
 	// invocation; a repair admission is rechecked once after consent.
-	gateAdmitted              *gateAdmission
+	gateAdmitted *gateAdmission
+	// sourceBinding replaces the installed-source proof of repair admissions
+	// in tests whose fixture CLI is not a published runtime.
+	sourceBinding             func(context.Context, releasetransition.JournalRecord) (string, string, error)
 	allowResetYard            bool
 	resourceSessionTransport  string
 	resourceWire              string

@@ -1444,16 +1444,24 @@ failure in one yard carries what it observed in the others, and a named yard who
 installed context cannot be loaded is that yard's finding, so one failed yard never hides another's
 finding. The direct CLI and RPC share this admission.
 
-A repair admission, of a member of the repair set with a confirmation step on a yard that needs
-repair or of the bounded stop below, records the release history (journal, ledger projection and
-checkpoint) it inspected, read before and after the inspection. `preparedCommand.Execute` rechecks
-it once, right after it acquires the owner barrier that every journal writer holds: the history must
-be unchanged and a fresh inspection, which binds the installed source and runtime links to that
-history, must admit the command again; otherwise it is refused as plan-stale before any effect.
-Still under the barrier, the history must be unchanged after the effect, and a repair other than
-init and teardown names what its yard still needs. Every other admission is decided once, as on a
-ready release; `start` and `shell` have no confirmation step, so their admission is their only
-check. Configuration admits only its prepared verbs and a resource only its declared shutdown with a
+A repair admission, of a member of the repair set other than `shell` on a yard that needs repair
+or of the bounded stop below, records the release history (journal, ledger projection and
+checkpoint) it inspected, read before and after the inspection. Except for the bounded stop, it also
+binds the running tooling to the installed source: the CLI must be the published runtime of the
+completed journal's target, under `releases/<target>`, and its source proof must name that journal's
+transaction and artifact, so a development build or another staged or retained runtime with the
+same registry and catalog is refused. `preparedCommand.Execute` rechecks it once, right after it
+acquires the owner barrier that every journal writer holds: the history and the source binding must
+be unchanged and a fresh inspection, which binds the runtime links to that history, must admit the
+command again; otherwise it is refused as plan-stale before any effect. Still under the barrier, the
+history must be unchanged after the effect, and a repair other than init and teardown names what its
+yard still needs. Every other admission is decided once, as on a ready release; `shell` has no
+prepared execution, so its admission is its only check. Configuration admits its prepared verbs:
+`apply`, `sync` and local `set`, `unset`, `import` and `edit`; Git authoring and other verbs are
+refused with the manual repair (edit the file, then `yard -Y NAME config validate`). After
+`config sync` publishes a change, the refresh of its target yards follows this gate: targets that
+are open or limited to repair only by drift are refreshed in process, while another yard's finding
+waits for its own repair. A resource admits only its declared shutdown with a
 prepared plan whose assessment is a reversible shutdown without persistent data or external effects;
 an older resource handler on such a yard is refused before consent. An adapter never runs for a
 repair admission that has not passed its recheck. Admission never takes the release update lock; the
@@ -2231,9 +2239,9 @@ before reconciliation.
 When completed release history leaves a yard limited to its repair commands, for example after its
 runtime observation failed, the local owner can still assess and confirm that yard's declared
 shutdown when its handler prepares a v2 plan with a reversible shutdown assessment. The repair
-admission is rechecked under the owner barrier after consent against the same history and a fresh
-inspection, which binds the installed source and links; bring-up, unfinished history, host causes
-and changed history remain gated. This authorizes only resource cleanup and preserves unverified
+admission binds the installed source and tooling and is rechecked under the owner barrier after
+consent against the same history, the same source binding and a fresh inspection, which binds the
+runtime links; bring-up, unfinished history, host causes and changed bindings remain gated. This authorizes only resource cleanup and preserves unverified
 guest cleanup; it never resumes or applies release activation.
 
 ## Test topology

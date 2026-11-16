@@ -246,6 +246,8 @@ func TestAdmittedRepairRechecksReleaseAfterConsent(t *testing.T) {
 	integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("c", 64), Scope: strings.Repeat("c", 64)}}
 	scenario.fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return integrations }
 	program, _, stdout, stderr := scenario.fixture.program(t, []string{"-Y", "named", "stop"}, prompt, func(nestedCall, io.Writer) int { return 0 })
+	// The fixture CLI is no published runtime; bind a stand-in installed source.
+	program.sourceBinding = func(context.Context, releasetransition.JournalRecord) (string, string, error) { return "source", "tooling", nil }
 	code := program.Run(context.Background())
 	incus := scenario.fixture.cli.options.Incus.(*testkit.Incus)
 	if code == 0 || !strings.Contains(stderr.String(), "the release changed after confirmation") || len(incus.PowerUpdates) != 0 {

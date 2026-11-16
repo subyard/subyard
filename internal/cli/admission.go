@@ -298,6 +298,9 @@ func (cli *CLI) admitReleaseGate(
 	}
 	if scoped {
 		cli.writeYardGateRefusal(yard, gate)
+		if admission.handler == "@config" {
+			cli.errorf("a setting this repair cannot write is corrected by editing its file, then yard -Y %s config validate", firstNonempty(yard, "default"))
+		}
 		return permits, 1, true
 	}
 	if admission.completedScalarAuthoring {

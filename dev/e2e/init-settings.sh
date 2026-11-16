@@ -231,10 +231,13 @@ yard init --yes
 guest python3 -c 'import json; value=json.load(open("/var/lib/subyard/integrations/inventory.json")); assert value["applied_settings"]["AGENT_claude_COMMAND"] == "fixture-agent-next"'
 printf 'PASS: yard init restores the applied baseline\n'
 guest mv /usr/local/libexec/subyard/projects-changed /usr/local/libexec/subyard/projects-changed.fixture-backup
-if yard stop --yes > "$STATE/missing-owned-file.log" 2>&1; then
+# The missing owned dispatcher is this yard's finding: stop stays one of its
+# repair commands, while a command outside that set is refused with the yard.
+if yard provision --yes > "$STATE/missing-owned-file.log" 2>&1; then
   printf 'init-settings: applied baseline concealed a missing owned dispatcher\n' >&2
   exit 1
 fi
+grep -Fq 'release gate: yard default needs repair' "$STATE/missing-owned-file.log"
 guest mv /usr/local/libexec/subyard/projects-changed.fixture-backup /usr/local/libexec/subyard/projects-changed
 yard init --yes
 printf 'PASS: applied settings retain missing-owned-file release refusal\n'
