@@ -112,7 +112,7 @@ case "$action" in
         # A failed first init can already have installed owner services, so
         # every installed one is paused. In a guest init never provisioned, an
         # owner whose state lives only in the guest has nothing to pause there.
-        if power_guest_never_provisioned "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "${DEV_USER:-}"; then
+        if power_guest_never_provisioned "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
           NEVER_PROVISIONED=1
           export SUBYARD_GUEST_NEVER_PROVISIONED=1
         fi

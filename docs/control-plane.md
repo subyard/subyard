@@ -666,16 +666,21 @@ legacy continuation and adoption accept it as power-owner metadata. A yard that 
 finished init refuses `start` before any power change with `yard NAME has not completed its first
 init; run yard -Y NAME init`. Its `stop` and `teardown` keep the SSH listener fence and pause every
 installed owner service, since a failed first init may already have installed some. When its
-guest also lacks the substrate provisioning installs first (python3, the developer account and
-`/srv/agents`, by an explicit guest answer), owner services get
+guest also lacks the substrate provisioning installs first (python3 and
+`/srv/agents`, by an explicit answer of a successful guest probe), owner services get
 `SUBYARD_GUEST_NEVER_PROVISIONED=1` and an owner whose state lives only in the guest skips its
 guest pause, resume and removal; `stop` checks SSH sessions for all users; and `init` defers its
 profile runtimes like a stopped yard's, plans its project hooks conditionally and reads its
 applied integration state as absent only if no integration inventory exists. Release repair
-decides that a yard is left to its init before reading any installed guest context. A working
-yard whose re-init failed keeps the strict checks. Boot rechecks the yard under the host network
-policy lock right before each power or runtime effect, and init marks an existing yard
-uninitialized under that lock.
+decides that a yard is left to its init from a context loaded without any guest read, before
+every part of context resolution that can read the guest; that context stays marked unobserved,
+and owners that never defer a yard (host key tools, service registration, registered-yard
+migrations) leave it out instead of treating it as installed state. A working yard whose
+re-init failed keeps the strict checks. Boot rechecks each yard under the host network policy
+lock right before every power or runtime effect, holding only the lock for a stop so a policy
+failure never blocks it, and init marks an existing yard uninitialized under that lock. Boot's
+host network check always covers the valid bridges of every managed yard, including those left
+to their init.
 
 Declared persist directories are adopted by a separate guest program
 (`internal/adapters/reconcileruntime/integration_persist.py`), not by the artifact

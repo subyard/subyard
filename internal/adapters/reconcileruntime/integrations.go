@@ -356,7 +356,7 @@ const integrationInventoryPath = "/var/lib/subyard/integrations/inventory.json"
 
 // guestNeverProvisioned reports a running instance whose init has never
 // finished and whose guest lacks the substrate every installed owner needs
-// (python3, the developer account and /srv/agents). Init's stages run in order
+// (python3 and /srv/agents). Init's stages run in order
 // and provisioning installs that substrate first, so no later stage has run in
 // this guest. A working yard whose re-init failed is never such a guest.
 func (runtime Runtime) guestNeverProvisioned(ctx context.Context, instance ports.InstanceInfo) (bool, error) {
@@ -365,7 +365,9 @@ func (runtime Runtime) guestNeverProvisioned(ctx context.Context, instance ports
 	}
 	// Only an explicit answer counts: a transport failure or any other exit
 	// status, such as an out-of-memory kill, is not evidence of absence.
-	result, answered, err := runtime.guestObserve(ctx, []string{"sh", "-eu", "-c", `if command -v python3 >/dev/null && id "$1" >/dev/null 2>&1 && test -d /srv/agents; then echo provisioned; else echo unprovisioned; fi`, "subyard", runtime.devUser()})
+	// The substrate does not depend on the current developer name, which a
+	// rename can change while installed owners still run.
+	result, answered, err := runtime.guestObserve(ctx, []string{"sh", "-eu", "-c", `if command -v python3 >/dev/null && test -d /srv/agents; then echo provisioned; else echo unprovisioned; fi`})
 	if err != nil || !answered {
 		return false, err
 	}

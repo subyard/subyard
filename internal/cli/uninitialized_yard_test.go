@@ -182,9 +182,11 @@ func TestUninitializedYardDecisionOnlyNarrows(t *testing.T) {
 	if left, err := operation.releaseYardUninitialized(context.Background(), target); err != nil || !left {
 		t.Fatalf("decision widened within the process: left=%t err=%v", left, err)
 	}
+	// Host key tools never defer a yard with a warning; they leave out only
+	// the unobserved context of a yard left to its init.
 	keyTools := &profileRuntimeActivationReconciler{cli: operation, request: scenario.request, id: "key-tools-runtime"}
-	if kept, uninitialized, failures := keyTools.splitUninitialized(context.Background(), operation, []configTarget{target}); len(kept) != 1 || len(uninitialized) != 0 || len(failures) != 0 {
-		t.Fatalf("key tools deferred a yard: kept=%d uninitialized=%v failures=%v", len(kept), uninitialized, failures)
+	if kept, uninitialized, failures := keyTools.splitUninitialized(context.Background(), operation, []configTarget{target}); len(kept) != 0 || len(uninitialized) != 0 || len(failures) != 0 {
+		t.Fatalf("key tools: kept=%d uninitialized=%v failures=%v", len(kept), uninitialized, failures)
 	}
 	fresh, err := New(scenario.fixture.cli.options)
 	if err != nil {
@@ -283,6 +285,65 @@ func TestReleaseRepairDefersUninitializedYardWithDeadAgent(t *testing.T) {
 	if outcome.Status != releasetransition.StatusReady ||
 		!strings.Contains(strings.Join(outcome.Warnings, "\n"), uninitializedYardWarning("named")) {
 		t.Fatalf("repair beside an uninitialized yard with a dead agent: %#v", outcome)
+	}
+	if applies := scenario.runtime.applies(t); len(applies) != 1 || applies[0] != "default" {
+		t.Fatalf("hook applies: %v", applies)
+	}
+	if hits != 0 {
+		t.Fatalf("release work entered the uninitialized yard's guest %d times", hits)
+	}
+}
+
+// A yard left to its init is decided before any part of context resolution
+// that can read its guest: with a missing desired provisioning source, whose
+// discovery would otherwise read the applied guest state, and a dead agent,
+// repair of the other yards still completes. Owners that never defer a yard
+// do not take its unobserved desired context as installed state.
+func TestReleaseRepairDefersUninitializedYardBeforeContextResolution(t *testing.T) {
+	scenario := newYardFailureScenario(t, false, false, "default", "named")
+	markYard(t, scenario.fixture, "default", "true")
+	markYard(t, scenario.fixture, "named", "false")
+	hits := 0
+	scenario.fixture.cli.options.Executor = deadAgentExecutor{base: scenario.fixture.cli.options.Executor,
+		dead: scenario.fixture.instanceName(t, "named"), hits: &hits}
+	path := filepath.Join(scenario.request.ConfigHome, "yards", "named", "config.env")
+	testkit.WriteFile(t, path, append(mustReadConfigFixture(t, path), []byte("AGENT_codex_PROVISION="+filepath.Join(scenario.fixture.cli.options.RepositoryRoot, "missing-provision")+"\n")...), 0o600)
+
+	program, err := New(scenario.fixture.cli.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := program.releaseActivationOperation(scenario.request)
+	if !operation.activation.repair {
+		t.Fatal("fixture is not an active release repair")
+	}
+	if _, err := operation.resolveReleaseTransitionContext(context.Background(), "named", scenario.request.ConfigHome); err != nil {
+		t.Fatalf("context of the uninitialized yard: %v", err)
+	}
+	if !operation.unobservedReleaseYard("named", scenario.request.ConfigHome) || operation.unobservedReleaseYard("default", scenario.request.ConfigHome) {
+		t.Fatal("only the uninitialized yard is unobserved")
+	}
+	keyTools := &profileRuntimeActivationReconciler{cli: operation, request: scenario.request, id: "key-tools-runtime"}
+	_, targets, err := operation.releaseActivationTargets(context.Background(), "default", scenario.request.ConfigHome, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, _, failures := keyTools.splitUninitialized(context.Background(), operation, targets)
+	for _, target := range kept {
+		if target.Name == "named" {
+			t.Fatal("host key tools took the unobserved yard as installed input")
+		}
+	}
+	if len(kept) == 0 || len(failures) != 0 {
+		t.Fatalf("key tools targets: kept=%d failures=%v", len(kept), failures)
+	}
+	if hits != 0 {
+		t.Fatalf("context resolution entered the uninitialized yard's guest %d times", hits)
+	}
+
+	outcome := scenario.converge(t)
+	if outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("repair beside an uninitialized yard with a missing source and a dead agent: %#v", outcome)
 	}
 	if applies := scenario.runtime.applies(t); len(applies) != 1 || applies[0] != "default" {
 		t.Fatalf("hook applies: %v", applies)

@@ -107,7 +107,7 @@ if [ "${SUBYARD_TEARDOWN_FULL:-0}" != 1 ]; then
 fi
 # Owner services never ran guest work in a guest that init never provisioned;
 # their removal does only its host-side cleanup there.
-if [ "$have_incus" = 1 ] && power_guest_never_provisioned "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "${DEV_USER:-}"; then
+if [ "$have_incus" = 1 ] && power_guest_never_provisioned "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
   export SUBYARD_GUEST_NEVER_PROVISIONED=1
 fi
 bash "$SCRIPT_DIR/profile-services.sh" --remove

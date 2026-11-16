@@ -77,7 +77,9 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 			if err != nil {
 				return nil, fmt.Errorf("yard %s: %w", yard, err)
 			}
-			if loaded.Context.AccessKind == domain.AccessRemote {
+			// A yard left to its init has no installed state to migrate yet; its
+			// unobserved desired context is not that state.
+			if loaded.Context.AccessKind == domain.AccessRemote || operation.unobservedReleaseYard(yard, request.ConfigHome) {
 				return nil, nil
 			}
 			runtime, ok := operation.initPlatform(loaded, nil).(reconcileruntime.Runtime)

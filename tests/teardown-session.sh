@@ -16,7 +16,7 @@ cat > "$TMP/bin/incus" <<'SH'
 set -euo pipefail
 case "$1 ${2:-}" in
   "list "*) printf '%s,RUNNING\n' "$2" ;;
-  "exec "*) printf '%s\n' "${MOCK_PROVISIONED:-provisioned}" ;;
+  "exec "*) printf '%s\n' "${MOCK_PROVISIONED:-provisioned}"; exit "${MOCK_PROBE_RC:-0}" ;;
   "config get")
     # MOCK_INCUS_CONFIG is "managed initialized ever_initialized"; "-" is unset.
     [ -n "${MOCK_INCUS_CONFIG:-}" ] || exit 1
@@ -46,7 +46,7 @@ run_guard() {
   : > "$MOCK_LOG"
   (
     die() { printf '%s\n' "$*" >&2; exit 1; }
-    have_incus=1 INCUS_PROJECT=subyard-y8 DEV_USER=dev
+    have_incus=1 INCUS_PROJECT=subyard-y8
     SCRIPT_DIR="$ROOT/scripts"
     # shellcheck source=scripts/lib/teardown-session.sh
     . "$ROOT/scripts/lib/teardown-session.sh"
@@ -80,5 +80,12 @@ for config in "true false -:provisioned" "true false true:unprovisioned" "true t
   grep -Fq 'could not pause profile owner services before teardown' "$TMP/out" \
     || fail "pause failure with '$config' is unclear: $(tr '\n' ' ' < "$TMP/out")"
 done
+
+# A probe killed after printing the answer (for example out of memory) is no
+# evidence of an unprovisioned guest: the pause stays strict.
+export MOCK_INCUS_CONFIG="true false -" MOCK_PROVISIONED=unprovisioned MOCK_PROBE_RC=137 MOCK_PAUSE_RC=2 MOCK_OWNER_GUEST_ONLY=1
+if run_guard; then fail "teardown accepted the answer of a killed probe"; fi
+grep -Fq 'could not pause profile owner services before teardown' "$TMP/out" || fail "killed-probe refusal is unclear"
+unset MOCK_PROBE_RC
 
 printf 'ok: teardown pauses installed owner services, also after a failed first init\n'

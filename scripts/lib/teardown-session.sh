@@ -32,7 +32,7 @@ teardown_session_guard() {
   # A failed first init can already have installed owner services, so every
   # installed one is paused. In a guest init never provisioned, an owner whose
   # state lives only in the guest has nothing to pause there.
-  if power_guest_never_provisioned "$INCUS_PROJECT" "$instance" "${DEV_USER:-}"; then
+  if power_guest_never_provisioned "$INCUS_PROJECT" "$instance"; then
     export SUBYARD_GUEST_NEVER_PROVISIONED=1
   fi
   paused="$("$SCRIPT_DIR/profile-services.sh" --pause)" || die "could not pause profile owner services before teardown"

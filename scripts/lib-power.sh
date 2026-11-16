@@ -52,14 +52,17 @@ power_never_initialized() { # <project> <instance>
 }
 
 # Succeeds only for a running never-initialized instance whose guest lacks the
-# substrate provisioning installs first (python3, the developer account and
-# /srv/agents), so no later init stage has run there. A failed probe is not.
-power_guest_never_provisioned() { # <project> <instance> <developer>
-  [ -n "$3" ] && power_never_initialized "$1" "$2" || return 1
+# substrate provisioning installs first (python3 and /srv/agents), so no later
+# init stage has run there. It does not depend on the current developer name,
+# which a rename can change. Only an explicit answer of a successful probe counts.
+power_guest_never_provisioned() { # <project> <instance>
+  local answer
+  power_never_initialized "$1" "$2" || return 1
   [ "$(power_state "$1" "$2")" = RUNNING ] || return 1
-  [ "$(incus exec "$2" --project "$1" -- sh -c \
-    'if command -v python3 >/dev/null && id "$1" >/dev/null 2>&1 && test -d /srv/agents; then echo provisioned; else echo unprovisioned; fi' \
-    subyard "$3" 2>/dev/null)" = unprovisioned ]
+  answer="$(incus exec "$2" --project "$1" -- sh -c \
+    'if command -v python3 >/dev/null && test -d /srv/agents; then echo provisioned; else echo unprovisioned; fi' \
+    2>/dev/null)" || return 1
+  [ "$answer" = unprovisioned ]
 }
 
 # Validate the effective NetworkManager configuration, not merely our drop-in file: a later distro

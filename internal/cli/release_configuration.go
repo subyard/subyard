@@ -66,6 +66,9 @@ type releaseConfiguration struct {
 type releaseYardConfiguration struct {
 	loaded config.Loaded
 	err    error
+	// unobserved marks a yard left to its init: its context is the desired
+	// one, never read from the guest, and is not installed state.
+	unobserved bool
 }
 
 // Scope and configuration view are separate contracts. Completed readiness is
@@ -123,11 +126,29 @@ func (source *releaseConfiguration) load(ctx context.Context, cli *CLI, yard, ho
 	key := home + "/" + yard
 	entry, exists := source.yards[key]
 	if !exists {
-		entry.loaded, entry.err = cli.resolveInstalledReleaseContext(ctx, yard, home)
-		// A yard left to its init is decided before any guest-dependent read,
+		// A yard left to its init is decided from a context loaded without any
+		// guest read, before every part of resolution that can read the guest,
 		// so an unanswering guest of that yard never blocks the other yards.
-		if entry.err == nil && entry.loaded.Context.AccessKind != domain.AccessRemote &&
-			!source.uninitializedLocked(ctx, cli, configTarget{Name: yard, Loaded: entry.loaded}) {
+		loaded, identity, sources, identityErr := cli.discoverReleaseContext(yard, home)
+		if identityErr == nil || sources != nil {
+			if identityErr == nil {
+				identity = loaded
+			}
+			if identity.Context.AccessKind != domain.AccessRemote &&
+				source.uninitializedLocked(ctx, cli, configTarget{Name: yard, Loaded: identity}) {
+				identity.Environment = maps.Clone(identity.Environment)
+				for name := range sources {
+					delete(identity.Environment, name) // discovery placeholders are no inputs
+				}
+				entry = releaseYardConfiguration{loaded: identity, unobserved: true}
+				source.yards[key] = entry
+				exists = true
+			}
+		}
+	}
+	if !exists {
+		entry.loaded, entry.err = cli.resolveInstalledReleaseContext(ctx, yard, home)
+		if entry.err == nil && entry.loaded.Context.AccessKind != domain.AccessRemote {
 			var target configTarget
 			readiness := source.request.Mode == releasetransition.ProcessInspect
 			target, _, entry.err = cli.observeInstalledReleaseTarget(ctx, configTarget{Name: yard, Loaded: entry.loaded}, readiness)
@@ -306,4 +327,17 @@ func (source *releaseConfiguration) uninitializedLocked(ctx context.Context, cli
 	}
 	source.uninitialized[target.Name] = true
 	return true
+}
+
+// unobservedReleaseYard reports a yard whose activation context was never read
+// from its guest because the yard is left to its init. Consumers that never
+// defer a yard must not treat that desired-only context as installed state.
+func (cli *CLI) unobservedReleaseYard(yard, home string) bool {
+	source := cli.activation
+	if source == nil {
+		return false
+	}
+	source.mutex.Lock()
+	defer source.mutex.Unlock()
+	return source.yards[home+"/"+yard].unobserved
 }
