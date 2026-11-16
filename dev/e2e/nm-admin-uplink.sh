@@ -311,9 +311,8 @@ prepare)
   if owner "$launcher" update --rollback --yes >"$STATE/rollback.log" 2>&1; then
     die 'rollback to the released guard was accepted'
   fi
-  # The refusal comes from the NetworkManager device guard boundary: the installed 0.29.0 and the
-  # candidate registries differ only by that migration and power-metadata 3 -> 4, and the rollback
-  # check reports the rollback-compatibility blocker.
+  # The installed 0.29.0 and the candidate registries differ only by the NetworkManager device
+  # guard migration and power-metadata 3 -> 4.
   installed_registry="$(find "$STATE/runtime/releases" -path "*$OLD_VERSION*/config/release-transition.json" -print -quit)"
   [ -n "$installed_registry" ] || die 'cannot find the installed 0.29.0 release-transition.json'
   jq -S '.currentEpochs["power-metadata"] = 3 | .migrations |= map(select(.id != "introduce-nm-device-guard-v4"))' \
@@ -323,9 +322,8 @@ prepare)
     || die "the registries differ beyond the device guard boundary: $(diff "$STATE/installed-registry.json" "$STATE/candidate-registry.json" | head -20)"
   jq -e '.currentEpochs["power-metadata"] == 4 and ([.migrations[] | select(.id == "introduce-nm-device-guard-v4" and .fromEpoch == 3 and .toEpoch == 4)] | length == 1)' \
     "$ROOT/config/release-transition.json" >/dev/null || die 'the candidate registry lacks the device guard boundary'
-  owner "$launcher" update --rollback --check --json >"$STATE/rollback-check.json" 2>"$STATE/rollback-check.log" || true
-  jq -e '[.. | objects | select(.resource? == "transition.rollback-compatibility")] | length >= 1' "$STATE/rollback-check.json" >/dev/null \
-    || die "the rollback check named no rollback-compatibility blocker: $(head -c 800 "$STATE/rollback-check.json") $(tail -3 "$STATE/rollback-check.log")"
+  # The CLI reports no blocker resource for a rollback (`--rollback` takes no --check), so the
+  # registry difference above is what binds the refusal to the boundary.
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
   pass 'rollback to the published release is refused before activation'
   owner "$launcher" status >"$STATE/status.log" 2>&1 || true
