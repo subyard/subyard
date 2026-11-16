@@ -96,6 +96,16 @@ func (service PowerService) Set(
 	desired domain.DesiredPower,
 	initialized bool,
 ) error {
+	return service.set(ctx, yard, desired, initialized, nil)
+}
+
+func (service PowerService) set(
+	ctx context.Context,
+	yard domain.Context,
+	desired domain.DesiredPower,
+	initialized bool,
+	extra map[string]string,
+) error {
 	if service.Instances == nil || service.Config == nil {
 		return errors.New("Incus instance reader and config writer are required")
 	}
@@ -110,22 +120,34 @@ func (service PowerService) Set(
 		return err
 	}
 	name, bridge := powerIdentity(yard)
-	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.YardInstanceName, map[string]string{
+	values := map[string]string{
 		powerAutostartKey:   "false",
 		powerManagedKey:     "true",
 		powerYardNameKey:    name,
 		powerBridgeKey:      bridge,
 		powerDesiredKey:     string(desired),
 		powerInitializedKey: fmt.Sprint(initialized),
-	})
+	}
+	// A yard that already finished an init, including one from a release
+	// before the completion mark, keeps that fact when a re-init clears
+	// initialized, so its failure never makes it look never initialized.
+	if !initialized && instance.Config[powerInitializedKey] == "true" {
+		values[powerEverInitializedKey] = "true"
+	}
+	for key, value := range extra {
+		values[key] = value
+	}
+	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.YardInstanceName, values)
 }
 
+// Commit records the desired power of a finished init and marks the yard
+// initialized, and once and for all as having finished an init.
 func (service PowerService) Commit(
 	ctx context.Context,
 	yard domain.Context,
 	desired domain.DesiredPower,
 ) error {
-	return service.Set(ctx, yard, desired, true)
+	return service.set(ctx, yard, desired, true, map[string]string{powerEverInitializedKey: "true"})
 }
 
 type LifecycleRunner struct {
@@ -166,7 +188,10 @@ func (runner LifecycleRunner) Run(
 	if !strings.EqualFold(observed.Status, string(desired)) {
 		return result, diagnostics, fmt.Errorf("physical %s did not establish %s before desired power commit", request.Action, desired)
 	}
-	if err := runner.Power.Commit(ctx, runner.Yard, desired); err != nil {
+	// Only init's finalize stage marks a yard initialized; start and stop keep
+	// the mark, so a failed init stays visible until the yard's next init.
+	initialized := parsePowerMetadata(observed).Initialized
+	if err := runner.Power.Set(ctx, runner.Yard, desired, initialized.State == fieldValid && initialized.Value); err != nil {
 		return result, diagnostics, fmt.Errorf("physical %s succeeded but desired power was not committed: %w",
 			request.Action, err)
 	}
@@ -243,6 +268,7 @@ func powerMetadataUpdate(
 	values[powerManagedKey] = "true"
 	values[powerDesiredKey] = string(desired)
 	values[powerInitializedKey] = "true"
+	values[powerEverInitializedKey] = "true"
 	return values, PowerIntent{Desired: desired, Imported: true}, nil
 }
 

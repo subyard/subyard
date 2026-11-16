@@ -14,6 +14,7 @@ project-registry-convergence.sh
 remote-projects.sh
 vscode-remote-maintenance.sh
 lifecycle-guard.sh
+teardown-session.sh
 yard-keys.sh
 yard-remote.sh
 yard-shell.sh

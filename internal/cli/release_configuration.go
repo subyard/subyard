@@ -59,11 +59,16 @@ type releaseConfiguration struct {
 	yards    map[string]releaseYardConfiguration
 	// pending is the activation's one deferral record for pending configuration.
 	pending pendingYardDeferral
+	// uninitialized names the yards this process leaves to their own init.
+	uninitialized map[string]bool
 }
 
 type releaseYardConfiguration struct {
 	loaded config.Loaded
 	err    error
+	// unobserved marks a yard left to its init: its context is the desired
+	// one, never read from the guest, and is not installed state.
+	unobserved bool
 }
 
 // Scope and configuration view are separate contracts. Completed readiness is
@@ -120,6 +125,27 @@ func (source *releaseConfiguration) load(ctx context.Context, cli *CLI, yard, ho
 	defer source.mutex.Unlock()
 	key := home + "/" + yard
 	entry, exists := source.yards[key]
+	if !exists {
+		// A yard left to its init is decided from a context loaded without any
+		// guest read, before every part of resolution that can read the guest,
+		// so an unanswering guest of that yard never blocks the other yards.
+		loaded, identity, sources, identityErr := cli.discoverReleaseContext(yard, home)
+		if identityErr == nil || sources != nil {
+			if identityErr == nil {
+				identity = loaded
+			}
+			if identity.Context.AccessKind != domain.AccessRemote &&
+				source.uninitializedLocked(ctx, cli, configTarget{Name: yard, Loaded: identity}) {
+				identity.Environment = maps.Clone(identity.Environment)
+				for name := range sources {
+					delete(identity.Environment, name) // discovery placeholders are no inputs
+				}
+				entry = releaseYardConfiguration{loaded: identity, unobserved: true}
+				source.yards[key] = entry
+				exists = true
+			}
+		}
+	}
 	if !exists {
 		entry.loaded, entry.err = cli.resolveInstalledReleaseContext(ctx, yard, home)
 		if entry.err == nil && entry.loaded.Context.AccessKind != domain.AccessRemote {
@@ -280,3 +306,38 @@ func (r *materializedConfigActivationReconciler) activationConfiguration() *CLI 
 func (r *installationActivationReconciler) activationConfiguration() *CLI       { return r.cli }
 func (r *activationStageReconciler) activationConfiguration() *CLI              { return r.configuration }
 func (r *routeConsumerActivationReconciler) activationConfiguration() *CLI      { return r.configuration }
+
+// uninitializedLocked is releaseYardUninitialized for a caller that holds the
+// mutex. It reads only the instance, never the guest; a failed read leaves the
+// decision to the owners' own observation.
+func (source *releaseConfiguration) uninitializedLocked(ctx context.Context, cli *CLI, target configTarget) bool {
+	if source.uninitialized[target.Name] {
+		return true
+	}
+	incus, _ := cli.statusPorts()
+	if ports.LocalInstallationAbsent(incus) {
+		return false
+	}
+	instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)
+	if err != nil || !instanceUninitialized(target, instance) {
+		return false
+	}
+	if source.uninitialized == nil {
+		source.uninitialized = map[string]bool{}
+	}
+	source.uninitialized[target.Name] = true
+	return true
+}
+
+// unobservedReleaseYard reports a yard whose activation context was never read
+// from its guest because the yard is left to its init. Consumers that never
+// defer a yard must not treat that desired-only context as installed state.
+func (cli *CLI) unobservedReleaseYard(yard, home string) bool {
+	source := cli.activation
+	if source == nil {
+		return false
+	}
+	source.mutex.Lock()
+	defer source.mutex.Unlock()
+	return source.yards[home+"/"+yard].unobserved
+}

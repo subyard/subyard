@@ -62,7 +62,8 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 				names, _ := config.YardNames(filepath.Join(cli.options.RepositoryRoot, "config"), request.ConfigHome)
 				for _, name := range names {
 					loaded, err := cli.resolveReleaseTransitionContext(context.Background(), name, request.ConfigHome, nil)
-					if err == nil && loaded.Context.AccessKind == domain.AccessLocal && service.Matches(loaded.Environment) {
+					if err == nil && !cli.unobservedReleaseYard(name, request.ConfigHome) &&
+						loaded.Context.AccessKind == domain.AccessLocal && service.Matches(loaded.Environment) {
 						return []string{fmt.Sprintf("register service %s (pool default) when exactly one owned runtime is proven; runtime and leases retained", service.ID)}
 					}
 				}
@@ -103,6 +104,12 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 							// Its role is unknown, so report the failed read separately
 							// and withhold registration without inventing a candidate.
 							findings = append(findings, fmt.Errorf("yard %s: load configuration: %w", name, err))
+							continue
+						}
+						if cli.unobservedReleaseYard(name, request.ConfigHome) {
+							// Its installed role is unread while it waits for its init;
+							// withhold registration rather than guess a candidate.
+							findings = append(findings, fmt.Errorf("yard %s: not initialized; registration waits for yard -Y %s init", name, name))
 							continue
 						}
 						if loaded.Context.AccessKind != domain.AccessLocal || !service.Matches(loaded.Environment) {

@@ -138,6 +138,8 @@ func TestPowerServiceWriterShapesUseEffectiveConfigAndPreserveUnownedKeys(t *tes
 		"user.subyard.bridge":        "incusbr0",
 		"user.subyard.desired_power": string(domain.PowerStopped),
 		"user.subyard.initialized":   "false",
+		// The yard had finished an init; clearing initialized keeps that fact.
+		"user.subyard.ever_initialized": "true",
 	}
 	if len(incus.ConfigUpdates) != 2 || !maps.Equal(incus.ConfigUpdates[1].Values, wantFull) {
 		t.Fatalf("full writer shape = %#v, want %#v", incus.ConfigUpdates, wantFull)
@@ -250,6 +252,106 @@ func TestLifecycleRunnerCommitsOnlyAfterPhysicalSuccess(t *testing.T) {
 	if len(physical.Requests) != 1 || len(physical.Requests[0].Arguments) != 1 ||
 		physical.Requests[0].Arguments[0] != "start" {
 		t.Fatalf("physical adapter did not receive typed start: %#v", physical.Requests)
+	}
+}
+
+// Start and stop keep the initialized mark as it is: only init's finalize
+// stage marks a yard initialized.
+func TestLifecycleRunnerPreservesInitializedMark(t *testing.T) {
+	yard := domain.Context{YardName: "named", IncusProject: "subyard-named", YardInstanceName: "yard-named"}
+	for _, action := range []string{"start", "stop"} {
+		for _, initialized := range []string{"false", "true"} {
+			t.Run(action+"-"+initialized, func(t *testing.T) {
+				status := map[string]string{"start": "Running", "stop": "Stopped"}[action]
+				incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-named/yard-named": {
+					Name: "yard-named", Project: "subyard-named", Status: status, Config: map[string]string{
+						"user.subyard.managed": "true", "user.subyard.initialized": initialized,
+						"user.subyard.desired_power": string(domain.PowerRunning), "user.subyard.name": "named",
+						"user.subyard.bridge": "incusbr0", "boot.autostart": "false",
+					},
+				}}}
+				physical := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{Schema: 1, OperationID: "operation-lifecycle", Status: "ok"}}}}
+				runner := LifecycleRunner{Power: PowerService{Instances: incus, Config: incus}, Physical: physical, Yard: yard}
+				request := domain.AdapterRequest{Schema: 1, OperationID: "operation-lifecycle", Adapter: "lifecycle", Action: action}
+				if _, _, err := runner.Run(context.Background(), request, nil); err != nil {
+					t.Fatal(err)
+				}
+				config := incus.Instances["subyard-named/yard-named"].Config
+				if config["user.subyard.initialized"] != initialized {
+					t.Fatalf("%s changed initialized %s to %q", action, initialized, config["user.subyard.initialized"])
+				}
+				if want := map[string]string{"start": "running", "stop": "stopped"}[action]; config["user.subyard.desired_power"] != want {
+					t.Fatalf("%s committed desired power %q", action, config["user.subyard.desired_power"])
+				}
+			})
+		}
+	}
+}
+
+// Only a finished init marks a yard as ever initialized, and nothing clears
+// the mark. A yard from a release before the mark counts as initialized.
+func TestEverInitializedMark(t *testing.T) {
+	instance := func(initialized, ever string) ports.InstanceInfo {
+		config := map[string]string{"user.subyard.managed": "true", "user.subyard.initialized": initialized}
+		if ever != "" {
+			config["user.subyard.ever_initialized"] = ever
+		}
+		return ports.InstanceInfo{Config: config}
+	}
+	for _, test := range []struct {
+		initialized, ever string
+		never             bool
+	}{
+		{"false", "", true}, {"false", "true", false}, {"true", "", false}, {"true", "true", false}, {"", "", false}, {"maybe", "", false},
+	} {
+		if got := InstanceNeverInitialized(instance(test.initialized, test.ever)); got != test.never {
+			t.Fatalf("initialized=%q ever=%q: never=%t", test.initialized, test.ever, got)
+		}
+	}
+	yard := domain.Context{YardName: "named", IncusProject: "subyard-named", YardInstanceName: "yard-named"}
+	incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-named/yard-named": {
+		Name: "yard-named", Project: "subyard-named", Status: "Running", Config: map[string]string{
+			"user.subyard.managed": "true", "user.subyard.initialized": "false",
+			"user.subyard.desired_power": "running", "user.subyard.name": "named",
+		},
+	}}}
+	service := PowerService{Instances: incus, Config: incus}
+	if err := service.Commit(context.Background(), yard, domain.PowerRunning); err != nil {
+		t.Fatal(err)
+	}
+	if config := incus.Instances["subyard-named/yard-named"].Config; config["user.subyard.ever_initialized"] != "true" || config["user.subyard.initialized"] != "true" {
+		t.Fatalf("finalize commit: %#v", config)
+	}
+	// A yard from a release before the mark keeps its completed init when a
+	// re-init clears initialized, so a failed re-init leaves it initialized.
+	upgraded := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-named/yard-named": {
+		Name: "yard-named", Project: "subyard-named", Status: "Running", Config: map[string]string{
+			"user.subyard.managed": "true", "user.subyard.initialized": "true",
+			"user.subyard.desired_power": "running", "user.subyard.name": "named",
+		},
+	}}}
+	if err := (PowerService{Instances: upgraded, Config: upgraded}).Set(context.Background(), yard, domain.PowerRunning, false); err != nil {
+		t.Fatal(err)
+	}
+	if after := upgraded.Instances["subyard-named/yard-named"]; InstanceNeverInitialized(after) || after.Config["user.subyard.ever_initialized"] != "true" {
+		t.Fatalf("re-init of an upgraded yard lost its completed init: %#v", after.Config)
+	}
+	// An imported legacy yard was already working: it is initialized for good.
+	legacy := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-named/yard-named": {
+		Name: "yard-named", Project: "subyard-named", Status: "Stopped", Config: map[string]string{},
+	}}}
+	if _, err := (PowerService{Instances: legacy, Config: legacy}).Ensure(context.Background(), yard); err != nil {
+		t.Fatal(err)
+	}
+	if config := legacy.Instances["subyard-named/yard-named"].Config; config["user.subyard.ever_initialized"] != "true" {
+		t.Fatalf("import did not record the completed init: %#v", config)
+	}
+	// A later re-init writes initialized=false and keeps the mark.
+	if err := service.Set(context.Background(), yard, domain.PowerRunning, false); err != nil {
+		t.Fatal(err)
+	}
+	if after := incus.Instances["subyard-named/yard-named"]; after.Config["user.subyard.ever_initialized"] != "true" || InstanceNeverInitialized(after) {
+		t.Fatalf("re-init cleared the completion mark: %#v", after.Config)
 	}
 }
 

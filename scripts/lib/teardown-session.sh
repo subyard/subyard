@@ -29,6 +29,12 @@ teardown_session_guard() {
   }
   trap teardown_session_restore EXIT
   ssh_listener_fence || die "could not fence new SSH sessions before teardown"
+  # A failed first init can already have installed owner services, so every
+  # installed one is paused. In a guest init never provisioned, an owner whose
+  # state lives only in the guest has nothing to pause there.
+  if power_guest_never_provisioned "$INCUS_PROJECT" "$instance"; then
+    export SUBYARD_GUEST_NEVER_PROVISIONED=1
+  fi
   paused="$("$SCRIPT_DIR/profile-services.sh" --pause)" || die "could not pause profile owner services before teardown"
   TEARDOWN_SESSION_PROFILES="$paused"
   # The same all-user SSH probe works before the developer account exists.

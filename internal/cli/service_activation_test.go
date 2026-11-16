@@ -95,7 +95,7 @@ func TestServiceRegistrationDoesNotBindSameRelease(t *testing.T) {
 }
 
 func TestNewReleaseServiceRegistrationUsesNativeProofAfterReconcile(t *testing.T) {
-	for _, scenario := range []string{"one", "UUID", "publish-failure", "broken-config", "broken-config+UUID", "lock-held", "lock-inherited"} {
+	for _, scenario := range []string{"one", "UUID", "publish-failure", "broken-config", "broken-config+UUID", "unobserved-unselected", "lock-held", "lock-inherited"} {
 		t.Run(scenario, func(t *testing.T) {
 			program, incus, selection := declaredServiceActivationFixture(t)
 			var output bytes.Buffer
@@ -116,8 +116,20 @@ func TestNewReleaseServiceRegistrationUsesNativeProofAfterReconcile(t *testing.T
 				}
 				testkit.WriteFile(t, path, []byte("YARD_KIND=vm\nSSH_PORT='unterminated\n"), 0o600)
 			}
+			if scenario == "unobserved-unselected" {
+				// A yard left to its init whose desired selection does not name
+				// the service: an older failed re-init may still run it.
+				path := filepath.Join(home, "yards/unrelated/config.env")
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, path, []byte("SSH_PORT=2299\n"), 0o600)
+			}
 			request := releasetransition.ProcessRequest{ConfigHome: home, RuntimeRoot: runtimeRoot, Target: "next-release", Mode: releasetransition.ProcessInspect, Direction: releasetransition.DirectionActivateTarget}
 			operation := program.releaseActivationOperation(request)
+			if scenario == "unobserved-unselected" {
+				operation.activation.yards[home+"/unrelated"] = releaseYardConfiguration{unobserved: true}
+			}
 			owner := registrationStageFixture(operation, "fixture-owner")
 			releases := releasetransition.ReleasePair{From: "previous-release", Target: request.Target}
 			links := releasetransition.ReleaseLinks{Active: releases.From}
@@ -196,6 +208,10 @@ func TestNewReleaseServiceRegistrationUsesNativeProofAfterReconcile(t *testing.T
 				}
 				if strings.Contains(scenario, "UUID") && !strings.Contains(output.String(), "service runtime UUID is unproven") {
 					t.Fatalf("independent proof finding lost: %s", &output)
+				}
+			} else if scenario == "unobserved-unselected" {
+				if resolveErr == nil || !strings.Contains(output.String(), "yard unrelated: not initialized; registration waits for yard -Y unrelated init") {
+					t.Fatalf("an unobserved yard did not withhold registration: %+v %v %s", record, resolveErr, &output)
 				}
 			} else if scenario == "UUID" {
 				if resolveErr == nil || !strings.Contains(output.String(), "service runtime UUID is unproven; run yard service register fixture-service --yard default") {

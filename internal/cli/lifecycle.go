@@ -117,6 +117,20 @@ func (cli *CLI) observeLifecycleExecution(
 	if err != nil {
 		return err
 	}
+	// Init is the repair of a yard that has never finished it; start would only
+	// boot a guest whose installed state does not exist yet. Refuse before any
+	// power change, at planning and again before execution.
+	if execution.action == "start" && application.InstanceNeverInitialized(instance) {
+		name := yard.YardName
+		if name == "" {
+			name = "default"
+		}
+		next := "yard init"
+		if domain.SafeName(name) {
+			next = "yard -Y " + name + " init"
+		}
+		return fmt.Errorf("yard %s has not completed its first init; run %s", name, next)
+	}
 	metadata := instance
 	metadata.Status = ""
 	if execution.observed != nil {
