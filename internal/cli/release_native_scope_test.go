@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -226,10 +227,15 @@ func TestActivationAccessDenialNamesYardAndRepair(t *testing.T) {
 }
 
 // seedOwnerHostID makes a fixture warm: only an installation that ran init can
-// own the native yards a fake Incus port reports.
+// own the native yards a fake Incus port reports. It records the identity init
+// itself would derive on this host, so owner-bound fixtures stay consistent.
 func seedOwnerHostID(t *testing.T, configHome string) {
 	t.Helper()
-	writeColdFile(t, filepath.Join(configHome, "host-id"), "yard\n", 0o600)
+	hostID, _, err := configsync.ResolveHostID(configHome, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeColdFile(t, filepath.Join(configHome, "host-id"), hostID+"\n", 0o600)
 }
 
 // grantedIncus denies the socket until the approved Incus stage grants access.
