@@ -1609,8 +1609,11 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 
 // A migrated NetworkManager guard waits for one host reboot; remind until the boot ID changes.
 func (cli *CLI) printNetworkManagerRebootReminder() {
-	if hostruntime.LocalNetworkManagerRebootPending() {
+	switch hostruntime.LocalNetworkManagerGuardPending() {
+	case "lists":
 		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerRebootReminder)
+	case "unread":
+		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerUnreadReminder)
 	}
 }
 

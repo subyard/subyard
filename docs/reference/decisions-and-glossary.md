@@ -156,11 +156,13 @@ Host NetworkManager must leave managed bridges/veth/tap devices unmanaged. Match
 well as interface naming and verify effective configuration; guards must precede instance
 creation/start and rerun during setup. The guard is a self-contained `[device-subyard]` section
 with `managed=0` for Subyard's own devices only: veths, Incus `tap` devices and Incus-managed
-bridges. It never reads or writes the administrator's `unmanaged-devices` or `no-auto-default`
-lists. Every change checks the proposed configuration and the devices NetworkManager manages
-before writing, and reports every refusal together. A guard written by a released version is
-rewritten during update without a NetworkManager reload, refusing while NetworkManager manages a
-device the administrator's list marks unmanaged; the host then reboots once to apply it.
+bridges. It never writes the administrator's `unmanaged-devices` or `no-auto-default` lists and
+reads them only to refuse an unsafe migration. Subyard never reloads or restarts NetworkManager, and no yard starts until NetworkManager
+has started after the guard was first written: on a host where it runs, the first init writes
+the guard and stops for a host reboot or NetworkManager restart. Its only state-changing
+NetworkManager call marks an existing own bridge unmanaged. A guard written by a released version
+is rewritten during update, refusing while NetworkManager provably manages a device the
+administrator's list marks unmanaged; the host then reboots once to apply it.
 Bridge-scoped DHCP/DNS and forwarding rules coexist with UFW/host Docker, without broad host
 input openings or hardcoded subnets. Package installation/upgrade and networking must be
 reproducible through product reconciliation, not unexplained manual host repair. Install

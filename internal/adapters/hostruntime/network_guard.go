@@ -17,8 +17,8 @@ import (
 type NetworkGuard struct {
 	Lookup func(string) (string, bool)
 	Run    func(context.Context, string, ...string) ([]byte, error)
-	// RebootPending reports a migrated guard waiting for a host reboot; nil means none.
-	RebootPending func() bool
+	// Pending reports the pending guard record kind ("unread", "lists" or ""); nil means none.
+	Pending func() string
 }
 
 // Check reports every independent refusal: NetworkManager's effective guard, the runtime state
@@ -53,6 +53,13 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 		return fmt.Errorf("read NetworkManager effective configuration: %w", err)
 	}
 	violations := networkManagerConfigViolations(string(output), bridges)
+	pending := ""
+	if guard.Pending != nil {
+		pending = guard.Pending()
+	}
+	if pending == "unread" {
+		violations = append(violations, "NetworkManager has not read the Subyard guard since it was written")
+	}
 	nmcli, ok := guard.lookup("nmcli")
 	if !ok {
 		violations = append(violations, "cannot read NetworkManager's devices with nmcli")
@@ -69,7 +76,10 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 	if len(violations) == 0 {
 		return nil
 	}
-	if guard.RebootPending != nil && guard.RebootPending() {
+	switch pending {
+	case "unread":
+		return fmt.Errorf("NetworkManager guard is not effective: %s — reboot the host or restart NetworkManager ('sudo systemctl restart NetworkManager'), then rerun yard start", strings.Join(violations, "; "))
+	case "lists":
 		return fmt.Errorf("NetworkManager guard is not effective: %s — a migrated NetworkManager guard waits for a host reboot: reboot the host once, then rerun yard start", strings.Join(violations, "; "))
 	}
 	return fmt.Errorf("NetworkManager guard is not effective: %s — correct the NetworkManager configuration, then rerun yard start", strings.Join(violations, "; "))
@@ -308,36 +318,56 @@ const bootIDPath = "/proc/sys/kernel/random/boot_id"
 // NetworkManagerRebootReminder is the one next step after a guard migration.
 const NetworkManagerRebootReminder = "reboot the host once so NetworkManager applies the migrated Subyard guard safely; NetworkManager keeps its previous configuration until then"
 
-// NetworkManagerRebootPending reports whether the migrated guard still waits: the record names
-// this boot and, when it names a NetworkManager invocation, NetworkManager has not restarted
-// since (a restart reads every configuration file again). It matches scripts/lib-power.sh.
-func NetworkManagerRebootPending(path, bootID string, invocation func() string) bool {
+// NetworkManagerGuardPending returns the kind of the pending guard record, or "": "unread" while
+// NetworkManager has not started since the guard was first written, "lists" while a migrated
+// guard waits for the host reboot. Both clear on a new boot or NetworkManager invocation, as in
+// scripts/lib-power.sh.
+func NetworkManagerGuardPending(path, bootID string, invocation func() string) string {
 	recorded, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return ""
 	}
 	fields := strings.Fields(string(recorded))
 	current, err := os.ReadFile(bootID)
 	if err != nil || len(fields) == 0 || fields[0] != strings.TrimSpace(string(current)) {
-		return false
+		return ""
 	}
-	if len(fields) < 2 || fields[1] == "unknown" || invocation == nil {
-		return true
+	if len(fields) >= 2 && fields[1] != "unknown" && invocation != nil {
+		if now := invocation(); now != "" && now != fields[1] {
+			return ""
+		}
 	}
-	now := invocation()
-	return now == "" || now == fields[1]
+	if len(fields) >= 3 && fields[2] == "unread" {
+		return "unread"
+	}
+	return "lists"
+}
+
+// NetworkManagerRebootPending reports a migrated guard waiting for the host reboot.
+func NetworkManagerRebootPending(path, bootID string, invocation func() string) bool {
+	return NetworkManagerGuardPending(path, bootID, invocation) == "lists"
+}
+
+func localNetworkManagerInvocation() string {
+	output, err := exec.Command("systemctl", "show", "-p", "InvocationID", "--value", "NetworkManager").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// LocalNetworkManagerGuardPending reports this host's pending guard record kind.
+func LocalNetworkManagerGuardPending() string {
+	return NetworkManagerGuardPending(NetworkManagerRebootPendingPath, bootIDPath, localNetworkManagerInvocation)
 }
 
 // LocalNetworkManagerRebootPending reports the pending reboot on this host.
 func LocalNetworkManagerRebootPending() bool {
-	return NetworkManagerRebootPending(NetworkManagerRebootPendingPath, bootIDPath, func() string {
-		output, err := exec.Command("systemctl", "show", "-p", "InvocationID", "--value", "NetworkManager").Output()
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(string(output))
-	})
+	return LocalNetworkManagerGuardPending() == "lists"
 }
+
+// NetworkManagerUnreadReminder names the start NetworkManager needs before any yard starts.
+const NetworkManagerUnreadReminder = "NetworkManager has not read the Subyard guard yet: reboot the host or restart NetworkManager before starting a yard"
 
 // NetworkManagerGuardCurrent reports whether no released guard remains: the guard is absent or
 // is the [device-subyard] section alone, and the legacy 99- file, even a dangling link, is gone.
@@ -347,9 +377,15 @@ func NetworkManagerGuardCurrent(conf string) (bool, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
+	if _, err := os.Lstat(conf); errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	} else if err != nil {
+		return false, err
+	}
+	// A dangling link is no current guard, as in scripts/lib/host.sh.
 	contents, err := os.ReadFile(conf)
 	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
+		return false, nil
 	}
 	if err != nil {
 		return false, err

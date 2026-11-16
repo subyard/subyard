@@ -212,22 +212,27 @@ power_nm_managed_bridges() { # <bridge...>
 }
 
 POWER_NM_GUARD_COMMAND="${POWER_NM_GUARD_COMMAND:-yard init}"
-# A migrated guard waits for one host reboot. The record holds the boot ID and NetworkManager's
-# invocation at migration; a new boot, or a NetworkManager restart (which reads every file
-# again), applies the migrated guard.
+# The pending NetworkManager guard record: boot ID, NetworkManager invocation and kind. `unread`:
+# NetworkManager has not started since the guard was first written, so no yard may start.
+# `lists`: a migrated guard waits for the host reboot. Both clear on a new boot or a new
+# NetworkManager invocation, since NetworkManager reads every file when it starts.
 POWER_NM_REBOOT_PENDING=/run/subyard/nm-guard-reboot-pending
 
 power_nm_boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
 
-power_nm_reboot_pending() {
-  local boot invocation current
-  [ -r "$POWER_NM_REBOOT_PENDING" ] || return 1
-  read -r boot invocation < "$POWER_NM_REBOOT_PENDING" || [ -n "${boot:-}" ] || return 1
-  [ -n "$boot" ] && [ "$boot" = "$(power_nm_boot_id)" ] || return 1
-  [ -n "${invocation:-}" ] && [ "$invocation" != unknown ] || return 0
-  current="$(systemctl show -p InvocationID --value NetworkManager 2>/dev/null)" || return 0
-  [ -z "$current" ] || [ "$current" = "$invocation" ]
+power_nm_guard_pending() { # prints the kind while the record is pending
+  local boot invocation kind current
+  [ -r "$POWER_NM_REBOOT_PENDING" ] || return 0
+  read -r boot invocation kind < "$POWER_NM_REBOOT_PENDING" || [ -n "${boot:-}" ] || return 0
+  [ -n "$boot" ] && [ "$boot" = "$(power_nm_boot_id)" ] || return 0
+  if [ -n "${invocation:-}" ] && [ "$invocation" != unknown ]; then
+    current="$(systemctl show -p InvocationID --value NetworkManager 2>/dev/null)" || current=''
+    [ -z "$current" ] || [ "$current" = "$invocation" ] || return 0
+  fi
+  case "${kind:-lists}" in unread) printf 'unread\n' ;; *) printf 'lists\n' ;; esac
 }
+
+power_nm_reboot_pending() { [ "$(power_nm_guard_pending)" = lists ]; }
 
 power_join() { # stdin lines -> one "; "-separated line
   local out='' line
@@ -256,6 +261,9 @@ power_nm_guard_effective() { # <bridge...>
     return 1
   }
   violations="$(printf '%s\n' "$config" | power_nm_config_violations "$@")"
+  if [ "$(power_nm_guard_pending)" = unread ]; then
+    violations+="${violations:+$'\n'}NetworkManager has not read the Subyard guard since it was written"
+  fi
   if ! managed="$(power_nm_managed_bridges "$@")"; then
     violations+="${violations:+$'\n'}cannot read NetworkManager's devices with nmcli"
   elif [ -n "$managed" ]; then
@@ -264,10 +272,14 @@ power_nm_guard_effective() { # <bridge...>
     done <<< "$managed"
   fi
   [ -z "$violations" ] && return 0
-  if power_nm_reboot_pending; then
-    power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — a migrated NetworkManager guard waits for a host reboot: reboot the host once, then rerun $POWER_NM_GUARD_COMMAND"
-    return 1
-  fi
+  case "$(power_nm_guard_pending)" in
+    unread)
+      power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — reboot the host or restart NetworkManager ('sudo systemctl restart NetworkManager'), then rerun $POWER_NM_GUARD_COMMAND"
+      return 1 ;;
+    lists)
+      power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — a migrated NetworkManager guard waits for a host reboot: reboot the host once, then rerun $POWER_NM_GUARD_COMMAND"
+      return 1 ;;
+  esac
   power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — correct the NetworkManager configuration, then rerun $POWER_NM_GUARD_COMMAND"
 }
 

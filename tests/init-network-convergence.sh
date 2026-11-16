@@ -167,7 +167,7 @@ mkdir -p "$nm_root/etc/NetworkManager/conf.d" "$nm_root/run"
 cp -r "$ROOT/scripts" "$nm_root/scripts"
 ln -s "$ROOT/config" "$nm_root/config"
 sed -i "s|/etc/NetworkManager/|$nm_root/etc/NetworkManager/|g; s|/run/subyard/|$nm_root/run/|g" "$nm_root/scripts/lib/host.sh"
-sed -i "s|/usr/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/usr/bin/NetworkManager|$TMP/bin/NetworkManager|g; s|/sbin/NetworkManager|$TMP/bin/NetworkManager|g" \
+sed -i "s|/usr/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/usr/bin/NetworkManager|$TMP/bin/NetworkManager|g; s|/sbin/NetworkManager|$TMP/bin/NetworkManager|g; s|/run/subyard/|$nm_root/run/|g" \
   "$nm_root/scripts/lib-power.sh"
 nm_guard="$nm_root/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
 cat > "$TMP/bin/NetworkManager" <<SH
@@ -192,12 +192,13 @@ if bash "$nm_root/scripts/06-network.sh" --check; then
 fi
 printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
   'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' > "$nm_guard"
+printf '%s unknown unread\n' "$(cat /proc/sys/kernel/random/boot_id)" > "$nm_root/run/nm-guard-reboot-pending"
 if MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check; then
-  fail "network planning accepted a guard NetworkManager has not reloaded"
+  fail "network planning accepted a guard NetworkManager has not read"
 fi
-printf '%s unknown\n' "$(sha256sum "$nm_guard" | cut -d ' ' -f1)" > "$nm_root/run/nm-guard.record"
+rm -f "$nm_root/run/nm-guard-reboot-pending"
 MOCK_NM_STATE=active bash "$nm_root/scripts/06-network.sh" --check \
-  || fail "network planning rejected the current, reloaded NetworkManager guard"
+  || fail "network planning rejected the current guard NetworkManager has read"
 bash "$nm_root/scripts/06-network.sh" --check \
   || fail "network planning rejected the current guard while NetworkManager is inactive"
 printf '[keyfile]\nunmanaged-devices=interface-name:legacybr0\n' > "$nm_root/etc/NetworkManager/conf.d/99-subyard-unmanaged.conf"

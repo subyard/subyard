@@ -64,13 +64,10 @@ controller_main() {
   start_lease_keeper
   NM_LANE_TOKEN="$LEASE_GENERATION"
   [[ "$NM_LANE_TOKEN" =~ ^[1-9][0-9]*$ ]] || die 'invalid lease generation'
-  if [ "$lane" = fresh ]; then
-    run_guest 1 "$NM_LANE_BUNDLE" "$NM_LANE_HASH" bash dev/e2e/nm-admin-uplink.sh fresh "$NM_LANE_TOKEN"
-    cleanup_guest 1
-    exit 0
-  fi
-  for phase in prepare resume final; do
-    [ "$phase" = prepare ] || controller_reboot
+  phases=(prepare resume final)
+  [ "$lane" = upgrade ] || phases=(fresh-prepare fresh-resume fresh-final)
+  for phase in "${phases[@]}"; do
+    case "$phase" in prepare|fresh-prepare) ;; *) controller_reboot ;; esac
     run_guest 1 "$NM_LANE_BUNDLE" "$NM_LANE_HASH" bash dev/e2e/nm-admin-uplink.sh "$phase" "$NM_LANE_TOKEN"
     cleanup_guest 1
   done
@@ -233,15 +230,21 @@ prepare)
   # The administrator keeps the uplink out of NetworkManager; a static profile with the uplink's own
   # address lets the released guard's takeover keep the VM reachable.
   sudo -n install -d -m 0755 "$conf_dir"
-  printf '[keyfile]\nunmanaged-devices=interface-name:%s\n' "$UP" | sudo -n tee "$admin_conf" >/dev/null
+  # The list also has a glob Subyard cannot decide for the NM-managed br0 (the docker* variant).
+  printf '[keyfile]\nunmanaged-devices=interface-name:%s;interface-name:docker*\n' "$UP" | sudo -n tee "$admin_conf" >/dev/null
+  # The fixture platform runs before NetworkManager exists, so it writes no guard.
+  bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
   watchdog_start
   install_network_manager
   uplink_admins 'NetworkManager install'
   sudo -n nmcli connection add type ethernet ifname "$UP" con-name e2e-uplink autoconnect yes \
     ipv4.method manual ipv4.addresses "$UP_ADDRESS" ipv4.gateway "$UP_GATEWAY" ipv6.method ignore >/dev/null
-  pass "NetworkManager leaves the administrator's uplink $UP unmanaged"
+  sudo -n nmcli connection add type bridge ifname br0 con-name e2e-br0 autoconnect yes bridge.stp no \
+    ipv4.method manual ipv4.addresses 198.19.0.1/24 ipv6.method ignore >/dev/null
+  settle
+  [ "$(device_state br0)" = connected ] || die "NetworkManager did not run br0 ($(device_state br0))"
+  pass "NetworkManager leaves the administrator's uplink $UP unmanaged and runs br0"
 
-  bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
   export STORAGE_PATH
   STORAGE_PATH="$(sudo -n /usr/bin/incus storage get default source)"
   curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 20 --max-time 300 \
@@ -303,15 +306,36 @@ prepare)
   if owner "$launcher" update --rollback --yes >"$STATE/rollback.log" 2>&1; then
     die 'rollback to the released guard was accepted'
   fi
-  grep -Eq 'rollback-incompatible|cannot safely accept the current migration ledger' "$STATE/rollback.log" \
-    || die 'the rollback refusal did not name the incompatible release'
+  # The refusal must come from the NetworkManager device guard boundary: the ledger is at
+  # power-metadata epoch 4 with that migration applied, which 0.29.0 cannot read.
+  jq -e '.domains["power-metadata"].epoch == 4 and (.domains["power-metadata"].applied | index("introduce-nm-device-guard-v4"))' \
+    "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null || die 'the ledger did not cross the NetworkManager guard boundary'
+  grep -Fq 'cannot safely accept the current migration ledger' "$STATE/rollback.log" \
+    || die "the rollback refusal did not name the migration ledger: $(tail -5 "$STATE/rollback.log")"
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
   pass 'rollback to the published release is refused before activation'
   owner "$launcher" status >"$STATE/status.log" 2>&1 || true
   grep -Fq 'Reminder: reboot the host once' "$STATE/status.log" || die 'yard status shows no reboot reminder'
   owner "$launcher" check >"$STATE/check.log" 2>&1 || true
   grep -Fq 'reboot the host once' "$STATE/check.log" || die 'yard check shows no reboot reminder'
-  pass 'after the hand-back the update rewrote the guard without a reload or restart; status and check ask for a reboot'
+  grep -Fq "cannot decide whether the administrator's unmanaged-devices list" "$STATE/update.log" \
+    && grep -Eq 'manages: ([^ ]+, )*br0' "$STATE/update.log" \
+    && grep -Fq 'Do not reload or restart NetworkManager before the reboot' "$STATE/update.log" \
+    || die 'the update gave no notice for the docker* list and the NM-managed br0'
+  [ "$(device_state br0)" = connected ] || die 'the migration touched br0'
+  pass 'after the hand-back the update rewrote the guard without a reload or restart; status and check ask for a reboot; the docker* list gave a notice'
+
+  # Waiting for the reboot blocks nothing: the released section in memory covers the yard.
+  write_yard_config images:debian/13/cloud
+  yard init --yes >"$STATE/pre-reboot-init.log" 2>&1 || die 'init failed while the migration waits for the reboot'
+  yard start --yes >"$STATE/pre-reboot-start.log" 2>&1 || die 'start failed while the migration waits for the reboot'
+  yard stop --yes >"$STATE/pre-reboot-stop.log" 2>&1 || die 'stop failed while the migration waits for the reboot'
+  yard start --yes >"$STATE/pre-reboot-start2.log" 2>&1 || die 'restart failed while the migration waits for the reboot'
+  settle
+  [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'init or start restarted NetworkManager'
+  uplink_admins 'init and start before the reboot'
+  yard_devices_unmanaged 'yard before the reboot'
+  pass 'init, start, stop and start work before the reboot without touching NetworkManager'
 
   # Would a NetworkManager restart do instead of a reboot? Observe, without asserting.
   {
@@ -338,14 +362,21 @@ resume)
   ! grep -Fq 'Reminder: reboot the host once' "$STATE/status-after.log" || die 'yard status still asks for a reboot'
   uplink_admins 'after the reboot'
   ! nmcli -t -f NAME,DEVICE connection show --active | grep -q ":$UP$" || die 'an NetworkManager profile is active on the uplink'
-  [ "$(effective_unmanaged)" = "interface-name:$UP" ] || die "effective unmanaged-devices is not exactly the administrator's: $(effective_unmanaged)"
+  [ "$(effective_unmanaged)" = "interface-name:$UP,interface-name:docker*" ] || die "effective unmanaged-devices is not exactly the administrator's: $(effective_unmanaged)"
   for bridge in docker0 virbr0; do
     [ -n "$(address_of "$bridge")" ] || die "$bridge lost its address after the reboot"
     evidence "after reboot $bridge is $(device_state "$bridge") with $(address_of "$bridge")"
   done
   pass 'after the reboot the uplink is the administrator'"'"'s and docker0/virbr0 keep their addresses'
 
-  write_yard_config images:debian/13/cloud
+  for _ in $(seq 1 60); do
+    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -q ",RUNNING$" && break
+    sleep 3
+  done
+  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -q ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
+  yard_devices_unmanaged 'yard restored at boot'
+  [ "$(device_state br0)" = connected ] || die 'the reboot lost br0'
+  pass 'the boot reconciler restored the running yard with its veth unmanaged'
   before_table="$(managedness)"
   yard init --yes >"$STATE/candidate-init.log" 2>&1 || die 'candidate init failed'
   yard start --yes >"$STATE/start.log" 2>&1 || die 'candidate start failed'
@@ -392,7 +423,7 @@ resume)
     [ ! -e "$guard" ] || die 'teardown kept the guard after the last Incus bridge'
   fi
   uplink_admins 'teardown'
-  [ "$(effective_unmanaged)" = "interface-name:$UP" ] || die 'teardown changed the administrator list'
+  [ "$(effective_unmanaged)" = "interface-name:$UP,interface-name:docker*" ] || die 'teardown changed the administrator list'
   watchdog_clean
   pass 'teardown left the administrator configuration and the uplink untouched'
   ;;
@@ -400,17 +431,19 @@ resume)
 final)
   load_uplink
   uplink_admins 'after the final reboot'
-  [ "$(effective_unmanaged)" = "interface-name:$UP" ] || die 'the final boot has a different unmanaged-devices list'
+  [ "$(effective_unmanaged)" = "interface-name:$UP,interface-name:docker*" ] || die 'the final boot has a different unmanaged-devices list'
   ! grep -q '^unmanaged-devices' "$guard" 2>/dev/null || die 'a released guard came back'
   pass 'after the final reboot the uplink and unmanaged-devices list are the administrator'"'"'s alone'
   ;;
 
-fresh)
+fresh-prepare)
   install -d -m 0700 "$STATE" "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME" "$SUBYARD_HOME"
   UP="$(ip -4 route show default | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
   UP_GATEWAY="$(ip -4 route show default | awk '{print $3; exit}')"
   UP_ADDRESS="$(ip -4 -o addr show dev "$UP" scope global | awk '{print $4; exit}')"
   printf 'UP=%q\nUP_ADDRESS=%q\nUP_GATEWAY=%q\n' "$UP" "$UP_ADDRESS" "$UP_GATEWAY" > "$STATE/uplink.env"
+  # The fixture platform runs before NetworkManager exists, so it writes no guard.
+  bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
   # An except-only list: NetworkManager manages br0 and nothing else.
   sudo -n install -d -m 0755 "$conf_dir"
   printf '[keyfile]\nunmanaged-devices=except:interface-name:br0\n' | sudo -n tee "$admin_conf" >/dev/null
@@ -424,43 +457,87 @@ fresh)
   sudo -n ip link set br-0123456789ab up
   settle
   [ "$(device_state br0)" = connected ] || die "NetworkManager did not run br0 ($(device_state br0))"
-  docker_style="$(device_state br-0123456789ab)"
-  bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
+  device_state br-0123456789ab > "$STATE/docker-style.state"
+  # An administrator file nobody has applied yet; Subyard never reloads, so it stays unapplied.
+  printf '[keyfile]\nunmanaged-devices=interface-name:br0\n' | sudo -n tee "$conf_dir/50-e2e-later.conf" >/dev/null
   export STORAGE_PATH
   STORAGE_PATH="$(sudo -n /usr/bin/incus storage get default source)"
   install_candidate
   launcher="$STATE/bin/yard"
   write_yard_config images:debian/13/cloud
-  yard init --yes >"$STATE/init.log" 2>&1 || die 'candidate init failed'
-  yard start --yes >"$STATE/start.log" 2>&1 || die 'candidate start failed'
+  invocation="$(systemctl show -p InvocationID --value NetworkManager)"
+  before_table="$(managedness)"
+  if yard init --yes >"$STATE/init-first.log" 2>&1; then die 'the first init continued before NetworkManager read the guard'; fi
+  grep -Fq 'Reboot the host or restart NetworkManager' "$STATE/init-first.log" \
+    || die "the first init did not ask for a reboot or NetworkManager restart: $(tail -5 "$STATE/init-first.log")"
+  [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the first init restarted NetworkManager'
+  [ "$(managedness)" = "$before_table" ] || die 'the first init changed a device managed state'
+  [ "$(address_of "$UP")" = "$UP_ADDRESS" ] && [ "$(device_state br0)" = connected ] || die 'the first init touched the uplink or br0'
+  [ "$(cut -d ' ' -f3 "$pending")" = unread ] || die 'the first init recorded no unread guard'
+  grep -q '^\[device-subyard\]' "$guard" || die 'the first init wrote no guard'
+  sudo -n rm -f "$conf_dir/50-e2e-later.conf"
+  pass 'the first init writes the guard and stops without touching NetworkManager, devices or the uplink'
+  ;;
+
+fresh-resume)
+  load_uplink
+  watchdog_start
+  launcher="$STATE/bin/yard"
+  [ ! -e "$pending" ] || [ "$(cut -d ' ' -f1 "$pending")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the guard unread'
+  yard init --yes >"$STATE/init.log" 2>&1 || die 'init failed after the reboot'
+  yard start --yes >"$STATE/start.log" 2>&1 || die 'start failed after the reboot'
   settle
   uplink_admins 'except-only list through init and start'
   [ "$(effective_unmanaged)" = 'except:interface-name:br0' ] || die "effective list differs from the administrator's: $(effective_unmanaged)"
   [ "$(device_state br0)" = connected ] && [ "$(address_of br0)" = 198.19.0.1/24 ] || die 'init touched the NM-managed br0'
-  [ "$(device_state br-0123456789ab)" = "$docker_style" ] && [ "$(address_of br-0123456789ab)" = 198.18.7.1/24 ] \
-    || die 'init touched the Docker-style bridge'
   grep -Eq 'interface-name:(br0|br-0123456789ab)(,|$)' "$guard" && die 'the guard lists a bridge Incus does not manage'
   yard_devices_unmanaged 'running yard'
-  pass 'except-only list, NM-managed br0 and a Docker-style bridge are untouched by install, init and start'
+  pass 'after the reboot init and start complete; the except-only list and NM-managed br0 are untouched'
+  sudo -n ip link add eth9 type veth peer name eth9p
+  sudo -n ip tuntap add tap1234abcd mode tap
+  sudo -n ip link set eth9 up; sudo -n ip link set tap1234abcd up
+  settle 4
+  for device in eth9 eth9p tap1234abcd; do
+    [ "$(device_state "$device")" = unmanaged ] || die "new device $device was born $(device_state "$device")"
+  done
+  sudo -n ip link del eth9; sudo -n ip tuntap del tap1234abcd mode tap
+  pass 'a veth named eth9 and an Incus-style tap device are born unmanaged'
+  yard stop --yes >"$STATE/stop.log" 2>&1 || die 'stop failed'
+  yard start --yes >"$STATE/start-again.log" 2>&1 || die 'start after stop failed'
+  settle
+  yard_devices_unmanaged 'restarted yard'
+  pass 'restarting the guest gives an unmanaged veth'
+  sudo -n /usr/bin/incus network create e2ebr1 ipv4.address=198.18.9.1/24 ipv4.nat=false ipv6.address=none >/dev/null
+  settle 4
+  evidence "new Incus bridge e2ebr1 is $(device_state e2ebr1) before init"
+  yard init --yes >"$STATE/init-bridge.log" 2>&1 || die 'init failed with a second bridge'
+  grep -Fq 'interface-name:e2ebr1' "$guard" || die 'the guard does not list the second bridge'
+  [ "$(device_state e2ebr1)" = unmanaged ] && [ "$(address_of e2ebr1)" = 198.18.9.1/24 ] \
+    || die "the second bridge is $(device_state e2ebr1) with $(address_of e2ebr1)"
+  pass 'a second Incus bridge is listed and unmanaged with its address intact'
+  watchdog_clean
+  ;;
 
-  # An administrator file nobody has applied yet: a guard reload would deconfigure br0.
-  printf '[keyfile]\nunmanaged-devices=interface-name:br0\n' | sudo -n tee "$conf_dir/50-e2e-later.conf" >/dev/null
-  sudo -n rm -f /run/subyard/nm-guard.record
-  if yard init --yes >"$STATE/init-refused.log" 2>&1; then die 'init reloaded over an unapplied administrator file'; fi
-  grep -Fq "NetworkManager manages br0, which the unmanaged-devices list in $conf_dir/50-e2e-later.conf marks unmanaged" \
-    "$STATE/init-refused.log" || die 'the init refusal did not name br0 and the administrator file'
-  [ "$(device_state br0)" = connected ] && [ "$(address_of br0)" = 198.19.0.1/24 ] || die 'the refused init touched br0'
-  sudo -n rm -f "$conf_dir/50-e2e-later.conf"
-  yard init --yes >"$STATE/init-again.log" 2>&1 || die 'init failed after removing the administrator file'
-  [ "$(device_state br0)" = connected ] || die 'the guard reload touched br0'
-  pass 'init refuses a reload that would apply an unapplied administrator file, naming br0 and the file'
+fresh-final)
+  load_uplink
+  launcher="$STATE/bin/yard"
+  for _ in $(seq 1 60); do
+    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -q ",RUNNING$" && break
+    sleep 3
+  done
+  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -q ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
+  settle
+  yard_devices_unmanaged 'yard restored at boot'
+  uplink_admins 'after the final reboot'
+  [ "$(device_state br0)" = connected ] && [ "$(device_state e2ebr1)" = unmanaged ] || die 'the reboot changed br0 or e2ebr1'
+  pass 'the boot reconciler restored the running yard; its veth and both bridges keep their state'
+  sudo -n /usr/bin/incus network delete e2ebr1 >/dev/null 2>&1 || true
   yard teardown --yes >"$STATE/teardown.log" 2>&1 || die 'teardown failed'
   settle
   [ -f "$admin_conf" ] || die 'teardown removed the administrator file'
   uplink_admins 'teardown'
   [ "$(device_state br0)" = connected ] || die 'teardown touched br0'
   [ "$(effective_unmanaged)" = 'except:interface-name:br0' ] || die 'teardown changed the administrator list'
-  watchdog_clean
   pass 'teardown left the uplink, br0 and the administrator list untouched'
   ;;
 *) die "unknown mode $MODE" ;;

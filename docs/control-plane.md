@@ -1913,7 +1913,11 @@ path. Host network and policy guards continue to fail closed.
 The compiled `nm-device-guard-v1` capability advances `power-metadata` from epoch 3 to 4. It
 is the reader boundary of the `[device-subyard]` NetworkManager guard; the
 `host-network-guard` activation owner rewrites a released guard file without reloading
-NetworkManager and records one pending host reboot. Released power readers reject the new
+NetworkManager and records one pending host reboot. Subyard never reloads or restarts
+NetworkManager; `/run/subyard/nm-guard-reboot-pending` holds the boot ID, NetworkManager's
+invocation and a kind: `unread` blocks every yard start until NetworkManager has started after
+the guard was first written, `lists` only reminds about the reboot after a migration. Both clear
+on a new boot or a new NetworkManager invocation. Released power readers reject the new
 guard, and their init would rewrite the released guard and reload NetworkManager, so
 rollback to a release below this epoch is refused before activation as `rollback-incompatible`.
 `yard update --rollback` does not cross this boundary.

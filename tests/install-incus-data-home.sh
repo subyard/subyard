@@ -420,7 +420,9 @@ cat > "$version_bin/nmcli" <<'SH'
 case "$*" in
   "-t -f DEVICE,STATE device") printf 'incusbr0:unmanaged\n' ;;
   "-t -f DEVICE,TYPE,STATE device") printf 'incusbr0:bridge:unmanaged\n' ;;
-  "general reload conf") [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'nmcli %s\n' "$*" >> "$TEST_EFFECT_LOG" ;;
+  "-g GENERAL.STATE device show "*) printf '10 (unmanaged)\n' ;;
+  "device set "*) [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'nmcli %s\n' "$*" >> "$TEST_EFFECT_LOG" ;;
+  general\ reload*) [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'nmcli %s\n' "$*" >> "$TEST_EFFECT_LOG" ;;
   *) exit 99 ;;
 esac
 SH
@@ -432,7 +434,7 @@ if [ "${1:-}" = --config-dir ]; then dir="$2"; shift 2; fi
 cat "$dir/zz-subyard-unmanaged.conf"
 SH
 # Retain the real reader/guard logic, redirecting only its absolute binary peer.
-sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g" \
+sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/run/subyard/|$TMP/run/subyard/|g" \
   "$TMP/version-scripts/lib-power.sh"
 # The package replaces the initial executable, keeping installed and final
 # versions separate without making package effects implicit in --version.
@@ -583,8 +585,10 @@ for installed in 6.0.6 7.0.0 6.0.5 none; do
           guard_count="$(grep -c '^systemctl is-active NetworkManager$' "$effect_log")"
           expected_guards=1
           [ "$mode" != normal ] || expected_guards=2
-          [ "$nm_state" != active ] || expected_guards=$((expected_guards * 2))
+          # The guard never reloads NetworkManager, so an active one adds no verification pass.
           [ "$guard_count" -eq "$expected_guards" ] || fail "$label omitted or repeated a guard reconcile"
+          ! grep -Eq '^(systemctl (reload|restart|try-restart|reload-or-restart) NetworkManager|nmcli general reload)' "$effect_log" \
+            || fail "$label reloaded or restarted NetworkManager"
         done
       done
     done

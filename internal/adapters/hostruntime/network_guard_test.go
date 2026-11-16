@@ -162,30 +162,23 @@ func TestRouteDevicesAreSubyardsOwn(t *testing.T) {
 	}
 }
 
-func TestNetworkManagerRebootPendingFollowsTheBootAndNetworkManager(t *testing.T) {
-	directory := testkit.TempDir(t)
-	pending, boot := filepath.Join(directory, "pending"), filepath.Join(directory, "boot_id")
-	invocation := "nm-1"
-	current := func() string { return invocation }
-	if NetworkManagerRebootPending(pending, boot, current) {
-		t.Fatal("absent record reported a pending reboot")
+// The shell reader in scripts/lib-power.sh reads the same vectors in tests/lib-power-network.sh.
+func TestNetworkManagerGuardPendingSharedVectors(t *testing.T) {
+	vectors, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "nm-guard-pending.txt"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	testkit.WriteFile(t, boot, []byte("boot-a\n"), 0o644)
-	testkit.WriteFile(t, pending, []byte("boot-a nm-1\n"), 0o644)
-	if !NetworkManagerRebootPending(pending, boot, current) {
-		t.Fatal("same boot and NetworkManager did not report the pending reboot")
-	}
-	invocation = "nm-2"
-	if NetworkManagerRebootPending(pending, boot, current) {
-		t.Fatal("a NetworkManager restart did not apply the migrated guard")
-	}
-	testkit.WriteFile(t, pending, []byte("boot-a unknown\n"), 0o644)
-	if !NetworkManagerRebootPending(pending, boot, current) {
-		t.Fatal("an inactive NetworkManager at migration did not keep the boot ID rule")
-	}
-	testkit.WriteFile(t, boot, []byte("boot-b\n"), 0o644)
-	if NetworkManagerRebootPending(pending, boot, current) {
-		t.Fatal("a new boot still reported the pending reboot")
+	for _, line := range strings.Split(strings.TrimSpace(string(vectors)), "\n") {
+		fields := strings.Split(line, "|")
+		directory := testkit.TempDir(t)
+		pending, boot := filepath.Join(directory, "pending"), filepath.Join(directory, "boot_id")
+		if fields[0] != "" {
+			testkit.WriteFile(t, pending, []byte(fields[0]+"\n"), 0o644)
+		}
+		testkit.WriteFile(t, boot, []byte(fields[1]+"\n"), 0o644)
+		if got := NetworkManagerGuardPending(pending, boot, func() string { return fields[2] }); got != fields[3] {
+			t.Errorf("%q: kind %q, want %q", line, got, fields[3])
+		}
 	}
 }
 
@@ -215,7 +208,7 @@ func TestNetworkManagerGuardFormatSharedFixtures(t *testing.T) {
 func TestNetworkGuardNamesThePendingReboot(t *testing.T) {
 	config := strings.Replace(currentGuardConfig, ",interface-name:incusbr0", "", 1)
 	guard := activeGuard(config, "incusbr0:unmanaged\n", `[]`)
-	guard.RebootPending = func() bool { return true }
+	guard.Pending = func() string { return "lists" }
 	err := guard.Check(context.Background(), []string{"incusbr0"})
 	if err == nil || !strings.Contains(err.Error(), "waits for a host reboot: reboot the host once") {
 		t.Fatalf("expected the pending reboot in %v", err)
@@ -266,5 +259,30 @@ func TestNetworkManagerGuardCurrentCountsADanglingLegacyLink(t *testing.T) {
 	}
 	if current, err := NetworkManagerGuardCurrent(filepath.Join(directory, "zz-subyard-unmanaged.conf")); err != nil || current {
 		t.Fatalf("dangling legacy link: current=%v err=%v", current, err)
+	}
+}
+
+func TestNetworkGuardRefusesAnUnreadGuard(t *testing.T) {
+	guard := activeGuard(currentGuardConfig, "incusbr0:unmanaged\n", `[]`)
+	guard.Pending = func() string { return "unread" }
+	err := guard.Check(context.Background(), []string{"incusbr0"})
+	if err == nil || !strings.Contains(err.Error(), "has not read the Subyard guard") ||
+		!strings.Contains(err.Error(), "restart NetworkManager") {
+		t.Fatalf("an unread guard did not refuse the start: %v", err)
+	}
+	guard.Pending = func() string { return "lists" }
+	if err := guard.Check(context.Background(), []string{"incusbr0"}); err != nil {
+		t.Fatalf("a migrated guard waiting for the reboot blocked the start: %v", err)
+	}
+}
+
+func TestNetworkManagerGuardCurrentTreatsADanglingGuardLinkAsReleased(t *testing.T) {
+	directory := testkit.TempDir(t)
+	conf := filepath.Join(directory, "zz-subyard-unmanaged.conf")
+	if err := os.Symlink(filepath.Join(directory, "missing"), conf); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := NetworkManagerGuardCurrent(conf); err != nil || current {
+		t.Fatalf("dangling guard link: current=%v err=%v", current, err)
 	}
 }
