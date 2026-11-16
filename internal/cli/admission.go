@@ -11,6 +11,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
@@ -298,7 +299,7 @@ func (cli *CLI) admitReleaseGate(
 	}
 	if scoped {
 		cli.writeYardGateRefusal(yard, gate)
-		if admission.handler == "@config" {
+		if admission.handler == "@config" && gate.state(yard).repairOnly() {
 			cli.errorf("a setting this repair cannot write is corrected by editing its file, then yard -Y %s config validate", firstNonempty(yard, "default"))
 		}
 		return permits, 1, true
@@ -433,8 +434,10 @@ func (cli *CLI) admitTeardownInvocation(ctx context.Context, definition command.
 // admitRPCOperation is the admission of operation.plan and, on its retained CLI,
 // operation.execute: hard-cleanup and developer-identity recovery, then the release gate,
 // which release recovery commands and recovered operations skip. A non-ready gate admits
-// by the selected yard as for the direct CLI. Execute decides again; its admission is the
-// one of record, and a repair admission is rechecked once more after the owner barrier.
+// by the selected yard as for the direct CLI. Execute decides again. A repair admitted at
+// plan keeps its admission, whose history and source binding must still hold at execute;
+// otherwise the execute-time admission is the one of record. Execute rechecks a repair
+// admission after the owner barrier.
 func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string, execute bool) *rpc.Error {
 	yard := loaded.Context.YardName
 	cleanupRecovery := false
@@ -452,12 +455,27 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 	if definition.Handler == "@update" || definition.Handler == "@current-migration" || cleanupRecovery || identityRecovery {
 		return nil
 	}
+	planned := cli.gateAdmitted
 	cli.gateAdmitted = nil
 	admitted, outcome, gateInspection, _, _, err := cli.admitGate(ctx, cli.rpcGateRequest(yard, definition, arguments), func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
 		return cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
 	})
 	if err != nil {
 		return operationRPCError(rpcMutationGateFailedCode, err)
+	}
+	// A repair admitted at plan time was consented to by the client: execute
+	// must see the same history and installed source, as the direct CLI
+	// requires after its prompt, and keeps that admission for the recheck in
+	// preparedCommand.Execute.
+	if execute && planned != nil && planned.repair {
+		if fault := cli.plannedRepairCurrent(ctx, planned); fault != nil {
+			return fault
+		}
+		if outcome != nil && admitted == nil {
+			return mutationGateRPCError(outcome, gateInspection)
+		}
+		cli.gateAdmitted = planned
+		return nil
 	}
 	if outcome == nil {
 		return nil
@@ -466,5 +484,22 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 		return mutationGateRPCError(outcome, gateInspection)
 	}
 	cli.gateAdmitted = admitted
+	return nil
+}
+
+// plannedRepairCurrent refuses an RPC execution whose release history or
+// installed source changed since the repair admission of its plan.
+func (cli *CLI) plannedRepairCurrent(ctx context.Context, planned *gateAdmission) *rpc.Error {
+	stale := operationRPCError(rpcMutationGateFailedCode, fmt.Errorf("%w: the release changed after the plan; plan the command again", domain.ErrPlanStale))
+	current, err := cli.readReleaseHistory()
+	if err != nil || current == nil || *current != planned.history {
+		return stale
+	}
+	if planned.sources != nil {
+		sources, err := cli.repairSources(ctx)
+		if err != nil || *sources != *planned.sources {
+			return stale
+		}
+	}
 	return nil
 }

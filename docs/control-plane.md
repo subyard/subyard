@@ -1442,7 +1442,10 @@ shared setting waits while any yard has pending findings; `network link` refuses
 repair at prepare, naming each such endpoint, and `network isolation` names such yards. An owner's
 failure in one yard carries what it observed in the others, and a named yard whose configuration or
 installed context cannot be loaded is that yard's finding, so one failed yard never hides another's
-finding. The direct CLI and RPC share this admission.
+finding. The direct CLI and RPC share this admission. An RPC repair admitted at
+`operation.plan` keeps that admission through `operation.execute`, which refuses it when the release
+history or installed source changed since the plan and admits it again only when the gate still
+does; `preparedCommand.Execute` then rechecks it as for the direct CLI.
 
 A repair admission, of a member of the repair set other than `shell` on a yard that needs repair
 or of the bounded stop below, records the release history (journal, ledger projection and

@@ -222,8 +222,8 @@ if yard integration enable claude --yes > "$STATE/retry-refusal.log" 2>&1; then
   printf 'init-settings: integration enable ran on a yard limited to repair\n' >&2
   exit 1
 fi
-grep -Fq 'release gate: yard default needs repair' "$STATE/retry-refusal.log"
-grep -Fq 'next: yard -Y default init' "$STATE/retry-refusal.log"
+grep -Fq "release gate: yard $name needs repair" "$STATE/retry-refusal.log"
+grep -Fq "next: yard -Y $name init" "$STATE/retry-refusal.log"
 yard init --yes
 printf 'PASS: a failed integration hook is repaired by the yard init\n'
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("applied_settings",None); open(p,"w").write(json.dumps(value))'
@@ -237,7 +237,7 @@ if yard provision --yes > "$STATE/missing-owned-file.log" 2>&1; then
   printf 'init-settings: applied baseline concealed a missing owned dispatcher\n' >&2
   exit 1
 fi
-grep -Fq 'release gate: yard default needs repair' "$STATE/missing-owned-file.log"
+grep -Fq "release gate: yard $name needs repair" "$STATE/missing-owned-file.log"
 guest mv /usr/local/libexec/subyard/projects-changed.fixture-backup /usr/local/libexec/subyard/projects-changed
 yard init --yes
 printf 'PASS: applied settings retain missing-owned-file release refusal\n'

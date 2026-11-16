@@ -1016,9 +1016,61 @@ func TestRPCRepairIsRecheckedAtExecute(t *testing.T) {
 		t.Fatalf("RPC repair over a changed journal: %v effects=%d", err, harness.effects())
 	}
 	testkit.WriteFile(t, harness.scenario.fixture.journalPath, journal, 0o600)
+	// Another session completes a migration of the same release between plan
+	// and execute: the release is ready again with other history. Execute
+	// compares the planned repair's history, as the direct CLI does after its
+	// prompt, and refuses it.
+	plan("migrated")
+	testkit.WriteFile(t, harness.scenario.fixture.journalPath, harness.flippedJournal(t), 0o600)
+	testkit.WriteFile(t, harness.inspect, harness.ready, 0o600)
+	if err := execute("migrated"); err == nil || !strings.Contains(err.Error(), "the release changed after the plan") || harness.effects() != 0 {
+		t.Fatalf("RPC repair over a migration completed after its plan: %v effects=%d", err, harness.effects())
+	}
+	testkit.WriteFile(t, harness.scenario.fixture.journalPath, journal, 0o600)
+	recordReadiness(t, harness.scenario, harness.inspect)
 	plan("current")
 	if err := execute("current"); err != nil || harness.effects() == 0 {
 		t.Fatalf("RPC repair: %v effects=%d", err, harness.effects())
+	}
+}
+
+// Every Git write and every host or shared write stays out of the repair
+// set and waits for another yard's pending findings, for set, unset, import
+// and edit alike; the refusal on a repair-only yard names the manual repair.
+func TestConfigWritesReachingEveryYardOrGit(t *testing.T) {
+	for _, test := range []struct {
+		arguments   []string
+		everyYard   bool
+		repairShape bool
+	}{
+		{[]string{"set", "GIT_USER_NAME", "x", "--scope", "yard", "--git"}, true, false},
+		{[]string{"unset", "GIT_USER_NAME", "--scope", "yard", "--git"}, true, false},
+		{[]string{"import", "AGENT_codex_RULES", "/tmp/rules", "--scope", "shared", "--local"}, true, true},
+		{[]string{"edit", "AGENT_codex_RULES", "--scope", "host", "--local"}, true, true},
+		{[]string{"import", "AGENT_codex_RULES", "/tmp/rules", "--scope", "yard", "--git"}, true, false},
+		{[]string{"import", "AGENT_codex_RULES", "/tmp/rules", "--scope", "yard", "--local"}, false, true},
+		{[]string{"set", "SSH_PORT", "2230", "--scope", "yard", "--local"}, false, true},
+	} {
+		program := &CLI{}
+		if got := configWritesEveryYard(test.arguments); got != test.everyYard {
+			t.Errorf("%v reaches every yard=%t, want %t", test.arguments, got, test.everyYard)
+		}
+		if got := configRepairInvocation(program, test.arguments); got != test.repairShape {
+			t.Errorf("%v repair member=%t, want %t", test.arguments, got, test.repairShape)
+		}
+		pending := yardGate{yards: map[string]*yardGateState{"named": {pending: true}}, order: []string{"named"}}
+		if admitted, _ := program.yardGateAdmits(pending, gateRequest{yard: "default", handler: "@config", name: "config", arguments: test.arguments}); admitted == test.everyYard {
+			t.Errorf("%v beside a pending yard admitted=%t", test.arguments, admitted)
+		}
+	}
+	harness := newRepairHarness(t)
+	code, output := harness.run(t, func() { t.Error("Git authoring reached consent") }, "-Y", "named", "config", "set", "GIT_USER_NAME", "x", "--scope", "yard", "--git")
+	if code == 0 || !strings.Contains(output, "release gate: yard named needs repair") || !strings.Contains(output, "yard -Y named config validate") {
+		t.Fatalf("Git scalar authoring on a repair-only yard: code=%d\n%s", code, output)
+	}
+	code, output = harness.run(t, func() { t.Error("provision reached consent") }, "-Y", "named", "provision")
+	if code == 0 || strings.Contains(output, "config validate") {
+		t.Fatalf("the configuration hint is shown on a non-configuration refusal: code=%d\n%s", code, output)
 	}
 }
 
@@ -1137,6 +1189,7 @@ func TestConfigSyncConsumersFollowTheYardScopedGate(t *testing.T) {
 	})
 	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
 	program.ownerMutationLock = &uninstall.Tree{} // held by the publishing command
+	program.sourceBinding = harness.bindSources
 	admission, err := program.configConsumerAdmission(context.Background(), "default", []string{"default"})
 	if err != nil || admission == nil || !admission.repair || !admission.rechecked {
 		t.Fatalf("refresh of the drifted healthy yard: %#v %v", admission, err)

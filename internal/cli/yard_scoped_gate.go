@@ -466,18 +466,33 @@ var yardRepairSet = []yardRepairEntry{
 // command: exact apply and sync, and local set, unset, import and edit. Git
 // authoring and the other verbs stay refused on a yard that needs repair.
 func configRepairInvocation(cli *CLI, arguments []string) bool {
-	if configExactInvocation(config.Loaded{Catalog: cli.catalog}, arguments) {
+	verbs := configArguments(arguments)
+	if len(verbs) == 0 || commandHelpRequested(verbs) {
+		return false
+	}
+	switch verbs[0] {
+	case "set", "unset", "import", "edit":
+		requests, ok := configAuthoringRequests(verbs)
+		if !ok || len(requests) == 0 || (verbs[0] == "import" || verbs[0] == "edit") && len(requests) != 1 {
+			return false
+		}
+		for _, request := range requests {
+			if request.git {
+				return false
+			}
+		}
 		return true
+	case "apply", "sync":
+		return configExactInvocation(config.Loaded{Catalog: cli.catalog}, arguments)
 	}
-	arguments = configArguments(arguments)
-	if len(arguments) == 0 || commandHelpRequested(arguments) || !slices.Contains([]string{"set", "unset", "import", "edit"}, arguments[0]) {
-		return false
-	}
-	requests, err := parseConfigAuthoringRequests(arguments[0], arguments[1:], false)
-	if err != nil || len(requests) != 1 {
-		return false
-	}
-	return !requests[0].git
+	return false
+}
+
+// configAuthoringRequests parses the authoring requests of a set, unset,
+// import or edit invocation.
+func configAuthoringRequests(verbs []string) ([]configAuthoringRequest, bool) {
+	requests, err := parseConfigAuthoringRequests(verbs[0], verbs[1:], false)
+	return requests, err == nil
 }
 
 func initRepairMode(request gateRequest, mode initMode) bool {
@@ -705,8 +720,13 @@ func (cli *CLI) configConsumerAdmission(ctx context.Context, yard string, names 
 	if err != nil || history == nil {
 		return nil, err
 	}
+	// Like every repair, the refresh runs only with the installed tooling.
+	sources, err := cli.repairSources(ctx)
+	if err != nil {
+		return nil, nil
+	}
 	return &gateAdmission{request: gateRequest{yard: yard, handler: "@config", name: "config"}, gate: &gate,
-		repair: true, history: *history, rechecked: true}, nil
+		repair: true, history: *history, sources: sources, rechecked: true}, nil
 }
 
 // guardEffects refuses an adapter while a repair admission has not passed its
@@ -864,14 +884,24 @@ func (cli *CLI) unfinishedActivationStop(ctx context.Context, yard string, outco
 	return err == nil && loaded.Context.AccessKind == domain.AccessLocal
 }
 
-// configWritesEveryYard reports a configuration write at host or shared scope.
+// configWritesEveryYard reports a configuration write at host or shared scope,
+// or to Git, which every yard's desired configuration can read: set, unset,
+// import and edit alike. A write that cannot be parsed is treated as one.
 func configWritesEveryYard(arguments []string) bool {
 	arguments = configArguments(arguments)
-	if len(arguments) == 0 || !slices.Contains([]string{"set", "unset"}, arguments[0]) {
+	if len(arguments) == 0 || !slices.Contains([]string{"set", "unset", "import", "edit"}, arguments[0]) {
 		return false
 	}
-	request, err := parseConfigAuthoringRequest(arguments[0], arguments[1:], false)
-	return err != nil || request.git || request.scope == config.ScopeHost || request.scope == config.ScopeShared
+	requests, ok := configAuthoringRequests(arguments)
+	if !ok || len(requests) == 0 {
+		return true
+	}
+	for _, request := range requests {
+		if request.git || request.scope == config.ScopeHost || request.scope == config.ScopeShared {
+			return true
+		}
+	}
+	return false
 }
 
 // repairOnlyYards names, in order, the given yards the admitting gate limits
