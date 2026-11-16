@@ -311,6 +311,100 @@ func TestBootPowerGuardsBridgesOfUninitializedYards(t *testing.T) {
 	}
 }
 
+// bootPowerLockFunc is a host network policy lock fixture.
+type bootPowerLockFunc func() (func(), error)
+
+func (lock bootPowerLockFunc) Acquire(context.Context) (func(), error) { return lock() }
+
+// A stop of a stopped-intent yard rechecks init under the power lock, without
+// the policy check: a yard init entered while boot waited is not stopped, and
+// an initialized one is stopped while the lock is held.
+func TestBootPowerStopsOnlyUnderThePowerLock(t *testing.T) {
+	for _, entered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("entered=%t", entered), func(t *testing.T) {
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"p/stop": managedPowerInstance("p", "stop", "Running", domain.PowerStopped),
+			}}
+			held, policies := false, 0
+			reconciler := BootPowerReconciler{
+				Inventory: fake, Instances: fake, Power: powerDuringLock{fake, &held, t},
+				NetworkPolicy: bootNetworkPolicyFunc(func(_ context.Context, _ yardnetwork.Yard, start func() error) error {
+					policies++
+					return start()
+				}),
+				EnsureNetworkLock: ensureBootNetworkLock,
+				Network:           networkGuardFunc(func(context.Context, []string) error { return nil }),
+				PowerLock: bootPowerLockFunc(func() (func(), error) {
+					if entered {
+						instance := fake.Instances["p/stop"]
+						instance.Config["user.subyard.initialized"] = "false"
+						fake.Instances["p/stop"] = instance
+					}
+					held = true
+					return func() { held = false }, nil
+				}),
+			}
+			result, err := reconciler.Run(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entered != (len(fake.PowerUpdates) == 0) || entered != (len(result.Uninitialized) == 1) || policies != 0 {
+				t.Fatalf("result=%#v updates=%#v policy checks=%d", result, fake.PowerUpdates, policies)
+			}
+		})
+	}
+}
+
+// powerDuringLock fails a power change made without the power lock held.
+type powerDuringLock struct {
+	*testkit.Incus
+	held *bool
+	t    *testing.T
+}
+
+func (power powerDuringLock) SetInstancePower(ctx context.Context, project, name, action string, force bool) error {
+	if !*power.held {
+		power.t.Errorf("%s %s/%s outside the power lock", action, project, name)
+	}
+	return power.Incus.SetInstancePower(ctx, project, name, action, force)
+}
+
+// With only yards left to their init, boot still checks the host network over
+// their valid bridges, and its failure stops the running ones fail-closed. A
+// malformed bridge of such a yard is left out of the check.
+func TestBootPowerChecksNetworkWithOnlyUninitializedYards(t *testing.T) {
+	left := managedPowerInstance("p", "left", "Running", domain.PowerRunning)
+	left.Config["user.subyard.initialized"] = "false"
+	malformed := managedPowerInstance("p", "malformed", "Stopped", domain.PowerRunning)
+	malformed.Config["user.subyard.initialized"] = "false"
+	malformed.Config["user.subyard.bridge"] = ""
+	for _, failing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failing=%t", failing), func(t *testing.T) {
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"p/left": left, "p/malformed": malformed}}
+			var checked []string
+			reconciler := BootPowerReconciler{
+				Inventory: fake, Instances: fake, Power: fake,
+				NetworkPolicy: bootNetworkPolicyFunc(allowBootNetworkPolicy), EnsureNetworkLock: ensureBootNetworkLock,
+				Network: networkGuardFunc(func(_ context.Context, bridges []string) error {
+					checked = bridges
+					if failing {
+						return errors.New("route hijacked")
+					}
+					return nil
+				}),
+			}
+			_, err := reconciler.Run(context.Background())
+			if !reflect.DeepEqual(checked, []string{"incusbr0"}) || (err != nil) != failing {
+				t.Fatalf("checked=%v err=%v", checked, err)
+			}
+			stopped := len(fake.PowerUpdates) == 1 && fake.PowerUpdates[0].Name == "left" && fake.PowerUpdates[0].Action == "stop"
+			if failing != stopped || !failing && len(fake.PowerUpdates) != 0 {
+				t.Fatalf("power updates: %#v", fake.PowerUpdates)
+			}
+		})
+	}
+}
+
 func TestBootPowerPostStartRunsOnlyAfterSuccessfulStartInsidePolicyLock(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		"p/running": managedPowerInstance("p", "running", "Running", domain.PowerRunning),

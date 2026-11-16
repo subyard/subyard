@@ -54,9 +54,14 @@ type BootPowerReconciler struct {
 	// ReconcilePublications changes only optional owned listeners, independently of power.
 	ReconcilePublications func(context.Context, yardnetwork.Yard) ([]string, error)
 	EnsureNetworkLock     func() error
-	Clock                 ports.Clock
-	IncusWait             time.Duration
-	LocalAddresses        func() ([]netip.Addr, error)
+	// PowerLock is the host network policy lock that NetworkPolicy.WithStart
+	// takes and that init holds while it marks a yard uninitialized. A stop
+	// holds it without the policy check, so a policy failure never blocks a
+	// stop. Without it (fixtures only) stops are not serialized with init.
+	PowerLock      yardnetwork.Locker
+	Clock          ports.Clock
+	IncusWait      time.Duration
+	LocalAddresses func() ([]netip.Addr, error)
 }
 
 func (reconciler BootPowerReconciler) HasManaged(ctx context.Context) (bool, error) {
@@ -84,11 +89,12 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 	for _, instance := range uninitialized {
 		result.uninitialized(instance)
 	}
-	if len(instances) == 0 {
+	if len(instances)+len(uninitialized) == 0 {
 		return result, nil
 	}
-	// The network guard powers nothing: it still covers the bridges of yards
-	// left to their init.
+	// The network guard powers nothing: it covers the bridges of every
+	// managed yard, including those left to their init, and its failure
+	// stops every running one, even when only such yards exist.
 	bridges := managedBridges(append(slices.Clone(instances), uninitializedBridges(uninitialized)...))
 	for _, listed := range instances {
 		desired := parsePowerMetadata(listed).Desired.Value
@@ -96,29 +102,37 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			continue
 		}
 		reference := instanceReference(listed)
-		// Init's instance stage marks the yard uninitialized before its other
-		// effects; a yard that init entered since the listing is left to it.
-		instance, err := reconciler.Instances.Instance(ctx, listed.Project, listed.Name)
-		if err != nil {
-			return result, fmt.Errorf("re-read %s: %w", reference, err)
-		}
-		if instanceUninitialized(instance) {
-			result.uninitialized(instance)
-			continue
-		}
-		switch strings.ToLower(instance.Status) {
-		case "stopped":
-		case "running":
-			if err := reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "stop", false); err != nil {
-				return result, fmt.Errorf("stop %s: %w", reference, err)
+		// Init marks its yard uninitialized under the power lock; the read
+		// under that lock is the power boundary of this stop.
+		if err := reconciler.withPowerLock(ctx, func() error {
+			instance, err := reconciler.Instances.Instance(ctx, listed.Project, listed.Name)
+			if err != nil {
+				return fmt.Errorf("re-read %s: %w", reference, err)
 			}
-			result.Stopped = append(result.Stopped, reference)
-		default:
-			return result, fmt.Errorf("cannot restore %s from state %q", reference, instance.Status)
+			if instanceUninitialized(instance) {
+				result.uninitialized(instance)
+				return nil
+			}
+			switch strings.ToLower(instance.Status) {
+			case "stopped":
+			case "running":
+				if err := reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "stop", false); err != nil {
+					return fmt.Errorf("stop %s: %w", reference, err)
+				}
+				result.Stopped = append(result.Stopped, reference)
+			default:
+				return fmt.Errorf("cannot restore %s from state %q", reference, instance.Status)
+			}
+			return nil
+		}); err != nil {
+			return result, err
 		}
 	}
 	if err := reconciler.Network.Check(ctx, bridges); err != nil {
 		return result, reconciler.stopRunningFailClosed(ctx, err)
+	}
+	if len(instances) == 0 {
+		return result, nil
 	}
 	for _, observed := range instances {
 		instance, err := reconciler.Instances.Instance(ctx, observed.Project, observed.Name)
@@ -468,12 +482,25 @@ func validateManagedPower(instance ports.InstanceInfo) error {
 	return nil
 }
 
-// uninitializedBridges are the valid bridges of yards left to their init.
+// uninitializedBridges keeps the yards left to their init whose bridge is
+// valid, as validateManagedPower requires of the others; a malformed bridge of
+// such a yard never fails the guard of every running yard.
 func uninitializedBridges(instances []ports.InstanceInfo) []ports.InstanceInfo {
 	return slices.DeleteFunc(slices.Clone(instances), func(instance ports.InstanceInfo) bool {
-		bridge, _ := instance.EffectiveConfig(powerBridgeKey)
-		return bridge == ""
+		return parsePowerMetadata(instance).Bridge.State != fieldValid
 	})
+}
+
+func (reconciler BootPowerReconciler) withPowerLock(ctx context.Context, effect func() error) error {
+	if reconciler.PowerLock == nil {
+		return effect()
+	}
+	release, err := reconciler.PowerLock.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire host network policy lock: %w", err)
+	}
+	defer release()
+	return effect()
 }
 
 func managedBridges(instances []ports.InstanceInfo) []string {
