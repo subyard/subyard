@@ -367,8 +367,16 @@ nm_guard_file_current() { # <conf> [bridge]
     [ -z "$bridge" ] || ! power_nm_binary >/dev/null
     return
   fi
+  local listed live
+  listed="$(nm_guard_bridges_in "$conf")"
   if [ -n "$bridge" ]; then
-    nm_guard_bridges_in "$conf" | grep -Fxq -- "$bridge" || return 1
+    grep -Fxq -- "$bridge" <<< "$listed" || return 1
+  fi
+  # Every Incus-managed bridge belongs in the guard; a new one is drift for the apply.
+  if command -v incus >/dev/null 2>&1 && live="$(nm_incus_bridge_names)"; then
+    while IFS= read -r bridge; do
+      [ -z "$bridge" ] || grep -Fxq -- "$bridge" <<< "$listed" || return 1
+    done <<< "$live"
   fi
   [ "$(power_nm_guard_pending)" != unread ]
 }

@@ -308,10 +308,11 @@ prepare)
   fi
   # The refusal must come from the NetworkManager device guard boundary: the ledger is at
   # power-metadata epoch 4 with that migration applied, which 0.29.0 cannot read.
-  jq -e '.domains["power-metadata"].epoch == 4 and (.domains["power-metadata"].applied | index("introduce-nm-device-guard-v4"))' \
-    "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null || die 'the ledger did not cross the NetworkManager guard boundary'
-  grep -Fq 'cannot safely accept the current migration ledger' "$STATE/rollback.log" \
-    || die "the rollback refusal did not name the migration ledger: $(tail -5 "$STATE/rollback.log")"
+  owner "$launcher" migrate --check --json >"$STATE/migrate-check.json" 2>"$STATE/migrate-check.log" || true
+  jq -e '[.domains[] | select(.domain == "power-metadata" and .epoch == 4 and (.applied | index("introduce-nm-device-guard-v4") != null))] | length == 1' \
+    "$STATE/migrate-check.json" >/dev/null || die "the ledger did not cross the NetworkManager guard boundary: $(head -c 600 "$STATE/migrate-check.json")"
+  grep -Fq 'code=rollback-incompatible' "$STATE/rollback.log" \
+    || die "the rollback refusal was not rollback-incompatible: $(tail -5 "$STATE/rollback.log")"
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
   pass 'rollback to the published release is refused before activation'
   owner "$launcher" status >"$STATE/status.log" 2>&1 || true

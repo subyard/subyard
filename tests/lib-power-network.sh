@@ -562,6 +562,10 @@ nm_guard_write_file "$guard_conf" "$(nm_guard_render incusbr0)"
 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
 [ "$(cat "$guard_conf")" = "$expected_guard" ] || fail "the new bridge was not added"
 [ "$(cat "$MOCK_NMCLI_PINS")" = nestedbr0 ] || fail "pins: $(cat "$MOCK_NMCLI_PINS" 2>/dev/null)"
+MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true},{"name":"thirdbr0","type":"bridge","managed":true}]'
+if nm_guard_file_current "$guard_conf" incusbr0; then fail "planning missed a new Incus bridge"; fi
+MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true}]'
+nm_guard_file_current "$guard_conf" incusbr0 || fail "planning reported drift for a complete guard"
 [ -z "$(pending_kind)" ] || fail "a read guard wrote a pending record"
 rm -f "$MOCK_NMCLI_PINS"
 if (MOCK_PIN_RC=1 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "a failed pin was accepted"; fi
