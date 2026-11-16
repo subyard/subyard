@@ -198,13 +198,23 @@ rpc_params() { jq -cn "$@"; }
 # Make the installed Orca hook fail as busy, without changing any installed file: hold its
 # registration lock exclusively, so the hook's bounded shared-lock wait expires.
 hold_registration_lock() {
+  # -F runs the command in flock's own process, so the recorded PID is the lock holder.
   registration_lock_pid="$(guest_root sh -c \
-    'flock -x /usr/local/libexec/subyard/orca-registration.lock sleep 600 </dev/null >/dev/null 2>&1 & echo $!')" \
+    'flock -F -x /usr/local/libexec/subyard/orca-registration.lock sleep 600 </dev/null >/dev/null 2>&1 & echo $!')" \
     || die 'the Orca registration lock could not be held'
-  sleep 1
+  for _ in $(seq 1 20); do
+    guest_root flock -n /usr/local/libexec/subyard/orca-registration.lock true || return 0
+    sleep 0.25
+  done
+  die 'the Orca registration lock was not taken by its holder'
 }
 release_registration_lock() {
   guest_root kill "$registration_lock_pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    guest_root flock -n /usr/local/libexec/subyard/orca-registration.lock true && return 0
+    sleep 0.25
+  done
+  die 'the Orca registration lock is still held after release'
 }
 worktree_tabs() {
   orca_rpc session.tabs.listAll | jq -r --arg worktree "$1" \
