@@ -778,6 +778,7 @@ printf '%s\n' \
   'case "$*" in' \
   '  info) ;;' \
   '  --version) printf "6.0.7\n" ;;' \
+  '  "query /1.0") printf "{\"environment\":{\"server_version\":\"6.0.7\"}}\n" ;;' \
   '  "storage show default --project default") ;;' \
   '  "network show incusbr0 --project default") ;;' \
   '  "admin waitready") ;;' \
