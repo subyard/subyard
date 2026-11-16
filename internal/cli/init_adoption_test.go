@@ -1054,7 +1054,9 @@ func TestRegisteredOwnerIngressEntersManagementAsFound(t *testing.T) {
 		publish int
 		want    string
 	}{
-		"receipts-match":  {mutate: receipts},
+		"receipts-match": {mutate: receipts},
+		// The power owner's completion mark of an already initialized yard.
+		"completion-mark": {mutate: func(state fixture) { receipts(state); set(state, "user.subyard.ever_initialized", "true") }},
 		"receipts-absent": {mutate: func(fixture) {}, publish: 2},
 		"startup-enabled": {mutate: func(state fixture) { receipts(state); set(state, startupKey, "enabled") }},
 		"startup-pending": {mutate: func(state fixture) { remove(state, udp); remove(state, tcp); set(state, startupKey, "pending") }},

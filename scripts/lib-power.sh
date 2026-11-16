@@ -16,6 +16,8 @@ POWER_KEY_BRIDGE=user.subyard.bridge
 POWER_KEY_DESIRED=user.subyard.desired_power
 # shellcheck disable=SC2034 # exported to sourced callers
 POWER_KEY_INITIALIZED=user.subyard.initialized
+# Written by the first finished init and never cleared; a re-init keeps it.
+POWER_KEY_EVER_INITIALIZED=user.subyard.ever_initialized
 POWER_ERROR=
 
 power_fail() {
@@ -37,6 +39,31 @@ incus_instance_columns() { # <project> <instance> <columns> [timeout]
 }
 
 power_state() { incus_instance_columns "$1" "$2" s; } # <project> <instance>
+
+# Succeeds only for a managed instance whose init has never finished:
+# initialized=false without the completion mark. A yard from a release before
+# the mark has initialized=true. Any failed read is not never-initialized.
+power_never_initialized() { # <project> <instance>
+  local managed initialized ever
+  managed="$(incus config get "$2" "$POWER_KEY_MANAGED" --project "$1" 2>/dev/null)" || return 1
+  initialized="$(incus config get "$2" "$POWER_KEY_INITIALIZED" --project "$1" 2>/dev/null)" || return 1
+  ever="$(incus config get "$2" "$POWER_KEY_EVER_INITIALIZED" --project "$1" 2>/dev/null)" || return 1
+  [ "$managed" = true ] && [ "$initialized" = false ] && [ "$ever" != true ]
+}
+
+# Succeeds only for a running never-initialized instance whose guest lacks the
+# substrate provisioning installs first (python3 and /srv/agents), so no later
+# init stage has run there. It does not depend on the current developer name,
+# which a rename can change. Only an explicit answer of a successful probe counts.
+power_guest_never_provisioned() { # <project> <instance>
+  local answer
+  power_never_initialized "$1" "$2" || return 1
+  [ "$(power_state "$1" "$2")" = RUNNING ] || return 1
+  answer="$(incus exec "$2" --project "$1" -- sh -c \
+    'if command -v python3 >/dev/null && test -d /srv/agents; then echo provisioned; else echo unprovisioned; fi' \
+    2>/dev/null)" || return 1
+  [ "$answer" = unprovisioned ]
+}
 
 # Validate the effective NetworkManager configuration, not merely our drop-in file: a later distro
 # file can override unmanaged-devices and recreate the route-hijack incident. No active NM is safe.
@@ -72,15 +99,24 @@ power_nm_prepare_reader() {
   [ "$(id -u)" -ne 0 ] || return 0
   command -v sudo >/dev/null 2>&1 \
     || { power_fail "sudo is required to verify NetworkManager configuration"; return 1; }
-  if [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" = 1 ]; then
-    sudo -n true </dev/null \
-      || { power_fail "sudo authorization expired; re-run 'yard start' in an operator terminal"; return 1; }
+  # `sudo -v` demands a password when any matching sudoers rule does, even with NOPASSWD:ALL.
+  if sudo -n true </dev/null 2>/dev/null; then
+    :
+  elif [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" = 1 ]; then
+    power_fail "sudo authorization expired; re-run the yard command in an operator terminal"
+    return 1
+  elif ! power_operator_terminal; then
+    power_fail "sudo authorization is required to verify NetworkManager configuration; re-run the yard command in an operator terminal"
+    return 1
   else
     sudo -v \
       || { power_fail "could not authorize NetworkManager configuration check"; return 1; }
   fi
   export SUBYARD_SUDO_PREAUTHORIZED=1
 }
+
+# sudo prompts on the controlling terminal; without one, `sudo -v` can only fail.
+power_operator_terminal() { { : </dev/tty; } 2>/dev/null; }
 
 power_nm_print_config() {
   local binary
@@ -103,7 +139,7 @@ power_nm_guard_effective() { # <bridge>
     if [ "$(id -u)" -eq 0 ]; then
       power_fail "cannot read NetworkManager's effective configuration"
     else
-      power_fail "cannot read NetworkManager's effective configuration as root — run 'sudo -v'"
+      power_fail "cannot read NetworkManager's effective configuration as root; check that 'sudo -n NetworkManager --print-config' works, then re-run the yard command"
     fi
     return 1
   }

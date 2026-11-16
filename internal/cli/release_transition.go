@@ -642,6 +642,10 @@ func (reconciler *activationStageReconciler) Reconcile(
 			if err := reconciler.authorize(ctx); err != nil {
 				return reconciler.failure("authorization", err)
 			}
+			// Rebuild so the guarded scripts receive the verified sudo authorization.
+			if platform, err = reconciler.platform(ctx, applicability); err != nil {
+				return reconciler.failure("platform", err)
+			}
 		}
 		if err := platform.ApplyStage(ctx, reconciler.stage); err != nil {
 			return reconciler.failure("apply", err)
@@ -851,6 +855,10 @@ func (cli *CLI) powerActivationReconciler(
 			operation := *cli
 			operation.baseEnv = cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 			operation.env = maps.Clone(operation.baseEnv)
+			// The fresh environment drops inherited flags; keep only this process's verified one.
+			if cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
+				operation.env["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
+			}
 			loaded, targets, err := operation.releaseActivationTargets(ctx, "default", request.ConfigHome, true, nil)
 			powerYards := make([]domain.Context, 0, len(targets))
 			for _, target := range targets {
@@ -1922,15 +1930,14 @@ func (cli *CLI) resolveReleaseTransitionContext(
 	return cli.loadReleaseTransitionContext(yard, configHome, nil, files...)
 }
 
-// Only installed-view repairs may replace desired provisioning sources before
-// strict loading. An inert, already-required file lets context discovery locate
-// the installed receipt without opening unavailable desired provisioning inputs;
-// the final load validates the recorded sources, or retains the original error
-// when no applied baseline is available. Ordinary loading is always strict.
-func (cli *CLI) resolveInstalledReleaseContext(ctx context.Context, yard, home string) (config.Loaded, error) {
+// discoverReleaseContext loads a yard's context without any guest read. When a
+// desired provisioning source is missing it returns a bootstrap context whose
+// placeholder sources only locate the yard, with those placeholders named in
+// sources; sources is nil when no such discovery is possible.
+func (cli *CLI) discoverReleaseContext(yard, home string) (config.Loaded, config.Loaded, map[string]string, error) {
 	loaded, originalErr := cli.loadReleaseTransitionContext(yard, home, nil)
 	if originalErr == nil {
-		return loaded, nil
+		return loaded, loaded, nil, nil
 	}
 	sources := map[string]string{}
 	bootstrap, err := loaded, originalErr
@@ -1938,13 +1945,29 @@ func (cli *CLI) resolveInstalledReleaseContext(ctx context.Context, yard, home s
 		var source *config.SourceError
 		if !errors.As(err, &source) || !cli.catalog.IntegrationInitSetting(source.Key) ||
 			!strings.HasPrefix(source.Key, "AGENT_") || !strings.HasSuffix(source.Key, "_PROVISION") {
-			return config.Loaded{}, originalErr
+			return config.Loaded{}, config.Loaded{}, nil, originalErr
 		}
 		if _, seen := sources[source.Key]; seen {
-			return config.Loaded{}, originalErr
+			return config.Loaded{}, config.Loaded{}, nil, originalErr
 		}
 		sources[source.Key] = filepath.Join(cli.options.RepositoryRoot, "config", "commands.registry")
 		bootstrap, err = cli.loadReleaseTransitionContext(yard, home, sources)
+	}
+	return loaded, bootstrap, sources, originalErr
+}
+
+// Only installed-view repairs may replace desired provisioning sources before
+// strict loading. An inert, already-required file lets context discovery locate
+// the installed receipt without opening unavailable desired provisioning inputs;
+// the final load validates the recorded sources, or retains the original error
+// when no applied baseline is available. Ordinary loading is always strict.
+func (cli *CLI) resolveInstalledReleaseContext(ctx context.Context, yard, home string) (config.Loaded, error) {
+	loaded, bootstrap, sources, originalErr := cli.discoverReleaseContext(yard, home)
+	if originalErr == nil {
+		return loaded, nil
+	}
+	if sources == nil {
+		return config.Loaded{}, originalErr
 	}
 	installed, known, err := cli.appliedIntegrationTargetBaseline(ctx, configTarget{Name: yard, Loaded: bootstrap})
 	if err != nil {
@@ -2306,7 +2329,7 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 	if err != nil {
 		return err
 	}
-	if strings.EqualFold(instance.Status, "stopped") {
+	if strings.EqualFold(instance.Status, "stopped") || operation.noteYardUninitialized(target, instance) {
 		return nil
 	}
 

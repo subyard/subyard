@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerroute"
@@ -200,6 +201,9 @@ type AppliedIntegrationConfiguration struct {
 // AppliedIntegrationConfiguration reads committed ownership and validated inputs,
 // independently of desired settings or an incomplete enable operation.
 func (runtime Runtime) AppliedIntegrationConfiguration(ctx context.Context) (AppliedIntegrationConfiguration, error) {
+	if absent, err := runtime.integrationStateNeverInstalled(ctx); err != nil || absent {
+		return AppliedIntegrationConfiguration{}, err
+	}
 	baseline, err := runtime.integrationInventory(ctx, "settings", nil, "")
 	if err != nil {
 		return AppliedIntegrationConfiguration{}, err
@@ -345,6 +349,47 @@ func adoptionPlan(observed integrationObservation, structuredEvidence []string) 
 		}
 	}
 	return plan, legacy
+}
+
+// integrationInventoryPath is the guest's integration ownership inventory.
+const integrationInventoryPath = "/var/lib/subyard/integrations/inventory.json"
+
+// guestNeverProvisioned reports a running instance whose init has never
+// finished and whose guest lacks the substrate every installed owner needs
+// (python3 and /srv/agents). Init's stages run in order
+// and provisioning installs that substrate first, so no later stage has run in
+// this guest. A working yard whose re-init failed is never such a guest.
+func (runtime Runtime) guestNeverProvisioned(ctx context.Context, instance ports.InstanceInfo) (bool, error) {
+	if runtime.Executor == nil || !strings.EqualFold(instance.Status, "running") || !application.InstanceNeverInitialized(instance) {
+		return false, nil
+	}
+	// Only an explicit answer counts: a transport failure or any other exit
+	// status, such as an out-of-memory kill, is not evidence of absence.
+	// The substrate does not depend on the current developer name, which a
+	// rename can change while installed owners still run.
+	result, answered, err := runtime.guestObserve(ctx, []string{"sh", "-eu", "-c", `if command -v python3 >/dev/null && test -d /srv/agents; then echo provisioned; else echo unprovisioned; fi`})
+	if err != nil || !answered {
+		return false, err
+	}
+	return strings.TrimSpace(string(result.Stdout)) == "unprovisioned", nil
+}
+
+// integrationStateNeverInstalled reports that a yard has no applied integration
+// state to read: its guest was never provisioned and has no integration
+// inventory. That is absent state, observed as such; any other yard, including
+// a working yard whose re-init failed, is read and refused strictly as before.
+func (runtime Runtime) integrationStateNeverInstalled(ctx context.Context) (bool, error) {
+	if runtime.Incus == nil || runtime.Executor == nil {
+		return false, nil
+	}
+	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
+	if err != nil {
+		return false, nil
+	}
+	if never, err := runtime.guestNeverProvisioned(ctx, instance); err != nil || !never {
+		return false, err
+	}
+	return runtime.guestCheck(ctx, []string{"sh", "-c", `test ! -e "$1" && test ! -L "$1"`, "subyard", integrationInventoryPath})
 }
 
 // errIntegrationSubstrateUnavailable is the precondition that init provisioning repairs.

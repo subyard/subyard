@@ -362,6 +362,7 @@ func main() {
 					return err
 				},
 				EnsureNetworkLock: networkruntime.EnsureHostLock,
+				PowerLock:         networkruntime.HostLock{},
 				LocalAddresses:    hostruntime.LocalAddresses,
 			}))
 	}

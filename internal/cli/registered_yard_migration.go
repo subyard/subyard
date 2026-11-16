@@ -77,6 +77,8 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 			if err != nil {
 				return nil, fmt.Errorf("yard %s: %w", yard, err)
 			}
+			// A yard left to its init is still migrated: this owner changes only
+			// host-side Incus metadata, from the desired context, as outside repair.
 			if loaded.Context.AccessKind == domain.AccessRemote {
 				return nil, nil
 			}

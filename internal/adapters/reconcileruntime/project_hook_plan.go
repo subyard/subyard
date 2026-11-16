@@ -116,8 +116,16 @@ func (runtime Runtime) PrepareProjectHooks(ctx context.Context, unavailable bool
 		plan.approved.Projects = fmt.Sprintf("%x", sha256.Sum256(nil))
 		return plan, nil
 	}
-	if !state.InstanceFound || !strings.EqualFold(state.Instance.Status, "running") {
-		if state.InstanceFound && !strings.EqualFold(state.Instance.Status, "stopped") {
+	// A guest that init never provisioned has no project hooks yet; it is
+	// planned conditionally like a yard init still has to create.
+	never := false
+	if state.InstanceFound {
+		if never, err = runtime.guestNeverProvisioned(ctx, state.Instance); err != nil {
+			return nil, err
+		}
+	}
+	if !state.InstanceFound || !strings.EqualFold(state.Instance.Status, "running") || never {
+		if state.InstanceFound && !never && !strings.EqualFold(state.Instance.Status, "stopped") {
 			return nil, fmt.Errorf("project hook observation requires a running or stopped yard")
 		}
 		if state.InstanceFound && instanceIntentionallyStopped(state.Instance) {
@@ -163,6 +171,13 @@ func (runtime Runtime) CheckProjectHookPlan(ctx context.Context, beforeWrites bo
 		if !state.InstanceFound || !application.ProjectHookStoppedIntentPreserved(state.Instance) ||
 			beforeWrites && !instanceIntentionallyStopped(state.Instance) {
 			return fmt.Errorf("%w: captured stopped project hook power intent changed", domain.ErrPlanStale)
+		}
+	}
+	// Before writes, a conditional plan of a guest that init never
+	// provisioned still has no hooks to check; init provisions it first.
+	if beforeWrites && plan.conditional && state.InstanceFound {
+		if never, err := runtime.guestNeverProvisioned(ctx, state.Instance); err != nil || never {
+			return err
 		}
 	}
 	if !state.InstanceFound || !strings.EqualFold(state.Instance.Status, "running") {

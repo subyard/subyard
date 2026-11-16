@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,5 +260,60 @@ func TestStoppedIdentityInspectionImportsPowerBeforePhysicalStart(t *testing.T) 
 				t.Fatal("foreign native change accepted after boot")
 			}
 		})
+	}
+}
+
+// The inspection runtime is built while planning, before sudo is prepared at execution.
+// Its guarded start must still receive the preparation result, or a passwordless sudo
+// user falls back to an interactive sudo prompt inside the lifecycle guard.
+func TestStoppedIdentityInspectionStartReceivesSudoPreauthorization(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := os.ReadFile("../../config/projects-changed.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, root+"/config/projects-changed.sh", dispatcher, 0755)
+	record := filepath.Join(root, "guard.env")
+	writeCLIFile(t, filepath.Join(bin, "systemctl"), "#!/bin/sh\nprintf 'active\\n'\n", 0o700)
+	writeCLIFile(t, filepath.Join(bin, "sudo"), "#!/bin/sh\n[ \"$*\" = \"-n true\" ]\n", 0o700)
+	writeCLIFile(t, filepath.Join(root, "scripts", "lifecycle-guard.sh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" \"${SUBYARD_SUDO_PREAUTHORIZED:-unset}\" > \"$GUARD_RECORD\"\nexit 1\n", 0o700)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	environment = append(environment, "PATH="+bin+":"+os.Getenv("PATH"), "GUARD_RECORD="+record)
+	native := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	cli, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native, NetworkPolicy: allowTestNetworkPolicy()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli.effectiveUID = func() int { return 1000 }
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(loaded.Context.Paths.ConfigHome, 0700); err != nil {
+		t.Fatal(err)
+	}
+	key := loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName
+	native.Instances[key] = ports.InstanceInfo{Name: loaded.Context.YardInstanceName, Status: "Stopped", Config: map[string]string{"volatile.uuid": "11111111-1111-1111-1111-111111111111"}}
+	prepared := &preparedCommand{CLI: cli, Loaded: loaded}
+	handled, err := prepared.prepareStoppedIdentityInspection(context.Background(), nil)
+	if err != nil || !handled {
+		t.Fatal("stopped account inspection omitted", handled, err)
+	}
+	if cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
+		t.Fatal("planning prepared sudo before execution")
+	}
+	if _, err := prepared.execute(context.Background(), nil, io.Discard); err == nil {
+		t.Fatal("failed guarded start was accepted")
+	}
+	payload, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal("guarded start did not run", err)
+	}
+	if string(payload) != "start --reconcile\n1\n" {
+		t.Fatalf("guarded start lost passwordless sudo preparation: %q", payload)
 	}
 }

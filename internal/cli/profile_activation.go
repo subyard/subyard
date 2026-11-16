@@ -88,6 +88,33 @@ func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Contex
 	return operation, targets, nil
 }
 
+// splitUninitialized leaves out the yards whose last init did not finish, as
+// stopped yards are left out, and names them. Host key tools are one host
+// installation that no yard's state defers. A yard whose instance cannot be
+// read is a finding of that yard; the other yards are still returned.
+func (reconciler *profileRuntimeActivationReconciler) splitUninitialized(
+	ctx context.Context, operation *CLI, targets []configTarget,
+) ([]configTarget, []string, []error) {
+	if reconciler.id == "key-tools-runtime" {
+		return targets, nil, nil
+	}
+	kept := make([]configTarget, 0, len(targets))
+	var uninitialized []string
+	var failures []error
+	for _, target := range targets {
+		left, err := operation.releaseYardUninitialized(ctx, target)
+		switch {
+		case err != nil:
+			failures = append(failures, reconciler.failure(target.Name, "inspect", err))
+		case left:
+			uninitialized = append(uninitialized, target.Name)
+		default:
+			kept = append(kept, target)
+		}
+	}
+	return kept, uninitialized, failures
+}
+
 func (reconciler *profileRuntimeActivationReconciler) sourceMigrationsComplete() (bool, error) {
 	store, err := releasetransition.NewPOSIXV2Store(reconciler.request.ConfigHome)
 	if err != nil {
@@ -136,13 +163,15 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
 	}
+	targets, uninitialized, failures := reconciler.splitUninitialized(ctx, operation, targets)
 	deferred, err := operation.deferredDiskTmpTargets(ctx, targets, reconciler.id == "core-guest-runtime" || slices.Contains(reconciler.cli.profileRuntimeIDs(), reconciler.id))
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, reconciler.failure("default", "inspect", err)
 	}
-	warnings := []string{}
+	warnings := uninitializedYardWarnings(uninitialized)
 	if reconciler.id == "core-guest-runtime" {
-		warnings = diskTmpWarnings(deferred, targets)
+		warnings = append(warnings, diskTmpWarnings(deferred, targets)...)
+		slices.Sort(warnings)
 	}
 	type observation struct {
 		Yard, Project, Instance, State, Digest, Desired string
@@ -155,7 +184,6 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	pendingInputs := false
 	var diagnostics []releasetransition.RedactedDecision
 	disclosed, order := map[string][]string{}, []string{}
-	var failures []error
 	for _, target := range targets {
 		if _, ok := deferred[target.Name]; ok {
 			continue
@@ -241,11 +269,18 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 	if err != nil {
 		return err
 	}
+	all := targets
+	targets, uninitialized, failures := reconciler.splitUninitialized(ctx, operation, targets)
+	if err := domain.CollectRefusals(failures...); err != nil {
+		return err
+	}
 	deferred, err := operation.deferredDiskTmpTargets(ctx, targets, reconciler.id == "core-guest-runtime" || slices.Contains(reconciler.cli.profileRuntimeIDs(), reconciler.id))
 	if err != nil {
 		return err
 	}
-	if reconciler.recovery != nil && len(targets) != len(reconciler.recovery) {
+	// A recovery plan binds every yard; a yard left to its init since then only
+	// narrows the work.
+	if reconciler.recovery != nil && len(all) != len(reconciler.recovery)+recoveryNarrowed(reconciler.recovery, uninitialized) {
 		return domain.ErrPlanStale
 	}
 	// A typed yard-scoped failure is recorded and does not stop the other
@@ -253,6 +288,13 @@ func (reconciler *profileRuntimeActivationReconciler) Reconcile(ctx context.Cont
 	// failure stops as before.
 	for _, target := range targets {
 		if _, ok := deferred[target.Name]; ok {
+			continue
+		}
+		// Init may have entered this yard since the scope was decided: its
+		// instance stage marks the yard first, so it is left to that init.
+		if _, uninitialized, failures := reconciler.splitUninitialized(ctx, operation, []configTarget{target}); len(failures) != 0 {
+			return failures[0]
+		} else if len(uninitialized) != 0 {
 			continue
 		}
 		platform := profileActivationPlatform(operation, target)
@@ -570,6 +612,10 @@ func (reconciler *profileRuntimeActivationReconciler) PrepareActivationRecovery(
 	if err != nil {
 		return "", err
 	}
+	targets, _, failures := reconciler.splitUninitialized(ctx, operation, targets)
+	if err := domain.CollectRefusals(failures...); err != nil {
+		return "", err
+	}
 	type entry struct {
 		Yard, Project, Instance string
 		Runtime                 ports.RuntimeObservation
@@ -591,6 +637,19 @@ func (reconciler *profileRuntimeActivationReconciler) PrepareActivationRecovery(
 		Targets  []entry
 	}{reconciler.id, releases, links, entries})
 }
+
+// recoveryNarrowed counts the uninitialized yards that a recovery plan did not
+// bind because they were already left to their init when it was prepared.
+func recoveryNarrowed(recovery map[string]ports.RuntimeObservation, uninitialized []string) int {
+	count := 0
+	for _, yard := range uninitialized {
+		if _, bound := recovery[yard]; !bound {
+			count++
+		}
+	}
+	return count
+}
+
 func (cli *CLI) profileRuntimeIDs() []string {
 	var result []string
 	for _, definition := range cli.catalog.Profiles() {

@@ -140,6 +140,7 @@ export PATH="$tmp/bin:$PATH"
 # shellcheck disable=SC1091
 . "$ROOT/scripts/lib-power.sh"
 power_nm_binary() { printf '%s\n' "$tmp/bin/NetworkManager"; }
+power_operator_terminal() { [ "$MOCK_TERMINAL" = 1 ]; }
 
 ROOT="$ROOT" bash -c '
   set -euo pipefail
@@ -155,7 +156,7 @@ reset_case() {
   rm -f "$MOCK_NM_COUNT" "$MOCK_SUDO_AUTH" "$MOCK_INCUS_EXEC_COUNT"
   POWER_ERROR=''
   unset SUBYARD_SUDO_PREAUTHORIZED
-  export MOCK_NM_STATE=active MOCK_UID=1000 MOCK_SUDO_V_RC=0 MOCK_SUDO_N_RC=0 \
+  export MOCK_TERMINAL=1 MOCK_NM_STATE=active MOCK_UID=1000 MOCK_SUDO_V_RC=0 MOCK_SUDO_N_RC=0 \
     MOCK_SUDO_REQUIRE_V=1 MOCK_NM_MODE=valid MOCK_RELOAD_RC=0 MOCK_NMCLI_RC=1 \
     MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1 MOCK_INCUS_EXEC_HANG=0 \
     MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS='' MOCK_NM_CONFIG_FILE='' MOCK_NM_REQUIRE_ROOT=1
@@ -196,6 +197,36 @@ reset_case
 MOCK_SUDO_V_RC=1
 if power_nm_prepare_reader; then fail "failed sudo authorization was accepted"; fi
 case "$POWER_ERROR" in *authorize*) ;; *) fail "sudo authorization error is unclear" ;; esac
+
+# NOPASSWD:ALL beside a password-requiring group rule: sudo -n works while sudo -v cannot.
+reset_case
+MOCK_SUDO_REQUIRE_V=0 MOCK_SUDO_V_RC=1 MOCK_TERMINAL=0
+power_nm_prepare_reader || fail "passwordless sudo was refused: $POWER_ERROR"
+[ "$SUBYARD_SUDO_PREAUTHORIZED" = 1 ] || fail "passwordless sudo did not record preauthorization"
+grep -Fxq -- '-v' "$MOCK_SUDO_LOG" && fail "passwordless sudo fell back to sudo -v"
+power_nm_guard_effective incusbr0 || fail "passwordless privileged read failed"
+
+reset_case
+MOCK_TERMINAL=0
+if power_nm_prepare_reader; then fail "password-required sudo without a terminal was accepted"; fi
+case "$POWER_ERROR" in *"operator terminal"*) ;; *) fail "no-terminal sudo refusal lacks a next step" ;; esac
+grep -Fxq -- '-v' "$MOCK_SUDO_LOG" && fail "no-terminal sudo attempted a password prompt"
+[ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" != 1 ] || fail "no-terminal refusal recorded preauthorization"
+
+# The real /dev/tty probe: setsid leaves no controlling terminal.
+reset_case
+if output="$(ROOT="$ROOT" setsid -w bash -c '
+  . "$ROOT/scripts/lib-power.sh"
+  power_nm_prepare_reader || { printf "%s\n" "$POWER_ERROR"; exit 1; }
+' </dev/null 2>&1)"; then fail "sudo without a controlling terminal was accepted"; fi
+case "$output" in *"required to verify"*"operator terminal"*) ;; *) fail "terminal probe refusal is unclear: $output" ;; esac
+grep -Fxq -- '-v' "$MOCK_SUDO_LOG" && fail "terminal probe attempted a password prompt"
+
+reset_case
+SUBYARD_SUDO_PREAUTHORIZED=1
+if power_nm_prepare_reader; then fail "expired preauthorized sudo was accepted"; fi
+case "$POWER_ERROR" in *"authorization expired"*"yard command"*) ;; *) fail "expired sudo refusal is unclear: $POWER_ERROR" ;; esac
+grep -Fxq -- '-v' "$MOCK_SUDO_LOG" && fail "expired preauthorized sudo attempted a password prompt"
 
 reset_case
 MOCK_SUDO_N_RC=1

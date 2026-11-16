@@ -38,6 +38,14 @@ case "${1:-}" in
         esac
         [ "${MOCK_RESTORE_RC:-0}" = 0 ] || exit "$MOCK_RESTORE_RC"
         ;;
+      *'command -v python3'*)
+        printf '%s\n' "${MOCK_PROVISIONED:-provisioned}"
+        ;;
+      *'check-ssh'*)
+        printf 'all-user-ssh-probe\n' >> "$MOCK_INCUS_LOG"
+        case "$*" in *VSCODE_USER*) exit 91 ;; esac
+        printf '%s\n' "${MOCK_VSCODE_STATE:-idle}"
+        ;;
       *)
         printf 'vscode-probe\n' >> "$MOCK_INCUS_LOG"
         [ "${MOCK_VSCODE_RC:-0}" = 0 ] || exit "$MOCK_VSCODE_RC"
@@ -48,6 +56,18 @@ case "${1:-}" in
   stop)
     printf 'stop\n' >> "$MOCK_INCUS_LOG"
     printf 'STOPPED\n' > "$MOCK_INCUS_STATE"
+    ;;
+  config)
+    [ "${2:-}" = get ] && [ -n "${MOCK_INCUS_CONFIG:-}" ] || exit 90
+    # MOCK_INCUS_CONFIG is "managed initialized ever_initialized"; "-" is unset.
+    read -r managed initialized ever <<<"$MOCK_INCUS_CONFIG"
+    case "$4" in
+      user.subyard.managed) value=$managed ;;
+      user.subyard.initialized) value=$initialized ;;
+      user.subyard.ever_initialized) value=$ever ;;
+      *) exit 90 ;;
+    esac
+    [ "$value" = - ] || printf '%s\n' "$value"
     ;;
   *) exit 90 ;;
 esac
@@ -60,6 +80,9 @@ set -euo pipefail
 [ "$(cat "$MOCK_PROFILE_MARKER")" = managed ] || exit 0
 case "$1" in
   --pause)
+    # A guest-only owner has nothing to pause in a guest init never provisioned.
+    [ "${MOCK_OWNER_GUEST_ONLY:-0}" = 1 ] && [ "${SUBYARD_GUEST_NEVER_PROVISIONED:-0}" = 1 ] && exit 0
+    [ "${MOCK_PROFILE_PAUSE_RC:-0}" = 0 ] || exit "$MOCK_PROFILE_PAUSE_RC"
     [ "$(cat "$MOCK_PROFILE_STATE_FILE")" = active ] || exit 0
     printf 'profile-stop\n' >> "$MOCK_INCUS_LOG"
     printf 'inactive\n' > "$MOCK_PROFILE_STATE_FILE"
@@ -115,6 +138,7 @@ reset_case() {
   export MOCK_VSCODE_STATE=idle MOCK_VSCODE_RC=0 MOCK_QUIESCE_RC=0
   export MOCK_STOP_LISTENER_RC=0 MOCK_RESTORE_RC=0
   export MOCK_QUIESCE_STATE=snapshot:1:0
+  unset MOCK_INCUS_CONFIG MOCK_PROFILE_PAUSE_RC MOCK_PROVISIONED MOCK_OWNER_GUEST_ONLY SUBYARD_GUEST_NEVER_PROVISIONED
 }
 
 reset_case
@@ -248,5 +272,42 @@ printf 'STOPPED\n' > "$MOCK_INCUS_STATE"
 : > "$MOCK_INCUS_LOG"
 "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1
 if grep -Fxq vscode-probe "$MOCK_INCUS_LOG"; then fail "already-stopped yard ran the VS Code probe"; fi
+
+# A failed first init can already have installed owner services, such as a host
+# broker whose transport holds an SSH session: stop pauses every installed one.
+# In a guest init never provisioned, a guest-only owner has nothing to pause and
+# the session check covers all users, since the developer account may not exist.
+reset_case
+export MOCK_INCUS_CONFIG="true false -" MOCK_PROVISIONED=unprovisioned
+"$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1 \
+  || fail "never-provisioned stop with an installed host owner refused: $(tr '\n' ' ' < "$TMP/out")"
+grep -Fxq profile-stop "$MOCK_INCUS_LOG" || fail "never-provisioned stop did not pause the installed owner"
+grep -Fxq profile-start "$MOCK_INCUS_LOG" || fail "never-provisioned stop did not resume the installed owner"
+grep -Fxq ssh-quiesce "$MOCK_INCUS_LOG" || fail "never-provisioned stop skipped the SSH listener fence"
+grep -Fxq all-user-ssh-probe "$MOCK_INCUS_LOG" || fail "never-provisioned stop skipped the all-user session probe"
+if grep -Fxq vscode-probe "$MOCK_INCUS_LOG"; then fail "never-provisioned stop probed the developer account"; fi
+grep -Fxq stop "$MOCK_INCUS_LOG" || fail "never-provisioned stop did not reach incus stop"
+reset_case
+export MOCK_INCUS_CONFIG="true false -" MOCK_PROVISIONED=unprovisioned MOCK_OWNER_GUEST_ONLY=1 MOCK_PROFILE_PAUSE_RC=2
+"$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1 \
+  || fail "never-provisioned stop with a guest-only owner refused: $(tr '\n' ' ' < "$TMP/out")"
+if grep -Fxq profile-stop "$MOCK_INCUS_LOG"; then fail "guest-only owner paused in a never-provisioned guest"; fi
+reset_case
+export MOCK_INCUS_CONFIG="true false -" MOCK_PROVISIONED=unprovisioned MOCK_VSCODE_STATE=active
+if "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1; then
+  fail "never-provisioned stop crossed an active SSH session"
+fi
+if grep -Fxq stop "$MOCK_INCUS_LOG"; then fail "never-provisioned active-session guard reached incus stop"; fi
+# A provisioned guest, a working yard whose re-init failed and a yard from a
+# release before the completion mark pause strictly.
+for config in "true false -:provisioned" "true false true:unprovisioned" "true true -:unprovisioned"; do
+  reset_case
+  export MOCK_INCUS_CONFIG="${config%%:*}" MOCK_PROVISIONED="${config#*:}" MOCK_OWNER_GUEST_ONLY=1 MOCK_PROFILE_PAUSE_RC=2
+  if "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1; then
+    fail "stop with '$config' accepted a failed owner-service pause"
+  fi
+  grep -Fq 'could not pause profile owner services' "$TMP/out" || fail "pause failure with '$config' is unclear"
+  if grep -Fxq stop "$MOCK_INCUS_LOG"; then fail "failed pause with '$config' reached incus stop"; fi
+done
 
 printf 'ok: yard stop protects active VS Code Remote-SSH state\n'

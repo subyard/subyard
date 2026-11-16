@@ -648,6 +648,40 @@ history, locks and rechecks that evidence, then writes only the desired selectio
 no activation or historical recovery authority. Drift beside a pending finding is ordinary drift
 for selection reduction and its repair permit.
 
+A yard whose last init did not finish is left to that init. Init's instance stage writes
+`user.subyard.initialized=false` and only its finalize stage writes `true`; `start` and `stop`
+keep the value. Like a stopped yard, such a yard is neither observed nor applied by the profile
+runtime, core guest runtime and materialized-config owners or the test-VM broker stage, so a
+failed first init leaves the release ready and other yards' commands open. Each engine process
+decides this once per yard and may only narrow it: a yard init enters during a transaction stays
+out of that transaction. The yard gets one release warning naming `yard -Y NAME init`; after that
+init finishes, release work observes the yard again and its failures block as before. Host key
+tools are never deferred. An engine without this rule observes the yard and fails closed.
+The boot power reconciler never starts or stops such a yard, in any state, except for its
+fail-closed stop of every running yard after a host network policy failure; it reports the yard
+as not initialized with `yard -Y NAME init` as the next step and restores the other yards.
+The first finished init also writes `user.subyard.ever_initialized=true`, which nothing clears;
+a re-init that clears `initialized=true`, and the import of an unmanaged yard, write it too, and
+legacy continuation and adoption accept it as power-owner metadata. A yard that has never
+finished init refuses `start` before any power change with `yard NAME has not completed its first
+init; run yard -Y NAME init`. Its `stop` and `teardown` keep the SSH listener fence and pause every
+installed owner service, since a failed first init may already have installed some. When its
+guest also lacks the substrate provisioning installs first (python3 and
+`/srv/agents`, by an explicit answer of a successful guest probe), owner services get
+`SUBYARD_GUEST_NEVER_PROVISIONED=1` and an owner whose state lives only in the guest skips its
+guest pause, resume and removal; `stop` checks SSH sessions for all users; and `init` defers its
+profile runtimes like a stopped yard's, plans its project hooks conditionally and reads its
+applied integration state as absent only if no integration inventory exists. Release repair
+decides that a yard is left to its init from a context loaded without any guest read, before
+every part of context resolution that can read the guest. Host key tools and registered-yard
+migrations, which change only host state, are not deferred and use that desired context; service
+registration withholds itself while any such yard waits for its init. A working yard whose
+re-init failed keeps the strict checks. Boot rechecks each yard under the host network policy
+lock right before every power or runtime effect, holding only the lock for a stop so a policy
+failure never blocks it, and init marks an existing yard uninitialized under that lock. Boot's
+host network check always covers the valid bridges of every managed yard, including those left
+to their init.
+
 Declared persist directories are adopted by a separate guest program
 (`internal/adapters/reconcileruntime/integration_persist.py`), not by the artifact
 inventory. It drops to the developer account, uses descriptor-relative no-follow

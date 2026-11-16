@@ -1266,13 +1266,19 @@ func (runtime Runtime) applyInstanceStage(ctx context.Context) error {
 			return ensureErr
 		}
 		desired = intent.Desired
-		if err := runtime.powerService().Set(ctx, runtime.Yard, desired, false); err != nil {
-			return err
-		}
 	} else if !errors.Is(err, ports.ErrInstanceNotFound) {
 		return err
 	}
+	existing := err == nil
 	if err := runtime.withNetworkStart(ctx, func() error {
+		// Mark an existing yard uninitialized under the host network policy
+		// lock that the boot power reconciler holds at its power boundary, so
+		// boot never powers a yard this init has entered.
+		if existing {
+			if err := runtime.powerService().Set(ctx, runtime.Yard, desired, false); err != nil {
+				return err
+			}
+		}
 		environment := map[string]string{"SUBYARD_POWER_DESIRED": string(desired), "SUBYARD_PREPARED_INCUS_APPARMOR": appArmor, "VM_CPU_WEIGHT": vmWeight}
 		return runtime.runScriptEnvironment(ctx, runtime.Stderr, environment, "03-create-subyard.sh", "--yes")
 	}); err != nil {

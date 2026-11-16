@@ -671,7 +671,7 @@ func TestLegacyContinuationRejectsUnknownInitialPermission(t *testing.T) {
 }
 
 func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
-	for _, change := range []string{"GPU", "project-feature", "profile-device", "profile-nic-security", "profile-config", "escape-disk", "instance-security", "instance-raw", "device-source", "device-permission", "nic-override", "unknown-config", "idmap-change", "runtime-only", "managed-apparmor", "managed-preview", "publication-only", "canonical-kvm", "managed-disk-tmp", "preexisting-disk-tmp", "disk-tmp-empty", "disk-tmp-unknown", "disk-tmp-inherited"} {
+	for _, change := range []string{"GPU", "project-feature", "profile-device", "profile-nic-security", "profile-config", "escape-disk", "instance-security", "instance-raw", "device-source", "device-permission", "nic-override", "unknown-config", "idmap-change", "runtime-only", "managed-apparmor", "managed-preview", "publication-only", "completion-mark", "canonical-kvm", "managed-disk-tmp", "preexisting-disk-tmp", "disk-tmp-empty", "disk-tmp-unknown", "disk-tmp-inherited"} {
 		t.Run(change, func(t *testing.T) {
 			program, execution, incus, _ := legacyContinuationInstalledFixture(t)
 			if change == "preexisting-disk-tmp" {
@@ -767,6 +767,12 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 					values["user.subyard.preview_endpoint_sha256"] = strings.Repeat("b", 64)
 					values["user.subyard.ccusage_version"] = "21.0.0"
 				}
+			case "completion-mark":
+				// A continuation that reaches finalize gains the power owner's
+				// completion mark; its next init keeps the same authority.
+				for _, values := range []map[string]string{incus.Reconcile.Instance.Config, incus.Reconcile.Instance.LocalConfig} {
+					values["user.subyard.ever_initialized"] = "true"
+				}
 			case "device-source":
 				incus.Reconcile.Instance.LocalDevices["srv"] = map[string]string{"type": "disk", "source": "/etc", "path": "/srv"}
 				incus.Reconcile.Instance.Devices["srv"] = incus.Reconcile.Instance.LocalDevices["srv"]
@@ -784,7 +790,7 @@ func TestLegacyContinuationFreshSessionPolicyBinding(t *testing.T) {
 			}
 			nativeApply := execution.platform.(reconcileruntime.Runtime)
 			nativeErr := nativeApply.ApplyStage(context.Background(), ports.ReconcileStageProject)
-			accepted := change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "canonical-kvm" || change == "managed-disk-tmp" || change == "preexisting-disk-tmp"
+			accepted := change == "runtime-only" || change == "managed-apparmor" || change == "managed-preview" || change == "publication-only" || change == "completion-mark" || change == "canonical-kvm" || change == "managed-disk-tmp" || change == "preexisting-disk-tmp"
 			if accepted {
 				if nativeErr != nil {
 					t.Fatal("runtime guard rejected unchanged policy", nativeErr)

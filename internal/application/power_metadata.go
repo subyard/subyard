@@ -10,10 +10,13 @@ import (
 const (
 	powerManagedKey     = "user.subyard.managed"
 	powerInitializedKey = "user.subyard.initialized"
-	powerDesiredKey     = "user.subyard.desired_power"
-	powerYardNameKey    = "user.subyard.name"
-	powerBridgeKey      = "user.subyard.bridge"
-	powerAutostartKey   = "boot.autostart"
+	// powerEverInitializedKey is written by the first finished init and never
+	// cleared: a re-init writes initialized=false but keeps this mark.
+	powerEverInitializedKey = "user.subyard.ever_initialized"
+	powerDesiredKey         = "user.subyard.desired_power"
+	powerYardNameKey        = "user.subyard.name"
+	powerBridgeKey          = "user.subyard.bridge"
+	powerAutostartKey       = "boot.autostart"
 )
 
 type metadataFieldState uint8
@@ -85,6 +88,17 @@ func InstanceIntentionallyStopped(instance ports.InstanceInfo) bool {
 		metadata.Managed.State == fieldValid && metadata.Managed.Value &&
 		metadata.Initialized.State == fieldValid && metadata.Initialized.Value &&
 		metadata.Desired.State == fieldValid && metadata.Desired.Value == domain.PowerStopped
+}
+
+// InstanceNeverInitialized reports a managed instance whose init has never
+// finished: initialized=false without the completion mark. A yard from a release
+// before the mark counts as initialized when its initialized value is true; an
+// unreadable or invalid value never counts as never initialized.
+func InstanceNeverInitialized(instance ports.InstanceInfo) bool {
+	metadata := parsePowerMetadata(instance)
+	return metadata.Managed.State == fieldValid && metadata.Managed.Value &&
+		metadata.Initialized.State == fieldValid && !metadata.Initialized.Value &&
+		instance.Config[powerEverInitializedKey] != "true"
 }
 
 // PowerMetadataReadyForFinalize checks the runtime's metadata prerequisite, ignoring yard name.
