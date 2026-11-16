@@ -498,6 +498,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runInstallation(ctx, remaining[1:])
 	}
 	if name == "_uninstall-resume" {
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt} // the recovery owns its admission
 		return cli.runFullTeardownRecovery(ctx, remaining[1:])
 	}
 	commandArguments := append([]string(nil), remaining[1:]...)

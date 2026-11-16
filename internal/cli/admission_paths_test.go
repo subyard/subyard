@@ -307,6 +307,22 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 	if !strings.HasPrefix(direct, resume) {
 		t.Fatalf("resume diagnostic=%q", direct)
 	}
+	// The direct resume entrypoint is exempt like teardown --full: its prepared
+	// command must not reach execution without an admission (tests do not refuse that).
+	var discard bytes.Buffer
+	resumed, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", pending},
+		Environment: append(append([]string(nil), environment...), "SUBYARD_HOME="+home), WorkingDir: root,
+		Stdin: strings.NewReader(""), Stdout: &discard, Stderr: &discard,
+		Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}, Prompt: &testkit.Prompt{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed.Run(context.Background())
+	if resumed.gateAdmitted == nil || resumed.gateAdmitted.kind != admissionExempt {
+		t.Fatalf("resume admission=%+v, want exempt", resumed.gateAdmitted)
+	}
 	cases := []struct {
 		name      string
 		arguments []string
