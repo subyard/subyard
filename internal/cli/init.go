@@ -537,7 +537,7 @@ func (cli *CLI) prepareInitExecution(
 	arguments []string,
 	bootstrap *initBootstrap,
 ) (*initExecution, error) {
-	owners, ownershipErr := cli.observeNativeOwner(ctx, loaded)
+	owners, ownershipErr := cli.observeInitNativeOwner(ctx, loaded, arguments)
 	if err := domain.CollectRefusals(cli.checkNativeTargets(loaded, false, owners), ownershipErr); err != nil {
 		return nil, err
 	}
@@ -1080,6 +1080,12 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		incusStage := application.InitStages(execution.loaded.Context)[0]
 		if err := (application.Reconciler{Stages: []application.ReconcileStage{incusStage},
 			Runner: execution.platform, Reporter: initReporter{output: output}}).Apply(ctx, execution.approvedStages(incusStage)); err != nil {
+			return err
+		}
+		// Planning may have deferred the owner check until this stage granted
+		// access. Repeat it strictly before any instance stage or yard write.
+		owners, ownershipErr := cli.observeNativeOwner(ctx, execution.loaded)
+		if err := domain.CollectRefusals(cli.checkNativeTargets(execution.loaded, false, owners), ownershipErr); err != nil {
 			return err
 		}
 		// The installer activates access in this process. Keep the approved

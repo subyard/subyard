@@ -307,7 +307,7 @@ func (runtime Runtime) resolveProfileRuntimePlan() {
 }
 
 func (runtime Runtime) nativeObservationUnavailable(err error) bool {
-	if probe, ok := runtime.Incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+	if ports.LocalInstallationAbsent(runtime.Incus) {
 		return true
 	}
 	var networkError *net.OpError

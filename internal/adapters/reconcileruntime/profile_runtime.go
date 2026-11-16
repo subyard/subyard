@@ -174,7 +174,7 @@ func (runtime Runtime) ObserveProfileRuntime(ctx context.Context, id string) (po
 	}
 	for _, definition := range definitions {
 		if definition.Runtime.ActivationID == id {
-			if probe, ok := runtime.Incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+			if ports.LocalInstallationAbsent(runtime.Incus) {
 				return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
 			}
 			observations, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})

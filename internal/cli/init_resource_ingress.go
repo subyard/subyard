@@ -69,7 +69,7 @@ func (cli *CLI) prepareOrphanIngress(ctx context.Context, loaded config.Loaded) 
 	// A proven cold host cannot contain an Incus route. An installed but
 	// unavailable daemon remains inconclusive and must fail closed.
 	incus, _ := cli.statusPorts()
-	if probe, ok := incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+	if ports.LocalInstallationAbsent(incus) {
 		return nil, nil
 	}
 	yard := networkYard(loaded.Context)

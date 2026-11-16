@@ -33,3 +33,34 @@ func CollectRefusals(causes ...error) error {
 	}
 	return &Refusals{causes}
 }
+
+// CollectOrderedRefusals keeps the caller's stable order (such as YardNames:
+// default first, then by name), dropping nil causes and exact repeats.
+func CollectOrderedRefusals(causes ...error) error {
+	kept := []error{}
+	for _, cause := range causes {
+		if cause != nil && !slices.ContainsFunc(kept, func(seen error) bool { return seen.Error() == cause.Error() }) {
+			kept = append(kept, cause)
+		}
+	}
+	switch len(kept) {
+	case 0:
+		return nil
+	case 1:
+		return kept[0]
+	}
+	return &Refusals{kept}
+}
+
+// CompareYardMessages orders per-yard diagnostics by target order: the default
+// yard first, then by text.
+func CompareYardMessages(left, right string) int {
+	leftDefault, rightDefault := strings.HasPrefix(left, "yard default: "), strings.HasPrefix(right, "yard default: ")
+	if leftDefault != rightDefault {
+		if leftDefault {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(left, right)
+}

@@ -305,3 +305,12 @@ func TestNativeTargetRefusalPassesProtocolValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestActivationBlockerGivesAccessRepairForDeniedSocket(t *testing.T) {
+	err := fmt.Errorf("get server: %w: dial unix /private: permission denied", domain.ErrIncusAccessDenied)
+	blocker := activationObservationBlocker(context.Background(), "power", err)
+	if blocker.Retry != domain.IncusAccessNextStep || strings.Contains(blocker.Message, "private") ||
+		blocker.Message != `activation reconciler "power" cannot inspect native state: this account cannot access the Incus socket` {
+		t.Fatalf("blocker = %#v", blocker)
+	}
+}

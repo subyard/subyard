@@ -324,3 +324,10 @@ type AuditSink interface {
 type EventSink interface {
 	Publish(context.Context, domain.OperationEvent) error
 }
+
+// LocalInstallationAbsent reports whether a native port proves that the local
+// host has no Incus installation, or that the installation owns no native state.
+func LocalInstallationAbsent(port any) bool {
+	probe, ok := port.(interface{ LocalInstallationAbsent() bool })
+	return ok && probe.LocalInstallationAbsent()
+}

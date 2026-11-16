@@ -130,7 +130,7 @@ func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContex
 		Stderr:         cli.options.Stderr,
 		Progress:       cli.updateProgress,
 		YardInstance: func(ctx context.Context, loaded config.Loaded) (ports.InstanceInfo, error) {
-			incus, _ := cli.statusPorts()
+			incus, _ := cli.releaseActivationOperation().statusPorts()
 			return incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 		},
 		InstalledRuntimePresence: func(ctx context.Context, root string, loaded config.Loaded, id string) (ports.RuntimePresence, error) {

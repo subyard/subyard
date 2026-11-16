@@ -2384,6 +2384,12 @@ func (transition *V2Transition) observeResume(
 			}
 			work := nativeMigrationWork(intent, migration)
 			retired, err := transition.retiredNativeBinding(ctx, migration, step.Resource, *journal)
+			// A typed per-yard verdict (such as denied socket access) stays one
+			// blocker of this row; the other rows are still assessed.
+			if hasMigrationRefusal(err) {
+				observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err, ctx))
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -2406,6 +2412,10 @@ func (transition *V2Transition) observeResume(
 					continue
 				}
 				replaced, err := transition.nativeIdentityReplaced(ctx, *journal, step, work, ownerSettingsView)
+				if hasMigrationRefusal(err) {
+					observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err, ctx))
+					continue
+				}
 				if err != nil {
 					return err
 				}
@@ -2628,11 +2638,21 @@ func (transition *V2Transition) observeResume(
 			found := slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID && step.Resource == owner.ID() })
 			if !found {
 				actual, err := owner.Observe(ctx, transition.options.Releases, observation.links)
+				// A typed per-yard verdict of a yard without a journal row stays
+				// one blocker; the blockers already collected are kept.
+				if hasMigrationRefusal(err) {
+					observation.blockers = append(observation.blockers, nativeRefusalBlocker(owner.ID(), err, ctx))
+					continue
+				}
 				if err != nil {
 					return err
 				}
 				if !actual.Converged {
 					retired, err := transition.retiredNativeBinding(ctx, migration, owner.ID(), *journal)
+					if hasMigrationRefusal(err) {
+						observation.blockers = append(observation.blockers, nativeRefusalBlocker(owner.ID(), err, ctx))
+						continue
+					}
 					if err != nil {
 						return err
 					}
@@ -3998,6 +4018,10 @@ func activationObservationBlocker(ctx context.Context, id string, err error) Blo
 	if errors.As(err, &conflict) && conflict.ActivationConflict() {
 		code = CodeActivationAmbiguous
 		message = fmt.Sprintf("activation reconciler %q reports ambiguous activation topology", id)
+	}
+	if errors.Is(err, domain.ErrIncusAccessDenied) {
+		message = fmt.Sprintf("activation reconciler %q cannot inspect native state: %v", id, domain.ErrIncusAccessDenied)
+		retry = domain.IncusAccessNextStep
 	}
 	message, retry = publicActivationDiagnostic(err, message, retry)
 	resource := "activation." + id

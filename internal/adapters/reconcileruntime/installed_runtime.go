@@ -249,7 +249,7 @@ func (runtime Runtime) installedGuestPresence(ctx context.Context) (ports.Runtim
 	if runtime.Incus == nil {
 		return ports.RuntimePresence{}, ports.InstanceInfo{}, errors.New("installed runtime observation requires Incus")
 	}
-	if probe, ok := runtime.Incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+	if ports.LocalInstallationAbsent(runtime.Incus) {
 		return ports.RuntimePresence{Actual: installedRuntimeDigest("local-installation-absent")}, ports.InstanceInfo{}, nil
 	}
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)

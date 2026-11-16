@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Real-host regression for the first named init after incus-admin membership changes.
+# Real-host regression: an installed Incus without the operator's incus-admin
+# membership, the public installer, and the first init that grants native access.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -8,13 +9,15 @@ MARKER=''
 OPERATOR=''
 OPERATOR_HOME=''
 SUDOERS=''
-YARD_NAME=''
 PROJECT=''
 INSTANCE=''
 POWER_UNIT=''
 POWER_RECONCILER=''
 SG_PROOF=''
-CANDIDATE=''
+YARD_NAME=''
+RELEASE=''
+VERSION=''
+LAUNCHER=''
 OPERATOR_UID=''
 ACCESS_SOCKET=''
 SOCKET_ID=''
@@ -34,8 +37,13 @@ if [ "$(id -u)" -ne 0 ]; then
   for command in go sudo; do
     command -v "$command" >/dev/null 2>&1 || die "$command is required"
   done
-  info 'building the current development candidate'
+  info 'building and packaging the current development candidate'
   "$ROOT/dev/build-engine.sh" --force
+  if [ ! -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
+    rm -rf "$ROOT/.build/group-reexec-release"
+    "$ROOT/dev/package-engine.sh" --version 1.0.0-group-reexec.e2e \
+      --output-dir "$ROOT/.build/group-reexec-release" >&2
+  fi
   exec sudo -n env \
     SUBYARD_E2E_VM="$SUBYARD_E2E_VM" \
     SUBYARD_GROUP_REEXEC_ROOT=1 \
@@ -72,8 +80,6 @@ operator_env() {
       SUBYARD_NO_AUDIT=1 \
       SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
       SUBYARD_POWER_LIBEXEC_DIR="$STATE/power" \
-      SUBYARD_POWER_RECONCILER_PATH="$POWER_RECONCILER" \
-      SUBYARD_POWER_UNIT_PATH="$POWER_UNIT" \
       MIN_DISK_GIB=1 \
       HOST_CLAUDE_MD= \
       HOST_CODEX_AGENTS_MD= \
@@ -82,7 +88,7 @@ operator_env() {
 }
 
 operator_yard() {
-  operator_env "$CANDIDATE/.build/yard" "$@"
+  operator_env "$LAUNCHER" "$@"
 }
 
 setting() {
@@ -161,9 +167,8 @@ cleanup() {
     && incus project show "$PROJECT" >/dev/null 2>&1; then
     project_marker="$(incus project get "$PROJECT" user.subyard.e2e 2>/dev/null)"
     if { [ -z "$project_marker" ] || [ "$project_marker" = "$MARKER" ]; } \
-      && [ -f "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME/config.env" ] \
-      && grep -Fqx "# $MARKER" \
-        "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME/config.env"; then
+      && [ -x "$LAUNCHER" ] && [ -f "$OPERATOR_HOME/.config/subyard/config.env" ] \
+      && grep -Fqx "# $MARKER" "$OPERATOR_HOME/.config/subyard/config.env"; then
       operator_yard -Y "$YARD_NAME" teardown --yes >/dev/null 2>&1 || rc=3
     else
       printf 'incus-group-reexec-e2e: refusing to remove ambiguous project %s\n' \
@@ -304,7 +309,8 @@ ensure_incus_platform() {
 }
 
 STATE="$(mktemp -d /var/tmp/subyard-group-reexec.XXXXXX)"
-chmod 0711 "$STATE"
+# The installer pins and reads every ancestor of the operator home.
+chmod 0755 "$STATE"
 token="$(printf '%s' "${STATE##*.}" | tr '[:upper:]' '[:lower:]')"
 MARKER="subyard-group-reexec-e2e-v1-$token"
 printf '%s\n' "$MARKER" > "$STATE/.marker"
@@ -312,13 +318,16 @@ chmod 0600 "$STATE/.marker"
 OPERATOR="sy-group-$token"
 OPERATOR_HOME="$STATE/home"
 SUDOERS="/etc/sudoers.d/subyard-group-reexec-$token"
+# Plain init of a new named yard writes its own definition: no yard file exists
+# beforehand, so the first init runs on a cold installation.
 YARD_NAME="group-reexec-$token"
 PROJECT="subyard-$YARD_NAME"
 INSTANCE="yard-$YARD_NAME"
 POWER_UNIT="/etc/systemd/system/$MARKER.service"
 POWER_RECONCILER="$STATE/power/yard-boot-reconcile"
 SG_PROOF="$STATE/sg-invocations"
-CANDIDATE="$STATE/candidate"
+RELEASE="$STATE/release"
+LAUNCHER="$STATE/home/.local/bin/yard"
 
 ensure_incus_platform
 
@@ -332,7 +341,7 @@ incus project show "$PROJECT" >/dev/null 2>&1 \
 useradd --user-group --no-create-home --home-dir "$OPERATOR_HOME" \
   --shell /bin/bash "$OPERATOR"
 install -d -o "$OPERATOR" -g "$OPERATOR" -m 0700 \
-  "$OPERATOR_HOME" "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME" \
+  "$OPERATOR_HOME" "$OPERATOR_HOME/.config/subyard" \
   "$OPERATOR_HOME/.subyard" "$OPERATOR_HOME/host"
 printf '%s\n' "$MARKER" > "$OPERATOR_HOME/.subyard-group-reexec-home"
 chown "$OPERATOR:$OPERATOR" "$OPERATOR_HOME/.subyard-group-reexec-home"
@@ -343,10 +352,14 @@ chown -R "$OPERATOR:$OPERATOR" "$OPERATOR_HOME"
 [ -z "$(find "$OPERATOR_HOME" \! -user "$OPERATOR" -print -quit)" ] \
   || die 'fixture operator does not own its fresh home tree'
 
-install -d -m 0755 "$CANDIDATE" "$CANDIDATE/.build"
-cp -a "$ROOT/config" "$ROOT/scripts" "$CANDIDATE/"
-install -m 0755 "$ROOT/.build/yard" "$CANDIDATE/.build/yard"
-chown -R "$OPERATOR:$OPERATOR" "$CANDIDATE"
+if [ -f "$ROOT/.subyard-acceptance/candidate.json" ]; then
+  VERSION="$(jq -er .version "$ROOT/.subyard-acceptance/candidate.json")"
+  cp -a "$ROOT/.subyard-acceptance/release" "$RELEASE"
+else
+  VERSION=1.0.0-group-reexec.e2e
+  cp -a "$ROOT/.build/group-reexec-release" "$RELEASE"
+fi
+chown -R "$OPERATOR:$OPERATOR" "$RELEASE"
 
 printf '%s ALL=(root) NOPASSWD: ALL\n' "$OPERATOR" > "$STATE/sudoers"
 chmod 0440 "$STATE/sudoers"
@@ -374,39 +387,6 @@ if operator_env /usr/bin/incus info >/dev/null 2>&1; then
 fi
 ok 'isolated operator starts without Incus group membership or socket access'
 
-ssh_port=$((36000 + ($$ % 12000)))
-for _ in $(seq 1 100); do
-  ss -Hln "sport = :$ssh_port" 2>/dev/null | grep -q . || break
-  ssh_port=$((ssh_port + 1))
-done
-ss -Hln "sport = :$ssh_port" 2>/dev/null | grep -q . \
-  && die 'could not reserve an unused loopback SSH port'
-
-base_image=subyard-e2e-debian-13-cloud-container
-if ! incus image info "$base_image" --project default >/dev/null 2>&1; then
-  base_image=images:debian/13
-fi
-cat > "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME/config.env" <<EOF
-# $MARKER
-SSH_PORT=$ssh_port
-YARD_IMAGE=$base_image
-YARD_IMAGE_FALLBACK=images:ubuntu/24.04
-CODING_TOOL_INTEGRATIONS=
-ENVIRONMENT_PROFILES=
-HOST_BASE=$OPERATOR_HOME/host
-HOST_MOUNTS=
-RESTRICTED_DISK_PATHS=$OPERATOR_HOME/host
-FORWARD_SSH_AGENT=0
-EOF
-chown "$OPERATOR:$OPERATOR" \
-  "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME/config.env"
-chmod 0600 "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME/config.env"
-
-[ "$(setting default SSH_PORT)" = 2222 ] \
-  || die 'fresh default yard did not start with shipped SSH_PORT 2222'
-[ "$(setting "$YARD_NAME" SSH_PORT)" = "$ssh_port" ] \
-  || die 'named yard did not resolve its registered SSH port'
-
 OPERATOR_UID="$(id -u "$OPERATOR")"
 ACCESS_SOCKET=/var/lib/incus/unix.socket
 [ ! -S /run/incus/unix.socket ] || ACCESS_SOCKET=/run/incus/unix.socket
@@ -414,6 +394,52 @@ ACCESS_SOCKET=/var/lib/incus/unix.socket
 [ -x /usr/bin/getfacl ] && [ -x /usr/bin/setfacl ] || die 'native ACL tools are unavailable'
 SOCKET_ID="$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")"
 SOCKET_ACL="$(/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | sed '/^mask:/d')"
+
+info 'installing the packaged candidate through the public installer without Incus access'
+install_output="$STATE/install.out"
+if ! operator_env YARD_RELEASE_BASE_URL="file://$RELEASE" \
+  bash "$RELEASE/subyard-install.sh" --version "$VERSION" --yes > "$install_output" 2>&1; then
+  tail -n 80 "$install_output" >&2 || true
+  die 'public installer failed on a host whose Incus this operator cannot reach'
+fi
+[ -x "$LAUNCHER" ] || die 'public installer did not publish the yard entrypoint'
+operator_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null \
+  || die 'installed release is not ready without Incus access'
+[ "$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")" = "$SOCKET_ID" ] \
+  && [ "$(/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | sed '/^mask:/d')" = "$SOCKET_ACL" ] \
+  || die 'public installer changed native socket access'
+id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fxq incus-admin \
+  && die 'public installer changed incus-admin membership'
+[ ! -s "$SG_PROOF" ] || die 'public installer invoked sg'
+ok 'public installer completed the cold release transition without Incus access'
+
+
+base_image=subyard-e2e-debian-13-cloud-container
+if ! incus image info "$base_image" --project default >/dev/null 2>&1; then
+  base_image=images:debian/13
+fi
+# Host-wide settings are not yard state: the installation stays cold. Host
+# paths stay per-yard derivations, so the new yard shares none with default.
+cat > "$OPERATOR_HOME/.config/subyard/config.env" <<EOF
+# $MARKER
+YARD_IMAGE=$base_image
+YARD_IMAGE_FALLBACK=images:ubuntu/24.04
+CODING_TOOL_INTEGRATIONS=
+ENVIRONMENT_PROFILES=
+HOST_MOUNTS=
+FORWARD_SSH_AGENT=0
+# Release readiness observes persisted power paths, not command overrides.
+SUBYARD_POWER_RECONCILER_PATH=$POWER_RECONCILER
+SUBYARD_POWER_UNIT_PATH=$POWER_UNIT
+EOF
+chown "$OPERATOR:$OPERATOR" "$OPERATOR_HOME/.config/subyard/config.env"
+chmod 0600 "$OPERATOR_HOME/.config/subyard/config.env"
+
+[ "$(setting default SSH_PORT)" = 2222 ] \
+  || die 'fresh default yard did not start with shipped SSH_PORT 2222'
+[ ! -e "$OPERATOR_HOME/.config/subyard/yards/$YARD_NAME" ] \
+  || die 'named yard definition exists before its first init'
+
 # Initialize only the existing native lock contract, without actor grants or
 # network readiness. Its retained inode is the unrelated-access preservation oracle.
 "$ROOT/.build/yard" _network-lock ensure || die 'native policy lock initialization failed'
@@ -422,7 +448,7 @@ SOCKET_ACL="$(/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | sed '/^mask:/d')"
   || die 'native policy lock ownership or permissions are unsafe'
 POLICY_LOCK_ID="$(stat -c '%d:%i:%u:%g:%a' "$POLICY_LOCK")"
 POLICY_LOCK_ACL="$(/usr/bin/getfacl -cpnE -- "$POLICY_LOCK" | sed '/^mask:/d')"
-if operator_env "$CANDIDATE/.build/yard" _network-lock check >/dev/null 2>&1; then
+if operator_yard _network-lock check >/dev/null 2>&1; then
   die 'fresh actor can already check the native policy lock'
 fi
 if operator_env python3 - "$POLICY_LOCK" >/dev/null 2>&1 <<'PYLOCK'
@@ -436,21 +462,26 @@ PYLOCK
 then
   die 'fresh actor can already acquire the native policy lock'
 fi
-info 'running first named init while retaining its approved parent'
+info 'running the first named init of the installed runtime while retaining its approved parent'
 
 first_output="$STATE/first-init.out"
-if ! operator_env DEV_UID=1357 "$CANDIDATE/.build/yard" \
-  -Y "$YARD_NAME" init --yes > "$first_output" 2>&1; then
+if ! operator_env DEV_UID=1357 "$LAUNCHER" -Y "$YARD_NAME" init --yes > "$first_output" 2>&1; then
   tail -n 160 "$first_output" >&2 || true
+  # Owner-level readiness facts only: plan step IDs, decisions and the outcome.
+  operator_yard migrate --check --json 2>/dev/null | jq -c 'del(.domains)' 2>/dev/null | head -c 8000 >&2 || true
+  printf '\n' >&2
+  operator_yard migrate --check 2>&1 | sed -nE 's/^  \[(apply|skip|conditional)\] ([A-Za-z0-9_.:-]+).*/  [\1] \2/p; /observed:|desired:/p' | head -n 80 >&2 || true
   die 'first named init did not survive incus-admin activation'
 fi
+named_port="$(setting "$YARD_NAME" SSH_PORT)"
+case "$named_port" in ''|2222|*[!0-9]*) die "named yard did not receive its own SSH port: $named_port" ;; esac
 grep -Fq "added $OPERATOR to incus-admin" "$first_output" \
   || die 'product installer did not add the fixture operator to incus-admin'
-grep -Fq "SSH_PORT $ssh_port is unique across configured yards" "$first_output" \
+grep -Fq "SSH_PORT $named_port is unique across configured yards" "$first_output" \
   || die 'retained init did not validate the named SSH port in isolated contexts'
 grep -Fq 'Subyard initialized' "$first_output" \
-  || die 'retained named init did not complete'
-[ ! -s "$SG_PROOF" ] || die 'first named init replaced its approved parent through sg'
+  || die 'retained first init did not complete'
+[ ! -s "$SG_PROOF" ] || die 'first init replaced its approved parent through sg'
 [ "$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")" = "$SOCKET_ID" ] \
   || die 'operator activation changed native socket identity or permissions'
 /usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -Fxq "user:$OPERATOR_UID:rw-" \
@@ -469,19 +500,20 @@ ok 'retained native parent verified and acquired the original policy lock withou
 id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fxq incus-admin \
   || die 'product installer did not persist incus-admin membership'
 incus project show "$PROJECT" >/dev/null 2>&1 \
-  || die 'first named init did not create its Incus project'
+  || die 'first init did not create its Incus project'
 incus info "$INSTANCE" --project "$PROJECT" >/dev/null 2>&1 \
-  || die 'first named init did not create its Incus instance'
+  || die 'first init did not create its Incus instance'
 incus project set "$PROJECT" user.subyard.e2e="$MARKER"
 incus config set "$INSTANCE" user.subyard.e2e="$MARKER" --project "$PROJECT"
 initial_state="$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)"
-[ "$initial_state" = STOPPED ] \
-  || die "first init left unexpected instance state $initial_state instead of STOPPED"
-info 'starting the initialized yard to inspect its provisioned operator identity'
+case "$initial_state" in STOPPED | RUNNING) ;;
+  *) die "first init left unexpected instance state $initial_state" ;;
+esac
+info 'starting the initialized yard (a no-op when running) to inspect its provisioned identity'
 start_output="$STATE/start.out"
 if ! operator_yard -Y "$YARD_NAME" start --yes > "$start_output" 2>&1; then
   tail -n 120 "$start_output" >&2 || true
-  die 'could not start the initialized yard for explicit-override verification'
+  die 'could not start the initialized yard for identity verification'
 fi
 running_state="$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)"
 [ "$running_state" = RUNNING ] \
@@ -492,8 +524,8 @@ fi
 [ "$actual_dev_uid" = 1357 ] \
   || die "explicit DEV_UID launch override resolved to $actual_dev_uid instead of 1357"
 [ "$(setting default SSH_PORT)" = 2222 ] \
-  || die 'named init polluted the synthetic default SSH port'
-[ "$(setting "$YARD_NAME" SSH_PORT)" = "$ssh_port" ] \
+  || die 'named init polluted the default SSH port'
+[ "$(setting "$YARD_NAME" SSH_PORT)" = "$named_port" ] \
   || die 'named init changed the named SSH port'
 ok 'retained parent preserved the explicit override and named-yard boundary'
 
@@ -509,22 +541,21 @@ instance_snapshot() {
 
 before="$(instance_snapshot)"
 retry_output="$STATE/retry-init.out"
-info 're-running the named init to verify convergence'
-if ! operator_env DEV_UID=1357 "$CANDIDATE/.build/yard" \
-  -Y "$YARD_NAME" init --yes > "$retry_output" 2>&1; then
+info 're-running init to verify convergence'
+if ! operator_env DEV_UID=1357 "$LAUNCHER" -Y "$YARD_NAME" init --yes > "$retry_output" 2>&1; then
   tail -n 160 "$retry_output" >&2 || true
-  die 'repeated named init failed'
+  die 'repeated init failed'
 fi
 if ! grep -Fq 'Everything is already set up' "$retry_output"; then
   # Only canonical decisions and IDs: no config, target or private binding payload.
   sed -nE 's/^  \[(apply|skip|conditional)\] (init\.[A-Za-z0-9_.-]+):.*/  [\1] \2/p' \
     "$retry_output" | tail -n 40 >&2
-  die 'repeated named init did not report convergence'
+  die 'repeated init did not report convergence'
 fi
 [ "$(instance_snapshot)" = "$before" ] \
-  || die 'repeated named init restarted or mutated the converged yard'
+  || die 'repeated init restarted or mutated the converged yard'
 [ ! -s "$SG_PROOF" ] || die 'converged retry unexpectedly invoked sg'
 [ "$(setting default SSH_PORT)" = 2222 ] \
-  || die 'converged retry polluted the synthetic default SSH port'
+  || die 'converged retry polluted the default SSH port'
 
-printf 'ok: first named init retains exact approval through native operator access without crossing config boundaries\n'
+printf 'ok: the public installer and first named init work before incus-admin membership is active, retaining exact approval through native operator access\n'

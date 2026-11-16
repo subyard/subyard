@@ -175,6 +175,7 @@ func TestReleaseDiagnosticsProfileFailurePreservesPhaseAndPublicCause(t *testing
 				writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 				configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 				seedCurrentReleaseLedger(t, root, configHome)
+				seedOwnerHostID(t, configHome)
 				cause := error(errors.New("synthetic-private-profile-cause"))
 				if public {
 					cause = publicReconcileTestError{}

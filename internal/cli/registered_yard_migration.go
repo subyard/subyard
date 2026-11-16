@@ -37,7 +37,11 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 			if err != nil {
 				return false, err
 			}
-			return cli.hardRetiredBinding(ctx, loaded, journal)
+			retired, err := cli.hardRetiredBinding(ctx, loaded, journal)
+			if errors.Is(err, domain.ErrIncusAccessDenied) {
+				return false, domain.IncusAccessRefusal(yard, err)
+			}
+			return retired, err
 		},
 		LoadTargets: func(ctx context.Context, view releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
 			var files *config.ProspectiveFiles
@@ -54,6 +58,11 @@ func (cli *CLI) registeredYardMigration(request releasetransition.ProcessRequest
 				files = &config.ProspectiveFiles{Root: request.ConfigHome, Yards: names, ReadSnapshot: view.ReadSnapshot}
 			}
 			if yard == "test-yard" || yard == "e2e-yard" {
+				// Recreation inspection runs the native CLI, whose socket denial
+				// would surface as an untyped exit status.
+				if err := cli.releaseActivationOperation().nativeAccessRefusal(ctx, yard); err != nil {
+					return nil, err
+				}
 				warning, err := cli.releaseTestYardRecreation(ctx, request.ConfigHome, files)
 				if err != nil {
 					return nil, err
@@ -128,13 +137,17 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 	if err != nil {
 		return -1, err
 	}
-	native, _ := cli.statusPorts()
-	if absent, ok := native.(interface{ LocalInstallationAbsent() bool }); ok && absent.LocalInstallationAbsent() {
+	// A cold installation has no yard to migrate, with or without socket access.
+	native, _ := cli.releaseActivationOperation().statusPorts()
+	if ports.LocalInstallationAbsent(native) {
 		return -1, nil
 	}
 	_, err = native.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
 	if errors.Is(err, ports.ErrInstanceNotFound) {
 		return -1, nil
+	}
+	if errors.Is(err, domain.ErrIncusAccessDenied) {
+		return -1, cli.localYardAccessRefusals(ctx, options.ConfigHome, native, yard, err)
 	}
 	if err != nil {
 		return -1, err
@@ -144,4 +157,49 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 	cli.profileOfferSuppressed = true
 	defer func() { cli.profileOfferSuppressed = false }()
 	return cli.runCurrentMigration(ctx, definition, nil, false, yes || slices.Contains(arguments, "--yes") || slices.Contains(arguments, "-y")), nil
+}
+
+// nativeAccessRefusal types a socket this account cannot open for one yard.
+// An absent server or any other failure is left to the caller's own read.
+func (cli *CLI) nativeAccessRefusal(ctx context.Context, yard string) error {
+	native, _ := cli.statusPorts()
+	if ports.LocalInstallationAbsent(native) {
+		return nil
+	}
+	if _, err := native.Server(ctx); errors.Is(err, domain.ErrIncusAccessDenied) {
+		return domain.IncusAccessRefusal(yard, err)
+	}
+	return nil
+}
+
+// localYardAccessRefusals reports every local yard whose native state this
+// account cannot read, in YardNames order (default first, then by name). When
+// no local yard reports a denial (for example a remote selected yard), the
+// selected yard's own denial still fails closed.
+func (cli *CLI) localYardAccessRefusals(ctx context.Context, configHome string, native interface {
+	Instance(context.Context, string, string) (ports.InstanceInfo, error)
+}, selected string, denied error) error {
+	names, err := config.YardNames(cli.options.RepositoryRoot+"/config", configHome)
+	if err != nil {
+		return err
+	}
+	var refusals []error
+	for _, name := range names {
+		loaded, err := cli.resolveReleaseTransitionContext(ctx, name, configHome)
+		if err != nil {
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+			continue
+		}
+		if loaded.Context.AccessKind == domain.AccessRemote {
+			continue
+		}
+		_, err = native.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
+		if errors.Is(err, domain.ErrIncusAccessDenied) {
+			refusals = append(refusals, domain.IncusAccessRefusal(name, err))
+		}
+	}
+	if !slices.ContainsFunc(refusals, func(err error) bool { return errors.Is(err, domain.ErrIncusAccessDenied) }) {
+		refusals = append(refusals, domain.IncusAccessRefusal(selected, denied))
+	}
+	return domain.CollectOrderedRefusals(refusals...)
 }

@@ -101,6 +101,7 @@ func TestNewReleaseServiceRegistrationUsesNativeProofAfterReconcile(t *testing.T
 			var output bytes.Buffer
 			program.options.Stderr = &output
 			home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
+			seedOwnerHostID(t, home)
 			runtimeRoot := testkit.TempDir(t)
 			if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases/previous-release"), 0o700); err != nil {
 				t.Fatal(err)

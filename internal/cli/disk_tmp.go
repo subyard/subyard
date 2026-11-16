@@ -24,7 +24,10 @@ type pendingDiskTmp struct{ Power, UUID string }
 func (cli *CLI) pendingDiskTmpTargets(ctx context.Context, targets []configTarget) (map[string]pendingDiskTmp, error) {
 	found := map[string]pendingDiskTmp{}
 	var refusals []error
-	native, _ := cli.statusPorts()
+	native, _ := cli.releaseActivationOperation().statusPorts()
+	if ports.LocalInstallationAbsent(native) {
+		return found, nil
+	}
 	for _, target := range targets {
 		yard := target.Loaded.Context
 		instance, err := native.Instance(ctx, yard.IncusProject, yard.YardInstanceName)

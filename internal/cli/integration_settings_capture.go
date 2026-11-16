@@ -75,7 +75,7 @@ func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded c
 			continue
 		}
 		incus, _ := cli.statusPorts()
-		if probe, ok := incus.(interface{ LocalInstallationAbsent() bool }); ok && probe.LocalInstallationAbsent() {
+		if ports.LocalInstallationAbsent(incus) {
 			continue
 		}
 		instance, err := incus.Instance(ctx, before.Context.IncusProject, before.Context.YardInstanceName)

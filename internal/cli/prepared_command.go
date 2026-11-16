@@ -703,7 +703,7 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 			return errors.New(warning)
 		}
 	}
-	owners, ownershipErr := cli.observeNativeOwner(ctx, prepared.Loaded)
+	owners, ownershipErr := cli.observeInitNativeOwner(ctx, prepared.Loaded, prepared.Arguments)
 	if err := domain.CollectRefusals(cli.checkNativeTargets(prepared.Loaded, false, owners), ownershipErr); err != nil {
 		return err
 	}

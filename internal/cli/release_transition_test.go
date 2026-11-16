@@ -56,6 +56,7 @@ func TestMaterializedConfigObservationStableAcrossPinnedRoots(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=codex\nAGENT_codex_COMMAND=codex\nAGENT_codex_RULES="+source+"\nAGENT_codex_RULES_DEST=.codex/rules/repo.rules\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "config", "projects-changed.sh"), "#!/bin/sh\nexit 0\n", 0o755)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	seedOwnerHostID(t, configHome)
 	observe := func() (releasetransition.V2ActivationObservation, *materializedConfigActivationReconciler) {
 		t.Helper()
 		pinned, err := os.Open(root)
@@ -260,6 +261,7 @@ func TestMaterializedConfigRecoveryPlanExcludesOperationContext(t *testing.T) {
 func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := filepath.Join(root, "state")
+	seedOwnerHostID(t, configHome)
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join(environment, "\n")+"\n", 0o600)
 	manifestPath := filepath.Join(root, "config", "commands.registry")
 	manifest, err := os.ReadFile(manifestPath)
@@ -343,6 +345,7 @@ func TestMaterializedConfigActivationIgnoresGitIdentityChanges(t *testing.T) {
 func TestMaterializedConfigActivationCollectsLegacyGitConfigRefusal(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	seedOwnerHostID(t, configHome)
 	path := filepath.Join(environmentValue(environment, "SUBYARD_HOME"), "gitconfig")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		t.Fatal(err)
@@ -446,50 +449,57 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 	}
 }
 
+// Without yard state the installation owns no native runtimes, whatever Incus
+// looks like. A warm installation keeps every native dependency guard.
 func TestProfileRuntimeActivationColdInstalledScopePreservesDependencyGuards(t *testing.T) {
-	for _, scenario := range []string{"cold", "retained", "client present", "custom socket", "invalid config"} {
-		t.Run(scenario, func(t *testing.T) {
-			root, environment, _ := nativeFixture(t)
-			writeRuntimeProfileFixture(t, root)
-			home := filepath.Join(root, "state")
-			seedCurrentReleaseLedger(t, root, home)
-			serverRoot := filepath.Join(root, "absent-server")
-			t.Setenv("INCUS_DIR", serverRoot)
-			t.Setenv("INCUS_SOCKET", "")
-			t.Setenv("PATH", root)
-			client := incusclient.New("")
-			switch scenario {
-			case "retained":
-				if err := os.Mkdir(serverRoot, 0700); err != nil {
+	for _, warm := range []bool{false, true} {
+		for _, scenario := range []string{"cold", "retained", "client present", "custom socket", "invalid config"} {
+			t.Run(fmt.Sprintf("warm=%t/%s", warm, scenario), func(t *testing.T) {
+				root, environment, _ := nativeFixture(t)
+				writeRuntimeProfileFixture(t, root)
+				home := filepath.Join(root, "state")
+				seedCurrentReleaseLedger(t, root, home)
+				if warm {
+					seedOwnerHostID(t, home)
+				}
+				serverRoot := filepath.Join(root, "absent-server")
+				t.Setenv("INCUS_DIR", serverRoot)
+				t.Setenv("INCUS_SOCKET", "")
+				t.Setenv("PATH", root)
+				client := incusclient.New("")
+				switch scenario {
+				case "retained":
+					if err := os.Mkdir(serverRoot, 0700); err != nil {
+						t.Fatal(err)
+					}
+				case "client present":
+					writeCLIFile(t, filepath.Join(root, "incus"), "#!/bin/sh\nexit 79\n", 0700)
+				case "custom socket":
+					client = incusclient.New(filepath.Join(root, "unknown.socket"))
+				case "invalid config":
+					writeCLIFile(t, filepath.Join(home, "config.env"), "YARD_TEMPLATE=unknown-cold-template\n", 0600)
+				}
+				program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: client})
+				if err != nil {
 					t.Fatal(err)
 				}
-			case "client present":
-				writeCLIFile(t, filepath.Join(root, "incus"), "#!/bin/sh\nexit 79\n", 0700)
-			case "custom socket":
-				client = incusclient.New(filepath.Join(root, "unknown.socket"))
-			case "invalid config":
-				writeCLIFile(t, filepath.Join(home, "config.env"), "YARD_TEMPLATE=unknown-cold-template\n", 0600)
-			}
-			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: client})
-			if err != nil {
-				t.Fatal(err)
-			}
-			reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
-			observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
-			if scenario == "cold" {
-				if err != nil || !observation.Converged || observation.Actual != observation.Desired {
-					t.Fatalf("verified empty installed scope: %#v %v", observation, err)
+				reconciler := program.profileActivationReconciler(releasetransition.ProcessRequest{ConfigHome: home}, "sample-runtime")
+				observation, err := reconciler.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{})
+				if scenario == "cold" || !warm && scenario != "invalid config" {
+					if err != nil || !observation.Converged || observation.Actual != observation.Desired {
+						t.Fatalf("verified empty installed scope: %#v %v", observation, err)
+					}
+					if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
+						t.Fatal(err)
+					}
+				} else if err == nil {
+					t.Fatalf("cold installed scope bypassed %s guard", scenario)
 				}
-				if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); err != nil {
-					t.Fatal(err)
+				if _, err := os.Lstat(filepath.Join(home, "sample-applied")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("cold assessment or activation wrote guest runtime state")
 				}
-			} else if err == nil {
-				t.Fatalf("cold installed scope bypassed %s guard", scenario)
-			}
-			if _, err := os.Lstat(filepath.Join(home, "sample-applied")); !errors.Is(err, os.ErrNotExist) {
-				t.Fatal("cold assessment or activation wrote guest runtime state")
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -634,6 +644,7 @@ func TestProfileRuntimePendingRecoveryKeepsItsActionAcrossFreshDiagnostics(t *te
 	writeRuntimeProfileFixture(t, root)
 	home := filepath.Join(root, "state")
 	seedCurrentReleaseLedger(t, root, home)
+	seedOwnerHostID(t, home)
 	handler := filepath.Join(root, "config/profiles/sample/runtime.sh")
 	writeCLIFile(t, handler, "#!/bin/sh\nprintf '%s\\n' '{\"state\":\"pending\",\"actual\":\""+strings.Repeat("a", 64)+"\",\"desired\":\""+strings.Repeat("b", 64)+"\",\"diagnostics\":[{\"parameter\":\"sample.input.invalid\",\"installed\":\"changed\",\"desired\":\"current\"}]}'\n", 0700)
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard/yard": {Status: "Running"}}}
@@ -2164,6 +2175,7 @@ func TestMaterializedConfigReconcileUsesTargetContextForRevalidation(t *testing.
 		t.Fatal(err)
 	}
 	writeReleaseTransitionTestFile(t, staleSource, []byte("model = \"stale\"\n"), 0o600)
+	seedOwnerHostID(t, configHome)
 	writeReleaseTransitionTestFile(t, filepath.Join(configHome, "config.env"),
 		[]byte("CODING_TOOL_INTEGRATIONS=codex\n"), 0o600)
 

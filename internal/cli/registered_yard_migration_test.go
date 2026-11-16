@@ -106,6 +106,7 @@ func TestPlainInitFinishesCurrentMigrationsBeforeNormalPlan(t *testing.T) {
 	if loadErr != nil {
 		t.Fatal(loadErr)
 	}
+	seedOwnerHostID(t, program.env["SUBYARD_CONFIG_HOME"])
 	program.options.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Config: map[string]string{"user.subyard.managed": "true"}}}}
 	code := program.Run(context.Background())
 	if _, err := os.Stat(marker); err != nil {
@@ -129,6 +130,7 @@ func TestPlainInitMigrationProbePropagatesMissingNativeSocket(t *testing.T) {
 			if absent {
 				cause = ports.ErrInstanceNotFound
 			}
+			seedOwnerHostID(t, program.env["SUBYARD_CONFIG_HOME"])
 			program.options.Incus = &testkit.Incus{Err: cause}
 			code, err := program.finishRegisteredInitMigrations(context.Background(), "default", nil, true)
 			if absent {

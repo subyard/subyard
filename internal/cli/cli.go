@@ -147,6 +147,9 @@ type CLI struct {
 	// nestedCommand replaces same-host follow-up commands in tests.
 	nestedCommand func(context.Context, []string, io.Writer) int
 	activation    *releaseConfiguration
+	// coldNative marks a release-activation operation of an installation that
+	// owns no native yard state; its Incus reads observe an absent server.
+	coldNative bool
 }
 
 func (cli *CLI) rpcOperation(operationID string) *CLI {
@@ -1267,6 +1270,10 @@ func (store readOnlyProjectStore) Delete(context.Context, string) error {
 }
 
 func (cli *CLI) statusPorts() (reconcileruntime.IncusReader, ports.InstanceExecutor) {
+	if cli.coldNative {
+		absent := incusclient.NewAbsent()
+		return absent, absent
+	}
 	incusPort := cli.options.Incus
 	executor := cli.options.Executor
 	if incusPort == nil || executor == nil {
