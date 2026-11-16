@@ -1,37 +1,26 @@
 package releasetransition
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 )
 
-const (
-	ownerRegistrationResource    = "test-yard-owner"
-	legacyOwnerRegistrationYard  = "e2e-yard"
-	currentOwnerRegistrationYard = "test-yard"
-)
+const ownerRegistrationResource = "test-yard-owner"
 
 // OwnerRegistrationState is a closed, redacted description of the persisted
 // test-yard owner topology. It deliberately carries neither paths nor config
 // values across the release-transition boundary.
 type OwnerRegistrationState string
-type OwnerRegistrationProgress string
 
 // OwnerRegistrationObservation binds the closed topology class to the exact
-// registration bytes and project image namespace needed by Commit. Registration
-// is an opaque digest; raw configuration never crosses the port.
+// registration bytes and project image namespace of frozen typed recovery.
+// Registration is an opaque digest; raw configuration is never recorded.
 type OwnerRegistrationObservation struct {
 	State        OwnerRegistrationState `json:"state"`
 	Registration Fingerprint            `json:"registration"`
 	Overrides    Fingerprint            `json:"overrides"`
 	Controller   Fingerprint            `json:"controller"`
 	SharedImages bool                   `json:"sharedImages"`
-
-	// These fields are the closed runtime binding from the outer recovery
-	// record. They never enter a plan fingerprint or serialized observation.
-	RecoveryToken   string `json:"-"`
-	TerminalCleanup bool   `json:"-"`
 }
 
 const (
@@ -45,30 +34,6 @@ const (
 	OwnerRegistrationLegacyFlatAdoptCurrent      OwnerRegistrationState = "legacy-flat-adopt-current"
 	OwnerRegistrationCurrent                     OwnerRegistrationState = "current"
 )
-
-const (
-	OwnerRegistrationExpected   OwnerRegistrationProgress = "expected"
-	OwnerRegistrationInProgress OwnerRegistrationProgress = "in-progress"
-	OwnerRegistrationDesired    OwnerRegistrationProgress = "desired"
-)
-
-// V2OwnerRegistration is the trusted mutation port for the compiled
-// owner-registration capability. Prepare is the fresh read-only assessment;
-// prospective settings let source ingress expose the exact registration it
-// will import before that import is authorized.
-// Observe accepts intermediate progress only when bound to its journaled
-// before-state. Commit is called only after that exact state was authorized.
-type V2OwnerRegistration interface {
-	Prepare(context.Context, V2SettingsSnapshotView) (OwnerRegistrationObservation, error)
-	Observe(context.Context, OwnerRegistrationObservation) (OwnerRegistrationProgress, error)
-	Commit(context.Context, OwnerRegistrationObservation) error
-}
-
-type ownerRegistrationV2Plan struct {
-	Before              OwnerRegistrationObservation
-	ExpectedFingerprint Fingerprint
-	DesiredFingerprint  Fingerprint
-}
 
 type ownerRegistrationRecoveryV1 struct {
 	SchemaVersion int                          `json:"schemaVersion"`
@@ -122,8 +87,6 @@ func validateOwnerRegistrationState(state OwnerRegistrationState) error {
 }
 
 func ownerRegistrationFingerprint(observation OwnerRegistrationObservation) Fingerprint {
-	observation.RecoveryToken = ""
-	observation.TerminalCleanup = false
 	payload, _ := json.Marshal(observation)
 	return fingerprintPayload(payload)
 }

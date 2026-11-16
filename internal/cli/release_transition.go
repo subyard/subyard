@@ -25,6 +25,7 @@ import (
 	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
@@ -120,14 +121,13 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	}
 	operation := cli.releaseActivationOperation(request)
 	reconcilers := operation.bindServiceRegistrationActivation(request, operation.activationReconcilers(request))
-	var ownerRegistration releasetransition.V2OwnerRegistration
 	ingressFactory := operation.releaseTransitionIngressFactory(request)
 	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
 	response, err := executeReleaseTransitionRequest(
 		ctx, cli.options.RepositoryRoot, request,
 		func(plan releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
 			return expectedAuthorization != "" && authorization == expectedAuthorization
-		}, reconcilers, ownerRegistration, ingressFactory, recovery,
+		}, reconcilers, ingressFactory, recovery,
 	)
 	if err != nil {
 		cli.errorf("release transition: %v", err)
@@ -1908,7 +1908,6 @@ func executeReleaseTransitionRequest(
 	request releasetransition.ProcessRequest,
 	verifyAuthorization func(releasetransition.PlanToken, releasetransition.Authorization) bool,
 	reconcilers []releasetransition.V2ActivationReconciler,
-	ownerRegistration releasetransition.V2OwnerRegistration,
 	ingressFactory func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error),
 	recoveryRequests ...*releasetransition.ActivationOnlyRecoveryRequest,
 ) (releasetransition.ProcessResponse, error) {
@@ -1946,6 +1945,12 @@ func executeReleaseTransitionRequest(
 				errors.New("release transition registry does not match the verified release manifest")
 		}
 	}
+	// Retained registered-yard recovery names endpoint settings; retention
+	// validates those frozen records against the compiled resource vocabulary.
+	resources, err := resource.Load(repositoryRoot)
+	if err != nil {
+		return releasetransition.ProcessResponse{}, err
+	}
 	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
 	if err != nil {
 		return releasetransition.ProcessResponse{}, err
@@ -1979,13 +1984,14 @@ func executeReleaseTransitionRequest(
 		ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {
 			return links.Activate(pair)
 		},
-		Reconcilers: reconcilers, OwnerRegistration: ownerRegistration, Ingress: ingress,
+		Reconcilers: reconcilers, Ingress: ingress,
 		RegistryPayload:     registry,
 		ArtifactDigest:      request.ArtifactDigest,
 		RollbackTarget:      rollbackTarget,
 		InheritedSettingIDs: request.InheritedSettingIDs,
 		VerifyAuthorization: verifyAuthorization,
 	})
+	transitionOptions.RegisteredEndpointSettings = resources.EndpointSettingNames()
 	transitionOptions.CompletedMetadata = func(ctx context.Context) (releasetransition.Fingerprint, error) {
 		runtime := releaseruntime.NewSourceInspector(repositoryRoot, io.Discard)
 		defer runtime.Close()

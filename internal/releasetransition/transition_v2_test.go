@@ -129,7 +129,6 @@ type v2RollbackBoundaryFixture struct {
 	links       *ReleaseLinks
 	ledger      ProtectedSnapshot
 	reconciler  *v2TestReconciler
-	owner       *v2TestOwnerRegistration
 	activations *int
 	authorizes  *int
 }
@@ -171,7 +170,6 @@ func newV2RollbackBoundaryFixtureWithLedger(
 	}
 	links := &ReleaseLinks{Active: "release-b", Previous: releaseIDPointer("release-a")}
 	reconciler := &v2TestReconciler{}
-	owner := &v2TestOwnerRegistration{state: OwnerRegistrationAbsent}
 	activations, authorizes := 0, 0
 	transition, err := NewV2Transition(V2Options{
 		ConfigHome: configHome,
@@ -188,7 +186,7 @@ func newV2RollbackBoundaryFixtureWithLedger(
 			*links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
 			return *links, nil
 		},
-		Reconcilers: []V2ActivationReconciler{reconciler}, OwnerRegistration: owner,
+		Reconcilers:     []V2ActivationReconciler{reconciler},
 		RegistryPayload: registryPayload, ArtifactDigest: digestA,
 		NewTransactionID: func() TransactionID { return "tx-rollback-001" },
 		VerifyAuthorization: func(PlanToken, Authorization) bool {
@@ -205,7 +203,7 @@ func newV2RollbackBoundaryFixtureWithLedger(
 	}
 	return v2RollbackBoundaryFixture{
 		transition: transition, configHome: configHome, links: links, ledger: ledger,
-		reconciler: reconciler, owner: owner, activations: &activations, authorizes: &authorizes,
+		reconciler: reconciler, activations: &activations, authorizes: &authorizes,
 	}
 }
 
@@ -246,10 +244,9 @@ func (fixture v2RollbackBoundaryFixture) assertUnchanged(t *testing.T, requireNo
 	t.Helper()
 	if *fixture.activations != 0 || *fixture.authorizes != 0 ||
 		(requireNoObservation && fixture.reconciler.observes != 0) || fixture.reconciler.reconciles != 0 ||
-		fixture.owner.prepares != 0 || fixture.owner.observes != 0 || fixture.owner.commits != 0 ||
 		!linksEqual(*fixture.links, ReleaseLinks{Active: "release-b", Previous: releaseIDPointer("release-a")}) {
-		t.Fatalf("rollback crossed proof boundary: activations=%d authorizes=%d links=%#v reconciler=%#v owner=%#v",
-			*fixture.activations, *fixture.authorizes, *fixture.links, fixture.reconciler, fixture.owner)
+		t.Fatalf("rollback crossed proof boundary: activations=%d authorizes=%d links=%#v reconciler=%#v",
+			*fixture.activations, *fixture.authorizes, *fixture.links, fixture.reconciler)
 	}
 	ledger, err := fixture.transition.store.ReadLedger()
 	if err != nil || ledger.Exists != fixture.ledger.Exists || !bytes.Equal(ledger.Payload, fixture.ledger.Payload) {
@@ -447,7 +444,6 @@ func newV2PostActivationRecoveryFixture(t *testing.T) *v2PostActivationRecoveryF
 		ObserveLinks:        func(context.Context) (ReleaseLinks, error) { return *links, nil },
 		RegistryPayload:     v2RegistryPayload(t),
 		ArtifactDigest:      digestA,
-		OwnerRegistration:   &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
 		NewTransactionID:    func() TransactionID { return "tx-source-v0111" },
 		VerifyAuthorization: func(PlanToken, Authorization) bool { return false },
 	}
@@ -911,7 +907,6 @@ func TestFreshV2TransitionResumesOriginalPairAtStableLinkCheckpoints(t *testing.
 					return links, nil
 				},
 				RegistryPayload: v2RegistryPayload(t), ArtifactDigest: digestA,
-				OwnerRegistration:   &v2TestOwnerRegistration{state: OwnerRegistrationCurrent},
 				VerifyAuthorization: func(PlanToken, Authorization) bool { return false },
 			})
 			if err != nil {
@@ -1151,8 +1146,6 @@ func TestV2TransitionRepairsActivationDriftAfterCompletedMigration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := transition.options.OwnerRegistration.(*v2TestOwnerRegistration)
-	ownerCalls := [3]int{owner.prepares, owner.observes, owner.commits}
 	transition.options.NewTransactionID = func() TransactionID { return "tx-test-002" }
 	reconciler.converged = false
 	repeat, err := transition.Inspect(context.Background(), goal)
@@ -1197,10 +1190,9 @@ func TestV2TransitionRepairsActivationDriftAfterCompletedMigration(t *testing.T)
 		t.Fatalf("ledger changed during reconcile: before=%#v after=%#v err=%v", before, after, err)
 	}
 	settingsAfter, err := os.ReadFile(settingsPath)
-	if err != nil || !bytes.Equal(settingsBefore, settingsAfter) ||
-		ownerCalls != [3]int{owner.prepares, owner.observes, owner.commits} {
-		t.Fatalf("migration capability ran during repair: settings before=%q after=%q owner=%#v err=%v",
-			settingsBefore, settingsAfter, owner, err)
+	if err != nil || !bytes.Equal(settingsBefore, settingsAfter) {
+		t.Fatalf("migration capability ran during repair: settings before=%q after=%q err=%v",
+			settingsBefore, settingsAfter, err)
 	}
 	journalSnapshot, err := store.ReadCurrentJournal()
 	if err != nil {
@@ -1266,8 +1258,6 @@ func TestV2TransitionResumesDurableActivationOnlyRepairAtEveryCheckpoint(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			owner := transition.options.OwnerRegistration.(*v2TestOwnerRegistration)
-			ownerCalls := [3]int{owner.prepares, owner.observes, owner.commits}
 			unrelatedSettings := map[string][]byte{
 				filepath.Join(configHome, "yards", "unrelated.env"): []byte("YARD_TEMPLATE=synthetic-other\n"),
 				filepath.Join(configHome, "yards", "empty.env"):     []byte("YARD_TEMPLATE=\n"),
@@ -1316,10 +1306,9 @@ func TestV2TransitionResumesDurableActivationOnlyRepairAtEveryCheckpoint(t *test
 			ledgerAfter, err := store.ReadLedger()
 			settingsAfter, settingsErr := os.ReadFile(settingsPath)
 			if err != nil || settingsErr != nil || !bytes.Equal(ledgerBefore.Payload, ledgerAfter.Payload) ||
-				!bytes.Equal(settingsBefore, settingsAfter) ||
-				ownerCalls != [3]int{owner.prepares, owner.observes, owner.commits} {
-				t.Fatalf("repair changed migration state: ledger before=%q after=%q settings before=%q after=%q owner=%#v err=%v settingsErr=%v",
-					ledgerBefore.Payload, ledgerAfter.Payload, settingsBefore, settingsAfter, owner, err, settingsErr)
+				!bytes.Equal(settingsBefore, settingsAfter) {
+				t.Fatalf("repair changed migration state: ledger before=%q after=%q settings before=%q after=%q err=%v settingsErr=%v",
+					ledgerBefore.Payload, ledgerAfter.Payload, settingsBefore, settingsAfter, err, settingsErr)
 			}
 			for path, payload := range unrelatedSettings {
 				preserved, err := os.ReadFile(path)
@@ -1481,9 +1470,8 @@ func TestV2TransitionDoesNotAttributeForeignCompletedJournalToBlockedGoal(t *tes
 		ObserveLinks: func(context.Context) (ReleaseLinks, error) {
 			return ReleaseLinks{Active: "release-b", Previous: releaseIDPointer("release-a")}, nil
 		},
-		RegistryPayload:   v2RegistryPayload(t),
-		ArtifactDigest:    digestA,
-		OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
+		RegistryPayload: v2RegistryPayload(t),
+		ArtifactDigest:  digestA,
 		VerifyAuthorization: func(plan PlanToken, authorization Authorization) bool {
 			return authorization == v2TestAuthorization(plan)
 		},
@@ -2321,7 +2309,6 @@ func TestFreshV2TransitionRejectsChangedObservationScope(t *testing.T) {
 				Reconcilers:     test.freshReconcilers,
 				RegistryPayload: v2RegistryPayload(t), ArtifactDigest: digestA,
 				InheritedSettingIDs: test.freshInputs,
-				OwnerRegistration:   &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
 				VerifyAuthorization: func(PlanToken, Authorization) bool { return false },
 			})
 			if err != nil {
@@ -2520,99 +2507,6 @@ type v2ActivationConflictError struct{}
 func (v2ActivationConflictError) Error() string            { return "private topology detail" }
 func (v2ActivationConflictError) ActivationConflict() bool { return true }
 
-type v2TestOwnerRegistration struct {
-	state           OwnerRegistrationState
-	registration    Fingerprint
-	prepares        int
-	observes        int
-	commits         int
-	cleanups        int
-	cleanupErr      error
-	intermediate    bool
-	interruptCommit bool
-}
-
-func (owner *v2TestOwnerRegistration) observation() OwnerRegistrationObservation {
-	return owner.observationFor(owner.state)
-}
-
-func (owner *v2TestOwnerRegistration) observationFor(
-	state OwnerRegistrationState,
-) OwnerRegistrationObservation {
-	observation := OwnerRegistrationObservation{State: state}
-	if state != OwnerRegistrationAbsent {
-		observation.Registration = owner.registration
-		if observation.Registration == "" {
-			observation.Registration = digestB
-		}
-		observation.Overrides = digestB
-		observation.Controller = digestB
-		observation.SharedImages = true
-	}
-	return observation
-}
-
-func (owner *v2TestOwnerRegistration) Prepare(
-	_ context.Context,
-	_ V2SettingsSnapshotView,
-) (OwnerRegistrationObservation, error) {
-	owner.prepares++
-	if owner.intermediate {
-		return OwnerRegistrationObservation{}, errors.New("owner registration has authorized intermediate state")
-	}
-	return owner.observation(), nil
-}
-
-func (owner *v2TestOwnerRegistration) Observe(
-	_ context.Context,
-	before OwnerRegistrationObservation,
-) (OwnerRegistrationProgress, error) {
-	owner.observes++
-	actual := owner.observation()
-	if actual.Registration != before.Registration || actual.Overrides != before.Overrides ||
-		actual.Controller != before.Controller || actual.SharedImages != before.SharedImages {
-		return "", errors.New("owner registration identity changed outside the transition")
-	}
-	if owner.intermediate && owner.state == before.State {
-		return OwnerRegistrationInProgress, nil
-	}
-	if owner.state == before.State {
-		return OwnerRegistrationExpected, nil
-	}
-	if owner.state == OwnerRegistrationCurrent {
-		return OwnerRegistrationDesired, nil
-	}
-	return "", errors.New("owner registration changed outside the transition")
-}
-
-func (owner *v2TestOwnerRegistration) Commit(
-	_ context.Context,
-	before OwnerRegistrationObservation,
-) error {
-	actual := owner.observation()
-	if before.State != OwnerRegistrationLegacyDirectory ||
-		actual.Registration != before.Registration || actual.SharedImages != before.SharedImages ||
-		(owner.state != before.State && owner.state != OwnerRegistrationCurrent) {
-		return errors.New("owner registration changed before commit")
-	}
-	if before.TerminalCleanup {
-		owner.cleanups++
-		return owner.cleanupErr
-	}
-	owner.commits++
-	if owner.state == OwnerRegistrationCurrent {
-		return nil
-	}
-	if owner.interruptCommit {
-		owner.interruptCommit = false
-		owner.intermediate = true
-		return errors.New("interrupted after an internal owner mutation")
-	}
-	owner.intermediate = false
-	owner.state = OwnerRegistrationCurrent
-	return nil
-}
-
 func TestV2ActivationWarningsReachOutcomesAndClearAfterRepair(t *testing.T) {
 	t.Run("invalid public warnings are rejected", func(t *testing.T) {
 		for _, warning := range []string{"", "unsafe\nmessage", strings.Repeat("x", maxDiagnosticText+1)} {
@@ -2802,8 +2696,7 @@ func v2TransitionFixtureWithReleases(
 		ConfigHome: configHome, Releases: releases, MigrationCheckpoint: true, SourceMigrationCheckpoint: true,
 		ObserveLinks:    func(context.Context) (ReleaseLinks, error) { return links, nil },
 		RegistryPayload: v2RegistryPayload(t), ArtifactDigest: digestA,
-		OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
-		NewTransactionID:  func() TransactionID { return "tx-test-001" },
+		NewTransactionID: func() TransactionID { return "tx-test-001" },
 		VerifyAuthorization: func(plan PlanToken, authorization Authorization) bool {
 			return authorization == v2TestAuthorization(plan)
 		},
@@ -2890,12 +2783,6 @@ func TestSupportedBuiltinCatalogRetainsIndependentIntroductions(t *testing.T) {
 			t.Fatal("changed implementation acquired historical recovery authority")
 		}
 	}
-}
-
-type v2RefusingFreshOwner struct{ *v2TestOwnerRegistration }
-
-func (*v2RefusingFreshOwner) FreshWarning(context.Context, V2SettingsSnapshotView) (string, error) {
-	return "test-yard requires recreation; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms", nil
 }
 
 func TestPublicActivationDiagnosticPreservesWrappedFallbackAndSafeActions(t *testing.T) {

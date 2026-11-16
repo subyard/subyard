@@ -434,75 +434,7 @@ func (view v2DiskSettingsView) ReadSnapshot(path string) (config.PersistentFileS
 }
 
 type v2SettingsBoundOwnerRegistration struct {
-	configHome string
-	path       string
-	state      OwnerRegistrationState
-	commits    int
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) observation(
-	view V2SettingsSnapshotView,
-) (OwnerRegistrationObservation, error) {
-	var snapshot config.PersistentFileSnapshot
-	var err error
-	if view != nil {
-		snapshot, err = view.ReadSnapshot(owner.path)
-	} else {
-		snapshot, err = config.ReadPersistentFileSnapshot(owner.configHome, owner.path)
-	}
-	if err != nil {
-		return OwnerRegistrationObservation{}, err
-	}
-	if !snapshot.Exists {
-		return OwnerRegistrationObservation{State: OwnerRegistrationAbsent}, nil
-	}
-	state := OwnerRegistrationLegacyDirectory
-	if owner.state == OwnerRegistrationCurrent {
-		state = OwnerRegistrationCurrent
-	}
-	return OwnerRegistrationObservation{
-		State: state, Registration: fingerprintPayload(snapshot.Content),
-		Overrides: digestB, Controller: digestB, SharedImages: true,
-	}, nil
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) Prepare(
-	_ context.Context,
-	view V2SettingsSnapshotView,
-) (OwnerRegistrationObservation, error) {
-	return owner.observation(view)
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) Observe(
-	_ context.Context,
-	before OwnerRegistrationObservation,
-) (OwnerRegistrationProgress, error) {
-	actual, err := owner.observation(nil)
-	if err != nil {
-		return "", err
-	}
-	if actual.Registration != before.Registration {
-		return "", errors.New("settings-bound owner registration changed")
-	}
-	if owner.state == OwnerRegistrationCurrent {
-		return OwnerRegistrationDesired, nil
-	}
-	return OwnerRegistrationExpected, nil
-}
-
-func (owner *v2SettingsBoundOwnerRegistration) Commit(
-	ctx context.Context,
-	before OwnerRegistrationObservation,
-) error {
-	if before.TerminalCleanup {
-		return nil
-	}
-	if _, err := owner.Observe(ctx, before); err != nil {
-		return err
-	}
-	owner.commits++
-	owner.state = OwnerRegistrationCurrent
-	return nil
+	path string
 }
 
 type v2IngressFixture struct {

@@ -49,17 +49,15 @@ func (owner *sourceProjectionOwner) desired(view *V2SourceActivationView) (Finge
 	if err != nil {
 		return "", err
 	}
-	registered := owner.owner.state == OwnerRegistrationCurrent
 	salt := owner.backend.nativeSalt
 	if view != nil {
 		salt = owner.projectionSalt
 	}
 	payload, err := json.Marshal(struct {
 		ID               string
-		Registered       bool
 		Settings, Shared []byte
 		Salt             string
-	}{owner.id, registered, settings.Content, shared.Content, salt})
+	}{owner.id, settings.Content, shared.Content, salt})
 	return fingerprintPayload(payload), err
 }
 
@@ -164,8 +162,7 @@ func sourceProjectionFixture(t *testing.T) (*V2Transition, *v2IngressFixture, []
 	settings := v2SourceSettingsPath(home, "e2e-yard")
 	shared := filepath.Join(home, "config.env")
 	imported := []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n")
-	owner := &v2SettingsBoundOwnerRegistration{configHome: home, path: settings}
-	transition.options.OwnerRegistration = owner
+	owner := &v2SettingsBoundOwnerRegistration{path: settings}
 	transition.options.MigrationCheckpoint = true
 	transition.options.SourceIngress = &SourceIngressRequest{SchemaVersion: SourceIngressRequestSchemaV1, Kind: SourceIngressPreGoV1,
 		SourceRoot: filepath.Join(home, "source"), DataHome: filepath.Join(home, "data"), BinDir: filepath.Join(home, "bin"), RC: filepath.Join(home, "rc"), LoginRC: filepath.Join(home, "login-rc")}
@@ -265,8 +262,8 @@ func TestPreparedSourceActivationSharesOneConsentAndReconstructsAfterRestart(t *
 			}
 			owner := owners[0].owner
 			imported, err := os.ReadFile(owner.path)
-			if err != nil || !bytes.Equal(imported, []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n")) || owner.commits != 0 {
-				t.Fatalf("ingress/retired owner state: %q commits=%d %v", imported, owner.commits, err)
+			if err != nil || !bytes.Equal(imported, []byte("YARD_TEMPLATE=e2e-vms\nNESTED_E2E_VMS=0\nSSH_PORT=2224\n")) {
+				t.Fatalf("ingress owner state: %q %v", imported, err)
 			}
 
 			checkpoint, err := transition.store.ReadMigrationCheckpoint()

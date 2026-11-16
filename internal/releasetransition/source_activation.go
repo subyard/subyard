@@ -5,15 +5,11 @@ import (
 	"slices"
 )
 
-// V2SourceActivationView contains the post-settings view and the exact prepared
-// owner before-state. Owners project their own registration/backend changes;
-// these facts grant no permission and never replace native observations.
+// V2SourceActivationView contains the post-settings view. Owners project their
+// own registration/backend changes; it grants no permission and never replaces
+// native observations.
 type V2SourceActivationView struct {
-	Settings          V2SettingsSnapshotView
-	OwnerRegistration *OwnerRegistrationObservation
-	// These are already journal-bound pending work identities, not drift grants.
-	RegisteredYards map[string]Fingerprint
-	GuestDiskTmp    map[string]Fingerprint
+	Settings V2SettingsSnapshotView
 }
 
 type V2SourceActivationPlan struct {
@@ -35,7 +31,7 @@ func (transition *V2Transition) retainSourceActivationView(observation *v2Observ
 	if settings == nil {
 		settings = posixV2SettingsSnapshotView{configHome: transition.options.ConfigHome}
 	}
-	observation.sourceActivationView = &V2SourceActivationView{Settings: settings, RegisteredYards: map[string]Fingerprint{}, GuestDiskTmp: map[string]Fingerprint{}}
+	observation.sourceActivationView = &V2SourceActivationView{Settings: settings}
 }
 
 func pendingSourceActivationWork(observation v2Observation) bool {

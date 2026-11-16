@@ -276,12 +276,11 @@ func newerReleaseCandidate(
 			*links = ReleaseLinks{Active: pair.Target, Previous: releaseIDPointer(pair.From)}
 			return *links, nil
 		},
-		RegistryPayload:   v2RegistryPayload(t),
-		ArtifactDigest:    artifact,
-		OwnerRegistration: &v2TestOwnerRegistration{state: OwnerRegistrationAbsent},
-		NewTransactionID:  func() TransactionID { return transaction },
-		CandidateVersion:  version,
-		Replacement:       replacement,
+		RegistryPayload:  v2RegistryPayload(t),
+		ArtifactDigest:   artifact,
+		NewTransactionID: func() TransactionID { return transaction },
+		CandidateVersion: version,
+		Replacement:      replacement,
 		VerifyAuthorization: func(plan PlanToken, authorization Authorization) bool {
 			return authorization == v2TestAuthorization(plan)
 		},

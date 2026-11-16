@@ -158,8 +158,8 @@ func newV0173RecoveryFixture(t *testing.T) v0111ProcessFixture {
 	links, _ := releasetransition.NewRuntimeLinkStore(fixture.runtimeRoot)
 	options := releasetransition.V2Options{
 		ConfigHome: fixture.configHome, Releases: releasetransition.ReleasePair{From: fixture.source.release, Target: fixture.source.release},
-		ObserveLinks:      func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
-		OwnerRegistration: v0111AbsentOwnerRegistration{}, RegistryPayload: fixture.registry,
+		ObserveLinks:        func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
+		RegistryPayload:     fixture.registry,
 		ArtifactDigest:      v0111FixtureFingerprintBytes(mustReadFile(t, filepath.Join(fixture.source.root, "runtime-files.sha256"))),
 		VerifyAuthorization: func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool { return grant != "" },
 	}
@@ -252,7 +252,7 @@ func TestV0173TransitionProcessHelper(t *testing.T) {
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
 		ConfigHome: request.ConfigHome, Releases: releasetransition.ReleasePair{From: observed.Active, Previous: observed.Previous, Target: request.Target},
 		ObserveLinks:    func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
-		RegistryPayload: registry, ArtifactDigest: request.ArtifactDigest, OwnerRegistration: v0111AbsentOwnerRegistration{},
+		RegistryPayload: registry, ArtifactDigest: request.ArtifactDigest,
 		Reconcilers:         []releasetransition.V2ActivationReconciler{v0173Reconciler(request.ConfigHome, os.Getenv("SUBYARD_TEST_V0173_STATE"))},
 		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return false },
 	})

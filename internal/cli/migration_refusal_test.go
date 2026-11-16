@@ -73,23 +73,6 @@ func TestReleaseTransitionIngressFactoryRefusesRuntimeDirectoryWithoutUninstallA
 	}
 }
 
-// The error comes from the real registration adapter; the synthetic port only
-// seeds an authorized historical row without running a host mutation.
-type diagnosticRegistrationOwner struct {
-	before  releasetransition.OwnerRegistrationObservation
-	failure error
-}
-
-func (owner *diagnosticRegistrationOwner) Prepare(context.Context, releasetransition.V2SettingsSnapshotView) (releasetransition.OwnerRegistrationObservation, error) {
-	return owner.before, owner.failure
-}
-func (owner *diagnosticRegistrationOwner) Observe(context.Context, releasetransition.OwnerRegistrationObservation) (releasetransition.OwnerRegistrationProgress, error) {
-	return releasetransition.OwnerRegistrationExpected, owner.failure
-}
-func (*diagnosticRegistrationOwner) Commit(context.Context, releasetransition.OwnerRegistrationObservation) error {
-	return errors.New("interrupt before native owner effects")
-}
-
 func TestLegacyKVMTransportFailureRemainsDependency(t *testing.T) {
 	_, execution, native, _ := legacyContinuationInstalledFixture(t)
 	instance := &native.Reconcile.Instance
@@ -202,7 +185,7 @@ func TestInterruptedAnchorHopHasNoRecoveryCommandCycle(t *testing.T) {
 			reconciler := &processDriftReconciler{failOnce: true}
 			run := func(request releasetransition.ProcessRequest) releasetransition.ProcessResponse {
 				t.Helper()
-				response, err := executeReleaseTransitionRequest(context.Background(), root, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{reconciler}, nil, nil)
+				response, err := executeReleaseTransitionRequest(context.Background(), root, request, func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }, []releasetransition.V2ActivationReconciler{reconciler}, nil)
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -79,13 +79,10 @@ type V2Options struct {
 	ObserveLinks              func(context.Context) (ReleaseLinks, error)
 	ActivateLinks             func(context.Context, ReleasePair) (ReleaseLinks, error)
 	Reconcilers               []V2ActivationReconciler
-	RegisteredYards           []V2ActivationReconciler
 	// Compiled owning-runtime vocabulary; never caller environment or private declarations.
 	// Descriptor removal/renaming in a future release also requires the verified
 	// predecessor vocabulary for retained records. Nil refuses endpoint recovery.
 	RegisteredEndpointSettings []string
-	GuestDiskTmp               []V2ActivationReconciler
-	OwnerRegistration          V2OwnerRegistration
 	Ingress                    V2Ingress
 	RegistryPayload            []byte
 	ArtifactDigest             Fingerprint
@@ -226,7 +223,7 @@ type settingsRecoveryV1 struct {
 }
 
 func NewV2Transition(options V2Options) (*V2Transition, error) {
-	if options.OwnerRegistration != nil && nilV2Adapter(options.OwnerRegistration) || options.Ingress != nil && nilV2Adapter(options.Ingress) {
+	if options.Ingress != nil && nilV2Adapter(options.Ingress) {
 		return nil, invalid("typed nil migration adapter")
 	}
 	for _, reconciler := range options.Reconcilers {

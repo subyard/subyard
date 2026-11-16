@@ -124,10 +124,10 @@ func TestObservedJournalReadyProofBindsCompletedHistory(t *testing.T) {
 func TestV2RejectsTypedNilAdapters(t *testing.T) {
 	transition, _, _ := v2TransitionFixture(t, nil)
 	options := transition.options
-	var owner *v2TestOwnerRegistration
-	options.OwnerRegistration = owner
+	var ingress *v2IngressFixture
+	options.Ingress = ingress
 	if _, err := NewV2Transition(options); err == nil {
-		t.Fatal("typed nil owner accepted")
+		t.Fatal("typed nil ingress accepted")
 	}
 	options = transition.options
 	var reconciler *v2FailingReconciler

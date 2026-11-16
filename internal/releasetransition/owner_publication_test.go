@@ -3,29 +3,10 @@ package releasetransition
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
-
-// Legacy owner commits install power helpers and initialize the replacement
-// owner. Those publication writes require the already persisted reader epoch.
-type powerReaderOwnerRegistration struct {
-	*v2TestOwnerRegistration
-	transition *V2Transition
-}
-
-func (owner *powerReaderOwnerRegistration) Commit(ctx context.Context, before OwnerRegistrationObservation) error {
-	state, err := owner.transition.store.ReadMigrationLedger(owner.transition.registry, owner.transition.registryDigest)
-	if err != nil {
-		return err
-	}
-	if state.Ledger.Domains["power-metadata"].Epoch != 2 {
-		return errors.New("legacy owner publication preceded its protected reader epoch")
-	}
-	return owner.v2TestOwnerRegistration.Commit(ctx, before)
-}
 
 func TestOwnerPublicationOrderPreservesCompletedHistoricalOwnerPrefix(t *testing.T) {
 	payload, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))

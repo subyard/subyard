@@ -168,7 +168,7 @@ func (fixture *sourceScopeFixture) execute(mode releasetransition.ProcessMode, p
 	}
 	response, err := executeReleaseTransitionRequest(context.Background(), fixture.root, request,
 		func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
-		[]releasetransition.V2ActivationReconciler{reconciler}, releaseTransitionOwnerFixture{}, nil)
+		[]releasetransition.V2ActivationReconciler{reconciler}, nil)
 	if err != nil {
 		fixture.t.Fatal(err)
 	}

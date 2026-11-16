@@ -920,7 +920,7 @@ UPDATE_FOLLOWUP_HELPER=1 exec "$UPDATE_FOLLOWUP_BINARY" -test.run='^TestUpdateCo
 		t.Helper()
 		response, err := executeReleaseTransitionRequest(context.Background(), fixture.cli.options.RepositoryRoot, request,
 			func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool { return grant != "" },
-			actors, releaseTransitionOwnerFixture{}, nil)
+			actors, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

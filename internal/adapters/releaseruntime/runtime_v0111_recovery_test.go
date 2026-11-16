@@ -79,31 +79,6 @@ func (reconciler v0111FixtureReconciler) Reconcile(
 	return os.WriteFile(reconciler.statePath, []byte(reconciler.desired+"\n"), 0o600)
 }
 
-type v0111AbsentOwnerRegistration struct{}
-
-func (v0111AbsentOwnerRegistration) Prepare(
-	context.Context,
-	releasetransition.V2SettingsSnapshotView,
-) (releasetransition.OwnerRegistrationObservation, error) {
-	return releasetransition.OwnerRegistrationObservation{
-		State: releasetransition.OwnerRegistrationAbsent,
-	}, nil
-}
-
-func (v0111AbsentOwnerRegistration) Observe(
-	context.Context,
-	releasetransition.OwnerRegistrationObservation,
-) (releasetransition.OwnerRegistrationProgress, error) {
-	return releasetransition.OwnerRegistrationExpected, nil
-}
-
-func (v0111AbsentOwnerRegistration) Commit(
-	context.Context,
-	releasetransition.OwnerRegistrationObservation,
-) error {
-	return nil
-}
-
 func inspectV0111ProcessRuntime(
 	t *testing.T,
 	repositoryRoot string,
@@ -201,11 +176,11 @@ func seedV0111PostActivationScopeJournal(
 		Reconcilers: []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{
 			statePath: fixture.statePath, desired: v0111FixtureFingerprint("source-scope"), fail: true,
 		}},
-		OwnerRegistration: v0111AbsentOwnerRegistration{},
-		RegistryPayload:   fixture.registry,
-		ArtifactDigest:    bindings.sourceArtifact,
-		CandidateVersion:  "0.11.1",
-		NewTransactionID:  func() releasetransition.TransactionID { return fixture.sourceTx },
+
+		RegistryPayload:  fixture.registry,
+		ArtifactDigest:   bindings.sourceArtifact,
+		CandidateVersion: "0.11.1",
+		NewTransactionID: func() releasetransition.TransactionID { return fixture.sourceTx },
 		VerifyAuthorization: func(
 			releasetransition.PlanToken,
 			releasetransition.Authorization,
@@ -394,7 +369,6 @@ func runV0111TransitionProcessHelper(input io.Reader, output io.Writer) error {
 		desired:   v0111FixtureFingerprint("candidate-scope"),
 	}
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
-		RegisteredYards: []releasetransition.V2ActivationReconciler{}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{},
 		ConfigHome: request.ConfigHome, Releases: releases, Direction: request.Direction,
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
 			return links.Observe()
@@ -405,12 +379,12 @@ func runV0111TransitionProcessHelper(input io.Reader, output io.Writer) error {
 		) (releasetransition.ReleaseLinks, error) {
 			return links.Activate(pair)
 		},
-		Reconcilers:       []releasetransition.V2ActivationReconciler{reconciler},
-		OwnerRegistration: v0111AbsentOwnerRegistration{},
-		RegistryPayload:   registry,
-		ArtifactDigest:    request.ArtifactDigest,
-		CandidateVersion:  os.Getenv("SUBYARD_TEST_V0111_VERSION"),
-		Replacement:       request.Replacement,
+		Reconcilers: []releasetransition.V2ActivationReconciler{reconciler},
+
+		RegistryPayload:  registry,
+		ArtifactDigest:   request.ArtifactDigest,
+		CandidateVersion: os.Getenv("SUBYARD_TEST_V0111_VERSION"),
+		Replacement:      request.Replacement,
 		NewTransactionID: func() releasetransition.TransactionID {
 			return releasetransition.TransactionID(os.Getenv("SUBYARD_TEST_V0111_TRANSACTION"))
 		},

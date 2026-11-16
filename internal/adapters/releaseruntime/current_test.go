@@ -629,9 +629,9 @@ func newCurrentInterruptedFixture(t *testing.T, preactivation bool) v0111Process
 			}
 			return links.Activate(pair)
 		},
-		Reconcilers:       []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{statePath: fixture.statePath, desired: v0111FixtureFingerprint("candidate-scope"), fail: true}},
-		OwnerRegistration: v0111AbsentOwnerRegistration{}, RegistryPayload: fixture.registry,
-		ArtifactDigest: v0111FixtureFingerprintBytes(mustReadFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"))), CandidateVersion: "0.11.2",
+		Reconcilers:     []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{statePath: fixture.statePath, desired: v0111FixtureFingerprint("candidate-scope"), fail: true}},
+		RegistryPayload: fixture.registry,
+		ArtifactDigest:  v0111FixtureFingerprintBytes(mustReadFile(t, filepath.Join(fixture.candidate.root, "runtime-files.sha256"))), CandidateVersion: "0.11.2",
 		NewTransactionID:    func() releasetransition.TransactionID { return fixture.candidateTx },
 		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
 	})
@@ -782,14 +782,13 @@ func currentScopeTransition(request releasetransition.ProcessRequest, statePath 
 		}
 	}
 	return releasetransition.NewV2Transition(releasetransition.V2Options{
-		RegisteredYards: []releasetransition.V2ActivationReconciler{}, GuestDiskTmp: []releasetransition.V2ActivationReconciler{},
 		ConfigHome: request.ConfigHome, Releases: releasetransition.ReleasePair{From: "0.11.1-source", Target: request.Target}, Direction: request.Direction,
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
 		ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {
 			return links.Activate(pair)
 		},
-		Reconcilers:       []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{statePath: statePath, desired: v0111FixtureFingerprint("scope:" + desiredScope), fail: fail}},
-		OwnerRegistration: v0111AbsentOwnerRegistration{}, RegistryPayload: registry, ArtifactDigest: request.ArtifactDigest, CandidateVersion: "0.11.2",
+		Reconcilers:     []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{statePath: statePath, desired: v0111FixtureFingerprint("scope:" + desiredScope), fail: fail}},
+		RegistryPayload: registry, ArtifactDigest: request.ArtifactDigest, CandidateVersion: "0.11.2",
 		NewTransactionID: func() releasetransition.TransactionID { return "tx-current-named-scope" },
 		VerifyAuthorization: func(_ releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
 			return authorization != ""

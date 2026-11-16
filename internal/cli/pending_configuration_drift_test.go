@@ -160,7 +160,7 @@ func (fixture pendingDriftFixture) execute(t *testing.T, execution *releasetrans
 	}
 	response, err := executeReleaseTransitionRequest(context.Background(), fixture.cli.options.RepositoryRoot, request,
 		func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool { return grant != "" },
-		owners, releaseTransitionOwnerFixture{}, nil)
+		owners, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -54,7 +54,7 @@ func runUpdateFollowupOwnerProcess() {
 	}
 	response, err := executeReleaseTransitionRequest(context.Background(), os.Getenv("UPDATE_FOLLOWUP_REPOSITORY"), request,
 		func(_ releasetransition.PlanToken, grant releasetransition.Authorization) bool { return grant != "" },
-		actors, releaseTransitionOwnerFixture{}, nil)
+		actors, nil)
 	if err != nil {
 		panic(err)
 	}

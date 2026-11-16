@@ -218,11 +218,7 @@ func interruptSourceMetadataActivation(t *testing.T, transition *V2Transition, s
 func TestSourceMetadataAcceptsRetainedCompletedResourceCheckpoints(t *testing.T) {
 	for _, resource := range []string{"hermes", ownerRegistrationResource} {
 		t.Run(resource, func(t *testing.T) {
-			var owner V2OwnerRegistration
-			if resource == ownerRegistrationResource {
-				owner = &v2TestOwnerRegistration{state: OwnerRegistrationLegacyDirectory}
-			}
-			transition, store := completedSourceMetadataFixtureWithOwner(t, owner)
+			transition, store := completedSourceMetadataFixtureWithOwner(t, resource == ownerRegistrationResource)
 			transition, store = interruptSourceMetadataActivation(t, transition, store)
 			prior, err := store.sourceRetainedTerminalEvidence("tx-test-001", transition.registry)
 			if err != nil {
@@ -301,17 +297,14 @@ func TestSourceMetadataRejectsUnclassifiedArtifactsWithCurrentJournal(t *testing
 
 func completedSourceMetadataFixture(t *testing.T) (*V2Transition, *POSIXV2Store) {
 	t.Helper()
-	return completedSourceMetadataFixtureWithOwner(t, nil)
+	return completedSourceMetadataFixtureWithOwner(t, false)
 }
 
-func completedSourceMetadataFixtureWithOwner(t *testing.T, owner V2OwnerRegistration) (*V2Transition, *POSIXV2Store) {
+func completedSourceMetadataFixtureWithOwner(t *testing.T, owner bool) (*V2Transition, *POSIXV2Store) {
 	t.Helper()
 	transition, home, _ := v2TransitionFixture(t, nil)
-	seedLegacyReaderFixture(t, home, owner != nil)
+	seedLegacyReaderFixture(t, home, owner)
 	transition.options.MigrationCheckpoint = false
-	if owner != nil {
-		transition.options.OwnerRegistration = owner
-	}
 	return transition, transition.store
 }
 
