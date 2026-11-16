@@ -937,9 +937,10 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
         if confirmed.get(repo["path"]) != repo["id"]:
             confirmed[repo["path"]] = repo["id"]
             state.save()
-        # This API also covers saved tabs of now-missing linked worktrees.
+        # This API also covers saved tabs of now-missing linked worktrees. The
+        # read only probes the inventory; the fence below reads it again.
         try:
-            snapshots = _session_snapshots(rpc)
+            _session_snapshots(rpc)
         except RpcError as error:
             if not error.timed_out or error.unknown:
                 raise
