@@ -2527,6 +2527,44 @@ class RemovedProjectSessionTests(unittest.TestCase):
                           for method, params in attempted])
 
 
+    def test_refused_terminal_close_persists_and_handle_turnover_resumes_with_one_resend(self):
+        self.rpc.snapshots = []
+        self.rpc.terminals = [self.terminal(self.repo, "p", "h-old")]
+        shutil.rmtree(self.root.parent)
+        attempted = self.attempts(lambda method, params: method in ("terminal.stopExact", "terminal.close"))
+        closes = lambda: [params["terminal"] for method, params in attempted if method == "terminal.close"]
+        refused = lambda: self.sidecar()["projects"]["sample-id"]["refused_closes"][self.repo["id"]]
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertEqual(["h-old"], closes())
+        self.assertEqual([["close", "h-old", "p"]], refused())
+        before = len(attempted)
+        for apply in (True, False, True):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual(("protected", True), (item["retention"], item.get("attention")))
+        self.assertEqual(before, len(attempted), "a refused terminal close was sent again")
+        # An Orca restart issues a new handle for the same PTY: the old marker no longer matches.
+        self.rpc.terminals = [self.terminal(self.repo, "p", "h-new")]
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertEqual(["h-old", "h-new"], closes())
+        self.assertEqual([["close", "h-new", "p"]], refused())
+        self.run_sync()
+        self.assertEqual(["h-old", "h-new"], closes())
+
+
+    def test_foreign_tab_without_identity_still_shares_its_terminal_handle(self):
+        self.rpc.snapshots = [
+            {"worktree": self.other["id"] + "::" + self.other["path"], "tabs": [{"type": "terminal", "terminal": "h"}]},
+        ]
+        self.rpc.terminals = [self.terminal(self.repo, "mine", "h")]
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(set(), self.rpc.killed)
+        self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"]))
+
+
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
         import fcntl
