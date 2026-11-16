@@ -6,17 +6,17 @@ description: Commit, rebase and push the private planning overlay in private/ wh
 # Private overlay sync
 
 `private/` is a separate Git repository without branches or pull requests: commit to its
-default branch, rebase, push. Its `AGENTS.md` lists *decision* changes that need the
-operator's approval; everything else you changed is *progress*.
+default branch, rebase, push. Its `AGENTS.md` says which changes need the operator's approval
+before a commit and which are *decision* changes; commit nothing it does not allow.
 
 1. `git -C private fetch`; report behind/ahead and `git -C private status --short`.
 2. Classify each uncommitted path: **mine** (changed only by this session), **others'**
    (operator or another session), or **unclear** (including paths that were already dirty
    when you edited them). Split *mine* into progress and decisions.
-3. If any decision, others' or unclear path exists, ask the operator once: each decision
-   with one line on what it changes, then the others' and unclear paths. Sync progress
-   without waiting; run this skill again after the answer.
-4. Commit progress by explicit paths (`git -C private add -- PATH...`, never `-A`).
+3. If anything needs approval, ask the operator once: each decision with one line on what it
+   changes, other paths that need approval, then the others' and unclear paths. Commit what
+   needs no approval without waiting; run this skill again after the answer.
+4. Commit allowed paths by explicit paths (`git -C private add -- PATH...`, never `-A`).
    Subject: the substance; body: affected tasks and public PRs. Commit approved decisions
    separately. Leave everything else uncommitted.
 5. `git -C private pull --rebase --autostash`, then `git -C private push`. On a conflict
