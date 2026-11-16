@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -37,5 +38,17 @@ func TestIncusAccessRefusalIsPublicPerYardVerdict(t *testing.T) {
 	}
 	if message, _ := IncusAccessDiagnostic("../bad"); !strings.HasPrefix(message, "registered yard: ") {
 		t.Fatalf("unsafe yard names stay hidden: %q", message)
+	}
+}
+
+func TestOrderedRefusalsKeepTargetOrder(t *testing.T) {
+	err := CollectOrderedRefusals(nil, errors.New("yard default: a"), errors.New("yard beta: b"), errors.New("yard default: a"), errors.New("yard alpha: c"))
+	if err.Error() != "yard default: a; yard beta: b; yard alpha: c" {
+		t.Fatalf("ordered refusals = %q", err)
+	}
+	messages := []string{"yard beta: x", "yard default: y", "yard alpha: z"}
+	slices.SortFunc(messages, CompareYardMessages)
+	if strings.Join(messages, "|") != "yard default: y|yard alpha: z|yard beta: x" {
+		t.Fatalf("yard message order = %q", messages)
 	}
 }

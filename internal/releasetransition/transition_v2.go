@@ -2384,6 +2384,12 @@ func (transition *V2Transition) observeResume(
 			}
 			work := nativeMigrationWork(intent, migration)
 			retired, err := transition.retiredNativeBinding(ctx, migration, step.Resource, *journal)
+			// A typed per-yard verdict (such as denied socket access) stays one
+			// blocker of this row; the other rows are still assessed.
+			if hasMigrationRefusal(err) {
+				observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err, ctx))
+				continue
+			}
 			if err != nil {
 				return err
 			}
@@ -2406,6 +2412,10 @@ func (transition *V2Transition) observeResume(
 					continue
 				}
 				replaced, err := transition.nativeIdentityReplaced(ctx, *journal, step, work, ownerSettingsView)
+				if hasMigrationRefusal(err) {
+					observation.blockers = append(observation.blockers, nativeRefusalBlocker(step.Resource, err, ctx))
+					continue
+				}
 				if err != nil {
 					return err
 				}

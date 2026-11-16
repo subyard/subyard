@@ -318,7 +318,7 @@ func nativeRefusalBlocker(resource string, err error, contexts ...context.Contex
 		classes = append(classes, migrationReasonClass{yard: finding.yard, reason: finding.reason, count: count, details: len(finding.names) + len(finding.parameters)})
 		messages = append(messages, message)
 	}
-	slices.Sort(messages)
+	slices.SortFunc(messages, domain.CompareYardMessages)
 	messages = slices.Compact(messages)
 	slices.Sort(actions)
 	actions = slices.Compact(actions)

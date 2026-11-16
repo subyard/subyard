@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -158,8 +161,15 @@ func TestColdInstallationReportsUnreadableStateAsWarm(t *testing.T) {
 	if coldInstallation(configHome, "") {
 		t.Fatal("unreadable configuration must not prove a cold installation")
 	}
-	if coldInstallation("relative/config", "") {
+	if coldInstallation("relative/config", root) {
 		t.Fatal("a relative configuration home must not prove a cold installation")
+	}
+	empty := filepath.Join(root, "empty-config")
+	if coldInstallation(empty, "") || coldInstallation(empty, "relative/runtime") {
+		t.Fatal("an unknown runtime root cannot exclude a retained previous release")
+	}
+	if !coldInstallation(empty, filepath.Join(root, "runtime")) {
+		t.Fatal("an empty installation with a known runtime root is cold")
 	}
 }
 
@@ -220,4 +230,136 @@ func TestActivationAccessDenialNamesYardAndRepair(t *testing.T) {
 func seedOwnerHostID(t *testing.T, configHome string) {
 	t.Helper()
 	writeColdFile(t, filepath.Join(configHome, "host-id"), "yard\n", 0o600)
+}
+
+// grantedIncus denies the socket until the approved Incus stage grants access.
+type grantedIncus struct {
+	*testkit.Incus
+	granted bool
+}
+
+func (native *grantedIncus) Instance(ctx context.Context, project, name string) (ports.InstanceInfo, error) {
+	if !native.granted {
+		return ports.InstanceInfo{}, fmt.Errorf("get instance: %w: %w", domain.ErrIncusAccessDenied, os.ErrPermission)
+	}
+	return native.Incus.Instance(ctx, project, name)
+}
+
+type grantingInitPlatform struct {
+	*initPlatformFixture
+	native *grantedIncus
+}
+
+func (platform *grantingInitPlatform) ApplyStage(ctx context.Context, stage ports.ReconcileStageID) error {
+	if err := platform.initPlatformFixture.ApplyStage(ctx, stage); err != nil {
+		return err
+	}
+	if stage == ports.ReconcileStageIncus {
+		platform.native.granted = true
+	}
+	return nil
+}
+
+// A cold first init may plan before socket access exists, but it repeats the
+// native owner check once its Incus stage grants access: another yard's
+// instance left behind by a deleted configuration is never taken over.
+func TestColdFirstInitRechecksNativeOwnerAfterAccessGrant(t *testing.T) {
+	root, environment, _ := migrateCLIFixture(t, false)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	writeColdFile(t, filepath.Join(configHome, "config.env"), "INCUS_PROJECT=subyard-beta\nYARD_INSTANCE_NAME=yard-beta\n", 0o600)
+	if !coldInstallation(configHome, environmentValue(environment, "YARD_RUNTIME_ROOT")) {
+		t.Fatal("fixture precondition: host-wide settings keep the installation cold")
+	}
+	native := &grantedIncus{Incus: &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-beta/yard-beta": {
+		Name: "yard-beta", Project: "subyard-beta", Status: "Stopped",
+		Config: map[string]string{"user.subyard.name": "beta", "user.subyard.managed": "true"},
+	}}}}
+	platform := &grantingInitPlatform{initPlatformFixture: newInitPlatformFixture(), native: native}
+	platform.converged[ports.ReconcileStageIncus] = false
+	platform.converged[ports.ReconcileStageInstance] = false
+	var output bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment,
+		Stdout: &output, Stderr: &output, InitPlatform: platform, Incus: native, Executor: native})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code == 0 {
+		t.Fatalf("init took over another yard's instance: %s", output.String())
+	}
+	t.Logf("applied=%v granted=%t", platform.applied, native.granted)
+	if !native.granted || !strings.Contains(output.String(), "belongs to yard beta") {
+		t.Fatalf("owner refusal missing after the access grant: granted=%t\n%s", native.granted, output.String())
+	}
+	for _, stage := range platform.applied {
+		if stage != ports.ReconcileStageIncus {
+			t.Fatalf("init applied %s before refusing the foreign instance", stage)
+		}
+	}
+}
+
+// deniedServer denies every socket read, as an inaccessible installed Incus does.
+type deniedServer struct{ *testkit.Incus }
+
+func (deniedServer) Server(context.Context) (ports.ServerInfo, error) {
+	return ports.ServerInfo{}, fmt.Errorf("get server: %w: %w", domain.ErrIncusAccessDenied, os.ErrPermission)
+}
+
+func (deniedServer) Instance(context.Context, string, string) (ports.InstanceInfo, error) {
+	return ports.InstanceInfo{}, fmt.Errorf("get instance: %w: %w", domain.ErrIncusAccessDenied, os.ErrPermission)
+}
+
+// Test-yard recreation inspection runs the native CLI; socket denial is typed
+// before it can surface as an untyped exit status.
+func TestRegisteredTestYardMigrationTypesSocketDenial(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	seedOwnerHostID(t, configHome)
+	native := deniedServer{&testkit.Incus{}}
+	program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: native, Executor: native})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := program.registeredYardMigration(releasetransition.ProcessRequest{ConfigHome: configHome}, false, "test-yard").(*migration.RegisteredYardMigration)
+	_, err = owner.LoadTargets(context.Background(), nil)
+	message, retry := "", ""
+	var public interface{ ActivationDiagnostic() (string, string) }
+	if errors.As(err, &public) {
+		message, retry = public.ActivationDiagnostic()
+	}
+	if !errors.Is(err, domain.ErrIncusAccessDenied) || retry != domain.IncusAccessNextStep ||
+		message != "yard test-yard: native state cannot be inspected: this account cannot access the Incus socket" {
+		t.Fatalf("test-yard socket denial = %v (%q / %q)", err, message, retry)
+	}
+}
+
+// Init's compatibility probe reports every local yard it cannot read, in
+// stable order, not only the selected one.
+func TestPlainInitMigrationProbeReportsEveryDeniedYard(t *testing.T) {
+	root, environment, _ := migrateCLIFixture(t, true)
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Environment: environment, Stdout: io.Discard, Stderr: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configHome := program.env["SUBYARD_CONFIG_HOME"]
+	seedOwnerHostID(t, configHome)
+	writeColdFile(t, filepath.Join(configHome, "yards", "beta", "config.env"), "SSH_PORT=2302\n", 0o600)
+	writeColdFile(t, filepath.Join(configHome, "yards", "alpha", "config.env"), "SSH_PORT=2301\n", 0o600)
+	native := deniedServer{&testkit.Incus{}}
+	program.options.Incus, program.options.Executor = native, native
+	code, err := program.finishRegisteredInitMigrations(context.Background(), "default", nil, true)
+	if code != -1 || !errors.Is(err, domain.ErrIncusAccessDenied) {
+		t.Fatalf("probe = %d %v", code, err)
+	}
+	text := err.Error()
+	positions := []int{}
+	for _, yard := range []string{"default", "alpha", "beta"} {
+		index := strings.Index(text, "yard "+yard+": native state cannot be inspected")
+		if index < 0 {
+			t.Fatalf("probe omitted yard %s: %s", yard, text)
+		}
+		positions = append(positions, index)
+	}
+	if positions[0] > positions[1] || positions[1] > positions[2] {
+		t.Fatalf("refusals are not in YardNames order: %s", text)
+	}
 }

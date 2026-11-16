@@ -30,15 +30,23 @@ func (cli *CLI) observeNativeOwner(ctx context.Context, loaded config.Loaded) (m
 	if errors.Is(err, ports.ErrInstanceNotFound) || errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	// A cold installation's first init grants socket access in its approved
-	// Incus stage; its project and instance stages then observe for real.
-	if errors.Is(err, domain.ErrIncusAccessDenied) && cli.coldInstallation() {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
 	return map[string]string{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: instance.Config["user.subyard.name"]}, domain.NativeTargetOwnership(loaded.Context, instance.Config)
+}
+
+// observeInitNativeOwner lets only init plan before socket access exists: a cold
+// installation's approved Incus stage grants it, and checkBeforeInitWrites then
+// repeats the strict owner and collision checks before any yard state is written.
+// Other init modes run no Incus stage, so they never defer.
+func (cli *CLI) observeInitNativeOwner(ctx context.Context, loaded config.Loaded, arguments []string) (map[string]string, error) {
+	owners, err := cli.observeNativeOwner(ctx, loaded)
+	if request, parseErr := parseInitArguments(arguments); parseErr == nil && request.mode == initReconcile &&
+		errors.Is(err, domain.ErrIncusAccessDenied) && cli.coldInstallation() {
+		return nil, nil
+	}
+	return owners, err
 }
 
 // Collision assessment only resolves addresses. Full-inventory callers report

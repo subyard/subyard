@@ -819,15 +819,22 @@ yard registration or config file, Git settings, applied-state record, retained p
 release or upgraded history. Init writes the HostID before it creates any native yard, so
 such an installation owns none, and its release activation observes an absent server
 (`coldInstallation` in `internal/cli/release_native_scope.go`, applied in
-`releaseActivationOperation`). Installing, updating and the first `yard init` therefore work
-when Incus is installed but this account cannot open its socket. Init's approved Incus stage
-then grants access, and its own stages inspect native state. A native yard left behind by
-another installation is foreign until init adopts it. Any unreadable or unexpected fact makes
-the installation warm. A warm installation without socket access fails closed: each local
-yard reports its own typed `domain.IncusAccessRefusal` with one next step (a new login
+`releaseActivationOperation`). While the installation is cold, which in practice means
+before its first init, installing, rerunning the installer and the first `yard init`
+(including plain `yard -Y NEW init`) work when Incus is installed but this account cannot
+open its socket. Such an init plans with its native owner check deferred; after its approved
+Incus stage grants access it repeats the strict owner and target-collision checks before any
+instance stage or yard write, so it never takes over another yard's instance. Other init
+modes and teardown never defer. A native yard left behind by another installation is foreign
+until init adopts it. Any unreadable or unexpected fact, including an unknown runtime root,
+makes the installation warm. A warm installation without socket access, including any update
+after the first init, fails closed: each local yard reports its own typed
+`domain.IncusAccessRefusal`, default first and then by name, with one next step (a new login
 session or `newgrp incus-admin`, after `sudo usermod -aG incus-admin "$USER"` when the account
-is not a member). The Incus client types the socket's permission error as
-`domain.ErrIncusAccessDenied`.
+is not a member). Interrupted transitions report the same refusal per journal row. The Incus
+client types only a permission error of the socket dial as `domain.ErrIncusAccessDenied`.
+Profile runtime handlers that run the `incus` CLI themselves report their own
+permission-denied observation failure instead.
 
 Schema-1 installation identity and protected metadata publication are shared by bootstrap,
 runtime publication, candidate activation and ownership consumers. The candidate advertises

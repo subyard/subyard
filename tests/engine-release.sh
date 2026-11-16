@@ -702,10 +702,12 @@ if [ "$(id -u)" != 0 ]; then
       fail 'warm bootstrap accepted uninspected native yard state'
     fi
     [ ! -e "$YARD_BIN_DIR/yard" ] || fail 'warm bootstrap without Incus access published entrypoints'
-    for yard in alpha default; do
-      grep -Fq "yard $yard: native state cannot be inspected: this account cannot access the Incus socket" "$log" \
-        || { cat "$log" >&2; fail "warm bootstrap did not name yard $yard's socket access"; }
-    done
+    # Target order: the default yard first, then by name.
+    summary="$(grep -F 'yard: prepare migrate:' "$log")" \
+      || { cat "$log" >&2; fail 'warm bootstrap did not summarize its refusal'; }
+    expected='yard default: native state cannot be inspected: this account cannot access the Incus socket; yard alpha: native state cannot be inspected: this account cannot access the Incus socket'
+    [[ "$summary" == *"$expected"* ]] \
+      || { cat "$log" >&2; fail 'warm bootstrap did not name each yard in target order'; }
     grep -Fq 'next: open a new login session or run newgrp incus-admin' "$log" \
       && ! grep -Fq 'compatible release' "$log" && ! grep -Fq "$denied_socket" "$log" \
       || { cat "$log" >&2; fail 'warm bootstrap gave a misleading or raw access diagnostic'; }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -620,7 +621,9 @@ func normalizeError(operation string, err error) error {
 		return fmt.Errorf("%s: %w: %w", operation, ports.ErrIncusUnavailable, err)
 	}
 	// A socket this account cannot open is not a missing or busy server.
-	if errors.Is(err, os.ErrPermission) {
+	// Only the dial is typed; other permission errors keep their own meaning.
+	var dial *net.OpError
+	if errors.As(err, &dial) && dial.Op == "dial" && dial.Net == "unix" && errors.Is(err, os.ErrPermission) {
 		return fmt.Errorf("%s: %w: %w", operation, domain.ErrIncusAccessDenied, err)
 	}
 	return fmt.Errorf("%s: %w", operation, err)

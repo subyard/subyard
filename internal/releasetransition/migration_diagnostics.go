@@ -212,7 +212,7 @@ func compactMigrationSummary(classes []migrationReasonClass) string {
 		slices.Sort(reasons)
 		messages = append(messages, "yard "+yard+": "+strings.Join(reasons, ", "))
 	}
-	slices.Sort(messages)
+	slices.SortFunc(messages, domain.CompareYardMessages)
 	message := strings.Join(messages, "; ")
 	if len(message)+len(hint) <= maxDiagnosticText {
 		return message + hint

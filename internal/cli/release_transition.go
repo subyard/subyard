@@ -1124,11 +1124,15 @@ func (reconciler *materializedConfigActivationReconciler) operation() *CLI {
 // coldInstallation is the single native-scope decision of release activation:
 // it is recomputed for every operation because init can warm the installation.
 func (cli *CLI) coldInstallation() bool {
+	options, available, err := cli.mutationGateReleaseOptions()
 	if cli.activation != nil {
 		request := cli.activation.request
+		// A request without its runtime root uses this installation's default.
+		if request.RuntimeRoot == "" && err == nil && available {
+			request.RuntimeRoot = options.RuntimeRoot
+		}
 		return coldInstallation(request.ConfigHome, request.RuntimeRoot)
 	}
-	options, available, err := cli.mutationGateReleaseOptions()
 	if err != nil || !available {
 		return false
 	}

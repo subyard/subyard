@@ -52,3 +52,14 @@ func TestAbsentClientNeverDials(t *testing.T) {
 		t.Fatalf("absent server read = %v, want not-exist", err)
 	}
 }
+
+// Only the socket dial is access denial; other permission errors keep their meaning.
+func TestOnlySocketDialPermissionIsAccessDenial(t *testing.T) {
+	if err := normalizeError("read state", os.ErrPermission); errors.Is(err, domain.ErrIncusAccessDenied) {
+		t.Fatalf("non-dial permission error was typed as socket access: %v", err)
+	}
+	dial := &net.OpError{Op: "dial", Net: "unix", Err: os.ErrPermission}
+	if err := normalizeError("get server", dial); !errors.Is(err, domain.ErrIncusAccessDenied) {
+		t.Fatalf("socket dial permission error was not typed: %v", err)
+	}
+}

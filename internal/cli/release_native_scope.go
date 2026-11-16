@@ -26,7 +26,7 @@ var coldInstallationEntries = map[string]map[string]bool{
 // a native instance without that record is foreign until init adopts it.
 // Every unreadable or unexpected fact makes the installation warm.
 func coldInstallation(configHome, runtimeRoot string) bool {
-	if configHome == "" || !filepath.IsAbs(configHome) {
+	if configHome == "" || !filepath.IsAbs(configHome) || runtimeRoot == "" || !filepath.IsAbs(runtimeRoot) {
 		return false
 	}
 	entries, err := os.ReadDir(configHome)
@@ -60,11 +60,9 @@ func coldInstallation(configHome, runtimeRoot string) bool {
 			}
 		}
 	}
-	if runtimeRoot != "" {
-		// A retained previous release proves history beyond the first install.
-		if _, err := os.Lstat(filepath.Join(runtimeRoot, "previous")); !errors.Is(err, os.ErrNotExist) {
-			return false
-		}
+	// A retained previous release proves history beyond the first install.
+	if _, err := os.Lstat(filepath.Join(runtimeRoot, "previous")); !errors.Is(err, os.ErrNotExist) {
+		return false
 	}
 	store, err := releasetransition.NewPOSIXV2Store(configHome)
 	if err != nil {
