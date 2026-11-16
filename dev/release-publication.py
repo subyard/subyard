@@ -46,6 +46,8 @@ PREPARATION_WORKFLOW_POLICIES = {
     "e903d9e71d3d2a92bd04fe401f1b0b50d21b8017": PREPARATION_JOBS,
     # Dispatch at the candidate; checkout uses the workflow SHA with an exact commit guard.
     "c91e74a532fb6624fd04107c3fe167f47ec36f55": PREPARATION_JOBS,
+    # host-free-verify job limit raised to 70 minutes; jobs and commands unchanged.
+    "9eb85775fcd01585c6f4a745d7b3b32c3d67700e": PREPARATION_JOBS,
 }
 
 

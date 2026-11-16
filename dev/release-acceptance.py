@@ -271,6 +271,8 @@ CI_COUNTED_POLICIES = frozenset({
     "e903d9e71d3d2a92bd04fe401f1b0b50d21b8017",
     # Dispatch at the candidate; checkout uses the workflow SHA with an exact commit guard.
     "c91e74a532fb6624fd04107c3fe167f47ec36f55",
+    # host-free-verify job limit raised to 70 minutes; commands unchanged.
+    "9eb85775fcd01585c6f4a745d7b3b32c3d67700e",
 })
 
 
