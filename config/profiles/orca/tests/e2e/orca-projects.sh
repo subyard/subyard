@@ -193,6 +193,31 @@ assert_no_managed_duplicates() {
     || die 'Orca contains duplicate managed project groups'
 }
 rpc_params() { jq -cn "$@"; }
+worktree_tabs() {
+  orca_rpc session.tabs.listAll | jq -r --arg worktree "$1" \
+    '.snapshots[] | select(.worktree == $worktree) | .tabs[] | .id'
+}
+agent_session_tab() {
+  # Create an agent-session tab through a stand-in agent command; print its new tab ID.
+  local worktree="$1" before after
+  guest_root sh -c '[ -e /usr/local/bin/codex ] || { printf "#!/bin/sh\nexec sleep 3600\n" >/usr/local/bin/codex; chmod 0755 /usr/local/bin/codex; }'
+  before="$(worktree_tabs "$worktree")"
+  guest_dev python3 -B - "$worktree" <<'YARD' >/dev/null || die 'agent session could not be created'
+import secrets, sys, time
+sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
+from transport import RuntimeRPC
+rpc = RuntimeRPC("/srv/agents/orca/config/orca/orca-runtime.json", timeout=30)
+rpc.call("terminal.createAgentSession", {
+    "clientOperationId": f"{int(time.time() * 1000):013d}-{secrets.token_hex(16)}",
+    "worktree": "id:" + sys.argv[1], "agent": "codex", "agentArgs": ""})
+YARD
+  for _ in $(seq 1 30); do
+    after="$(worktree_tabs "$worktree")"
+    comm -13 <(sort <<<"$before") <(sort <<<"$after") | head -n1 | grep . && return 0
+    sleep 1
+  done
+  die 'agent session tab did not appear'
+}
 rpc_write() {
   local method="$1" params="$2"
   orca_rpc "$method" "$params" >/dev/null
@@ -523,6 +548,17 @@ for mode in ordinary hook sync periodic legacy; do
   removal_group="$(group_id "$removal_root")" \
     || die "removed-project fixture group missing: $mode"
   removal_selector="id:$removal_id::$removal_root"
+  removal_saved_tab='' removal_agent_tab=''
+  if [ "$mode" = hook ]; then
+    # A saved tab that survived an Orca restart, and an agent-session tab of the removed project.
+    removal_saved_tab="$(orca_rpc session.tabs.createTerminal "$(rpc_params --arg selector "$removal_selector" \
+      '{worktree:$selector,activate:false,clientMutationId:"orca-projects-removal-saved"}')" | jq -er '.tab.id')" \
+      || die 'saved removed-project tab was not created'
+    yard orca restart --yes >/dev/null
+    worktree_tabs "${removal_selector#id:}" | grep -Fxq "$removal_saved_tab" \
+      || die 'saved removed-project tab did not survive the Orca restart'
+    removal_agent_tab="$(agent_session_tab "${removal_selector#id:}")"
+  fi
   if [ "$mode" = hook ] || [ "$mode" = sync ] || [ "$mode" = periodic ]; then
     removal_session="$(guest_dev python3 -B /tmp/orca-projects-helper.py cleanup-terminal \
       create "$removal_selector")"
@@ -581,6 +617,10 @@ YARD
     # further sync or discovery pass.
     assert_absent_repo "$removal_root"
     assert_removed_sessions
+    for tab in "$removal_saved_tab" "$removal_agent_tab"; do
+      ! worktree_tabs "${removal_selector#id:}" | grep -Fxq "$tab" \
+        || die 'the removal hook kept a saved or agent-session tab of the removed project'
+    done
   elif [ "$mode" = sync ] || [ "$mode" = periodic ]; then
     guest_root chmod 0755 "$orca_hook"
     [ "$(repo_id "$removal_root")" = "$removal_id" ] \
@@ -613,6 +653,38 @@ YARD
     || die 'verified removed-project cleanup retained stale ownership'
   yard orca sync --yes >/dev/null
 done
+
+stage 'keeping a removed record protected while files remain at its address'
+protected_name=cleanup-removal-protected
+protected_root="/srv/workspaces/$protected_name/src"
+yard sync "$removal_source" --name "$protected_name" --yes >/dev/null
+yard orca sync --yes >/dev/null
+protected_id="$(repo_id "$protected_root")" || die 'protected fixture registration missing'
+protected_tab="$(orca_rpc session.tabs.createTerminal "$(rpc_params --arg selector "id:$protected_id::$protected_root" \
+  '{worktree:$selector,activate:false,clientMutationId:"orca-projects-protected"}')" | jq -er '.tab.id')" \
+  || die 'protected fixture tab was not created'
+orca_hook=/usr/local/libexec/subyard/projects-changed.d/orca
+guest_root chmod a-x "$orca_hook"
+yard remove "$protected_name" --yes >/dev/null || die 'protected fixture removal failed'
+# A directory without project metadata at the address, such as a bind mountpoint.
+guest_dev mkdir "/srv/workspaces/$protected_name"
+guest_root chmod 0755 "$orca_hook"
+yard orca status >"$STATE/protected-status.out" 2>"$STATE/protected-status.err" || die 'status failed for a protected record'
+grep -F "$protected_root" "$STATE/protected-status.out" "$STATE/protected-status.err" | grep -Fvq '[warn]' \
+  || die 'status did not show the protected record as information'
+yard orca up --yes >"$STATE/protected-up.out" 2>"$STATE/protected-up.err" \
+  || die 'orca up did not settle with only a protected removed record'
+if yard orca sync --yes >"$STATE/protected-sync.out" 2>"$STATE/protected-sync.err"; then
+  die 'explicit sync accepted a retained removed-project record'
+fi
+grep -Fq 'cleanup is retained' "$STATE/protected-sync.out" "$STATE/protected-sync.err" \
+  || die 'strict sync omitted the retained cleanup message'
+[ "$(repo_id "$protected_root")" = "$protected_id" ] || die 'a protected record was removed'
+worktree_tabs "$protected_id::$protected_root" | grep -Fxq "$protected_tab" || die 'a protected tab was closed'
+guest_dev rmdir "/srv/workspaces/$protected_name"
+yard orca sync --yes >/dev/null || die 'sync did not clean up once the address was empty'
+assert_absent_repo "$protected_root"
+
 resume_discovery
 if [ "${SUBYARD_E2E_ORCA_CLEANUP_ONLY:-}" = 1 ]; then
   sleep 3
