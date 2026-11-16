@@ -578,6 +578,8 @@ for mode in ordinary hook sync periodic legacy; do
       '{worktree:$selector,activate:false,clientMutationId:"orca-projects-removal-saved"}')" | jq -er '.tab.id')" \
       || die 'saved removed-project tab was not created'
     yard orca restart --yes >/dev/null
+    # Restart starts the discovery timer again; keep this stage's passes explicit.
+    pause_discovery
     worktree_tabs "${removal_selector#id:}" | grep -Fxq "$removal_saved_tab" \
       || die 'saved removed-project tab did not survive the Orca restart'
     removal_agent_tab="$(agent_session_tab "${removal_selector#id:}")"
@@ -615,7 +617,10 @@ path.write_text(json.dumps(state))
 YARD
   fi
   if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
-    # Recovery modes: the removal hook fails, so sync or discovery alone must clean up.
+    # Recovery modes: the removal hook fails, so sync or discovery alone must clean up. A
+    # running discovery pass would also clean up as soon as the lock is released.
+    ! guest_root systemctl is-active --quiet subyard-orca-discovery.timer \
+      || die "discovery is not paused before the recovery precondition: $mode"
     hold_registration_lock
   fi
   yard remove "$removal_name" --yes >"$STATE/remove-$mode.out" 2>"$STATE/remove-$mode.err" \
@@ -652,8 +657,14 @@ YARD
         || die 'the removal hook kept a saved or agent-session tab of the removed project'
     done
   elif [ "$mode" = sync ] || [ "$mode" = periodic ]; then
-    [ "$(repo_id "$removal_root")" = "$removal_id" ] \
-      || die 'recovery precondition lost: the failed removal hook still cleaned up'
+    if [ "$(repo_id "$removal_root")" != "$removal_id" ]; then
+      yard orca status >"$STATE/remove-status-$mode.out" 2>"$STATE/remove-status-$mode.err" || true
+      guest_root systemctl status --no-pager subyard-orca-discovery.timer subyard-orca-discovery.service \
+        >"$STATE/remove-discovery-$mode.out" 2>&1 || true
+      show_output "$STATE/remove-$mode.out" "$STATE/remove-$mode.err" "$STATE/remove-status-$mode.out" \
+        "$STATE/remove-status-$mode.err" "$STATE/remove-discovery-$mode.out"
+      die 'recovery precondition lost: the failed removal hook still cleaned up'
+    fi
     if [ "$mode" = sync ]; then
       yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err" \
         || { show_output "$STATE/remove-retry-$mode.out" "$STATE/remove-retry-$mode.err"
