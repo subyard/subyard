@@ -194,10 +194,14 @@ CLI / operation.plan → manifest → resolveCoreCommand → prepareCommand
                                                       Close
 ```
 
-Before context loading, `internal/cli/admission.go` classifies each CLI invocation once: the
-manifest effect refined by verb-level readers, early dispatch, the release-gate policy and the
-bounded recovery that may replace a blocked gate. The gate returns recovery permits as one value
-that the invocation installs before dispatch; it does not decide policy itself.
+Before context loading, `internal/cli/admission.go` classifies each CLI invocation once: teardown
+pre-admission, the manifest effect refined by verb-level readers, early dispatch, the release-gate
+policy and the bounded recovery that may replace a blocked gate. `Run` keeps developer-identity
+admission, the pending hard-cleanup fence and init migrations. The gate returns recovery permits
+as one value that the invocation installs before dispatch; it does not decide policy itself.
+`operation.plan` and `operation.execute` share one operation admission in the same file:
+hard-cleanup and developer-identity recovery, then the release gate. Beyond the ordinary admission
+shared with the CLI, a blocked gate admits only init through its bounded profile-init permit.
 
 The handler-family resolver binds preparation and physical leaves in one place. Startup rejects
 unknown internal handlers. A prepared command owns canonical arguments, resolved context, the

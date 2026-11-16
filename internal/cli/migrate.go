@@ -97,7 +97,3 @@ func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ 
 	}
 	return prepared.preparePostRepairInit(ctx, execution)
 }
-
-func releaseRecoveryCommand(definition command.Definition) bool {
-	return definition.Handler == "@update" || definition.Handler == "@current-migration"
-}

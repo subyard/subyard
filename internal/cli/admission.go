@@ -3,12 +3,18 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
+	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 // Command admission is the single owner of per-invocation command policy: whether an
@@ -394,4 +400,90 @@ func (cli *CLI) admitTeardownGate(
 		return nil, 1, true
 	}
 	return permit, 0, false
+}
+
+// admitTeardownInvocation is teardown pre-admission, before service selection: argument
+// validation, local-only full uninstall, resume of a pending full uninstall store and the
+// reset-config registration fallback. When done is true, Run returns code without dispatch.
+func (cli *CLI) admitTeardownInvocation(ctx context.Context, definition command.Definition, core bool, yard string, arguments []string) (code int, done bool) {
+	if !core || definition.Handler != "@teardown" || commandHelpRequested(arguments) {
+		return 0, false
+	}
+	execution, err := prepareTeardownExecution(arguments)
+	if err != nil {
+		cli.errorf("%v", err)
+		return 2, true
+	}
+	if execution.full && strings.Contains(yard, "/") {
+		cli.errorf("--full must run locally on the owner host; remote selectors do not authorize host uninstall")
+		return 2, true
+	}
+	if execution.full {
+		home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
+		if root := runtimeRootForRepository(cli.options.RepositoryRoot, ""); root != "" {
+			if own, readErr := uninstall.ReadInstallationFile(filepath.Join(root, uninstall.ManifestName), "", uint32(os.Getuid())); readErr == nil {
+				home = own.DataHome
+			}
+		}
+		directory := home + ".uninstall"
+		if _, statErr := os.Lstat(directory); statErr == nil {
+			retry := []string{directory}
+			if slices.Contains(arguments, "--yes") || cli.env["ASSUME_YES"] == "1" {
+				retry = append(retry, "--yes")
+			}
+			return cli.runFullTeardownRecovery(ctx, retry), true
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			cli.errorf("full uninstall recovery inventory: %v", statErr)
+			return 1, true
+		}
+	}
+	cli.allowResetYard = cli.allowResetYard || execution.resetConfig
+	return 0, false
+}
+
+// admitRPCOperation is the admission of operation.plan and, on its retained CLI,
+// operation.execute: hard-cleanup and developer-identity recovery, then the release gate,
+// which release recovery commands and recovered operations skip. Beyond ordinary admission,
+// a blocked gate admits only init: plan prepares its bounded profile-init permit, and
+// execute requires that retained permit to bind the same gate.
+func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string, execute bool) *rpc.Error {
+	yard := loaded.Context.YardName
+	cleanupRecovery := false
+	if definition.Handler == "@cleanup" {
+		_, err := cli.boundHardCleanupRecovery(ctx, loaded, arguments)
+		cleanupRecovery, _ = cleanupMode(arguments)
+		if err != nil {
+			return operationRPCError("cleanup_recovery_failed", err)
+		}
+	}
+	identityRecovery, err := cli.admitDeveloperIdentity(ctx, yard, definition.Handler, arguments)
+	if err != nil {
+		return operationRPCError("identity_recovery_failed", err)
+	}
+	if definition.Handler == "@update" || definition.Handler == "@current-migration" || cleanupRecovery || identityRecovery {
+		return nil
+	}
+	outcome, gateInspection, err := cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
+	if err != nil {
+		return operationRPCError(rpcMutationGateFailedCode, err)
+	}
+	if outcome == nil || cli.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
+		return nil
+	}
+	switch {
+	case definition.Handler != "@init":
+	case execute:
+		if cli.permits.profileInit != nil && sameConfigApplyGate(cli.permits.profileInit.gate, *outcome) {
+			return nil
+		}
+	default:
+		cli.permits.profileInit, outcome, err = cli.prepareInitAdmission(ctx, yard, arguments, *outcome)
+		if err != nil {
+			return operationRPCError(rpcMutationGateFailedCode, err)
+		}
+		if outcome == nil {
+			return nil
+		}
+	}
+	return mutationGateRPCError(outcome, gateInspection)
 }

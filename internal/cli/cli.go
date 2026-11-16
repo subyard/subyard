@@ -495,37 +495,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		commandArguments = append([]string{"--yes"}, commandArguments...)
 	}
 	definition, core := cli.manifest.Lookup(name)
-	if core && definition.Handler == "@teardown" && !commandHelpRequested(commandArguments) {
-		if _, err := prepareTeardownExecution(commandArguments); err != nil {
-			cli.errorf("%v", err)
-			return 2
-		}
-		if slices.Contains(commandArguments, "--full") && strings.Contains(yard, "/") {
-			cli.errorf("--full must run locally on the owner host; remote selectors do not authorize host uninstall")
-			return 2
-		}
-		if slices.Contains(commandArguments, "--full") && !strings.Contains(yard, "/") {
-			home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
-			if root := runtimeRootForRepository(cli.options.RepositoryRoot, ""); root != "" {
-				if own, readErr := uninstall.ReadInstallationFile(filepath.Join(root, uninstall.ManifestName), "", uint32(os.Getuid())); readErr == nil {
-					home = own.DataHome
-				}
-			}
-			directory := home + ".uninstall"
-			if _, statErr := os.Lstat(directory); statErr == nil {
-				retry := []string{directory}
-				if slices.Contains(commandArguments, "--yes") || cli.env["ASSUME_YES"] == "1" {
-					retry = append(retry, "--yes")
-				}
-				return cli.runFullTeardownRecovery(ctx, retry)
-			} else if !errors.Is(statErr, os.ErrNotExist) {
-				cli.errorf("full uninstall recovery inventory: %v", statErr)
-				return 1
-			}
-		}
-		if execution, err := prepareTeardownExecution(commandArguments); err == nil && execution.resetConfig {
-			cli.allowResetYard = true
-		}
+	if code, done := cli.admitTeardownInvocation(ctx, definition, core, yard, commandArguments); done {
+		return code
 	}
 	resourceDefinition, profileResource := cli.resources.Lookup(name)
 	if !core && !profileResource {
@@ -4283,39 +4254,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, &rpc.Error{Code: "owner_context_changed", Message: "bootstrap owner context changed; reconnect before planning"}
 			}
 		}
-		cleanupRecovery := false
-		if definition.Handler == "@cleanup" {
-			_, err = operationCLI.boundHardCleanupRecovery(ctx, operationLoaded, params.Arguments)
-			cleanupRecovery, _ = cleanupMode(params.Arguments)
-			if err != nil {
-				return nil, operationRPCError("cleanup_recovery_failed", err)
-			}
-		}
-		identityRecovery, identityErr := operationCLI.admitDeveloperIdentity(ctx, operationLoaded.Context.YardName, definition.Handler, params.Arguments)
-		if identityErr != nil {
-			return nil, operationRPCError("identity_recovery_failed", identityErr)
-		}
-		if !releaseRecoveryCommand(definition) && !cleanupRecovery && !identityRecovery {
-			outcome, gateInspection, gateErr := operationCLI.inspectCommandMutationGate(
-				ctx, operationLoaded.Context.YardName, definition.Handler, params.Arguments,
-			)
-			if gateErr != nil {
-				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
-			}
-			if outcome != nil && !operationCLI.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
-				if definition.Handler == "@init" {
-					var permit *configApplyRepairPermit
-					permit, outcome, gateErr = operationCLI.prepareInitAdmission(
-						ctx, operationLoaded.Context.YardName, params.Arguments, *outcome)
-					operationCLI.permits.profileInit = permit
-					if gateErr != nil {
-						return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
-					}
-				}
-				if outcome != nil {
-					return nil, mutationGateRPCError(outcome, gateInspection)
-				}
-			}
+		if fault := operationCLI.admitRPCOperation(ctx, operationLoaded, definition, params.Arguments, false); fault != nil {
+			return nil, fault
 		}
 		var prepared *preparedCommand
 		if params.Source != nil {
@@ -4415,32 +4355,8 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
 			return nil, &rpc.Error{Code: "exact_plan_required", Message: "no exact plan is bound to this operation"}
 		}
-		cleanupRecovery := false
-		if planned.Definition.Handler == "@cleanup" {
-			var err error
-			_, err = planned.CLI.boundHardCleanupRecovery(ctx, planned.Loaded, planned.Arguments)
-			cleanupRecovery, _ = cleanupMode(planned.Arguments)
-			if err != nil {
-				return nil, operationRPCError("cleanup_recovery_failed", err)
-			}
-		}
-		identityRecovery, identityErr := planned.CLI.admitDeveloperIdentity(ctx, planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments)
-		if identityErr != nil {
-			return nil, operationRPCError("identity_recovery_failed", identityErr)
-		}
-		if !releaseRecoveryCommand(planned.Definition) && !cleanupRecovery && !identityRecovery {
-			outcome, gateInspection, gateErr := planned.CLI.inspectCommandMutationGate(
-				ctx, planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments,
-			)
-			if gateErr != nil {
-				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
-			}
-			if outcome != nil && !planned.CLI.ordinaryCommandAdmitted(planned.Definition.Handler, outcome, gateInspection) {
-				if planned.Definition.Handler != "@init" || planned.CLI.permits.profileInit == nil ||
-					!sameConfigApplyGate(planned.CLI.permits.profileInit.gate, *outcome) {
-					return nil, mutationGateRPCError(outcome, gateInspection)
-				}
-			}
+		if fault := planned.CLI.admitRPCOperation(ctx, planned.Loaded, planned.Definition, planned.Arguments, true); fault != nil {
+			return nil, fault
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {
 			return nil, &rpc.Error{Code: "remote_owner_required", Message: "execute this plan through owner-host SSH stdio"}
