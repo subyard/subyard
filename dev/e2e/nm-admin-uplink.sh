@@ -282,7 +282,7 @@ prepare)
   # defect, not the candidate. From the hand-back on, any watchdog restore fails the lane.
   if [ -s "$STATE/watchdog.log" ]; then
     sed 's/^/evidence: watchdog during the released takeover: /' "$STATE/watchdog.log"
-    : > "$STATE/watchdog.log"
+    sudo -n truncate -s 0 "$STATE/watchdog.log"
   fi
   [ "$(device_state "$UP")" = unmanaged ] && [ "$(address_of "$UP")" = "$UP_ADDRESS" ] || die 'the hand-back lost the uplink'
   before_table="$(managedness)"
@@ -296,7 +296,7 @@ prepare)
   grep -q '^unmanaged-devices' "$guard" && die 'the update kept the released guard'
   grep -q '^\[device-subyard\]' "$guard" || die 'the update wrote no guard section'
   [ ! -e /etc/systemd/system/subyard-power-reconcile.service ] || die 'the guard-only migration installed the boot reconciler'
-  [ "$(cat "$pending")" = "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the update recorded no pending reboot'
+  [ "$(cut -d ' ' -f1 "$pending")" = "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the update recorded no pending reboot'
   [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the update restarted NetworkManager'
   [ "$(nm_reloads_since "$since")" = 0 ] || die "the update reloaded NetworkManager: $(sudo -n journalctl -u NetworkManager --since "@$since" -q | tail -5)"
   [ "$(managedness)" = "$before_table" ] || die 'the update changed a device managed state'
@@ -333,7 +333,7 @@ prepare)
 resume)
   load_uplink
   watchdog_start
-  [ ! -e "$pending" ] || [ "$(cat "$pending")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the reminder pending'
+  [ ! -e "$pending" ] || [ "$(cut -d ' ' -f1 "$pending")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the reminder pending'
   owner "$launcher" status >"$STATE/status-after.log" 2>&1 || true
   ! grep -Fq 'Reminder: reboot the host once' "$STATE/status-after.log" || die 'yard status still asks for a reboot'
   uplink_admins 'after the reboot'
