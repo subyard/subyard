@@ -158,6 +158,7 @@ yard_devices_unmanaged() { # <label>
   done < <(nmcli -t -f DEVICE,STATE device)
   [ "$checked" -ge 1 ] || die "$1: no yard device was present"
 }
+# No LIMITS_* settings: full teardown currently refuses them as adapter context keys.
 write_yard_config() { # <image>
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
   cat > "$SUBYARD_CONFIG_HOME/yards/$name/config.env" <<EOF
@@ -172,8 +173,6 @@ DEV_UID=1001
 HOST_BASE=$STATE/host
 RESTRICTED_DISK_PATHS=$STATE/host
 FORWARD_SSH_AGENT=0
-LIMITS_CPU=1
-LIMITS_MEMORY=1GiB
 EOF
   chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
 }
