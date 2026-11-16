@@ -183,7 +183,7 @@ class RecipePreflightTests(unittest.TestCase):
                     "TestServiceProfileAndNativePoolBindingAgree",
                     "TestServiceContextRereadsShippedPresetAndPreservesCustomPort",
                     "TestServiceRemovedRuntimeIsAbsentForReleaseAdmission"]
-        for kind in ("pass", "missing", "skip", "installer-failure"):
+        for kind in ("pass", "missing", "skip", "installer-failure", "full", "full-after-core", "preflight-after-core"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir="/tmp") as directory:
                 root = pathlib.Path(directory)
                 runner = root / "config/profiles/test-vms/tests/run.sh"
@@ -210,11 +210,17 @@ class RecipePreflightTests(unittest.TestCase):
                 environment = dict(os.environ, PATH=str(tools)+":"+os.environ["PATH"], CHECK_ORDER=str(order),
                                    INSTALLER_EXIT="23" if kind == "installer-failure" else "0")
                 environment.pop("SUBYARD_E2E_LOCAL_EVIDENCE", None)
-                result = subprocess.run(["bash", str(runner), "--preflight"], env=environment,
+                environment.pop("SUBYARD_CORE_INSTALLER_CHECKED", None)
+                if kind.endswith("-after-core"):
+                    environment["SUBYARD_CORE_INSTALLER_CHECKED"] = "1"
+                # Only a full run after the passed core suite of `make verify` skips the installer.
+                arguments = [] if kind.startswith("full") else ["--preflight"]
+                result = subprocess.run(["bash", str(runner), *arguments], env=environment,
                                         capture_output=True, text=True, timeout=5)
-                self.assertEqual(result.returncode == 0, kind == "pass", result.stdout + result.stderr)
-                self.assertEqual(order.read_text().splitlines(),
-                                 ["installer"] if kind == "installer-failure" else ["installer", "go"])
+                self.assertEqual(result.returncode == 0, kind not in ("missing", "skip", "installer-failure"),
+                                 result.stdout + result.stderr)
+                expected = {"installer-failure": ["installer"], "full-after-core": ["go"]}.get(kind, ["installer", "go"])
+                self.assertEqual(order.read_text().splitlines(), expected)
 
 
 class AcceptanceRunnerTests(unittest.TestCase):

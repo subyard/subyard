@@ -32,11 +32,12 @@ cli-docs-check: cli-docs-engine
 lint:
 	bash dev/lint.sh
 
+# Profiles skip the installer check that the core suite already passed in this run.
 verify:
 	bash dev/test-profiles.sh --permissions-only
 	$(MAKE) lint
 	./tests/run.sh
-	bash dev/test-profiles.sh --after-permissions
+	SUBYARD_CORE_INSTALLER_CHECKED=1 bash dev/test-profiles.sh --after-permissions
 
 verify-veranda:
 	$(PYTHON) dev/check-veranda.py

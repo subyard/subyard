@@ -21,11 +21,13 @@ disposable-VM acceptance lane. The profile
 and full-uninstall lanes by default. Its lane inventory keeps both mandatory for release collection.
 The cold lane requires the collector's checksum-verified frozen public candidate.
 
-The owning runner executes the installer identity regression before
+`tests/run.sh --preflight` executes the installer identity regression before
 `TestBaseRecipeInstallerContract`. That test unpacks the production recipe bundle and runs the
 real base recipe and installer for both environments with only physical effects replaced.
-`tests/run.sh --preflight` selects those prerequisites and rejects missing or skipped recipe cases;
+The preflight selects those prerequisites and rejects missing or skipped recipe cases;
 a collector-bound `make verify` PASS can satisfy them through the existing evidence contract.
+The full host-free run also executes the installer regression first, except under `make verify`,
+which sets `SUBYARD_CORE_INSTALLER_CHECKED=1` after its core suite passed the same check.
 
 Recipe/archive producer, installer or called library, broker activation and release migration
 changes require `tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`. It installs the

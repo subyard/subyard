@@ -21,11 +21,14 @@ PYREUSE
 fi
 log="$(mktemp /tmp/subyard-test-vms-checks.XXXXXX)"
 trap 'rm -f -- "$log"' EXIT
-printf 'test-vms prerequisite: installer package-only identity regression before bundled base recipe\n'
-if bash "$ROOT/tests/install-incus-data-home.sh" >"$log" 2>&1; then
-  tail -n 1 "$log"
-else
-  rc=$?; cat "$log"; exit "$rc"
+# `make verify` sets the signal after its core suite passed this installer check.
+if [ "$preflight" = 1 ] || [ "${SUBYARD_CORE_INSTALLER_CHECKED:-}" != 1 ]; then
+  printf 'test-vms prerequisite: installer package-only identity regression before bundled base recipe\n'
+  if bash "$ROOT/tests/install-incus-data-home.sh" >"$log" 2>&1; then
+    tail -n 1 "$log"
+  else
+    rc=$?; cat "$log"; exit "$rc"
+  fi
 fi
 selection=()
 [ "$preflight" = 0 ] || selection=(-run '^(TestBaseRecipeInstallerContract|TestServicePoolFenceIsAtomicWithAdmissionAndDoesNotRevokeBeforeStop|TestServiceProfileAndNativePoolBindingAgree|TestServiceContextRereadsShippedPresetAndPreservesCustomPort|TestServiceRemovedRuntimeIsAbsentForReleaseAdmission)$')

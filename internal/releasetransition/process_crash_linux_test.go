@@ -500,6 +500,8 @@ func runCrashMatrix(t *testing.T, build func(*testing.T) *crashFixture, verifyCo
 	slices.Sort(cuts)
 	for _, cut := range cuts {
 		t.Run(cut, func(t *testing.T) {
+			// Each cut owns its root and writer processes; the control signature is read-only.
+			t.Parallel()
 			f := build(t)
 			crashChild(t, f, cut, false, true)
 			before, err := f.trace.store.ReadCurrentJournal()
