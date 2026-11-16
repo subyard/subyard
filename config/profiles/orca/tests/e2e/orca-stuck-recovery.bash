@@ -1,5 +1,7 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2154 # release_version and the fixture state come from orca-bootstrap.sh
+# shellcheck source=config/profiles/orca/tests/e2e/orca-lane-output.bash
+. "$ROOT/config/profiles/orca/tests/e2e/orca-lane-output.bash"
 # Stuck 0.29.0 recovery, sourced by orca-bootstrap.sh after the published predecessor runs Orca.
 # A removed project keeps a saved tab that survived an Orca restart, an agent-session tab and a
 # live terminal. Updating to published 0.29.0 must stop in recovery; the candidate, a newer
@@ -50,7 +52,7 @@ stuck_orca_version() {
 run_stuck_recovery() {
   local removed_source neighbour_source removed_root neighbour_root removed_id neighbour_id
   local removed_wt neighbour_wt saved_tab agent_tab live_tab live_pty neighbour_agent
-  local neighbour_live neighbour_pty orca_before hint started elapsed helper_target
+  local neighbour_live neighbour_pty orca_before hint started elapsed helper_target status_warnings
   stage 'seeding a removed project with saved, agent-session and live sessions on the predecessor'
   incus --project "$PROJECT" file push "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" \
     "$INSTANCE/tmp/orca-projects-helper.py" --mode 0755
@@ -89,7 +91,8 @@ run_stuck_recovery() {
     die "published $UPGRADE_TARGET unexpectedly completed with a retained removed-project record"
   fi
   grep -Fq 'recovery-ambiguous' "$STATE/stuck-target.out" "$STATE/stuck-target.err" \
-    || die "published $UPGRADE_TARGET did not stop in recovery-ambiguous"
+    || { show_output "$STATE/stuck-target.out" "$STATE/stuck-target.err"
+         die "published $UPGRADE_TARGET did not stop in recovery-ambiguous"; }
   if yard update --yes >"$STATE/stuck-plain.out" 2>"$STATE/stuck-plain.err"; then
     die "plain update unexpectedly completed the stuck $UPGRADE_TARGET transition"
   fi
@@ -104,7 +107,8 @@ run_stuck_recovery() {
   started="$(date +%s)"
   YARD_RELEASE_BASE_URL="file://$STATE/release" yard update --version "$release_version" --yes \
     >"$STATE/stuck-recover.out" 2>"$STATE/stuck-recover.err" \
-    || { report_config_failure "$STATE/stuck-recover.err"; die 'candidate update did not recover the stuck transition'; }
+    || { report_config_failure "$STATE/stuck-recover.err"; show_output "$STATE/stuck-recover.out" "$STATE/stuck-recover.err"
+         die 'candidate update did not recover the stuck transition'; }
   elapsed=$(( $(date +%s) - started ))
   [ "$(yard version)" = "yard $release_version" ] || die 'candidate is not active after recovery'
   INSTALLED_RELEASE="$(readlink "$SUBYARD_HOME/runtime/current")"
@@ -125,14 +129,28 @@ run_stuck_recovery() {
   stuck_tabs "$neighbour_wt" | grep -Fxq "$neighbour_live" || die 'recovery closed the neighbour terminal tab'
   yard config status >"$STATE/stuck-config.out" 2>"$STATE/stuck-config.err" \
     || die 'materialized config is not converged after recovery'
-  yard orca status >"$STATE/stuck-status.out" 2>"$STATE/stuck-status.err" || die 'Orca status failed after recovery'
-  if grep -Fq '[warn]' "$STATE/stuck-status.out" "$STATE/stuck-status.err"; then
-    die 'Orca status warns after recovery'
+  yard orca status >"$STATE/stuck-status.out" 2>"$STATE/stuck-status.err" \
+    || { show_output "$STATE/stuck-status.out" "$STATE/stuck-status.err"; die 'Orca status failed after recovery'; }
+  # The predecessor's Orca package and service stay until orca up; their status warnings are
+  # expected here. Project registration and cleanup must already be clean.
+  if grep -h -F '[warn]' "$STATE/stuck-status.out" "$STATE/stuck-status.err" \
+    | grep -Eiq 'cleanup|registration|checkouts registered|orca registration'; then
+    show_output "$STATE/stuck-status.out" "$STATE/stuck-status.err"
+    die 'Orca status warns about project registration or cleanup after recovery'
+  fi
+  status_warnings="$(cat "$STATE/stuck-status.out" "$STATE/stuck-status.err" | grep -c -F '[warn]' || true)"
+  yard orca up --yes >"$STATE/stuck-up.out" 2>"$STATE/stuck-up.err" \
+    || { show_output "$STATE/stuck-up.out" "$STATE/stuck-up.err"; die 'orca up failed after recovery'; }
+  yard orca status >"$STATE/stuck-status-up.out" 2>"$STATE/stuck-status-up.err" \
+    || { show_output "$STATE/stuck-status-up.out" "$STATE/stuck-status-up.err"; die 'Orca status failed after orca up'; }
+  if grep -Fq '[warn]' "$STATE/stuck-status-up.out" "$STATE/stuck-status-up.err"; then
+    show_output "$STATE/stuck-status-up.out" "$STATE/stuck-status-up.err"
+    die 'Orca status warns after orca up'
   fi
   started="$(date +%s)"
-  guest_dev timeout 125 /usr/local/libexec/subyard/projects-changed >/dev/null 2>&1 \
-    || die 'installed project hooks fail after recovery'
-  printf 'orca-stuck-recovery-evidence: from=%s stuck=%s candidate=%s orca=%s newer-release-hint=%s recover-seconds=%s steady-hook-seconds=%s saved-tab=%s agent-tab=%s live-tab=%s\n' \
+  guest_dev timeout 125 /usr/local/libexec/subyard/projects-changed >"$STATE/stuck-hook.out" 2>"$STATE/stuck-hook.err" \
+    || { show_output "$STATE/stuck-hook.out" "$STATE/stuck-hook.err"; die 'installed project hooks fail after recovery'; }
+  printf 'orca-stuck-recovery-evidence: from=%s stuck=%s candidate=%s orca=%s newer-release-hint=%s recover-seconds=%s steady-hook-seconds=%s pre-up-status-warnings=%s saved-tab=%s agent-tab=%s live-tab=%s\n' \
     "$UPGRADE_FROM" "$UPGRADE_TARGET" "$release_version" "$orca_before" "$hint" "$elapsed" \
-    "$(( $(date +%s) - started ))" "$saved_tab" "$agent_tab" "$live_tab"
+    "$(( $(date +%s) - started ))" "$status_warnings" "$saved_tab" "$agent_tab" "$live_tab"
 }
