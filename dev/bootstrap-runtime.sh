@@ -492,6 +492,36 @@ if [ "$existing_runtime" = 0 ] || [ ! -d "$CONFIG_HOME" ]; then
   install -d -m 0700 "$CONFIG_HOME"
 fi
 unset SUBYARD_INSTALL_ENTRYPOINTS SUBYARD_INSTALL_VERIFIED_HELPER
+# A first install interrupted before its first journal leaves only current.
+# A retry with another version first lets that supported release finish its own
+# initial activation; its engine still classifies and refuses damaged history.
+uninitialized_current=0
+if [ "$run_transition" = 1 ] && [ -z "$SOURCE_INGRESS_ROOT" ] &&
+   [ ! -e "$RUNTIME_ROOT/previous" ] && [ ! -L "$RUNTIME_ROOT/previous" ]; then
+  current_release="$(readlink -- "$RUNTIME_ROOT/current")" || current_release=''
+  current_version="${current_release#releases/}"
+  current_version="${current_version%-*}"
+  IFS=. read -r current_major current_minor _ <<<"${current_version%%-*}"
+  if [[ "$current_release" == releases/* && "$current_release" != releases/"$VERSION"-* &&
+        "$current_major" =~ ^[0-9]+$ && "$current_minor" =~ ^[0-9]+$ ]] &&
+     (( 10#$current_major > 0 || 10#$current_minor >= 28 )); then
+    uninitialized_current=1
+    for protected_record in journal.json ledger.json history-checkpoint.json; do
+      if [ -e "$CONFIG_HOME/release-transition/v2/$protected_record" ] ||
+         [ -L "$CONFIG_HOME/release-transition/v2/$protected_record" ]; then
+        uninitialized_current=0
+      fi
+    done
+  fi
+fi
+if [ "$uninitialized_current" = 1 ]; then
+  initial_arguments=(migrate)
+  if [ "$ASSUME_YES" = 1 ]; then
+    initial_arguments+=(--yes)
+  fi
+  env "YARD_RUNTIME_ROOT=$RUNTIME_ROOT" \
+    "$RUNTIME_ROOT/current/bin/yard" "${initial_arguments[@]}"
+fi
 if [ "$run_transition" = 1 ]; then
   transition_arguments=(update --runtime-root "$RUNTIME_ROOT" --version "$VERSION" --offline)
   transition_environment=(

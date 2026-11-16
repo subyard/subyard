@@ -831,6 +831,60 @@ jq -e '.version == "1.1.0-test" and .rpc.min == 1 and .rpc.max == 1 and
   "$artifact_two.manifest.json" >/dev/null
 rpc_negotiate "$artifact_two" 1.1.0-test 1 compatible artifact-two-v1
 
+# An interrupted first install retried with another version first finishes the
+# published release's own initial activation, then updates to the new target.
+(
+  export HOME="$TMP/bootstrap-other-version-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-other-version-home"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+  mkdir -m 0700 "$HOME"
+  "$release/subyard-install-runtime-release.sh" --runtime-root "$YARD_RUNTIME_ROOT" \
+    --bundle "$bundle_one" --checksum "$bundle_one.sha256" --manifest "$bundle_one.manifest.json" \
+    --provenance "$bundle_one.provenance.json" > "$TMP/bootstrap-other-version-stage.log"
+  first_target="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  [[ "$first_target" == releases/1.0.0-test-* ]] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    && [ ! -e "$SUBYARD_CONFIG_HOME" ] \
+    || fail 'other-version retry precondition was not established'
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-other-version-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-other-version-retry.log" >&2; fail 'interrupted first install did not resume with another version'; }
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  grep -Fq 'Status: ready' "$TMP/bootstrap-other-version-retry.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && [ "$(readlink "$YARD_RUNTIME_ROOT/previous")" = "$first_target" ] \
+    && jq -e '.checkpoint == "complete" and (.steps | length) == 0' "$protected/journal.json" >/dev/null \
+    && jq -e '.domains["power-metadata"] == {"epoch": 3, "applied": []}' "$protected/ledger.json" >/dev/null \
+    && [ -f "$protected/history-checkpoint.json" ] \
+    && [ -x "$YARD_BIN_DIR/yard" ] && [ -x "$YARD_BIN_DIR/sy" ] \
+    || fail 'other-version retry omitted readiness, protected history or entrypoints'
+)
+# A completed first install keeps its journal; losing ledger and checkpoint is
+# engine-classified damage, never a fresh initial activation before the update.
+(
+  export HOME="$TMP/bootstrap-damaged-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-damaged-home"
+  export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
+  export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
+  export YARD_RELEASE_BASE_URL="file://$release"
+  mkdir -m 0700 "$HOME"
+  YARD_RELEASE_VERSION=1.0.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-damaged-install.log" 2>&1 \
+    || { cat "$TMP/bootstrap-damaged-install.log" >&2; fail 'damaged-history fixture install failed'; }
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  [ ! -e "$YARD_RUNTIME_ROOT/previous" ] && [ -f "$protected/journal.json" ] \
+    || fail 'damaged-history precondition was not established'
+  rm -f -- "$protected/ledger.json" "$protected/history-checkpoint.json"
+  damaged_journal="$(sha256sum "$protected/journal.json")"
+  damaged_current="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  if YARD_RELEASE_VERSION=1.1.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-damaged-retry.log" 2>&1; then
+    fail 'installer accepted a completed install without protected history'
+  fi
+  grep -Fq 'protected migration history is absent' "$TMP/bootstrap-damaged-retry.log" \
+    && [ "$(sha256sum "$protected/journal.json")" = "$damaged_journal" ] \
+    && [ ! -e "$protected/ledger.json" ] && [ ! -e "$protected/history-checkpoint.json" ] \
+    && [ "$(readlink "$YARD_RUNTIME_ROOT/current")" = "$damaged_current" ] \
+    && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    || { cat "$TMP/bootstrap-damaged-retry.log" >&2; fail 'damaged completed install was not refused unchanged'; }
+)
+
 # A verified standalone bootstrap is the one-time bridge for an active runtime
 # whose installed release installer predates immutable publish-only support.
 # The candidate must own the transition; the legacy installer is never asked
@@ -867,6 +921,7 @@ HOME="$legacy_bridge_home" SUBYARD_HOME="$legacy_bridge_home/.subyard" \
 grep -Fq 'v0.11.0' "$TMP/legacy-refusal.log" \
   && grep -Fq 'uninstall --full' "$TMP/legacy-refusal.log" \
   && [ "$(readlink "$legacy_bridge_runtime/current")" = "$legacy_bridge_initial" ] \
+  && [ -z "$(ls -A "$legacy_bridge_home/.config/subyard")" ] \
   || fail 'legacy refusal changed active state or omitted removal guidance'
 
 # Publication is intentionally separate from activation. The transition module

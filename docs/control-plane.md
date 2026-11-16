@@ -810,7 +810,12 @@ The standalone installer completes the supported current-release transition afte
 the first runtime link and before publishing CLI entrypoints. Its initial installation
 consent includes this boundary. An interrupted first installation retains protected recovery
 evidence; rerunning the installer uses the existing-runtime transition to resume it before
-publishing entrypoints. Publication-only staging leaves migration state untouched.
+publishing entrypoints. If the first link of a v0.28.0+ release was published before any
+journal, ledger or checkpoint and the rerun selects another version, the installer first runs
+that release's own `yard migrate`, then updates; the engine still refuses damaged history.
+Plain `yard update` has no such step: finish an interrupted first install by rerunning the
+installer (any version) or `yard migrate --yes` before `yard update`.
+Publication-only staging leaves migration state untouched.
 
 Schema-1 installation identity and protected metadata publication are shared by bootstrap,
 runtime publication, candidate activation and ownership consumers. The candidate advertises
