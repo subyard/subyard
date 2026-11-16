@@ -168,7 +168,7 @@ func (runtime *Runtime) inspectionFailure(parsed options, err error) (Prepared, 
 
 func allowsCompletedMetadataAdmission(protected *protectedTransitionInspection, err error) bool {
 	var selected unsupportedReleaseOwnerError
-	if errors.As(err, &selected) {
+	if errors.As(err, &selected) || errors.Is(err, releasetransition.ErrCompatibilityIngressUnavailable) {
 		return false
 	}
 	return err != nil || protected != nil &&
@@ -287,6 +287,11 @@ func (runtime *Runtime) inspectProtectedTransition(
 			"the protected release transition journal is invalid",
 			"restore protected release metadata from backup, then run yard update --check",
 		)
+	}
+	if err := journal.CheckIngressSupport(); err != nil {
+		return nil, newPublicReleaseInspectionError(err, runtimeRoot, journal.Goal.Target, &journal.Transaction,
+			releasetransition.CodePreconditionBlocked, err.Error(),
+			"restore protected release metadata from backup, then run yard update --check")
 	}
 	if err := store.ValidateCurrentRecovery(journal); err != nil {
 		return nil, newPublicReleaseInspectionError(err, runtimeRoot, journal.Goal.Target, &journal.Transaction,
@@ -561,6 +566,20 @@ func (runtime *Runtime) PrepareTransition(
 	}
 	if !filepath.IsAbs(configHome) {
 		return Prepared{}, errors.New("release transition config home must be absolute")
+	}
+	// Retired ingress must refuse before even a version probe executes its owner.
+	// Other metadata failures retain their ordinary inspection diagnostics below.
+	if store, readErr := releasetransition.NewPOSIXV2Store(configHome); readErr == nil {
+		if snapshot, readErr := store.ReadCurrentJournal(); readErr == nil && snapshot.Exists {
+			if journal, parseErr := releasetransition.ParseJournal(snapshot.Payload); parseErr == nil {
+				if ingressErr := journal.CheckIngressSupport(); ingressErr != nil {
+					return runtime.inspectionFailure(parsed, newPublicReleaseInspectionError(
+						ingressErr, parsed.root, journal.Goal.Target, &journal.Transaction,
+						releasetransition.CodePreconditionBlocked, ingressErr.Error(),
+						"restore protected release metadata from backup, then run yard update --check"))
+				}
+			}
+		}
 	}
 	if !parsed.check && runtime.config.Progress != nil {
 		version := "unknown"

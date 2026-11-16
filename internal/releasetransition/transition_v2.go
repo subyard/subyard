@@ -291,6 +291,9 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		if parseErr != nil {
 			return nil, parseErr
 		}
+		if err := journal.CheckIngressSupport(); err != nil {
+			return nil, err
+		}
 		if err := store.ValidateCurrentRecovery(journal); err != nil &&
 			!mayBypassRecoveryValidation(options.Replacement, journal.Checkpoint) {
 			return nil, err

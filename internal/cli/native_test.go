@@ -2818,7 +2818,7 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 	root, environment, _ := nativeFixture(t)
 	runtimeRoot := filepath.Join(root, "runtime")
 	environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
-	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 
 	ownerJournalPath := filepath.Join(
 		environmentValue(environment, "SUBYARD_HOME"), "owner-inventory", "registration.json",
@@ -2856,10 +2856,10 @@ func TestMutationGatePrecedesOwnerRecoveryAndReturnsStructuredOutcome(t *testing
 	if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil {
 		t.Fatalf("mutation gate output is not structured JSON: %q: %v", stderr.String(), err)
 	}
-	if outcome.Status != "operator-action-required" || outcome.Code != "journal-invalid" ||
-		outcome.Active != "0.0.9" || outcome.Previous == nil || *outcome.Previous != "0.0.8" ||
-		outcome.Target != Version || outcome.Transaction != nil ||
-		outcome.Action != "run yard update --check" {
+	if outcome.Status != "recovering" || outcome.Code != "recovery-pending" ||
+		outcome.Active != "release-a" || outcome.Previous != nil ||
+		outcome.Target != "1.2.3-aaaaaaaaaaaa" || outcome.Transaction == nil || *outcome.Transaction != "tx-0123456789abcdef" ||
+		outcome.Action != "run yard update" {
 		t.Fatalf("mutation gate outcome=%#v", outcome)
 	}
 	got, err := os.ReadFile(ownerJournalPath)
@@ -3300,7 +3300,7 @@ func TestV2MutationGateBlocksLifecycleWhileStatusRemainsReadOnly(t *testing.T) {
 	}
 }
 
-func TestV2MutationGateOwnsRecoveryWhileImportingV1Journal(t *testing.T) {
+func TestV2MutationGateIgnoresUnrelatedV1Journal(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	runtimeRoot := filepath.Join(root, "runtime-v2-with-v1")
 	capture := filepath.Join(root, "v2-with-v1-candidate-inspections")
@@ -3323,7 +3323,7 @@ func TestV2MutationGateOwnsRecoveryWhileImportingV1Journal(t *testing.T) {
 	outcome, err := program.inspectMutationGate(context.Background(), "default")
 	if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering ||
 		outcome.Transaction == nil || *outcome.Transaction != "tx-0123456789abcdef" {
-		t.Fatalf("v2 did not own related v1 recovery: outcome=%#v err=%v", outcome, err)
+		t.Fatalf("V1 files changed the V2 recovery gate: outcome=%#v err=%v", outcome, err)
 	}
 }
 
@@ -3594,7 +3594,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 		projectJournalPath := filepath.Join(stateDirectory, ".name-migration")
 		projectJournal := []byte("{invalid-project-recovery\n")
 		writeCLIFile(t, projectJournalPath, string(projectJournal), 0o600)
-		installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+		installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
@@ -3612,7 +3612,7 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 			Params: json.RawMessage(`{"command":"code","arguments":["Demo"]}`),
 		}, nil)
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "journal-invalid" {
+		if !ok || fault.Code != "recovery-pending" {
 			t.Fatalf("gated plan error=%#v", err)
 		}
 		got, readErr := os.ReadFile(projectJournalPath)
@@ -3648,13 +3648,13 @@ func TestRPCMutationGateBlocksPlanAndRechecksExecute(t *testing.T) {
 			t.Fatal(err)
 		}
 		plan := result.(domain.OperationPlan)
-		installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+		installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 		_, err = handler.Handle(context.Background(), rpc.Call{
 			Method: "operation.execute", OperationID: plan.OperationID,
 			Params: json.RawMessage(`{"confirmed":true}`),
 		}, func(string, any) (uint64, error) { return 1, nil })
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != "journal-invalid" || len(runner.Requests) != 0 {
+		if !ok || fault.Code != "recovery-pending" || len(runner.Requests) != 0 {
 			t.Fatalf("execute gate error=%#v requests=%#v", err, runner.Requests)
 		}
 	})
@@ -3762,7 +3762,7 @@ func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 			"YARD_RUNTIME_ROOT="+runtimeRoot,
 			"SUBYARD_INTERNAL_MIGRATION_CHILD=1",
 		)
-		installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+		installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard", Environment: environment, WorkingDir: root,
 		})
@@ -3770,7 +3770,7 @@ func TestMutationGateSkipsMissingMetadataButNotInternalChild(t *testing.T) {
 			t.Fatal(err)
 		}
 		outcome, err := program.inspectMutationGate(context.Background(), "default")
-		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusOperatorActionRequired {
+		if err != nil || outcome == nil || outcome.Status != releasetransition.StatusRecovering {
 			t.Fatalf("caller-controlled child marker bypassed mutation gate: outcome=%#v err=%v",
 				outcome, err)
 		}
@@ -3795,7 +3795,7 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 		"YARD_RUNTIME_ROOT="+runtimeRoot,
 		"SUBYARD_OPERATION_ID=trusted-release-child",
 	)
-	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	runner := &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
 		Schema: 1, OperationID: "trusted-release-child", Status: "ok",
 	}}}}
@@ -5881,6 +5881,65 @@ func TestCanonicalSelectorMutationGateUsesControllerLocalScope(t *testing.T) {
 			after, err := os.ReadFile(journalPath)
 			if err != nil || !bytes.Equal(before, after) || control.applied != 0 || len(incus.PowerUpdates) != 0 || len(incus.ConfigUpdates) != 0 || len(incus.ExecCalls) != 0 {
 				t.Fatal("local readiness gate changed protected history or reached owner/native action")
+			}
+		})
+	}
+}
+
+func TestMutationGateIgnoresV1Files(t *testing.T) {
+	for _, state := range []string{"unfinished", "invalid", "multiple", "unsafe-directory", "symlink"} {
+		t.Run(state, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			runtimeRoot := filepath.Join(root, "runtime")
+			environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot)
+			id := installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+			home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+			legacy := filepath.Join(home, "migrations")
+			journal := filepath.Join(legacy, "transactions", id, "transaction.json")
+			switch state {
+			case "invalid":
+				writeCLIFile(t, journal, "{broken\n", 0600)
+			case "multiple":
+				other := filepath.Join(legacy, "transactions", "other", "transaction.json")
+				if err := os.MkdirAll(filepath.Dir(other), 0700); err != nil {
+					t.Fatal(err)
+				}
+				writeCLIFile(t, other, "{}\n", 0600)
+			case "unsafe-directory":
+				if err := os.Chmod(legacy, 0777); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Rename(legacy, legacy+"-retained"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(legacy+"-retained", legacy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeCLIFile(t, filepath.Join(legacy, "state.json"), "invalid retained state\n", 0644)
+			before := nativeTreeSnapshot(t, legacy)
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Environment: environment, Stdout: &stdout, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := program.inspectMutationGate(context.Background(), "default")
+			if err != nil || outcome != nil {
+				t.Fatalf("V1 files gated mutation: %#v, %v", outcome, err)
+			}
+			if code := program.runMigration(context.Background(), "default", []string{"check"}); code != 0 {
+				t.Fatalf("legacy check exit=%d: %s", code, &stderr)
+			}
+			want, err := json.Marshal(releasetransition.Outcome{
+				Status: releasetransition.StatusReady, Code: releasetransition.CodeReady,
+				Target: releasetransition.ReleaseID(Version), Message: "no unfinished v1 release transition was found",
+			})
+			if err != nil || stdout.String() != string(want)+"\n" || stderr.Len() != 0 {
+				t.Fatalf("legacy check output changed: stdout=%q stderr=%q err=%v", &stdout, &stderr, err)
+			}
+			if !slices.Equal(before, nativeTreeSnapshot(t, legacy)) {
+				t.Fatal("ignored V1 files changed")
 			}
 		})
 	}

@@ -172,6 +172,9 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		if err != nil {
 			return err
 		}
+		if err := journal.CheckIngressSupport(); err != nil {
+			return err
+		}
 		if journal.Checkpoint != releasetransition.JournalComplete &&
 			journal.Goal.Target == request.Target && journal.Goal.Direction == request.Direction &&
 			journal.ArtifactDigest == request.ArtifactDigest {
@@ -268,8 +271,6 @@ func CheckSourcePolicy(ctx context.Context, request releasetransition.ProcessReq
 		}
 		absent := !ledger.Exists && !checkpoint.Exists
 		paths := []string{
-			filepath.Join(request.ConfigHome, "migrations", "state.json"),
-			filepath.Join(request.ConfigHome, "migrations", "transactions"),
 			filepath.Join(filepath.Dir(request.RuntimeRoot), "recovery", "pre-go-source"),
 		}
 		if dataHome := os.Getenv("SUBYARD_HOME"); dataHome != "" {

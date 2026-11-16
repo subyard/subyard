@@ -80,7 +80,7 @@ func replaceableJournal(
 		return releasetransition.JournalRecord{}, releasetransition.ProtectedSnapshot{}, false
 	}
 	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	if err != nil || journal.Checkpoint == releasetransition.JournalComplete {
+	if err != nil || journal.Checkpoint == releasetransition.JournalComplete || journal.CheckIngressSupport() != nil {
 		return releasetransition.JournalRecord{}, releasetransition.ProtectedSnapshot{}, false
 	}
 	pinned, err := releasetransition.ReleaseIDVersion(journal.Goal.Target)

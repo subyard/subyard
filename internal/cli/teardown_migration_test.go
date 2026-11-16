@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerinventory"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
@@ -60,6 +62,11 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				var migrationsBefore []string
+				if strings.HasPrefix(state, "V1") {
+					testkit.WriteFile(t, filepath.Join(configHome, "migrations", "state.json"), []byte("retained V1 state\n"), 0600)
+					migrationsBefore = nativeTreeSnapshot(t, filepath.Join(configHome, "migrations"))
+				}
 				installation := uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()),
 					DataHome: environmentValue(environment, "SUBYARD_HOME"), ConfigHome: configHome,
 					RuntimeRoot: runtimeRoot, CacheRoot: filepath.Join(root, "cache")}
@@ -75,12 +82,34 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 				prompt := &testkit.Prompt{Answers: []bool{false}}
 				observed := false
 				cleanupBlocked := errors.New("fixture cleanup inventory unavailable")
+				native := lifecycleIncus()
+				var adapter ports.AdapterRunner
+				var runner *testkit.ScriptedAdapter
+				if strings.HasPrefix(state, "V1") && !invocation.fullRemoval {
+					environment = append(environment, "SUBYARD_OPERATION_ID=v1-admission")
+					runner = &testkit.ScriptedAdapter{Steps: []testkit.AdapterStep{{Result: domain.AdapterResult{
+						Schema: 1, OperationID: "v1-admission", Status: "ok",
+					}}}}
+					adapter = runner
+					if invocation.name == "start" {
+						native = powerScriptedIncus(runner, native)
+					} else {
+						native.Reconcile.InstanceFound = true
+						runner.Steps[0].Apply = func(domain.AdapterRequest) {
+							native.Reconcile.InstanceFound = false
+							native.Instances = map[string]ports.InstanceInfo{}
+						}
+					}
+				}
 				program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: invocation.arguments,
-					Environment: environment, WorkingDir: root, Incus: lifecycleIncus(), Prompt: prompt,
+					Environment: environment, WorkingDir: root, Incus: native, AdapterRunner: adapter, NetworkPolicy: allowTestNetworkPolicy(), Prompt: prompt,
 					Stdin: strings.NewReader(invocation.input), Stdout: io.Discard, Stderr: &stderr,
 					ObserveCoreProducers: func(config.Loaded, uninstall.RecoveryPlan, []string, int) ([]uninstall.RecoveryService, error) {
 						observed = true
-						return nil, cleanupBlocked
+						if invocation.fullRemoval {
+							return nil, cleanupBlocked
+						}
+						return nil, nil
 					},
 				})
 				if err != nil {
@@ -88,7 +117,7 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 				}
 				program.promptInputTerminal = func() bool { return invocation.terminal }
 				code := program.Run(context.Background())
-				if code == 0 || observed != invocation.fullRemoval || len(prompt.Requests) != 0 {
+				if (invocation.fullRemoval || strings.HasPrefix(state, "V2")) && (code == 0 || observed != invocation.fullRemoval || len(prompt.Requests) != 0) {
 					t.Fatalf("cleanup admission: code=%d observed=%t prompts=%d stderr=%s", code, observed, len(prompt.Requests), stderr.String())
 				}
 				if invocation.fullRemoval {
@@ -98,13 +127,22 @@ func TestFullUninstallDoesNotRequireMigration(t *testing.T) {
 					if _, err := os.Stat(capture); !errors.Is(err, os.ErrNotExist) {
 						t.Fatalf("full uninstall inspected the migration owner: %v", err)
 					}
-				} else {
+				} else if strings.HasPrefix(state, "V2") {
 					var outcome mutationGateOutcome
 					if err := json.Unmarshal(bytes.TrimSpace(stderr.Bytes()), &outcome); err != nil ||
 						(outcome.Status != "recovering" && outcome.Status != "operator-action-required") {
 						t.Fatalf("ordinary mutation bypassed migration gate: %s, %v", stderr.String(), err)
 					}
 				}
+				if strings.HasPrefix(state, "V1") && !invocation.fullRemoval {
+					if code != 0 || observed != (invocation.name == "selected yard") || len(prompt.Requests) != 0 || len(runner.Requests) != 1 {
+						t.Fatalf("V1 files blocked ordinary command: code=%d observed=%t prompts=%d calls=%d stderr=%s", code, observed, len(prompt.Requests), len(runner.Requests), &stderr)
+					}
+					if !slices.Equal(migrationsBefore, nativeTreeSnapshot(t, filepath.Join(configHome, "migrations"))) {
+						t.Fatal("admitted command changed retained migrations directory")
+					}
+				}
+
 				after, err := os.ReadFile(journal)
 				if err != nil || !bytes.Equal(before, after) {
 					t.Fatalf("admission changed migration state: %v", err)

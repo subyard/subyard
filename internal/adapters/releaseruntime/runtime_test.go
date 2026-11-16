@@ -3390,3 +3390,133 @@ func TestNewerReleaseAfterInspectionErrorKeepsExperimentalRefusal(t *testing.T) 
 		t.Fatalf("experimental owner selected %#v", selected)
 	}
 }
+
+func TestMutationGateRefusesUnfinishedV1ImportBeforeRetainedOwner(t *testing.T) {
+	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalReconciling)
+	capture := filepath.Join(filepath.Dir(fixture.runtimeRoot), "legacy-owner-called")
+	writeProtectedRuntimeFixtureEngine(t, fixture, fmt.Sprintf(`#!/bin/sh
+printf called > %q
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, capture, fixture.recoveringResponse()))
+	payload, err := os.ReadFile(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := releasetransition.ParseJournal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := releasetransition.Fingerprint(strings.Repeat("b", 64))
+	journal.Steps = []releasetransition.JournalStep{{
+		ID: "legacy-v1.import", Migration: string(releasetransition.V2LegacyV1Import), Resource: "legacy-v1.journal",
+		Decision: releasetransition.DecisionCanonicalize, Expected: facts, Desired: facts,
+		Checkpoint: releasetransition.StepVerified,
+		Evidence: &releasetransition.EvidenceRecord{
+			SchemaVersion: releasetransition.JournalSchemaV2, Transaction: journal.Transaction,
+			Releases: journal.Releases, Step: "legacy-v1.import", Expected: facts, Desired: facts,
+			Observed: facts, Recovery: releasetransition.Fingerprint(strings.Repeat("c", 64)),
+			Checkpoint: releasetransition.EvidenceVerified,
+		},
+	}}
+	// Intent binds the step's immutable identity, excluding its mutable checkpoint.
+	steps := json.RawMessage(fmt.Sprintf(`[{"id":"legacy-v1.import","migration":"legacy-v1-import","resource":"legacy-v1.journal","decision":"canonicalize","expected":%q,"desired":%q}]`, facts, facts))
+	intent, err := json.Marshal(struct {
+		AuthorizationPlan releasetransition.PlanToken   `json:"authorizationPlan"`
+		ResumePlan        releasetransition.PlanToken   `json:"resumePlan"`
+		ObservationScope  releasetransition.Fingerprint `json:"observationScope"`
+		Steps             json.RawMessage               `json:"steps"`
+	}{journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, steps})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(intent)
+	journal.IntentDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", digest))
+	payload, err = releasetransition.MarshalJournal(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, fixture.journalPath, payload, 0600)
+	// Activation has switched current to the sealed owner, but its journal is unfinished.
+	current := filepath.Join(fixture.runtimeRoot, "current")
+	if err := os.Remove(current); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/"+fixture.target, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/release-a", filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := os.Lstat(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := New(Config{Progress: io.Discard, Installer: fixture.installer, Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	defer runtime.Close()
+	outcome, err := runtime.InspectMutationGate(context.Background(), fixture.runtimeRoot, fixture.configHome, "default")
+	if err != nil || outcome == nil || outcome.Code != releasetransition.CodePreconditionBlocked ||
+		outcome.Message != "compatibility ingress operation is unavailable" {
+		t.Fatalf("unfinished import gate: %#v, %v", outcome, err)
+	}
+	if _, err := runtime.PrepareTransition(context.Background(), []string{"--runtime-root", fixture.runtimeRoot, "--version", "1.3.0"}, fixture.configHome, "default"); err == nil {
+		t.Fatal("unfinished legacy import admitted a newer release")
+	} else if refusal, ok := TransitionOutcome(err); !ok || refusal.Message != "compatibility ingress operation is unavailable" {
+		t.Fatalf("newer release lost retired import refusal: %v", err)
+	}
+	if _, err := os.Lstat(fixture.publicationCapture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retired import published another release: %v", err)
+	}
+	if _, err := os.Lstat(capture); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy owner executed: %v", err)
+	}
+	for _, entry := range []struct {
+		name    string
+		inspect func() error
+	}{
+		{"source_admission", func() error {
+			_, err := runtime.InspectSourceAdmission(context.Background(), fixture.runtimeRoot, fixture.configHome)
+			return err
+		}},
+		{"source_policy", func() error {
+			return CheckSourcePolicy(context.Background(), releasetransition.ProcessRequest{
+				Mode: releasetransition.ProcessInspect, RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome,
+				Target: "1.3.0-next", Direction: releasetransition.DirectionActivateTarget,
+			})
+		}},
+		{"source_policy_exact", func() error {
+			return CheckSourcePolicy(context.Background(), releasetransition.ProcessRequest{
+				Mode: releasetransition.ProcessInspect, RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome,
+				Target: journal.Goal.Target, Direction: journal.Goal.Direction, ArtifactDigest: journal.ArtifactDigest,
+			})
+		}},
+	} {
+		t.Run(entry.name, func(t *testing.T) {
+			err := entry.inspect()
+			if _, markerErr := os.Lstat(capture); !errors.Is(markerErr, os.ErrNotExist) {
+				t.Errorf("retained owner executed before refusal: %v", markerErr)
+				// Keep the other entrypoint's negative proof independent on a failed run.
+				if markerErr == nil {
+					if err := os.Remove(capture); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if !errors.Is(err, releasetransition.ErrCompatibilityIngressUnavailable) || err.Error() != "compatibility ingress operation is unavailable" {
+				t.Errorf("retired import refusal = %v", err)
+			}
+		})
+	}
+
+	after, err := os.Lstat(fixture.journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustReadFile(t, fixture.journalPath); !bytes.Equal(got, payload) || !os.SameFile(before, after) || before.ModTime() != after.ModTime() {
+		t.Fatal("unfinished import inspection changed its journal")
+	}
+}

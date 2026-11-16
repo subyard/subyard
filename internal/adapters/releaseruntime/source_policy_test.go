@@ -38,8 +38,8 @@ func TestSourcePolicyUsesSealedVersionAndV2Provenance(t *testing.T) {
 		{"fixture successor", aboveAnchor.String() + "-p0.next", "", true, false, true},
 		{"prerelease fixture", aboveAnchor.String() + "-p0.15.next", "", true, false, true},
 		{"fresh development bootstrap", "development", "", true, true, true},
-		{"raw V1 is not fresh", "development", "migrations/state.json", true, true, false},
-		{"raw journal is not fresh", "development", "migrations/transactions/unknown/transaction.json", true, true, false},
+		{"raw V1 is ignored", "development", "migrations/state.json", true, true, true},
+		{"raw journal is ignored", "development", "migrations/transactions/unknown/transaction.json", true, true, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			root := testkit.TempDir(t)

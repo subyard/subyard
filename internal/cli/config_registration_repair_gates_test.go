@@ -78,7 +78,7 @@ func TestConfigRegistrationRepairBlocksUnfinishedReleaseBeforePrompt(t *testing.
 			writeConfigCommandFile(t, filepath.Join(configHome, "yards/named/config.env"), "# nested\n")
 			writeConfigCommandFile(t, filepath.Join(configHome, "yards/named.env"), "# flat\n")
 			before := nativeTreeSnapshot(t, root)
-			prompt := &testkit.Prompt{Answers: []bool{true}}
+			prompt := &testkit.Prompt{Answers: []bool{false}}
 			var stdout, stderr bytes.Buffer
 			program, err := New(Options{
 				RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "repair-registration", "named"},
@@ -88,7 +88,12 @@ func TestConfigRegistrationRepairBlocksUnfinishedReleaseBeforePrompt(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			if code := program.Run(context.Background()); code != 1 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "release transition") {
+			code := program.Run(context.Background())
+			if version == "v1" {
+				if len(prompt.Requests) != 1 || strings.Contains(stderr.String(), "release transition") {
+					t.Fatalf("legacy files blocked repair confirmation: code=%d prompts=%d stderr=%s", code, len(prompt.Requests), stderr.String())
+				}
+			} else if code != 1 || len(prompt.Requests) != 0 || !strings.Contains(stderr.String(), "release transition") {
 				t.Fatalf("unfinished transition was not blocked before confirmation: code=%d prompts=%d stderr=%s", code, len(prompt.Requests), stderr.String())
 			}
 			if after := nativeTreeSnapshot(t, root); !reflect.DeepEqual(before, after) {

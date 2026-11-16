@@ -350,11 +350,7 @@ func (cli *CLI) inspectMutationGateInspection(
 	if v2 != nil && v2.Outcome.Status != releasetransition.StatusReady {
 		return v2.Outcome, v2, nil
 	}
-	legacy, err := migration.InspectMutationGate(ctx, options)
-	if err != nil {
-		return nil, nil, err
-	}
-	return legacy, nil, nil
+	return nil, nil, nil
 }
 
 // RPC error codes for release gate refusals that do not carry an outcome code.
@@ -2673,35 +2669,15 @@ func (cli *CLI) runMigration(ctx context.Context, yard string, arguments []strin
 		}
 		return 0
 	}
-	runtimeRoot := environment["YARD_RUNTIME_ROOT"]
-	if runtimeRoot == "" {
-		runtimeRoot = filepath.Join(environment["SUBYARD_HOME"], "runtime")
-	}
-	runtimeRoot = runtimeRootForRepository(cli.options.RepositoryRoot, runtimeRoot)
-	outcome, err := migration.InspectMutationGate(ctx, migration.ReleaseOptions{
-		RegistryPath:   filepath.Join(cli.options.RepositoryRoot, "config", "migrations.json"),
-		RepositoryRoot: cli.options.RepositoryRoot,
-		RuntimeRoot:    runtimeRoot,
-		ConfigHome:     configHome,
-		DataHome:       environment["SUBYARD_HOME"],
-		Version:        Version,
-		Executable:     cli.options.DispatcherPath,
-		Incus:          "incus",
-		Environment:    environmentList(migrationEnvironment, nil),
-		Diagnostics:    cli.options.Stderr,
-		Stderr:         cli.options.Stderr,
-	})
-	if err != nil {
-		cli.errorf("state migration %s: %v", arguments[0], err)
+	if !filepath.IsAbs(configHome) || filepath.Clean(configHome) == string(filepath.Separator) {
+		cli.errorf("state migration %s: mutation gate config home must be an absolute non-root path", arguments[0])
 		return 1
 	}
-	if outcome == nil {
-		outcome = &releasetransition.Outcome{
-			Status:  releasetransition.StatusReady,
-			Code:    releasetransition.CodeReady,
-			Target:  releasetransition.ReleaseID(Version),
-			Message: "no unfinished v1 release transition was found",
-		}
+	outcome := &releasetransition.Outcome{
+		Status:  releasetransition.StatusReady,
+		Code:    releasetransition.CodeReady,
+		Target:  releasetransition.ReleaseID(Version),
+		Message: "no unfinished v1 release transition was found",
 	}
 	if err := json.NewEncoder(cli.options.Stdout).Encode(outcome); err != nil {
 		cli.errorf("state migration report: %v", err)

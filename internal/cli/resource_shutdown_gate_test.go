@@ -315,6 +315,11 @@ func TestResourceShutdownAdmitsCompletedHistoryUnavailableGuest(t *testing.T) {
 	}{{"v1", "", false}, {"v2", "v2", false}, {"installed-guest-v1", "", true}, {"installed-guest-v2", "v2", true}} {
 		t.Run(scenario.name, func(t *testing.T) {
 			program, home, output := shutdownGateFixture(t, scenario.protocol, scenario.installedGuest)
+			legacy := filepath.Join(home, "migrations", "transactions", "retired", "transaction.json")
+			if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, legacy, "{broken legacy journal\n", 0600)
 			invariants := nativeRecoveryInvariants(t, program, home)
 			if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), "guest shutdown is unverified") {
 				t.Fatalf("declared shutdown blocked before guest cleanup: code=%d output=%s", code, output)

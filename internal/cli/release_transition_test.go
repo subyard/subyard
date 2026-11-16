@@ -293,7 +293,7 @@ func TestMaterializedConfigObservationDirectsToReadOnlyDiagnostic(t *testing.T) 
 	}
 	// The suggested command must reach the underlying failure even when normal
 	// commands are blocked by an unfinished release transition.
-	installUnfinishedMutationGateFixture(t, root, environment, filepath.Join(root, "data", "runtime"))
+	installUnfinishedV2MutationGateFixture(t, root, environment, filepath.Join(root, "data", "runtime"))
 	program.options.Arguments = strings.Fields(strings.TrimPrefix(retry, "run yard "))
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stderr.String(), cause.Error()) {
 		t.Fatalf("diagnostic command failed to expose the cause: code=%d stderr=%q", code, stderr.String())
@@ -3021,7 +3021,7 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 		"YARD_RUNTIME_ROOT="+runtimeRoot,
 		"SUBYARD_OPERATION_ID=release-transition-config",
 	)
-	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	platform := newInitPlatformFixture()
 	platform.configsConverged = false
 	var stderr bytes.Buffer
@@ -3074,7 +3074,7 @@ func TestMaterializedConfigActivationUsesTrustedProcessChild(t *testing.T) {
 		"YARD_RUNTIME_ROOT="+runtimeRoot,
 		"SUBYARD_OPERATION_ID=materialized-config-activation",
 	)
-	installUnfinishedMutationGateFixture(t, root, environment, runtimeRoot)
+	installUnfinishedV2MutationGateFixture(t, root, environment, runtimeRoot)
 	dispatcher := filepath.Join(root, "bin", "yard-engine")
 	if err := os.MkdirAll(filepath.Dir(dispatcher), 0o700); err != nil {
 		t.Fatal(err)

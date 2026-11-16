@@ -174,7 +174,7 @@ func sourceCandidateInputs(verified *verifiedPublishedCandidate) (map[string]sou
 func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, configHome string) (proof SourceAdmission, result error) {
 	phase := "links"
 	defer func() {
-		if result != nil {
+		if result != nil && !errors.Is(result, releasetransition.ErrCompatibilityIngressUnavailable) {
 			result = sourceAdmissionError{phase, result}
 		}
 	}()
@@ -200,6 +200,9 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 	if snapshot.Exists {
 		value, err := releasetransition.ParseJournal(snapshot.Payload)
 		if err != nil {
+			return proof, err
+		}
+		if err := value.CheckIngressSupport(); err != nil {
 			return proof, err
 		}
 		journal = &value

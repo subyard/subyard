@@ -1,7 +1,7 @@
 ---
 title: Legacy migration support and reinstall policy
 status: accepted policy
-updated: 2026-11-10
+updated: 2026-11-15
 ---
 
 # Legacy migration support and reinstall policy
@@ -43,7 +43,7 @@ This removal route deletes owned data only after its existing explicit confirmat
 refusal never authorizes deletion. There is no automatic update chain or new bridge release.
 
 Retirement removes fresh V1 upgrades and journal imports, including unfinished source V1
-recovery. Detection must refuse before changing the active installation and explain the full
+recovery. Source-version admission must refuse before changing the active installation and explain the full
 data removal and clean-install path. New rollback targets below v0.28.0 also refuse, but keep
 the current release active and offer no uninstall path. Refusal never deletes evidence. An installation that already completed its transition to supported V2 state
 remains supported, including necessary historical evidence and recovery bindings with legacy
@@ -181,8 +181,10 @@ deletion) starts from these facts of the current candidate:
   newer-release replacement and the post-activation takeover of an anchor-series journal.
 - **Readers an install completed on the anchor still needs:** the V2 journal and runtime links, the
   migration ledger and its history checkpoint and projection at the unchanged `minimumEpochs`, and
-  the recovery readers for anchor-series journals. Whether any completed v0.28.x install can still
-  hold pre-V2 history that needs the V1 import reader is not established here.
+  the recovery readers for anchor-series journals. Ordinary admission assumes supported installations
+  have no V1 files and does not inspect them. Completed V2 evidence and recovery bindings with
+  legacy provenance remain readable. An unfinished `legacy-v1-import` journal requires its
+  original V1 files and is outside this assumption; current tooling refuses it without writes.
 - **Lowest rollback target:** v0.28.0. Rollback below it refuses before dispatch; compatible v0.28.x
   rollback stays supported.
 
@@ -192,18 +194,30 @@ Retired migration V1 used a global layout, schema 1 registry, applied state at
 `migrations/state.json` and journals under `migrations/transactions/`. The live
 [compatibility header](../../config/migrations.json) retains schema/layout fields solely so old
 released callers can reach an actionable refusal; it contains no migration definitions.
+Supported installations are assumed to have no V1 journals. Ordinary commands and source-repair
+inventory do not read, classify or refuse on `migrations/state.json` or
+`migrations/transactions/`; stray files are ignored and left untouched. If such files need repair,
+the operator handles them manually. There is no V1 mutation gate. The shared migration lock is
+still coordination state, not a V1 history read.
+
 Power/layout mutation and verification code without accepted-history consumers is removed.
-The exact retained v0.4.1/v0.4.2 registry, journal codecs and read-only owner/route/broker observations
-remain only for accepted bound V2 recovery and static completion receipts. There is no fresh-import
-reader API. Current release transitions use domain epochs and Ledger V2. Superseded `_migrate`
+The V1 registry/journal reader and its read-only owner/route/broker adapters are removed.
+An unfinished V2 journal containing `legacy-v1-import`, even with a verified import step, still
+requires original V1 files. Current tooling refuses to open it with
+`compatibility ingress operation is unavailable`, before invoking a retained owner or taking
+locks, writes, resume or replacement. Metadata fallback and automatic replacement do not bypass
+this refusal.
+The operator repairs such an installation by hand. Completed V2 provenance, compatibility
+receipts, recovery bindings, history checkpoints and Ledger V2 projections keep their existing
+readers and validation. Current release transitions use domain epochs and Ledger V2. Superseded `_migrate`
 mutation endpoints refuse and direct old updaters to staged tooling and full uninstall.
 
 The historical released producers and their retained contracts are:
 
 | Baseline | Supported role |
 | --- | --- |
-| v0.4.1 | Retired V1 owner checkpoint/terminal: refusal/uninstall; accepted V2 historical reader |
-| v0.4.2 | Retired V1 broker/route/owner checkpoints: refusal/uninstall; accepted V2 historical reader |
+| v0.4.1 | Retired V1 owner checkpoint/terminal: refusal/uninstall; completed V2 evidence reader |
+| v0.4.2 | Retired V1 broker/route/owner checkpoints: refusal/uninstall; completed V2 evidence reader |
 | v0.9.1 | Retired V1 standalone updater: refusal/uninstall |
 | v0.10.0 | Last V1 release: refusal/uninstall at the upper unsupported edge |
 | v0.11.0 | First V2 release: anchor refusal; historical V2 reader |
@@ -214,9 +228,8 @@ The historical released producers and their retained contracts are:
 | v0.19.0 | Historical independent completed domain history producer; current anchor refusal |
 | v0.21.0 Linux amd64 | Exact published migration-ledger owner-defect proof and separately consented standalone-candidate supersession through v0.25.1, whose registry matches, then the v0.28.1 hop; later candidates refuse the replacement and unknown artifacts fail closed |
 
-The [historical reader](../../internal/migration/v1_import.go) binds the exact retained runtime
-pair, registry, journal and observed postconditions. It does not admit arbitrary historical
-journals. The [released compatibility check](../../dev/verify-release-upgrades.py) pins official
+Completed V2 journals and evidence retain their sealed runtime, registry and recovery bindings;
+they do not require reading original V1 files. The [released compatibility check](../../dev/verify-release-upgrades.py) pins official
 v0.4.1, v0.4.2, v0.9.1, v0.10.0, v0.11.0 and v0.17.3 runtime checksums, the amd64 v0.27.0 checksum
 and the exact legacy runtime installers. These binaries remain current refusal/uninstall inputs. Their successful migration and original-owner recovery
 corpora are frozen in the v0.28.0 tag; current Go readers retain accepted history coverage. Rebuilding
@@ -241,7 +254,39 @@ domain floor and proven retained-runtime rollback eligibility are assessed separ
 Use [`yard update --check`](../cli-reference.md#update) for read-only assessment. Unsupported
 sources require the [staged full-uninstall route](../control-plane.md#legacy-upgrades), followed
 by the user's separate clean install. Unknown, ambiguous or foreign state blocks before mutation;
-manual journal editing is unsupported. Ordinary ready operation emits no deprecation warning.
+manual editing of V2 journals is unsupported. Stray V1 files are outside automatic recovery and
+may be repaired by hand. Ordinary ready operation emits no deprecation warning.
+
+### Retained committed V1 files with v0.28.x updaters
+
+An installation created before v0.11.0 may have completed V2 import and still retain committed
+V1 files. The installed v0.28.x updater includes those files in its completed-metadata fallback
+binding; the current candidate always binds their absence without reading them. That fallback
+can therefore refuse with:
+
+`candidate does not bind supported completed history to a new ordinary plan; stage a compatible candidate supporting protected metadata admission`
+
+If the V2 import is complete but an original V1 journal is unfinished, v0.28.x can refuse
+earlier, before that binding comparison. Its source-history reader reports
+`legacy transaction is not closed canonical history`
+(`v0.28.1:internal/migration/source_history.go:93`). The v0.28.x source-repair commands render this as
+`release source admission: protected metadata is unsupported or unresolved (legacy history); finish pending publications or recovery intent with the exact sealed original owner before source repair`;
+`yard update` of v0.28.x does not show it, because its fallback reports the installed owner's
+original refusal instead. The same manual step below applies to those retained V1 files.
+
+Do not move these files during a running update. Once no update is running, move aside only
+these two paths from the configuration home
+to a private backup outside it, then retry the same update:
+
+- `migrations/state.json`;
+- the entire `migrations/transactions/` directory, containing the retained V1 journals and
+  their retained recovery files.
+
+Both paths must be absent; leaving an empty `migrations/transactions/` directory still changes
+the old updater's binding. Keep `migrations/update.lock`, all `release-transition/` metadata
+and all other installation data in place. No other cleanup, migration, uninstall or reinstall
+is needed. This manual workaround does not restore a V1 reader and does not apply to an
+unfinished V2 `legacy-v1-import` journal.
 
 ## Supported V2 checkpoint compatibility
 
@@ -272,7 +317,8 @@ Published v0.18.1 has no sealed checkpoint-reader marker; it cannot itself serve
 
 Retirement guidance must state the v0.11.0 source boundary, affected V1 formats, full-uninstall
 data loss and the user's separate clean-install step. Diagnose unsupported legacy state when
-encountered; ordinary ready operation needs no deprecation warning. Supported V2 unfinished
+encountered through source-version admission; ordinary commands do not inspect V1 files and
+ready operation needs no deprecation warning. Supported V2 unfinished
 transactions retain their exact sealed owners, artifacts and evidence until closure. The separately negotiated `migration-ledger-owner-replacement-v1` contract may retain an exactly proved
 defective owner as typed superseded evidence and select a freshly authorized forward candidate;
 it never manufactures old activation readiness. Compatible retained rollback within the support

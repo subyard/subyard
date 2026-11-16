@@ -1192,6 +1192,23 @@ owns the complete rules, including unfinished transitions below the anchor.
 
 Sources before **v0.11.0** retain the full-uninstall route; no V1 upgrade bridge exists. Accepted
 V2 history and evidence remain readable independently of fresh update admission.
+Supported installations are assumed to have no V1 journals. Ordinary commands, including
+configuration repair and source-history assessment, ignore `migrations/state.json` and
+`migrations/transactions/` without reading or deleting them. There is no V1 mutation gate;
+stray V1 files are repaired manually if needed. Current tooling refuses an unfinished V2
+`legacy-v1-import` journal with `compatibility ingress operation is unavailable` before writes,
+including retained-owner inspection, resume or replacement. Completed V2 legacy provenance,
+evidence, recovery bindings,
+history checkpoints and projections retain their existing validation and readers. The static
+`config/migrations.json` header remains for old released callers' actionable refusal.
+An installed v0.28.x updater's completed-metadata fallback can refuse an installation that
+completed V2 import but retained committed V1 files. An unfinished original V1 journal under
+completed V2 import can cause an earlier v0.28.x source-history refusal; the same manual step
+applies. Once no update is running, move aside only `migrations/state.json`
+and the entire `migrations/transactions/` directory to a private backup outside the configuration
+home, then retry; no other cleanup or reinstall is needed. Keep `migrations/update.lock`,
+`release-transition/` and all other data in place. See the
+[retained committed V1 workaround](reference/legacy-migration-support.md#retained-committed-v1-files-with-v028x-updaters).
 For a source before v0.11.0, stage verified current cleanup tooling in its existing runtime store:
 
 ```bash

@@ -2,9 +2,10 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
@@ -36,41 +37,43 @@ func TestSourceHistoryAbsenceSurvivesFirstSharedLock(t *testing.T) {
 	}
 	testkit.WriteFile(t, filepath.Join(home, "migrations", "state.json"), []byte("{\"schemaVersion\":1,\"layout\":5}\n"), 0o600)
 	changed, err := InspectSourceHistory(context.Background(), options)
-	if err != nil || changed == before {
-		t.Fatalf("new legacy history was not bound: %v", err)
+	if err != nil || changed != before {
+		t.Fatalf("ignored legacy history changed the binding: %v", err)
 	}
 }
 
-func TestSourceHistoryRejectsUnfinishedLegacyBehindOtherHistory(t *testing.T) {
-	options, _, _ := publishedV1CompatibilityFixture(t, "0.4.1")
-	links := releasetransition.ReleaseLinks{Active: "release-a"}
-	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
-		ConfigHome:      options.ConfigHome,
-		ArtifactDigest:  releasetransition.Fingerprint(strings.Repeat("a", 64)),
-		RegistryPayload: []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`),
-		Releases:        releasetransition.ReleasePair{From: links.Active, Target: "release-b"},
-		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) {
-			return links, nil
-		},
-		ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {
-			previous := pair.From
-			links = releasetransition.ReleaseLinks{Active: pair.Target, Previous: &previous}
-			return links, nil
-		},
-		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true },
-	})
+func TestSourceHistoryIgnoresUnsafeV1Files(t *testing.T) {
+	home := testkit.TempDir(t)
+	options := ReleaseOptions{ConfigHome: home}
+	before, err := InspectSourceHistory(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspection, err := transition.Inspect(context.Background(), releasetransition.Goal{Target: "release-b", Direction: releasetransition.DirectionActivateTarget})
-	if err != nil {
+	if err := os.Symlink("missing-legacy-history", filepath.Join(home, "migrations")); err != nil {
 		t.Fatal(err)
 	}
-	outcome, err := transition.Converge(context.Background(), releasetransition.Execution{Plan: inspection.Plan, Authorization: "new-synthetic-consent"})
-	if err != nil || outcome.Status != releasetransition.StatusReady {
-		t.Fatalf("completed v2 fixture: %v %v", outcome, err)
+	after, err := InspectSourceHistory(context.Background(), options)
+	if err != nil || after != before {
+		t.Fatalf("ignored legacy symlink changed source binding: %s, %v", after, err)
 	}
-	if _, err := InspectSourceHistory(context.Background(), options); err == nil {
-		t.Fatal("unfinished legacy migration admitted by source repair")
+}
+
+func TestSourceHistoryBindsCommittedV1FilesAsAbsent(t *testing.T) {
+	home := testkit.TempDir(t)
+	state := filepath.Join(home, "migrations", "state.json")
+	transactions := filepath.Join(home, "migrations", "transactions")
+	versionDigest := sha256.Sum256([]byte("0.10.0"))
+	journal := filepath.Join(transactions, fmt.Sprintf("%x", versionDigest[:16]), "transaction.json")
+	if err := os.MkdirAll(filepath.Dir(journal), 0700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, state, []byte(`{"schemaVersion":1,"layout":5}`), 0600)
+	testkit.WriteFile(t, journal, []byte(`{"schemaVersion":1,"fromLayout":4,"toLayout":5,"toRelease":"0.10.0","phase":"committed","migrations":[]}`), 0600)
+	// Pin the absent-history wire value independently of the on-disk committed history.
+	absent := fmt.Sprintf(`{%q:{"Present":false,"Digest":"","Device":0,"Inode":0,"Links":0,"Mode":0,"UID":0,"GID":0},%q:{"Present":false,"Digest":"","Device":0,"Inode":0,"Links":0,"Mode":0,"UID":0,"GID":0}}`, state, transactions)
+	want := fmt.Sprintf("%x", sha256.Sum256([]byte(absent)))
+	got, err := InspectSourceHistory(context.Background(), ReleaseOptions{ConfigHome: home, Version: "0.29.0"})
+	if err != nil || string(got) != want {
+		t.Fatalf("committed V1 binding = %s, %v; want absent %s", got, err, want)
 	}
 }

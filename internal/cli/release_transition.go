@@ -817,7 +817,7 @@ func (cli *CLI) ensureReleaseTransitionImageProject(ctx context.Context, configH
 func (cli *CLI) releaseTransitionIngressFactory(
 	request releasetransition.ProcessRequest,
 ) func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error) {
-	return func(releases releasetransition.ReleasePair) (releasetransition.V2Ingress, error) {
+	return func(_ releasetransition.ReleasePair) (releasetransition.V2Ingress, error) {
 		if request.SourceIngress != nil {
 			sourceRoot, sourceErr := filepath.EvalSymlinks(request.SourceIngress.SourceRoot)
 			runtimeRoot, runtimeErr := filepath.EvalSymlinks(request.RuntimeRoot)
@@ -832,35 +832,7 @@ func (cli *CLI) releaseTransitionIngressFactory(
 			return nil, fmt.Errorf("entrypoints point at the checkout %s; if this is an installation older than v0.11.0, see docs/reference/legacy-migration-support.md", request.SourceIngress.SourceRoot)
 		}
 
-		testYard, err := cli.releaseTransitionTestYardOptions(request)
-		if err != nil {
-			return nil, err
-		}
-		options := migration.ReleaseOptions{
-			RepositoryRoot: testYard.RepositoryRoot,
-			RuntimeRoot:    request.RuntimeRoot, ConfigHome: testYard.ConfigHome,
-			DataHome: testYard.DataHome, Executable: testYard.Executable, Incus: testYard.Incus,
-			Environment: testYard.Environment, Diagnostics: testYard.Stdout, Stderr: testYard.Stderr,
-		}
-		facts, err := migration.NewV1ImportFactObserver(options)
-		if err != nil {
-			return nil, err
-		}
-		reader, err := migration.NewV1ImportReader(migration.V1ImportOptions{
-			ConfigHome: request.ConfigHome, RuntimeRoot: request.RuntimeRoot, Facts: facts,
-		})
-		if err != nil {
-			return nil, err
-		}
-		pair := migration.V1ImportRuntimePair{Current: "releases/" + string(releases.From)}
-		if releases.Previous != nil {
-			pair.Previous = "releases/" + string(*releases.Previous)
-		}
-		legacy, err := migration.NewV2LegacyIngress(reader, pair)
-		if err != nil {
-			return nil, err
-		}
-		return &migration.V2CompatibilityIngress{Legacy: legacy}, nil
+		return &migration.V2CompatibilityIngress{}, nil
 	}
 }
 

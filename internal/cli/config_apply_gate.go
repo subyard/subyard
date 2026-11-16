@@ -20,7 +20,6 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
@@ -195,12 +194,6 @@ func (cli *CLI) prepareActivationRepair(
 		if !pendingInit {
 			return nil, nil
 		}
-	}
-	// A V2 drift outcome can mask unfinished legacy migration metadata in the
-	// ordinary gate. Both journal families must independently admit this repair.
-	legacy, err := migration.InspectMutationGate(ctx, options)
-	if err != nil || legacy != nil {
-		return nil, nil
 	}
 	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
 	if err != nil {

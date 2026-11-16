@@ -365,8 +365,20 @@ The approved [legacy support boundary](legacy-migration-support.md) is v0.11.0, 
 Earlier source installations use full uninstall and a separate
 clean installation instead of V1 upgrade/import or unfinished source V1 recovery. No V1 upgrade
 bridge or notice window is required. Already accepted V2 history with legacy provenance remains
-readable, and supported V2 recovery retains its exact bindings. The source-version boundary is
+readable, and supported V2 recovery retains its exact bindings. Supported installations are
+assumed to have no V1 journals: ordinary commands ignore V1 files without reading or deleting them.
+Stray V1 files require manual repair if needed. An unfinished V2 `legacy-v1-import` journal
+requires those files and current tooling refuses it without writes; completed V2 legacy
+provenance and recovery evidence remain readable. The source-version boundary is
 separate from domain epochs and V2 checkpoint-reader compatibility.
+When an installed v0.28.x updater's completed-metadata fallback refuses a completed V2 import
+with committed V1 remnants, wait until no update is running, then move aside only
+`migrations/state.json` and the whole
+`migrations/transactions/` directory to a private backup outside the configuration home.
+Nothing else needs cleanup or reinstallation; keep `migrations/update.lock`, V2 metadata and
+all other data in place. The [retained committed V1 workaround](legacy-migration-support.md#retained-committed-v1-files-with-v028x-updaters)
+explains the binding limitation and the earlier v0.28.x source-history refusal for an
+unfinished original V1 journal under a completed V2 import; the same manual step applies.
 
 Three independent policies determine support:
 
@@ -441,8 +453,10 @@ drift does not authorize or resume completed migration history; apply still requ
 and creates a new repair transaction. The current caller validates the identity and actual links.
 The [implemented compatibility contract](../control-plane.md#release-migrations) describes this projection.
 
-Fresh V1 imports are retired. Accepted bound V2 history retains read-only compatibility ingress
-with its original protected evidence and required postcondition observations. There is no supported manual phase edit. Exact supported older-engine failures retain
+Fresh V1 imports and unfinished `legacy-v1-import` resume are retired. Completed V2 history
+retains its protected evidence and recovery bindings without reading original V1 journals.
+Stray V1 files require manual repair; manual editing of supported V2 phases remains unsupported.
+Exact supported older-engine failures retain
 dedicated recovery rules rather than a general permission to replace journals or links. Use the maintained
 [legacy upgrade](../control-plane.md#legacy-upgrades)
 and [interrupted recovery](../control-plane.md#interrupted-release-recovery) guidance.

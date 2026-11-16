@@ -15,7 +15,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
@@ -702,10 +701,7 @@ func TestConfigApplyRepairUsesCompletedProtectedGateAndStableLock(t *testing.T) 
 	if err != nil || !available {
 		t.Fatalf("release options: available=%v err=%v", available, err)
 	}
-	legacy, err := migration.InspectMutationGate(context.Background(), options)
-	if err != nil || legacy != nil {
-		t.Fatalf("legacy gate blocks fixture: outcome=%#v err=%v", legacy, err)
-	}
+
 	store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
 	if err != nil {
 		t.Fatal(err)
@@ -971,7 +967,7 @@ func TestConfigApplyRepairExactSelectionMustCoverEveryDriftedYard(t *testing.T) 
 	}
 }
 
-func TestConfigApplyRepairRejectsLegacyBlockerMaskedByCompletedV2(t *testing.T) {
+func TestConfigApplyRepairIgnoresLegacyFiles(t *testing.T) {
 	fixture := newConfigApplyRepairFixture(t, false)
 	options, _, err := fixture.cli.mutationGateReleaseOptions()
 	if err != nil {
@@ -984,11 +980,11 @@ func TestConfigApplyRepairRejectsLegacyBlockerMaskedByCompletedV2(t *testing.T) 
 	writeCLIFile(t, legacyPath, "{broken\n", 0o600)
 	gate, err := fixture.cli.inspectMutationGate(context.Background(), "default")
 	if err != nil || gate == nil || !sameConfigApplyGate(*gate, fixture.outcome) {
-		t.Fatalf("V2 should mask legacy blocker in ordinary gate: gate=%#v err=%v", gate, err)
+		t.Fatalf("V1 files should not change the V2 gate: gate=%#v err=%v", gate, err)
 	}
 	permit, err := fixture.cli.prepareConfigApplyRepair(context.Background(), "default", false, *gate)
-	if err != nil || permit != nil {
-		t.Fatalf("masked legacy corruption admitted repair: permit=%#v err=%v", permit, err)
+	if err != nil || permit == nil {
+		t.Fatalf("legacy corruption blocked repair: permit=%#v err=%v", permit, err)
 	}
 }
 

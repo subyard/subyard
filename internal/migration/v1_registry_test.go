@@ -12,7 +12,11 @@ func TestLiveV1RegistryHasNoMigrationDefinitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var registry Registry
+	var registry struct {
+		MinimumLayout int               `json:"minimumLayout"`
+		CurrentLayout int               `json:"currentLayout"`
+		Migrations    []json.RawMessage `json:"migrations"`
+	}
 	if err := json.Unmarshal(payload, &registry); err != nil {
 		t.Fatal(err)
 	}
