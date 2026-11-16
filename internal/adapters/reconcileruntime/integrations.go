@@ -354,21 +354,32 @@ func adoptionPlan(observed integrationObservation, structuredEvidence []string) 
 // integrationInventoryPath is the guest's integration ownership inventory.
 const integrationInventoryPath = "/var/lib/subyard/integrations/inventory.json"
 
+// guestNeverProvisioned reports a running instance whose init has never
+// finished and whose guest lacks the substrate every installed owner needs
+// (python3, the developer account and /srv/agents). Init's stages run in order
+// and provisioning installs that substrate first, so no later stage has run in
+// this guest. A working yard whose re-init failed is never such a guest.
+func (runtime Runtime) guestNeverProvisioned(ctx context.Context, instance ports.InstanceInfo) (bool, error) {
+	if runtime.Executor == nil || !strings.EqualFold(instance.Status, "running") || !application.InstanceNeverInitialized(instance) {
+		return false, nil
+	}
+	substrate, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()})
+	return err == nil && !substrate, err
+}
+
 // integrationStateNeverInstalled reports that a yard has no applied integration
-// state to read: its instance has never finished init, the guest lacks the
-// integration substrate, and the guest has no integration inventory. That is
-// absent state, observed as such; any other yard, including a working yard
-// whose re-init failed, is read and refused strictly as before.
+// state to read: its guest was never provisioned and has no integration
+// inventory. That is absent state, observed as such; any other yard, including
+// a working yard whose re-init failed, is read and refused strictly as before.
 func (runtime Runtime) integrationStateNeverInstalled(ctx context.Context) (bool, error) {
 	if runtime.Incus == nil || runtime.Executor == nil {
 		return false, nil
 	}
 	instance, err := runtime.Incus.Instance(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName)
-	if err != nil || !strings.EqualFold(instance.Status, "running") || !application.InstanceNeverInitialized(instance) {
+	if err != nil {
 		return false, nil
 	}
-	substrate, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()})
-	if err != nil || substrate {
+	if never, err := runtime.guestNeverProvisioned(ctx, instance); err != nil || !never {
 		return false, err
 	}
 	return runtime.guestCheck(ctx, []string{"sh", "-c", `test ! -e "$1" && test ! -L "$1"`, "subyard", integrationInventoryPath})

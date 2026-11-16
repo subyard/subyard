@@ -38,6 +38,11 @@ case "${1:-}" in
         esac
         [ "${MOCK_RESTORE_RC:-0}" = 0 ] || exit "$MOCK_RESTORE_RC"
         ;;
+      *'check-ssh'*)
+        printf 'all-user-ssh-probe\n' >> "$MOCK_INCUS_LOG"
+        case "$*" in *VSCODE_USER*) exit 91 ;; esac
+        printf '%s\n' "${MOCK_VSCODE_STATE:-idle}"
+        ;;
       *)
         printf 'vscode-probe\n' >> "$MOCK_INCUS_LOG"
         [ "${MOCK_VSCODE_RC:-0}" = 0 ] || exit "$MOCK_VSCODE_RC"
@@ -273,8 +278,15 @@ export MOCK_INCUS_CONFIG="true false -" MOCK_PROFILE_PAUSE_RC=2
   || fail "never-initialized stop refused: $(tr '\n' ' ' < "$TMP/out")"
 grep -Fxq stop "$MOCK_INCUS_LOG" || fail "never-initialized stop did not reach incus stop"
 grep -Fxq ssh-quiesce "$MOCK_INCUS_LOG" || fail "never-initialized stop skipped the SSH listener fence"
-grep -Fxq vscode-probe "$MOCK_INCUS_LOG" || fail "never-initialized stop skipped the session probe"
+grep -Fxq all-user-ssh-probe "$MOCK_INCUS_LOG" || fail "never-initialized stop skipped the all-user session probe"
+if grep -Fxq vscode-probe "$MOCK_INCUS_LOG"; then fail "never-initialized stop probed the developer account"; fi
 if grep -Fxq profile-stop "$MOCK_INCUS_LOG"; then fail "never-initialized stop paused owner services"; fi
+reset_case
+export MOCK_INCUS_CONFIG="true false -" MOCK_VSCODE_STATE=active
+if "$ROOT/scripts/lifecycle-guard.sh" stop > "$TMP/out" 2>&1; then
+  fail "never-initialized stop crossed an active SSH session"
+fi
+if grep -Fxq stop "$MOCK_INCUS_LOG"; then fail "never-initialized active-session guard reached incus stop"; fi
 for config in "true false true" "true true -"; do
   reset_case
   export MOCK_INCUS_CONFIG="$config" MOCK_PROFILE_PAUSE_RC=2

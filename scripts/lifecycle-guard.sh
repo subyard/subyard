@@ -52,10 +52,15 @@ fi
 
 # A container stop cannot gracefully close desktop windows or SSH shells. Refuse to cross an active
 # session after closing the SSH listener to new connections.
+# A yard whose init never finished may lack the developer account; it gets the
+# all-user SSH session check that teardown uses before that account exists.
+NEVER_INITIALIZED=0
 vscode_remote_state() {
   local result
-  if result="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env VSCODE_USER="$DEV_USER" -- \
-      sh -s -- check-active < "$SCRIPT_DIR/vscode-remote-maintenance.sh" 2>/dev/null)"; then
+  local -a probe=(--env VSCODE_USER="$DEV_USER" -- sh -s -- check-active)
+  [ "$NEVER_INITIALIZED" = 0 ] || probe=(-- sh -s -- check-ssh)
+  if result="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${probe[@]}" \
+      < "$SCRIPT_DIR/vscode-remote-maintenance.sh" 2>/dev/null)"; then
     result="${result##*$'\n'}"
     case "$result" in idle | active | unknown) printf '%s\n' "$result" ;; *) printf 'unknown\n' ;; esac
   else
@@ -106,9 +111,11 @@ case "$action" in
         esac
         # A yard whose init never finished has no installed owner services to
         # pause; its guest may lack what their handlers need. The SSH listener
-        # fence above and the session check below still apply.
+        # fence above and an all-user session check below still apply.
         paused_profiles=
-        if ! power_never_initialized "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
+        if power_never_initialized "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
+          NEVER_INITIALIZED=1
+        else
           paused_profiles="$("$SCRIPT_DIR/profile-services.sh" --pause)" \
             || die 'could not pause profile owner services before checking SSH sessions'
         fi

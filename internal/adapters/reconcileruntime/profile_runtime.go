@@ -229,7 +229,13 @@ func (runtime Runtime) observeProfileRuntimes(
 		}
 		return nil, fmt.Errorf("inspect yard for profile runtimes: %w", err)
 	}
-	if strings.EqualFold(instance.Status, "stopped") {
+	// A guest that init never provisioned has no installed profile runtime and
+	// may lack what the handlers need; like a stopped yard it is not observed.
+	never, err := runtime.guestNeverProvisioned(ctx, instance)
+	if err != nil {
+		return nil, fmt.Errorf("inspect yard for profile runtimes: %w", err)
+	}
+	if strings.EqualFold(instance.Status, "stopped") || never {
 		for _, definition := range definitions {
 			observations[definition.Runtime.ActivationID] = ports.RuntimeObservation{State: ports.RuntimeStateDeferred}
 		}

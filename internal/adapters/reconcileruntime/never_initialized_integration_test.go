@@ -87,3 +87,41 @@ func TestAppliedIntegrationStateOfNeverInitializedYardIsAbsent(t *testing.T) {
 		})
 	}
 }
+
+// A guest that init never provisioned is not observed by profile runtime
+// handlers, like a stopped yard; a working yard whose re-init failed still runs
+// them and refuses on their failure.
+func TestProfileRuntimesOfNeverProvisionedGuestAreDeferred(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		ever     string
+		deferred bool
+	}{
+		{name: "never initialized", deferred: true},
+		{name: "re-init of a working yard", ever: "true"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			config := map[string]string{"user.subyard.managed": "true", "user.subyard.name": "y8", "user.subyard.initialized": "false"}
+			if test.ever != "" {
+				config["user.subyard.ever_initialized"] = test.ever
+			}
+			incus := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-y8/yard-y8": {
+				Name: "yard-y8", Project: "subyard-y8", Status: "Running", Config: config,
+			}}}
+			root := testkit.TempDir(t)
+			definition := profile.Definition{Name: "sample", Root: root, Runtime: &profile.RuntimeHook{ActivationID: "sample-runtime", Handler: "missing-runtime.sh"}}
+			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: &neverInitializedGuest{},
+				Yard: domain.Context{YardName: "y8", IncusProject: "subyard-y8", YardInstanceName: "yard-y8", DevUser: "dev", DevUID: 1000}}
+			observations, err := runtime.observeProfileRuntimes(context.Background(), []profile.Definition{definition})
+			if test.deferred {
+				if err != nil || observations["sample-runtime"].State != ports.RuntimeStateDeferred {
+					t.Fatalf("never-provisioned guest: %#v err=%v", observations, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a re-initialized yard skipped its runtime handler: %#v", observations)
+			}
+		})
+	}
+}
