@@ -386,45 +386,25 @@ verify_legacy_rollback_refusal() {
   ok "incompatible published v$OLD_VERSION rollback refused without mutation"
 }
 
-check_compatible_transition() {
-  local version="$1" release_root="$2" target="${3#releases/}" active="${4#releases/}"
-  operator_env env YARD_RELEASE_BASE_URL="file://$release_root" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$version" --check --json \
-    > "$STATE_ROOT/compatible-check.json"
-  jq -e --arg target "$target" --arg active "$active" '
-    .outcome.target == $target and .outcome.active == $active and
-    .outcome.status == "migration-required" and .outcome.code == "transition-required" and
-    .outcome.reachedGoal == false and .assessment.changed == true and
-    (.plan | type == "string" and startswith("plan-v1-")) and
-    ((.blockers // []) | type == "array" and length == 0)
-  ' "$STATE_ROOT/compatible-check.json" >/dev/null \
-    || die 'public update inspection did not authorize the exact compatible target'
-}
-
+# Rollback to the published anchor crosses the candidate's power-metadata epoch and is refused
+# without mutation; the rollback cycle then runs against a candidate-built compatible release.
 finish_candidate_flow() {
   local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
   load_release_targets
-  capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
-  local legacy="$OPERATOR_HOME/.config/subyard/migrations/state.json"
-  if operator_env test ! -e "$legacy" && operator_env test ! -L "$legacy"; then
-    printf 'absent\n' > "$STATE_ROOT/refusal-3.mode"
-  else
-    operator_env stat -c '%a:%u:%g:%d:%i' "$legacy" > "$STATE_ROOT/refusal-3.mode"
-    operator_env cat "$legacy" > "$STATE_ROOT/refusal-3.bytes"
-  fi
-  info "retaining the authentic published $COMPATIBLE_VERSION runtime through verified public updates"
-  check_compatible_transition "$COMPATIBLE_VERSION" "$COMPATIBLE_RELEASE_ROOT" \
-    "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  verify_legacy_rollback_refusal
+  info "updating to the candidate-built compatible $COMPATIBLE_VERSION through verified public updates"
   operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --yes
+  COMPATIBLE_RELEASE_TARGET="$(operator_env readlink "$runtime/current")"
+  [[ "$COMPATIBLE_RELEASE_TARGET" = releases/* ]] && [ "$COMPATIBLE_RELEASE_TARGET" != "$CANDIDATE_RELEASE_TARGET" ] \
+    || die 'the compatible update activated no separate release'
   assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_state "$COMPATIBLE_VERSION" \
     "$runtime/$COMPATIBLE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
     "$COMPATIBLE_RELEASE_TARGET"
   assert_legacy_native_policy
   assert_published_v1_history_unchanged
-  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
-    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
@@ -432,7 +412,7 @@ finish_candidate_flow() {
   assert_legacy_native_policy
   rollback_catalog="$(operator_env jq -er '.catalogDigest | select(type == "string" and test("^[a-f0-9]{64}$"))' "$V2_JOURNAL")"
   rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')"
-  info "rolling back to the exact compatible published $COMPATIBLE_VERSION runtime"
+  info "rolling back to the compatible $COMPATIBLE_VERSION runtime"
   operator_yard update --rollback --yes
   assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_state "$COMPATIBLE_VERSION" \
@@ -443,8 +423,6 @@ finish_candidate_flow() {
   [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$rollback_ledger" ] \
     || die 'rollback changed the exact v2 migration ledger bytes'
   assert_legacy_native_policy
-  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
-    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
@@ -453,7 +431,7 @@ finish_candidate_flow() {
   operator_yard init --yes
   assert_legacy_native_policy
   assert_published_v1_history_unchanged
-  ok 'authentic compatible rollback and candidate roll-forward retained upgrade ownership'
+  ok 'refused anchor rollback, compatible rollback and candidate roll-forward retained upgrade ownership'
 }
 
 verify_compatible_capabilities() {

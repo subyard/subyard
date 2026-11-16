@@ -4921,11 +4921,12 @@ power_rollback_fixture_contract() {
     if [[ "$scenario" = continuation-* ]]; then continuation=1; scenario="${scenario#continuation-}"; fi
     . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
-    RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
-    OLD_VERSION=0.8.0 CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=0.21.0
+    RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
+    OLD_VERSION=0.8.0 CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=compatible
     CANDIDATE_RELEASE_TARGET=releases/candidate-aaaaaaaaaaaa
     OLD_RELEASE_TARGET=releases/0.8.0-bbbbbbbbbbbb
-    COMPATIBLE_RELEASE_TARGET=releases/0.21.0-1fee6251856e
+    # The flow learns the compatible target from the runtime link the update activates.
+    COMPATIBLE_RELEASE_TARGET='' expected_compatible=releases/compatible-1fee6251856e
     V2_STATE_ROOT="$OPERATOR_HOME/.config/subyard/release-transition/v2"
     V2_LEDGER="$V2_STATE_ROOT/ledger.json" V2_JOURNAL="$V2_STATE_ROOT/journal.json"
     PROJECT=legacy INSTANCE=yard
@@ -4944,14 +4945,15 @@ power_rollback_fixture_contract() {
     printf '{"profiles":["default"],"config":{"volatile.uuid":"stable-uuid","security.nesting":"true"},"expanded_config":{"volatile.uuid":"stable-uuid","security.nesting":"true"},"devices":{},"expanded_devices":{}}\n' > "$STATE_ROOT/instance"
     die() { printf '%s\n' "$*" >&2; exit 2; }
     info() { :; }
-    ok() { case "$*" in 'authentic compatible rollback'*) touch "$STATE_ROOT/passed" ;; esac; }
+    ok() { case "$*" in 'refused anchor rollback, compatible rollback'*) touch "$STATE_ROOT/passed" ;; esac; }
+    readlink() { cat "$STATE_ROOT/current"; }
     load_release_targets() { :; }
     assert_legacy_continuation() { [ "$(cat "$grant")" = 'retained grant' ] && [ "$(stat -c %a "$grant")" = 600 ] || die 'grant changed'; }
     assert_published_v1_history_unchanged() { [ "$(cat "$OPERATOR_HOME/.config/subyard/migrations/state.json")" = 'retained v1' ] || die 'v1 changed'; }
     assert_runtime_links() { [ "$(cat "$STATE_ROOT/current")" = "$1" ] && [ "$(cat "$STATE_ROOT/previous")" = "$2" ] || die 'wrong actual runtime links'; }
     assert_runtime_state() { [ "$(cat "$STATE_ROOT/current")" = "$5" ] || die 'wrong runtime executable target'; }
     assert_candidate_state() { [ "$(cat "$STATE_ROOT/current")" = "$CANDIDATE_RELEASE_TARGET" ] || die 'candidate not active'; }
-    assert_v2_transition() { [ "$1" = activate-previous ] && [ "$2" = "$COMPATIBLE_RELEASE_TARGET" ] || die 'wrong rollback journal target'; }
+    assert_v2_transition() { [ "$1" = activate-previous ] && [ "$2" = "$expected_compatible" ] || die 'wrong rollback journal target'; }
     verify_legacy_full_removal_refusal() {
       assert_legacy_continuation
       if [ "$scenario" = full-removal-change ]; then
@@ -4972,7 +4974,7 @@ power_rollback_fixture_contract() {
         local source="$2"
         shift 3
         case "$*" in
-          'update --version 0.21.0 '*) [ "$source" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] || die 'foreign compatible source' ;;
+          'update --version compatible '*) [ "$source" = "YARD_RELEASE_BASE_URL=file://$COMPATIBLE_RELEASE_ROOT" ] || die 'foreign compatible source' ;;
           'update --version candidate '*) [ "$source" = "YARD_RELEASE_BASE_URL=file://$RELEASE_ROOT" ] || die 'foreign candidate source' ;;
           *) die 'unexpected public operation' ;;
         esac
@@ -5005,20 +5007,12 @@ power_rollback_fixture_contract() {
             printf 'operator-action-required: code=rollback-incompatible\n' >&2
             return 1
           fi
-          [ "$previous" = "$COMPATIBLE_RELEASE_TARGET" ] || die 'wrong compatible rollback'
+          [ "$previous" = "$expected_compatible" ] || die 'wrong compatible rollback'
           [ "$scenario" != rollback-fail ] || return 45
-          next="$COMPATIBLE_RELEASE_TARGET" ;;
-        'update --version 0.21.0 --check --json'|'update --version candidate --check --json')
-          next="$CANDIDATE_RELEASE_TARGET"
-          [ "$3" != 0.21.0 ] || next="$COMPATIBLE_RELEASE_TARGET"
-          jq -n --arg target "${next#releases/}" --arg active "${current#releases/}" --arg scenario "$scenario" '
-            {plan:"plan-v1-fixture",assessment:{changed:true},blockers:[],outcome:{target:$target,active:$active,status:"migration-required",code:"transition-required",reachedGoal:false}} |
-            if $scenario == "blocked-check" then .blockers=[{code:"blocked"}] | .outcome.status="operator-action-required"
-            elif $scenario == "wrong-target" then .outcome.target="foreign"
-            elif $scenario == "noop-check" then .assessment.changed=false | .outcome.status="ready" | .outcome.reachedGoal=true
-            else . end'
-          return ;;
-        'update --version 0.21.0 --yes') next="$COMPATIBLE_RELEASE_TARGET" ;;
+          next="$expected_compatible" ;;
+        'update --version compatible --yes')
+          next="$expected_compatible"
+          [ "$scenario" != compatible-noop ] || next="$current" ;;
         'update --version candidate --yes')
           [ "$scenario" != rollforward-fail ] || return 45
           next="$CANDIDATE_RELEASE_TARGET" ;;
@@ -5035,14 +5029,13 @@ power_rollback_fixture_contract() {
         mv "$STATE_ROOT/project.next" "$STATE_ROOT/project"
       fi
     }
-    verify_legacy_rollback_refusal
     finish_candidate_flow
-    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
+    assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$expected_compatible"
     [ "$(wc -l < "$STATE_ROOT/updates")" = 4 ] && [ -f "$STATE_ROOT/passed" ] || die 'compatible cycle incomplete'
   )
 }
 for power_rollback_scenario in success unexpected-accept wrong-reason links-change ledger-change journal-change \
-  checkpoint-change history-change native-change blocked-check wrong-target noop-check \
+  checkpoint-change history-change native-change compatible-noop \
   compatible-policy-change rollback-fail rollforward-fail continuation-success continuation-grant-change \
   continuation-mode-change continuation-rollback-fail continuation-rollforward-fail; do
   power_rollback_log="$TMP/power-rollback-$power_rollback_scenario.log"

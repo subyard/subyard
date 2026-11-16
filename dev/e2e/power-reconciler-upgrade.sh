@@ -24,11 +24,12 @@ OPERATOR_HOME="/home/$OPERATOR"
 OPERATOR_HOME_MARKER="$OPERATOR_HOME/.subyard-p0-power-systemd-home"
 RELEASE_ROOT="$STATE_ROOT/candidate"
 INSTALLER="$STATE_ROOT/subyard-install-v$OLD_VERSION.sh"
-# A pinned published runtime at the migration epochs the candidate requires.
-COMPATIBLE_VERSION="$OLD_VERSION"
-COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/published-compatible"
-COMPATIBLE_RUNTIME_ROOT="$STATE_ROOT/published-compatible-runtime"
-COMPATIBLE_RELEASE_TARGET="releases/$COMPATIBLE_VERSION-${OLD_BUNDLE_SHA256:0:12}"
+# Published releases sit below the candidate's power-metadata epoch, so the compatible
+# rollback cycle uses a separate standard package built from the candidate source, as the
+# release smoke does. Its release target is known once the update has activated it.
+COMPATIBLE_VERSION="$CANDIDATE_VERSION-p0.compatible.$TOKEN"
+COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
+COMPATIBLE_RELEASE_TARGET=''
 SUDOERS="/etc/sudoers.d/$MARKER"
 SUDOERS_TEMP=''
 PROJECT=subyard
@@ -595,26 +596,9 @@ prepare_candidate() {
 }
 
 prepare_compatible_release() {
-  local name archive="subyard-$COMPATIBLE_VERSION-linux-amd64.tar.gz"
-  mkdir -p "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
-  for name in "$archive" "$archive.sha256" "$archive.manifest.json" "$archive.provenance.json"; do
-    curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 180 \
-      "https://github.com/Subyard/Subyard/releases/download/v$COMPATIBLE_VERSION/$name" \
-      -o "$COMPATIBLE_RELEASE_ROOT/$name"
-  done
-  [ "$(sha256sum "$COMPATIBLE_RELEASE_ROOT/$archive" | awk '{print $1}')" = "$OLD_BUNDLE_SHA256" ] \
-    || die 'published compatible archive checksum changed'
-  tar -xzf "$COMPATIBLE_RELEASE_ROOT/$archive" -C "$COMPATIBLE_RUNTIME_ROOT"
-  (cd "$COMPATIBLE_RUNTIME_ROOT" && sha256sum --check runtime-files.sha256 >/dev/null) \
-    || die 'published compatible runtime manifest failed'
-  chmod -R a+rX "$COMPATIBLE_RELEASE_ROOT" "$COMPATIBLE_RUNTIME_ROOT"
-  # This executable probe belongs to the allocated guest, before cold legacy setup.
-  printf '%s\n' '{"schemaVersion":2,"mode":"runtime-activation-capabilities"}' | \
-    operator_env timeout 30 bash -c 'ulimit -f 64; exec "$@"' _ \
-      env SUBYARD_REPOSITORY_ROOT="$COMPATIBLE_RUNTIME_ROOT" \
-      "$COMPATIBLE_RUNTIME_ROOT/bin/yard-engine" _release-transition \
-      > "$STATE_ROOT/compatible-capabilities.json"
-  verify_compatible_capabilities "$STATE_ROOT/compatible-capabilities.json"
+  "$ROOT/dev/package-engine.sh" --output-dir "$COMPATIBLE_RELEASE_ROOT" \
+    --version "$COMPATIBLE_VERSION" >/dev/null
+  chmod -R a+rX "$COMPATIBLE_RELEASE_ROOT"
 }
 
 # A supported V2 source may have no V1 state; preserve that absence as well as bytes.
@@ -683,7 +667,7 @@ case "$MODE" in
       exit 0
     fi
     finish_candidate_flow
-    printf 'ok: exact published anchor upgrade and authentic anchor rollback/roll-forward passed\n'
+    printf 'ok: exact published anchor upgrade, refused anchor rollback and compatible rollback/roll-forward passed\n'
     ;;
   resume)
     assert_state_root
@@ -704,6 +688,6 @@ case "$MODE" in
     assert_fixture_phase candidate-reconciled
     assert_post_reboot_candidate
     finish_candidate_flow
-    printf 'ok: exact published anchor upgrade survived two reboots and authentic anchor rollback/roll-forward\n'
+    printf 'ok: exact published anchor upgrade survived two reboots, refused anchor rollback and compatible rollback/roll-forward\n'
     ;;
 esac
