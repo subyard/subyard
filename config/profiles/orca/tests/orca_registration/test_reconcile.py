@@ -2397,6 +2397,21 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
                                            if item["repoId"] == self.repo["id"]))
 
+    def test_foreign_tab_without_identity_still_shares_its_pty(self):
+        self.rpc.snapshots = [
+            {"worktree": self.repo["id"] + "::" + self.repo["path"],
+             "tabs": [{"id": "mine", "type": "terminal", "ptyId": "shared"}]},
+            {"worktree": self.other["id"] + "::" + self.other["path"], "tabs": [{"type": "terminal", "ptyId": "shared"}]},
+        ]
+        self.rpc.terminals = [self.terminal(self.repo, "shared", "h")]
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(set(), self.rpc.killed)
+        self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"]))
+
+
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
         import fcntl
@@ -2443,14 +2458,18 @@ class OwnershipInvariantTests(unittest.TestCase):
             pass
 
     def states(self):
-        tab_opts = [None] + [(o, p, h) for o in "AB" for p in ("p", "q", None) for h in (None, "hx")]
+        tab_opts = [None] + [(o, p, h, True) for o in "AB" for p in ("p", "q", None) for h in (None, "hx")]
+        # The second tab may also lack any identity while still naming a PTY.
+        second = tab_opts[:7] + [(o, p, None, False) for o in "AB" for p in ("p", "q")]
         row_opts = [None] + [(o, host, p, h) for o in "AB" for host in ("local", "remote")
                              for p in ("p", "q") for h in ("unique", "hx")]
-        for t1, t2, r1, r2 in itertools.product(tab_opts, tab_opts[:7], row_opts, row_opts):
+        for t1, t2, r1, r2 in itertools.product(tab_opts, second, row_opts, row_opts):
             snapshots = {}
             for index, tab in enumerate((t1, t2)):
                 if tab:
-                    item = {"id": "t%d" % index, "ptyId": tab[1]}
+                    item = {"ptyId": tab[1]}
+                    if tab[3]:
+                        item["id"] = "t%d" % index
                     if tab[2]:
                         item["terminal"] = tab[2]
                     snapshots.setdefault(self.WT[tab[0]], []).append(item)

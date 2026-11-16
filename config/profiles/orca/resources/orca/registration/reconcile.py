@@ -649,6 +649,11 @@ def _ownership(repo, catalog, snapshots, terminals):
     for item in snapshots:
         who = owner(item["worktree"])
         for tab in item["tabs"]:
+            keys = mentioned if who == repo["id"] else set()
+            if isinstance(tab, dict):
+                # Claimed even for a tab without identity: its PTY and handle are still shared.
+                claim("pty", tab.get("ptyId"), who, keys)
+                claim("handle", tab.get("terminal"), who, keys)
             parent = (tab.get("parentTabId") or tab.get("id")) if isinstance(tab, dict) else None
             if not isinstance(parent, str) or not parent:
                 # A tab without identity cannot be addressed exactly: its record stays protected.
@@ -658,10 +663,7 @@ def _ownership(repo, catalog, snapshots, terminals):
                     mentioned.add(key)
                     tabs.append((item["worktree"], None))
                 continue
-            keys = mentioned if who == repo["id"] else set()
             claim("tab", parent, who, keys)
-            claim("pty", tab.get("ptyId"), who, keys)
-            claim("handle", tab.get("terminal"), who, keys)
             if who == repo["id"]:
                 tabs.append((item["worktree"], parent))
     for terminal in terminals:
