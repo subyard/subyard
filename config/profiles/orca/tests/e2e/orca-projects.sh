@@ -15,6 +15,8 @@ ORIGINAL_HOME="$HOME"
 
 stage() { printf 'orca-projects-e2e: %s\n' "$*" >&2; }
 die() { printf 'orca-projects-e2e: %s\n' "$*" >&2; exit 1; }
+# shellcheck source=config/profiles/orca/tests/e2e/orca-lane-output.bash
+. "$ROOT/config/profiles/orca/tests/e2e/orca-lane-output.bash"
 
 [ "${SUBYARD_E2E_ORCA_PROJECTS:-}" = 1 ] \
   || die 'set SUBYARD_E2E_ORCA_PROJECTS=1 inside a disposable test host'
@@ -193,6 +195,17 @@ assert_no_managed_duplicates() {
     || die 'Orca contains duplicate managed project groups'
 }
 rpc_params() { jq -cn "$@"; }
+# Make the installed Orca hook fail as busy, without changing any installed file: hold its
+# registration lock exclusively, so the hook's bounded shared-lock wait expires.
+hold_registration_lock() {
+  registration_lock_pid="$(guest_root sh -c \
+    'flock -x /usr/local/libexec/subyard/orca-registration.lock sleep 600 </dev/null >/dev/null 2>&1 & echo $!')" \
+    || die 'the Orca registration lock could not be held'
+  sleep 1
+}
+release_registration_lock() {
+  guest_root kill "$registration_lock_pid" 2>/dev/null || true
+}
 worktree_tabs() {
   orca_rpc session.tabs.listAll | jq -r --arg worktree "$1" \
     '.snapshots[] | select(.worktree == $worktree) | .tabs[] | .id'
@@ -591,14 +604,21 @@ entries[0].pop('confirmed_repos')
 path.write_text(json.dumps(state))
 YARD
   fi
-  orca_hook=/usr/local/libexec/subyard/projects-changed.d/orca
   if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
-    # Recovery modes: the removal hook does not run, so sync or discovery alone must clean up.
-    guest_root chmod a-x "$orca_hook"
+    # Recovery modes: the removal hook fails, so sync or discovery alone must clean up.
+    hold_registration_lock
   fi
   yard remove "$removal_name" --yes >"$STATE/remove-$mode.out" 2>"$STATE/remove-$mode.err" \
-    || die "project removal failed: $mode"
+    || { show_output "$STATE/remove-$mode.out" "$STATE/remove-$mode.err"; die "project removal failed: $mode"; }
+  hook_failed=no
   if grep -Fq 'optional agent project hook failed' "$STATE/remove-$mode.out" "$STATE/remove-$mode.err"; then
+    hook_failed=yes
+  fi
+  if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
+    release_registration_lock
+    [ "$hook_failed" = yes ] || { show_output "$STATE/remove-$mode.err"; die "the held lock did not fail the removal hook: $mode"; }
+  elif [ "$hook_failed" = yes ]; then
+    show_output "$STATE/remove-$mode.out" "$STATE/remove-$mode.err"
     die "removal hook failed: $mode"
   fi
   guest_dev test ! -e "$removal_root" || die 'project removal left its workspace behind'
@@ -622,12 +642,12 @@ YARD
         || die 'the removal hook kept a saved or agent-session tab of the removed project'
     done
   elif [ "$mode" = sync ] || [ "$mode" = periodic ]; then
-    guest_root chmod 0755 "$orca_hook"
     [ "$(repo_id "$removal_root")" = "$removal_id" ] \
-      || die 'recovery precondition lost: the disabled removal hook still cleaned up'
+      || die 'recovery precondition lost: the failed removal hook still cleaned up'
     if [ "$mode" = sync ]; then
       yard orca sync --yes >"$STATE/remove-retry-$mode.out" 2>"$STATE/remove-retry-$mode.err" \
-        || die 'sync did not recover the removed project cleanup'
+        || { show_output "$STATE/remove-retry-$mode.out" "$STATE/remove-retry-$mode.err"
+             die 'sync did not recover the removed project cleanup'; }
     else
       resume_discovery
       for _ in $(seq 1 60); do
@@ -663,22 +683,26 @@ protected_id="$(repo_id "$protected_root")" || die 'protected fixture registrati
 protected_tab="$(orca_rpc session.tabs.createTerminal "$(rpc_params --arg selector "id:$protected_id::$protected_root" \
   '{worktree:$selector,activate:false,clientMutationId:"orca-projects-protected"}')" | jq -er '.tab.id')" \
   || die 'protected fixture tab was not created'
-orca_hook=/usr/local/libexec/subyard/projects-changed.d/orca
-guest_root chmod a-x "$orca_hook"
-yard remove "$protected_name" --yes >/dev/null || die 'protected fixture removal failed'
+hold_registration_lock
+yard remove "$protected_name" --yes >"$STATE/protected-remove.out" 2>"$STATE/protected-remove.err" \
+  || { show_output "$STATE/protected-remove.out" "$STATE/protected-remove.err"; die 'protected fixture removal failed'; }
 # A directory without project metadata at the address, such as a bind mountpoint.
 guest_dev mkdir "/srv/workspaces/$protected_name"
-guest_root chmod 0755 "$orca_hook"
-yard orca status >"$STATE/protected-status.out" 2>"$STATE/protected-status.err" || die 'status failed for a protected record'
+release_registration_lock
+yard orca status >"$STATE/protected-status.out" 2>"$STATE/protected-status.err" \
+  || { show_output "$STATE/protected-status.out" "$STATE/protected-status.err"; die 'status failed for a protected record'; }
 grep -F "$protected_root" "$STATE/protected-status.out" "$STATE/protected-status.err" | grep -Fvq '[warn]' \
-  || die 'status did not show the protected record as information'
+  || { show_output "$STATE/protected-status.out" "$STATE/protected-status.err"
+       die 'status did not show the protected record as information'; }
 yard orca up --yes >"$STATE/protected-up.out" 2>"$STATE/protected-up.err" \
-  || die 'orca up did not settle with only a protected removed record'
+  || { show_output "$STATE/protected-up.out" "$STATE/protected-up.err"
+       die 'orca up did not settle with only a protected removed record'; }
 if yard orca sync --yes >"$STATE/protected-sync.out" 2>"$STATE/protected-sync.err"; then
   die 'explicit sync accepted a retained removed-project record'
 fi
 grep -Fq 'cleanup is retained' "$STATE/protected-sync.out" "$STATE/protected-sync.err" \
-  || die 'strict sync omitted the retained cleanup message'
+  || { show_output "$STATE/protected-sync.out" "$STATE/protected-sync.err"
+       die 'strict sync omitted the retained cleanup message'; }
 [ "$(repo_id "$protected_root")" = "$protected_id" ] || die 'a protected record was removed'
 worktree_tabs "$protected_id::$protected_root" | grep -Fxq "$protected_tab" || die 'a protected tab was closed'
 guest_dev rmdir "/srv/workspaces/$protected_name"
