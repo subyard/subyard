@@ -106,6 +106,15 @@ func (reconciler *profileRuntimeActivationReconciler) observedTargets(ctx contex
 	return operation, targets, yardRefusals, nil
 }
 
+// probedFailure re-probes the guest after a handler failure: a lost guest agent
+// becomes that yard's typed finding, keeping the handler's public diagnostic.
+func (reconciler *profileRuntimeActivationReconciler) probedFailure(ctx context.Context, operation *CLI, target configTarget, err error) error {
+	if reconciler.id != "key-tools-runtime" && operation.guestAgentLost(ctx, target) {
+		return guestAgentLostError{target.Name, err}
+	}
+	return err
+}
+
 // uninitialized reports a yard left to its own init; host key tools never are.
 func (reconciler *profileRuntimeActivationReconciler) uninitialized(ctx context.Context, operation *CLI, target configTarget) (bool, error) {
 	if reconciler.id == "key-tools-runtime" {
@@ -202,6 +211,7 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		}
 		state, err := reconciler.observeTarget(ctx, operation, target)
 		if err != nil {
+			err = reconciler.probedFailure(ctx, operation, target, err)
 			failures = append(failures, reconciler.failure(target.Name, "inspect", err))
 			continue
 		}
@@ -338,7 +348,7 @@ func (reconciler *profileRuntimeActivationReconciler) reconcileTarget(ctx contex
 		}
 		state, err := observe()
 		if err != nil {
-			return reconciler.failure(target.Name, "inspect", err)
+			return reconciler.failure(target.Name, "inspect", reconciler.probedFailure(ctx, operation, target, err))
 		}
 		if reconciler.recovery != nil {
 			if _, exists := reconciler.recovery[target.Name]; !exists {
@@ -383,7 +393,7 @@ func (reconciler *profileRuntimeActivationReconciler) reconcileTarget(ctx contex
 		if err := apply(ctx, reconciler.id, operation.ensureOperationID(), state.Actual, state.Desired); err != nil {
 			var yardFailure *reconcileruntime.ProfileRuntimeYardFailure
 			if !errors.As(err, &yardFailure) || yardFailure.Yard != target.Name {
-				return reconciler.failure(target.Name, "apply", err)
+				return reconciler.failure(target.Name, "apply", reconciler.probedFailure(ctx, operation, target, err))
 			}
 			if recordErr := reconciler.recordPending(target, observe, yardFailure); recordErr != nil {
 				// Without its record the failure stays blocking; both causes are reported.

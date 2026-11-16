@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -248,4 +250,85 @@ func decodeGateRefusal(text []byte) (mutationGateOutcome, error) {
 		}
 	}
 	return outcome, nil
+}
+
+// lostAgentExecutor fails every command in one instance the way a guest agent
+// that does not answer does: an exec transport error, not a guest exit status.
+type lostAgentExecutor struct {
+	ports.InstanceExecutor
+	instance string
+}
+
+func (executor lostAgentExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if instance == executor.instance {
+		return ports.InstanceExecResult{}, errors.New("websocket: guest agent is not responding")
+	}
+	return executor.InstanceExecutor.Exec(ctx, project, instance, request)
+}
+
+// The core probe tells a lost guest agent from a failed handler: the finding
+// keeps the handler's diagnostic, and its next step retries migrate before a
+// forced stop and start.
+func TestLostGuestAgentIsThatYardsFinding(t *testing.T) {
+	scenario := newYardFailureScenario(t, true, true, "default", "named")
+	inspect := scenario.replayReleaseEngine(t)
+	if outcome := scenario.converge(t); outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("baseline: %#v", outcome)
+	}
+	observeFailing(t, scenario, "named")
+	scenario.fixture.cli.options.Executor = lostAgentExecutor{scenario.fixture.cli.options.Executor, scenario.fixture.instanceName(t, "named")}
+	readiness := recordReadiness(t, scenario, inspect)
+	if len(readiness.Inspection.Blockers) != 1 || !strings.Contains(readiness.Inspection.Blockers[0].Message, "guest agent does not answer") ||
+		!strings.Contains(readiness.Inspection.Blockers[0].Message, "stop --force") {
+		payload, _ := json.Marshal(readiness.Inspection.Blockers)
+		t.Fatalf("lost agent finding: %s", payload)
+	}
+	program, _, _, _ := scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
+	outcome, inspection, err := program.inspectMutationGateInspection(context.Background(), "named")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, ok := program.yardScopedGate(outcome, inspection)
+	if !ok || !gate.state("named").unreachable || gate.state("default").repairOnly() ||
+		!strings.HasPrefix(yardNextStep("named", gate.state("named")), "yard migrate;") {
+		t.Fatalf("lost agent gate: ok=%t %#v", ok, gate)
+	}
+}
+
+// Status states the release once and each finding under its own yard.
+func TestStatusReportsYardFindingsUnderTheirYard(t *testing.T) {
+	scenario := newYardFailureScenario(t, true, true, "default", "named")
+	inspect := scenario.replayReleaseEngine(t)
+	scenario.converge(t)
+	observeFailing(t, scenario, "named")
+	recordReadiness(t, scenario, inspect)
+	program, _, stdout, _ := scenario.fixture.program(t, []string{"status"}, nil, func(nestedCall, io.Writer) int { return 0 })
+	program.Run(context.Background())
+	output := stdout.String()
+	if strings.Count(output, "release  active and complete; yard named needs attention") != 1 ||
+		strings.Count(output, "attention yard named: profile sample-runtime observation failed") != 1 || strings.Contains(output, "NOT OK") {
+		t.Fatalf("status: %s", output)
+	}
+}
+
+// While an activation of the active release is unfinished, stopping one local
+// yard is the only new exit; teardown and other lifecycle commands stay gated.
+// (Init keeps its own embedded resume of the unfinished transition.)
+func TestUnfinishedActivationAdmitsOnlyYardStop(t *testing.T) {
+	scenario := newYardFailureScenario(t, false, false, "default", "named")
+	inspect := scenario.replayReleaseEngine(t)
+	scenario.runtime.failing(t, "named", true)
+	if outcome := scenario.converge(t); outcome.ReachedGoal {
+		t.Fatalf("fixture activation did not stop: %#v", outcome)
+	}
+	if journal := scenario.journal(t); journal.Checkpoint != releasetransition.JournalReconciling {
+		t.Fatalf("journal: %s", journal.Checkpoint)
+	}
+	recordReadiness(t, scenario, inspect)
+	requireGate(t, scenario, []gateCase{
+		{arguments: []string{"-Y", "named", "stop"}},
+		{arguments: []string{"-Y", "named", "stop", "--force"}},
+		{arguments: []string{"-Y", "named", "teardown", "--yes"}, refused: true},
+		{arguments: []string{"-Y", "default", "start"}, refused: true},
+	})
 }

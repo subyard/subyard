@@ -22,14 +22,16 @@ import (
 
 // yardGateState is what the gate knows about one implicated yard.
 type yardGateState struct {
-	failed, drift, pending, config bool
+	failed, drift, pending, config, unreachable bool
 	// messages are the yard's distinct causes in report order.
 	messages []string
 	retry    string
 }
 
 // repairOnly reports a yard that admits only its repair commands.
-func (state yardGateState) repairOnly() bool { return state.failed || state.drift || state.config }
+func (state yardGateState) repairOnly() bool {
+	return state.failed || state.drift || state.config || state.unreachable
+}
 
 type yardGate struct {
 	yards map[string]*yardGateState
@@ -80,7 +82,7 @@ func (cli *CLI) yardScopedGate(outcome *releasetransition.Outcome, inspection *r
 			kind, yard, found := strings.Cut(decision.Result, " ")
 			if !ok || !found || decision.Decision != releasetransition.DecisionPreserve || !domain.SafeName(yard) ||
 				!slices.Contains([]string{releasetransition.YardFindingDrift, releasetransition.YardFindingFailed,
-					releasetransition.YardFindingPending, releasetransition.YardFindingConfig}, kind) {
+					releasetransition.YardFindingPending, releasetransition.YardFindingConfig, releasetransition.YardFindingUnreachable}, kind) {
 				return gate, false
 			}
 			attribution[owner] = append(attribution[owner], attributed{kind, yard})
@@ -125,7 +127,7 @@ func (cli *CLI) yardScopedGate(outcome *releasetransition.Outcome, inspection *r
 			continue
 		}
 		owner, ok := activationOwner(blocker.Resource)
-		if !ok || !owned(owner, releasetransition.YardFindingFailed, releasetransition.YardFindingConfig) {
+		if !ok || !owned(owner, releasetransition.YardFindingFailed, releasetransition.YardFindingConfig, releasetransition.YardFindingUnreachable) {
 			return gate, false
 		}
 	}
@@ -145,6 +147,8 @@ func (cli *CLI) yardScopedGate(outcome *releasetransition.Outcome, inspection *r
 				state.drift = drift[owner] || state.drift
 			case releasetransition.YardFindingFailed:
 				state.failed = true
+			case releasetransition.YardFindingUnreachable:
+				state.unreachable = true
 			case releasetransition.YardFindingPending:
 				state.pending = true
 			case releasetransition.YardFindingConfig:
@@ -267,6 +271,8 @@ func yardNextStep(yard string, state yardGateState) string {
 	switch {
 	case state.config:
 		return "correct the yard's configuration, then yard -Y " + yard + " config validate"
+	case state.unreachable:
+		return "yard migrate; if the guest agent still does not answer: yard -Y " + yard + " stop --force, yard -Y " + yard + " start, yard migrate"
 	case state.failed:
 		return "yard -Y " + yard + " init"
 	case state.drift:
@@ -369,4 +375,47 @@ func (cli *CLI) unfinishedActivationStop(ctx context.Context, yard string, outco
 	}
 	loaded, err := cli.loadContext(yard)
 	return err == nil && loaded.Context.AccessKind == domain.AccessLocal
+}
+
+// statusYardGate classifies the local release for status when it is neither
+// ready nor unknown; only then is the release reported once for all yards.
+func (cli *CLI) statusYardGate(ctx context.Context, readiness *domain.ReleaseReadiness) (yardGate, bool) {
+	if readiness == nil || readiness.Status == string(releasetransition.StatusReady) || readiness.Status == "unknown" {
+		return yardGate{}, false
+	}
+	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, "default")
+	if err != nil || outcome == nil {
+		return yardGate{}, false
+	}
+	return cli.yardScopedGate(outcome, inspection)
+}
+
+// releaseLine states the release once; the protocol word ready is never used
+// for a non-ready status.
+func (gate yardGate) releaseLine() string {
+	names := gate.order
+	if gate.everyYard {
+		names = []string{"default"}
+	}
+	subject := "yard " + strings.Join(names, ", ")
+	if len(names) > 1 {
+		subject = "yards " + strings.Join(names, ", ")
+	}
+	return "release  active and complete; " + subject + " needs attention"
+}
+
+// printYardAttention prints one yard's findings under it, with its next step.
+func (cli *CLI) printYardAttention(gate yardGate, yard string) {
+	state := gate.state(yard)
+	if _, implicated := gate.yards[yard]; !implicated && !gate.everyYard {
+		return
+	}
+	messages := state.messages
+	if len(messages) == 0 {
+		messages = []string{"this yard needs attention"}
+	}
+	for _, message := range messages {
+		fmt.Fprintf(cli.options.Stdout, "  attention %s\n", message)
+	}
+	fmt.Fprintf(cli.options.Stdout, "    next: %s\n", yardNextStep(yard, state))
 }

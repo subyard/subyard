@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -111,6 +112,10 @@ func activationYardFindings(err error, yard string, hostWide bool, home string) 
 	if errors.As(err, &inner) {
 		return activationYardFindings(inner, yard, hostWide, home)
 	}
+	var lost guestAgentLostError
+	if errors.As(err, &lost) && domain.SafeName(lost.yard) {
+		return []releasetransition.V2YardAttribution{{Yard: lost.yard, Kind: releasetransition.YardFindingUnreachable}}, true
+	}
 	var source *config.SourceError
 	if errors.As(err, &source) {
 		name := configSourceYard(home, source.Path)
@@ -155,4 +160,51 @@ func onlyYardConfigRefusals(err error, home string) bool {
 		attributed = attributed && finding.Kind == releasetransition.YardFindingConfig && finding.Yard != "default"
 	}
 	return attributed
+}
+
+// guestAgentProbeTimeout bounds the core's one liveness command in a guest.
+const guestAgentProbeTimeout = 10 * time.Second
+
+// guestAgentLost probes a yard after a failed observation: Incus reports the
+// instance running, yet a trivial command cannot run in it, or does not finish
+// in time. A guest exit status is an answer, so the agent is not lost.
+func (cli *CLI) guestAgentLost(ctx context.Context, target configTarget) bool {
+	incus, executor := cli.statusPorts()
+	if incus == nil || executor == nil || ctx.Err() != nil {
+		return false
+	}
+	instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)
+	if err != nil || !strings.EqualFold(instance.Status, "running") {
+		return false
+	}
+	probe, cancel := context.WithTimeout(ctx, guestAgentProbeTimeout)
+	defer cancel()
+	_, err = executor.Exec(probe, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, ports.InstanceExecRequest{Command: []string{"true"}})
+	var exit *ports.GuestExitError
+	return err != nil && ctx.Err() == nil && !errors.As(err, &exit)
+}
+
+// guestAgentLostError keeps an owner's own public diagnostic and adds that the
+// guest agent of a running yard does not answer, with its repair sequence.
+type guestAgentLostError struct {
+	yard  string
+	cause error
+}
+
+func (err guestAgentLostError) Error() string {
+	return fmt.Sprintf("yard %s: the guest agent does not answer while Incus reports the yard running: %v", err.yard, err.cause)
+}
+
+func (err guestAgentLostError) Unwrap() error { return err.cause }
+
+func (err guestAgentLostError) ActivationDiagnostic() (string, string) {
+	message := fmt.Sprintf("yard %s: the guest agent does not answer while Incus reports the yard running", err.yard)
+	var diagnostic interface{ ActivationDiagnostic() (string, string) }
+	if errors.As(err.cause, &diagnostic) {
+		if own, _ := diagnostic.ActivationDiagnostic(); own != "" {
+			message += " (" + own + ")"
+		}
+	}
+	message += fmt.Sprintf("; retry yard migrate, and if it persists run yard -Y %s stop --force, then yard -Y %s start, then yard migrate", err.yard, err.yard)
+	return message, "run yard migrate"
 }

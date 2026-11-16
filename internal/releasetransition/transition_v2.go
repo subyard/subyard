@@ -148,6 +148,8 @@ const (
 	YardFindingPending = "pending"
 	// YardFindingConfig is a yard whose own configuration source is invalid.
 	YardFindingConfig = "config"
+	// YardFindingUnreachable is a running yard whose guest agent does not answer.
+	YardFindingUnreachable = "unreachable"
 	// YardAttributionScope is the decision scope of one attributed yard finding:
 	// resource activation.<owner>, decision preserve, result "<kind> <yard>".
 	YardAttributionScope = "yard-attribution"
@@ -207,32 +209,32 @@ const (
 )
 
 type v2Observation struct {
-	goal                             Goal
-	links                            ReleaseLinks
-	ledger                           LedgerV2
-	ledgerSnapshot                   ProtectedSnapshot
-	migrationLedgerSnapshot          MigrationLedgerSnapshot
-	checkpointSnapshot               ProtectedSnapshot
-	checkpointAuthority              bool
-	checkpointConsent                bool
-	checkpointConversion             bool
-	checkpointCompaction             bool
-	journal                          *JournalRecord
-	journalSnapshot                  ProtectedSnapshot
-	assessment                       domain.ActionAssessment
-	decisions                        []RedactedDecision
-	blockers                         []Blocker
-	observations                     []ResourceObservation
-	intents                          []PlannerStepIntent
-	work                             []v2Work
-	activationScope                  []v2ActivationScope
-	activationConsequences           []string
-	activationWarnings               []string
+	goal                    Goal
+	links                   ReleaseLinks
+	ledger                  LedgerV2
+	ledgerSnapshot          ProtectedSnapshot
+	migrationLedgerSnapshot MigrationLedgerSnapshot
+	checkpointSnapshot      ProtectedSnapshot
+	checkpointAuthority     bool
+	checkpointConsent       bool
+	checkpointConversion    bool
+	checkpointCompaction    bool
+	journal                 *JournalRecord
+	journalSnapshot         ProtectedSnapshot
+	assessment              domain.ActionAssessment
+	decisions               []RedactedDecision
+	blockers                []Blocker
+	observations            []ResourceObservation
+	intents                 []PlannerStepIntent
+	work                    []v2Work
+	activationScope         []v2ActivationScope
+	activationConsequences  []string
+	activationWarnings      []string
 	// yardAttribution are completed-history findings attributed to yards; the
 	// inspection reports them after planning, never as plan facts.
 	yardAttribution []RedactedDecision
 	// unattributed is set when any yard-scoped finding could not be attributed.
-	unattributed bool
+	unattributed                     bool
 	activationPending                []v2PendingActivation
 	activationObservationFailure     error
 	observationScope                 Fingerprint
@@ -3588,7 +3590,7 @@ func (transition *V2Transition) observeActivation(
 // yard behind the release gate.
 func (observation *v2Observation) attributeYard(owner, kind, yard string) {
 	result := kind + " " + yard
-	if !slices.Contains([]string{YardFindingDrift, YardFindingFailed, YardFindingPending, YardFindingConfig}, kind) ||
+	if !slices.Contains([]string{YardFindingDrift, YardFindingFailed, YardFindingPending, YardFindingConfig, YardFindingUnreachable}, kind) ||
 		!domain.SafeName(yard) || len(result) > maxRedactedText || validateSafeID("activation."+owner, "owner") != nil {
 		observation.unattributed = true
 		return

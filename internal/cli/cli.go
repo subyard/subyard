@@ -1432,6 +1432,14 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 	}
 	results := cli.allOwnerInventoriesForStatus(ctx, loaded)
 	releases := cli.summaryReleaseReadiness(ctx, loaded, results)
+	var localGate yardGate
+	yardScoped := false
+	if len(releases) != 0 {
+		localGate, yardScoped = cli.statusYardGate(ctx, releases[0])
+	}
+	if yardScoped {
+		fmt.Fprintln(cli.options.Stdout, localGate.releaseLine())
+	}
 	code := 0
 	first := true
 	for index, result := range results {
@@ -1458,6 +1466,10 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 				owner = result.inventory.HostID
 			} else if local, err := cli.loadInventoryLoaded(yard.Name, loaded); err == nil {
 				printIgnoredAssignments(cli.options.Stdout, "  ", "", local)
+			}
+			if index == 0 && yardScoped {
+				cli.printYardAttention(localGate, yard.Name)
+				continue
 			}
 			cli.printReleaseReadiness(releases[index], owner)
 		}
@@ -1571,7 +1583,13 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	}
 	fmt.Fprintf(cli.options.Stdout, "  space    %s\n", status.Facts.Space)
 	printIgnoredAssignments(cli.options.Stdout, "  ", "", loaded)
-	cli.printReleaseReadiness(cli.releaseReadiness(ctx), "")
+	readiness := cli.releaseReadiness(ctx)
+	if gate, ok := cli.statusYardGate(ctx, readiness); ok {
+		fmt.Fprintln(cli.options.Stdout, "  "+gate.releaseLine())
+		cli.printYardAttention(gate, loaded.Context.YardName)
+		return 0
+	}
+	cli.printReleaseReadiness(readiness, "")
 	return 0
 }
 
