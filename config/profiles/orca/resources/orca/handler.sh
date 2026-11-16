@@ -1646,8 +1646,13 @@ require_no_resource_arguments() {
 # unit files. State under /srv/agents/orca, the orca-ide package and lingering
 # stay; `orca up` installs Orca again. It runs no installed Orca helper itself.
 ORCA_REMOVE_UNITS=("$ORCA_DISCOVERY_TIMER" "$ORCA_DISCOVERY_UNIT" "$ORCA_UNIT")
-[ "${#ORCA_FIXED_UNIT_FILES[@]}" -eq 3 ] && [ "${ORCA_FIXED_UNIT_FILES[2]##*/}" = "$ORCA_UNIT" ] \
-  || { printf 'invalid Orca fixed unit file list\n' >&2; exit 1; }
+# Every unit entry is the systemd unit file of its unit, in the units' order.
+[ "${#ORCA_FIXED_UNIT_FILES[@]}" -eq "${#ORCA_REMOVE_UNITS[@]}" ] || { printf 'invalid Orca fixed unit file list\n' >&2; exit 1; }
+for orca_index in "${!ORCA_REMOVE_UNITS[@]}"; do
+  [ "${ORCA_FIXED_UNIT_FILES[$orca_index]}" = "/etc/systemd/system/${ORCA_REMOVE_UNITS[$orca_index]}" ] \
+    || { printf 'invalid Orca fixed unit file list\n' >&2; exit 1; }
+done
+unset orca_index
 # Files of a unit that stay while that unit still runs: its stop needs them.
 ORCA_REMOVE_UNIT_FILES=("${ORCA_FIXED_UNIT_FILES[@]}" "${ORCA_FIXED_UNIT_HELPERS[@]}")
 ORCA_REMOVE_PATHS=("${ORCA_FIXED_OTHER_PATHS[@]}")

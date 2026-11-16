@@ -1827,6 +1827,29 @@ grep -Fq 'without scheme, path or port' "$TMP/invalid.out" \
 # The profile's one fixed-path list.
 mapfile -t orca_remove_paths < <(awk '$1 ~ /^(unit|unit-helper|path)$/ {print $2}' "$ROOT/config/profiles/orca/resources/orca/fixed-paths")
 [ "${#orca_remove_paths[@]}" -ge 14 ] || fail 'the Orca fixed-path list is incomplete'
+# Unit entries must name each Orca unit's file in the units' order; a swapped
+# or foreign entry makes the handler refuse to start.
+fixed_check="$TMP/fixed-paths-check"
+rm -rf "$fixed_check"
+mkdir -p "$fixed_check/config/profiles"
+cp -a "$ROOT/config/profiles/orca" "$fixed_check/config/profiles/orca"
+# The copied handler finds the shared scripts through its own source root.
+ln -s "$ROOT/scripts" "$fixed_check/scripts"
+for change in swap foreign; do
+  listing="$fixed_check/config/profiles/orca/resources/orca/fixed-paths"
+  cp "$ROOT/config/profiles/orca/resources/orca/fixed-paths" "$listing"
+  case "$change" in
+    swap) sed -i 's#^unit /etc/systemd/system/subyard-orca-discovery.timer$#unit /etc/systemd/system/subyard-orca-discovery.TMP#;
+      s#^unit /etc/systemd/system/subyard-orca-discovery.service$#unit /etc/systemd/system/subyard-orca-discovery.timer#;
+      s#^unit /etc/systemd/system/subyard-orca-discovery.TMP$#unit /etc/systemd/system/subyard-orca-discovery.service#' "$listing" ;;
+    foreign) sed -i 's#^unit /etc/systemd/system/subyard-orca-discovery.timer$#unit /etc/systemd/system/cron.service#' "$listing" ;;
+  esac
+  if SUBYARD_RESOURCE_MODE=prepare "$fixed_check/config/profiles/orca/resources/orca/handler.sh" is-up >"$TMP/fixed-$change.out" 2>&1; then
+    fail "a $change unit entry in the fixed-path list was accepted"
+  fi
+  grep -Fq 'invalid Orca fixed unit file list' "$TMP/fixed-$change.out" || { cat "$TMP/fixed-$change.out" >&2; fail "a $change unit entry was not refused as an invalid unit list"; }
+done
+rm -rf "$fixed_check"
 # The observer's link check, the apply's link refusal and orca remove read that
 # one list, so they cannot diverge.
 handler_source="$ROOT/config/profiles/orca/resources/orca/handler.sh"
