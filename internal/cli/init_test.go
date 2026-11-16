@@ -102,6 +102,16 @@ type initPlatformFixture struct {
 	hooksApplicable           bool
 	hooksBeforeProfileRuntime bool
 	readyOnProfileRuntime     string
+	// runtimeDeferred models a stopped yard: its profile runtimes are deferred,
+	// never observed converged.
+	runtimeDeferred bool
+	// convergeOnRefresh marks these stages converged on the first execution-time
+	// recheck, as if another init finished them while this plan awaited approval.
+	convergeOnRefresh []ports.ReconcileStageID
+}
+
+func (fixture *initPlatformFixture) ProfileRuntimeObservedConverged(context.Context, string) (bool, error) {
+	return !fixture.runtimeDeferred && fixture.converged[ports.ReconcileStageProfileRuntimes], nil
 }
 
 func (fixture *initPlatformFixture) InstanceExists(context.Context) (bool, error) {
@@ -1360,7 +1370,9 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 	// example by the profile's own command), so init takes its hooks-only path.
 	// "converged-no-hooks": the same with no project hook work left (for
 	// example after the profile removed itself), which is otherwise a no-op init.
-	for _, scenario := range []string{"repair", "converged", "converged-no-hooks", "failure", "declined"} {
+	// "stopped" and "stopped-full": a stopped yard defers its runtimes, so
+	// neither the hooks-only nor the full path may retire the record.
+	for _, scenario := range []string{"repair", "converged", "converged-no-hooks", "stopped", "stopped-full", "failure", "declined"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			// A recorded yard-scoped runtime failure of this yard.
@@ -1376,7 +1388,7 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				t.Fatal(err)
 			}
 			record, _ := activationPendingRecordPath(configHome, "default", "sample-runtime")
-			if scenario == "converged" || scenario == "converged-no-hooks" {
+			if scenario == "converged" || scenario == "converged-no-hooks" || scenario == "stopped" || scenario == "stopped-full" {
 				// A published owner HostID leaves no host step pending.
 				writeCLIFile(t, filepath.Join(configHome, "host-id"), "owner-a\n", 0o600)
 			}
@@ -1385,8 +1397,13 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				platform.converged[stage] = true
 			}
 			platform.converged[ports.ReconcileStageFinalize] = true
-			platform.converged[ports.ReconcileStageProfileRuntimes] = scenario == "converged" || scenario == "converged-no-hooks"
-			platform.hooksApplicable = scenario != "converged-no-hooks"
+			platform.converged[ports.ReconcileStageProfileRuntimes] = scenario != "repair" && scenario != "failure" && scenario != "declined"
+			platform.hooksApplicable = scenario != "converged-no-hooks" && scenario != "stopped"
+			platform.runtimeDeferred = scenario == "stopped" || scenario == "stopped-full"
+			if scenario == "stopped-full" {
+				// Another stage keeps the full path.
+				platform.converged[ports.ReconcileStageExtras] = false
+			}
 			if scenario == "failure" {
 				platform.applyErr = errors.New("injected ProfileRuntime installation failure")
 			}
@@ -1404,6 +1421,15 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 			code := program.Run(context.Background())
 			// Only a converged init resolves the recorded failure.
 			resolved := scenario == "repair" || scenario == "converged" || scenario == "converged-no-hooks"
+			if scenario == "stopped" || scenario == "stopped-full" {
+				if _, err := os.Stat(record); err != nil || code != 0 {
+					t.Fatalf("a stopped yard's init retired the record of an unobserved runtime: code=%d err=%v output=%s", code, err, output.String())
+				}
+				if scenario == "stopped" && !strings.Contains(output.String(), "Everything is already set up") {
+					t.Fatalf("a stopped yard's record counted as init work: %s", output.String())
+				}
+				return
+			}
 			if _, err := os.Stat(record); (err == nil) != !resolved {
 				t.Fatalf("pending record kept=%v after %s: %v", err == nil, scenario, err)
 			}
@@ -2025,5 +2051,58 @@ func TestInitExtrasDetachPreviewReadsNoIncusOnColdHost(t *testing.T) {
 	runtime.Environment = []string{"ENVIRONMENT_PROFILES=bad"}
 	if err := execution.assessExtrasDetach(context.Background(), runtime); err == nil || !strings.Contains(err.Error(), `invalid YARD_DEVICES entry "tape"`) {
 		t.Fatalf("declaration refusal hidden: %v", err)
+	}
+}
+
+// convergingPrompt approves the plan after another init finished a stage.
+type convergingPrompt struct {
+	platform *initPlatformFixture
+	stage    ports.ReconcileStageID
+}
+
+func (prompt convergingPrompt) Confirm(context.Context, domain.ConfirmationRequest) (bool, error) {
+	prompt.platform.converged[prompt.stage] = true
+	return true, nil
+}
+
+// An approved full init that shrinks to its hooks-only remainder before it runs
+// still retires the yard's resolved pending record instead of becoming a no-op.
+func TestInitShrinkingToHooksOnlyStillRetiresResolvedRecord(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	writeRuntimeProfileFixture(t, root)
+	writeCLIFile(t, filepath.Join(root, "config", "profiles", "sample", "profile.json"),
+		`{"schema_version":1,"runtime":{"activation_id":"sample-runtime","handler":"runtime.sh","failure_scope":"yard"}}`, 0o600)
+	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeActivationPendingRecord(configHome, activationPendingRecord{Yard: "default", Project: "p", Instance: "i", Owner: "sample-runtime",
+		Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	record, _ := activationPendingRecordPath(configHome, "default", "sample-runtime")
+	writeCLIFile(t, filepath.Join(configHome, "host-id"), "owner-a\n", 0o600)
+	platform := newInitPlatformFixture()
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	platform.converged[ports.ReconcileStageFinalize] = true
+	platform.converged[ports.ReconcileStageExtras] = false
+	platform.hooksApplicable = false
+	var output bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init"},
+		Environment: environment, WorkingDir: root, Stdout: &output, Stderr: &output,
+		InitPlatform: platform, Stdin: strings.NewReader(""), Prompt: convergingPrompt{platform: platform, stage: ports.ReconcileStageExtras}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("init failed: %d %s", code, output.String())
+	}
+	if _, err := os.Stat(record); !os.IsNotExist(err) {
+		t.Fatalf("a shrunk init left the resolved pending record: %v %s", err, output.String())
+	}
+	if strings.Contains(output.String(), "Everything is already set up") {
+		t.Fatalf("a shrunk init that retired a record reported nothing to do: %s", output.String())
 	}
 }

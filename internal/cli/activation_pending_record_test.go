@@ -142,3 +142,23 @@ func TestInvalidActivationPendingRecordNamesItsPath(t *testing.T) {
 		})
 	}
 }
+
+// A record location that cannot be read names each record relative to the
+// configuration root and reports every owner's refusal, not only the first.
+func TestUnreadablePendingRecordsAreAllNamed(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.MkdirAll(filepath.Join(home, "activation-pending", "v1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The yard's record directory is a file, so no record under it can be read.
+	testkit.WriteFile(t, filepath.Join(home, "activation-pending", "v1", "named"), []byte("not a directory\n"), 0o600)
+	_, err := yardActivationPendingRecords(home, "named", []string{"sample-runtime", "other-runtime"})
+	if err == nil {
+		t.Fatal("unreadable pending records were not refused")
+	}
+	for _, path := range []string{"activation-pending/v1/named/sample-runtime.json", "activation-pending/v1/named/other-runtime.json"} {
+		if !strings.Contains(err.Error(), "pending activation record "+path) {
+			t.Fatalf("refusal omitted %s: %v", path, err)
+		}
+	}
+}

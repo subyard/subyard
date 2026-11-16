@@ -184,6 +184,28 @@ func (runtime Runtime) ObserveProfileRuntime(ctx context.Context, id string) (po
 	return ports.RuntimeObservation{}, errors.New("profile runtime owner is unavailable")
 }
 
+// ProfileRuntimeObservedConverged reports whether a fresh observation of one
+// profile runtime is current or absent. A deferred runtime (a stopped yard) was
+// not observed, so it never counts as converged.
+func (runtime Runtime) ProfileRuntimeObservedConverged(ctx context.Context, activationID string) (bool, error) {
+	definitions, err := runtime.profileRuntimeDefinitions()
+	if err != nil {
+		return false, err
+	}
+	for _, definition := range definitions {
+		if definition.Runtime == nil || definition.Runtime.ActivationID != activationID {
+			continue
+		}
+		observations, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})
+		if err != nil {
+			return false, err
+		}
+		state := observations[activationID].State
+		return state == ports.RuntimeStateCurrent || state == ports.RuntimeStateAbsent, nil
+	}
+	return false, nil
+}
+
 func (runtime Runtime) observeProfileRuntimes(
 	ctx context.Context,
 	definitions []profile.Definition,

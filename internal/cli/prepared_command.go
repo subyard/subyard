@@ -786,8 +786,14 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 		// Another init can finish provisioning while this broader action awaits approval.
 		// Keep its authorized upper bound; execution now performs only the bounded hook retry.
 		if execution.hooksOnly() && prepared.Plan.Assessment.Action == "yard.init.reconcile" {
+			// Resolved pending records still need this init's retirement.
+			records, err := execution.resolvedPendingRecords(ctx, cli)
+			if err != nil {
+				return "", domain.ActionDelta{}, err
+			}
+			execution.pendingRecords = records
 			return "yard.init.reconcile", domain.ActionDelta{
-				Changed: execution.hooksApplicable, Consequences: slices.Clone(prepared.Plan.Assessment.Consequences),
+				Changed: execution.hooksApplicable || len(execution.pendingRecords) != 0, Consequences: slices.Clone(prepared.Plan.Assessment.Consequences),
 			}, nil
 		}
 		return execution.actionPlan()
@@ -799,8 +805,10 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 		}
 	}
 	prepared.printResult = func(domain.AdapterResult) {
-		if execution.hooksOnly() {
+		if execution.hooksOnly() && len(execution.pendingRecords) == 0 {
 			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Everything is already set up")
+		} else if execution.hooksOnly() {
+			fmt.Fprintln(cli.options.Stdout, "  [ ok ] Resolved pending activation records retired")
 		}
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (result domain.AdapterResult, runErr error) {

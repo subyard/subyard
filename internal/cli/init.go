@@ -665,11 +665,9 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 		}
 		execution.platform = runtime
 	}
-	if loaded.Context.AccessKind == domain.AccessLocal {
-		execution.pendingRecords, err = yardActivationPendingRecords(loaded.Context.Paths.ConfigHome, loaded.Context.YardName, cli.yardScopedRuntimeIDs())
-		if err != nil {
-			return nil, err
-		}
+	execution.pendingRecords, err = execution.resolvedPendingRecords(ctx, cli)
+	if err != nil {
+		return nil, err
 	}
 	if execution.hooksOnly() {
 		execution.hooksApplicable, err = execution.projectHooksApplicable(ctx, cli, true)
@@ -773,15 +771,51 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 	return action, delta, nil
 }
 
-// retireResolvedPendingRecords runs on every converged init path: every runtime
-// of this yard is current, so recorded yard-scoped failures are resolved and
-// must not match a later state again.
-func (execution *initExecution) retireResolvedPendingRecords(cli *CLI) error {
+// profileRuntimeObserver observes one profile runtime afresh.
+type profileRuntimeObserver interface {
+	ProfileRuntimeObservedConverged(ctx context.Context, activationID string) (bool, error)
+}
+
+// resolvedPendingRecords are this yard's pending activation records whose owner
+// runtime a fresh observation shows current or absent. A deferred runtime of a
+// stopped yard was not observed, so its record stays for a later init.
+func (execution *initExecution) resolvedPendingRecords(ctx context.Context, cli *CLI) ([]string, error) {
 	if execution.loaded.Context.AccessKind != domain.AccessLocal {
-		return nil
+		return nil, nil
 	}
-	if err := removeYardActivationPendingRecords(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName, cli.yardScopedRuntimeIDs()); err != nil {
+	owners, err := yardActivationPendingRecords(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName, cli.yardScopedRuntimeIDs())
+	if err != nil || len(owners) == 0 {
+		return nil, err
+	}
+	observer, ok := execution.platform.(profileRuntimeObserver)
+	if !ok {
+		return nil, nil
+	}
+	var resolved []string
+	for _, owner := range owners {
+		converged, err := observer.ProfileRuntimeObservedConverged(ctx, owner)
+		if err != nil {
+			return nil, fmt.Errorf("observe profile runtime %s for its pending activation record: %w", owner, err)
+		}
+		if converged {
+			resolved = append(resolved, owner)
+		}
+	}
+	return resolved, nil
+}
+
+// retireResolvedPendingRecords retires, on every converged init path, the
+// records whose owner runtime this init observed converged; they must not match
+// a later state again.
+func (execution *initExecution) retireResolvedPendingRecords(ctx context.Context, cli *CLI) error {
+	owners, err := execution.resolvedPendingRecords(ctx, cli)
+	if err != nil {
 		return fmt.Errorf("retire resolved pending activation records: %w", err)
+	}
+	for _, owner := range owners {
+		if err := removeActivationPendingRecord(execution.loaded.Context.Paths.ConfigHome, execution.loaded.Context.YardName, owner); err != nil {
+			return fmt.Errorf("retire resolved pending activation records: %w", err)
+		}
 	}
 	return nil
 }
@@ -1003,7 +1037,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	}
 	if execution.hooksOnly() {
 		// Every stage, profile runtimes included, was verified current above.
-		if err := execution.retireResolvedPendingRecords(cli); err != nil {
+		if err := execution.retireResolvedPendingRecords(ctx, cli); err != nil {
 			return err
 		}
 		if err := execution.retryProjectHooks(ctx); err != nil {
@@ -1094,7 +1128,7 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 	if err := reconciler.Apply(ctx, approved); err != nil {
 		return err
 	}
-	if err := execution.retireResolvedPendingRecords(cli); err != nil {
+	if err := execution.retireResolvedPendingRecords(ctx, cli); err != nil {
 		return err
 	}
 	if err := execution.retryProjectHooks(ctx); err != nil {

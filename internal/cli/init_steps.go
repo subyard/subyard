@@ -163,6 +163,12 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		}
 	}
 	steps = append(steps, execution.runtimePlan.OperationSteps(target)...)
+	// Retirement runs after the runtimes converge and before the hook retry.
+	if len(execution.pendingRecords) != 0 {
+		appendStep("init.pending-records", target, "no recorded yard-scoped runtime failure remains for this yard",
+			"the yard's pending activation records are absent after its converged runtimes",
+			"retire the yard's resolved local pending activation records: "+strings.Join(execution.pendingRecords, " "), false, false)
+	}
 	// Hooks and final power may become observable only after approved stages.
 	// They stay in the original step set even if those stages converge meanwhile.
 	if execution.hookPlan != nil {
@@ -173,11 +179,6 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 	} else {
 		appendStep("init.project-hooks", target, "retry installed project hooks for the captured project set",
 			"native hook runner reports each installed hook outcome", "retry installed project hooks once for active resources", execution.hooksOnly() && !execution.hooksApplicable, !execution.hooksOnly())
-	}
-	if len(execution.pendingRecords) != 0 {
-		appendStep("init.pending-records", target, "no recorded yard-scoped runtime failure remains for this yard",
-			"the yard's pending activation records are absent after its converged runtimes",
-			"retire the yard's resolved pending activation records: "+strings.Join(execution.pendingRecords, " "), false, false)
 	}
 	appendStep("init.finalize", target, "configured desired power and host boot reconciliation", "native VerifyStage finalize returns converged",
 		"restore and commit the configured desired yard power state", execution.hooksOnly(), !execution.hooksOnly())

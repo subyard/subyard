@@ -149,16 +149,26 @@ func removeActivationPendingRecord(configHome, yard, owner string) error {
 // record for the yard; it never inspects other entries of the record directory.
 func yardActivationPendingRecords(configHome, yard string, owners []string) ([]string, error) {
 	var present []string
+	var refusals []error
 	for _, owner := range owners {
 		path, err := activationPendingRecordPath(configHome, yard, owner)
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
 		if _, err := os.Lstat(path); err == nil {
 			present = append(present, owner)
 		} else if !os.IsNotExist(err) {
-			return nil, err
+			relative, relErr := filepath.Rel(filepath.Clean(configHome), path)
+			if relErr != nil {
+				relative = path
+			}
+			refusals = append(refusals, fmt.Errorf("pending activation record %s cannot be read: %w", filepath.ToSlash(relative), err))
 		}
+	}
+	// Every owner's refusal is reported, not only the first.
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
 	}
 	return present, nil
 }
