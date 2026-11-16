@@ -546,6 +546,8 @@ fresh-resume)
   [ "$(device_state br0)" = connected ] && [ "$(address_of br0)" = 198.19.0.1/24 ] || die 'INCUS_BRIDGE=br0 touched br0'
   grep -Eq 'interface-name:br0(,|$)' "$guard" && die 'the guard lists br0'
   rm -rf "$SUBYARD_CONFIG_HOME/yards/$other"
+  # The refused init may have created that yard's project; it must not hold the shared pool.
+  sudo -n /usr/bin/incus project delete "subyard-$other" >/dev/null 2>&1 || true
   pass 'INCUS_BRIDGE=br0 refuses and leaves the administrator bridge untouched'
 
   # A guard whose veth entries were edited out, read by a restarted NetworkManager: init repairs
