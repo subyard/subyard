@@ -21,7 +21,11 @@ SPLIT = {"vm:p0-full"}
 # two 120s guest cleanups and the 180s lease release.
 PERIODIC_ONLY = [{"id": "periodic:config-sync",
                   "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
-                              "bash", "dev/e2e/config-sync-acceptance.sh", *SLOT]}]
+                              "bash", "dev/e2e/config-sync-acceptance.sh", *SLOT]},
+                 # Physical regression outside the release acceptance catalog; uses the normal candidate bundle.
+                 {"id": "vm:incus-apparmor-probe",
+                  "command": ["dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
+                              "--purpose", "apparmor-probe", "--", "bash", "dev/e2e/incus-apparmor-probe.sh"]}]
 # Veranda GUI SHORT scenarios (veranda/desktop/README.md). They gate no CLI or engine release, so
 # they are periodic only and use their own bundle, which adds the GUI and engine ELFs. A manual
 # check runs only when a dispatch names it.
