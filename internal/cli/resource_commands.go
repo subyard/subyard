@@ -123,8 +123,13 @@ func (cli *CLI) runResourceCommand(
 	if !exact && resourceOwnsIngress(definition, invocation.verb) {
 		// Public ingress and desired startup change only inside a prepared
 		// operation, which takes the owner barrier before the yard lock.
-		cli.errorf("%s: %v: public ingress %s requires a prepared %s plan for an exact mutation; handler returned %s",
-			definition.Command, resource.ErrResourcePlanInvalid, invocation.verb, resource.PrepareAssessmentSchemaV2, native.Schema)
+		if native.Schema != resource.PrepareAssessmentSchemaV2 {
+			cli.errorf("%s: %v: public ingress %s requires a prepared %s plan; handler returned %s",
+				definition.Command, resource.ErrResourcePlanInvalid, invocation.verb, resource.PrepareAssessmentSchemaV2, native.Schema)
+		} else {
+			cli.errorf("%s: %v: public ingress %s must be an exact mutation without external-system impact; declared action %s is not",
+				definition.Command, resource.ErrResourcePlanInvalid, invocation.verb, native.Assessment.Action)
+		}
 		return 1
 	}
 	assessment := native.Assessment

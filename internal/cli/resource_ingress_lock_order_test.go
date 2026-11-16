@@ -56,7 +56,9 @@ func waitForFile(t *testing.T, ctx context.Context, path string) {
 }
 
 // A public-ingress resource verb and a migrate-like owner of the barrier that
-// then needs the yard lock must both finish in either interleaving.
+// then needs the yard lock must both finish in either interleaving. This pins
+// the prepared v2 path's order (owner barrier, then yard lock); the regression
+// for the removed legacy path's deadlock is TestResourceIngressRefusesLegacyPlan.
 func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 	for _, order := range []string{"barrier-first", "verb-first"} {
 		t.Run(order, func(t *testing.T) {
@@ -72,6 +74,10 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 			barrier := make(chan struct{})
 			switch order {
 			case "barrier-first":
+				// Native apply needs no pause here; it must only wait for the barrier.
+				if err := os.WriteFile(filepath.Join(sync, "go"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
 				proceed := make(chan struct{})
 				go func() { holderDone <- migrateLikeHolder(ctx, program, barrier, proceed) }()
 				<-barrier
