@@ -315,7 +315,7 @@ func (source *releaseConfiguration) uninitializedLocked(ctx context.Context, cli
 		return true
 	}
 	incus, _ := cli.statusPorts()
-	if incus == nil || ports.LocalInstallationAbsent(incus) {
+	if ports.LocalInstallationAbsent(incus) {
 		return false
 	}
 	instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)

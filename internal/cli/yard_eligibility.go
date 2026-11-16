@@ -60,7 +60,7 @@ func (cli *CLI) releaseYardUninitialized(ctx context.Context, target configTarge
 		return true, nil
 	}
 	incus, _ := cli.statusPorts()
-	if incus == nil || ports.LocalInstallationAbsent(incus) {
+	if ports.LocalInstallationAbsent(incus) {
 		return false, nil
 	}
 	instance, err := incus.Instance(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName)
