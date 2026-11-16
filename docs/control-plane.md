@@ -1408,6 +1408,16 @@ bounded warning. A successful init of the yard, a converged or
 re-applied owner for that yard and teardown of the yard remove the record through its known owner
 path; other entries of the record directory are never touched.
 
+### Plain update selection
+
+A plain `yard update` selects the stable channel's latest release, but never one with a lower
+semver than the active release (pre-releases order before their release). When the installed
+version is newer, update and `--check` change nothing, download nothing and succeed. They report
+that the installed version is newer than the latest published release, with the active release's
+protected readiness, or `yard migrate --check` without a journal. Only an explicit
+`yard update --version VERSION` selects an older release, under the ordinary candidate inspection.
+An equal version keeps the ordinary same-release inspection.
+
 ### Interrupted release recovery
 
 An unfinished forward update pins its exact target, so a plain `yard update` only resumes it. To
