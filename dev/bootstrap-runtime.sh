@@ -169,11 +169,42 @@ latest_release_tag() (
   printf '%s\n' "$tag"
 )
 
+# active_version_newer ACTIVE LATEST: whether the active release version orders
+# after a stable X.Y.Z latest release. A pre-release orders before its release.
+active_version_newer() {
+  local active="${1%%+*}" latest="$2" core
+  core="${active%%-*}"
+  [[ "$core" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+  local -a installed=("${BASH_REMATCH[@]:1}")
+  [[ "$latest" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+  local -a published=("${BASH_REMATCH[@]:1}")
+  local index
+  for index in 0 1 2; do
+    [ "${#installed[index]}" = "${#published[index]}" ] || { [ "${#installed[index]}" -gt "${#published[index]}" ]; return; }
+    [[ "${installed[index]}" = "${published[index]}" ]] || { [[ "${installed[index]}" > "${published[index]}" ]]; return; }
+  done
+  return 1
+}
+
 tag=""
 if [ -z "$VERSION" ]; then
   [ "$OFFLINE" = 0 ] || { printf 'bootstrap-runtime: offline mode requires --version\n' >&2; exit 2; }
   tag="$(latest_release_tag)" || exit 1
   VERSION="${tag#v}"
+  # The candidate's own update owns every explicit selection. A channel
+  # selection, like a plain yard update, never installs an older release, so it
+  # stops before anything is downloaded or published.
+  if [ "$existing_runtime" = 1 ]; then
+    active_release="$(readlink -- "$RUNTIME_ROOT/current" || true)"
+    active_release="${active_release#releases/}"
+    if [[ "$active_release" == *-* ]] && active_version_newer "${active_release%-*}" "$VERSION"; then
+      printf 'Installed version %s is newer than the latest published release %s; no release was selected.\n' "${active_release%-*}" "$VERSION"
+      downgrade="yard update --version $VERSION"
+      [ "$RUNTIME_ROOT" = "$DATA_HOME/runtime" ] || downgrade+=" --runtime-root $(printf '%q' "$RUNTIME_ROOT")"
+      printf 'To install the older release, review and apply an explicit downgrade:\n  %s --check\n  %s\n' "$downgrade" "$downgrade"
+      exit 0
+    fi
+  fi
 else
   tag="${YARD_RELEASE_TAG:-v$VERSION}"
 fi
