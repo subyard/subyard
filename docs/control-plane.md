@@ -664,8 +664,9 @@ The first finished init also writes `user.subyard.ever_initialized=true`, which 
 a yard from a release before that mark counts as ever initialized when `initialized=true`. A
 yard that has never finished init has no installed owner services: its `stop` and `teardown`
 keep the SSH listener fence and an all-user SSH session check but skip the profile owner-service
-pause. When its guest also lacks the substrate provisioning installs first (python3, the
-developer account and `/srv/agents`), `init` defers its profile runtimes like a stopped yard's,
+pause, and its `start` refuses before any power change with `yard NAME has not completed its
+first init; run yard -Y NAME init`. When its guest also lacks the substrate provisioning installs
+first (python3, the developer account and `/srv/agents`), `init` defers its profile runtimes like a stopped yard's,
 plans its project hooks conditionally and reads its applied integration state as absent only if
 no integration inventory exists, and teardown runs owner-service removal with
 `SUBYARD_GUEST_NEVER_PROVISIONED=1`: an owner whose state lives only in the yard skips its guest

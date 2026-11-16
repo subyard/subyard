@@ -192,3 +192,62 @@ func TestUninitializedYardDecisionOnlyNarrows(t *testing.T) {
 		t.Fatalf("a fresh process kept an initialized yard out: left=%t err=%v", left, err)
 	}
 }
+
+// Start of a yard that has never finished its first init refuses before any
+// power change and names init; a yard whose re-init failed after a finished
+// init, and a yard from a release before the completion mark, still start.
+func TestStartRefusesNeverInitializedYardBeforePower(t *testing.T) {
+	for _, test := range []struct {
+		name, initialized, ever string
+		refused                 bool
+	}{
+		{name: "never initialized", initialized: "false", refused: true},
+		{name: "re-init failed", initialized: "false", ever: "true"},
+		{name: "upgraded initialized", initialized: "true"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newConfigApplyRepairFixture(t, false)
+			options := fixture.cli.options
+			native := options.Incus.(*testkit.Incus)
+			key := "subyard/yard"
+			instance := native.Instances[key]
+			instance.Status = "Stopped"
+			instance.Config = map[string]string{
+				"user.subyard.desired_power": "stopped", "user.subyard.managed": "true",
+				"user.subyard.name": "default", "user.subyard.bridge": "incusbr0",
+				"user.subyard.initialized": test.initialized, "boot.autostart": "false",
+			}
+			if test.ever != "" {
+				instance.Config["user.subyard.ever_initialized"] = test.ever
+			}
+			native.Instances[key] = instance
+			runner := &testkit.ScriptedAdapter{}
+			options.AdapterRunner = runner
+			program, err := New(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := program.loadContext("default")
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition, _ := program.manifest.Lookup("start")
+			prepared := &preparedCommand{CLI: program, Definition: definition, Loaded: loaded, Arguments: []string{"--yes"}}
+			err = prepared.prepareLifecycle(context.Background(), nil)
+			if !test.refused {
+				if err != nil {
+					t.Fatalf("start refused: %v", err)
+				}
+				return
+			}
+			if err == nil || err.Error() != "yard default has not completed its first init; run yard -Y default init" {
+				t.Fatalf("start of a never-initialized yard: %v", err)
+			}
+			after := native.Instances[key]
+			if len(runner.Requests) != 0 || len(native.PowerUpdates) != 0 || after.Status != "Stopped" ||
+				after.Config["user.subyard.desired_power"] != "stopped" || after.Config["user.subyard.initialized"] != "false" {
+				t.Fatalf("refused start changed power: requests=%v updates=%v instance=%#v", runner.Requests, native.PowerUpdates, after)
+			}
+		})
+	}
+}
