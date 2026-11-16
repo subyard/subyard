@@ -319,10 +319,11 @@ prepare)
   # The source provenance check runs before it and refuses a published 0.29.0 target first; the
   # CLI exposes no rollback check past it, so that case is a stated limit and the epoch blocker
   # itself is proven host-free (go:releasetransition). Any other refusal fails the lane.
+  grep -Fq 'code=rollback-incompatible' "$STATE/rollback.log" || die 'rollback was refused without code=rollback-incompatible'
   if grep -Fq 'the retained release cannot safely accept the current migration ledger' "$STATE/rollback.log"; then
     evidence 'rollback refused by the rollback-compatibility blocker'
   elif grep -Fq 'source release has invalid or foreign V2 registry provenance' "$STATE/rollback.log"; then
-    evidence 'LIMIT: rollback refused by the source registry provenance check, which runs before the rollback-compatibility blocker; that blocker is proven host-free only'
+    evidence 'LIMIT: rollback refused by the source provenance check, which runs before the rollback-compatibility blocker for every published target before this epoch; that blocker is proven host-free'
   else
     die 'rollback was refused by neither the rollback-compatibility blocker nor the provenance check'
   fi

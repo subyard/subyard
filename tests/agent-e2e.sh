@@ -5078,6 +5078,7 @@ smoke_rollback_fixture_contract() {
     for function_name in assert_registered_ownership establish_registered_ownership; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/power-reconciler-upgrade.sh")"
     done
+    eval "$(sed -n '/^classify_epoch_rollback_refusal() {/,/^}/p' "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh")"
     STATE_ROOT="$fixture/state" OPERATOR_HOME="$fixture/operator"
     RELEASE_ROOT="$STATE_ROOT/candidate" COMPATIBLE_RELEASE_ROOT="$STATE_ROOT/compatible-release"
     OLD_VERSION=predecessor CANDIDATE_VERSION=candidate COMPATIBLE_VERSION=compatible
@@ -5200,7 +5201,11 @@ smoke_rollback_fixture_contract() {
               ledger-change) printf 'changed\n' > "$V2_LEDGER" ;;
               journal-change) printf 'changed\n' > "$V2_JOURNAL" ;;
             esac
-            printf 'operator-action-required: code=rollback-incompatible\n' >&2
+            case "$scenario" in
+              other-blocker) printf 'release transition operator-action-required: code=rollback-incompatible; the VM QEMU policy cannot roll back\n' >&2 ;;
+              epoch-blocker) printf 'release transition operator-action-required: code=rollback-incompatible; the retained release cannot safely accept the current migration ledger\n' >&2 ;;
+              *) printf 'yard-engine: release transition: source release has invalid or foreign V2 registry provenance\nrelease transition operator-action-required: code=rollback-incompatible\n' >&2 ;;
+            esac
             return 1
           fi
           [ "$current" = "$CANDIDATE_RELEASE_TARGET" ] \
@@ -5242,7 +5247,7 @@ smoke_rollback_fixture_contract() {
     printf '%s\n' "$CANDIDATE_RELEASE_TARGET" > "$STATE_ROOT/current"
     establish_smoke_ownership
     operator_yard init --yes
-    verify_predecessor_rollback_refusal
+    # finish_smoke itself refuses the predecessor rollback before the compatible swap.
     finish_smoke
     [ "$(wc -l < "$STATE_ROOT/enrollments")" = 1 ] \
       && [ "$(wc -l < "$STATE_ROOT/plain-inits")" = 2 ] || die 'smoke lost enrollment or repeated ordinary init'
@@ -5261,13 +5266,13 @@ for smoke_rollback_scenario in success \
   missing-ownership foreign-ownership init-ownership-change unexpected-grant installation-change \
   init-fail repeat-init-fail init-unrelated-fail init-wrong-exit init-reboot-required \
   wrong-reason unexpected-accept links-change checkpoint-change ledger-change journal-change \
-  rollback-fail rollforward-fail; do
+  rollback-fail rollforward-fail other-blocker epoch-blocker; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
   set +e
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [ "$smoke_rollback_scenario" = success ]; then
+  if [ "$smoke_rollback_scenario" = success ] || [ "$smoke_rollback_scenario" = epoch-blocker ]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'

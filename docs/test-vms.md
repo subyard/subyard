@@ -1513,9 +1513,13 @@ Its verified update registers the local yard through the release journal, so rep
 init and both reboots must retain that ownership without a legacy continuation grant. The
 first-release chains use staged candidate tooling to refuse their retained pre-anchor rollback
 without changing links or protected state. Published releases sit below the candidate's
-`power-metadata` epoch, so rollback to the anchor must be refused by the rollback-compatibility
-blocker without changing links, checkpoint/history, ledger, native identity or retained V1
-evidence. The same-epoch cycle uses a compatible release built from the candidate source: a
+`power-metadata` epoch, so rollback to the anchor must be refused with `code=rollback-incompatible`
+without changing links, checkpoint/history, ledger, native identity or retained V1 evidence. For
+every published target before this epoch the source provenance check refuses first (the retained
+engine cannot read the newer registry), so the lane records the expected `LIMIT` line; the
+rollback-compatibility blocker itself is proven host-free, and any other refusal fails the lane.
+The release smoke and the NetworkManager guard lane classify their predecessor rollback the same
+way. The same-epoch cycle uses a compatible release built from the candidate source: a
 public `update --check --json` names its exact target with a plan and no blockers, then the lane
 updates to it, returns to the candidate, performs a real rollback to it and rolls forward again.
 Both passages preserve native policy and the registered ownership. Fresh sources below v0.11.0

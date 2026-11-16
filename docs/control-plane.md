@@ -1917,15 +1917,20 @@ is the reader boundary of the `[device-subyard]` NetworkManager guard; the
 `host-network-guard` activation owner rewrites a released guard file without reloading
 NetworkManager and records one pending host reboot. Subyard never reloads or restarts
 NetworkManager. Whether NetworkManager read the guard is proven only by a boot: the root-owned
-record `/var/lib/subyard/nm-guard-state` (`boot_id sha256 held|unread init|migration`) names the
-SHA-256 of the guard's static content (the file read through any symlink, without comments, blank
-lines or the exact Incus bridge names, which are pinned unmanaged one by one instead). The guard
-counts as read when that hash matches the file and the record is `held` or names another boot.
-Changed static content while NetworkManager runs, a repair included, records `unread` for this
-boot; `held` needs NetworkManager inactive across the write, or a migration with evidence that it
-holds the released guard. A missing, unreadable or foreign record, a hash mismatch or any failed
-read means "not read"; a NetworkManager restart never counts. No yard starts while the guard is
-unread: init stops for a host reboot, a migration waits for it. Released power readers reject the new
+record `/var/lib/subyard/nm-guard-state` (`boot_id inode:ctime sha256 held|unread init|migration`)
+binds one regular guard file, by its identity (compared only for equality), to the SHA-256 of its
+static content (without comments, blank lines or the exact Incus bridge names, which are pinned
+unmanaged one by one instead). The guard counts as read when the record binds the file on disk
+and is `held` or names another boot. Subyard removes the record durably before any change to the
+static content, then renames the guard in and records it `unread` for this boot; `held` needs
+NetworkManager explicitly inactive at both samples, or a migration with evidence that it holds the
+released guard. A bridge-only rewrite keeps boot and state and refreshes the identity. A guard
+without a binding record is `unbound`: the record is missing, unreadable or foreign, the identity
+or hash differs (a hand edit or restore), or the guard is a symbolic link. Its next step is
+`yard init` (which records it `unread`, replacing a link with a file), then one reboot. A
+NetworkManager restart never counts. No yard starts while the guard is unread or unbound: init,
+early installation included, stops before anything creates devices; update and teardown leave the
+reboot to the operator. Released power readers reject the new
 guard, and their init would rewrite the released guard and reload NetworkManager, so
 rollback to a release below this epoch is refused before activation as `rollback-incompatible`.
 `yard update --rollback` does not cross this boundary.
