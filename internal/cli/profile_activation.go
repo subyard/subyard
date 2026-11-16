@@ -81,13 +81,9 @@ func (reconciler *profileRuntimeActivationReconciler) targets(ctx context.Contex
 func (reconciler *profileRuntimeActivationReconciler) observedTargets(ctx context.Context) (*CLI, []configTarget, error, error) {
 	operation := reconciler.cli.releaseActivationOperation()
 	// Host-wide inventory must not require the caller's yard to exist.
-	_, targets, err := operation.releaseActivationTargets(ctx, "default", reconciler.request.ConfigHome, true, nil)
-	var yardRefusals error
+	_, targets, yardRefusals, err := operation.tolerantActivationTargets(ctx, "default", reconciler.request.ConfigHome, true, nil)
 	if err != nil {
-		if !onlyYardConfigRefusals(err, reconciler.request.ConfigHome) {
-			return operation, nil, nil, err
-		}
-		yardRefusals = err
+		return operation, nil, nil, err
 	}
 	// Only installed local yard runtimes belong to release activation. A verified
 	// absent local installation has none; raw runtime observation still reports

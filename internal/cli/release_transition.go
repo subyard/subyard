@@ -717,15 +717,6 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 			// Release repair leaves a deferred broker yard untouched; its state
 			// stays in Desired, like the materialized configuration of that yard.
 			deferred := err == nil && cli.activation != nil && cli.activation.repair && cli.activation.pending.decided(ctx, releasetransition.ReleasePair{})[yard]
-			// A broker yard whose init did not finish is left to that init, like
-			// every yard-scoped owner leaves it; an initialized one stays host-level.
-			if err == nil && !deferred && yard != "" {
-				if loaded, loadErr := cli.resolveReleaseTransitionContext(ctx, yard, request.ConfigHome, files); loadErr == nil {
-					// A failed read is left to the broker's own observation, which reports it.
-					uninitialized, probeErr := cli.releaseActivationOperation(request).releaseYardUninitialized(ctx, configTarget{Name: yard, Loaded: loaded})
-					deferred = probeErr == nil && uninitialized
-				}
-			}
 			return activationApplicability{
 				state: string(state), applies: state == testyardmigration.BrokerRuntimeActive && !deferred,
 				target: yard,
@@ -860,15 +851,15 @@ func (cli *CLI) powerActivationReconciler(
 			operation := *cli
 			operation.baseEnv = cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 			operation.env = maps.Clone(operation.baseEnv)
-			loaded, targets, err := operation.releaseActivationTargets(ctx, "default", request.ConfigHome, true, nil)
+			// Host power serves the yards that load. A yard whose own configuration
+			// is invalid is reported by the yard-scoped owners, not here.
+			loaded, targets, _, err := operation.tolerantActivationTargets(ctx, "default", request.ConfigHome, true, nil)
+			if err != nil {
+				return nil, err
+			}
 			powerYards := make([]domain.Context, 0, len(targets))
 			for _, target := range targets {
 				powerYards = append(powerYards, target.Loaded.Context)
-			}
-			// Host power serves the yards that load. A yard whose own configuration
-			// is invalid is reported by the yard-scoped owners, not here.
-			if err != nil && (len(targets) == 0 || !onlyYardConfigRefusals(err, request.ConfigHome)) {
-				return nil, err
 			}
 			return operation.initPlatformWithDispatcher(
 				loaded,
@@ -1204,7 +1195,7 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 		yard = "default"
 	}
 	operation := reconciler.operation()
-	_, targets, err := operation.releaseActivationTargets(ctx, yard, reconciler.configHome, reconciler.allLocal, files)
+	_, targets, yardRefusals, err := operation.tolerantActivationTargets(ctx, yard, reconciler.configHome, reconciler.allLocal, files)
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, (materializedConfigActivationError{err, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}).collected()
 	}
@@ -1216,7 +1207,12 @@ func (reconciler *materializedConfigActivationReconciler) observe(
 	}
 	// Each yard is observed independently. A refusal skips only that yard's
 	// findings that depend on the failed read; every refusal is reported together.
+	// A yard whose configuration cannot load is a refusal outside every yard span,
+	// so it stays blocking, while the other yards keep their observed drift.
 	var refusals []error
+	if yardRefusals != nil {
+		refusals = materializedConfigActivationError{yardRefusals, yard, "local yard configurations", "config status --all-local", "inspect", reconciler.configHome}.appendTo(refusals)
+	}
 	spans := make([]yardObservationSpan, 0, len(targets))
 	for _, target := range targets {
 		spans = append(spans, yardObservationSpan{name: target.Name, refusals: len(refusals), consequences: len(consequences)})
@@ -1354,6 +1350,11 @@ func (reconciler *materializedConfigActivationReconciler) deferPendingYards(
 			reconciler.pendingDeferral().record(nil)
 		}
 		return nil, nil
+	}
+	// A refusal before the first yard's span belongs to no yard: it is never
+	// pending configuration, so it keeps the observation refused.
+	if len(spans) == 0 || spans[0].refusals > 0 {
+		return nil, collectActivationRefusals(refusals)
 	}
 	var findings []releasetransition.V2PendingConfiguration
 	deferred := map[string]*config.MaterializationActivationTarget{}

@@ -228,3 +228,18 @@ func (err observedYardsError) ActivationYardFindings() []releasetransition.V2Yar
 	}
 	return append(own, err.observed...)
 }
+
+// tolerantActivationTargets loads the local yard set for release observation.
+// Yards whose own configuration cannot be loaded are returned as yardRefusals
+// beside the other targets, so they are reported without hiding the others;
+// any other refusal, including the default yard's, is err with no targets.
+func (cli *CLI) tolerantActivationTargets(ctx context.Context, yard, home string, allLocal bool, files *config.ProspectiveFiles) (config.Loaded, []configTarget, error, error) {
+	loaded, targets, err := cli.releaseActivationTargets(ctx, yard, home, allLocal, files)
+	if err == nil {
+		return loaded, targets, nil, nil
+	}
+	if len(targets) == 0 || !onlyYardConfigRefusals(err, home) {
+		return loaded, nil, nil, err
+	}
+	return loaded, targets, err, nil
+}
