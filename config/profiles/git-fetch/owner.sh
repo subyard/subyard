@@ -41,6 +41,10 @@ case "$state" in
     exit 0 ;;
   *) printf 'git-fetch: yard is not ready for profile reconciliation\n' >&2; exit 2 ;;
 esac
+# The fetch timer lives only in the yard; a guest init never provisioned has none.
+if [ "${SUBYARD_GUEST_NEVER_PROVISIONED:-0}" = 1 ] && [ "$mode" = apply ] && [ "$selected" = 0 ]; then
+  exit 0
+fi
 startup_environment=()
 if [ "$mode" = startup ] && [[ "${SUBYARD_STARTUP_REMAINING_MS:-}" =~ ^[0-9]{1,9}$ ]]; then
   startup_environment=(--env "SUBYARD_STARTUP_REMAINING_MS=$SUBYARD_STARTUP_REMAINING_MS")

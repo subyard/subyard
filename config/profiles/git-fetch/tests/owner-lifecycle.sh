@@ -58,6 +58,16 @@ python3 - "$state/calls" <<'PY'
 import json,sys
 assert json.load(open(sys.argv[1]))==['apply','0','dev','0']
 PY
+# Removal from a guest that init never provisioned has nothing in the yard to remove.
+rm -f "$state/calls"
+SUBYARD_GUEST_NEVER_PROVISIONED=1 bash "$root/config/profiles/git-fetch/owner.sh" --remove
+[ ! -e "$state/calls" ] || { printf 'never-provisioned removal entered the guest\n' >&2; exit 1; }
+# Only removal is skipped: other modes still reach the guest.
+SUBYARD_GUEST_NEVER_PROVISIONED=1 bash "$root/config/profiles/git-fetch/owner.sh" --yes
+python3 - "$state/calls" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))==['apply','1','dev','0']
+PY
 [ "$(bash "$root/config/profiles/git-fetch/owner.sh" --pause)" = paused ]
 GIT_FETCH_FIXTURE_STATE=STOPPED bash "$root/config/profiles/git-fetch/owner.sh" --check
 expect_exit() {

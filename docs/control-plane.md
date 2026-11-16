@@ -664,12 +664,12 @@ The first finished init also writes `user.subyard.ever_initialized=true`, which 
 a yard from a release before that mark counts as ever initialized when `initialized=true`. A
 yard that has never finished init has no installed owner services: its `stop` and `teardown`
 keep the SSH listener fence and an all-user SSH session check but skip the profile owner-service
-pause, and teardown stops that instance before the owners' cleanup. When its guest also lacks
-the substrate provisioning installs first (python3, the developer account and `/srv/agents`),
-`init` defers its profile runtimes like a stopped yard's, plans its project hooks conditionally
-and reads its applied integration state
-as absent only if no integration inventory exists. A working yard whose re-init failed keeps the
-strict checks.
+pause. When its guest also lacks the substrate provisioning installs first (python3, the
+developer account and `/srv/agents`), `init` defers its profile runtimes like a stopped yard's,
+plans its project hooks conditionally and reads its applied integration state as absent only if
+no integration inventory exists, and teardown runs owner-service removal with
+`SUBYARD_GUEST_NEVER_PROVISIONED=1`: an owner whose state lives only in the yard skips its guest
+work, and host-side cleanup still runs. A working yard whose re-init failed keeps the strict checks.
 
 Declared persist directories are adopted by a separate guest program
 (`internal/adapters/reconcileruntime/integration_persist.py`), not by the artifact

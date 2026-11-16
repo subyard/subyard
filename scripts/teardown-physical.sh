@@ -105,11 +105,10 @@ if [ "${SUBYARD_TEARDOWN_FULL:-0}" != 1 ]; then
   . "$SCRIPT_DIR/lib/teardown-services.sh"
   teardown_stop_services
 fi
-# Owner services of a yard whose init never finished were never installed in
-# its guest, which may lack what their handlers need. Stop that instance, which
-# is deleted below anyway, so the handlers do only their stopped-yard cleanup.
-if [ "$have_incus" = 1 ] && power_never_initialized "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
-  power_stop_instance "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" || die "could not stop never-initialized $YARD_INSTANCE_NAME before teardown: $POWER_ERROR"
+# Owner services never ran guest work in a guest that init never provisioned;
+# their removal does only its host-side cleanup there.
+if [ "$have_incus" = 1 ] && power_guest_never_provisioned "$INCUS_PROJECT" "$YARD_INSTANCE_NAME" "${DEV_USER:-}"; then
+  export SUBYARD_GUEST_NEVER_PROVISIONED=1
 fi
 bash "$SCRIPT_DIR/profile-services.sh" --remove
 

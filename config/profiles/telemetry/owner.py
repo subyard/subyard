@@ -104,6 +104,9 @@ def main():
         return 0
     if status != 'RUNNING':
         raise ValueError('yard unavailable')
+    # The collector lives only in the yard; a guest init never provisioned has none.
+    if os.environ.get('SUBYARD_GUEST_NEVER_PROVISIONED') == '1' and arguments == ['--remove']:
+        return 0
     source = Path(__file__).resolve().parent
     binary, refusals = collector_binary(source, selected and operation != 'startup')
     agents = ' '.join(name for name in ('claude', 'codex') if name in os.environ.get('CODING_TOOL_INTEGRATIONS', '').split())
