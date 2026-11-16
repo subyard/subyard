@@ -33,13 +33,6 @@ func pendingIntegrationConfigurationShape(outcome *releasetransition.Outcome, in
 	return true
 }
 
-// ordinaryCommandAdmitted is the one pending-configuration admission of the
-// direct CLI and RPC: an ordinary command passes a gate blocked only by a
-// completed owner's pending configuration and reaches its own guards.
-func (cli *CLI) ordinaryCommandAdmitted(handler string, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
-	return ordinaryCommandDuringPendingConfiguration(handler) && cli.pendingIntegrationConfigurationGate(outcome, inspection)
-}
-
 // pendingInitYards returns each yard whose plain init a blocker names as its
 // next step. It fails when any blocker names another step.
 func pendingInitYards(inspection *releasetransition.Inspection) (map[string]bool, bool) {
@@ -58,17 +51,6 @@ func pendingInitYards(inspection *releasetransition.Inspection) (map[string]bool
 		yards[yard] = true
 	}
 	return yards, true
-}
-
-// otherYardsPendingOnly reports a gate blocked only by other yards' pending
-// configuration whose next steps are those yards' inits. They wait for their own
-// inits and do not fail this yard's.
-func (cli *CLI) otherYardsPendingOnly(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection, yard string) bool {
-	if !cli.pendingIntegrationConfigurationGate(outcome, inspection) {
-		return false
-	}
-	yards, ok := pendingInitYards(inspection)
-	return ok && !yards[yard]
 }
 
 // pendingConfigurationResource accepts only the typed resource of one owner:
