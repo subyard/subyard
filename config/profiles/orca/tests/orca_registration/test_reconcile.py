@@ -2412,6 +2412,22 @@ class RemovedProjectSessionTests(unittest.TestCase):
                                            if item["repoId"] == self.repo["id"]))
 
 
+    def test_refused_fenced_stop_falls_back_to_the_handle_close_before_any_tab_close(self):
+        self.rpc.snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],
+                               "tabs": [{"id": "tab", "type": "terminal", "ptyId": "live"}]}]
+        self.rpc.terminals = [self.terminal(self.repo, "live", "h-live")]
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def refuse_stop(method, params=None, **kwargs):
+            if method == "terminal.stopExact":
+                raise self.error("Orca runtime rejected terminal.stopExact", rejected=True)
+            return original(method, params, **kwargs)
+        self.rpc.call = refuse_stop
+        self.assertTrue(self.run_sync()["settled"])
+        methods = [method for method, _ in self.closes()]
+        self.assertEqual(["terminal.close", "session.tabs.close"], methods)
+
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
         import fcntl
