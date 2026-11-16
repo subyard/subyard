@@ -5,7 +5,7 @@
 #            uplink. The candidate update refuses and names the hand-back; after it, the update
 #            rewrites the guard without a reload and asks for a reboot. Docker and libvirt
 #            bridges, a restart experiment, the reboot, candidate init and start, a new veth,
-#            a later managed=1 section, full teardown and a final reboot follow.
+#            a later managed=1 section, teardown and a final reboot follow.
 #   fresh:   an except-only administrator list, an NM-managed br0 and a Docker-style bridge
 #            through a fresh candidate install, init, start and teardown, without a reboot.
 # A watchdog restores the uplink address if it changes and fails the lane.
@@ -374,22 +374,28 @@ resume)
   yard start --yes >"$STATE/start-again.log" 2>&1 || die 'start failed after removing the later section'
   pass 'a later managed=1 section for veths refuses the start, naming it'
 
-  owner "$launcher" teardown --full --yes >"$STATE/teardown.log" 2>&1 || die 'full teardown failed'
+  # The fixture platform owns the storage pool, so full teardown refuses; the ordinary teardown
+  # keeps the shared bridge and therefore the guard for it.
+  yard teardown --yes >"$STATE/teardown.log" 2>&1 || die 'teardown failed'
   settle
-  [ ! -e "$guard" ] || die 'full teardown kept the guard'
-  [ -f "$admin_conf" ] || die 'full teardown removed the administrator file'
-  uplink_admins 'full teardown'
+  [ -f "$admin_conf" ] || die 'teardown removed the administrator file'
+  if ip link show incusbr0 >/dev/null 2>&1; then
+    grep -Fq 'interface-name:incusbr0' "$guard" || die 'teardown dropped the guard of the surviving bridge'
+  else
+    [ ! -e "$guard" ] || die 'teardown kept the guard after the last Incus bridge'
+  fi
+  uplink_admins 'teardown'
   [ "$(effective_unmanaged)" = "interface-name:$UP" ] || die 'teardown changed the administrator list'
   watchdog_clean
-  pass 'full teardown removed only the Subyard guard'
+  pass 'teardown left the administrator configuration and the uplink untouched'
   ;;
 
 final)
   load_uplink
   uplink_admins 'after the final reboot'
   [ "$(effective_unmanaged)" = "interface-name:$UP" ] || die 'the final boot has a different unmanaged-devices list'
-  [ ! -e "$guard" ] || die 'the guard came back'
-  pass 'after the final reboot NetworkManager runs only the administrator configuration'
+  ! grep -q '^unmanaged-devices' "$guard" 2>/dev/null || die 'a released guard came back'
+  pass 'after the final reboot the uplink and unmanaged-devices list are the administrator'"'"'s alone'
   ;;
 
 fresh)
@@ -429,13 +435,14 @@ fresh)
   grep -Eq 'interface-name:(br0|br-0123456789ab)(,|$)' "$guard" && die 'the guard lists a bridge Incus does not manage'
   yard_devices_unmanaged 'running yard'
   pass 'except-only list, NM-managed br0 and a Docker-style bridge are untouched by install, init and start'
-  owner "$launcher" teardown --full --yes >"$STATE/teardown.log" 2>&1 || die 'full teardown failed'
+  yard teardown --yes >"$STATE/teardown.log" 2>&1 || die 'teardown failed'
   settle
-  [ ! -e "$guard" ] && [ -f "$admin_conf" ] || die 'teardown changed the wrong files'
+  [ -f "$admin_conf" ] || die 'teardown removed the administrator file'
   uplink_admins 'teardown'
   [ "$(device_state br0)" = connected ] || die 'teardown touched br0'
+  [ "$(effective_unmanaged)" = 'except:interface-name:br0' ] || die 'teardown changed the administrator list'
   watchdog_clean
-  pass 'teardown removed only the Subyard guard; the uplink and br0 are untouched'
+  pass 'teardown left the uplink, br0 and the administrator list untouched'
   ;;
 *) die "unknown mode $MODE" ;;
 esac

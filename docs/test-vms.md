@@ -811,7 +811,7 @@ published 0.29.0 init that stops after writing its guard, which lets NetworkMana
 administrator's uplink; the candidate update must refuse and name the hand-back, then rewrite the
 guard without a reload and ask for one reboot. It records a NetworkManager restart experiment,
 reboots, runs candidate init and start, checks new veth and tap devices and a later `managed=1`
-section, runs full teardown and reboots again. `--lane fresh` installs the candidate behind an
+section, runs teardown and reboots again. `--lane fresh` installs the candidate behind an
 except-only administrator list with an NM-managed `br0` and a Docker-style bridge:
 
 ```sh
