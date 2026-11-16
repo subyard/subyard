@@ -169,66 +169,33 @@ latest_release_tag() (
   printf '%s\n' "$tag"
 )
 
-# named_runtime_version prints the semver that the `current` link's release ID
-# starts with, whatever the link's form; an unparseable ID keeps the ordinary path.
-named_runtime_version() {
-  local target release version number='(0|[1-9][0-9]*)' identifier='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)' build='[0-9A-Za-z-]+'
+# installed_core_newer LATEST prints the version named by the `current` link's
+# release ID when its X.Y.Z core is greater than the stable LATEST core. Only the
+# core decides; a name without a canonical core keeps the ordinary path.
+installed_core_newer() {
+  local latest="$1" target release version core index number='(0|[1-9][0-9]*)'
   [ -L "$RUNTIME_ROOT/current" ] || return 1
   target="$(readlink -- "$RUNTIME_ROOT/current")" || return 1
   release="${target##*/}"
   [[ "$release" == *-* ]] || return 1
   version="${release%-*}"
-  [[ "$version" =~ ^$number\.$number\.$number(-$identifier(\.$identifier)*)?(\+$build(\.$build)*)?$ ]] || return 1
-  printf '%s\n' "$version"
-}
-
-# runtime_link_valid applies the Go update's bounds: a canonical relative
-# `releases/<id>` link to a present runtime with its launcher and engine.
-runtime_link_valid() {
-  local target binary
-  target="$(readlink -- "$RUNTIME_ROOT/current")" || return 1
-  [[ "$target" =~ ^releases/[^/]+$ ]] && [ "$target" != releases/. ] && [ "$target" != releases/.. ] || return 1
-  [ -d "$RUNTIME_ROOT/$target" ] || return 1
-  for binary in yard yard-engine; do
-    [ -f "$RUNTIME_ROOT/$target/bin/$binary" ] && [ ! -L "$RUNTIME_ROOT/$target/bin/$binary" ] &&
-      [ -x "$RUNTIME_ROOT/$target/bin/$binary" ] || return 1
-  done
-}
-
-# active_version_newer ACTIVE LATEST: whether a valid active semver orders after
-# a stable X.Y.Z latest release. Its pre-release orders before that release.
-active_version_newer() {
-  local active="${1%%+*}" latest="$2" index
-  [[ "${active%%-*}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
+  core="${version%%[-+]*}"
+  [[ "$core" =~ ^$number\.$number\.$number$ ]] || return 1
   local -a installed=("${BASH_REMATCH[@]:1}")
-  [[ "$latest" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || return 1
+  [[ "$latest" =~ ^$number\.$number\.$number$ ]] || return 1
   local -a published=("${BASH_REMATCH[@]:1}")
   for index in 0 1 2; do
-    [ "${#installed[index]}" = "${#published[index]}" ] || { [ "${#installed[index]}" -gt "${#published[index]}" ]; return; }
-    [[ "${installed[index]}" = "${published[index]}" ]] || { [[ "${installed[index]}" > "${published[index]}" ]]; return; }
+    if [ "${#installed[index]}" != "${#published[index]}" ]; then
+      [ "${#installed[index]}" -gt "${#published[index]}" ] || return 1
+      break
+    fi
+    if [ "${installed[index]}" != "${published[index]}" ]; then
+      [[ "${installed[index]}" > "${published[index]}" ]] || return 1
+      break
+    fi
+    [ "$index" != 2 ] || return 1
   done
-  return 1
-}
-
-# installation_complete reports whether every step of an earlier run finished:
-# protected transition, inventory, entrypoints and the startup-file lines this
-# run would add. An incomplete installation needs its own release re-run.
-installation_complete() {
-  local index
-  [ -d "$CONFIG_HOME" ] && [ ! -L "$CONFIG_HOME" ] || return 1
-  jq -e '.checkpoint == "complete"' "$CONFIG_HOME/release-transition/v2/journal.json" >/dev/null 2>&1 || return 1
-  [ -f "$DATA_HOME/installation.json" ] && [ ! -L "$DATA_HOME/installation.json" ] || return 1
-  [ -z "$SOURCE_INGRESS_ROOT" ] || return 1
-  [ "$(readlink -- "$BIN_DIR/yard")" = "$RUNTIME_ROOT/current/bin/yard" ] || return 1
-  [ "$(readlink -- "$BIN_DIR/sy")" = "$RUNTIME_ROOT/current/bin/yard" ] || return 1
-  for index in "${!login_rcs[@]}"; do
-    grep -qF 'Subyard CLI login PATH' "${login_rcs[index]}" 2>/dev/null || return 1
-    [ "${login_shells[index]}" != bash ] || grep -qF 'Subyard CLI login completion' "${login_rcs[index]}" || return 1
-  done
-  for index in "${!shell_rcs[@]}"; do
-    grep -qF "export PATH=\"$BIN_DIR:" "${shell_rcs[index]}" 2>/dev/null || return 1
-    grep -qF 'Subyard CLI completion' "${shell_rcs[index]}" || return 1
-  done
+  printf '%s\n' "$version"
 }
 
 tag=""
@@ -410,23 +377,16 @@ if [ -n "$SOURCE_INGRESS_ROOT" ] && [ "$existing_runtime" = 0 ]; then
 fi
 
 # A channel selection, like a plain yard update, never installs a release older
-# than the active one. Explicit selections stay with the candidate's own update.
-# This stops before anything is downloaded or published.
-# A link naming a newer release that is invalid, missing or incompletely
-# installed is refused; its own release re-run repairs it.
-if [ "$channel_selected" = 1 ] && installed_version="$(named_runtime_version)" &&
-   active_version_newer "$installed_version" "$VERSION"; then
+# than the active one. It refuses before any prompt, cache directory or download;
+# explicit selections stay with the candidate's own update.
+if [ "$channel_selected" = 1 ] && installed_version="$(installed_core_newer "$VERSION")"; then
   root_argument=''
   [ "$RUNTIME_ROOT" = "$DATA_HOME/runtime" ] || root_argument=" --runtime-root $(printf '%q' "$RUNTIME_ROOT")"
-  if ! runtime_link_valid || ! installation_complete; then
-    printf 'bootstrap-runtime: installed version %s is newer than the latest published release %s, and its installation is incomplete or invalid; repair it with: subyard-install.sh --version %s%s\n' \
-      "$installed_version" "$VERSION" "$installed_version" "$root_argument" >&2
-    exit 1
-  fi
-  printf 'Installed version %s is newer than the latest published release %s; no release was selected.\n' "$installed_version" "$VERSION"
-  printf 'To install the older release, review and apply an explicit downgrade:\n  yard update --version %s%s --check\n  yard update --version %s%s\n' \
-    "$VERSION" "$root_argument" "$VERSION" "$root_argument"
-  exit 0
+  printf 'bootstrap-runtime: installed version %s is newer than the latest published release %s; no release was selected and nothing was changed\n' "$installed_version" "$VERSION" >&2
+  printf '  to re-run the installed release, which also completes an interrupted install: subyard-install.sh --version %s%s\n' "$installed_version" "$root_argument" >&2
+  printf '  (an unpublished build needs its own assets: YARD_RELEASE_BASE_URL, or --offline with a complete release cache)\n' >&2
+  printf '  to install the older release instead (downgrade): subyard-install.sh --version %s%s\n' "$VERSION" "$root_argument" >&2
+  exit 1
 fi
 
 need_path_line=1
