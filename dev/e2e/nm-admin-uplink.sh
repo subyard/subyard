@@ -279,6 +279,12 @@ prepare)
 
   sudo -n nmcli device set "$UP" managed no
   settle 3
+  # The released guard's takeover may briefly reconfigure the uplink; that is the reproduced
+  # defect, not the candidate. From the hand-back on, any watchdog restore fails the lane.
+  if [ -s "$STATE/watchdog.log" ]; then
+    sed 's/^/evidence: watchdog during the released takeover: /' "$STATE/watchdog.log"
+    : > "$STATE/watchdog.log"
+  fi
   [ "$(device_state "$UP")" = unmanaged ] && [ "$(address_of "$UP")" = "$UP_ADDRESS" ] || die 'the hand-back lost the uplink'
   before_table="$(managedness)"
   since="$(date +%s)"
