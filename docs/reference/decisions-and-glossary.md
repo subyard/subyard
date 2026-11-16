@@ -161,7 +161,10 @@ reads them only to refuse an unsafe migration. Subyard never reloads or restarts
 and no yard starts until NetworkManager has provably read the guard: a persistent record ties the
 guard's static content to the boot that wrote it, and only a later boot (or NetworkManager being
 inactive across the write) proves the read. On a host where it runs, the first init and a
-migration without evidence wait for one host reboot. Bridge names come only from the Incus-managed bridges
+migration without evidence wait for one host reboot. The record binds only the guard file and
+trusts systemd's view of NetworkManager: an administrator who restarts NetworkManager on a
+different configuration and then restores the files on disk (a swapped `conf.d`, a temporary
+higher-priority file) is outside what it can detect, so reboot after such changes. Bridge names come only from the Incus-managed bridges
 of the same run, and the only state-changing NetworkManager call marks such a bridge unmanaged. A
 guard written by a released version is rewritten during update, refusing while NetworkManager
 provably manages a device the administrator's list marks unmanaged; the host then reboots once.

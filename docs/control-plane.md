@@ -1930,7 +1930,15 @@ or hash differs (a hand edit or restore), or the guard is a symbolic link. Its n
 `yard init` (which records it `unread`, replacing a link with a file), then one reboot. A
 NetworkManager restart never counts. No yard starts while the guard is unread or unbound: init,
 early installation included, stops before anything creates devices; update and teardown leave the
-reboot to the operator. Released power readers reject the new
+reboot to the operator.
+
+The record's guarantee has a boundary. It binds the guard file, not the rest of NetworkManager's
+configuration: an administrator who restarts NetworkManager on a different configuration and then
+restores the files on disk, for example by swapping or restoring the `conf.d` directory or by
+adding a temporary higher-priority file such as `zzz.conf`, restarting and removing it again, is
+outside what the record can detect. Reboot after such changes. `held` also trusts systemd's view
+of NetworkManager: "explicitly inactive at both samples" means `systemctl is-active` reported it
+inactive, so a NetworkManager process running outside its unit is not seen. Released power readers reject the new
 guard, and their init would rewrite the released guard and reload NetworkManager, so
 rollback to a release below this epoch is refused before activation as `rollback-incompatible`.
 `yard update --rollback` does not cross this boundary.
