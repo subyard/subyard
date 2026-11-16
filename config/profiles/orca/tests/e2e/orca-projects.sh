@@ -226,7 +226,7 @@ agent_session_tab() {
   # Create an agent-session tab through a stand-in agent command; print its new tab ID.
   local worktree="$1" before after
   guest_root sh -c '[ -e /usr/local/bin/codex ] || { printf "#!/bin/sh\nexec sleep 3600\n" >/usr/local/bin/codex; chmod 0755 /usr/local/bin/codex; }'
-  before="$(worktree_tabs "$worktree")"
+  before="$(worktree_tabs "$worktree")" || die 'Orca session tab read failed before the agent session'
   guest_dev python3 -B - "$worktree" <<'YARD' >/dev/null || die 'agent session could not be created'
 import secrets, sys, time
 sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
@@ -237,7 +237,7 @@ rpc.call("terminal.createAgentSession", {
     "worktree": "id:" + sys.argv[1], "agent": "codex", "agentArgs": ""})
 YARD
   for _ in $(seq 1 30); do
-    after="$(worktree_tabs "$worktree")"
+    after="$(worktree_tabs "$worktree")" || die 'Orca session tab read failed after the agent session'
     comm -13 <(sort <<<"$before") <(sort <<<"$after") | head -n1 | grep . && return 0
     sleep 1
   done

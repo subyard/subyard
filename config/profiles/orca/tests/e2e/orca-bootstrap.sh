@@ -243,11 +243,15 @@ stock_orca_probe() {
     --registration "$ROOT/config/profiles/orca/resources/orca/registration"
 }
 
+# Reads the catalog first: a failed or invalid read fails the fixture, so a negative use
+# (`orca_catalog_has PATH && die ...`) can never pass on a missing catalog.
 orca_catalog_has() {
-  local path="$1"
-  orca_rpc repo.list | jq -e --arg path "$path" \
+  local path="$1" catalog
+  catalog="$(orca_rpc repo.list)" || die 'Orca repository catalog read failed'
+  jq -e '.repos | type == "array"' <<<"$catalog" >/dev/null || die 'Orca repository catalog is invalid'
+  jq -e --arg path "$path" \
     '.repos | any(.path == $path and ((.executionHostId // "local") == "local") and (.connectionId // null) == null)' \
-    >/dev/null
+    <<<"$catalog" >/dev/null
 }
 
 orca_repo_id() {

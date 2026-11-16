@@ -9,14 +9,16 @@
 # predecessor's Orca package is still installed.
 
 stuck_tabs() {
-  # Print the tab IDs of one exact worktree selector, one per line.
-  orca_rpc session.tabs.listAll | jq -r --arg worktree "$1" \
-    '.snapshots[] | select(.worktree == $worktree) | .tabs[] | .id'
+  # Print the tab IDs of one exact worktree selector, one per line; fail on a failed read.
+  local snapshots
+  snapshots="$(orca_rpc session.tabs.listAll)" || return 1
+  jq -e '.snapshots | type == "array"' <<<"$snapshots" >/dev/null || return 1
+  jq -r --arg worktree "$1" '.snapshots[] | select(.worktree == $worktree) | .tabs[] | .id' <<<"$snapshots"
 }
 
 stuck_agent_tab() {
   local worktree="$1" name="$2" before after
-  before="$(stuck_tabs "$worktree")"
+  before="$(stuck_tabs "$worktree")" || die "Orca session tab read failed: $name"
   guest_dev python3 -B - "$worktree" <<'YARD' >/dev/null || die "agent session could not be created: $name"
 import secrets, sys, time
 sys.path.insert(0, "/usr/local/libexec/subyard/orca-registration")
@@ -27,7 +29,7 @@ rpc.call("terminal.createAgentSession", {
     "worktree": "id:" + sys.argv[1], "agent": "codex", "agentArgs": ""})
 YARD
   for _ in $(seq 1 30); do
-    after="$(stuck_tabs "$worktree")"
+    after="$(stuck_tabs "$worktree")" || die "Orca session tab read failed: $name"
     comm -13 <(sort <<<"$before") <(sort <<<"$after") | head -n1 | grep . && return 0
     sleep 1
   done
@@ -50,14 +52,6 @@ stuck_pty_live() {
   jq -e --arg pty "$1" '.terminals | any(.ptyId == $pty and .connected == true)' <<<"$census" >/dev/null
 }
 
-stuck_catalog_has() {
-  local catalog
-  catalog="$(orca_rpc repo.list)" || die 'Orca repository catalog read failed'
-  jq -e '.repos | type == "array"' <<<"$catalog" >/dev/null || die 'Orca repository catalog is invalid'
-  jq -e --arg path "$1" \
-    '.repos | any(.path == $path and ((.executionHostId // "local") == "local") and (.connectionId // null) == null)' \
-    <<<"$catalog" >/dev/null
-}
 
 stuck_orca_version() {
   guest_root dpkg-query -W -f '${Version}' orca-ide
@@ -97,7 +91,7 @@ run_stuck_recovery() {
 
   yard remove stuck-removed --yes >"$STATE/stuck-remove.out" 2>"$STATE/stuck-remove.err" \
     || die 'predecessor project removal failed'
-  stuck_catalog_has "$removed_root" || die 'predecessor unexpectedly removed the record with sessions'
+  orca_catalog_has "$removed_root" || die 'predecessor unexpectedly removed the record with sessions'
 
   stage "updating to published $UPGRADE_TARGET, which must stop in recovery"
   if YARD_RELEASE_BASE_URL="https://github.com/subyard/subyard/releases/download/v$UPGRADE_TARGET" \
@@ -136,7 +130,7 @@ run_stuck_recovery() {
   [ "$(stuck_orca_version)" = "$orca_before" ] || die 'the update changed the Orca package before the hook ran'
 
   stage 'checking that only the removed record and its sessions are gone'
-  ! stuck_catalog_has "$removed_root" || die 'recovered update retained the removed-project record'
+  ! orca_catalog_has "$removed_root" || die 'recovered update retained the removed-project record'
   orca_rpc session.tabs.listAll | jq -e --arg prefix "$removed_id::" \
     '.snapshots | all(((.worktree | startswith($prefix)) and (.tabs | length > 0)) | not)' >/dev/null \
     || die 'removed-project tabs survived the recovery'
