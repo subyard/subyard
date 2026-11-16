@@ -1,0 +1,37 @@
+name: Veranda native client on macOS
+
+# Hosted macOS arm64 runners are scarce, so the macOS native client check runs daily, on release
+# tags and on manual dispatch instead of on every push and pull request. It is not a merge gate.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-client:
+    name: Native client on macos-15
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/veranda/target
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update
+      - name: Check Veranda host-free contracts
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: python dev/check-veranda.py
