@@ -31,9 +31,14 @@ type resourceIngress struct {
 	port     int
 }
 
+// resourceOwnsIngress reports whether the verb publishes or closes owned public ingress.
+func resourceOwnsIngress(definition resource.Definition, verb string) bool {
+	return definition.Proxy != nil && definition.Proxy.IsOwnerIPv4Ingress() &&
+		(verb == definition.BringUp || verb == definition.Shutdown)
+}
+
 func (cli *CLI) prepareResourceIngress(ctx context.Context, loaded config.Loaded, definition resource.Definition, verb string) (*resourceIngress, error) {
-	if definition.Proxy == nil || !definition.Proxy.IsOwnerIPv4Ingress() ||
-		(verb != definition.BringUp && verb != definition.Shutdown) {
+	if !resourceOwnsIngress(definition, verb) {
 		return nil, nil
 	}
 	if loaded.Context.AccessKind != domain.AccessLocal || loaded.Context.YardKind != domain.YardVM ||

@@ -119,6 +119,14 @@ func (cli *CLI) runResourceCommand(
 		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
 		return 1
 	}
+	exact := native.Schema == resource.PrepareAssessmentSchemaV2 && cli.resourceExactInvocation(definition, arguments)
+	if !exact && resourceOwnsIngress(definition, invocation.verb) {
+		// Public ingress and desired startup change only inside a prepared
+		// operation, which takes the owner barrier before the yard lock.
+		cli.errorf("%s: %v: public ingress %s requires a prepared %s plan for an exact mutation; handler returned %s",
+			definition.Command, resource.ErrResourcePlanInvalid, invocation.verb, resource.PrepareAssessmentSchemaV2, native.Schema)
+		return 1
+	}
 	assessment := native.Assessment
 	resourceConsequences := slices.Clone(assessment.Consequences)
 	assessment = bootstrap.augment(assessment)
@@ -148,7 +156,7 @@ func (cli *CLI) runResourceCommand(
 		localAction: localAction, effect: assessment.Effect, arguments: slices.Clone(invocation.arguments),
 		bootstrap: bootstrap, consequences: resourceConsequences, ingress: ingress, startupIntent: intent,
 	}
-	if native.Schema == resource.PrepareAssessmentSchemaV2 && cli.resourceExactInvocation(definition, arguments) {
+	if exact {
 		prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: resourceCommandDefinition(definition), Arguments: slices.Clone(arguments), Loaded: loaded}
 		if err := prepared.attachResourceExecution(runner, baseline, native); err != nil {
 			cli.errorf("%s: prepare exact resource: %v", definition.Command, err)
@@ -194,22 +202,10 @@ func (cli *CLI) runResourceCommand(
 	}
 	defer unlockShutdown()
 	runner.shutdownLocked = true
-	if ingress != nil && assessment.Changed {
-		unlock, lockErr := lockIntegrationYard(ctx, loaded)
-		if lockErr != nil {
-			cli.errorf("%s: lock ingress yard: %v", definition.Command, lockErr)
-			return 1
-		}
-		defer unlock()
-	}
 	if assessment.Changed &&
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		if err := bootstrap.refresh(ctx, cli); err != nil {
 			cli.errorf("%s: refresh bootstrap: %v", definition.Command, err)
-			return 1
-		}
-		if err := intent.refresh(ctx, cli); err != nil {
-			cli.errorf("%s: refresh startup intent: %v", definition.Command, err)
 			return 1
 		}
 		refreshedOutput, refreshErr := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
@@ -225,12 +221,6 @@ func (cli *CLI) runResourceCommand(
 			return 1
 		}
 		refreshed = bootstrap.augment(refreshed)
-		if err := ingress.refresh(ctx, cli); err != nil {
-			cli.errorf("%s: refresh ingress: %v", definition.Command, err)
-			return 1
-		}
-		refreshed = intent.augment(refreshed)
-		refreshed = ingress.augment(refreshed)
 		if refreshed.Action != assessment.Action {
 			cli.errorf("%s: %v: resource action changed after confirmation",
 				definition.Command, domain.ErrPlanStale)
@@ -245,13 +235,6 @@ func (cli *CLI) runResourceCommand(
 			return 1
 		}
 	}
-	if ingress != nil && ingress.up && assessment.Changed && cli.options.NetworkPolicy == nil {
-		if err := cli.prepareSudoPrivileges(ctx, cli.options.Stderr, cli.effectiveUID(), definition.Command); err != nil {
-			cli.errorf("%s: authorize public UDP recovery: %v", definition.Command, err)
-			return 1
-		}
-	}
-
 	orchestrator.Runner = runner
 	_, diagnostics, err := orchestrator.RunAdapter(ctx, plan, domain.AdapterRequest{
 		Schema:      1,

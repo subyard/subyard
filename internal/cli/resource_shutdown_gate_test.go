@@ -38,14 +38,21 @@ SHUTDOWN=down
 `,
 		"config/profiles/sample/resources/relay/handler.sh": `#!/bin/sh
 set -eu
+sync="$SUBYARD_CONFIG_HOME/lock-order"
 case "$SUBYARD_RESOURCE_MODE" in
 prepare)
+  if [ -d "$sync" ]; then printf '%s\n' prepared >>"$sync/prepared"; fi
   printf '{"schema":"yard.resource-action-assessment.v1","action":"%s","changed":true,"consequences":["close owned ingress; preserve state and retain unverified guest cleanup"]}\n' "$1"
   ;;
 apply)
   [ "$1" = down ]
   [ "$SUBYARD_RESOURCE_ACTION" = down ]
   [ -n "$SUBYARD_OPERATION_ID" ]
+  if [ -d "$sync" ]; then
+    : >"$sync/applying"
+    tries=0
+    while [ ! -e "$sync/go" ] && [ "$tries" -lt 200 ]; do sleep 0.1; tries=$((tries + 1)); done
+  fi
   printf '%s\n' pending >"$SUBYARD_CONFIG_HOME/cleanup-pending"
   jq 'del(.Yards[0].InstanceInfo.localDevices["sample-relay"], .Yards[0].InstanceInfo.devices["sample-relay"]) | .Yards[0].InstanceInfo.localConfig["user.subyard.resource.sample-relay"] |= sub("^v1:"; "v1:pending:") | .Yards[0].InstanceInfo.config["user.subyard.resource.sample-relay"] = .Yards[0].InstanceInfo.localConfig["user.subyard.resource.sample-relay"]' "$SUBYARD_CONFIG_HOME/instance.json" >"$SUBYARD_CONFIG_HOME/instance.tmp"
   chmod 0600 "$SUBYARD_CONFIG_HOME/instance.tmp"
@@ -61,7 +68,9 @@ esac
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(home, "yards/default/config.env"), []byte("# unchanged owner context\n"), 0600)
-	if scenario == "v2" {
+	// Bring-up and shutdown of public ingress require exact v2 plans; "v1"
+	// keeps the legacy-shaped handler only to prove its refusal.
+	if scenario != "v1" {
 		handler := filepath.Join(root, "config/profiles/sample/resources/relay/handler.sh")
 		content := string(mustReadConfigFixture(t, handler))
 		start := strings.Index(content, "  printf '{\"schema\"")
@@ -312,7 +321,7 @@ func TestResourceShutdownAdmitsCompletedHistoryUnavailableGuest(t *testing.T) {
 	for _, scenario := range []struct {
 		name, protocol string
 		installedGuest bool
-	}{{"v1", "", false}, {"v2", "v2", false}, {"installed-guest-v1", "", true}, {"installed-guest-v2", "v2", true}} {
+	}{{"exact", "", false}, {"installed-guest", "", true}} {
 		t.Run(scenario.name, func(t *testing.T) {
 			program, home, output := shutdownGateFixture(t, scenario.protocol, scenario.installedGuest)
 			legacy := filepath.Join(home, "migrations", "transactions", "retired", "transaction.json")
@@ -451,7 +460,7 @@ func TestResourceShutdownRepairRevalidatesAfterConsent(t *testing.T) {
 }
 
 func TestResourceShutdownRepairRejectsExactNativeDriftAfterConsent(t *testing.T) {
-	program, home, output := shutdownGateFixture(t, "v2")
+	program, home, output := shutdownGateFixture(t, "")
 	program.options.Arguments = []string{"-Y", "private", "relay", "down"}
 	program.options.Prompt = &callbackPrompt{callback: func() { testkit.WriteFile(t, filepath.Join(home, "native-drift"), []byte("changed"), 0600) }}
 	if code := program.Run(context.Background()); code == 0 {
