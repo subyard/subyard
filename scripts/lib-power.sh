@@ -238,8 +238,16 @@ power_nm_guard_static_hash() { # <conf>: fails when the guard cannot be read
   power_nm_guard_text_hash "$content"
 }
 
-# The guard file's identity through any symlink, as hostruntime.networkManagerFileID.
-power_nm_file_id() { stat -L -c '%i:%.9Z' -- "$1" 2>/dev/null; }
+# The guard file's identity, as hostruntime.networkManagerFileID: one lstat of the path itself,
+# which must be a regular file (never a link, FIFO or anything a read could block on).
+power_nm_file_id() { # <path>
+  local identity
+  identity="$(stat -c '%F|%i:%.9Z' -- "$1" 2>/dev/null)" || return 1
+  case "${identity%%|*}" in
+    'regular file'|'regular empty file') printf '%s\n' "${identity#*|}" ;;
+    *) return 1 ;;
+  esac
+}
 
 # The pure read-state rule, shared with hostruntime.NetworkManagerGuardState and checked on
 # tests/fixtures/nm-guard-state.txt. A record binds one guard file (its identity) and its static
@@ -270,8 +278,8 @@ power_nm_guard_state() { # [conf]: the read state of the guard on disk
   local conf="${1:-$POWER_NM_GUARD_CONF}" record='' hash boot file
   boot="$(power_nm_boot_id)" || boot=''
   [ -n "$boot" ] || { printf 'unread-init\n'; return; }
-  # Subyard writes a regular file; a link could be retargeted and restored behind the record.
-  [ ! -L "$conf" ] || { printf 'unbound\n'; return; }
+  # Subyard writes a regular file; a link could be retargeted and restored behind the record, and
+  # the type is part of the identity read, so nothing else is ever opened.
   file="$(power_nm_file_id "$conf")" || { printf 'unbound\n'; return; }
   hash="$(power_nm_guard_static_hash "$conf")" || { printf 'unbound\n'; return; }
   # The identity read after the content: a concurrent rewrite changes it, never the reverse.
@@ -326,8 +334,8 @@ power_nm_guard_effective() { # <bridge...>: every independent finding, next step
       reboot=1 ;;
     unbound)
       # Only init can tell what NetworkManager holds: it records the guard as unread.
-      if [ -L "$POWER_NM_GUARD_CONF" ]; then
-        violations+="${violations:+$'\n'}the Subyard guard $POWER_NM_GUARD_CONF is a symbolic link; init replaces the link with a file"
+      if { [ -e "$POWER_NM_GUARD_CONF" ] || [ -L "$POWER_NM_GUARD_CONF" ]; } && ! power_nm_file_id "$POWER_NM_GUARD_CONF" >/dev/null; then
+        violations+="${violations:+$'\n'}the Subyard guard $POWER_NM_GUARD_CONF is not a regular file (a link, for example); init replaces it with a file"
       else
         violations+="${violations:+$'\n'}no Subyard record binds the guard on disk to what NetworkManager read"
       fi

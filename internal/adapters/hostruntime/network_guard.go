@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,8 +80,8 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 		reboot = true
 	case "unbound":
 		// Only init can tell what NetworkManager holds: it records the guard as unread.
-		if info, err := os.Lstat(NetworkManagerGuardPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			violations = append(violations, "the Subyard guard "+NetworkManagerGuardPath+" is a symbolic link; init replaces the link with a file")
+		if _, err := os.Lstat(NetworkManagerGuardPath); err == nil && networkManagerFileID(NetworkManagerGuardPath) == "" {
+			violations = append(violations, "the Subyard guard "+NetworkManagerGuardPath+" is not a regular file (a link, for example); init replaces it with a file")
 		} else {
 			violations = append(violations, "no Subyard record binds the guard on disk to what NetworkManager read")
 		}
@@ -393,13 +394,30 @@ func NetworkManagerGuardState(record, boot, fileID, hash string) string {
 	}
 }
 
-// networkManagerFileID matches `stat -L -c '%i:%.9Z'`: the guard's identity through any symlink.
+// networkManagerFileID matches power_nm_file_id: one lstat of the path itself, which must be a
+// regular file (never a link, FIFO or anything a read could block on).
 func networkManagerFileID(path string) string {
 	var stat syscall.Stat_t
-	if err := syscall.Stat(path, &stat); err != nil {
+	if err := syscall.Lstat(path, &stat); err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFREG {
 		return ""
 	}
 	return fmt.Sprintf("%d:%d.%09d", stat.Ino, stat.Ctim.Sec, stat.Ctim.Nsec)
+}
+
+// readRegularGuard opens the path without following a link or blocking, and reads it only when
+// the opened file is the regular file the identity named.
+func readRegularGuard(path, fileID string) ([]byte, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var stat syscall.Stat_t
+	if err := syscall.Fstat(int(file.Fd()), &stat); err != nil || stat.Mode&syscall.S_IFMT != syscall.S_IFREG ||
+		fmt.Sprintf("%d:%d.%09d", stat.Ino, stat.Ctim.Sec, stat.Ctim.Nsec) != fileID {
+		return nil, errors.New("the guard is not the regular file it was")
+	}
+	return io.ReadAll(io.LimitReader(file, 1<<20))
 }
 
 func localNetworkManagerShow(property string) string {
@@ -422,12 +440,13 @@ func networkManagerGuardStateAt(statePath, guardPath, bootPath string) string {
 	if err != nil || strings.TrimSpace(string(boot)) == "" {
 		return "unread-init"
 	}
-	// Subyard writes a regular file; a link could be retargeted and restored behind the record.
-	if info, err := os.Lstat(guardPath); err != nil || !info.Mode().IsRegular() {
+	// Subyard writes a regular file; a link could be retargeted and restored behind the record,
+	// and the type is part of the identity read, so nothing else is ever opened.
+	fileID := networkManagerFileID(guardPath)
+	if fileID == "" {
 		return "unbound"
 	}
-	fileID := networkManagerFileID(guardPath)
-	guard, err := os.ReadFile(guardPath)
+	guard, err := readRegularGuard(guardPath, fileID)
 	// The identity is read again after the content: a concurrent rewrite changes it.
 	if fileID == "" || err != nil || networkManagerFileID(guardPath) != fileID {
 		return "unbound"

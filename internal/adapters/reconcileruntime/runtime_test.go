@@ -2344,6 +2344,14 @@ func TestNetworkStageCapturesKernelActorBeforeElevatedScript(t *testing.T) {
 			t.Fatalf("kernel actor not retained in script identity and argv: %v", err)
 		}
 	}
+	// yard update names itself in the stage's next steps.
+	runtime.Environment, runtime.FromUpdate = nil, true
+	if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageNetwork); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || !strings.HasSuffix(string(data), "\n--from-update\n") {
+		t.Fatalf("update context not passed to the network stage: %q %v", data, err)
+	}
 }
 
 func TestPowerStageKeepsCurrentActorAndPinnedRepository(t *testing.T) {

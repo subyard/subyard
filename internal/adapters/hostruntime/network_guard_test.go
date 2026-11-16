@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -389,6 +390,32 @@ func TestLocalNetworkManagerGuardStateRefusesALinkedGuard(t *testing.T) {
 	testkit.WriteFile(t, target, []byte(rendered), 0o644)
 	if got := networkManagerGuardStateAt(record, target, boot); got != "unbound" {
 		t.Fatalf("a restored file gave %q", got)
+	}
+}
+
+// A FIFO or directory in place of the guard reads unbound at once and is never opened.
+func TestLocalNetworkManagerGuardStateRefusesNonRegularGuards(t *testing.T) {
+	directory := testkit.TempDir(t)
+	boot, record := filepath.Join(directory, "boot_id"), filepath.Join(directory, "state")
+	testkit.WriteFile(t, boot, []byte("b2\n"), 0o644)
+	fifo, folder := filepath.Join(directory, "fifo.conf"), filepath.Join(directory, "dir.conf")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, guard := range []string{fifo, folder} {
+		done := make(chan string, 1)
+		go func() { done <- networkManagerGuardStateAt(record, guard, boot) }()
+		select {
+		case got := <-done:
+			if got != "unbound" {
+				t.Fatalf("%s gave %q", filepath.Base(guard), got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s blocked the read", filepath.Base(guard))
+		}
 	}
 }
 

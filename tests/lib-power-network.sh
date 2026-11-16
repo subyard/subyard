@@ -84,7 +84,8 @@ if [ -n "$dir" ]; then
   exec python3 -I - "$dir" <<'PY'
 import os, sys
 directory = sys.argv[1]
-files = sorted(name for name in os.listdir(directory) if name.endswith(".conf")) if os.path.isdir(directory) else []
+# Like NetworkManager, only regular .conf files are read.
+files = sorted(name for name in os.listdir(directory) if name.endswith(".conf") and os.path.isfile(os.path.join(directory, name))) if os.path.isdir(directory) else []
 listed, sections = None, []
 for name in files:
     section = None
@@ -650,7 +651,7 @@ ln -sfn "$tmp/linked.conf" "$guard_conf"
 nm_guard_write_file "$POWER_NM_GUARD_STATE" "boot-0 $(power_nm_file_id "$guard_conf") $(power_nm_guard_static_hash "$guard_conf") held init"
 [ "$(state_of)" = unbound ] || fail "a linked guard with a record for its target read as $(state_of)"
 if power_host_safe incusbr0; then fail "a start passed on a linked guard"; fi
-case "$POWER_ERROR" in *'is a symbolic link; init replaces the link with a file'*'run yard init, then reboot the host once'*) ;; *) fail "linked guard refusal: $POWER_ERROR" ;; esac
+case "$POWER_ERROR" in *'is not a regular file (a link, for example); init replaces it with a file'*'run yard init, then reboot the host once'*) ;; *) fail "linked guard refusal: $POWER_ERROR" ;; esac
 if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "init continued after replacing a linked guard"; fi
 [ -f "$guard_conf" ] && [ ! -L "$guard_conf" ] && [ "$(cat "$tmp/linked.conf")" = "$expected_guard" ] \
   || fail "init did not replace the link with a file, or changed its target"
@@ -660,6 +661,28 @@ nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null || fail "init failed after 
 ln -sfn "$tmp/missing.conf" "$guard_conf"
 [ "$(state_of)" = unbound ] || fail "a dangling guard link read as $(state_of)"
 rm -f "$guard_conf"
+# A link to a directory: init replaces the link itself with a regular file and leaves the
+# directory untouched (mv -T never moves into it).
+guard_case
+mkdir -p "$tmp/linked-dir" && printf 'keep\n' > "$tmp/linked-dir/admin.txt"
+ln -sfn "$tmp/linked-dir" "$guard_conf"
+[ "$(state_of)" = unbound ] || fail "a guard link to a directory read as $(state_of)"
+if (nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out" 2>&1); then fail "init continued after replacing a directory link"; fi
+[ -f "$guard_conf" ] && [ ! -L "$guard_conf" ] && [ "$(cat "$guard_conf")" = "$expected_guard" ] \
+  || fail "init did not replace the directory link with the guard file: $(cat "$tmp/guard.out"; ls -la "$guard_conf")"
+[ "$(ls -A "$tmp/linked-dir")" = admin.txt ] && [ "$(cat "$tmp/linked-dir/admin.txt")" = keep ] \
+  || fail "init changed the linked directory: $(ls -A "$tmp/linked-dir")"
+# A non-regular guard is a form Subyard did not write, so it goes through the migration.
+[ "$(record_state)" = 'unread migration' ] || fail "directory link record: $(cat "$POWER_NM_GUARD_STATE")"
+# A FIFO in place of the guard reads unbound at once and is never opened; init replaces it.
+guard_case
+rm -f "$guard_conf" && mkfifo "$guard_conf"
+[ "$(timeout 5 bash -c '. "$1"; POWER_NM_GUARD_STATE="$2" power_nm_guard_state "$3"' _ "$ROOT/scripts/lib-power.sh" "$POWER_NM_GUARD_STATE" "$guard_conf")" = unbound ] \
+  || fail "a FIFO guard did not read unbound at once"
+if (timeout 20 bash -c "$(declare -f); $(declare -p | grep -E '^declare -[^ ]*x? *(POWER_|NM_GUARD|MOCK_|tmp=|ROOT=)' || true); nm_unmanaged_guard incusbr0 '$guard_conf'" >"$tmp/guard.out" 2>&1); then
+  fail "init continued after replacing a FIFO guard"
+fi
+[ -f "$guard_conf" ] && [ "$(cat "$guard_conf")" = "$expected_guard" ] || fail "init did not replace the FIFO guard: $(cat "$tmp/guard.out")"
 # Equal bytes without a binding and NetworkManager explicitly inactive at both samples: `held`.
 guard_case
 MOCK_NM_STATE=inactive

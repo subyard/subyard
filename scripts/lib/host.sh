@@ -243,7 +243,7 @@ nm_guard_released() { # <conf>
 }
 
 nm_guard_bridges_in() { # <conf>: bridges a current-format guard lists
-  [ -r "$1" ] || return 0
+  [ -f "$1" ] || return 0
   awk '
     /^[[:space:]]*match-device[[:space:]]*=/ {
       value = $0; sub(/^[^=]*=/, "", value)
@@ -268,8 +268,9 @@ nm_guard_write_file() { # <path> <contents>: atomic; the temporary name never en
   local temporary
   temporary="${1%/*}/.${1##*/}.$$.tmp"
   # Durable: the bytes reach the disk before the rename, and the rename before any later step.
+  # -T: the destination is a file name, never a directory a link points to.
   printf '%s\n' "$2" > "$temporary" && chmod 0644 "$temporary" && sync -- "$temporary" \
-    && mv -f "$temporary" "$1" && sync -- "${1%/*}" \
+    && mv -fT -- "$temporary" "$1" && sync -- "${1%/*}" \
     || { rm -f "$temporary"; return 1; }
 }
 
@@ -470,7 +471,7 @@ nm_guard_hijack_check() {
 nm_guard_released_names() { # <conf>: exact interface names a released or legacy guard lists
   local file
   for file in "$1" "$(nm_legacy_guard "$1")"; do
-    [ -r "$file" ] && sed -n 's/^[[:space:]]*\(unmanaged-devices\|match-device\)[[:space:]]*[+]\{0,1\}=//p' "$file"
+    [ -f "$file" ] && sed -n 's/^[[:space:]]*\(unmanaged-devices\|match-device\)[[:space:]]*[+]\{0,1\}=//p' "$file"
   done | tr ',;' '\n\n' | sed -n 's/^[[:space:]]*interface-name:\([A-Za-z0-9_.:-]*\)[[:space:]]*$/\1/p' | LC_ALL=C sort -u
 }
 
@@ -525,7 +526,7 @@ nm_guard_inactive_state() { # <active at the first sample> <binary>
 #   then records `unread` for this boot. `held` needs NetworkManager explicitly inactive at both
 #   samples, or a migration with evidence that NetworkManager holds the released guard.
 nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <active> <binary> [evidence: 1|0]
-  local conf="$1" desired="$2" kind="$3" active="$4" binary="$5" evidence="${6:-0}" legacy hash before record bound=0 disk
+  local conf="$1" desired="$2" kind="$3" active="$4" binary="$5" evidence="${6:-0}" legacy hash before record bound=0 disk identity
   local old_boot old_hash old_state old_kind state=unread
   NM_GUARD_RECORD_ERROR=''
   legacy="$(nm_legacy_guard "$conf")"
@@ -542,11 +543,13 @@ nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <ac
   { IFS= read -r record < "$POWER_NM_GUARD_STATE"; } 2>/dev/null || true
   read -r old_boot _ old_hash old_state old_kind _ <<< "$record"
   # Bound: the record names this very file and its static content (any boot).
-  disk="$(power_nm_guard_static_hash "$conf")" || disk=''
-  # A link in place of the file is never bound and is replaced by a regular file below.
-  [ "$(power_nm_guard_state_rule "$record" any "$(power_nm_file_id "$conf")" "$disk")" = unbound ] \
-    || nm_path_exists "$legacy" || [ -L "$conf" ] || bound=1
-  if [ -f "$conf" ] && [ ! -L "$conf" ] && ! nm_path_exists "$legacy" && [ "$(cat "$conf")" = "$desired" ]; then
+  # Anything but a regular file in place of the guard is never bound, never read, and is replaced
+  # by a regular file below.
+  disk='' identity=''
+  if identity="$(power_nm_file_id "$conf")"; then disk="$(power_nm_guard_static_hash "$conf")" || disk=''; fi
+  [ "$(power_nm_guard_state_rule "$record" any "$identity" "$disk")" = unbound ] \
+    || nm_path_exists "$legacy" || bound=1
+  if [ -n "$identity" ] && ! nm_path_exists "$legacy" && [ "$(cat -- "$conf")" = "$desired" ]; then
     ok "NetworkManager guard already current ($conf)"
     [ "$bound" = 0 ] || return 0
     nm_guard_record "$conf" "$hash" "$(nm_guard_inactive_state "$active" "$binary")" "$kind" "$(power_nm_boot_id)"

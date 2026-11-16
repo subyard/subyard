@@ -27,6 +27,8 @@ for arg in "$@"; do
     --check) mode=check ;;
     --verify) mode=verify ;;
     --operator-uid=*) APPROVED_OPERATOR_UID="${arg#--operator-uid=}" ;;
+    # yard update applies this stage for its disk-tmp policy; its next steps name the update.
+    --from-update) POWER_NM_GUARD_COMMAND="yard update" ;;
   esac
 done
 

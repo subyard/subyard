@@ -86,6 +86,8 @@ type Runtime struct {
 	HookPlan                  *ProjectHookPlan
 	projectMetadataProjection []byte
 	Environment               []string
+	// FromUpdate marks stages applied by yard update, so their next steps name the update.
+	FromUpdate bool
 	// AdoptLegacyIntegrations permits one initial, exact ownership adoption during
 	// a reviewed init plan. Ordinary integration commands leave it false.
 	AdoptLegacyIntegrations bool
@@ -269,9 +271,12 @@ func (runtime Runtime) ApplyStage(ctx context.Context, stage ports.ReconcileStag
 		if err != nil {
 			return err
 		}
+		arguments := []string{"--yes", "--operator-uid=" + operator.Uid}
+		if runtime.FromUpdate {
+			arguments = append(arguments, "--from-update")
+		}
 		return runtime.runScriptEnvironment(ctx, runtime.Stderr,
-			map[string]string{"SUBYARD_USER": operator.Username},
-			"06-network.sh", "--yes", "--operator-uid="+operator.Uid)
+			map[string]string{"SUBYARD_USER": operator.Username}, "06-network.sh", arguments...)
 	case ports.ReconcileStageNetworkPolicy:
 		if runtime.NetworkPolicy == nil {
 			return errors.New("yard network policy service is required")
