@@ -217,8 +217,10 @@ release_registration_lock() {
   die 'the Orca registration lock is still held after release'
 }
 worktree_tabs() {
-  orca_rpc session.tabs.listAll | jq -r --arg worktree "$1" \
-    '.snapshots[] | select(.worktree == $worktree) | .tabs[] | .id'
+  local snapshots
+  snapshots="$(orca_rpc session.tabs.listAll)" || return 1
+  jq -e '.snapshots | type == "array"' <<<"$snapshots" >/dev/null || return 1
+  jq -r --arg worktree "$1" '.snapshots[] | select(.worktree == $worktree) | .tabs[] | .id' <<<"$snapshots"
 }
 agent_session_tab() {
   # Create an agent-session tab through a stand-in agent command; print its new tab ID.
@@ -619,8 +621,10 @@ YARD
   if [ "$mode" = sync ] || [ "$mode" = periodic ]; then
     # Recovery modes: the removal hook fails, so sync or discovery alone must clean up. A
     # running discovery pass would also clean up as soon as the lock is released.
-    ! guest_root systemctl is-active --quiet subyard-orca-discovery.timer \
-      || die "discovery is not paused before the recovery precondition: $mode"
+    discovery_state="$(guest_root systemctl show -p ActiveState --value subyard-orca-discovery.timer)" \
+      || die 'the discovery timer state could not be read'
+    [ "$discovery_state" = inactive ] || [ "$discovery_state" = failed ] \
+      || die "discovery is not paused before the recovery precondition: $mode ($discovery_state)"
     hold_registration_lock
   fi
   yard remove "$removal_name" --yes >"$STATE/remove-$mode.out" 2>"$STATE/remove-$mode.err" \
@@ -652,8 +656,9 @@ YARD
     # further sync or discovery pass.
     assert_absent_repo "$removal_root"
     assert_removed_sessions
+    remaining_tabs="$(worktree_tabs "${removal_selector#id:}")" || die 'Orca session tab read failed'
     for tab in "$removal_saved_tab" "$removal_agent_tab"; do
-      ! worktree_tabs "${removal_selector#id:}" | grep -Fxq "$tab" \
+      ! grep -Fxq "$tab" <<<"$remaining_tabs" \
         || die 'the removal hook kept a saved or agent-session tab of the removed project'
     done
   elif [ "$mode" = sync ] || [ "$mode" = periodic ]; then
@@ -712,9 +717,11 @@ guest_dev mkdir "/srv/workspaces/$protected_name"
 release_registration_lock
 yard orca status >"$STATE/protected-status.out" 2>"$STATE/protected-status.err" \
   || { show_output "$STATE/protected-status.out" "$STATE/protected-status.err"; die 'status failed for a protected record'; }
-grep -F "$protected_root" "$STATE/protected-status.out" "$STATE/protected-status.err" | grep -Fvq '[warn]' \
-  || { show_output "$STATE/protected-status.out" "$STATE/protected-status.err"
-       die 'status did not show the protected record as information'; }
+protected_lines="$(grep -hF "$protected_root" "$STATE/protected-status.out" "$STATE/protected-status.err" || true)"
+if [ -z "$protected_lines" ] || grep -Fq '[warn]' <<<"$protected_lines"; then
+  show_output "$STATE/protected-status.out" "$STATE/protected-status.err"
+  die 'status did not show the protected record as information only'
+fi
 yard orca up --yes >"$STATE/protected-up.out" 2>"$STATE/protected-up.err" \
   || { show_output "$STATE/protected-up.out" "$STATE/protected-up.err"
        die 'orca up did not settle with only a protected removed record'; }

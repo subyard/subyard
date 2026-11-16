@@ -40,9 +40,23 @@ stuck_live_terminal() {
     | jq -er '.tab_id + " " + .pty_id'
 }
 
+# Absence checks read their inventory first: a failed read fails the lane, never passes it.
 stuck_pty_live() {
-  orca_rpc terminal.list '{"limit":1000,"requireFreshPtyLiveness":true,"includeVisualLayouts":false}' \
-    | jq -e --arg pty "$1" '.terminals | any(.ptyId == $pty and .connected == true)' >/dev/null
+  local census
+  census="$(orca_rpc terminal.list '{"limit":1000,"requireFreshPtyLiveness":true,"includeVisualLayouts":false}')" \
+    || die 'Orca terminal census failed'
+  jq -e '(.terminals | type == "array") and .truncated == false' <<<"$census" >/dev/null \
+    || die 'Orca terminal census is incomplete'
+  jq -e --arg pty "$1" '.terminals | any(.ptyId == $pty and .connected == true)' <<<"$census" >/dev/null
+}
+
+stuck_catalog_has() {
+  local catalog
+  catalog="$(orca_rpc repo.list)" || die 'Orca repository catalog read failed'
+  jq -e '.repos | type == "array"' <<<"$catalog" >/dev/null || die 'Orca repository catalog is invalid'
+  jq -e --arg path "$1" \
+    '.repos | any(.path == $path and ((.executionHostId // "local") == "local") and (.connectionId // null) == null)' \
+    <<<"$catalog" >/dev/null
 }
 
 stuck_orca_version() {
@@ -83,7 +97,7 @@ run_stuck_recovery() {
 
   yard remove stuck-removed --yes >"$STATE/stuck-remove.out" 2>"$STATE/stuck-remove.err" \
     || die 'predecessor project removal failed'
-  orca_catalog_has "$removed_root" || die 'predecessor unexpectedly removed the record with sessions'
+  stuck_catalog_has "$removed_root" || die 'predecessor unexpectedly removed the record with sessions'
 
   stage "updating to published $UPGRADE_TARGET, which must stop in recovery"
   if YARD_RELEASE_BASE_URL="https://github.com/subyard/subyard/releases/download/v$UPGRADE_TARGET" \
@@ -96,6 +110,9 @@ run_stuck_recovery() {
   if yard update --yes >"$STATE/stuck-plain.out" 2>"$STATE/stuck-plain.err"; then
     die "plain update unexpectedly completed the stuck $UPGRADE_TARGET transition"
   fi
+  grep -Fq 'recovery-ambiguous' "$STATE/stuck-plain.out" "$STATE/stuck-plain.err" \
+    || { show_output "$STATE/stuck-plain.out" "$STATE/stuck-plain.err"
+         die "plain update no longer reports the stuck $UPGRADE_TARGET transition"; }
   # The hint names the newest published stable release, which this fixture does not control.
   hint=absent
   if grep -Fq 'yard update --version' "$STATE/stuck-plain.out" "$STATE/stuck-plain.err"; then hint=present; fi
@@ -119,11 +136,11 @@ run_stuck_recovery() {
   [ "$(stuck_orca_version)" = "$orca_before" ] || die 'the update changed the Orca package before the hook ran'
 
   stage 'checking that only the removed record and its sessions are gone'
-  orca_catalog_has "$removed_root" && die 'recovered update retained the removed-project record'
+  ! stuck_catalog_has "$removed_root" || die 'recovered update retained the removed-project record'
   orca_rpc session.tabs.listAll | jq -e --arg prefix "$removed_id::" \
     '.snapshots | all(((.worktree | startswith($prefix)) and (.tabs | length > 0)) | not)' >/dev/null \
     || die 'removed-project tabs survived the recovery'
-  stuck_pty_live "$live_pty" && die 'removed-project live terminal survived the recovery'
+  ! stuck_pty_live "$live_pty" || die 'removed-project live terminal survived the recovery'
   stuck_pty_live "$neighbour_pty" || die 'recovery ended the neighbour live terminal'
   stuck_tabs "$neighbour_wt" | grep -Fxq "$neighbour_agent" || die 'recovery closed the neighbour agent-session tab'
   stuck_tabs "$neighbour_wt" | grep -Fxq "$neighbour_live" || die 'recovery closed the neighbour terminal tab'
