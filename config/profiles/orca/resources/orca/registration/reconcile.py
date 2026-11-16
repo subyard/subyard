@@ -512,6 +512,16 @@ def _report_cleanup(report, scan, state, rpc, groups, repos, cleanup_pass, evide
                  "sessions": True}, evidence) is True:
             # Sessions of a removed project are cleanup work, not a retention reason.
             reason = "repository removal is pending"
+        if (reason in SESSION_RETENTION or reason == "repository removal is pending") \
+                and entry.get("refused_closes", {}).get(repo["id"]):
+            # A close Orca refused in an earlier pass needs the operator while its target remains.
+            try:
+                if read_set is None:
+                    read_set = (repos, _session_snapshots(rpc), _terminal_census(rpc))
+                if _refused_targets(entry, repo, read_set):
+                    reason = REFUSED_CLOSE
+            except RpcError:
+                reason = "session inventory is unavailable; cleanup is retained"
         if reason == "legacy repository identity is unconfirmed":
             action = "Inspect sessions and remove the exact repository in Orca"
         elif reason == REFUSED_CLOSE:
@@ -696,6 +706,31 @@ def _cleanup_plan(repo, read_set, refused_stops=frozenset()):
             + [close(row) for row in rows if row not in fallback])
 
 
+def _refused_targets(entry, repo, read_set):
+    """Persisted refused closes of this record whose targets are still planned. A refused
+    close stays protected across passes, and is never re-sent, until its target is gone."""
+    remembered = entry.get("refused_closes", {}).get(repo["id"], [])
+    plan = _cleanup_plan(repo, read_set)
+    if plan is None:
+        return remembered
+    return [target for target in remembered if tuple(target) in plan]
+
+
+def _remember_refusals(state, entry, repo, targets):
+    refused = entry.setdefault("refused_closes", {})
+    if targets:
+        if refused.get(repo["id"]) == targets:
+            return
+        refused[repo["id"]] = targets
+    elif repo["id"] in refused:
+        del refused[repo["id"]]
+    else:
+        return
+    if not refused:
+        del entry["refused_closes"]
+    state.save()
+
+
 def _has_session_state(repo, read_set):
     _, tabs, rows = _ownership(repo, *read_set)
     return bool(tabs or rows)
@@ -741,6 +776,9 @@ class _PreSendFailure(RpcError):
 
 class CleanupRefused(RpcError):
     """Orca definitively refused a close and readback still shows the target."""
+    def __init__(self, message, target):
+        super().__init__(message)
+        self.target = target
 
 
 REFUSED_CLOSE = "Orca refused a session close; repository is retained"
@@ -820,7 +858,7 @@ def _send_and_confirm(rpc, repo, fence, action, deadline, refused_stops, allow_l
             refused_stops.add(action[2])
             return
         if planned():
-            raise CleanupRefused(REFUSED_CLOSE)
+            raise CleanupRefused(REFUSED_CLOSE, list(action))
         return
     interval = READBACK_INTERVAL
     while planned():
@@ -976,6 +1014,13 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
             report["warnings"].append("Missing Orca checkout has session state it does not own alone "
                                       "and is retained: " + repo["path"])
             continue
+        # A close Orca refused earlier stays protected and is not re-sent while its target remains.
+        if entry.get("refused_closes", {}).get(repo["id"]):
+            still = _refused_targets(entry, repo, read_set)
+            _remember_refusals(state, entry, repo, still)
+            if still:
+                cleanup_pass.outcomes[repo["id"]] = REFUSED_CLOSE
+                continue
         # Live session content: any terminal row, or a tab other than this checkout's stale layouts.
         record["sessions"] = bool(rows) or bool(tabs) and not _only_stale_terminal_layouts(read_set[1], repo)
         if removal_authorized(record, evidence) is not True:
@@ -990,7 +1035,11 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
         except AmbiguousSession:
             cleanup_pass.outcomes[repo["id"]] = AMBIGUOUS_SESSION
             continue
-        except CleanupRefused:
+        except CleanupRefused as refusal:
+            remembered = entry.get("refused_closes", {}).get(repo["id"], [])
+            if refusal.target not in remembered:
+                remembered = remembered + [refusal.target]
+            _remember_refusals(state, entry, repo, remembered)
             cleanup_pass.outcomes[repo["id"]] = REFUSED_CLOSE
             continue
 
@@ -1017,6 +1066,7 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
         remaining = _records(rpc, "repo.list", "repos")
         if any(item["id"] == repo["id"] for item in remaining):
             raise RpcError("Orca repository removal is unconfirmed: " + repo["path"])
+        _remember_refusals(state, entry, repo, [])
         # Keep the original identity if a replacement appeared during removal;
         # retiring it would let a later legacy-path retry adopt the new record.
         if not any(item["path"] == repo["path"] for item in remaining):

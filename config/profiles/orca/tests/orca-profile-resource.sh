@@ -539,6 +539,9 @@ case "${1:-}" in
         elif [ -e "$state_root/project-cleanup-pending" ]; then
           printf '%s\n' '{"ready":false,"settled":false,"registered":2,"total":2,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"session tabs are retained","nextAction":"Inspect retained sessions, then retry Orca sync"}]}'
           exit 1
+        elif [ -e "$state_root/project-report.json" ]; then
+          cat "$state_root/project-report.json"
+          exit 1
         elif [ -e "$state_root/project-counts-drift" ]; then
           printf '%s\n' '{"ready":false,"settled":false,"registered":1,"total":2,"errors":["nested checkout has the wrong group"],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
           exit 1
@@ -1043,6 +1046,44 @@ grep -Fq 'Orca cleanup pending: /srv/workspaces/removed/src: session tabs are re
 ! grep -Fq '[warn]' "$TMP/status-cleanup-pending.out" \
   || fail 'expected cleanup drift generated a warning'
 rm -f "$TMP/project-cleanup-pending"
+
+# A close Orca refused in an earlier pass: the real read-only report keeps it protected and
+# status warns with the manual-close action, with no hand-written report.
+python3 -B - "$ROOT/config/profiles/orca/tests/orca_registration" "$TMP/refused-fixture" >"$TMP/project-report.json" <<'PY_REFUSED_REPORT'
+import json, shutil, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from support import Catalog, project
+from discovery import discover
+from reconcile import reconcile
+base = Path(sys.argv[2])
+workspaces, state = base / "workspaces", base / "state"
+root = project(workspaces, "removed", "Removed")
+rpc = Catalog()
+run = lambda apply: reconcile(discover(str(workspaces)), rpc, str(state), apply=apply, host_name="owner-host")
+assert run(True)["ready"]
+repo = rpc.repos[0]
+rpc.snapshots = [{"worktree": repo["id"] + "::" + repo["path"], "tabs": [{"id": "kept"}]}]
+shutil.rmtree(root.parent)
+original = rpc.call
+def refuse(method, params=None, before_send=None):
+    if method != "session.tabs.close":
+        return original(method, params, before_send=before_send)
+    before_send(rpc.runtime_id)
+    return {"closed": True, "refused": True, "refusalReason": "live-host-pty"}
+rpc.call = refuse
+assert run(True)["settled"]
+print(json.dumps(run(False), separators=(",", ":")))
+PY_REFUSED_REPORT
+jq -e '.settled == true and any(.cleanup[]; .retention == "protected" and .attention == true)' \
+  "$TMP/project-report.json" >/dev/null || fail 'the real report lost the refused-close protection'
+ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status-refused.out"
+grep -Fq '[ .. ] checkouts registered: 0/0; protected project cleanup is retained' "$TMP/status-refused.out" \
+  || { cat "$TMP/status-refused.out" >&2; fail "status did not report a settled pass with a protected refused record"; }
+grep -F 'Orca refused a session close; repository is retained' "$TMP/status-refused.out" | grep -Fq '[warn]' \
+  || fail 'status did not warn about a refused close'
+grep -Fq 'in Orca by hand' "$TMP/status-refused.out" || fail 'status omitted the manual-close action'
+rm -f "$TMP/project-report.json"
 
 # The rendered hook succeeds from validated settlement, never from main.py's strict exit.
 hook_dir="$TMP/hook-contract"

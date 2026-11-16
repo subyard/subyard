@@ -498,7 +498,9 @@ atomic fence for closing a tab or a terminal handle, so a change made in the ins
 the last read and Orca handling the request is not detected. When Orca definitively refuses
 a close, a single readback decides: if the target remains, the record is kept as protected,
 nothing more of it is closed and the pass can still settle, but `status` warns and its next
-action asks to close that tab or terminal in Orca by hand. An accepted close, or one whose
+action asks to close that tab or terminal in Orca by hand. The refusal is kept in the
+registration state: later passes, discovery and `status` keep the record protected and never
+send that close again while its target remains. Once the target is gone, cleanup resumes. An accepted close, or one whose
 reply was lost, is read back with backoff until the cleanup deadline; an unresolved one leaves
 the record undetermined. The record is removed only once its plan is empty.
 An absent checkout's terminal layouts can be removed when all belong to that exact checkout,

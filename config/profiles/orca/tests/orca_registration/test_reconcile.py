@@ -2397,6 +2397,75 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
                                            if item["repoId"] == self.repo["id"]))
 
+    def refuse_tab_closes(self):
+        original = self.rpc.call
+
+        def close(method, params=None, before_send=None):
+            if method != "session.tabs.close":
+                return original(method, params, before_send=before_send)
+            before_send(self.rpc.runtime_id)
+            self.rpc.calls.append((method, params))
+            return {"closed": True, "refused": True, "refusalReason": "live-host-pty"}
+        self.rpc.call = close
+        return original
+
+    def test_refused_close_stays_protected_across_passes_until_its_target_is_gone(self):
+        self.sessions()
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+        shutil.rmtree(self.root.parent)
+        original = self.refuse_tab_closes()
+        first = self.run_sync()
+        sent = len(self.closes())
+        self.assertEqual(1, sent)
+        for apply in (False, True, False):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual(("Orca refused a session close; repository is retained", "protected", True),
+                             (item["reason"], item["retention"], item.get("attention")), apply)
+            self.assertIn("by hand", item["nextAction"])
+            self.assertTrue(report["settled"], report)
+            self.assertEqual(sent, len(self.closes()), "a refused close was sent again")
+        self.assertTrue(first["settled"])
+        refused = self.sidecar()["projects"]["sample-id"]["refused_closes"][self.repo["id"]]
+        self.assertEqual([["tab", self.repo["id"] + "::/srv/linked-elsewhere", "linked-tab"]], refused)
+        # Once the refused tab is gone (closed in Orca by hand), the marker clears and cleanup completes.
+        self.rpc.call = original
+        for snapshot in self.rpc.snapshots:
+            snapshot["tabs"] = [tab for tab in snapshot["tabs"] if tab["id"] != "linked-tab"]
+        report = self.run_sync()
+        self.assertTrue(report["settled"], report)
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertNotIn("sample-id", self.sidecar()["projects"])
+
+    def test_refused_close_marker_clears_when_its_target_is_gone_but_the_record_remains(self):
+        self.sessions()
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+        shutil.rmtree(self.root.parent)
+        self.refuse_tab_closes()
+        self.run_sync()
+        for snapshot in self.rpc.snapshots:
+            snapshot["tabs"] = [tab for tab in snapshot["tabs"] if tab["id"] != "linked-tab"]
+        report = self.run_sync()
+        # The next target is refused too: only it is remembered now.
+        self.assertEqual([["tab", self.repo["id"] + "::" + self.repo["path"], "agent"]],
+                         self.sidecar()["projects"]["sample-id"]["refused_closes"][self.repo["id"]])
+        self.assertTrue(report["settled"])
+
+    def test_state_without_refusals_loads_and_malformed_refusals_are_rejected(self):
+        from state import State, StateError
+        import time
+        path = self.state / "subyard-registration.json"
+        data = self.sidecar()
+        self.assertNotIn("refused_closes", data["projects"]["sample-id"])
+        with State(self.state, False, time.monotonic() + 5):
+            pass
+        for value in ({"x": []}, {"x": [["tab", "w"]]}, {"": [["tab", "w", "t"]]}, []):
+            data["projects"]["sample-id"]["refused_closes"] = value
+            path.write_text(json.dumps(data))
+            with self.assertRaises(StateError):
+                with State(self.state, False, time.monotonic() + 5):
+                    pass
+
     def test_foreign_tab_without_identity_still_shares_its_pty(self):
         self.rpc.snapshots = [
             {"worktree": self.repo["id"] + "::" + self.repo["path"],
@@ -2410,7 +2479,6 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.assertEqual(set(), self.rpc.killed)
         self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
                                            if item["repoId"] == self.repo["id"]))
-
 
     def test_refused_fenced_stop_falls_back_to_the_handle_close_before_any_tab_close(self):
         self.rpc.snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],

@@ -108,6 +108,15 @@ class State:
                         or not isinstance(pending.get("runtime_id"), str)
                         or not isinstance(pending.get("name"), str)):
                     raise ValueError()
+            # Optional: closes Orca definitively refused, per repository ID, kept until the target
+            # or the record is gone. Older state files simply have none.
+            refused = entry.get("refused_closes", {})
+            if not isinstance(refused, dict) or any(
+                    not isinstance(repo_id, str) or not repo_id or not isinstance(targets, list) or not targets
+                    or any(not isinstance(target, list) or len(target) != 3
+                           or not all(isinstance(part, str) and part for part in target) for target in targets)
+                    for repo_id, targets in refused.items()):
+                raise ValueError()
             for path, pending in entry.get("pending_repos", {}).items():
                 if (not isinstance(path, str) or not isinstance(pending, dict)
                         or not isinstance(pending.get("before_ids"), list)
