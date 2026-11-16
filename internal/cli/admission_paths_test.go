@@ -22,14 +22,14 @@ const blockedGateRefusal = `{"status":"migration-required","code":"transition-re
 const sealedSourceRefusal = "release source admission: sealed original assets are unavailable or inconsistent; restore the exact original release without changing protected history\n"
 
 // blockedGateAdmissionFixture is a blocked release gate with the shipped config,
-// integration and profile commands added to the fixture manifest.
-func blockedGateAdmissionFixture(t *testing.T) configApplyRepairFixture {
+// integration, profile and extra commands added to the fixture manifest.
+func blockedGateAdmissionFixture(t *testing.T, extra ...string) configApplyRepairFixture {
 	t.Helper()
 	fixture := newConfigApplyRepairFixture(t, false)
 	path := filepath.Join(fixture.cli.options.RepositoryRoot, "config", "commands.registry")
 	commands := mustReadConfigFixture(t, path)
 	for _, line := range strings.Split(string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "commands.registry"))), "\n") {
-		for _, name := range []string{"config|", "integration|", "profile|"} {
+		for _, name := range append([]string{"config|", "integration|", "profile|"}, extra...) {
 			if strings.HasPrefix(line, name) {
 				commands = append(commands, []byte(line+"\n")...)
 			}
@@ -37,6 +37,22 @@ func blockedGateAdmissionFixture(t *testing.T) configApplyRepairFixture {
 	}
 	testkit.WriteFile(t, path, commands, 0o600)
 	return fixture
+}
+
+// operationSession is an RPC session of the default yard of fixture.
+func operationSession(t *testing.T, fixture configApplyRepairFixture) *rpcHandler {
+	t.Helper()
+	program, err := New(fixture.cli.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
+	t.Cleanup(handler.closePlans)
+	return handler
 }
 
 // TestRunAdmissionBlockedGateRecovery characterizes, through Run, which bounded recovery
@@ -107,20 +123,6 @@ func TestRunAdmissionBlockedGateRecovery(t *testing.T) {
 // operation.execute: the typed refusal, inline init recovery that leaves the gate blocked,
 // the release recovery command that skips the gate, and reinspection at execution.
 func TestRPCOperationGatePolicy(t *testing.T) {
-	session := func(t *testing.T, fixture configApplyRepairFixture) *rpcHandler {
-		t.Helper()
-		program, err := New(fixture.cli.options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		loaded, err := program.loadContext("default")
-		if err != nil {
-			t.Fatal(err)
-		}
-		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
-		t.Cleanup(handler.closePlans)
-		return handler
-	}
 	refused := func(t *testing.T, err error) {
 		t.Helper()
 		fault, ok := err.(*rpc.Error)
@@ -130,14 +132,14 @@ func TestRPCOperationGatePolicy(t *testing.T) {
 	}
 	for _, command := range []string{"start", "init", "teardown"} {
 		t.Run("plan_"+command, func(t *testing.T) {
-			handler := session(t, blockedGateAdmissionFixture(t))
+			handler := operationSession(t, blockedGateAdmissionFixture(t))
 			_, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "gate-" + command,
 				Params: json.RawMessage(`{"command":"` + command + `","arguments":[]}`)}, nil)
 			refused(t, err)
 		})
 	}
 	t.Run("plan_migrate", func(t *testing.T) {
-		handler := session(t, blockedGateAdmissionFixture(t))
+		handler := operationSession(t, blockedGateAdmissionFixture(t))
 		_, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "gate-migrate",
 			Params: json.RawMessage(`{"command":"migrate","arguments":[]}`)}, nil)
 		fault, ok := err.(*rpc.Error)
@@ -148,7 +150,7 @@ func TestRPCOperationGatePolicy(t *testing.T) {
 	t.Run("execute_reinspects", func(t *testing.T) {
 		fixture := blockedGateAdmissionFixture(t)
 		writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
-		handler := session(t, fixture)
+		handler := operationSession(t, fixture)
 		if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "gate-execute",
 			Params: json.RawMessage(`{"command":"start","arguments":[]}`)}, nil); err != nil {
 			t.Fatal(err)
@@ -165,34 +167,9 @@ func TestRPCOperationGatePolicy(t *testing.T) {
 // TestRPCOperationGateRecoverySkip characterizes the RPC release gate skip of operations
 // admitted by hard-cleanup or developer-identity recovery, at operation.plan and at
 // operation.execute; the same operation without that recovery is refused by the gate.
+// Only init passes through init recovery: a retained permit bound to the blocked gate
+// admits init at execution but not start, and plan never parses teardown as init.
 func TestRPCOperationGateRecoverySkip(t *testing.T) {
-	fixture := func(t *testing.T) configApplyRepairFixture {
-		t.Helper()
-		fixture := blockedGateAdmissionFixture(t)
-		path := filepath.Join(fixture.cli.options.RepositoryRoot, "config", "commands.registry")
-		commands := mustReadConfigFixture(t, path)
-		for _, line := range strings.Split(string(mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "commands.registry"))), "\n") {
-			if strings.HasPrefix(line, "cleanup|") {
-				commands = append(commands, []byte(line+"\n")...)
-			}
-		}
-		testkit.WriteFile(t, path, commands, 0o600)
-		return fixture
-	}
-	session := func(t *testing.T, fixture configApplyRepairFixture) *rpcHandler {
-		t.Helper()
-		program, err := New(fixture.cli.options)
-		if err != nil {
-			t.Fatal(err)
-		}
-		loaded, err := program.loadContext("default")
-		if err != nil {
-			t.Fatal(err)
-		}
-		handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
-		t.Cleanup(handler.closePlans)
-		return handler
-	}
 	// A pending developer identity of the default yard admits only its plain init.
 	pendingIdentity := func(t *testing.T, handler *rpcHandler) {
 		t.Helper()
@@ -219,55 +196,45 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 		}
 		return "", ""
 	}
+	// Neither recovery command plans in this fixture, so execution reuses a start plan
+	// prepared while the gate was ready and binds it to the recovered invocation. Its
+	// lifecycle is detached, so only confirmation after the gate can report it.
+	const confirmed = "prepared command is not executable"
 	cases := []struct {
-		name      string
-		command   string
-		arguments []string
-		identity  bool
-		code      string
-		message   string
+		name                        string
+		command                     string
+		arguments                   []string
+		setup                       string // identity: pending developer identity; permit: retained init permit
+		planCode, planMessage       string
+		executeCode, executeMessage string
 	}{
-		{"cleanup-hard", "cleanup", []string{"--hard"}, false, "plan_failed", "native independent yard backup is unavailable"},
-		{"cleanup-soft", "cleanup", nil, false, "transition-required", blockedGateRefusal},
-		{"identity-init", "init", nil, true, "plan_failed", "EOF"},
-		{"init", "init", nil, false, "transition-required", blockedGateRefusal},
+		{"cleanup-hard", "cleanup", []string{"--hard"}, "", "plan_failed", "native independent yard backup is unavailable", "confirmation_failed", confirmed},
+		{"cleanup-soft", "cleanup", nil, "", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
+		{"identity-init", "init", nil, "identity", "plan_failed", "EOF", "confirmation_failed", confirmed},
+		{"init", "init", nil, "", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
+		{"permit-init", "init", nil, "permit", "transition-required", blockedGateRefusal, "confirmation_failed", confirmed},
+		{"permit-start", "start", nil, "permit", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
+		{"teardown-keep-data", "teardown", []string{"--keep-data"}, "", "transition-required", blockedGateRefusal, "transition-required", blockedGateRefusal},
 	}
 	for _, test := range cases {
 		t.Run("plan_"+test.name, func(t *testing.T) {
-			handler := session(t, fixture(t))
-			if test.identity {
+			handler := operationSession(t, blockedGateAdmissionFixture(t, "cleanup|"))
+			if test.setup == "identity" {
 				pendingIdentity(t, handler)
 			}
 			arguments, _ := json.Marshal(append([]string{}, test.arguments...))
 			_, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "recovery-" + test.name,
 				Params: json.RawMessage(`{"command":"` + test.command + `","arguments":` + string(arguments) + `}`)}, nil)
-			if code, message := fault(err); code != test.code || message != test.message {
-				t.Fatalf("plan=%#v want code %q message %q", err, test.code, test.message)
+			if code, message := fault(err); code != test.planCode || message != test.planMessage {
+				t.Fatalf("plan=%#v want code %q message %q", err, test.planCode, test.planMessage)
 			}
 		})
 	}
-	// Neither recovery command plans in this fixture, so execution reuses a start plan
-	// prepared while the gate was ready and binds it to the recovered invocation. Its
-	// lifecycle is detached, so only confirmation after the gate can report it.
-	const confirmed = "prepared command is not executable"
-	executeCases := []struct {
-		name      string
-		command   string
-		arguments []string
-		identity  bool
-		code      string
-		message   string
-	}{
-		{"cleanup-hard", "cleanup", []string{"--hard"}, false, "confirmation_failed", confirmed},
-		{"cleanup-soft", "cleanup", nil, false, "transition-required", blockedGateRefusal},
-		{"identity-init", "init", nil, true, "confirmation_failed", confirmed},
-		{"init", "init", nil, false, "transition-required", blockedGateRefusal},
-	}
-	for _, test := range executeCases {
+	for _, test := range cases {
 		t.Run("execute_"+test.name, func(t *testing.T) {
-			fixture := fixture(t)
+			fixture := blockedGateAdmissionFixture(t, "cleanup|")
 			writeCLIFile(t, fixture.readyMarker, "ready\n", 0o600)
-			handler := session(t, fixture)
+			handler := operationSession(t, fixture)
 			id := "recovery-execute-" + test.name
 			if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: id,
 				Params: json.RawMessage(`{"command":"start","arguments":[]}`)}, nil); err != nil {
@@ -285,13 +252,20 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 			lifecycle := planned.lifecycle
 			planned.lifecycle = nil
 			t.Cleanup(func() { planned.lifecycle = lifecycle; _ = planned.Close() })
-			if test.identity {
+			if test.setup == "identity" {
 				pendingIdentity(t, handler)
+			}
+			if test.setup == "permit" {
+				outcome, _, err := planned.CLI.inspectCommandMutationGate(context.Background(), planned.Loaded.Context.YardName, "@init", nil)
+				if err != nil || outcome == nil {
+					t.Fatal("blocked gate", outcome, err)
+				}
+				planned.CLI.permits.profileInit = &configApplyRepairPermit{gate: *outcome}
 			}
 			_, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: id,
 				Params: json.RawMessage(`{"confirmed":true}`)}, func(string, any) (uint64, error) { return 0, nil })
-			if code, message := fault(err); code != test.code || message != test.message {
-				t.Fatalf("execute=%#v want code %q message %q", err, test.code, test.message)
+			if code, message := fault(err); code != test.executeCode || message != test.executeMessage {
+				t.Fatalf("execute=%#v want code %q message %q", err, test.executeCode, test.executeMessage)
 			}
 		})
 	}
@@ -352,7 +326,7 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 		{"remote-invalid", []string{"-Y", "owner/yard", "teardown", "--full", "--keep-data"}, nil, 2,
 			"yard: --full cannot be combined with --keep-data\n"},
 		{"pending", []string{"teardown", "--full"}, []string{"SUBYARD_HOME=" + home}, 1, direct},
-		{"pending-yes", []string{"teardown", "--full", "--yes"}, []string{"SUBYARD_HOME=" + home}, 1, direct},
+		// Consent reaches the resume as --yes, from the normalized global -y or ASSUME_YES.
 		{"pending-global-yes", []string{"-y", "teardown", "--full"}, []string{"SUBYARD_HOME=" + home}, 1, direct},
 		{"pending-assume-yes", []string{"teardown", "--full"}, []string{"SUBYARD_HOME=" + home, "ASSUME_YES=1"}, 1, direct},
 		{"inventory", []string{"teardown", "--full"}, []string{"SUBYARD_HOME=" + filepath.Join(blocker, "home")}, 1,

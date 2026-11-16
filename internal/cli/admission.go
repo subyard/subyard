@@ -21,8 +21,6 @@ import (
 // invocation only reads, how it passes the release mutation gate, which early dispatch
 // precedes the gate and which bounded recovery may replace a blocked gate. The manifest
 // supplies the command-level effect; handlerAdmissions refines mixed commands by verb.
-// RPC operations do not run an invocation through Run: operation.plan and
-// operation.execute each apply the operation gate policy at the end of this file.
 
 // gatePolicy is how an invocation passes the release mutation gate before dispatch.
 type gatePolicy int
@@ -407,25 +405,20 @@ func (cli *CLI) admitTeardownGate(
 // admitTeardownInvocation is teardown pre-admission, before service selection: argument
 // validation, local-only full uninstall, resume of a pending full uninstall store and the
 // reset-config registration fallback. When done is true, Run returns code without dispatch.
-func (cli *CLI) admitTeardownInvocation(
-	ctx context.Context,
-	definition command.Definition,
-	core bool,
-	yard string,
-	arguments []string,
-) (code int, done bool) {
+func (cli *CLI) admitTeardownInvocation(ctx context.Context, definition command.Definition, core bool, yard string, arguments []string) (code int, done bool) {
 	if !core || definition.Handler != "@teardown" || commandHelpRequested(arguments) {
 		return 0, false
 	}
-	if _, err := prepareTeardownExecution(arguments); err != nil {
+	execution, err := prepareTeardownExecution(arguments)
+	if err != nil {
 		cli.errorf("%v", err)
 		return 2, true
 	}
-	if slices.Contains(arguments, "--full") && strings.Contains(yard, "/") {
+	if execution.full && strings.Contains(yard, "/") {
 		cli.errorf("--full must run locally on the owner host; remote selectors do not authorize host uninstall")
 		return 2, true
 	}
-	if slices.Contains(arguments, "--full") && !strings.Contains(yard, "/") {
+	if execution.full {
 		home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
 		if root := runtimeRootForRepository(cli.options.RepositoryRoot, ""); root != "" {
 			if own, readErr := uninstall.ReadInstallationFile(filepath.Join(root, uninstall.ManifestName), "", uint32(os.Getuid())); readErr == nil {
@@ -444,74 +437,53 @@ func (cli *CLI) admitTeardownInvocation(
 			return 1, true
 		}
 	}
-	if execution, err := prepareTeardownExecution(arguments); err == nil && execution.resetConfig {
-		cli.allowResetYard = true
-	}
+	cli.allowResetYard = cli.allowResetYard || execution.resetConfig
 	return 0, false
 }
 
-// releaseRecoveryCommand reports commands that inspect and recover the release
-// themselves; RPC operations admit them without the operation gate.
-func releaseRecoveryCommand(definition command.Definition) bool {
-	return definition.Handler == "@update" || definition.Handler == "@current-migration"
-}
-
-// admitRPCPlanGate is the release gate of operation.plan. Release recovery commands and
-// operations admitted by hard-cleanup or developer-identity recovery skip it. When ordinary
-// admission does not admit a blocked gate, init may still pass through its bounded profile-init
-// recovery, whose permit the operation CLI retains for execution.
-func (cli *CLI) admitRPCPlanGate(
-	ctx context.Context,
-	yard string,
-	definition command.Definition,
-	arguments []string,
-	recovered bool,
-) *rpc.Error {
-	if releaseRecoveryCommand(definition) || recovered {
+// admitRPCOperation is the admission of operation.plan and, on its retained CLI,
+// operation.execute: hard-cleanup and developer-identity recovery, then the release gate,
+// which release recovery commands and recovered operations skip. Beyond ordinary admission,
+// a blocked gate admits only init: plan prepares its bounded profile-init permit, and
+// execute requires that retained permit to bind the same gate.
+func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string, execute bool) *rpc.Error {
+	yard := loaded.Context.YardName
+	cleanupRecovery := false
+	if definition.Handler == "@cleanup" {
+		_, err := cli.boundHardCleanupRecovery(ctx, loaded, arguments)
+		cleanupRecovery, _ = cleanupMode(arguments)
+		if err != nil {
+			return operationRPCError("cleanup_recovery_failed", err)
+		}
+	}
+	identityRecovery, err := cli.admitDeveloperIdentity(ctx, yard, definition.Handler, arguments)
+	if err != nil {
+		return operationRPCError("identity_recovery_failed", err)
+	}
+	if definition.Handler == "@update" || definition.Handler == "@current-migration" || cleanupRecovery || identityRecovery {
 		return nil
 	}
-	outcome, gateInspection, gateErr := cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
-	if gateErr != nil {
-		return operationRPCError(rpcMutationGateFailedCode, gateErr)
+	outcome, gateInspection, err := cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
+	if err != nil {
+		return operationRPCError(rpcMutationGateFailedCode, err)
 	}
-	if outcome != nil && !cli.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
-		if definition.Handler == "@init" {
-			var permit *configApplyRepairPermit
-			permit, outcome, gateErr = cli.prepareInitAdmission(ctx, yard, arguments, *outcome)
-			cli.permits.profileInit = permit
-			if gateErr != nil {
-				return operationRPCError(rpcMutationGateFailedCode, gateErr)
-			}
-		}
-		if outcome != nil {
-			return mutationGateRPCError(outcome, gateInspection)
-		}
-	}
-	return nil
-}
-
-// admitRPCExecuteGate reinspects the release gate at operation.execute. When ordinary
-// admission does not admit a blocked gate, only init passes, and only when its retained
-// profile-init permit binds the same gate.
-func (cli *CLI) admitRPCExecuteGate(
-	ctx context.Context,
-	yard string,
-	definition command.Definition,
-	arguments []string,
-	recovered bool,
-) *rpc.Error {
-	if releaseRecoveryCommand(definition) || recovered {
+	if outcome == nil || cli.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
 		return nil
 	}
-	outcome, gateInspection, gateErr := cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
-	if gateErr != nil {
-		return operationRPCError(rpcMutationGateFailedCode, gateErr)
-	}
-	if outcome != nil && !cli.ordinaryCommandAdmitted(definition.Handler, outcome, gateInspection) {
-		if definition.Handler != "@init" || cli.permits.profileInit == nil ||
-			!sameConfigApplyGate(cli.permits.profileInit.gate, *outcome) {
-			return mutationGateRPCError(outcome, gateInspection)
+	switch {
+	case definition.Handler != "@init":
+	case execute:
+		if cli.permits.profileInit != nil && sameConfigApplyGate(cli.permits.profileInit.gate, *outcome) {
+			return nil
+		}
+	default:
+		cli.permits.profileInit, outcome, err = cli.prepareInitAdmission(ctx, yard, arguments, *outcome)
+		if err != nil {
+			return operationRPCError(rpcMutationGateFailedCode, err)
+		}
+		if outcome == nil {
+			return nil
 		}
 	}
-	return nil
+	return mutationGateRPCError(outcome, gateInspection)
 }

@@ -4254,19 +4254,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, &rpc.Error{Code: "owner_context_changed", Message: "bootstrap owner context changed; reconnect before planning"}
 			}
 		}
-		cleanupRecovery := false
-		if definition.Handler == "@cleanup" {
-			_, err = operationCLI.boundHardCleanupRecovery(ctx, operationLoaded, params.Arguments)
-			cleanupRecovery, _ = cleanupMode(params.Arguments)
-			if err != nil {
-				return nil, operationRPCError("cleanup_recovery_failed", err)
-			}
-		}
-		identityRecovery, identityErr := operationCLI.admitDeveloperIdentity(ctx, operationLoaded.Context.YardName, definition.Handler, params.Arguments)
-		if identityErr != nil {
-			return nil, operationRPCError("identity_recovery_failed", identityErr)
-		}
-		if fault := operationCLI.admitRPCPlanGate(ctx, operationLoaded.Context.YardName, definition, params.Arguments, cleanupRecovery || identityRecovery); fault != nil {
+		if fault := operationCLI.admitRPCOperation(ctx, operationLoaded, definition, params.Arguments, false); fault != nil {
 			return nil, fault
 		}
 		var prepared *preparedCommand
@@ -4367,20 +4355,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
 			return nil, &rpc.Error{Code: "exact_plan_required", Message: "no exact plan is bound to this operation"}
 		}
-		cleanupRecovery := false
-		if planned.Definition.Handler == "@cleanup" {
-			var err error
-			_, err = planned.CLI.boundHardCleanupRecovery(ctx, planned.Loaded, planned.Arguments)
-			cleanupRecovery, _ = cleanupMode(planned.Arguments)
-			if err != nil {
-				return nil, operationRPCError("cleanup_recovery_failed", err)
-			}
-		}
-		identityRecovery, identityErr := planned.CLI.admitDeveloperIdentity(ctx, planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments)
-		if identityErr != nil {
-			return nil, operationRPCError("identity_recovery_failed", identityErr)
-		}
-		if fault := planned.CLI.admitRPCExecuteGate(ctx, planned.Loaded.Context.YardName, planned.Definition, planned.Arguments, cleanupRecovery || identityRecovery); fault != nil {
+		if fault := planned.CLI.admitRPCOperation(ctx, planned.Loaded, planned.Definition, planned.Arguments, true); fault != nil {
 			return nil, fault
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {
