@@ -450,8 +450,8 @@ case "$*" in
     printf '[{"name":"%s"}]\n' "$BROKER_PROJECT"
     ;;
   "list $BROKER_INSTANCE --project $BROKER_PROJECT --format=json")
-    printf '[{"name":"%s","status":"%s","config":{"user.subyard.desired_power":"%s"}}]\n' \
-      "$BROKER_INSTANCE" "$BROKER_YARD_STATE" "$BROKER_DESIRED_POWER"
+    printf '[{"name":"%s","status":"%s","config":{"user.subyard.desired_power":"%s"%s}}]\n' \
+      "$BROKER_INSTANCE" "$BROKER_YARD_STATE" "$BROKER_DESIRED_POWER" "${BROKER_EXTRA_CONFIG:-}"
     ;;
   "exec $BROKER_INSTANCE --project $BROKER_PROJECT -- systemctl is-active subyard-test-vms-broker.service")
     printf '%s\n' "$BROKER_SERVICE_STATE"
@@ -606,5 +606,22 @@ func TestBrokerProspectiveRegistrationPreservesConsumerPermissionGuard(t *testin
 				t.Fatal("read-only observation changed registration")
 			}
 		})
+	}
+}
+
+// A broker yard whose last init did not finish is left to that init before any
+// guest probe, even with a dead guest agent: it reports what a stopped yard
+// with stopped intent reports.
+func TestBrokerRuntimeDefersUninitializedYardBeforeGuestProbe(t *testing.T) {
+	stopped, _ := brokerRuntimeFixture(t, "STOPPED", "inactive")
+	stoppedState, _, err := PrepareBrokerRuntimeTarget(context.Background(), stopped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options, _ := brokerRuntimeFixture(t, "RUNNING", "agent-lost")
+	options.Environment = append(options.Environment, `BROKER_EXTRA_CONFIG=,"user.subyard.managed":"true","user.subyard.initialized":"false"`)
+	state, _, err := PrepareBrokerRuntimeTarget(context.Background(), options)
+	if err != nil || state != stoppedState {
+		t.Fatalf("uninitialized broker yard: state=%q err=%v, want %q", state, err, stoppedState)
 	}
 }
