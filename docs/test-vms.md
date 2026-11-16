@@ -984,10 +984,10 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
 | `newer-release` | VM1; published v0.28.0 direct pin, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
-| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | targeted diagnostic; required in full |
-| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full |
+| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-source-upgrade` |
+| `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-power-systemd` |
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.28.0 upgrade, incompatible rollback refusal and authentic v0.28.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
-| `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full |
+| `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full; release acceptance runs it as `vm:p0-legacy-continuation` |
 | `yard-maintenance` | VM1, frozen candidate and pinned published 0.21.3 → 0.28.1 hop; one container and two bounded VMs, one weighted | VM yards left pending by guest preflight refusals through the hop, upfront restart disclosure and decline of the candidate's current-release retry, approved interruption of a live SSH session, isolated guest preflight refusal, ready warnings, marker-only selective retry and CPU scheduling | targeted migration acceptance; no host reboot |
 | `init-settings` | VM1, frozen candidate; one container yard | `config set` to plain `init` without `migrate`, ordinary commands before it, failed-hook retry and same-UID/GID `DEV_USER` rename with a native cut, stopped-yard recovery and a second rename | targeted; run for init-owned settings, release readiness or developer identity changes |
 | `release-smoke` | VM1, shared published anchor, candidate package and one reboot | marked yard/project plus retained operator and guest data | singleton retained-data/reboot evidence; also required in smoke and full |
@@ -1492,7 +1492,10 @@ SUBYARD_P0_WAIT_SECONDS=1200 \
 `python3 dev/release-acceptance.py prepare`; release acceptance passes them itself.
 Release acceptance runs `vm:p0-full` as `--lane full --smoke-covered`: its required
 `p0-release-smoke` runs on the same candidate bundle, so the full check reports newer-release,
-release smoke and peer as covered instead of repeating them. A standalone `--lane full` runs them.
+release smoke and peer as covered instead of repeating them. It also adds `--split-covered`:
+source-upgrade, power-systemd and legacy-continuation run as the separate `vm:p0-source-upgrade`,
+`vm:p0-power-systemd` and `vm:p0-legacy-continuation` checks of the same candidate (hosted in
+release preparation), so VM2 runs only nested teardown. A standalone `--lane full` runs them all.
 
 After capacity preflight, boundary and transport pass, `--lane full` does not stop at the first failed
 phase. The parallel owner and auxiliary chain both finish, auxiliary stages continue after a failure,
@@ -1518,7 +1521,8 @@ The cache fill and local launch both emit progress. Their independent positive-i
 operation and limit. The fixture never starts a second remote pull or launch after a timeout.
 
 The full matrix keeps the historical owner, real-Incus contract, release and broker-migration chain on VM1.
-VM2 independently runs nested teardown, container-image preparation, source upgrade, power-systemd and legacy-continuation in that order.
+VM2 independently runs nested teardown, container-image preparation, source upgrade, power-systemd and legacy-continuation in that order;
+with `--split-covered` it runs nested teardown only.
 Independent source-upgrade, power-systemd, legacy-continuation, reboot-verify and release-smoke lanes reconcile Incus and cache
 their container image without repeating the real-Incus contract's container/VM launches and Go tests.
 The owner fixture packages its candidate once and reuses those exact assets across its independent
@@ -1549,7 +1553,9 @@ source or baseline changes. Do not infer test progress from VM files or a previo
 `--resume` and `--keep-failed` are rejected by P0 with these instructions. Invoke only remaining
 independent `--lane` segments; each prepares its prerequisites on fresh VMs. Reboot continuation
 within one active lease still works. A required full P0 always runs fresh within a single lease;
-a collection of targeted passes does not replace that gate. No Markdown parser executes the plan.
+a collection of targeted passes does not replace that gate. Release acceptance's full P0 is a fresh
+`vm:p0-full` plus its split lane checks of the same frozen candidate; `--split-covered` refuses outside
+the release collector. No Markdown parser executes the plan.
 
 Open an unrestricted root guest session or run a root command:
 

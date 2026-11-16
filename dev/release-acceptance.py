@@ -284,6 +284,8 @@ CI_HOSTED_CHECKS = frozenset({
     "vm:integration-selection/container",
     "vm:integration-selection/special", "vm:disabled-components",
     "profile:test-vms/full-uninstall", "profile:github", "vm:p0-full-uninstall",
+    # Split from vm:p0-full, whose --split-covered matrix keeps only the nested-VM stages.
+    "vm:p0-source-upgrade", "vm:p0-power-systemd", "vm:p0-legacy-continuation",
     "profile:subyard-dev", "profile:openclaw", "profile:git-fetch", "profile:hermes",
 })
 # release-vm.yml Git blobs reviewed to execute one exact collector selection per job.
@@ -384,9 +386,43 @@ CORE_VM_CATALOG = "dev/e2e/release-vm-checks.json"
 CORE_VM_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}(?:/[a-z0-9][a-z0-9.-]{0,63})?")
 
 
+def required_vm_checks(results, requirements):
+    """The one split-requirement rule: {required check: owner} for each owner that is requested or
+    has any recorded result, i.e. is not an untouched optional VM check. Such a required check is
+    never optional, even while it is not run."""
+    return {name: owner for owner, names in sorted(requirements.items())
+            if not optional_vm_not_run(owner, results.get(owner, OPTIONAL_VM_NOT_RUN)) for name in names}
+
+
+def optional_vm_unrequired(name, result, required):
+    return optional_vm_not_run(name, result) and name not in required
+
+
+def selected_requirements(receipt, names):
+    """Checks that these selected checks require and that a run therefore also selects."""
+    return set(required_vm_checks({name: {"status": "pending"} for name in names}, receipt.get("requirements", {}))) - set(names)
+
+
+def with_requirements(receipt, names):
+    """Names plus the checks required when these are requested, together with recorded owners."""
+    requested = {**receipt["checks"], **{name: {"status": "pending"} for name in names}}
+    return set(names) | set(required_vm_checks(requested, receipt.get("requirements", {})))
+
+
 def core_vm_checks(root):
     """Core VM release checks declared by the candidate's pinned source, in catalog order.
     Candidates prepared before the catalog declare none."""
+    return [entry["id"] for entry in core_vm_catalog(root)]
+
+
+def core_vm_requirements(root):
+    """Catalog checks that count only together with others: {vm:ID: [vm:REQUIRED, ...]}.
+    A full P0 run with --split-covered requires the checks that run its split lanes."""
+    return {"vm:" + entry["id"]: ["vm:" + name for name in entry["requires"]]
+            for entry in core_vm_catalog(root) if "requires" in entry}
+
+
+def core_vm_catalog(root):
     path = root / CORE_VM_CATALOG
     if not path.is_file():
         return []
@@ -399,7 +435,7 @@ def core_vm_checks(root):
     for index, entry in enumerate(entries):
         label = entry.get("id") if isinstance(entry, dict) and isinstance(entry.get("id"), str) else f"entry {index}"
         lease = entry.get("lease", {}) if isinstance(entry, dict) else None
-        if (not isinstance(entry, dict) or set(entry) - {"id", "lease", "timeout_seconds", "command"}
+        if (not isinstance(entry, dict) or set(entry) - {"id", "lease", "timeout_seconds", "command", "requires"}
                 or not isinstance(entry.get("id"), str) or not CORE_VM_ID.fullmatch(entry["id"])):
             refusals.append(f"{label}: invalid identity or fields")
             continue
@@ -415,9 +451,22 @@ def core_vm_checks(root):
             refusals.append(f"{label}: lease accepts only an environment type")
     ids = [entry["id"] for entry in entries if isinstance(entry, dict) and isinstance(entry.get("id"), str)]
     refusals += [f"{name}: duplicate check" for name in sorted({name for name in ids if ids.count(name) > 1})]
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
+            continue
+        requires = entry.get("requires")
+        split = isinstance(entry.get("command"), list) and "--split-covered" in entry["command"]
+        if requires is None:
+            if split:
+                refusals.append(f"{entry['id']}: --split-covered needs the checks that run its split lanes in requires")
+        elif (not isinstance(requires, list) or not requires or len(set(map(str, requires))) != len(requires)
+              or any(not isinstance(name, str) or name == entry["id"] or name not in ids for name in requires)):
+            refusals.append(f"{entry['id']}: requires must list distinct other catalog checks")
+        elif not split:
+            refusals.append(f"{entry['id']}: requires applies only to a --split-covered full P0 run")
     if refusals:
         raise ValueError("invalid core VM check catalog: " + "; ".join(refusals))
-    return ids
+    return entries
 
 
 def transfer_target_open(name, result):
@@ -502,13 +551,15 @@ def update_result(receipt):
             "passed" if children and all(state == "passed" for state in children) else
             "not-applicable" if children == ["not-applicable"] else
             "not-run" if children and all(state == "not-run" for state in children) else "incomplete")
-    states = [item["status"] for name, item in receipt["checks"].items() if not optional_vm_not_run(name, item)]
+    required = required_vm_checks(receipt["checks"], receipt.get("requirements", {}))
+    states = [item["status"] for name, item in receipt["checks"].items() if not optional_vm_unrequired(name, item, required)]
+    states += ["missing" for name in required if name not in receipt["checks"]]
     receipt["reproducible_result"] = (
         "failed" if "failed" in states else
         "passed" if all(state in ("passed", "not-applicable") for state in states) else "incomplete")
     if receipt["reproducible_result"] == "passed" and any(
         receipt["checks"].get(name, {}).get("status") != "not-applicable"
-        and not optional_vm_not_run(name, receipt["checks"].get(name, {}))
+        and not optional_vm_unrequired(name, receipt["checks"].get(name, {}), required)
         for name in receipt.get("operator_exclusions", [])):
         receipt["reproducible_result"] = "incomplete"
     receipt["result"] = receipt["reproducible_result"]
@@ -849,6 +900,9 @@ def prepare(output, version, prepared=None):
     receipt = {"schema_version": 1, "version": version, "source_fingerprint": original,
                "profiles": inventory, "external_obligations": external, "checks": {},
                "environment": execution_environment()}
+    requirements = core_vm_requirements(root)
+    if requirements:
+        receipt["requirements"] = requirements
     for name, command in commands(root, version, inventory).items():
         receipt["checks"][name] = {"status": "pending" if command else "not-applicable"}
         if command is None:
@@ -937,6 +991,8 @@ def load_bound(output, entries=None, context=None):
         context.update(commands=required_commands, external=external, attempts={})
     if set(receipt["checks"]) != set(required_commands) | {"package"}:
         raise ValueError("required check inventory is incomplete")
+    if receipt.get("requirements", {}) != core_vm_requirements(root):
+        raise ValueError("check requirements changed")
     if receipt["checks"]["process-coverage"]["status"] == "not-applicable" and receipt["checks"]["process-coverage"] != PROCESS_COVERAGE_DIAGNOSTIC:
         raise ValueError("invalid optional process coverage diagnostic")
     if digest(output / "candidate-bundle.tar.gz") != receipt["candidate_bundle_sha256"]:
@@ -1059,7 +1115,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
     else:
         root = ROOT
         inventory = profile_inventory(root)
-        receipt = {"version": "preflight", "profiles": inventory,
+        receipt = {"version": "preflight", "profiles": inventory, "requirements": core_vm_requirements(root),
                    "external_obligations": external_inventory(root),
                    "checks": {name: {"status": "pending" if command else "not-applicable"}
                               for name, command in commands(root, "preflight", inventory).items()}}
@@ -1071,9 +1127,11 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                     receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     checks = receipt["checks"]
     selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
+    selected |= selected_requirements(receipt, selected)
     excluded = select_checks(checks, exclude)
     if "p0-release-smoke" in excluded:
         raise ValueError("p0-release-smoke is required and cannot be excluded")
+    required = with_requirements(receipt, selected)
     readiness = {}
     if external_readiness:
         if external_readiness.stat().st_size > 1024 * 1024:
@@ -1083,7 +1141,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
             or any(value not in ("available", "unavailable", "unknown") for value in readiness.values())):
             raise ValueError("invalid external readiness declaration")
     report = {"schema_version": 1, "candidate": "frozen" if output else "worktree", "superseded": bool(receipt.get("superseded")),
-              "checks": [{"id": name, "status": entry["status"], "required": entry["status"] != "not-applicable" and (name in selected or not optional_vm_not_run(name, entry)),
+              "checks": [{"id": name, "status": entry["status"], "required": entry["status"] != "not-applicable" and (name in required or not optional_vm_not_run(name, entry)),
                           "selected": name in selected and name not in excluded,
                           "excluded": name in excluded, "physical": is_live(name)}
                          for name, entry in checks.items()],
@@ -1231,6 +1289,21 @@ def duration_estimates(receipt, previous):
     return durations
 
 
+def print_acceptance_summary(output, receipt):
+    required = required_vm_checks(receipt["checks"], receipt.get("requirements", {}))
+    optional_vms = [name for name, item in receipt["checks"].items() if optional_vm_unrequired(name, item, required)]
+    if optional_vms:
+        print("ACCEPTANCE vm_optional_not_run=" + ",".join(optional_vms) + " status=not-run", flush=True)
+    for name, owner in required.items():
+        status = receipt["checks"].get(name, {}).get("status", "missing")
+        if status != "passed":
+            print(f"ACCEPTANCE vm_required={name} status={status} reason=required-by-{owner}", flush=True)
+    optional = [name for name, item in receipt["external_obligations"].items() if optional_external_not_run(item)]
+    if optional:
+        print("ACCEPTANCE external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
+    print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
+
+
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=()):
     root, receipt = load_bound(output)
     if receipt.get("superseded"):
@@ -1242,7 +1315,11 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
     prioritized = select_checks(checks, first)
     selected |= prioritized
-    requested = selected.copy()
+    # A selected check also runs what it requires, such as vm:p0-full its split checks; a
+    # required check that already passed is not rerun, and an excluded one stays not run.
+    dependencies = selected_requirements(receipt, selected)
+    selected |= dependencies
+    requested = with_requirements(receipt, selected)
     excluded = select_checks(checks, exclude)
     if "p0-release-smoke" in excluded:
         raise ValueError("p0-release-smoke is required and cannot be excluded")
@@ -1260,7 +1337,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     capacity_wait = env.pop("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
-               and (rerun or receipt["checks"][name]["status"] != "passed")]
+               and ((rerun and name not in dependencies) or receipt["checks"][name]["status"] != "passed")]
     live = [name for name in pending if is_live(name)]
     durations = duration_estimates(receipt, previous)
     live.sort(key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
@@ -1319,9 +1396,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                 failure_reason = "local-check-stop"
                 break
         local_names = [name for name in checks if not is_live(name) and name not in preflights] + (["package"] if "package" in receipt["checks"] else [])
-        local_ready = not any(receipt["checks"][name]["status"] != "passed"
-                        and not (name == "process-coverage" and receipt["checks"][name] == PROCESS_COVERAGE_DIAGNOSTIC)
-                        for name in local_names)
+        unready_local = [name for name in local_names if receipt["checks"][name]["status"] != "passed"
+                         and not (name == "process-coverage" and receipt["checks"][name] == PROCESS_COVERAGE_DIAGNOSTIC)]
+        local_ready = not unready_local
         if local_ready:
             # Keep collecting independent refusals in profile-name order.
             for name in preflights:
@@ -1353,7 +1430,13 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
         if stopped or waiting_local:
             invocation.finish("interrupted" if STOP.is_set() else "finished",
                               "profile-preflight-stop" if stopped else "prerequisite-stop")
+            print_acceptance_summary(output, receipt)
             return 1
+        if (not local_ready and failure_reason == "not-dispatched" and not STOP.is_set()
+                and any(name in pending for name in preflights)):
+            # For example, an excluded local gate: name it instead of leaving preflights silently not run.
+            print("INCOMPLETE: profile preflights await successful local gates; not passed: " + ", ".join(unready_local), flush=True)
+            failure_reason = "prerequisite-stop"
         # Only live checks wait for broker memory or disk instead of draining the queue on a
         # transient refusal; a refusal that outlasts this bound still blocks visibly.
         env["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
@@ -1402,13 +1485,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
         save(output, receipt)
         invocation.finish("interrupted" if STOP.is_set() else "finished",
                           "interrupted-before-dispatch" if STOP.is_set() else failure_reason)
-        optional_vms = [name for name, item in receipt["checks"].items() if optional_vm_not_run(name, item)]
-        if optional_vms:
-            print("ACCEPTANCE vm_optional_not_run=" + ",".join(optional_vms) + " status=not-run", flush=True)
-        optional = [name for name, item in receipt["external_obligations"].items() if optional_external_not_run(item)]
-        if optional:
-            print("ACCEPTANCE external_optional_not_run=" + ",".join(optional) + " status=not-run", flush=True)
-        print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
+        print_acceptance_summary(output, receipt)
         return 0 if receipt["result"] == "passed" and not STOP.is_set() else 1
     except Exception:
         # Keep the current identity even when capture fails; never fall back to another run.

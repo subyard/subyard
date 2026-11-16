@@ -38,6 +38,7 @@ declare -A HOME_STATE_BEFORE=()
 P0_LANE=smoke
 # Release acceptance runs the required smoke on the same candidate bundle; its phases are not repeated.
 P0_SMOKE_COVERED=0
+P0_SPLIT_COVERED=0
 P0_EVIDENCE=''
 P0_FAILURE_LOG=''
 P0_CURRENT_PHASE='startup'
@@ -53,6 +54,11 @@ P0_FAILURE_LOG_MODE=truncate
 P0_ACTIVE_PHASE_VMS=''
 FULL_AUX_RESULTS_FILE=''
 FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd legacy-continuation newer-release release-smoke peer cleanup)
+# VM2 chain of the full matrix, in order.
+FULL_AUX_STAGES=(nested-teardown fixture-platform source-upgrade power-systemd legacy-continuation)
+# Release acceptance runs these full-matrix lanes as their own catalog checks of the same candidate.
+# They must be exactly the VM2 chain after nested teardown and its platform prerequisite.
+FULL_SPLIT_LANES=(source-upgrade power-systemd legacy-continuation)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
 # export and ensures every direct and bundled command addresses the same disposable allocation.
@@ -62,6 +68,14 @@ ENVIRONMENT_TYPE=subyard-pair
 VM_COUNT=2
 
 die() { printf 'p0-acceptance: %s\n' "$*" >&2; exit 2; }
+assert_split_lanes() {
+  local lane
+  [ "${FULL_AUX_STAGES[*]}" = "nested-teardown fixture-platform ${FULL_SPLIT_LANES[*]}" ] \
+    || die 'split lanes must be exactly the VM2 chain after nested-teardown and fixture-platform'
+  for lane in "${FULL_SPLIT_LANES[@]}"; do
+    case " ${FULL_P0_LANES[*]} " in *" $lane "*) ;; *) die "split lane $lane is not a full P0 lane" ;; esac
+  done
+}
 p0_monotonic_seconds() {
   local uptime _
   IFS=' ' read -r uptime _ < /proc/uptime \
@@ -96,18 +110,23 @@ Usage:
 The --slot N form runs the release smoke. Use --lane full for the complete compatibility and
 recovery matrix. Targeted lanes are diagnostics; they do not replace the release smoke.
 Release acceptance adds --smoke-covered to --lane full: its required smoke runs on the same
-candidate bundle, so newer-release, release-smoke and peer are not repeated there.
+candidate bundle, so newer-release, release-smoke and peer are not repeated there. It also adds
+--split-covered: source-upgrade, power-systemd and legacy-continuation run as separate release
+checks of the same candidate, so the full matrix runs only release and nested-teardown.
 Every lane sets up its own prerequisites on clean VMs. Record passed, failed and pending
 lanes with source/baseline identity and evidence in the current task plan; invoke remaining
-lanes explicitly. A required full P0 must always run fresh within one lease.
+lanes explicitly. A required full P0 must always run fresh within one lease; in release acceptance
+it is a fresh vm:p0-full plus its split lane checks of the same frozen candidate.
 EOF
 }
 list_lanes() {
+  assert_split_lanes
   printf '%s\n' \
     smoke boundary nested-teardown full-uninstall transport dependencies real-incus profile-resource release source-upgrade \
     power-systemd newer-release legacy-continuation yard-maintenance init-settings \
     reboot-verify release-smoke peer peer-cleanup cleanup
   printf 'full\t%s\n' "${FULL_P0_LANES[*]}"
+  printf 'split-covered\t%s\n' "${FULL_SPLIT_LANES[*]}"
   printf 'producer-reboot\tdiagnostic-only\n'
 }
 parse_arguments() {
@@ -129,6 +148,7 @@ parse_arguments() {
         shift 2
         ;;
       --smoke-covered) P0_SMOKE_COVERED=1; shift ;;
+      --split-covered) P0_SPLIT_COVERED=1; shift ;;
       --resume|--keep-failed) die 'VM state is disposable between leases; record progress and evidence in the current task plan, then run remaining --lane segments with fresh setup' ;;
       --list-lanes) list_lanes; exit 0 ;;
       -h | --help) usage; exit 0 ;;
@@ -141,6 +161,8 @@ parse_arguments() {
   esac
   [ "${P0_SMOKE_COVERED:-0}" = 0 ] || [ "$P0_LANE" = full ] \
     || die '--smoke-covered applies only to --lane full'
+  [ "${P0_SPLIT_COVERED:-0}" = 0 ] || [ "$P0_LANE" = full ] \
+    || die '--split-covered applies only to --lane full'
   [ "$lane_seen" = 0 ] || [ "$BROKER_RECOVERY_ONLY" = 0 ] \
     || die 'broker-recovery-only cannot be combined with --lane'
   [ -n "$LEASE_REQUESTED_SLOT" ] \
@@ -1006,7 +1028,6 @@ transport_probes() {
   assert_no_worktrees
 }
 
-FULL_AUX_STAGES=(nested-teardown fixture-platform source-upgrade power-systemd legacy-continuation)
 run_full_aux_stage() {
   local stage="$1" started now rc; shift
   printf '%s\n' "$stage" > "$FULL_AUX_STAGE_FILE"
@@ -1065,6 +1086,8 @@ full_aux_lane() (
   FULL_AUX_BLOCKED=''
   FULL_AUX_LAST_STATUS=''
   run_full_aux_stage nested-teardown run_vm 2 nested-teardown
+  # The remaining stages and their platform prerequisite are separate release checks.
+  [ "${P0_SPLIT_COVERED:-0}" = 0 ] || exit 0
   run_full_aux_stage fixture-platform run_vm 2 fixture-platform
   [ "$FULL_AUX_LAST_STATUS" != failed ] || FULL_AUX_BLOCKED="${FULL_AUX_BLOCKED:-depends on failed fixture-platform}"
   [ -e "$FULL_SOURCE_ARM_FILE" ] || arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
@@ -1181,12 +1204,18 @@ run_full_matrix_phase() {
   FULL_AUX_STAGE_FILE="$LOCAL_TEMP/full-aux-stage"
   FULL_AUX_RESULTS_FILE="$LOCAL_TEMP/full-aux-results"
   : > "$FULL_AUX_RESULTS_FILE"
-  FULL_SOURCE_ARM_FILE="$LOCAL_TEMP/full-source-vm"
-  FULL_POWER_ARM_FILE="$LOCAL_TEMP/full-power-vm"
-  SOURCE_LANE_VM=2
-  POWER_SYSTEMD_LANE_VM=2
-  arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
-  arm_full_fixture "$FULL_POWER_ARM_FILE" 2
+  if [ "${P0_SPLIT_COVERED:-0}" = 1 ]; then
+    assert_split_lanes
+    # No VM2 upgrade fixture runs, so none is armed for cleanup.
+    FULL_AUX_STAGES=(nested-teardown)
+  else
+    FULL_SOURCE_ARM_FILE="$LOCAL_TEMP/full-source-vm"
+    FULL_POWER_ARM_FILE="$LOCAL_TEMP/full-power-vm"
+    SOURCE_LANE_VM=2
+    POWER_SYSTEMD_LANE_VM=2
+    arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
+    arm_full_fixture "$FULL_POWER_ARM_FILE" 2
+  fi
   printf '  [ .. ] phase=parallel-matrix bundle=%s timeout=%ss\n' \
     "$P0_BUNDLE_HASH" "$FULL_MATRIX_TIMEOUT_SECONDS"
   failures="${#P0_FAILED_PHASES[@]}"
@@ -1388,6 +1417,42 @@ full_uninstall_reboot() {
  wait_reboot_host_ready 1
 }
 
+# The collector passes its output and frozen bundle; its receipt must own the split checks.
+split_covered_by_collector() {
+  local evidence="${SUBYARD_E2E_LOCAL_EVIDENCE:-}" lane checks=()
+  [ -n "$evidence" ] && [ "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" = "$evidence/candidate-bundle.tar.gz" ] \
+    && [ -f "$evidence/receipt.json" ] && [ ! -L "$evidence/receipt.json" ] || return 1
+  for lane in "${FULL_SPLIT_LANES[@]}"; do checks+=("vm:p0-$lane"); done
+  jq -e --arg sha "${SUBYARD_E2E_CANDIDATE_SHA256:-}" \
+    '.candidate_bundle_sha256 == $sha and ($sha | length) == 64 and (.checks | type) == "object"
+     and (. as $receipt | $ARGS.positional | all(. as $name | $receipt.checks | has($name)))' \
+    "$evidence/receipt.json" --args "${checks[@]}" >/dev/null
+}
+
+# A capture of each VM before the run, compared by full_final_verify.
+capture_final_baseline() {
+  local vm snapshot
+  for ((vm=1; vm<=VM_COUNT; vm++)); do
+    snapshot="$(capacity_cache_snapshot "$vm")"
+    IFS=$'\t' read -r DEFAULT_BUILD_CACHE_BEFORE[$vm] MODULE_CACHE_BEFORE[$vm] <<<"$snapshot"
+    HOME_STATE_BEFORE[$vm]="$(home_state "$vm")"
+  done
+}
+
+# A full-matrix lane run alone keeps the full run's capacity monitors and final verification.
+split_lane() { # <lane> <lane function>
+  local lane="$1" function="$2"
+  capture_final_baseline
+  run_phase capacity-preflight run_vm 1 capacity-preflight
+  start_capacity_monitors
+  run_phase "$lane-platform" run_vm 1 fixture-platform
+  run_phase "$lane" "$function" 1
+  run_phase cleanup cleanup_lane
+  run_phase final-verify full_final_verify
+  find "$CAPACITY_LOG_DIR" -depth -delete
+  CAPACITY_LOG_DIR=''
+}
+
 full_final_verify() {
   local vm
   for ((vm=1; vm<=VM_COUNT; vm++)); do
@@ -1402,6 +1467,8 @@ full_final_verify() {
 # Matrix fixtures install the frozen candidate; refuse before allocation instead of failing per stage.
 [ "$P0_LANE" != full ] || [ -n "${SUBYARD_E2E_CANDIDATE_BUNDLE:-}" ] \
   || die '--lane full needs a frozen candidate: run python3 dev/release-acceptance.py prepare and export SUBYARD_E2E_CANDIDATE_BUNDLE and SUBYARD_E2E_CANDIDATE_SHA256'
+[ "${P0_SPLIT_COVERED:-0}" = 0 ] || split_covered_by_collector \
+  || die '--split-covered runs only under the release collector, whose receipt for this candidate bundle declares the split lane checks'
 LOCAL_TEMP="$(mktemp -d "${TMPDIR:-/tmp}/subyard-agent-e2e.XXXXXX")"
 LEASE_PURPOSE="p0-$P0_LANE"
 [ "$P0_LANE" != full-uninstall ] || ENVIRONMENT_TYPE=android-test
@@ -1494,18 +1561,8 @@ case "$P0_LANE" in
     find "$CAPACITY_LOG_DIR" -depth -delete
     CAPACITY_LOG_DIR=''
     ;;
-  source-upgrade)
-    run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase source-upgrade-platform run_vm 1 fixture-platform
-    run_phase source-upgrade source_upgrade_lane 1
-    run_phase cleanup cleanup_lane
-    ;;
-  power-systemd)
-    run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase power-systemd-platform run_vm 1 fixture-platform
-    run_phase power-systemd power_systemd_lane 1
-    run_phase cleanup cleanup_lane
-    ;;
+  source-upgrade) split_lane source-upgrade source_upgrade_lane ;;
+  power-systemd) split_lane power-systemd power_systemd_lane ;;
   init-settings)
     run_phase capacity-preflight run_vm 1 capacity-preflight
     run_phase init-settings init_settings_lane
@@ -1516,12 +1573,7 @@ case "$P0_LANE" in
     run_phase yard-maintenance yard_maintenance_lane
     run_phase cleanup cleanup_lane
     ;;
-  legacy-continuation)
-    run_phase capacity-preflight run_vm 1 capacity-preflight
-    run_phase legacy-continuation-platform run_vm 1 fixture-platform
-    run_phase legacy-continuation legacy_continuation_lane 1
-    run_phase cleanup cleanup_lane
-    ;;
+  legacy-continuation) split_lane legacy-continuation legacy_continuation_lane ;;
   reboot-verify)
     run_phase capacity-preflight run_vm 1 capacity-preflight
     run_phase reboot-verify-platform run_vm 1 fixture-platform
@@ -1542,11 +1594,7 @@ case "$P0_LANE" in
   peer-cleanup) run_phase peer-cleanup cleanup_lane ;;
   cleanup) run_phase cleanup cleanup_lane ;;
   smoke|full)
-    for ((vm=1; vm<=VM_COUNT; vm++)); do
-      snapshot="$(capacity_cache_snapshot "$vm")"
-      IFS=$'\t' read -r DEFAULT_BUILD_CACHE_BEFORE[$vm] MODULE_CACHE_BEFORE[$vm] <<<"$snapshot"
-      HOME_STATE_BEFORE[$vm]="$(home_state "$vm")"
-    done
+    capture_final_baseline
     run_phase capacity-preflight preflight_lane
     start_capacity_monitors
     run_phase boundary verify_boundary
@@ -1554,6 +1602,10 @@ case "$P0_LANE" in
     if [ "$P0_LANE" = full ]; then
       # Prerequisites above stop the run; these phases report every failure together.
       run_full_matrix_phase
+      if [ "${P0_SPLIT_COVERED:-0}" = 1 ]; then
+        printf '  [ ok ] phase=%s covered by separate release checks of candidate=%s\n' \
+          "$(IFS=,; printf '%s' "${FULL_SPLIT_LANES[*]}")" "${SUBYARD_E2E_CANDIDATE_SHA256:-}"
+      fi
       if [ "${P0_SMOKE_COVERED:-0}" = 1 ]; then
         printf '  [ ok ] phase=newer-release,release-smoke,peer covered by the release smoke of candidate=%s\n' "${SUBYARD_E2E_CANDIDATE_SHA256:-}"
       else
@@ -1580,10 +1632,13 @@ case "$P0_LANE" in
 esac
 
 if [ "$P0_LANE" = full ]; then
+  full_covered=''
+  [ "${P0_SPLIT_COVERED:-0}" = 0 ] \
+    || full_covered+="; ${FULL_SPLIT_LANES[*]} are covered by separate release checks"
   if [ "${P0_SMOKE_COVERED:-0}" = 1 ]; then
-    printf 'ok: full P0 owner and release matrix passed within one broker lease; newer-release, release-smoke and peer are covered by the release smoke\n'
+    printf 'ok: full P0 owner and release matrix passed within one broker lease; newer-release, release-smoke and peer are covered by the release smoke%s\n' "$full_covered"
   else
-    printf 'ok: full P0 owner, release and peer matrix passed within one broker lease\n'
+    printf 'ok: full P0 owner, release and peer matrix passed within one broker lease%s\n' "$full_covered"
   fi
 elif [ "$P0_LANE" = smoke ]; then
   printf 'ok: P0 release smoke passed within one broker lease\n'

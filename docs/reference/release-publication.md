@@ -52,7 +52,7 @@ are counted from the successful preparation jobs and not repeated; `release-acce
 `--only NAME --rerun` replaces a counted result with a local run. A locally prepared candidate runs them.
 
 After downloading the preparation artifact, `prepare` also dispatches `release-vm.yml` asynchronously
-for the 24 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
+for the 25 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
 commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`; otherwise it reports the refusal and
 leaves those checks open. It downloads the exact preparation run/attempt artifact, uses the shared
 hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to
@@ -60,7 +60,8 @@ hosted pool setup, and runs one fresh collector selection per job (12 jobs at on
 `accept` waits up to six hours for that request, then collects only completed successful jobs before
 running the remaining requested checks. `--ci-wait-seconds 0` collects the current snapshot immediately;
 a nonzero override is bounded to 86400 seconds. Failed, running, missing or refused results stay open
-for local execution when requested. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
+for local execution when requested. After a local check fails, `accept` neither waits nor runs hosted
+checks locally: it counts finished hosted results and leaves the rest pending for a later `accept`. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
 `CI-HOSTED-SKIP CHECK: REASON`.
 
 Hosted evidence is `execution: ci-hosted`, with the original runner environment, manifest, complete
@@ -112,6 +113,11 @@ python3 dev/release-acceptance.py run --output .build/release-local \
 `--slots` alone does not request local VM execution. Checks without counted hosted evidence or an
 explicit local request remain `not-run` in acceptance and publication; they are not passing physical evidence. Once requested, incomplete or failed
 checks block the candidate, including after interruption or a later default invocation.
+A catalog check's `requires` (the split lanes of `vm:p0-full`) must also pass once that check is requested
+or recorded, imported or transferred; acceptance stays incomplete and publication refuses otherwise,
+including under failure acceptance or profile deferral. `run --only vm:p0-full` runs the full P0:
+`vm:p0-full --split-covered` plus its split checks that have not passed; `accept --only` counts their
+hosted results first.
 
 `prepare` pins a full lowercase 40-character commit SHA and stable version. Release preparation
 runs native ARM64 and host-free verification in parallel after input validation.
