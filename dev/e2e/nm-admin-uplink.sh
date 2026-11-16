@@ -314,9 +314,10 @@ prepare)
     die 'rollback to the released guard was accepted'
   fi
   # The rollback-compatibility blocker (the device-guard epoch), not another rollback-incompatible one.
-  grep -Fq 'code=rollback-incompatible' "$STATE/rollback.log" \
-    && grep -Fq 'the retained release cannot safely accept the current migration ledger' "$STATE/rollback.log" \
-    || die "rollback was not refused by the rollback-compatibility blocker: $(tail -5 "$STATE/rollback.log")"
+  # Its message is unique to that blocker (resource transition.rollback-compatibility).
+  sed 's/^/evidence: rollback: /' "$STATE/rollback.log"
+  grep -Fq 'the retained release cannot safely accept the current migration ledger' "$STATE/rollback.log" \
+    || die "rollback was not refused by the rollback-compatibility blocker"
   # The installed 0.29.0 and the candidate registries differ only by the NetworkManager device
   # guard migration and power-metadata 3 -> 4.
   installed_registry="$(find "$STATE/runtime/releases" -path "*$OLD_VERSION*/config/release-transition.json" -print -quit)"
