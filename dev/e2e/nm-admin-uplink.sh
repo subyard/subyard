@@ -306,7 +306,7 @@ prepare)
   # Every up Incus bridge the released guard named was unmanaged: evidence that NetworkManager held
   # an adequate guard, so the migration is `held` and only waits for the reboot.
   [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
-    && [ "$(cut -d ' ' -f3,4 "$state_record")" = 'held migration' ] || die "the update record: $(cat "$state_record" 2>/dev/null)"
+    && [ "$(cut -d ' ' -f4,5 "$state_record")" = 'held migration' ] || die "the update record: $(cat "$state_record" 2>/dev/null)"
   [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the update restarted NetworkManager'
   [ "$(nm_reloads_since "$since")" = 0 ] || die "the update reloaded NetworkManager: $(sudo -n journalctl -u NetworkManager --since "@$since" -q | tail -5)"
   [ "$(managedness)" = "$before_table" ] || die 'the update changed a device managed state'
@@ -491,7 +491,9 @@ fresh-prepare)
   [ "$(managedness)" = "$before_table" ] || die 'the first init changed a device managed state'
   [ "$(address_of "$UP")" = "$UP_ADDRESS" ] && [ "$(device_state br0)" = connected ] || die 'the first init touched the uplink or br0'
   [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
-    && [ "$(cut -d ' ' -f3,4 "$state_record")" = 'unread init' ] || die "the first init record: $(cat "$state_record" 2>/dev/null)"
+    && [ "$(cut -d ' ' -f4,5 "$state_record")" = 'unread init' ] \
+    && [ "$(cut -d ' ' -f2 "$state_record")" = "$(sudo -n stat -L -c '%i:%.9Z' "$guard")" ] \
+    || die "the first init record: $(cat "$state_record" 2>/dev/null)"
   [ "$(stat -c '%U %a' "$state_record")" = 'root 644' ] || die "record ownership: $(stat -c '%U %a' "$state_record")"
   grep -q '^\[device-subyard\]' "$guard" || die 'the first init wrote no guard'
   # Losing the record opens nothing.
@@ -541,10 +543,13 @@ fresh-resume)
   sudo -n /usr/bin/incus network create e2ebr1 ipv4.address=198.18.9.1/24 ipv4.nat=false ipv6.address=none >/dev/null
   settle 4
   evidence "new Incus bridge e2ebr1 is $(device_state e2ebr1) before init"
-  record_before="$(cat "$state_record")"
+  record_before="$(cut -d ' ' -f1,3- "$state_record")"
   yard init --yes >"$STATE/init-bridge.log" 2>&1 || die 'init failed with a second bridge (no reboot is needed for bridge names)'
   grep -Fq 'interface-name:e2ebr1' "$guard" || die 'the guard does not list the second bridge'
-  [ "$(cat "$state_record")" = "$record_before" ] || die "a bridge name changed the record: $(cat "$state_record")"
+  # Boot, content and state stay; the identity follows Subyard's rewrite of the guard.
+  [ "$(cut -d ' ' -f1,3- "$state_record")" = "$record_before" ] \
+    && [ "$(cut -d ' ' -f2 "$state_record")" = "$(sudo -n stat -L -c '%i:%.9Z' "$guard")" ] \
+    || die "a bridge name changed the record: $(cat "$state_record")"
   [ "$(device_state e2ebr1)" = unmanaged ] && [ "$(address_of e2ebr1)" = 198.18.9.1/24 ] \
     || die "the second bridge is $(device_state e2ebr1) with $(address_of e2ebr1)"
   pass 'a second Incus bridge is listed and unmanaged with its address intact'
@@ -574,7 +579,7 @@ fresh-resume)
   grep -Fq 'Reboot the host once' "$STATE/init-repair.log" || die "repair stop: $(tail -5 "$STATE/init-repair.log")"
   grep -Fq 'type:veth,driver:veth' "$guard" || die 'init did not repair the veth entries'
   [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
-    && [ "$(cut -d ' ' -f3,4 "$state_record")" = 'unread init' ] || die "repair record: $(cat "$state_record")"
+    && [ "$(cut -d ' ' -f4,5 "$state_record")" = 'unread init' ] || die "repair record: $(cat "$state_record")"
   uplink_admins 'after the repair'
   pass 'an edited-out guard is repaired and init waits for a reboot'
   watchdog_clean
