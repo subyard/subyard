@@ -120,8 +120,14 @@ func TestPlainUpdateNeverSelectsAnOlderLatestRelease(t *testing.T) {
 					len(report.InstalledNewer.Downgrade) != 2 {
 					t.Fatalf("installed-newer check report = %#v, %v", report, err)
 				}
-			} else if !strings.Contains(output, "[ ok ] No update installed") || !strings.Contains(output, "Warning: recovery cleanup is pending") && test.journal {
-				t.Fatalf("installed-newer update report = %q", output)
+			} else {
+				if !strings.Contains(output, "[ ok ] No update installed") {
+					t.Fatalf("installed-newer update report = %q", output)
+				}
+				// The human report renders the inspection's warnings.
+				if test.journal && !strings.Contains(output, "\n  Warning: recovery cleanup is pending\n") {
+					t.Fatalf("installed-newer update report dropped warnings: %q", output)
+				}
 			}
 			if calls == 0 {
 				t.Fatal("plain update did not discover the latest release")
