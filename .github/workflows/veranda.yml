@@ -18,7 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022, macos-15]
+        # macOS runs in veranda-macos.yml: hosted macOS arm64 capacity is too scarce for every push.
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, windows-2022]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
