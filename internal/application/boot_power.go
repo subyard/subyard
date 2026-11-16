@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -86,7 +87,9 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 	if len(instances) == 0 {
 		return result, nil
 	}
-	bridges := managedBridges(instances)
+	// The network guard powers nothing: it still covers the bridges of yards
+	// left to their init.
+	bridges := managedBridges(append(slices.Clone(instances), uninitializedBridges(uninitialized)...))
 	for _, listed := range instances {
 		desired := parsePowerMetadata(listed).Desired.Value
 		if desired != domain.PowerStopped {
@@ -134,16 +137,42 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			continue
 		}
 		reference := instanceReference(instance)
+		// Init marks its yard uninitialized under the host network policy lock
+		// that every WithStart below holds, so this read inside the lock is
+		// the power boundary: a yard init has entered is never touched.
+		leftToInit := false
+		enteredInit := func() (bool, error) {
+			current, err := reconciler.Instances.Instance(ctx, observed.Project, observed.Name)
+			if err != nil {
+				return false, fmt.Errorf("re-read %s: %w", reference, err)
+			}
+			if instanceUninitialized(current) {
+				result.uninitialized(current)
+				leftToInit = true
+			}
+			return leftToInit, nil
+		}
 		publicationFailed := false
 		if reconciler.ReconcilePublications != nil {
 			var publicationErr error
 			var waiting []string
+			var readErr error
 			err := reconciler.NetworkPolicy.WithStart(ctx, bootNetworkYard(instance), func() error {
+				if entered, err := enteredInit(); err != nil || entered {
+					readErr = err
+					return nil
+				}
 				waiting, publicationErr = reconciler.ReconcilePublications(ctx, bootNetworkYard(instance))
 				return nil // Publication failures are isolated; policy failures still stop all yards.
 			})
 			if err != nil {
 				return result, reconciler.stopRunningFailClosed(ctx, err)
+			}
+			if readErr != nil {
+				return result, readErr
+			}
+			if leftToInit {
+				continue
 			}
 			if publicationErr != nil {
 				result.PublicationErrors = append(result.PublicationErrors, fmt.Errorf("reconcile optional publication %s: %w", reference, publicationErr))
@@ -156,12 +185,20 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			if err != nil {
 				return result, err
 			}
+			if instanceUninitialized(instance) {
+				result.uninitialized(instance)
+				continue
+			}
 		}
 		switch strings.ToLower(instance.Status) {
 		case "running":
-			var runtimeErr error
+			var runtimeErr, readErr error
 			if err := reconciler.NetworkPolicy.WithStart(
 				ctx, bootNetworkYard(instance), func() error {
+					if entered, err := enteredInit(); err != nil || entered {
+						readErr = err
+						return nil
+					}
 					if reconciler.ReconcileRunning != nil {
 						runtimeErr = reconciler.ReconcileRunning(ctx, bootNetworkYard(instance))
 						return runtimeErr
@@ -179,6 +216,12 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 					ctx, fmt.Errorf("validate network policy for %s: %w", reference, err),
 				)
 			}
+			if readErr != nil {
+				return result, readErr
+			}
+			if leftToInit {
+				continue
+			}
 			result.AlreadyRunning = append(result.AlreadyRunning, reference)
 		case "stopped":
 			if publicationFailed {
@@ -194,7 +237,12 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 			}
 			var startErr error
 			yard := bootNetworkYard(instance)
+			var readErr error
 			if err := reconciler.NetworkPolicy.WithStart(ctx, yard, func() error {
+				if entered, err := enteredInit(); err != nil || entered {
+					readErr = err
+					return nil
+				}
 				startErr = reconciler.Power.SetInstancePower(ctx, instance.Project, instance.Name, "start", false)
 				if startErr != nil || reconciler.AfterStart == nil {
 					return startErr
@@ -213,6 +261,12 @@ func (reconciler BootPowerReconciler) Run(ctx context.Context) (BootPowerResult,
 				return result, reconciler.stopRunningFailClosed(
 					ctx, fmt.Errorf("validate network policy for %s: %w", reference, err),
 				)
+			}
+			if readErr != nil {
+				return result, readErr
+			}
+			if leftToInit {
+				continue
 			}
 			result.Started = append(result.Started, reference)
 		default:
@@ -412,6 +466,14 @@ func validateManagedPower(instance ports.InstanceInfo) error {
 		return fmt.Errorf("%s has no managed bridge", reference)
 	}
 	return nil
+}
+
+// uninitializedBridges are the valid bridges of yards left to their init.
+func uninitializedBridges(instances []ports.InstanceInfo) []ports.InstanceInfo {
+	return slices.DeleteFunc(slices.Clone(instances), func(instance ports.InstanceInfo) bool {
+		bridge, _ := instance.EffectiveConfig(powerBridgeKey)
+		return bridge == ""
+	})
 }
 
 func managedBridges(instances []ports.InstanceInfo) []string {

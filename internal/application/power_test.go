@@ -138,6 +138,8 @@ func TestPowerServiceWriterShapesUseEffectiveConfigAndPreserveUnownedKeys(t *tes
 		"user.subyard.bridge":        "incusbr0",
 		"user.subyard.desired_power": string(domain.PowerStopped),
 		"user.subyard.initialized":   "false",
+		// The yard had finished an init; clearing initialized keeps that fact.
+		"user.subyard.ever_initialized": "true",
 	}
 	if len(incus.ConfigUpdates) != 2 || !maps.Equal(incus.ConfigUpdates[1].Values, wantFull) {
 		t.Fatalf("full writer shape = %#v, want %#v", incus.ConfigUpdates, wantFull)
@@ -319,6 +321,30 @@ func TestEverInitializedMark(t *testing.T) {
 	}
 	if config := incus.Instances["subyard-named/yard-named"].Config; config["user.subyard.ever_initialized"] != "true" || config["user.subyard.initialized"] != "true" {
 		t.Fatalf("finalize commit: %#v", config)
+	}
+	// A yard from a release before the mark keeps its completed init when a
+	// re-init clears initialized, so a failed re-init leaves it initialized.
+	upgraded := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-named/yard-named": {
+		Name: "yard-named", Project: "subyard-named", Status: "Running", Config: map[string]string{
+			"user.subyard.managed": "true", "user.subyard.initialized": "true",
+			"user.subyard.desired_power": "running", "user.subyard.name": "named",
+		},
+	}}}
+	if err := (PowerService{Instances: upgraded, Config: upgraded}).Set(context.Background(), yard, domain.PowerRunning, false); err != nil {
+		t.Fatal(err)
+	}
+	if after := upgraded.Instances["subyard-named/yard-named"]; InstanceNeverInitialized(after) || after.Config["user.subyard.ever_initialized"] != "true" {
+		t.Fatalf("re-init of an upgraded yard lost its completed init: %#v", after.Config)
+	}
+	// An imported legacy yard was already working: it is initialized for good.
+	legacy := &testkit.Incus{Instances: map[string]ports.InstanceInfo{"subyard-named/yard-named": {
+		Name: "yard-named", Project: "subyard-named", Status: "Stopped", Config: map[string]string{},
+	}}}
+	if _, err := (PowerService{Instances: legacy, Config: legacy}).Ensure(context.Background(), yard); err != nil {
+		t.Fatal(err)
+	}
+	if config := legacy.Instances["subyard-named/yard-named"].Config; config["user.subyard.ever_initialized"] != "true" {
+		t.Fatalf("import did not record the completed init: %#v", config)
 	}
 	// A later re-init writes initialized=false and keeps the mark.
 	if err := service.Set(context.Background(), yard, domain.PowerRunning, false); err != nil {

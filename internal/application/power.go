@@ -128,6 +128,12 @@ func (service PowerService) set(
 		powerDesiredKey:     string(desired),
 		powerInitializedKey: fmt.Sprint(initialized),
 	}
+	// A yard that already finished an init, including one from a release
+	// before the completion mark, keeps that fact when a re-init clears
+	// initialized, so its failure never makes it look never initialized.
+	if !initialized && instance.Config[powerInitializedKey] == "true" {
+		values[powerEverInitializedKey] = "true"
+	}
 	for key, value := range extra {
 		values[key] = value
 	}
@@ -262,6 +268,7 @@ func powerMetadataUpdate(
 	values[powerManagedKey] = "true"
 	values[powerDesiredKey] = string(desired)
 	values[powerInitializedKey] = "true"
+	values[powerEverInitializedKey] = "true"
 	return values, PowerIntent{Desired: desired, Imported: true}, nil
 }
 

@@ -238,6 +238,79 @@ func TestBootPowerLeavesYardThatEnteredInitAfterListing(t *testing.T) {
 	}
 }
 
+// Init can enter a yard while boot reconciles its publications or waits for
+// the host network policy lock. Boot rechecks the yard under that lock, which
+// init's uninitialized mark also takes, and never powers it.
+func TestBootPowerRechecksInitAtThePowerBoundary(t *testing.T) {
+	for _, moment := range []string{"during publications", "before the start lock", "before the running lock"} {
+		t.Run(moment, func(t *testing.T) {
+			status := "Stopped"
+			if moment == "before the running lock" {
+				status = "Running"
+			}
+			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+				"p/entering": managedPowerInstance("p", "entering", status, domain.PowerRunning),
+			}}
+			enter := func() {
+				instance := fake.Instances["p/entering"]
+				instance.Config["user.subyard.initialized"] = "false"
+				fake.Instances["p/entering"] = instance
+			}
+			locks, reconciled := 0, 0
+			reconciler := BootPowerReconciler{
+				Inventory: fake, Instances: fake, Power: fake,
+				NetworkPolicy: bootNetworkPolicyFunc(func(_ context.Context, _ yardnetwork.Yard, start func() error) error {
+					locks++
+					if moment != "during publications" && locks == 2 {
+						enter() // init held the lock first and marked the yard
+					}
+					return start()
+				}),
+				EnsureNetworkLock: ensureBootNetworkLock,
+				Network:           networkGuardFunc(func(context.Context, []string) error { return nil }),
+				ReconcilePublications: func(context.Context, yardnetwork.Yard) ([]string, error) {
+					if moment == "during publications" {
+						enter()
+					}
+					return nil, nil
+				},
+				ReconcileRunning: func(context.Context, yardnetwork.Yard) error { reconciled++; return nil },
+			}
+			result, err := reconciler.Run(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fake.PowerUpdates) != 0 || reconciled != 0 || len(result.Started)+len(result.AlreadyRunning) != 0 ||
+				!reflect.DeepEqual(result.Uninitialized, []BootUninitialized{{Instance: "p/entering", Yard: "entering"}}) {
+				t.Fatalf("result=%#v updates=%#v reconciled=%d", result, fake.PowerUpdates, reconciled)
+			}
+		})
+	}
+}
+
+// The network guard check powers nothing, so it still covers the bridge of a
+// yard left to its init.
+func TestBootPowerGuardsBridgesOfUninitializedYards(t *testing.T) {
+	left := managedPowerInstance("p", "left", "Running", domain.PowerRunning)
+	left.Config["user.subyard.initialized"] = "false"
+	left.Config["user.subyard.bridge"] = "leftbr0"
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		"p/left": left, "p/start": managedPowerInstance("p", "start", "Stopped", domain.PowerRunning),
+	}}
+	var checked []string
+	reconciler := BootPowerReconciler{
+		Inventory: fake, Instances: fake, Power: fake,
+		NetworkPolicy: bootNetworkPolicyFunc(allowBootNetworkPolicy), EnsureNetworkLock: ensureBootNetworkLock,
+		Network: networkGuardFunc(func(_ context.Context, bridges []string) error { checked = bridges; return nil }),
+	}
+	if _, err := reconciler.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(checked, []string{"incusbr0", "leftbr0"}) {
+		t.Fatalf("guarded bridges: %v", checked)
+	}
+}
+
 func TestBootPowerPostStartRunsOnlyAfterSuccessfulStartInsidePolicyLock(t *testing.T) {
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		"p/running": managedPowerInstance("p", "running", "Running", domain.PowerRunning),

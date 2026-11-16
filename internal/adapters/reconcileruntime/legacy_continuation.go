@@ -385,6 +385,11 @@ func (runtime Runtime) legacyInstancePolicy(ctx context.Context, state ports.Rec
 				"user.subyard.ccusage_version", "user.subyard.codex_version", "user.subyard.preview_sha256", "user.subyard.preview_endpoint_sha256",
 				"volatile.uuid", "volatile.uuid.generation", "volatile.base_image", "volatile.cloud-init.instance-id", "volatile.idmap.base", "volatile.idmap.current", "volatile.idmap.next", "volatile.last_state.idmap", "volatile.apply_template", "volatile.last_state.power", "volatile.last_state.ready", "volatile.eth0.name", "volatile.eth0.hwaddr", "volatile.eth0.host_name", "volatile.eth0.last_state.ip_addresses":
 				continue
+			case "user.subyard.ever_initialized":
+				// The power owner's completion mark: only ever written as true.
+				if value == "true" {
+					continue
+				}
 			case previewroute.Key, ownerpublication.Prefix + previewroute.DeviceName:
 				if adopt || runtime.previewRouteConverged(ctx, instance) {
 					continue
@@ -605,7 +610,7 @@ func legacyStableConfig(values map[string]string) map[string]string {
 	}
 	// Exact state/publication fields written by the existing power and guest
 	// publication owners. ID maps, MACs and every other property remain bound.
-	for _, key := range []string{"user.subyard.initialized", "user.subyard.desired_power", "user.subyard.ccusage_version", "user.subyard.preview_sha256", "user.subyard.preview_endpoint_sha256", "volatile.last_state.power", "volatile.last_state.ready", "volatile.eth0.host_name", "volatile.eth0.last_state.ip_addresses", previewroute.Key, ownerpublication.Prefix + previewroute.DeviceName} {
+	for _, key := range []string{"user.subyard.initialized", "user.subyard.ever_initialized", "user.subyard.desired_power", "user.subyard.ccusage_version", "user.subyard.preview_sha256", "user.subyard.preview_endpoint_sha256", "volatile.last_state.power", "volatile.last_state.ready", "volatile.eth0.host_name", "volatile.eth0.last_state.ip_addresses", previewroute.Key, ownerpublication.Prefix + previewroute.DeviceName} {
 		delete(result, key)
 	}
 	// Historical retirement proofs remain outside the continuation binding.
