@@ -526,7 +526,7 @@ nm_guard_inactive_state() { # <active at the first sample> <binary>
 #   then records `unread` for this boot. `held` needs NetworkManager explicitly inactive at both
 #   samples, or a migration with evidence that NetworkManager holds the released guard.
 nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <active> <binary> [evidence: 1|0]
-  local conf="$1" desired="$2" kind="$3" active="$4" binary="$5" evidence="${6:-0}" legacy hash before record bound=0 disk identity
+  local conf="$1" desired="$2" kind="$3" active="$4" binary="$5" evidence="${6:-0}" legacy hash before record bound=0 disk guard_identity
   local old_boot old_hash old_state old_kind state=unread
   NM_GUARD_RECORD_ERROR=''
   legacy="$(nm_legacy_guard "$conf")"
@@ -545,11 +545,11 @@ nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <ac
   # Bound: the record names this very file and its static content (any boot).
   # Anything but a regular file in place of the guard is never bound, never read, and is replaced
   # by a regular file below.
-  disk='' identity=''
-  if identity="$(power_nm_file_id "$conf")"; then disk="$(power_nm_guard_static_hash "$conf")" || disk=''; fi
-  [ "$(power_nm_guard_state_rule "$record" any "$identity" "$disk")" = unbound ] \
+  disk='' guard_identity=''
+  if guard_identity="$(power_nm_file_id "$conf")"; then disk="$(power_nm_guard_static_hash "$conf")" || disk=''; fi
+  [ "$(power_nm_guard_state_rule "$record" any "$guard_identity" "$disk")" = unbound ] \
     || nm_path_exists "$legacy" || bound=1
-  if [ -n "$identity" ] && ! nm_path_exists "$legacy" && [ "$(cat -- "$conf")" = "$desired" ]; then
+  if [ -n "$guard_identity" ] && ! nm_path_exists "$legacy" && [ "$(cat -- "$conf")" = "$desired" ]; then
     ok "NetworkManager guard already current ($conf)"
     [ "$bound" = 0 ] || return 0
     nm_guard_record "$conf" "$hash" "$(nm_guard_inactive_state "$active" "$binary")" "$kind" "$(power_nm_boot_id)"

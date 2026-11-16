@@ -241,10 +241,10 @@ power_nm_guard_static_hash() { # <conf>: fails when the guard cannot be read
 # The guard file's identity, as hostruntime.networkManagerFileID: one lstat of the path itself,
 # which must be a regular file (never a link, FIFO or anything a read could block on).
 power_nm_file_id() { # <path>
-  local identity
-  identity="$(stat -c '%F|%i:%.9Z' -- "$1" 2>/dev/null)" || return 1
-  case "${identity%%|*}" in
-    'regular file'|'regular empty file') printf '%s\n' "${identity#*|}" ;;
+  local guard_identity
+  guard_identity="$(stat -c '%F|%i:%.9Z' -- "$1" 2>/dev/null)" || return 1
+  case "${guard_identity%%|*}" in
+    'regular file'|'regular empty file') printf '%s\n' "${guard_identity#*|}" ;;
     *) return 1 ;;
   esac
 }
