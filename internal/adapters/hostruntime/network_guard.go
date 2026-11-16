@@ -79,7 +79,11 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 		reboot = true
 	case "unbound":
 		// Only init can tell what NetworkManager holds: it records the guard as unread.
-		violations = append(violations, "no Subyard record binds the guard on disk to what NetworkManager read")
+		if info, err := os.Lstat(NetworkManagerGuardPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			violations = append(violations, "the Subyard guard "+NetworkManagerGuardPath+" is a symbolic link; init replaces the link with a file")
+		} else {
+			violations = append(violations, "no Subyard record binds the guard on disk to what NetworkManager read")
+		}
 		if !slices.Contains(remedies, "run yard init") {
 			remedies = append(remedies, "run yard init")
 		}
@@ -417,6 +421,10 @@ func networkManagerGuardStateAt(statePath, guardPath, bootPath string) string {
 	boot, err := os.ReadFile(bootPath)
 	if err != nil || strings.TrimSpace(string(boot)) == "" {
 		return "unread-init"
+	}
+	// Subyard writes a regular file; a link could be retargeted and restored behind the record.
+	if info, err := os.Lstat(guardPath); err != nil || !info.Mode().IsRegular() {
+		return "unbound"
 	}
 	fileID := networkManagerFileID(guardPath)
 	guard, err := os.ReadFile(guardPath)

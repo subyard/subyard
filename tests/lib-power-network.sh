@@ -641,17 +641,31 @@ for broken in edited managed; do
   reboot_host
   [ "$(state_of)" = loaded ] || fail "the reboot did not load the repair ($broken)"
 done
-# A guard read through a symlink: the record binds the target file.
+# A link in place of the guard is never bound, even with a record for its unchanged target: the
+# link could have been retargeted and restored after NetworkManager read another file. Starts
+# send the operator to init, and init replaces the link with a regular file, recorded unread.
 guard_case
 printf '%s\n' "$expected_guard" > "$tmp/linked.conf"
 ln -sfn "$tmp/linked.conf" "$guard_conf"
-mark_loaded
-[ "$(state_of)" = loaded ] || fail "a held record for the linked content did not load"
-sed -i 's/^managed=0$/managed=1/' "$tmp/linked.conf"
-[ "$(state_of)" = unbound ] || fail "changed content behind the link read as $(state_of)"
-rm -f "$tmp/linked.conf"
+nm_guard_write_file "$POWER_NM_GUARD_STATE" "boot-0 $(power_nm_file_id "$guard_conf") $(power_nm_guard_static_hash "$guard_conf") held init"
+[ "$(state_of)" = unbound ] || fail "a linked guard with a record for its target read as $(state_of)"
+if power_host_safe incusbr0; then fail "a start passed on a linked guard"; fi
+case "$POWER_ERROR" in *'is a symbolic link; init replaces the link with a file'*'run yard init, then reboot the host once'*) ;; *) fail "linked guard refusal: $POWER_ERROR" ;; esac
+if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "init continued after replacing a linked guard"; fi
+[ -f "$guard_conf" ] && [ ! -L "$guard_conf" ] && [ "$(cat "$tmp/linked.conf")" = "$expected_guard" ] \
+  || fail "init did not replace the link with a file, or changed its target"
+[ "$(cat "$POWER_NM_GUARD_STATE")" = "$(record_for 'unread init')" ] || fail "linked guard record: $(cat "$POWER_NM_GUARD_STATE")"
+reboot_host
+nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null || fail "init failed after the reboot read the replaced guard: $POWER_ERROR"
+ln -sfn "$tmp/missing.conf" "$guard_conf"
 [ "$(state_of)" = unbound ] || fail "a dangling guard link read as $(state_of)"
 rm -f "$guard_conf"
+# Equal bytes without a binding and NetworkManager explicitly inactive at both samples: `held`.
+guard_case
+MOCK_NM_STATE=inactive
+nm_guard_write_file "$guard_conf" "$(render '')"
+nm_unmanaged_guard_early "$guard_conf" >/dev/null || fail "an inactive NetworkManager stopped the early call on an unbound guard"
+[ "$(record_state)" = 'held init' ] || fail "unbound guard with inactive NetworkManager recorded: $(cat "$POWER_NM_GUARD_STATE")"
 # A hand restore after NetworkManager read something else: equal bytes in another file are
 # unbound; init records them unread for this boot and only the reboot loads them.
 guard_case
@@ -926,17 +940,40 @@ MOCK_NM_STATE=inactive
 PATH="$tmp/noincus" nm_unmanaged_guard_migrate "$guard_conf" >/dev/null || fail "migration without incus failed"
 [ "$(sed -n 3p "$guard_conf")" = 'match-device=type:veth,driver:veth,interface-name:tap????????' ] && [ "$(record_state)" = 'held migration' ] \
   || fail "no-incus migration: $(cat "$guard_conf") $(cat "$POWER_NM_GUARD_STATE" 2>/dev/null)"
+# The early call stops after a migration NetworkManager has not provably read, before the
+# installer installs packages or restarts Incus; a record-write failure stops it too.
 MOCK_NM_STATE=active
 write_released
-PATH="$tmp/noincus" nm_unmanaged_guard_early "$guard_conf" >/dev/null || fail "the early call failed on a released guard without incus"
-nm_guard_format_current "$guard_conf" || fail "the early call did not migrate the released guard"
+if (PATH="$tmp/noincus" nm_unmanaged_guard_early "$guard_conf" >"$tmp/migrate.out" 2>&1); then fail "the early call continued after an unread migration without incus"; fi
+grep -Fq 'Reboot the host once' "$tmp/migrate.out" || fail "early unread migration stop: $(cat "$tmp/migrate.out")"
+nm_guard_format_current "$guard_conf" && [ "$(record_state)" = 'unread migration' ] || fail "the early call did not migrate the released guard"
+for truncated in empty partial; do
+  rm -f "$legacy_conf" "$POWER_NM_GUARD_STATE"
+  if [ "$truncated" = empty ]; then : > "$guard_conf"; else printf '[main]\nno-auto-default=type:veth' > "$guard_conf"; fi
+  nm_guard_released "$guard_conf" || fail "a $truncated guard is not a released form"
+  if (nm_unmanaged_guard_early "$guard_conf" >"$tmp/migrate.out" 2>&1); then fail "the early call continued after migrating a $truncated guard"; fi
+  grep -Fq 'Reboot the host once' "$tmp/migrate.out" && [ "$(record_state)" = 'unread migration' ] \
+    || fail "$truncated guard: $(cat "$tmp/migrate.out") $(cat "$POWER_NM_GUARD_STATE" 2>/dev/null)"
+done
+: > "$guard_conf"; rm -f "$POWER_NM_GUARD_STATE"
+POWER_NM_GUARD_STATE="$tmp/state-blocked/nm-guard-state"
+if (nm_unmanaged_guard_early "$guard_conf" >"$tmp/migrate.out" 2>&1); then fail "the early call continued after a failed migration record"; fi
+grep -Fq "could not write the NetworkManager guard record $POWER_NM_GUARD_STATE, so no yard starts" "$tmp/migrate.out" \
+  && [ "$(grep -c 'no yard starts' "$tmp/migrate.out")" = 1 ] || fail "failed migration record: $(cat "$tmp/migrate.out")"
+POWER_NM_GUARD_STATE="$tmp/state/nm-guard-state"
 # A failed inventory keeps released names NetworkManager reports as unmanaged bridges and drops
 # a bridge it runs (the administrator's br0).
 write_released
 MOCK_NM_DEVICES=$'enp6s0:ethernet:unmanaged\nincusbr0:bridge:unmanaged\nbr0:bridge:connected'
-MOCK_INCUS_NETWORK_RC=7 nm_unmanaged_guard_early "$guard_conf" >/dev/null || fail "the early call failed on a released guard with a failed inventory"
+(MOCK_INCUS_NETWORK_RC=7 nm_unmanaged_guard_early "$guard_conf" >/dev/null 2>&1) || true
 grep -Fq 'interface-name:incusbr0' "$guard_conf" && ! grep -Eq 'interface-name:br0(,|$)' "$guard_conf" \
   || fail "the early migration with a failed inventory listed: $(cat "$guard_conf")"
+# With NetworkManager inactive nothing tells the bridges apart: every released name stays.
+write_released
+(MOCK_NM_STATE=inactive MOCK_INCUS_NETWORK_RC=7 nm_unmanaged_guard_early "$guard_conf" >/dev/null 2>&1) \
+  || fail "the early migration with NetworkManager inactive failed"
+grep -Fq 'interface-name:incusbr0' "$guard_conf" && grep -Eq 'interface-name:br0(,|$)' "$guard_conf" \
+  || fail "the early migration with NetworkManager inactive dropped released names: $(cat "$guard_conf")"
 # Teardown of a released guard without a hijack removes both files and the record.
 write_released
 MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null || fail "teardown of a released guard failed: $POWER_ERROR"

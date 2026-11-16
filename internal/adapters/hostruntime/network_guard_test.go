@@ -347,35 +347,48 @@ func bindGuardRecord(t *testing.T, record, guard, boot, contents, state string) 
 	testkit.WriteFile(t, record, []byte(boot+" "+networkManagerFileID(guard)+" "+NetworkManagerGuardStaticHash(contents)+" "+state+" init\n"), 0o644)
 }
 
-func TestLocalNetworkManagerGuardStateReadsContentThroughSymlinks(t *testing.T) {
+// A link in place of the guard is never bound: it could be retargeted and restored behind the
+// record (the shell twin runs in tests/lib-power-network.sh).
+func TestLocalNetworkManagerGuardStateRefusesALinkedGuard(t *testing.T) {
 	directory := testkit.TempDir(t)
-	target, guard := filepath.Join(directory, "target.conf"), filepath.Join(directory, "zz.conf")
+	target, other, guard := filepath.Join(directory, "a.conf"), filepath.Join(directory, "b.conf"), filepath.Join(directory, "zz.conf")
 	boot, record := filepath.Join(directory, "boot_id"), filepath.Join(directory, "state")
 	rendered := "[device-subyard]\nmatch-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0\nmanaged=0\n"
 	testkit.WriteFile(t, target, []byte(rendered), 0o644)
+	testkit.WriteFile(t, other, []byte("[device-subyard]\nmatch-device=interface-name:incusbr0\nmanaged=0\n"), 0o644)
+	testkit.WriteFile(t, boot, []byte("b2\n"), 0o644)
 	if err := os.Symlink(target, guard); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, boot, []byte("b1\n"), 0o644)
 	bindGuardRecord(t, record, guard, "b1", rendered, "held")
-	if got := networkManagerGuardStateAt(record, guard, boot); got != "loaded" {
-		t.Fatalf("a held record for the linked file gave %q", got)
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "unbound" {
+		t.Fatalf("a linked guard with a record for its target gave %q", got)
 	}
-	// Any rewrite behind the link changes the identity, even with equal bytes (a hand restore).
-	// ctime ticks with the kernel's coarse clock; a real restore is never within one tick.
+	// Retarget to B and back to the unchanged A: still unbound.
+	for _, destination := range []string{other, target} {
+		if err := os.Remove(guard); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(destination, guard); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := networkManagerGuardStateAt(record, guard, boot); got != "unbound" {
+		t.Fatalf("a restored guard link gave %q", got)
+	}
+	// The regular file it points to, bound by its own record, loads.
+	bindGuardRecord(t, record, target, "b1", rendered, "held")
+	if got := networkManagerGuardStateAt(record, target, boot); got != "loaded" {
+		t.Fatalf("a bound regular guard gave %q", got)
+	}
+	// Any rewrite changes the identity, even with equal bytes (a hand restore).
 	time.Sleep(30 * time.Millisecond)
 	if err := os.Remove(target); err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, target, []byte(rendered), 0o644)
-	if got := networkManagerGuardStateAt(record, guard, boot); got != "unbound" {
-		t.Fatalf("a restored file behind the link gave %q", got)
-	}
-	if err := os.Remove(target); err != nil {
-		t.Fatal(err)
-	}
-	if got := networkManagerGuardStateAt(record, guard, boot); got != "unbound" {
-		t.Fatalf("a dangling guard link gave %q", got)
+	if got := networkManagerGuardStateAt(record, target, boot); got != "unbound" {
+		t.Fatalf("a restored file gave %q", got)
 	}
 }
 

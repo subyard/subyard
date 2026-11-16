@@ -270,6 +270,8 @@ power_nm_guard_state() { # [conf]: the read state of the guard on disk
   local conf="${1:-$POWER_NM_GUARD_CONF}" record='' hash boot file
   boot="$(power_nm_boot_id)" || boot=''
   [ -n "$boot" ] || { printf 'unread-init\n'; return; }
+  # Subyard writes a regular file; a link could be retargeted and restored behind the record.
+  [ ! -L "$conf" ] || { printf 'unbound\n'; return; }
   file="$(power_nm_file_id "$conf")" || { printf 'unbound\n'; return; }
   hash="$(power_nm_guard_static_hash "$conf")" || { printf 'unbound\n'; return; }
   # The identity read after the content: a concurrent rewrite changes it, never the reverse.
@@ -324,7 +326,11 @@ power_nm_guard_effective() { # <bridge...>: every independent finding, next step
       reboot=1 ;;
     unbound)
       # Only init can tell what NetworkManager holds: it records the guard as unread.
-      violations+="${violations:+$'\n'}no Subyard record binds the guard on disk to what NetworkManager read"
+      if [ -L "$POWER_NM_GUARD_CONF" ]; then
+        violations+="${violations:+$'\n'}the Subyard guard $POWER_NM_GUARD_CONF is a symbolic link; init replaces the link with a file"
+      else
+        violations+="${violations:+$'\n'}no Subyard record binds the guard on disk to what NetworkManager read"
+      fi
       case "$remedy" in *'run yard init'*) ;; *) remedy+="run yard init, then " ;; esac
       reboot=1 ;;
   esac

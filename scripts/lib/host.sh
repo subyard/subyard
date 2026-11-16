@@ -489,16 +489,31 @@ nm_guard_released_evidence() { # <conf>: any failed read means no evidence
 }
 
 # Record which guard NetworkManager holds, bound to the guard file's identity. A failed write
-# removes the record (it then reads as unbound) and warns with its path.
+# removes the record (it then reads as unbound) and leaves its one next step in
+# NM_GUARD_RECORD_ERROR for nm_guard_post_publish.
+NM_GUARD_RECORD_ERROR=''
 nm_guard_record() { # <conf> <hash> <held|unread> <init|migration> <boot>
   local file
   file="$(power_nm_file_id "$1")" || file=''
-  if [ -n "$5" ] && [ -n "$file" ] && { install -d -m 0755 "${POWER_NM_GUARD_STATE%/*}" \
+  if [ -z "$5" ]; then
+    NM_GUARD_RECORD_ERROR="cannot read the boot ID (/proc/sys/kernel/random/boot_id), so Subyard cannot record which NetworkManager guard is loaded and no yard starts; fix the boot ID, then rerun $POWER_NM_GUARD_COMMAND"
+  elif [ -n "$file" ] && { install -d -m 0755 "${POWER_NM_GUARD_STATE%/*}" \
     && nm_guard_write_file "$POWER_NM_GUARD_STATE" "$5 $file $2 $3 $4"; } 2>/dev/null; then
     return 0
+  else
+    NM_GUARD_RECORD_ERROR="could not write the NetworkManager guard record $POWER_NM_GUARD_STATE, so no yard starts; make ${POWER_NM_GUARD_STATE%/*} a writable persistent directory, then rerun $POWER_NM_GUARD_COMMAND"
   fi
   rm -f "$POWER_NM_GUARD_STATE" 2>/dev/null || true
-  warn "could not write the NetworkManager guard record $POWER_NM_GUARD_STATE; no yard starts until yard init can write it"
+}
+
+# `held` when NetworkManager was explicitly inactive at the first sample (or is not installed)
+# and still is now; anything else, a failed read included, is `unread`.
+nm_guard_inactive_state() { # <active at the first sample> <binary>
+  local rc=0
+  [ "$1" = 0 ] || { printf 'unread\n'; return; }
+  [ -n "$2" ] || { printf 'held\n'; return; }
+  power_nm_active || rc=$?
+  if [ "$rc" = 1 ]; then printf 'held\n'; else printf 'unread\n'; fi
 }
 
 # Publish one guard change; the file is rewritten only when its bytes differ.
@@ -510,8 +525,9 @@ nm_guard_record() { # <conf> <hash> <held|unread> <init|migration> <boot>
 #   then records `unread` for this boot. `held` needs NetworkManager explicitly inactive at both
 #   samples, or a migration with evidence that NetworkManager holds the released guard.
 nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <active> <binary> [evidence: 1|0]
-  local conf="$1" desired="$2" kind="$3" active="$4" binary="$5" evidence="${6:-0}" legacy hash before record rc bound=0 disk
+  local conf="$1" desired="$2" kind="$3" active="$4" binary="$5" evidence="${6:-0}" legacy hash before record bound=0 disk
   local old_boot old_hash old_state old_kind state=unread
+  NM_GUARD_RECORD_ERROR=''
   legacy="$(nm_legacy_guard "$conf")"
   if [ -z "$desired" ]; then
     rm -f "$conf" "$legacy" "$POWER_NM_GUARD_STATE" || { power_fail "could not remove $conf"; return 1; }
@@ -527,12 +543,13 @@ nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <ac
   read -r old_boot _ old_hash old_state old_kind _ <<< "$record"
   # Bound: the record names this very file and its static content (any boot).
   disk="$(power_nm_guard_static_hash "$conf")" || disk=''
+  # A link in place of the file is never bound and is replaced by a regular file below.
   [ "$(power_nm_guard_state_rule "$record" any "$(power_nm_file_id "$conf")" "$disk")" = unbound ] \
-    || nm_path_exists "$legacy" || bound=1
-  if [ -f "$conf" ] && ! nm_path_exists "$legacy" && [ "$(cat "$conf")" = "$desired" ]; then
+    || nm_path_exists "$legacy" || [ -L "$conf" ] || bound=1
+  if [ -f "$conf" ] && [ ! -L "$conf" ] && ! nm_path_exists "$legacy" && [ "$(cat "$conf")" = "$desired" ]; then
     ok "NetworkManager guard already current ($conf)"
     [ "$bound" = 0 ] || return 0
-    nm_guard_record "$conf" "$hash" unread "$kind" "$(power_nm_boot_id)"
+    nm_guard_record "$conf" "$hash" "$(nm_guard_inactive_state "$active" "$binary")" "$kind" "$(power_nm_boot_id)"
     return 0
   fi
   install -d -m 0755 "${conf%/*}" || { power_fail "could not create ${conf%/*}"; return 1; }
@@ -552,11 +569,8 @@ nm_guard_publish() { # <conf> <desired, or empty to remove> <init|migration> <ac
   ok "NetworkManager guard written for veths, Incus tap devices and Incus bridges ($conf)"
   if [ "$active" = 1 ]; then
     [ "$kind" = migration ] && [ "$evidence" = 1 ] && state=held
-  elif [ -z "$binary" ]; then
-    state=held
   else
-    rc=0; power_nm_active || rc=$?
-    [ "$rc" = 1 ] && state=held
+    state="$(nm_guard_inactive_state "$active" "$binary")"
   fi
   nm_guard_record "$conf" "$hash" "$state" "$kind" "$(power_nm_boot_id)"
 }
@@ -571,6 +585,27 @@ nm_guard_nm_state() { # sets NM_GUARD_ACTIVE and NM_GUARD_BINARY, or fails
 
 nm_guard_unread_message() {
   printf '%s\n' "NetworkManager has not read the Subyard guard yet; Subyard never reloads or restarts NetworkManager. Reboot the host once, then rerun $POWER_NM_GUARD_COMMAND"
+}
+
+# After a publish, judged on the record rather than the first sample (NetworkManager may have
+# started meanwhile). Returns 0 when NetworkManager holds the guard (a migration waiting for its
+# reboot included), 1 after stopping, 2 when it does not and the caller continues (update,
+# teardown): starts refuse until the one next step is done.
+nm_guard_post_publish() { # <conf> <stop: 1|0>
+  if [ -n "$NM_GUARD_RECORD_ERROR" ]; then
+    [ "$2" = 0 ] || { power_fail "$NM_GUARD_RECORD_ERROR"; return 1; }
+    warn "$NM_GUARD_RECORD_ERROR"
+    return 2
+  fi
+  case "$(power_nm_guard_state "$1")" in
+    loaded|loaded-reboot) return 0 ;;
+    unbound)
+      [ "$2" = 0 ] || { power_fail "the Subyard guard on disk is not bound to a record; rerun $POWER_NM_GUARD_COMMAND"; return 1; }
+      return 2 ;;
+    *)
+      [ "$2" = 0 ] || { power_fail "$(nm_guard_unread_message)"; return 1; }
+      return 2 ;;
+  esac
 }
 
 # Write or remove the current guard (init, setup, teardown): preflight, publish, then stop while
@@ -588,19 +623,10 @@ nm_guard_apply_current() { # <conf> <desired or empty> <bridges> <stop: 1|0> <pi
   fi
   nm_guard_publish "$conf" "$desired" init "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY" || return 1
   [ -n "$desired" ] && [ -n "$NM_GUARD_BINARY" ] || return 0
-  # Judged on the record, not the first sample: NetworkManager may have started meanwhile.
-  case "$(power_nm_guard_state "$conf")" in
-    unread-init)
-      [ "$4" = 1 ] || return 0
-      power_fail "$(nm_guard_unread_message)"
-      return 1 ;;
-    unbound)
-      [ "$4" = 1 ] || return 0
-      power_fail "Subyard could not record which NetworkManager guard is loaded ($POWER_NM_GUARD_STATE); make it writable, then rerun $POWER_NM_GUARD_COMMAND"
-      return 1 ;;
-    # A migrated guard waits for the host reboot; starts refuse until then.
-    unread-migration) return 0 ;;
-  esac
+  local rc=0
+  nm_guard_post_publish "$conf" "$4" || rc=$?
+  [ "$rc" != 1 ] || return 1
+  [ "$rc" = 0 ] || return 0
   [ "$NM_GUARD_ACTIVE" = 1 ] && [ "$5" = 1 ] || return 0
   nm_guard_pin_bridges
 }
@@ -608,9 +634,9 @@ nm_guard_apply_current() { # <conf> <desired or empty> <bridges> <stop: 1|0> <pi
 # Migrate a guard written by a released version: refuse a provable takeover of a device the
 # restored administrator lists mark unmanaged, give a notice for lists Subyard cannot decide, and
 # publish without touching NetworkManager. Until NetworkManager reads it, starts wait for the
-# host reboot.
-nm_guard_migrate_with() { # <conf> <bridges>
-  local conf="$1" desired
+# host reboot; init (stop 1) stops there before anything creates devices.
+nm_guard_migrate_with() { # <conf> <bridges> <stop: 1|0>
+  local conf="$1" desired rc=0
   desired="$(nm_guard_render "$2")" || { power_fail "unsafe Incus bridge name in NetworkManager guard"; return 1; }
   nm_guard_preflight "$conf" "$desired" "$2" "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY"
   [ "$NM_GUARD_ACTIVE" = 0 ] || nm_guard_hijack_check
@@ -624,13 +650,14 @@ nm_guard_migrate_with() { # <conf> <bridges>
   if [ -n "$NM_GUARD_UNDECIDED" ]; then
     warn "Subyard cannot decide whether the administrator's unmanaged-devices list ($NM_GUARD_LIST) marks these devices NetworkManager manages: $(power_join_comma <<< "$NM_GUARD_UNDECIDED"). Do not reload or restart NetworkManager before the reboot."
   fi
-  if [ "$NM_GUARD_ACTIVE" = 1 ]; then
-    if nm_guard_loaded "$conf"; then
-      ok "NetworkManager guard migrated without touching NetworkManager — reboot the host once to apply it safely"
-    else
-      warn "NetworkManager guard migrated without touching NetworkManager; nothing shows NetworkManager holds an adequate guard, so no yard starts until the host reboots once"
-    fi
-  fi
+  [ -n "$NM_GUARD_BINARY" ] || return 0
+  nm_guard_post_publish "$conf" "$3" || rc=$?
+  case "$rc" in
+    0) [ "$NM_GUARD_ACTIVE" = 0 ] || ok "NetworkManager guard migrated without touching NetworkManager — reboot the host once to apply it safely" ;;
+    1) return 1 ;;
+    *) [ -n "$NM_GUARD_RECORD_ERROR" ] \
+      || warn "NetworkManager guard migrated without touching NetworkManager; nothing shows NetworkManager holds an adequate guard, so no yard starts until the host reboots once" ;;
+  esac
 }
 
 # The early install call, before Incus is installed or initialized: the static section and the
@@ -641,8 +668,9 @@ nm_unmanaged_guard_early() { # [conf]
   if nm_guard_released "$conf"; then
     # Without an inventory only released names NetworkManager reports as unmanaged bridges stay
     # listed: keeping them unmanaged changes nothing NetworkManager does now. An administrator's
-    # bridge NetworkManager runs (a non-Incus INCUS_BRIDGE such as br0) is dropped; ownership is
-    # unknowable here, so a later call with an inventory decides.
+    # bridge NetworkManager runs (a non-Incus INCUS_BRIDGE such as br0) is dropped. When
+    # NetworkManager is inactive or nmcli cannot be read, every released name stays, as it was.
+    # Ownership is unknowable here; a later call with an inventory decides.
     if nm_guard_inventory; then bridges="$NM_INVENTORY"
     elif [ "$NM_GUARD_ACTIVE" = 1 ] && command -v nmcli >/dev/null 2>&1 && nm_read_devices; then
       local name
@@ -650,8 +678,10 @@ nm_unmanaged_guard_early() { # [conf]
         [ -n "$name" ] && awk -F: -v d="$name" '$1 == d && $2 == "bridge" && $3 == "unmanaged" { found = 1 } END { exit !found }' <<< "$NM_DEVICES" \
           && bridges+="$name"$'\n'
       done < <(nm_guard_released_names "$conf")
+    else
+      bridges="$(nm_guard_released_names "$conf")"
     fi
-    nm_guard_migrate_with "$conf" "$bridges" || die "$POWER_ERROR"
+    nm_guard_migrate_with "$conf" "$bridges" 1 || die "$POWER_ERROR"
     return 0
   fi
   if nm_guard_inventory; then
@@ -676,7 +706,7 @@ nm_unmanaged_guard() { # <bridge> [conf]
   grep -Fxq -- "$bridge" <<< "$NM_INVENTORY" \
     || die "the yard bridge $bridge is not an Incus-managed bridge; Subyard guards and pins only Incus bridges — set INCUS_BRIDGE to an Incus bridge"
   if nm_guard_released "$conf"; then
-    nm_guard_migrate_with "$conf" "$NM_INVENTORY" || die "$POWER_ERROR"
+    nm_guard_migrate_with "$conf" "$NM_INVENTORY" 1 || die "$POWER_ERROR"
     return 0
   fi
   nm_guard_apply_current "$conf" "$(nm_guard_render "$NM_INVENTORY")" "$NM_INVENTORY" 1 1 || die "$POWER_ERROR"
@@ -691,7 +721,7 @@ nm_unmanaged_guard_migrate() { # [conf]
   fi
   nm_guard_nm_state || die "$POWER_ERROR"
   nm_guard_inventory || die "could not list Incus-managed bridges to migrate the released NetworkManager guard; nothing was changed — rerun $POWER_NM_GUARD_COMMAND once incus network list works"
-  nm_guard_migrate_with "$conf" "$NM_INVENTORY" || die "$POWER_ERROR"
+  nm_guard_migrate_with "$conf" "$NM_INVENTORY" 0 || die "$POWER_ERROR"
 }
 
 # Teardown: keep the guard for surviving Incus bridges, remove it after the last one. A released
@@ -714,7 +744,7 @@ nm_unmanaged_guard_reconcile() { # [conf]
       nm_guard_publish "$conf" '' migration "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY"
       return
     fi
-    nm_guard_migrate_with "$conf" "$NM_INVENTORY" || { warn "kept the NetworkManager guard: $POWER_ERROR"; return 1; }
+    nm_guard_migrate_with "$conf" "$NM_INVENTORY" 0 || { warn "kept the NetworkManager guard: $POWER_ERROR"; return 1; }
     return 0
   fi
   if [ -z "$NM_INVENTORY" ]; then
