@@ -470,6 +470,9 @@ func parseResource(profile, name string, reader io.Reader, path string) (Resourc
 	if bootstrap && !bootstrapAction(actionDefinitions, declarations, bringUp) {
 		return ResourceSpec{}, fmt.Errorf("profile bootstrap bring-up must use bootstrap-change with recoverable mutation in %s", path)
 	}
+	if proxy != nil && proxy.IsOwnerIPv4Ingress() && !ingressLifecycleActions(actionDefinitions, declarations, bringUp, shutdown) {
+		return ResourceSpec{}, fmt.Errorf("public ingress bring-up and shutdown must be mutations without external-system impact in %s", path)
+	}
 	if startup != "" && !startupAction(actionDefinitions, declarations, bringUp) {
 		return ResourceSpec{}, fmt.Errorf("startup bring-up must use public-ingress-change with reversible mutation in %s", path)
 	}
@@ -619,6 +622,22 @@ func bootstrapAction(
 		return true
 	}
 	return false
+}
+
+// Public ingress changes only through the exact prepared resource path, which
+// admits only mutations and destructions without external-system impact.
+func ingressLifecycleActions(definitions []domain.ActionDefinition, declarations []actionDeclaration, bringUp, shutdown string) bool {
+	for index, declaration := range declarations {
+		if declaration.verb != bringUp && declaration.verb != shutdown {
+			continue
+		}
+		definition := definitions[index]
+		if (definition.Effect != domain.ActionMutation && definition.Effect != domain.ActionDestruction) ||
+			slices.Contains(definition.Impacts, domain.ImpactExternalSystem) {
+			return false
+		}
+	}
+	return true
 }
 
 func startupAction(definitions []domain.ActionDefinition, declarations []actionDeclaration, bringUp string) bool {

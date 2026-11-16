@@ -422,6 +422,38 @@ ACTION="down down public-ingress-change reversible"
 	}
 }
 
+func TestPublicIngressLifecycleRequiresExactMutation(t *testing.T) {
+	for _, test := range []struct{ name, up, down string }{
+		{"exact", "public-ingress-change reversible", "runtime-destruction reversible"},
+		{"session-up", "session not-needed", "public-ingress-change reversible"},
+		{"external-down", "public-ingress-change reversible", "external-change reversible"},
+		{"read-only-up", "read-only not-needed", "public-ingress-change reversible"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := ParseResource("sample", "relay", strings.NewReader(`
+COMMAND=relay
+HANDLER=resources/relay/handler.sh
+TITLE="Relay"
+PROXY="sample-relay SAMPLE_IPV4 SAMPLE_PORT SAMPLE_INTERFACE tcp:guest:22 owner-metadata-v1 owner-ipv4-tcp"
+ACTION="up up `+test.up+`"
+ACTION="down down `+test.down+`"
+ACTION="status status read-only not-needed"
+BRINGUP=up
+SHUTDOWN=down
+`))
+			if test.name == "exact" {
+				if err != nil {
+					t.Fatalf("exact ingress lifecycle rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "public ingress bring-up and shutdown must be mutations without external-system impact") {
+				t.Fatalf("non-exact ingress lifecycle accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestBuildRegistryDerivesExplicitDashboardContract(t *testing.T) {
 	spec, err := ParseResource("sample", "dashboard", strings.NewReader(`
 COMMAND=dashboard
