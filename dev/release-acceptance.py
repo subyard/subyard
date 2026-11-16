@@ -276,7 +276,7 @@ CI_COUNTED_POLICIES = frozenset({
 CI_HOSTED_CHECKS = frozenset({
     "profile:orca/bootstrap", "profile:orca/existing-yard", "profile:orca/resource",
     "profile:orca/projects", "profile:orca/ssh-agent", "profile:orca/codex-permissions",
-    "profile:orca/managed-agents", "profile:orca/identity-rename", "profile:orca/stuck-recovery",
+    "profile:orca/managed-agents", "profile:orca/identity-rename",
     "vm:published-upgrade/anchor",
     "vm:published-upgrade/0.11.0",
     "vm:published-upgrade/0.17.3",
