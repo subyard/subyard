@@ -28,18 +28,22 @@ func TestBootstrapRerunRefusesAnOlderLatestRelease(t *testing.T) {
 		environment  []string
 		refuse       bool
 	}{
-		"newer core":            {release: "1.3.0-aaaaaaaaaaaa", refuse: true},
-		"newer patch":           {release: "1.2.10-aaaaaaaaaaaa", refuse: true},
-		"newer pre-release":     {release: "1.3.0-rc.1-aaaaaaaaaaaa", refuse: true},
-		"custom runtime root":   {release: "1.3.0-aaaaaaaaaaaa", customRoot: true, refuse: true},
-		"dangling current":      {release: "1.3.0-aaaaaaaaaaaa", dangling: true, refuse: true},
-		"absolute current":      {release: "1.3.0-aaaaaaaaaaaa", absoluteLink: true, refuse: true},
-		"equal core":            {release: "1.2.3-aaaaaaaaaaaa"},
-		"pre-release of latest": {release: "1.2.3-rc.1-aaaaaaaaaaaa"},
-		"older core":            {release: "1.2.2-aaaaaaaaaaaa"},
-		"unversioned release":   {release: "release-a"},
-		"explicit version":      {release: "1.3.0-aaaaaaaaaaaa", arguments: []string{"--version", "1.2.3"}},
-		"environment version":   {release: "1.3.0-aaaaaaaaaaaa", environment: []string{"YARD_RELEASE_VERSION=1.2.3"}},
+		"newer core":             {release: "1.3.0-aaaaaaaaaaaa", refuse: true},
+		"newer patch":            {release: "1.2.10-aaaaaaaaaaaa", refuse: true},
+		"newer pre-release":      {release: "1.3.0-rc.1-aaaaaaaaaaaa", refuse: true},
+		"build metadata":         {release: "1.3.0+b.5-aaaaaaaaaaaa", refuse: true},
+		"non-semver pre-release": {release: "1.3.0-01-aaaaaaaaaaaa", refuse: true},
+		"unsafe version text":    {release: "1.3.0-rc$x-aaaaaaaaaaaa", refuse: true},
+		"leading-zero core":      {release: "01.3.0-aaaaaaaaaaaa"},
+		"custom runtime root":    {release: "1.3.0-aaaaaaaaaaaa", customRoot: true, refuse: true},
+		"dangling current":       {release: "1.3.0-aaaaaaaaaaaa", dangling: true, refuse: true},
+		"absolute current":       {release: "1.3.0-aaaaaaaaaaaa", absoluteLink: true, refuse: true},
+		"equal core":             {release: "1.2.3-aaaaaaaaaaaa"},
+		"pre-release of latest":  {release: "1.2.3-rc.1-aaaaaaaaaaaa"},
+		"older core":             {release: "1.2.2-aaaaaaaaaaaa"},
+		"unversioned release":    {release: "release-a"},
+		"explicit version":       {release: "1.3.0-aaaaaaaaaaaa", arguments: []string{"--version", "1.2.3"}},
+		"environment version":    {release: "1.3.0-aaaaaaaaaaaa", environment: []string{"YARD_RELEASE_VERSION=1.2.3"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			root := testkit.TempDir(t)
@@ -94,6 +98,9 @@ func TestBootstrapRerunRefusesAnOlderLatestRelease(t *testing.T) {
 				return
 			}
 			version := test.release[:strings.LastIndex(test.release, "-")]
+			if strings.ContainsAny(version, "$") {
+				version = "1.3.0"
+			}
 			for _, want := range []string{
 				"installed version " + version + " is newer than the latest published release 1.2.3; no release was selected and nothing was changed",
 				"subyard-install.sh --version " + version + rootArgument + "\n",

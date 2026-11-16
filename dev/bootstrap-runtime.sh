@@ -195,6 +195,8 @@ installed_core_newer() {
     fi
     [ "$index" != 2 ] || return 1
   done
+  # The hint repeats only installer-safe characters; anything else shows the core.
+  case "$version" in *[!A-Za-z0-9._+-]*) version="$core" ;; esac
   printf '%s\n' "$version"
 }
 
