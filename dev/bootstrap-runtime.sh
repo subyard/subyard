@@ -169,11 +169,44 @@ latest_release_tag() (
   printf '%s\n' "$tag"
 )
 
+# installed_core_newer LATEST prints the version named by the `current` link's
+# release ID when its X.Y.Z core is greater than the stable LATEST core. Only the
+# core decides; a name without a canonical core keeps the ordinary path.
+installed_core_newer() {
+  local latest="$1" target release version core index number='(0|[1-9][0-9]*)'
+  [ -L "$RUNTIME_ROOT/current" ] || return 1
+  target="$(readlink -- "$RUNTIME_ROOT/current")" || return 1
+  release="${target##*/}"
+  [[ "$release" == *-* ]] || return 1
+  version="${release%-*}"
+  core="${version%%[-+]*}"
+  [[ "$core" =~ ^$number\.$number\.$number$ ]] || return 1
+  local -a installed=("${BASH_REMATCH[@]:1}")
+  [[ "$latest" =~ ^$number\.$number\.$number$ ]] || return 1
+  local -a published=("${BASH_REMATCH[@]:1}")
+  for index in 0 1 2; do
+    if [ "${#installed[index]}" != "${#published[index]}" ]; then
+      [ "${#installed[index]}" -gt "${#published[index]}" ] || return 1
+      break
+    fi
+    if [ "${installed[index]}" != "${published[index]}" ]; then
+      [[ "${installed[index]}" > "${published[index]}" ]] || return 1
+      break
+    fi
+    [ "$index" != 2 ] || return 1
+  done
+  # The hint repeats only installer-safe characters; anything else shows the core.
+  case "$version" in *[!A-Za-z0-9._+-]*) version="$core" ;; esac
+  printf '%s\n' "$version"
+}
+
 tag=""
+channel_selected=0
 if [ -z "$VERSION" ]; then
   [ "$OFFLINE" = 0 ] || { printf 'bootstrap-runtime: offline mode requires --version\n' >&2; exit 2; }
   tag="$(latest_release_tag)" || exit 1
   VERSION="${tag#v}"
+  channel_selected=1
 else
   tag="${YARD_RELEASE_TAG:-v$VERSION}"
 fi
@@ -342,6 +375,19 @@ fi
 # journals still route through their exact sealed release owner.
 if [ -n "$SOURCE_INGRESS_ROOT" ] && [ "$existing_runtime" = 0 ]; then
   printf '%s\n' "bootstrap-runtime: Sources before v0.11.0 are unsupported. Stage verified current tooling with subyard-install.sh --version <version> --publish-only, then run the printed candidate's bin/yard uninstall --full. Full uninstall deletes this installation's owned data; review and confirm its removal plan. After verified cleanup, install a new version separately." >&2
+  exit 1
+fi
+
+# A channel selection, like a plain yard update, never installs a release older
+# than the active one. It refuses before any prompt, cache directory or download;
+# explicit selections stay with the candidate's own update.
+if [ "$channel_selected" = 1 ] && installed_version="$(installed_core_newer "$VERSION")"; then
+  root_argument=''
+  [ "$RUNTIME_ROOT" = "$DATA_HOME/runtime" ] || root_argument=" --runtime-root $(printf '%q' "$RUNTIME_ROOT")"
+  printf 'bootstrap-runtime: installed version %s is newer than the latest published release %s; no release was selected and nothing was changed\n' "$installed_version" "$VERSION" >&2
+  printf '  to re-run the installed release, which also completes an interrupted install: subyard-install.sh --version %s%s\n' "$installed_version" "$root_argument" >&2
+  printf '  (an unpublished build needs its own assets: YARD_RELEASE_BASE_URL, or --offline with a complete release cache)\n' >&2
+  printf '  to install the older release instead (downgrade): subyard-install.sh --version %s%s\n' "$VERSION" "$root_argument" >&2
   exit 1
 fi
 

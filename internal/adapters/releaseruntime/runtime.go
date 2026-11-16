@@ -701,7 +701,8 @@ func (runtime *Runtime) PrepareTransition(
 			"release-transition-unsupported: active runtime requires a bridge release with immutable publication support",
 		)
 	}
-	if parsed.version == "" {
+	discovered := parsed.version == ""
+	if discovered {
 		if parsed.offline {
 			return Prepared{}, errors.New("offline mode requires --version")
 		}
@@ -723,6 +724,14 @@ func (runtime *Runtime) PrepareTransition(
 	linksBefore, err := runtime.inspectRuntimeLinks(parsed.root)
 	if err != nil {
 		return Prepared{}, err
+	}
+	// The only release-selection decision for a plain update: discovery never
+	// selects a release older than the active one. Equal versions keep the
+	// ordinary verified same-release inspection.
+	if installed, newer := installedVersionNewerThan(
+		releaseLinksFromRuntimeSnapshot(linksBefore).Active, parsed.version,
+	); discovered && newer {
+		return runtime.prepareInstalledNewer(parsed, linksBefore, installed, originalProtected, originalErr)
 	}
 	parsed.expectedLinks = &linksBefore
 	rootBefore, err := os.Lstat(parsed.root)

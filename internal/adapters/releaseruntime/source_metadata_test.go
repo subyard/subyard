@@ -120,7 +120,7 @@ func sealSourceAdmissionCandidate(t *testing.T, candidate publishedCandidate) re
 }
 
 func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *testing.T) {
-	for _, drift := range []string{"none", "journal replacement", "catalog", "registry", "sealed asset", "unfinished", "unfinished same target", "current repair", "current repair old-wire", "current repair replacement", "private draft", "private draft parent replacement", "private draft parent mode", "private draft immutable hardlink"} {
+	for _, drift := range []string{"none", "journal replacement", "catalog", "registry", "sealed asset", "unfinished", "unfinished same target", "current repair", "current repair old-wire", "current repair replacement", "private draft", "private draft parent replacement", "private draft parent mode", "private draft immutable hardlink", "older latest"} {
 		t.Run(drift, func(t *testing.T) {
 			ctx := context.Background()
 			root := testkit.TempDir(t)
@@ -205,7 +205,9 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			}
 			installer := filepath.Join(root, "installer")
 			testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nwhile [ $# -gt 0 ]; do case \"$1\" in --runtime-root) shift; destination=$1;; esac; shift; done\nmkdir -p \"$destination/releases\"\ncp -a %q \"$destination/releases/%s\"\nprintf 'releases/%s\\n'\n", candidate.root, candidateID, candidateID)), 0o700)
-			adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}), Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			lookups := 0
+			adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}), Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+				HTTPClient: latestReleaseClient(t, "v1.2.2", &lookups)})
 			defer adapter.Close()
 			if drift == "catalog" || strings.HasPrefix(drift, "unfinished") {
 				journal, err := releasetransition.ParseJournal(before)
@@ -230,13 +232,25 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 				}
 				testkit.WriteFile(t, path, []byte("changed\n"), 0o600)
 			}
-			if drift == "none" || drift == "journal replacement" || strings.HasPrefix(drift, "current repair") || strings.HasPrefix(drift, "private draft") {
+			if drift == "none" || drift == "older latest" || drift == "journal replacement" || strings.HasPrefix(drift, "current repair") || strings.HasPrefix(drift, "private draft") {
 				if _, proofErr := adapter.InspectSourceAdmission(ctx, runtimeRoot, home); proofErr != nil {
 					for cause := proofErr; cause != nil; cause = errors.Unwrap(cause) {
 						t.Logf("synthetic proof prerequisite: %v", cause)
 					}
 					t.Fatal("valid completed metadata prerequisite failed")
 				}
+			}
+			if drift == "older latest" {
+				// The admission fallback must not hide the original owner's failed
+				// inspection behind an installed-newer no-op or select the older release.
+				_, err := adapter.PrepareTransition(ctx, nil, home, "default")
+				if err == nil || lookups == 0 || !strings.Contains(err.Error(), "installed version 1.2.3 is newer than the latest published release 1.2.2") {
+					t.Fatalf("older latest over a failed original inspection = %v after %d lookups", err, lookups)
+				}
+				if _, statErr := os.Lstat(filepath.Join(runtimeRoot, "releases", "1.2.2")); !bytes.Equal(before, mustReadFile(t, journalPath)) || !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatal("older latest changed protected history or published a release")
+				}
+				return
 			}
 			version := "1.2.4"
 			if drift == "unfinished same target" || strings.HasPrefix(drift, "current repair") {

@@ -1408,6 +1408,22 @@ bounded warning. A successful init of the yard, a converged or
 re-applied owner for that yard and teardown of the yard remove the record through its known owner
 path; other entries of the record directory are never touched.
 
+### Plain update selection
+
+A plain `yard update`, also with `--force`, selects the stable channel's latest release, but never
+one with a lower semver than the active release (pre-releases order before their release). When
+the installed version is newer, nothing is downloaded or changed. With a ready protected inspection,
+or without any journal, update and `--check` succeed and report that the installed version is newer
+than the latest published release, the active release's readiness, warnings and next step, and the
+explicit downgrade commands; the `--check --json` report adds them as `installedNewer`. Any other
+inspection result keeps its ordinary report or refusal, with the same note. Re-running the
+installer without `--version` refuses before any prompt or download when the active release's
+X.Y.Z core is greater than the latest release: it changes nothing and names two re-runs,
+`--version <installed>` to re-run the installed release (which also completes an interrupted
+install; an unpublished build needs its own assets) and `--version <latest>` to downgrade.
+Only an explicit `--version VERSION` or `YARD_RELEASE_VERSION` selects an older release, under the
+ordinary candidate inspection. An equal version keeps the ordinary same-release inspection.
+
 ### Interrupted release recovery
 
 An unfinished forward update pins its exact target, so a plain `yard update` only resumes it. To
