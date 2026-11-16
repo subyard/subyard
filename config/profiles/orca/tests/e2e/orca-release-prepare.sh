@@ -2,12 +2,15 @@
 # Release preparation shared by the owning fixture and its host-free regression.
 
 orca_prepare_bootstrap_release() {
-  if [ -e "$ROOT/.subyard-acceptance/candidate.json" ] && [ -n "$UPGRADE_FROM" ] && [ -z "$HANDLER_ACCEPTANCE" ]; then
+  # Handler acceptance and stuck recovery install the unmodified candidate.
+  local unmodified=0
+  [ -z "$HANDLER_ACCEPTANCE" ] && [ "${STUCK_RECOVERY:-0}" != 1 ] || unmodified=1
+  if [ -e "$ROOT/.subyard-acceptance/candidate.json" ] && [ -n "$UPGRADE_FROM" ] && [ "$unmodified" = 0 ]; then
     die 'the mutated upgrade fixture requires a separate candidate'
   fi
 
   local package_source="$ROOT"
-  if [ -n "$UPGRADE_FROM" ] && [ -z "$HANDLER_ACCEPTANCE" ]; then
+  if [ -n "$UPGRADE_FROM" ] && [ "$unmodified" = 0 ]; then
     # Only the source-mutating upgrade fixture needs a disposable public copy.
     mkdir "$STATE/source"
     bash "$ROOT/tests/helpers/source-files.sh" \
@@ -28,6 +31,8 @@ PY_UPGRADE_DEFAULT
   fi
   release_version=0.29.0-orca-bootstrap-e2e
   [ -z "$HANDLER_ACCEPTANCE" ] || release_version=0.29.0-orca-handler-e2e
+  # Replacing a stuck 0.29.0 journal requires a strictly newer candidate.
+  [ "${STUCK_RECOVERY:-0}" != 1 ] || release_version=0.29.1-orca-recovery-e2e
   if [ -e "$ROOT/.subyard-acceptance/candidate.json" ]; then
     release_version="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json")"
     mkdir -p "$STATE/release"

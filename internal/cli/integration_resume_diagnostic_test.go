@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -115,6 +116,7 @@ func TestIntegrationApplyFailurePreservesPublicCauseAndExecutableRetry(t *testin
 		{resumeTransientCause{}, "native dependency unavailable", "run yard migrate"},
 		{independentOwnershipTestError("/home/dev/settings"), "ownership conflict at /home/dev/settings", "inspect /home/dev/settings"},
 		{errors.New("private native stderr"), "yard sample: cannot reconcile integrations for release activation (stage=apply projected=false)", "run yard migrate"},
+		{&application.ProjectHookFailure{Yard: "sample", Reason: "timed out"}, "yard sample: optional agent project hooks timed out; the hook pass failed or its state is undetermined, see the integration's status", "run yard migrate"},
 	} {
 		failure := &integrationActivationFailure{cause: test.cause, stage: "apply"}
 		boundary := materializedConfigActivationError{cause: failure, yard: "sample", phase: "integrations", action: "reconcile", command: "integration status"}

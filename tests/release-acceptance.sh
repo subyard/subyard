@@ -2026,6 +2026,25 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with self.assertRaisesRegex(ValueError, "invalid or duplicate"):
                 m.profile_inventory(checkout)
 
+    def test_periodic_only_lane_is_never_a_release_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = fixture_checkout(Path(temporary))
+            manifest = checkout / "config/profiles/sample/tests/e2e/acceptance-lanes.json"
+            lanes = json.loads(manifest.read_text())
+            lanes["lanes"].append({"id": "history", "arguments": ["--lane", "history"], "periodic_only": True})
+            manifest.write_text(json.dumps(lanes))
+            inventory = m.profile_inventory(checkout)
+            self.assertNotIn("profile:sample/history", m.commands(checkout, "test", inventory))
+            self.assertEqual(m.select_checks(m.commands(checkout, "test", inventory), ["profile:sample"]),
+                             {"profile:sample/one", "profile:sample/two"})
+            self.assertEqual(m.commands(checkout, "test", inventory, periodic=True)["profile:sample/history"],
+                             ["bash", inventory["sample"]["path"], "--lane", "history"])
+            for value in (False, "true", 1):
+                lanes["lanes"][-1]["periodic_only"] = value
+                manifest.write_text(json.dumps(lanes))
+                with self.assertRaisesRegex(ValueError, "invalid or duplicate"):
+                    m.profile_inventory(checkout)
+
     def test_preflight_does_not_package_allocate_authenticate_or_write(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

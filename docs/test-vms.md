@@ -1438,6 +1438,21 @@ Live account/service checks follow the [external-check contract](reference/relea
 Required synthetic VM fixtures, including OpenClaw staging safety/lifecycle, establish their own
 boundaries; they do not prove real service behavior.
 
+The `stuck-recovery` lane (`profile:orca/stuck-recovery`) is periodic-only: it runs in Periodic
+E2E and never gates a release. It starts from the published anchor with
+Orca running, then gives a project a saved tab that survives an Orca restart, an agent-session
+tab and a live terminal, plus a neighbour project with an agent-session tab and a live terminal,
+and removes the first project. Updating to published 0.29.0 must stop in `recovery-ambiguous`,
+and a plain `yard update` must not complete it. The lane records whether the newer-release
+hint appeared, since the newest published release is outside its control. The candidate,
+packaged as `0.29.1-orca-recovery-e2e` or the acceptance candidate's version and required to sort
+above 0.29.0, then completes through `yard update --version` with no manual step. The lane
+checks release readiness, the candidate's installed helper and the unchanged predecessor
+Orca package. It checks that the removed record, its tabs and its live terminal are gone,
+that the neighbour's agent-session tab and live terminal survive, that config and Orca status
+are clean and that a steady hook pass succeeds. It prints one `orca-stuck-recovery-evidence`
+line.
+
 For a narrow predecessor upgrade check, set `SUBYARD_E2E_ORCA_UPGRADE_FROM` to an exact published
 version and `SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256` to that release's installer asset digest.
 Use the `0.28.0` direct TSV pin for supported predecessor checks. Handler acceptance defaults

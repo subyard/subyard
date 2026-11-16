@@ -53,9 +53,9 @@ def veranda_short(name, options):
 
 def plan(root=ROOT):
     module = collector()
-    declared = module.commands(root, "0.0.0", module.profile_inventory(root))
+    declared = module.commands(root, "0.0.0", module.profile_inventory(root), periodic=True)
     # The same release checks the collector runs: every shipped profile lane, the core VM catalog
-    # with its agent upgrade baselines, and the release smoke check.
+    # with its agent upgrade baselines, and the release smoke check, plus periodic-only lanes.
     include = [{"id": name, "command": command + SLOT} for name, command in declared.items()
                if command and module.is_live(name) and name not in SPLIT]
     lanes = subprocess.check_output(["bash", "dev/e2e/p0-acceptance.sh", "--list-lanes"],

@@ -359,6 +359,10 @@ for only in ("", config_sync["id"]):
                  for kind, group in plan.items()})
     assert selected == expected
 print("ok: periodic config sync runs by default and by dispatch, outside release acceptance")
+# Periodic-only profile lanes are planned for Periodic E2E but are never release checks.
+periodic_only = {"profile:" + name + "/" + lane["id"] for name, entry in a.profile_inventory(root).items()
+                 for lane in entry.get("lanes", []) if lane.get("periodic_only")}
+assert periodic_only <= set(entries) and not periodic_only & set(commands)
 assert entries["vm:integration-selection/default"] == commands["vm:integration-selection/default"] + ["--slot", "1"]
 for name, command in commands.items():
     if name.startswith("vm:published-upgrade/"):

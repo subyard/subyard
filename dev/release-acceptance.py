@@ -175,7 +175,9 @@ def profile_inventory(root):
                 result[name]["preflight"] = command
             ids = set()
             for lane in lanes:
-                if (not isinstance(lane, dict) or set(lane) != {"id", "arguments"}
+                # An optional "periodic_only": true lane runs in Periodic E2E and never gates a release.
+                if (not isinstance(lane, dict) or set(lane) - {"periodic_only"} != {"id", "arguments"}
+                    or lane.get("periodic_only", True) is not True
                     or not isinstance(lane["id"], str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}", lane["id"])
                     or lane["id"] in ids or not isinstance(lane["arguments"], list)
                     or any(not isinstance(arg, str) or len(arg) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in arg) for arg in lane["arguments"])
@@ -515,7 +517,7 @@ def validate_optional_vm_history(output, names):
 PROCESS_COVERAGE_DIAGNOSTIC = {"status": "not-applicable", "reason": "optional process coverage diagnostic; ordinary process contracts run in verify"}
 
 
-def commands(root, version, inventory):
+def commands(root, version, inventory, periodic=False):
     release = root / ".subyard-acceptance/release"
     result = {
         "verify": ["make", "verify"],
@@ -532,6 +534,8 @@ def commands(root, version, inventory):
             result["profile-preflight:" + name] = entry["preflight"]
         if "lanes" in entry:
             for lane in entry["lanes"]:
+                if lane.get("periodic_only") and not periodic:
+                    continue
                 result["profile:" + name + "/" + lane["id"]] = ["bash", entry["path"], *lane["arguments"]]
         else:
             result["profile:" + name] = ["bash", entry["path"]] if entry["kind"] == "runner" else None

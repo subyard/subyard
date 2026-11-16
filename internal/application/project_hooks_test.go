@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -42,5 +43,36 @@ func TestProjectHooksHonorCallerCancellation(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("cancelled hook was reported as successful")
+	}
+}
+
+func TestProjectHookFailureHasPublicActivationDiagnostic(t *testing.T) {
+	for _, test := range []struct {
+		result ports.InstanceExecResult
+		err    error
+		reason string
+	}{
+		{ports.InstanceExecResult{ExitCode: 1, Stdout: []byte("private stdout"), Stderr: []byte("private stderr")}, nil, "exited unsuccessfully"},
+		{ports.InstanceExecResult{ExitCode: 124, Stderr: []byte("private stderr")}, nil, "timed out"},
+		{ports.InstanceExecResult{ExitCode: 137}, nil, "timed out"},
+		{ports.InstanceExecResult{Stderr: []byte("private stderr")}, errors.New("private transport output"), "could not be executed"},
+		{ports.InstanceExecResult{}, fmt.Errorf("private transport: %w", context.Canceled), "were cancelled"},
+		{ports.InstanceExecResult{}, fmt.Errorf("private transport: %w", context.DeadlineExceeded), "timed out"},
+	} {
+		err := RunProjectHooks(context.Background(), domain.Context{YardName: "sample"}, func(context.Context, ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			return test.result, test.err
+		})
+		var diagnostic interface{ ActivationDiagnostic() (string, string) }
+		if !errors.As(err, &diagnostic) {
+			t.Fatalf("hook failure has no activation diagnostic: %v", err)
+		}
+		message, retry := diagnostic.ActivationDiagnostic()
+		want := "yard sample: optional agent project hooks " + test.reason + "; the hook pass failed or its state is undetermined, see the integration's status"
+		if message != want || retry != "run yard migrate" || strings.Contains(message+err.Error(), "private") {
+			t.Fatalf("diagnostic = %q / %q (%v)", message, retry, err)
+		}
+		if err.Error() != "an optional agent project hook failed; run 'yard init' to repair wiring and retry active integrations, or use the integration's sync command" {
+			t.Fatalf("public warning text changed: %q", err.Error())
+		}
 	}
 }

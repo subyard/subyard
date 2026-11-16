@@ -44,6 +44,14 @@ class Catalog:
         self.runtime_id = "runtime-1"
         self.calls = []
         self.after = None
+        # Effect model of the pinned server: stopping or closing kills a PTY for every
+        # binding of it, so collateral kills of other records are observable.
+        self.killed = set()
+
+    def kill(self, pty_ids):
+        pty_ids = {pty for pty in pty_ids if isinstance(pty, str) and pty}
+        self.killed |= pty_ids
+        self.terminals = [t for t in self.terminals if t["ptyId"] not in pty_ids]
 
     def call(self, method, params=None, before_send=None):
         if before_send:
@@ -67,11 +75,27 @@ class Catalog:
         elif method == "session.tabs.close":
             assert params["reason"] == "user" and params["worktree"].startswith("id:")
             worktree = params["worktree"][3:]
+            closed = []
             for snapshot in self.snapshots:
                 if snapshot["worktree"] == worktree:
+                    closed += [tab for tab in snapshot["tabs"]
+                               if (tab.get("parentTabId") or tab["id"]) == params["tabId"]]
                     snapshot["tabs"] = [tab for tab in snapshot["tabs"]
                                         if (tab.get("parentTabId") or tab["id"]) != params["tabId"]]
+            self.kill(tab.get("ptyId") for tab in closed)
             result = {"closed": True}
+        elif method == "terminal.stopExact":
+            # Stock stops one PTY only while it is live in the named worktree.
+            worktree, (pty,) = params["worktree"][3:], params["expectedPtyIds"]
+            if not any(t["ptyId"] == pty and t["worktreeId"] == worktree and t["connected"]
+                       for t in self.terminals):
+                from transport import RpcError
+                raise RpcError("Orca runtime rejected terminal.stopExact", rejected=True)
+            self.kill([pty])
+            result = {"stopped": 1, "stoppedPtyIds": [pty], "postStopVerified": True}
+        elif method == "terminal.close":
+            self.kill(t["ptyId"] for t in self.terminals if t.get("handle") == params["terminal"])
+            result = {"close": {"handle": params["terminal"]}}
         elif method == "projectGroup.list":
             result = {"groups": self.groups}
         elif method == "projectGroup.delete":

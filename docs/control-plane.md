@@ -2487,6 +2487,10 @@ declared hook for its native compare-and-swap check before effects. It is not a 
 and must not fingerprint credentials, protected contents or secret values. Genuinely unavailable
 observations may resolve within the explicitly approved conditional hook and root scope; this
 does not authorize additional hook paths or project roots.
+A hook exits nonzero only when its pass failed or its state is undetermined. Retained state
+that the owner accepts is not a failure; the owner's status command reports it. A failed
+hook during release activation names the yard and the fixed failure class (unsuccessful
+exit, timeout, cancellation or unavailable execution) and never includes hook output.
 One successful, verified hook invocation satisfies its prepared operation, including when
 integration repair runs it before committing ownership. Repeated internal calls still verify
 captured inputs; a new explicit init prepares a new plan and retries the hooks.

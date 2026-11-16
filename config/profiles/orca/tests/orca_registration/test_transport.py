@@ -190,3 +190,137 @@ class TransportTests(unittest.TestCase):
             return self.frame(request)
         self.server(answer)
         self.client(self.metadata).call("projectGroup.create", {"name": "Fixture"}, before_send=captured.append)
+
+    def test_budget_spent_by_pre_send_checks_is_known_and_never_sent(self):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(self.endpoint)
+        listener.listen()
+        self.addCleanup(listener.close)
+        client = self.client(self.metadata, timeout=5, deadline=time.monotonic() + 0.2)
+        with self.assertRaises(self.error) as raised:
+            client.call("repo.rm", {"repo": "id:fixture"}, before_send=lambda _: time.sleep(0.3))
+        self.assertEqual("Orca registration time budget exhausted", str(raised.exception))
+        self.assertTrue(raised.exception.timed_out)
+        self.assertFalse(raised.exception.unknown)
+        listener.settimeout(0.5)
+        connection, _ = listener.accept()
+        with connection:
+            connection.settimeout(0.5)
+            self.assertEqual(b"", connection.recv(1))
+
+    def test_only_an_answered_rejection_is_definitive(self):
+        self.server(lambda request, _: (json.dumps({"id": request["id"], "ok": False, "error": {"message": "x"},
+                                                    "_meta": {"runtimeId": "runtime-1"}}) + "\n").encode())
+        with self.assertRaises(self.error) as raised:
+            self.client(self.metadata).call("session.tabs.close", {"worktree": "id:a::/w", "tabId": "t"})
+        self.assertTrue(raised.exception.rejected)
+        self.assertFalse(raised.exception.unknown)
+        self.metadata.unlink()
+        with self.assertRaises(self.error) as raised:
+            self.client(self.metadata).call("session.tabs.close", {"worktree": "id:a::/w", "tabId": "t"})
+        self.assertFalse(raised.exception.rejected or raised.exception.unknown)
+
+    def test_rejection_raised_by_a_pre_send_check_is_not_this_requests_answer(self):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(self.endpoint)
+        listener.listen()
+        self.addCleanup(listener.close)
+
+        def nested_rejection(_):
+            raise self.error("Orca runtime rejected terminal.list", rejected=True)
+        with self.assertRaises(self.error) as raised:
+            self.client(self.metadata).call("session.tabs.close", {"worktree": "id:a::/w", "tabId": "t"},
+                                            before_send=nested_rejection)
+        self.assertFalse(raised.exception.rejected or raised.exception.unknown)
+
+    def test_deliberate_unknown_from_a_pre_send_check_is_kept(self):
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(self.endpoint)
+        listener.listen()
+        self.addCleanup(listener.close)
+
+        def still_pending(_):
+            raise self.error("Orca repository creation is still pending", unknown=True)
+        with self.assertRaises(self.error) as raised:
+            self.client(self.metadata).call("repo.add", {"path": "/w", "kind": "git"}, before_send=still_pending)
+        self.assertTrue(raised.exception.unknown)
+        self.assertFalse(raised.exception.rejected)
+
+
+class LostAddResendTests(unittest.TestCase):
+    """Over the real RuntimeRPC: a lost repo.add is never re-sent into the runtime that may still
+    apply it, even when a pre-send check refuses with its deliberate unknown result."""
+
+    def test_lost_add_is_not_resent_into_the_same_runtime(self):
+        import os
+        from discovery import discover
+        from reconcile import reconcile
+        from support import Catalog, project
+        from transport import RuntimeRPC
+        tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        workspaces, state = base / "w", base / "state"
+        workspaces.mkdir()
+        (state / "config/orca").mkdir(parents=True)
+        project(workspaces)
+        endpoint, meta = str(base / "s"), state / "config/orca/orca-runtime.json"
+
+        def publish(runtime):
+            temporary = str(meta) + ".t"
+            Path(temporary).write_text(json.dumps({"transport": {"kind": "unix", "endpoint": endpoint},
+                                                   "authToken": "t", "runtimeId": runtime}))
+            os.replace(temporary, meta)
+
+        fake, adds, mode = Catalog(), [], {"flip": False, "lists": 0}
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(endpoint)
+        listener.listen()
+        listener.settimeout(0.2)
+        stopped = threading.Event()
+        self.addCleanup(stopped.set)
+
+        def serve():
+            while not stopped.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except OSError:
+                    continue
+                with connection:
+                    connection.settimeout(1.0)
+                    try:
+                        line = connection.makefile("rb").readline()
+                    except OSError:
+                        continue
+                    if not line:
+                        continue
+                    request = json.loads(line)
+                    runtime = json.loads(meta.read_text())["runtimeId"]
+                    if request["method"] == "repo.add":
+                        adds.append(runtime)
+                        continue  # unanswered: the add may still insert later
+                    result = fake.call(request["method"], request.get("params"))
+                    if mode["flip"] and request["method"] == "repo.list":
+                        mode["lists"] += 1
+                        if mode["lists"] == 2:
+                            publish("X")  # metadata names X again right before the add connects
+                    connection.sendall(json.dumps({"id": request["id"], "ok": True, "result": result,
+                                                   "_meta": {"runtimeId": runtime}}).encode() + b"\n")
+            listener.close()
+        worker = threading.Thread(target=serve, daemon=True)
+        worker.start()
+        self.addCleanup(worker.join, 3)
+
+        def run():
+            rpc = RuntimeRPC(meta, timeout=1.0, deadline=time.monotonic() + 30)
+            reconcile(discover(str(workspaces), recursive=False), rpc, str(state), deadline=time.monotonic() + 30)
+
+        publish("X")
+        run()
+        publish("W")
+        mode["flip"] = True
+        run()
+        mode["flip"] = False
+        publish("X")
+        run()
+        self.assertEqual(1, adds.count("X"), adds)

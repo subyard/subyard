@@ -14,10 +14,14 @@ import uuid
 
 
 class RpcError(Exception):
-    def __init__(self, message, unknown=False, timed_out=False):
+    """unknown: a write may have applied. rejected: the request was sent and Orca answered it
+    with a definitive refusal (an ok:false frame). Any other error happened before sending, or
+    concerns a read, and says nothing about the request's effect."""
+    def __init__(self, message, unknown=False, timed_out=False, rejected=False):
         super().__init__(message)
         self.unknown = unknown
         self.timed_out = timed_out
+        self.rejected = rejected
 
 
 class RuntimeRPC:
@@ -71,7 +75,18 @@ class RuntimeRPC:
                 connection.settimeout(remaining)
                 connection.connect(endpoint)
                 if before_send is not None:
-                    before_send(runtime_id)
+                    try:
+                        before_send(runtime_id)
+                    except RpcError as error:
+                        # A nested call's answer is not this request's: nothing was sent, so it
+                        # was not rejected. A deliberate unknown (an earlier send may still apply)
+                        # is the caller's statement and is kept.
+                        error.rejected = False
+                        raise
+                    # Pre-send identity checks consume the same budget; never send late.
+                    if deadline - time.monotonic() <= 0:
+                        raise RpcError("Orca registration time budget exhausted" if budget_limited
+                                       else f"Orca runtime request timed out: {method}", timed_out=True)
                 # sendall may write part or all of the frame before raising.
                 sent = True
                 connection.sendall(json.dumps(request).encode("utf-8") + b"\n")
@@ -107,7 +122,7 @@ class RuntimeRPC:
                             raise RpcError("Orca runtime response runtime mismatch", unknown=write)
                         if frame.get("ok") is False and isinstance(frame.get("error"), dict):
                             # Do not echo upstream messages or codes: either can contain secrets.
-                            raise RpcError("Orca runtime rejected " + method)
+                            raise RpcError("Orca runtime rejected " + method, rejected=True)
                         if frame.get("ok") is not True or not isinstance(frame.get("result"), dict):
                             raise RpcError("Orca runtime returned invalid envelope", unknown=write)
                         return frame["result"]

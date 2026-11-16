@@ -31,7 +31,8 @@ UPGRADE_FROM="${SUBYARD_E2E_ORCA_UPGRADE_FROM:-}"
 UPGRADE_INSTALLER_SHA256="${SUBYARD_E2E_ORCA_UPGRADE_INSTALLER_SHA256:-}"
 UPGRADE_TARGET="${SUBYARD_E2E_ORCA_UPGRADE_TARGET:-}"
 HANDLER_ACCEPTANCE="${SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE:-}"
-if [ -n "$HANDLER_ACCEPTANCE" ] && [ -z "$UPGRADE_FROM" ]; then
+STUCK_RECOVERY="${SUBYARD_E2E_ORCA_STUCK_RECOVERY:-0}"
+if { [ -n "$HANDLER_ACCEPTANCE" ] || [ "$STUCK_RECOVERY" = 1 ]; } && [ -z "$UPGRADE_FROM" ]; then
   IFS=$'\t' read -r UPGRADE_FROM UPGRADE_INSTALLER_SHA256 _ _ < <(
     published_anchor
   )
@@ -98,6 +99,14 @@ if [ -n "$UPGRADE_TARGET" ]; then
   [[ "$UPGRADE_TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || die 'upgrade target must be an exact published version'
 fi
+case "$STUCK_RECOVERY" in
+  0) ;;
+  1)
+    [ -z "$HANDLER_ACCEPTANCE" ] && [ -n "$UPGRADE_TARGET" ] \
+      || die 'stuck recovery needs the published stuck target and no handler acceptance'
+    ;;
+  *) die 'SUBYARD_E2E_ORCA_STUCK_RECOVERY must be 0 or 1' ;;
+esac
 case "$HANDLER_ACCEPTANCE" in
   ''|direct) ;;
   *) die 'SUBYARD_E2E_ORCA_HANDLER_ACCEPTANCE must be direct' ;;
@@ -234,11 +243,15 @@ stock_orca_probe() {
     --registration "$ROOT/config/profiles/orca/resources/orca/registration"
 }
 
+# Reads the catalog first: a failed or invalid read fails the fixture, so a negative use
+# (`orca_catalog_has PATH && die ...`) can never pass on a missing catalog.
 orca_catalog_has() {
-  local path="$1"
-  orca_rpc repo.list | jq -e --arg path "$path" \
+  local path="$1" catalog
+  catalog="$(orca_rpc repo.list)" || die 'Orca repository catalog read failed'
+  jq -e '.repos | type == "array"' <<<"$catalog" >/dev/null || die 'Orca repository catalog is invalid'
+  jq -e --arg path "$path" \
     '.repos | any(.path == $path and ((.executionHostId // "local") == "local") and (.connectionId // null) == null)' \
-    >/dev/null
+    <<<"$catalog" >/dev/null
 }
 
 orca_repo_id() {
@@ -1260,6 +1273,13 @@ if [ -n "$UPGRADE_FROM" ]; then
   install_stock_orca_client
   client_status "$pairing" upgrade-client
 
+  if [ "$STUCK_RECOVERY" = 1 ]; then
+    # shellcheck source=config/profiles/orca/tests/e2e/orca-stuck-recovery.bash
+    . "$ROOT/config/profiles/orca/tests/e2e/orca-stuck-recovery.bash"
+    run_stuck_recovery
+    printf 'ok: stuck %s recovered through the newer candidate with exact removed-project cleanup\n' "$UPGRADE_TARGET"
+    exit 0
+  fi
   if [ -n "$UPGRADE_TARGET" ]; then
     stage 'seeding missing-checkout records before the exact published upgrade'
     incus --project "$PROJECT" file push "$ROOT/config/profiles/orca/tests/e2e/orca-projects-helper.py" \

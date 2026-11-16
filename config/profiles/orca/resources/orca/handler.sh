@@ -998,6 +998,13 @@ projects_synced() {
   jq -e '.ready == true' <<<"$report" >/dev/null
 }
 
+# Up and pair converge when only protected cleanup records of removed projects remain.
+projects_settled() {
+  local report
+  report="$(project_registration_report)" || return 1
+  jq -e '.settled == true' <<<"$report" >/dev/null
+}
+
 # A source digest makes a new profile helper invalidate an otherwise intact installed contract.
 
 registration_files() {
@@ -1051,7 +1058,7 @@ up_converged() {
   release_ready && dependencies_ready && runtime_contract_ready && service_enabled &&
     service_ready && ingress_active && owned_route_matches && owner_endpoint_ready &&\
     automatic_project_hook_ready && discovery_scheduled && launch_defaults_ready && chat_reset_complete &&
-    projects_synced
+    projects_settled
 }
 
 discovery_scheduled() {
@@ -1107,7 +1114,7 @@ cmd_up() {
   fi
   yexec systemctl start "$ORCA_DISCOVERY_TIMER"
   launch_defaults_ready || die "Orca agent launch defaults did not converge"
-  automatic_project_hook_ready && projects_synced || die "Orca project registration did not converge"
+  automatic_project_hook_ready && projects_settled || die "Orca project registration did not converge"
   ok "Orca ready through $ORCA_TRANSPORT at $ORCA_ADVERTISE_HOST:$ORCA_HOST_PORT"
 }
 
@@ -1150,7 +1157,7 @@ cmd_pair() {
   fi
   wait_owner_endpoint || die "Orca owner endpoint is not reachable after restart"
   run_project_sync
-  projects_synced || die "Orca project registrations did not converge"
+  projects_settled || die "Orca project registrations did not converge"
   yexec jq -er --arg scope "$scope" '
     select(.type == "orca_server_ready" and .schemaVersion == 1) |
     .pairing | select(.available == true and .scope == $scope) |
@@ -1165,7 +1172,10 @@ cmd_sync() {
     || die "Orca project helper is stale or incomplete; run '$(yard_cmd_hint) init' first"
   run_project_sync
   ! chat_reset_requested || run_claude_chat_reset
-  projects_synced || die "Orca project registration did not converge"
+  if ! projects_synced; then
+    ! projects_settled || die "Orca project cleanup is retained; run '$(yard_cmd_hint) orca status'"
+    die "Orca project registration did not converge"
+  fi
   ok "Subyard roots and nested Git checkouts are registered in their Orca project groups"
   if claude_chat_restart_pending; then
     warn "saved Claude chats may still run Git without approval until Orca restarts; run '$(yard_cmd_hint) orca restart' or '$(yard_cmd_hint) orca up'"
@@ -1315,6 +1325,8 @@ cmd_status() {
       total="$(jq -r '.total' <<<"$report")"
       if jq -e '.ready' <<<"$report" >/dev/null; then
         ok "checkouts registered: $registered/$total (project groups and kinds verified)"
+      elif jq -e '.settled == true' <<<"$report" >/dev/null; then
+        info "checkouts registered: $registered/$total; protected project cleanup is retained"
       elif jq -e '.registered == .total and (.errors | length) == 0 and (.cleanup | length) > 0' <<<"$report" >/dev/null; then
         info "checkouts registered: $registered/$total; project cleanup pending; run '$(yard_cmd_hint) orca sync'"
       else
@@ -1323,9 +1335,12 @@ cmd_status() {
       while IFS= read -r diagnostic; do
         warn "$diagnostic"
       done < <(jq -r '.errors[], .warnings[]' <<<"$report")
-      while IFS= read -r diagnostic; do
-        info "$diagnostic"
-      done < <(jq -r '.cleanup[]? | "Orca cleanup pending: " + .path + ": " + .reason + "; " + .nextAction' <<<"$report")
+      # Protected records and pending work are expected; undetermined records and records that
+      # need a manual close in Orca warn.
+      while IFS=$'\t' read -r level diagnostic; do
+        if [ "$level" = warn ]; then warn "$diagnostic"; else info "$diagnostic"; fi
+      done < <(jq -r '.cleanup[]? | [(if .retention == "undetermined" or .attention == true then "warn" else "info" end),
+        "Orca cleanup pending: " + .path + ": " + .reason + "; " + .nextAction] | @tsv' <<<"$report")
       if jq -e '.discovery' <<<"$report" >/dev/null; then
         info "repository discovery: $(jq -r '.discovery.state + " (generation " + (.discovery.generation | tostring) + ")"' <<<"$report")"
         while IFS= read -r diagnostic; do
@@ -1448,8 +1463,10 @@ orca_step_add() {
     dependsOn:$dependencies,verify:$verify,consequence:$consequence}]')"
 }
 
+# Up observes settlement; explicit sync stays strict on readiness.
 orca_registration_observation() {
-  local report expected catalog
+  local report expected catalog field=ready
+  [ "${1:-sync}" != up ] || field=settled
   report="$(project_registration_report)" || { printf 'unavailable'; return; }
   expected="$(jq -r '.scopeDigest // empty' <<<"$report")"
   [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || die 'Orca native root-scope fingerprint unavailable; refresh the profile runtime'
@@ -1460,7 +1477,7 @@ orca_registration_observation() {
     captured="$(jq -r '.[]|select(.id == "registration")|.observed|select(startswith("catalog:"))|split(":scope:")[1] // empty' <<<"$SUBYARD_RESOURCE_STEPS")"
     [ -z "$captured" ] || [ "$captured" = "$expected" ] || die 'Orca native verified-root scope changed after apply'
   fi
-  if jq -e '.ready' <<<"$report" >/dev/null; then printf 'registered'; else printf 'catalog:%s:scope:%s' "$catalog" "$expected"; fi
+  if jq -e --arg field "$field" '.[$field] == true' <<<"$report" >/dev/null; then printf 'registered'; else printf 'catalog:%s:scope:%s' "$catalog" "$expected"; fi
 }
 
 emit_up_assessment() {
@@ -1514,12 +1531,12 @@ STEPS
   chat_reset_step_add "$CHAT_RESET_UP_DESIRED" "$CHAT_RESET_CONSEQUENCE" "$chat_available"
   observed=unknown; decision=conditional
   if [ "$available" = true ] && registration_contract_ready && service_endpoint_ready; then
-    observed="$(orca_registration_observation)"; decision=apply
+    observed="$(orca_registration_observation up)"; decision=apply
     if [ "$observed" = registered ]; then decision=skip; fi
     if [ "$observed" = unavailable ]; then observed=unknown; decision=conditional; fi
   fi
   orca_step_add registration workspace-driver/srv/workspaces "$observed" registered "$decision" \
-    'native verified local roots registered in their project groups; native saved-tab retention and removal checks succeed' \
+    'native verified local roots registered in their project groups; sessions of removed projects closed and their records removed, or kept as protected' \
     'reconcile only the captured native verified-root catalog, or the bounded catalog revealed by approved startup'
   orca_steps_emit up "$ORCA_STEPS"
 }
@@ -1561,7 +1578,7 @@ emit_sync_assessment() {
     'native Codex and Claude custom arguments are retained or stock defaults disabled' \
     'converge the bounded Orca Codex and Claude launch defaults, then reset saved Claude chats from Full access once'
   chat_reset_step_add "$CHAT_RESET_SYNC_DESIRED" "$CHAT_RESET_SYNC_CONSEQUENCE" true
-  observed="$(orca_registration_observation)";decision=apply
+  observed="$(orca_registration_observation sync)";decision=apply
   [ "$observed" != unavailable ] || die 'Orca native root catalog is unavailable'
   if [ "$observed" = registered ];then
     if [ "${SUBYARD_RESOURCE_MODE:-}" = verify ];then decision=skip;else
@@ -1569,7 +1586,7 @@ emit_sync_assessment() {
     fi
   fi
   orca_step_add registration workspace-driver/srv/workspaces "$observed" registered "$decision" \
-    'captured native verified-root catalog converged with saved-tab retention' 'reconcile the captured native verified-root catalog'
+    'captured native verified-root catalog converged; sessions of removed projects closed and their records removed' 'reconcile the captured native verified-root catalog'
   orca_steps_emit sync "$ORCA_STEPS"
 }
 
