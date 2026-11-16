@@ -185,7 +185,7 @@ A native-only checkout gets neutral guidance. The diagnostic environment value
 | Shared RPC implementations | Go shared frame contracts and Rust golden/fault tests | Linux Veranda native Rust client builds the current Go engine, negotiates and queries it, then refuses version skew; existing Python subprocess owner retains the fault matrix | Existing Veranda owner/SSH lanes | RPC schema/client/server changes; stable Rust, Python and Go, T1; cold build separate |
 | Installed credential timer ownership and intent | Owning credential/release adapter checks, including verified ancestor replacement | `tests/installed-runtime-refresh.sh`: production validator on exact-mode `/tmp` files; receipt/no-receipt, altered/foreign/symlink/mode refusal with no writes or manager calls; stopped/disabled intent | `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`: real user manager, installed runtime admission, due worker and SSH/SOPS peer result | Keys unit/sandbox, installer/refresh or shared admission changes; local checks T0/T1, actual worker T3 |
 | Test-VM client handles and skill delivery | `config/profiles/test-vms-client/tests/run.sh`: host-access refusal and selection, skill/client delivery with Hermes links and deselection, session handles against a fake facade | `tests/agent-e2e.sh`: the runner built on the same client | `config/profiles/test-vms-client/tests/e2e/acceptance.sh --slot N`: installed candidate provisions the profile into a Hermes-preset yard, then deselection and init retire it; installed copy outside a checkout acquires, runs root commands in two calls of one lease, releases; runner `--verify-boundary` | Shared client, its profile hook or skill, or facade lease protocol changes |
-| Broker bundled base recipe and supported upgrade | `config/profiles/test-vms`: `TestBaseRecipeInstallerContract`, both real archived environment recipes and installer with minimal context | Owning `tests/run.sh --preflight`: installer identity regression → bundled recipe contract; nonzero required cases and zero skips, validated collector PASS reuse | `config/profiles/test-vms/tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`: pinned actual 0.28.0 updater → frozen candidate → cold acquire, new base/boot/SSH/release/cleanup | Recipe or archive producer, installer/called libraries, broker activation or release migrations; T0/T1 before T3. Synthetic rollback and full-uninstall remain separate required coverage |
+| Broker bundled base recipe and supported upgrade | `config/profiles/test-vms`: `TestBaseRecipeInstallerContract`, both real archived environment recipes and installer with minimal context | Owning `tests/run.sh --preflight`: installer identity regression → bundled recipe contract; nonzero required cases and zero skips, validated collector PASS reuse. The full profile run repeats the installer check except under `make verify`, whose passed core suite sets `SUBYARD_CORE_INSTALLER_CHECKED=1` | `config/profiles/test-vms/tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`: pinned actual 0.28.0 updater → frozen candidate → cold acquire, new base/boot/SSH/release/cleanup | Recipe or archive producer, installer/called libraries, broker activation or release migrations; T0/T1 before T3. Synthetic rollback and full-uninstall remain separate required coverage |
 | Frozen historical producer ownership | `TestHistoricalUninstallSourceIgnoresMigrationReadiness`: frozen public bytes and independent production hash oracle; unknown/tampered/unsealed/rehashed negatives | Existing release/uninstall filesystem contracts preserve refusal and retained journals | Existing source-upgrade/full-uninstall lanes when their physical behavior changes | Historical recognition/migration changes; owning frozen fixtures with provenance, T0/T1 |
 | Static skill inventory, transport and readiness | `go:adapters/reconcileruntime`: `TestAgentSkillSourcesParityWithCapturedReadiness`, unsafe-source refusal and captured-source guest readiness; `tests/agent-skills.sh`: delivery under three umasks | `tests/release-candidate.sh`: actual wrapper against a strict nonexecuting shim, independent synthetic inventory, all checkout/private/frozen layouts and umasks, exact member/command mutants; `go:internal/testkit/cmd/empty-incus`: `TestHistoryReadinessContract` connects public runtime readiness through the native Incus adapter to the migration-history responder | `config/profiles/android/tests/e2e/acceptance.sh --slot N --lane skills`: packaged delivery, repeat refresh, discovery repair and disable with unrelated content retained | Shared skill producer, helpers, source admission or transport changes; local contracts before T3 |
 | Published evidence and resumable staging | `go:releasetransition`: existing pending/store recovery and unsafe-link/refusal cases; independent Python oracle negatives | `TestEvidenceOracleContract`: actual POSIX publication cuts, Python-owned snapshot/handshake, public completion and no-op retry; published mode/inode/mtime/digest remain fixed while allowed staging retains its inode/mode/prefix | Go history/checkpoint reader contracts and the published hop row (`published:0.28.1`); existing source-upgrade lanes when production transition behavior changes | Evidence writer, recovery or compatibility-oracle changes; prefix retention does not prove complete-record validity |
@@ -682,7 +682,8 @@ acceptance. A passing default release does not claim full physical acceptance.
 
 ### One release candidate
 
-The same profile inventory is used by local acceptance and branch CI preflight.
+The same profile inventory is used by local acceptance and the branch CI inventory step
+(`dev/test-profiles.sh --e2e --list`).
 Check prerequisites before packaging or acquiring a VM, then freeze the final candidate:
 
 ```sh
@@ -749,14 +750,17 @@ its original attempt logs/events and applicable PASS results from the same candi
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
-and ordered `lanes` entries containing `id` and runner `arguments`. A schema-version-1
+and ordered `lanes` entries containing `id` and runner `arguments`. A lane marked
+`"periodic_only": true` runs only in Periodic E2E: it is not a release check, so release
+acceptance neither runs nor requires it. A schema-version-1
 `acceptance-lanes.json` may declare nonempty `lanes`, a host-free `preflight` command array, or both.
 A preflight-only declaration preserves the unsplit profile acceptance check. Full collector runs
 execute declared preflights after successful local gates and collect results in profile-name order
 before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfinished `running`
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
-every runnable lane; `--only profile:NAME/ID` requests one lane. Available approved slots take the
+every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
+periodic-only lane as an unknown check. Available approved slots take the
 next queued check after their controller exits. A typed `blocked/capacity_memory` or
 `blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
 next independent check. After all first-pass controllers finish, capacity-blocked checks are

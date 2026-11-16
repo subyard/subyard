@@ -7,6 +7,7 @@ trap 'rm -rf -- "$tmp"' EXIT
 controller=config/profiles/orca/tests/e2e/acceptance.sh
 mkdir -p "$tmp/$(dirname "$controller")" "$tmp/dev"
 cp "$ROOT/$controller" "$tmp/$controller"
+cp "$ROOT/config/profiles/orca/tests/e2e/acceptance-lanes.json" "$tmp/config/profiles/orca/tests/e2e/"
 export PROFILE_CONTROLLER_CALLS="$tmp/broker-calls"
 cat > "$tmp/dev/agent-e2e.sh" <<'SH'
 #!/usr/bin/env bash
@@ -45,6 +46,10 @@ cat > "$tmp/expected" <<'CALLS'
 --slot 7 --vm-count 1 --purpose managed-agents --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_MANAGED_AGENTS=1 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh
 --slot 7 --vm-count 1 --purpose orca-identity --vm 1 -- bash config/profiles/orca/tests/e2e/identity-rename.sh
 CALLS
+# Periodic-only lanes are dispatched one at a time and never by the default full run.
+{ cat "$tmp/expected"
+  printf '%s\n' '--slot 7 --vm-count 1 --purpose orca-bootstrap --vm 1 -- env SUBYARD_E2E_ORCA_BOOTSTRAP=1 SUBYARD_E2E_ORCA_STUCK_RECOVERY=1 SUBYARD_E2E_ORCA_UPGRADE_TARGET=0.29.0 bash config/profiles/orca/tests/e2e/orca-bootstrap.sh'
+} > "$tmp/expected-lanes"
 : > "$PROFILE_CONTROLLER_CALLS"
 bash "$tmp/$controller" --slot 7
 diff -u "$tmp/expected" "$PROFILE_CONTROLLER_CALLS"
@@ -54,15 +59,16 @@ diff -u "$tmp/expected" "$PROFILE_CONTROLLER_CALLS"
 
 manifest="$ROOT/config/profiles/orca/tests/e2e/acceptance-lanes.json"
 jq -e '.schema_version == 1 and [.lanes[].id] ==
-  ["bootstrap", "existing-yard", "resource", "projects", "ssh-agent", "codex-permissions", "managed-agents", "identity-rename"] and
-  all(.lanes[]; .arguments == ["--lane", .id])' "$manifest" > /dev/null
+  ["bootstrap", "existing-yard", "resource", "projects", "ssh-agent", "codex-permissions", "managed-agents", "identity-rename", "stuck-recovery"] and
+  all(.lanes[]; .arguments == ["--lane", .id]) and
+  [.lanes[] | select(.periodic_only == true) | .id] == ["stuck-recovery"]' "$manifest" > /dev/null
 jq -r '.lanes[].id' "$manifest" > "$tmp/lanes"
 index=0
 while IFS= read -r lane; do
   index=$((index + 1))
   : > "$PROFILE_CONTROLLER_CALLS"
   bash "$tmp/$controller" --lane "$lane" --slot 7
-  sed -n "${index}p" "$tmp/expected" > "$tmp/expected-lane"
+  sed -n "${index}p" "$tmp/expected-lanes" > "$tmp/expected-lane"
   diff -u "$tmp/expected-lane" "$PROFILE_CONTROLLER_CALLS"
 done < "$tmp/lanes"
 

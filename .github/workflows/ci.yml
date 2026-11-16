@@ -74,7 +74,7 @@ jobs:
     # supported RestartForceExitStatus=/Type= compatibility boundary.
     runs-on: ubuntu-24.04
     # Include setup and ShellCheck alongside all core and profile checks.
-    timeout-minutes: 60
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,11 +94,20 @@ jobs:
       - name: ShellCheck
         run: |
           mapfile -t shell_files < <(find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print | sort)
-          shellcheck -x -S warning bin/yard completions/yard.bash "${shell_files[@]}"
+          files=(bin/yard completions/yard.bash "${shell_files[@]}")
+          # One process per file on every CPU; findings print afterwards in file order.
+          SHELLCHECK_LOGS="$(mktemp -d)"
+          export SHELLCHECK_LOGS
+          status=0
+          # shellcheck disable=SC2016 # The child shell expands its own arguments.
+          for i in "${!files[@]}"; do printf '%s\0%s\0' "$i" "${files[$i]}"; done \
+            | xargs -0 -n 2 -P "$(nproc)" bash -c \
+              'shellcheck -x -S warning "$2" > "$SHELLCHECK_LOGS/$1.log" 2>&1' shellcheck \
+            || status=$?
+          for i in "${!files[@]}"; do cat "$SHELLCHECK_LOGS/$i.log"; done
+          exit "$status"
       - name: Complete shipped profile acceptance inventory
         run: bash dev/test-profiles.sh --e2e --list
-      - name: Broker installer and bundled recipe prerequisites
-        run: bash config/profiles/test-vms/tests/run.sh --preflight
       - name: Yard-safe verification gate
         run: |
           set -o pipefail

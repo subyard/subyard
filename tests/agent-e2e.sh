@@ -2195,6 +2195,7 @@ owner_incus_call="$TMP/p0-owner-incus-call"
   p0_capacity_prepare_platform_root() { :; }
   ensure_incus() { printf '%s\n' "$*" > "$owner_incus_call"; }
   reconcile_p0_incus_apparmor_compat() { :; }
+  assert_incus_daemon_line() { :; }
   eval "$(sed -n '/^ensure_owner_incus() {/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
   ensure_owner_incus owner
 ) || fail 'P0 owner Incus bootstrap path selection failed'

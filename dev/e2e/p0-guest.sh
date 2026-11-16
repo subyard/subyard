@@ -977,6 +977,23 @@ restore_p0_incus_apparmor_default() {
   fi
 }
 
+# Acceptance runs on the supported daemon line: LTS 6.0 (6.0.x) at or above the product minimum.
+# `incus --version` reports the client package, which can differ from the running
+# daemon until it restarts, so the check reads the daemon's own server version.
+P0_INCUS_DAEMON_MIN=6.0.7
+P0_INCUS_DAEMON_NEXT_LINE=6.1
+assert_incus_daemon_line() {
+  local version
+  version="$(incus query /1.0 | python3 -c 'import json,sys; print(json.load(sys.stdin)["environment"]["server_version"])')" \
+    || die 'could not read the running Incus daemon version'
+  dpkg --validate-version "$version" >/dev/null 2>&1 \
+    || die "the running Incus daemon reported an invalid version: $version"
+  dpkg --compare-versions "$version" ge "$P0_INCUS_DAEMON_MIN" \
+    && dpkg --compare-versions "$version" lt "$P0_INCUS_DAEMON_NEXT_LINE" \
+    || die "acceptance requires the LTS 6.0 daemon >= $P0_INCUS_DAEMON_MIN, got $version (client $(incus --version))"
+  printf '  [ ok ] VM%s: Incus daemon %s (client %s)\n' "$SUBYARD_E2E_VM" "$version" "$(incus --version)"
+}
+
 ensure_incus() {
 	local state_root="$1" install_marker="${2:-}" resume_mode="$3"
 	local storage_path="${4:-$state_root/incus/storage}"
@@ -986,11 +1003,11 @@ ensure_incus() {
 		reexec_with_incus_group "$resume_mode"
 	fi
 	if incus info >/dev/null 2>&1; then
-    if ! dpkg --compare-versions "$(incus --version)" ge 6.0.7; then
+    if ! dpkg --compare-versions "$(incus --version)" ge "$P0_INCUS_DAEMON_MIN"; then
       printf '  [ .. ] VM%s: upgrading Incus to the supported LTS\n' "$SUBYARD_E2E_VM"
       run_incus_installer "$state_root" "$storage_path" --yes --zabbly --upgrade-only
-      dpkg --compare-versions "$(incus --version)" ge 6.0.7 \
-        || die 'Incus upgrade did not reach 6.0.7'
+      dpkg --compare-versions "$(incus --version)" ge "$P0_INCUS_DAEMON_MIN" \
+        || die "Incus upgrade did not reach $P0_INCUS_DAEMON_MIN"
     fi
     if incus storage show default --project default >/dev/null 2>&1 \
       && incus network show incusbr0 --project default >/dev/null 2>&1; then
@@ -1021,10 +1038,16 @@ ensure_owner_incus() {
   ensure_incus "$P0_CAPACITY_PLATFORM_ROOT" '' "$resume_mode" \
     "$P0_CAPACITY_PLATFORM_ROOT/incus/incus/storage"
   reconcile_p0_incus_apparmor_compat
+  assert_incus_daemon_line
 }
 ensure_peer_incus() {
   ensure_incus "$PEER_STATE_ROOT/incus-home" "$PEER_INCUS_MARKER" peer-prepare-resume
+  peer_incus_ready
+}
+# A group re-exec resumes peer preparation after ensure_incus; it must pass the same checks.
+peer_incus_ready() {
   reconcile_p0_incus_apparmor_compat
+  assert_incus_daemon_line
 }
 
 cleanup_peer_incus() {
@@ -2010,7 +2033,7 @@ capacity_verify_cleanup() {
   owner-migration) owner_migration ;;
   broker-recovery-owner) broker_recovery_owner ;;
   peer-prepare) peer_prepare ;;
-  peer-prepare-resume) peer_prepare_finish ;;
+  peer-prepare-resume) peer_incus_ready; peer_prepare_finish ;;
   peer-info) peer_info ;;
   peer-authorize) peer_authorize ;;
   peer-probe) peer_probe ;;

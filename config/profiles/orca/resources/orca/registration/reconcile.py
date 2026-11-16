@@ -11,12 +11,25 @@ import os
 import stat
 import time
 
-from discovery import include_known, verify_missing, verify_root
+from discovery import absence, include_known, verify_missing, verify_root
 from state import State, StateError
 from transport import RpcError
 
 
 REPOSITORY_LIMIT = 1000
+
+# Retention classes of a cleanup record. Only "protected" records can settle a pass:
+# "pending" is cleanup work still to perform and "undetermined" lacks safe evidence.
+PROTECTED, PENDING, UNDETERMINED = "protected", "pending", "undetermined"
+OWNERSHIP_REFUSALS = frozenset((
+    "repository identity changed", "repository belongs to another execution host",
+    "repository belongs to another project group", "legacy repository identity is unconfirmed",
+    "repository path changed"))
+SESSION_RETENTION = frozenset(("session tabs are retained", "live terminals are retained"))
+PENDING_WORK = frozenset(("repository removal is pending", "project group removal is pending"))
+ACTIVE_ROOT_MISSING = "project root is missing; repository is retained"
+CLEANUP_INCOMPLETE = "cleanup safety checks are incomplete; repository is retained"
+READBACK_INTERVAL, READBACK_MAX_INTERVAL = 0.1, 1.0
 
 
 class AdmissionLimit(RpcError):
@@ -60,6 +73,67 @@ def _root_metadata(root, deadline):
             identity = None
         metadata.append([directory, identity])
     return metadata
+
+
+class RemovalEvidence:
+    """Filesystem facts of one pass that can prove a project's removal from Subyard."""
+    def __init__(self, scan, errors):
+        self.scan = scan
+        self.errors = errors
+
+
+class CleanupRefusal(RpcError):
+    """A pre-send identity check refused a destructive request; nothing was sent."""
+
+
+AMBIGUOUS_SESSION = "session identity is ambiguous; repository is retained"
+
+
+class AmbiguousSession(CleanupRefusal):
+    """A PTY is attributed to this record and to another; the next close is not sent."""
+
+
+class CleanupPass:
+    """Typed per-repository outcomes of one pruning pass, keyed by native repository ID."""
+    def __init__(self):
+        self.outcomes = {}
+        self.complete = False
+
+
+def removal_authorized(record, evidence):
+    """Whether one exact owned cleanup record may be destroyed: True, False or None (undetermined).
+
+    Session-free records rely on the caller's verified absence of the checkout below the
+    same workspace boundary after complete registration. Sessions of an active project are
+    protected. A project whose whole workspace directory (its address) is absent below the
+    scan's boundary is removed, so its sessions may be closed: with no project files at the
+    address it may be removed, including from Orca. An existing directory there, such as
+    a remaining bind mountpoint, keeps them. An incomplete scan, another or changed
+    workspace boundary or an unreadable path is undetermined.
+    """
+    if not record["sessions"]:
+        return True
+    if not record["removedProject"]:
+        return False
+    if evidence.errors:
+        return None
+    address = os.path.dirname(record["root"])
+    if os.path.basename(record["root"]) != "src" or os.path.dirname(address) != evidence.scan.workspaces:
+        return None
+    return absence(evidence.scan, address)
+
+
+def retention(project_id, root, removed, reason, evidence):
+    # A PTY shared with another record leaves ownership unproven, like the refusals above.
+    if reason in OWNERSHIP_REFUSALS or reason == AMBIGUOUS_SESSION or reason == ACTIVE_ROOT_MISSING and not removed:
+        return PROTECTED
+    if reason == REFUSED_CLOSE:
+        return REFUSED_CLOSE_CLASS
+    if reason in SESSION_RETENTION:
+        authorized = removal_authorized({"projectId": project_id, "root": root, "removedProject": removed,
+                                         "sessions": True}, evidence)
+        return PROTECTED if authorized is False else PENDING if authorized else UNDETERMINED
+    return PENDING if reason in PENDING_WORK else UNDETERMINED
 
 
 def _admission_full(state, rpc, repos):
@@ -326,7 +400,7 @@ def _apply_repo(state, entry, root, group_id, rpc):
             raise RpcError("Orca repository membership is unconfirmed: " + root.path)
 
 
-def _report_catalog(report, scan, state, rpc, host_name):
+def _report_catalog(report, scan, state, rpc, host_name, cleanup_pass, evidence):
     groups = _records(rpc, "projectGroup.list", "groups")
     repos = _records(rpc, "repo.list", "repos")
     admission_full = _admission_full(state, rpc, repos)
@@ -391,12 +465,22 @@ def _report_catalog(report, scan, state, rpc, host_name):
         report["errors"].append(
             f"Orca repository admission limit reached ({REPOSITORY_LIMIT} records including pending additions); "
             f"{report['deferred']} new registrations deferred; existing records are retained")
-    _report_cleanup(report, scan, state, rpc, groups, repos)
+    _report_cleanup(report, scan, state, rpc, groups, repos, cleanup_pass, evidence)
 
 
-def _report_cleanup(report, scan, state, rpc, groups, repos):
+def _cleanup_item(report, evidence, project_id, root, removed, reason, **fields):
+    item = {"projectId": project_id, **fields, "removedProject": removed, "reason": reason,
+            "retention": retention(project_id, root, removed, reason, evidence)}
+    if reason == REFUSED_CLOSE:
+        # Protected, yet it needs the operator: status shows it as a warning.
+        item["attention"] = True
+    report["cleanup"].append(item)
+
+
+def _report_cleanup(report, scan, state, rpc, groups, repos, cleanup_pass, evidence):
     active = {project.project_id for project in scan.projects}
-    snapshots = None
+    rootless = {project.project_id for project in scan.projects if not project.roots}
+    read_set = None
     folders = None
     for project_id, entry, repo, reason in _cleanup_records(scan, state, groups, repos):
         if not verify_missing(scan, repo["path"]):
@@ -405,48 +489,68 @@ def _report_cleanup(report, scan, state, rpc, groups, repos):
             if project_id in active:
                 continue
             reason = reason or "workspace absence is unverified"
-        if reason is None and (state.apply or project_id in active):
-            if any(repo["path"] in warning and "session tabs" in warning for warning in report["warnings"]):
-                reason = "session tabs are retained"
-            elif any(repo["path"] in warning and "live terminals" in warning for warning in report["warnings"]):
-                reason = "live terminals are retained"
-            elif report["errors"]:
-                reason = "cleanup safety checks are incomplete; repository is retained"
-            else:
-                reason = "repository removal is pending"
+        if reason is None and project_id in rootless:
+            # The registered project's mount may be temporarily unavailable.
+            reason = ACTIVE_ROOT_MISSING
         if reason is None:
+            # Outcomes are keyed by exact repository ID, never inferred from path text.
+            reason = cleanup_pass.outcomes.get(repo["id"])
+        if reason is None and (report["errors"] or state.apply and not cleanup_pass.complete):
+            reason = CLEANUP_INCOMPLETE
+        if reason is None:
+            # The same ownership rule as the apply pass classifies the record.
             try:
-                if snapshots is None:
-                    snapshots = _session_snapshots(rpc)
-                if _has_saved_tabs(snapshots, repo):
-                    reason = "session tabs are retained"
-                elif _has_terminal_reference(rpc, repo, snapshots):
-                    reason = "live terminals are retained"
-                else:
-                    reason = "repository removal is pending"
+                if read_set is None:
+                    read_set = (repos, _session_snapshots(rpc), _terminal_census(rpc))
+                closable, tabs, rows = _ownership(repo, *read_set)
+                reason = (AMBIGUOUS_SESSION if not closable else "session tabs are retained" if tabs
+                          else "live terminals are retained" if rows else "repository removal is pending")
             except RpcError:
                 reason = "session inventory is unavailable; cleanup is retained"
-        report["cleanup"].append({"projectId": project_id, "path": repo["path"],
-                                  "repoId": repo["id"], "removedProject": project_id not in active,
-                                  "reason": reason, "nextAction": (
-                                      "Inspect sessions and remove the exact repository in Orca"
-                                      if reason == "legacy repository identity is unconfirmed"
-                                      else "Inspect retained sessions or ownership, then retry Orca sync")})
+        if reason in SESSION_RETENTION and removal_authorized(
+                {"projectId": project_id, "root": entry["root"], "removedProject": project_id not in active,
+                 "sessions": True}, evidence) is True:
+            # Sessions of a removed project are cleanup work, not a retention reason.
+            reason = "repository removal is pending"
+        if (reason in SESSION_RETENTION or reason == "repository removal is pending") \
+                and entry.get("refused_closes", {}).get(repo["id"]):
+            # A close Orca refused in an earlier pass needs the operator while its target remains.
+            try:
+                if read_set is None:
+                    read_set = (repos, _session_snapshots(rpc), _terminal_census(rpc))
+                if _refused_targets(entry, repo, read_set):
+                    reason = REFUSED_CLOSE
+            except RpcError:
+                reason = "session inventory is unavailable; cleanup is retained"
+        if reason == "legacy repository identity is unconfirmed":
+            action = "Inspect sessions and remove the exact repository in Orca"
+        elif reason == REFUSED_CLOSE:
+            action = ("Close this repository's remaining tab or terminal in Orca by hand; "
+                      "Orca refused Subyard's close and the record is retained")
+        elif reason == AMBIGUOUS_SESSION:
+            action = ("Close the terminal session it shares with another repository in Orca; "
+                      "Subyard retains this record")
+        elif retention(project_id, entry["root"], project_id not in active, reason, evidence) == PROTECTED:
+            action = "Inspect the exact repository in Orca; Subyard retains it"
+        else:
+            action = "Inspect retained sessions or ownership, then retry Orca sync"
+        _cleanup_item(report, evidence, project_id, entry["root"], project_id not in active, reason,
+                      path=repo["path"], repoId=repo["id"], nextAction=action)
     for project_id, entry in state.data["projects"].items():
         if project_id in active:
             continue
         reported = {item["path"] for item in report["cleanup"] if item["projectId"] == project_id}
         for path in entry.get("pending_repos", {}):
             if path not in reported:
-                report["cleanup"].append({"projectId": project_id, "path": path, "repoId": None,
-                                          "removedProject": True,
-                                          "reason": "repository creation identity is pending",
-                                          "nextAction": "Inspect the Orca catalog after runtime recovery, then retry sync"})
+                _cleanup_item(report, evidence, project_id, entry["root"], True,
+                              "repository creation identity is pending",
+                              path=path, repoId=None,
+                              nextAction="Inspect the Orca catalog after runtime recovery, then retry sync")
         if entry.get("pending_group"):
-            report["cleanup"].append({"projectId": project_id, "path": entry["root"], "repoId": None,
-                                      "removedProject": True,
-                                      "reason": "project group creation identity is pending",
-                                      "nextAction": "Inspect the Orca catalog after runtime recovery, then retry sync"})
+            _cleanup_item(report, evidence, project_id, entry["root"], True,
+                          "project group creation identity is pending",
+                          path=entry["root"], repoId=None,
+                          nextAction="Inspect the Orca catalog after runtime recovery, then retry sync")
         group_id = entry.get("group_id")
         group = next((group for group in groups if group["id"] == group_id), None)
         if (group is None or not _local(group)
@@ -465,9 +569,8 @@ def _report_cleanup(report, scan, state, rpc, groups, repos):
                 continue
         except RpcError:
             reason = "project group inventory is unavailable; cleanup is retained"
-        report["cleanup"].append({"projectId": project_id, "path": entry["root"],
-                                  "groupId": group_id, "repoId": None, "removedProject": True,
-                                  "reason": reason, "nextAction": "Retry Orca sync"})
+        _cleanup_item(report, evidence, project_id, entry["root"], True, reason, path=entry["root"],
+                      groupId=group_id, repoId=None, nextAction="Retry Orca sync")
     report["cleanupReady"] = not any(item["removedProject"] for item in report["cleanup"])
 
 
@@ -479,11 +582,6 @@ def _session_snapshots(rpc):
             or not isinstance(item.get("tabs"), list) for item in snapshots)):
         raise RpcError("Orca returned an invalid session tab catalog; cleanup skipped")
     return snapshots
-
-
-def _has_saved_tabs(snapshots, repo):
-    return any(item["worktree"].startswith(repo["id"] + "::") and item["tabs"]
-               for item in snapshots)
 
 
 def _only_stale_terminal_layouts(snapshots, repo):
@@ -513,7 +611,7 @@ def _only_stale_terminal_layouts(snapshots, repo):
     return found
 
 
-def _has_terminal_reference(rpc, repo, snapshots):
+def _terminal_census(rpc):
     # A pending layout can fail to bind a live orphan PTY. Request the native
     # controller's fresh census without worktree/handle filters before pruning.
     result = rpc.call("terminal.list", {"limit": 1000, "requireFreshPtyLiveness": True,
@@ -526,10 +624,6 @@ def _has_terminal_reference(rpc, repo, snapshots):
             or not isinstance(scope.get("omittedHostIds"), list)
             or "local" not in scope["hostIds"] or "local" in scope["omittedHostIds"]):
         raise RpcError("Orca terminal inventory is incomplete or invalid; cleanup skipped")
-    prefix = repo["id"] + "::"
-    pty_ids = {tab["ptyId"] for item in snapshots if item["worktree"].startswith(prefix)
-               for tab in item["tabs"] if isinstance(tab, dict) and isinstance(tab.get("ptyId"), str)}
-    matched = False
     for terminal in terminals:
         if (not isinstance(terminal, dict) or not isinstance(terminal.get("ptyId"), str)
                 or not terminal["ptyId"] or not isinstance(terminal.get("worktreeId"), str)
@@ -537,55 +631,259 @@ def _has_terminal_reference(rpc, repo, snapshots):
                 or not isinstance(terminal.get("executionHostId"), str) or not terminal["executionHostId"]
                 or type(terminal.get("connected")) is not bool):
             raise RpcError("Orca terminal inventory has an unknown identity; cleanup skipped")
-        if terminal["executionHostId"] == "local" and (
-                terminal["worktreeId"].startswith(prefix) or terminal["ptyId"] in pty_ids):
-            matched = True
-    return matched
+    return terminals
 
 
-def _close_stale_terminal_layouts(scan, rpc, repo, snapshots, same_runtime):
-    prefix = repo["id"] + "::"
-    relevant = lambda items: [item for item in items
-                              if item["worktree"].startswith(prefix) and item["tabs"]]
-    expected = relevant(snapshots)
-    observed = snapshots
-    parents = {(item["worktree"], tab.get("parentTabId") or tab["id"])
-               for item in expected for tab in item["tabs"]}
-    for worktree, parent in sorted(parents):
-        def before_close(runtime_id):
-            same_runtime(runtime_id)
-            observed = _session_snapshots(rpc)
-            if relevant(observed) != expected or not _only_stale_terminal_layouts(observed, repo):
-                raise RpcError("Orca cleanup tab state changed; retry sync")
-            if _has_terminal_reference(rpc, repo, snapshots + observed):
-                raise RpcError("Orca cleanup terminal appeared; retry sync")
-            rpc.refresh()
-            if (_repo_at(_records(rpc, "repo.list", "repos"), repo["path"]) != repo
-                    or not verify_missing(scan, repo["path"])):
-                raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
-            same_runtime(rpc.runtime_id)
+def _ownership(repo, catalog, snapshots, terminals):
+    """The one ownership rule for record R, over one read set.
 
-        # Stock lifecycle close cannot retire a null-handle layout. Ordinary
-        # close checks native retirement ownership, but has no atomic liveness
-        # fence; repeat our exact snapshot/census proof immediately before send.
+    Every identity key - a PTY ID or terminal handle, and a tab's close identity - is owned
+    by every tab and terminal row that mentions it: the local catalog repository its
+    worktree names, or unknown for another execution host or an unknown repository. The
+    edges are snapshot.worktree, tab.ptyId, tab.terminal, tab.parentTabId (or its own ID),
+    terminal.worktreeId, executionHostId, ptyId and handle. R is closable only when every
+    key R mentions is owned by R alone. Returns (closable, R's tabs, R's terminal rows).
+    """
+    local = {item["id"] for item in catalog if _local(item)}
+    owner = lambda worktree, host="local": (
+        worktree.split("::", 1)[0] if host == "local" and "::" in worktree
+        and worktree.split("::", 1)[0] in local else None)
+    owners, tabs, rows = {}, [], []
+
+    def claim(kind, value, who, keys):
+        if isinstance(value, str) and value:
+            owners.setdefault((kind, value), set()).add(who)
+            keys.add((kind, value))
+
+    mentioned = set()
+    for item in snapshots:
+        who = owner(item["worktree"])
+        for tab in item["tabs"]:
+            keys = mentioned if who == repo["id"] else set()
+            if isinstance(tab, dict):
+                # Claimed even for a tab without identity: its PTY and handle are still shared.
+                claim("pty", tab.get("ptyId"), who, keys)
+                claim("handle", tab.get("terminal"), who, keys)
+            parent = (tab.get("parentTabId") or tab.get("id")) if isinstance(tab, dict) else None
+            if not isinstance(parent, str) or not parent:
+                # A tab without identity cannot be addressed exactly: its record stays protected.
+                if who == repo["id"]:
+                    key = ("unidentified", item["worktree"], len(tabs))
+                    owners[key] = {None}
+                    mentioned.add(key)
+                    tabs.append((item["worktree"], None))
+                continue
+            claim("tab", parent, who, keys)
+            if who == repo["id"]:
+                tabs.append((item["worktree"], parent))
+    for terminal in terminals:
+        who = owner(terminal["worktreeId"], terminal["executionHostId"])
+        keys = mentioned if who == repo["id"] else set()
+        claim("pty", terminal["ptyId"], who, keys)
+        claim("handle", terminal.get("handle"), who, keys)
+        if who == repo["id"]:
+            rows.append(terminal)
+    closable = all(owners[key] == {repo["id"]} for key in mentioned)
+    return closable, sorted(set(tabs), key=lambda tab: (tab[0], tab[1] or "")), rows
+
+
+def _cleanup_plan(repo, read_set, refused_stops=frozenset()):
+    """Pure plan over one read set: None when R is protected, else the ordered actions that
+    remove R's session state. A PTY whose fenced exact stop was refused is closed by handle
+    first, so that close directly follows the refused stop; the remaining live PTYs are then
+    stopped through the fenced exact stop, tabs close next, then the remaining terminal handles."""
+    catalog, snapshots, terminals = read_set
+    closable, tabs, rows = _ownership(repo, catalog, snapshots, terminals)
+    if not closable:
+        return None
+    rows = sorted(rows, key=lambda row: (row["ptyId"], str(row.get("handle"))))
+    close = lambda row: ("close", row.get("handle"), row["ptyId"])
+    fallback = [row for row in rows if row["ptyId"] in refused_stops]
+    return ([close(row) for row in fallback]
+            + [("stop", row["worktreeId"], row["ptyId"]) for row in rows
+               if row["connected"] and row["ptyId"] not in refused_stops]
+            + [("tab", worktree, parent) for worktree, parent in tabs]
+            + [close(row) for row in rows if row not in fallback])
+
+
+def _refused_targets(entry, repo, read_set):
+    """Persisted refused closes of this record whose targets are still planned. A refused
+    close stays protected across passes, and is never re-sent, until its target is gone."""
+    remembered = entry.get("refused_closes", {}).get(repo["id"], [])
+    plan = _cleanup_plan(repo, read_set)
+    if plan is None:
+        return remembered
+    return [target for target in remembered if tuple(target) in plan]
+
+
+def _remember_refusals(state, entry, repo, targets):
+    refused = entry.setdefault("refused_closes", {})
+    if targets:
+        if refused.get(repo["id"]) == targets:
+            return
+        refused[repo["id"]] = targets
+    elif repo["id"] in refused:
+        del refused[repo["id"]]
+    else:
+        return
+    if not refused:
+        del entry["refused_closes"]
+    state.save()
+
+
+def _has_session_state(repo, read_set):
+    _, tabs, rows = _ownership(repo, *read_set)
+    return bool(tabs or rows)
+
+
+class _Fence:
+    """The pre-send check of one cleanup candidate.
+
+    read() takes the catalog first and the terminal census last. A caller decides on that
+    read set only, then authorize() checks the catalog record, the filesystem removal
+    authority and the runtime without any further read, RPC or sleep before the send.
+    Stock Orca offers no atomic fence for tab or terminal-handle close, so the remaining
+    window is the request's own transit.
+    """
+    def __init__(self, rpc, scan, repo, record, evidence, runtime_id):
+        self.rpc, self.scan, self.repo, self.record, self.evidence = rpc, scan, repo, record, evidence
+        self.runtime_id = runtime_id
+
+    def same_runtime(self, runtime_id):
+        if runtime_id != self.runtime_id:
+            raise CleanupRefusal("Orca cleanup runtime changed; retry sync")
+
+    def read(self):
+        self.rpc.refresh()
+        catalog = _records(self.rpc, "repo.list", "repos")
+        return catalog, _session_snapshots(self.rpc), _terminal_census(self.rpc)
+
+    def authorize(self, read_set):
+        if (_repo_at(read_set[0], self.repo["path"]) != self.repo
+                or not verify_missing(self.scan, self.repo["path"])
+                or self.record["sessions"] and removal_authorized(self.record, self.evidence) is not True):
+            raise CleanupRefusal("Orca cleanup candidate changed; retry sync: " + self.repo["path"])
+        self.same_runtime(self.rpc.runtime_id)
+
+
+class _Stale(Exception):
+    """The target left the recomputed plan before sending; nothing was sent."""
+
+
+class _PreSendFailure(RpcError):
+    """A read or check inside a pre-send callback failed; nothing was sent."""
+
+
+class CleanupRefused(RpcError):
+    """Orca definitively refused a close and readback still shows the target."""
+    def __init__(self, message, target):
+        super().__init__(message)
+        self.target = target
+
+
+REFUSED_CLOSE = "Orca refused a session close; repository is retained"
+# Operator decision: a definitively refused close keeps the record protected; nothing more is
+# closed for it, the pass can settle, and status warns that it needs a manual close in Orca.
+REFUSED_CLOSE_CLASS = PROTECTED
+
+
+def _request(action):
+    kind = action[0]
+    if kind == "stop":
+        return "terminal.stopExact", {"worktree": "id:" + action[1], "expectedPtyIds": [action[2]],
+                                      "targetOnly": True}
+    if kind == "tab":
+        return "session.tabs.close", {"worktree": "id:" + action[1], "tabId": action[2], "reason": "user"}
+    if not isinstance(action[1], str) or not action[1]:
+        raise RpcError("Orca cleanup terminal handle is unavailable; retry sync")
+    return "terminal.close", {"terminal": action[1]}
+
+
+def _send_and_confirm(rpc, repo, fence, action, deadline, refused_stops, allow_live):
+    """One destructive request and its outcome.
+
+    Pre-send: re-read all three inventories, recompute the plan, require the target still
+    in it, then authorize; nothing is read between that decision and the send. A
+    pre-send refusal sends nothing. A definitive refusal (an RPC rejection, or a tab close
+    answered {closed: true, refused: true}) gets one readback: if the target is still
+    planned the record is retained. An accepted or unknown outcome is polled until the
+    target leaves the plan or the cleanup deadline passes.
+    """
+    method, params = _request(action)
+
+    def before_send(runtime_id):
+        fence.same_runtime(runtime_id)
+        read_set = fence.read()
+        plan = _cleanup_plan(repo, read_set, refused_stops)
+        # Decision on this read set only; no reads follow.
+        if plan is None:
+            raise AmbiguousSession(AMBIGUOUS_SESSION)
+        if not allow_live and (any(item[0] != "tab" for item in plan)
+                               or not _only_stale_terminal_layouts(read_set[1], repo)):
+            raise CleanupRefusal("Orca cleanup session state changed; retry sync")
+        if action not in plan:
+            raise _Stale()
+        fence.authorize(read_set)
+
+    def guarded(runtime_id):
         try:
-            result = rpc.call("session.tabs.close", {"worktree": "id:" + worktree,
-                              "tabId": parent, "reason": "user"}, before_send=before_close)
-            if result.get("closed") is not True or result.get("refused"):
-                raise RpcError("Orca terminal layout removal is unconfirmed; retry sync")
+            before_send(runtime_id)
+        except (CleanupRefusal, _Stale):
+            raise
         except RpcError as error:
-            if not error.unknown:
-                raise
-        observed = _session_snapshots(rpc)
-        if any(not isinstance(tab, dict) or not isinstance(tab.get("id"), str) or not tab["id"]
-               for item in relevant(observed) for tab in item["tabs"]):
-            raise RpcError("Orca returned an invalid session tab identity; cleanup skipped")
-        if any((tab.get("parentTabId") or tab["id"]) == parent
-               for item in relevant(observed) for tab in item["tabs"]):
-            raise RpcError("Orca terminal layout removal is unconfirmed; retry sync")
-        expected = relevant(observed)
-    if expected or _has_terminal_reference(rpc, repo, snapshots + observed):
-        raise RpcError("Orca terminal layout cleanup changed; retry sync")
+            # Even a rejected nested read is only a pre-send failure of this request.
+            raise _PreSendFailure(str(error)) from None
+
+    try:
+        result = rpc.call(method, params, before_send=guarded)
+        refused = method == "session.tabs.close" and result.get("refused") is True
+        unknown = False
+    except (CleanupRefusal, _Stale, _PreSendFailure):
+        raise
+    except RpcError as error:
+        if not (error.rejected or error.unknown):
+            # Nothing was sent: a pre-send read or transport failure leaves this pass
+            # undetermined, never a refusal and never a fallback.
+            raise
+        refused, unknown = error.rejected, error.unknown
+    def planned():
+        # A record that became protected stops here: nothing more of it is sent.
+        plan = _cleanup_plan(repo, fence.read(), refused_stops)
+        if plan is None:
+            raise AmbiguousSession(AMBIGUOUS_SESSION)
+        return action in plan
+    if refused and not unknown:
+        if action[0] == "stop":
+            # A refused fenced stop falls back to the checked handle close.
+            refused_stops.add(action[2])
+            return
+        if planned():
+            raise CleanupRefused(REFUSED_CLOSE, list(action))
+        return
+    interval = READBACK_INTERVAL
+    while planned():
+        if time.monotonic() + interval >= deadline:
+            raise RpcError("Orca session cleanup is unconfirmed; retry sync: " + repo["path"])
+        time.sleep(interval)
+        interval = min(interval * 2, READBACK_MAX_INTERVAL)
+
+
+def _remove_sessions(rpc, repo, fence, deadline, allow_live=True):
+    """Remove every saved tab and live terminal of one exact record by replanning after each
+    confirmed step; nothing outside the plan of a closable record is ever addressed."""
+    refused_stops = set()
+    while True:
+        if time.monotonic() >= deadline:
+            raise RpcError("Orca registration time budget exhausted")
+        plan = _cleanup_plan(repo, fence.read(), refused_stops)
+        if plan is None:
+            raise AmbiguousSession(AMBIGUOUS_SESSION)
+        if not plan:
+            return
+        try:
+            _send_and_confirm(rpc, repo, fence, plan[0], deadline, refused_stops, allow_live)
+        except _Stale:
+            continue
 
 
 def _cleanup_records(scan, state, groups, repos):
@@ -628,12 +926,15 @@ def _cleanup_records(scan, state, groups, repos):
     return records
 
 
-def _prune_missing(report, scan, state, rpc, approved_ids=None):
+def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_ids=None):
     # Missing project roots may be temporarily unmounted. A known checkout
     # losing Git metadata is retained without blocking independent missing paths.
-    if report["errors"] or any(not project.roots for project in scan.projects):
+    if report["errors"]:
         return
     active = {project.project_id for project in scan.projects}
+    # A registered project whose root is missing may be temporarily unmounted. Only its own
+    # records are inhibited; other projects, including removed ones, are still cleaned.
+    rootless = {project.project_id for project in scan.projects if not project.roots}
     # Removed projects cannot pass through registration again. Recover only
     # submitted identities, without creating or renaming native resources.
     if any(project_id not in active and (entry.get("pending_group") or entry.get("pending_repos"))
@@ -667,8 +968,24 @@ def _prune_missing(report, scan, state, rpc, approved_ids=None):
                 del entry["pending_repos"][path]
                 state.save()
     candidates = _cleanup_records(scan, state, groups, repos)
+    # A refusal marker lives only while its repository is still a cleanup candidate in the
+    # catalog: a reappearing directory, a reactivated project or a vanished record drops it.
+    live_ids = {repo["id"] for repo in repos}
+    eligible = {(project_id, repo["id"]) for project_id, _, repo, reason in candidates
+                if not reason and project_id not in rootless and verify_missing(scan, repo["path"])}
+    for project_id, entry in state.data["projects"].items():
+        refused = entry.get("refused_closes")
+        if refused:
+            kept = {repo_id: targets for repo_id, targets in refused.items()
+                    if repo_id in live_ids and (project_id, repo_id) in eligible}
+            if kept != refused:
+                if kept:
+                    entry["refused_closes"] = kept
+                else:
+                    del entry["refused_closes"]
+                state.save()
     for project_id, entry, repo, reason in candidates:
-        if reason or not verify_missing(scan, repo["path"]):
+        if reason or project_id in rootless or not verify_missing(scan, repo["path"]):
             continue
         if approved_ids is not None and repo["id"] not in approved_ids[0]:
             raise RpcError("plan_stale: unapproved Orca cleanup repository")
@@ -680,9 +997,10 @@ def _prune_missing(report, scan, state, rpc, approved_ids=None):
         if confirmed.get(repo["path"]) != repo["id"]:
             confirmed[repo["path"]] = repo["id"]
             state.save()
-        # This API also covers saved tabs of now-missing linked worktrees.
+        # This API also covers saved tabs of now-missing linked worktrees. The
+        # read only probes the inventory; the fence below reads it again.
         try:
-            snapshots = _session_snapshots(rpc)
+            _session_snapshots(rpc)
         except RpcError as error:
             if not error.timed_out or error.unknown:
                 raise
@@ -693,60 +1011,78 @@ def _prune_missing(report, scan, state, rpc, approved_ids=None):
                 retry_snapshots = _session_snapshots(rpc)
             except RpcError:
                 raise error from None
-            if not _has_saved_tabs(retry_snapshots, repo):
+            if not _has_session_state(repo, (repos, retry_snapshots, [])):
                 raise error from None
             report["warnings"].append(
                 "Missing Orca checkout has session tabs and is retained: " + repo["path"]
             )
+            # Later candidates stay unvisited, so the pass remains incomplete.
+            cleanup_pass.outcomes[repo["id"]] = "session tabs are retained"
             return
         proof_runtime = rpc.runtime_id
-        saved = _has_saved_tabs(snapshots, repo)
-        if saved and not _only_stale_terminal_layouts(snapshots, repo):
-            report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
+        record = {"projectId": project_id, "root": entry["root"],
+                  "removedProject": project_id not in active, "sessions": False}
+        fence = _Fence(rpc, scan, repo, record, evidence, proof_runtime)
+        read_set = fence.read()
+        closable, tabs, rows = _ownership(repo, *read_set)
+        if not closable:
+            cleanup_pass.outcomes[repo["id"]] = AMBIGUOUS_SESSION
+            report["warnings"].append("Missing Orca checkout has session state it does not own alone "
+                                      "and is retained: " + repo["path"])
             continue
-        if not saved and _has_terminal_reference(rpc, repo, snapshots):
-            report["warnings"].append("Missing Orca checkout has live terminals and is retained: " + repo["path"])
-            continue
-        if saved:
-            latest = _session_snapshots(rpc)
-            if (_has_saved_tabs(latest, repo) and not _only_stale_terminal_layouts(latest, repo)
-                    or _has_terminal_reference(rpc, repo, snapshots + latest)):
-                report["warnings"].append("Missing Orca checkout has session tabs and is retained: " + repo["path"])
+        # A close Orca refused earlier stays protected and is not re-sent while its target remains.
+        if entry.get("refused_closes", {}).get(repo["id"]):
+            still = _refused_targets(entry, repo, read_set)
+            _remember_refusals(state, entry, repo, still)
+            if still:
+                cleanup_pass.outcomes[repo["id"]] = REFUSED_CLOSE
                 continue
-        rpc.refresh()
-        current = _repo_at(_records(rpc, "repo.list", "repos"), repo["path"])
-        if current != repo or not verify_missing(scan, repo["path"]):
-            raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
+        # Live session content: any terminal row, or a tab other than this checkout's stale layouts.
+        record["sessions"] = bool(rows) or bool(tabs) and not _only_stale_terminal_layouts(read_set[1], repo)
+        if removal_authorized(record, evidence) is not True:
+            retained = "session tabs are retained" if tabs else "live terminals are retained"
+            cleanup_pass.outcomes[repo["id"]] = retained
+            report["warnings"].append("Missing Orca checkout has " + retained.split(" are ")[0]
+                                      + " and is retained: " + repo["path"])
+            continue
+        fence.authorize(read_set)
+        try:
+            _remove_sessions(rpc, repo, fence, state.deadline, allow_live=record["sessions"])
+        except AmbiguousSession:
+            cleanup_pass.outcomes[repo["id"]] = AMBIGUOUS_SESSION
+            continue
+        except CleanupRefused as refusal:
+            remembered = entry.get("refused_closes", {}).get(repo["id"], [])
+            if refusal.target not in remembered:
+                remembered = remembered + [refusal.target]
+            _remember_refusals(state, entry, repo, remembered)
+            cleanup_pass.outcomes[repo["id"]] = REFUSED_CLOSE
+            continue
 
-        def same_runtime(runtime_id):
-            if runtime_id != proof_runtime:
-                raise RpcError("Orca cleanup runtime changed; retry sync")
-
-        if saved and _has_saved_tabs(latest, repo):
-            _close_stale_terminal_layouts(scan, rpc, repo, latest, same_runtime)
-            rpc.refresh()
-            if (_repo_at(_records(rpc, "repo.list", "repos"), repo["path"]) != repo
-                    or not verify_missing(scan, repo["path"])):
-                raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
         def before_remove(runtime_id):
-            same_runtime(runtime_id)
-            latest_tabs = _session_snapshots(rpc)
-            if _has_saved_tabs(latest_tabs, repo) or _has_terminal_reference(rpc, repo, latest_tabs):
+            fence.same_runtime(runtime_id)
+            read_set = fence.read()
+            # The repository is removed only while its plan is empty.
+            plan = _cleanup_plan(repo, read_set)
+            if plan is None:
+                raise AmbiguousSession(AMBIGUOUS_SESSION)
+            if plan:
                 raise RpcError("Orca cleanup session state changed; retry sync")
-            rpc.refresh()
-            if (_repo_at(_records(rpc, "repo.list", "repos"), repo["path"]) != repo
-                    or not verify_missing(scan, repo["path"])):
-                raise RpcError("Orca cleanup candidate changed; retry sync: " + repo["path"])
-            same_runtime(rpc.runtime_id)
+            fence.authorize(read_set)
 
         try:
             rpc.call("repo.rm", {"repo": "id:" + repo["id"]}, before_send=before_remove)
+        except AmbiguousSession:
+            # The record became protected just before removal: keep it and continue the pass.
+            cleanup_pass.outcomes[repo["id"]] = AMBIGUOUS_SESSION
+            continue
         except RpcError as error:
             if not error.unknown:
                 raise
         remaining = _records(rpc, "repo.list", "repos")
         if any(item["id"] == repo["id"] for item in remaining):
             raise RpcError("Orca repository removal is unconfirmed: " + repo["path"])
+        _remember_refusals(state, entry, repo, [])
         # Keep the original identity if a replacement appeared during removal;
         # retiring it would let a later legacy-path retry adopt the new record.
         if not any(item["path"] == repo["path"] for item in remaining):
@@ -805,6 +1141,7 @@ def _prune_missing(report, scan, state, rpc, approved_ids=None):
             continue
         del state.data["projects"][project_id]
         state.save()
+    cleanup_pass.complete = True
 
 
 def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", known_paths=None):
@@ -812,7 +1149,8 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
     report = {"ready": False, "registered": 0,
               "total": sum(len(project.roots) for project in scan.projects),
               "errors": list(scan.errors), "warnings": list(scan.warnings), "projects": [],
-              "cleanup": [], "cleanupReady": True}
+              "cleanup": [], "cleanupReady": True, "settled": False}
+    cleanup_pass, evidence = CleanupPass(), RemovalEvidence(scan, report["errors"])
     try:
         with State(state_dir, apply, deadline) as state:
             rpc = CatalogRPC(rpc)
@@ -905,15 +1243,20 @@ def reconcile(scan, rpc, state_dir, apply=True, deadline=None, host_name="", kno
                         except RpcError as error:
                             report["errors"].append(root.path + ": " + str(error))
                 try:
-                    _prune_missing(report, scan, state, rpc, approved_ids)
+                    _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_ids)
                 except RpcError as error:
                     report["errors"].append(str(error))
             rpc.refresh()
-            _report_catalog(report, scan, state, rpc, host_name)
+            _report_catalog(report, scan, state, rpc, host_name, cleanup_pass, evidence)
     except (RpcError, StateError) as error:
         report["errors"].append(str(error))
     report["errors"] = list(dict.fromkeys(report["errors"]))
     report["warnings"] = list(dict.fromkeys(report["warnings"]))
     report["ready"] = (not report["errors"] and report["registered"] == report["total"]
                        and report["cleanupReady"])
+    # Like ready, but a removed project's remaining record may be protected. Pending work of
+    # removed projects and any undetermined record never settle, including after partial progress.
+    report["settled"] = (not report["errors"] and report["registered"] == report["total"]
+                         and all(item["retention"] == PROTECTED if item["removedProject"]
+                                 else item["retention"] != UNDETERMINED for item in report["cleanup"]))
     return report

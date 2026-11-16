@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -27,5 +28,34 @@ func RunProjectHooks(ctx context.Context, yard domain.Context,
 	if err == nil && result.ExitCode == 0 {
 		return nil
 	}
-	return errors.New("an optional agent project hook failed; run 'yard init' to repair wiring and retry active integrations, or use the integration's sync command")
+	failure := &ProjectHookFailure{Yard: yard.YardName, Reason: "exited unsuccessfully"}
+	switch {
+	case errors.Is(err, context.Canceled):
+		failure.Reason = "were cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		failure.Reason = "timed out"
+	case err != nil:
+		failure.Reason = "could not be executed"
+	case result.ExitCode == 124 || result.ExitCode == 137:
+		failure.Reason = "timed out"
+	}
+	return failure
+}
+
+// ProjectHookFailure carries only fixed text and the validated yard name; hook
+// output may contain secrets and never enters the error or its diagnostic.
+type ProjectHookFailure struct{ Yard, Reason string }
+
+func (*ProjectHookFailure) Error() string {
+	return "an optional agent project hook failed; run 'yard init' to repair wiring and retry active integrations, or use the integration's sync command"
+}
+
+// ActivationDiagnostic reports that the pass failed or its state is undetermined;
+// retained state that an integration accepts is shown by that integration's status.
+func (failure *ProjectHookFailure) ActivationDiagnostic() (string, string) {
+	yard := failure.Yard
+	if yard == "" {
+		yard = "default"
+	}
+	return fmt.Sprintf("yard %s: optional agent project hooks %s; the hook pass failed or its state is undetermined, see the integration's status", yard, failure.Reason), "run yard migrate"
 }

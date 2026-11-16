@@ -531,19 +531,22 @@ case "${1:-}" in
           exit $?
         fi
         [ ! -e "$state_root/project-counts-fail" ] || exit 1
-        printf '%s\n' '{"ready":true,"registered":2,"total":2,"errors":[],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
+        printf '%s\n' '{"ready":true,"settled":true,"registered":2,"total":2,"errors":[],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
         ;;
       *' /usr/bin/python3 -B /usr/local/libexec/subyard/orca-registration/main.py status --host-name owner-host ')
         if [ -e "$state_root/project-counts-fail" ]; then
           exit 1
         elif [ -e "$state_root/project-cleanup-pending" ]; then
-          printf '%s\n' '{"ready":false,"registered":2,"total":2,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"session tabs are retained","nextAction":"Inspect retained sessions, then retry Orca sync"}]}'
+          printf '%s\n' '{"ready":false,"settled":false,"registered":2,"total":2,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"session tabs are retained","nextAction":"Inspect retained sessions, then retry Orca sync"}]}'
+          exit 1
+        elif [ -e "$state_root/project-report.json" ]; then
+          cat "$state_root/project-report.json"
           exit 1
         elif [ -e "$state_root/project-counts-drift" ]; then
-          printf '%s\n' '{"ready":false,"registered":1,"total":2,"errors":["nested checkout has the wrong group"],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
+          printf '%s\n' '{"ready":false,"settled":false,"registered":1,"total":2,"errors":["nested checkout has the wrong group"],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
           exit 1
         else
-          printf '%s\n' '{"ready":true,"registered":2,"total":2,"errors":[],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
+          printf '%s\n' '{"ready":true,"settled":true,"registered":2,"total":2,"errors":[],"warnings":[],"scopeDigest":"0000000000000000000000000000000000000000000000000000000000000001","catalogDigest":"0000000000000000000000000000000000000000000000000000000000000002"}'
         fi
         ;;
     esac
@@ -1043,6 +1046,105 @@ grep -Fq 'Orca cleanup pending: /srv/workspaces/removed/src: session tabs are re
 ! grep -Fq '[warn]' "$TMP/status-cleanup-pending.out" \
   || fail 'expected cleanup drift generated a warning'
 rm -f "$TMP/project-cleanup-pending"
+
+# A close Orca refused in an earlier pass: the real read-only report keeps it protected and
+# status warns with the manual-close action, with no hand-written report.
+python3 -B - "$ROOT/config/profiles/orca/tests/orca_registration" "$TMP/refused-fixture" >"$TMP/project-report.json" <<'PY_REFUSED_REPORT'
+import json, shutil, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from support import Catalog, project
+from discovery import discover
+from reconcile import reconcile
+base = Path(sys.argv[2])
+workspaces, state = base / "workspaces", base / "state"
+root = project(workspaces, "removed", "Removed")
+rpc = Catalog()
+run = lambda apply: reconcile(discover(str(workspaces)), rpc, str(state), apply=apply, host_name="owner-host")
+assert run(True)["ready"]
+repo = rpc.repos[0]
+rpc.snapshots = [{"worktree": repo["id"] + "::" + repo["path"], "tabs": [{"id": "kept"}]}]
+shutil.rmtree(root.parent)
+original = rpc.call
+def refuse(method, params=None, before_send=None):
+    if method != "session.tabs.close":
+        return original(method, params, before_send=before_send)
+    before_send(rpc.runtime_id)
+    return {"closed": True, "refused": True, "refusalReason": "live-host-pty"}
+rpc.call = refuse
+assert run(True)["settled"]
+print(json.dumps(run(False), separators=(",", ":")))
+PY_REFUSED_REPORT
+jq -e '.settled == true and any(.cleanup[]; .retention == "protected" and .attention == true)' \
+  "$TMP/project-report.json" >/dev/null || fail 'the real report lost the refused-close protection'
+ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status-refused.out"
+grep -Fq '[ .. ] checkouts registered: 0/0; protected project cleanup is retained' "$TMP/status-refused.out" \
+  || { cat "$TMP/status-refused.out" >&2; fail "status did not report a settled pass with a protected refused record"; }
+grep -F 'Orca refused a session close; repository is retained' "$TMP/status-refused.out" | grep -Fq '[warn]' \
+  || fail 'status did not warn about a refused close'
+grep -Fq 'in Orca by hand' "$TMP/status-refused.out" || fail 'status omitted the manual-close action'
+rm -f "$TMP/project-report.json"
+
+# The rendered hook succeeds from validated settlement, never from main.py's strict exit.
+hook_dir="$TMP/hook-contract"
+mkdir -p "$hook_dir/registration" "$hook_dir/bin"
+printf '#!/bin/sh\nexit 0\n' >"$hook_dir/bin/systemctl"
+chmod 0755 "$hook_dir/bin/systemctl"
+cat >"$hook_dir/registration/main.py" <<'PY'
+import os, sys
+assert sys.argv[sys.argv.index("--deadline") + 1]
+open(os.environ["ORCA_TEST_HOOK_SETTINGS"], "a").write("registration\n")
+print(os.environ["ORCA_TEST_HOOK_REPORT"])
+raise SystemExit(int(os.environ["ORCA_TEST_HOOK_EXIT"]))
+PY
+cat >"$hook_dir/registration/settings.py" <<'PY'
+import os, sys
+assert sys.argv[1] in ("--launch-defaults", "--reset-chats") and sys.argv[2] == "--deadline"
+assert float(sys.argv[3]) > 0
+open(os.environ["ORCA_TEST_HOOK_SETTINGS"], "a").write(sys.argv[1] + "\n")
+raise SystemExit(int(sys.argv[1] == "--launch-defaults" and os.environ.get("ORCA_TEST_HOOK_LAUNCH_FAIL") == "1"))
+PY
+touch "$hook_dir/lock"
+(
+  RESOURCE_DIR="$ROOT/config/profiles/orca/resources/orca"
+  ORCA_REGISTRATION="$hook_dir/registration" ORCA_REGISTRATION_LOCK="$hook_dir/lock"
+  ORCA_REGISTRATION_DIGEST="$hook_dir/digest" ORCA_UNIT=subyard-orca.service ORCA_CONTRACT_VERSION=7
+  # shellcheck source=config/profiles/orca/resources/orca/registration-contract.sh
+  . "$RESOURCE_DIR/registration-contract.sh"
+  registration_contract_version >"$hook_dir/digest"
+  render_registration_hook sync >"$hook_dir/sync"
+  render_registration_hook discover >"$hook_dir/discover"
+)
+chmod 0755 "$hook_dir/sync" "$hook_dir/discover"
+run_hook() {
+  local mode="$1" report="$2" exit_code="$3"
+  rm -f "$hook_dir/settings-ran"
+  PATH="$hook_dir/bin:$PATH" ORCA_TEST_HOOK_REPORT="$report" ORCA_TEST_HOOK_EXIT="$exit_code" \
+    ORCA_TEST_HOOK_SETTINGS="$hook_dir/settings-ran" "$hook_dir/$mode" \
+    >"$hook_dir/out" 2>"$hook_dir/err" </dev/null
+}
+protected='{"ready":false,"settled":true,"registered":1,"total":1,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"repository belongs to another execution host","nextAction":"Inspect the exact repository in Orca; Subyard retains it","removedProject":true,"retention":"protected"}]}'
+run_hook sync "$protected" 1 || fail 'hook failed for settled protected cleanup'
+[ "$(cat "$hook_dir/settings-ran")" = "$(printf -- '--launch-defaults\nregistration\n--reset-chats')" ] \
+  || fail 'settled hook did not run launch defaults before registration and the chat reset after it'
+grep -Fq 'Orca cleanup pending: /srv/workspaces/removed/src: repository belongs to another execution host' \
+  "$hook_dir/err" || fail 'settled hook omitted the pending cleanup line'
+run_hook discover "$protected" 1 || fail 'discovery failed for settled protected cleanup'
+[ "$(cat "$hook_dir/settings-ran")" = registration ] || fail 'discovery ran settings'
+if ORCA_TEST_HOOK_LAUNCH_FAIL=1 run_hook sync "$protected" 1; then
+  fail 'hook succeeded although required launch defaults failed'
+fi
+[ "$(cat "$hook_dir/settings-ran")" = "$(printf -- '--launch-defaults\nregistration')" ] \
+  || fail 'failed launch defaults skipped registration or still ran the chat reset'
+for report in \
+  '{"ready":false,"settled":false,"registered":1,"total":1,"errors":[],"warnings":[],"cleanup":[{"path":"/srv/workspaces/removed/src","reason":"workspace absence is unverified","nextAction":"Retry","removedProject":true,"retention":"undetermined"}]}' \
+  '{"ready":false,"settled":false,"registered":0,"total":1,"errors":["Orca registration time budget exhausted"],"warnings":[]}' \
+  '{"ready":true,"registered":1,"total":1,"errors":[],"warnings":[]}'; do
+  for mode in sync discover; do
+    if run_hook "$mode" "$report" 0; then fail "hook settled an unsettled or invalid report: $report"; fi
+    ! grep -Fqx -- --reset-chats "$hook_dir/settings-ran" || fail 'unsettled hook ran the chat reset'
+  done
+done
 rm -f "$ORCA_TEST_GUEST/usr/local/libexec/subyard/orca-registration.sha256"
 observation="$("$ROOT/config/profiles/orca/resources/orca/handler.sh" _runtime-contract observe)"
 jq -e '.state == "stale" and .actual != .desired' <<<"$observation" >/dev/null \

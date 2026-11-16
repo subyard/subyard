@@ -449,9 +449,15 @@ lease_acquire_input() {
 }
 
 
+# Call only in the keeper or acquire-guard background subshell: `jobs -p` is its own job table.
 lease_keeper_stop_jobs() {
-  local pid
-  for pid in "$keeper_timer_pid" "$keeper_job_pid"; do
+  local pid listed
+  local -a pids=("$keeper_timer_pid" "$keeper_job_pid")
+  # A signal between a fork and its PID assignment leaves the job only in the job table;
+  # an orphaned timer would hold the caller's captured streams until it expires.
+  listed="$(jobs -p)"
+  [ -z "$listed" ] || mapfile -t -O "${#pids[@]}" pids <<<"$listed"
+  for pid in "${pids[@]}"; do
     [ -z "$pid" ] || { kill -KILL -- "-$pid" >/dev/null 2>&1 || true; wait "$pid" >/dev/null 2>&1 || true; }
   done
 }

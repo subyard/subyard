@@ -407,6 +407,8 @@ func TestProcessCrashRegisteredIdentityBoundary(t *testing.T) {
 		{"VM foreign clock at last row", crashFamilyRegisteredVM, "row/guest-tmp-v3.yard.default/verified", "volatile.vm.rtc_adjustment", "01"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// Each case owns its root and writer processes.
+			t.Parallel()
 			f := registeredCrashFamily(test.family)(t)
 			crashChild(t, f, test.cut, false, true)
 			original := registeredCrashFixtureAt(t, f.root, false, test.family)

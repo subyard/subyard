@@ -1251,7 +1251,9 @@ The Release workflow retains the compatibility check's output with its other fai
 
 ### Legacy upgrades
 
-Direct updates, the installer over an existing installation and offline update require installed
+Current code carries migrations only for direct updates from the anchor release
+[`UpdateAnchorVersion`](../internal/adapters/releaseruntime/source_policy.go) (v0.28.0) or newer;
+older sources must first take the hop below. Direct updates, the installer over an existing installation and offline update require installed
 **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0 refuse before any change and print
 `yard update --version 0.28.1 && yard update`: the hop is the v0.28.1 fix release, because the
 anchor itself can stop with a running VM yard (see below). Rollback targets below v0.28.0 refuse. The
@@ -2487,6 +2489,10 @@ declared hook for its native compare-and-swap check before effects. It is not a 
 and must not fingerprint credentials, protected contents or secret values. Genuinely unavailable
 observations may resolve within the explicitly approved conditional hook and root scope; this
 does not authorize additional hook paths or project roots.
+A hook exits nonzero only when its pass failed or its state is undetermined. Retained state
+that the owner accepts is not a failure; the owner's status command reports it. A failed
+hook during release activation names the yard and the fixed failure class (unsuccessful
+exit, timeout, cancellation or unavailable execution) and never includes hook output.
 One successful, verified hook invocation satisfies its prepared operation, including when
 integration repair runs it before committing ownership. Repeated internal calls still verify
 captured inputs; a new explicit init prepares a new plan and retries the hooks.

@@ -1,10 +1,12 @@
 import copy
+import itertools
 import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -563,7 +565,8 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual([], report["warnings"])
         self.assertEqual([{"projectId": "sample-id", "path": str(self.root), "groupId": group_id,
                            "repoId": None, "removedProject": True,
-                           "reason": "project group removal is pending", "nextAction": "Retry Orca sync"}],
+                           "reason": "project group removal is pending", "nextAction": "Retry Orca sync",
+                       "retention": "pending"}],
                          report["cleanup"])
         self.assertEqual(before, self.sidecar())
         self.assertTrue(all(method in ("repo.list", "projectGroup.list", "folderWorkspace.list")
@@ -701,7 +704,7 @@ class ReconcileTests(unittest.TestCase):
         init_git(self.root / "nested")
         self.assertTrue(self.run_sync()["ready"])
         original, held = copy.deepcopy(self.rpc.repos)
-        self.rpc.snapshots = [{"worktree": held["id"] + "::/saved", "tabs": [{"id": "saved"}]}]
+        self.hold_with_ambiguous_terminal(held)
         shutil.rmtree(self.root.parent)
         self.assertFalse(self.run_sync()["ready"])
         self.assertEqual(original["id"], self.sidecar()["projects"]["sample-id"]
@@ -709,6 +712,7 @@ class ReconcileTests(unittest.TestCase):
         replacement = dict(original, id="delayed-replacement", projectGroupId=None)
         self.rpc.repos.append(replacement)
         self.rpc.snapshots.clear()
+        self.rpc.terminals.clear()
         for apply in (True, False, True):
             report = self.run_sync(apply=apply)
             self.assertFalse(report["ready"])
@@ -788,38 +792,36 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(groups, self.rpc.groups)
         self.assertFalse(any(method == "projectGroup.delete" for method, _ in self.rpc.calls))
 
+    def hold_with_ambiguous_terminal(self, repo):
+        # A saved PTY attributed to another record makes the close undetermined.
+        self.rpc.snapshots = [{"worktree": repo["id"] + "::/saved",
+                               "tabs": [{"id": "saved", "ptyId": "shared"}]}]
+        self.rpc.terminals = [{"ptyId": "shared", "worktreeId": "other::/other", "handle": "other",
+                               "executionHostId": "local", "connected": True}]
+
     def test_empty_group_does_not_erase_retained_removed_project_identity(self):
         self.assertTrue(self.run_sync()["ready"])
         repo = self.rpc.repos[0]
         repo["projectGroupId"] = None
-        self.rpc.snapshots = [{"worktree": repo["id"] + "::/saved", "tabs": [{"id": "saved"}]}]
+        self.hold_with_ambiguous_terminal(repo)
         shutil.rmtree(self.root.parent)
         report = self.run_sync()
         self.assertFalse(report["ready"])
+        self.assertTrue(report["settled"])
         self.assertEqual([], self.rpc.groups)
         self.assertEqual(repo["id"], self.sidecar()["projects"]["sample-id"]
                          ["confirmed_repos"][repo["path"]])
-        self.assertEqual("session tabs are retained", report["cleanup"][0]["reason"])
+        self.assertEqual("session identity is ambiguous; repository is retained", report["cleanup"][0]["reason"])
+        self.assertEqual("protected", report["cleanup"][0]["retention"])
+        self.assertEqual(1, len(self.rpc.snapshots[0]["tabs"]))
+        self.assertFalse(any(method in ("session.tabs.close", "terminal.close", "terminal.stopExact")
+                             for method, _ in self.rpc.calls))
         before = self.sidecar()
         self.assertFalse(self.run_sync(apply=False)["ready"])
         self.assertEqual(before, self.sidecar())
-        self.rpc.snapshots.clear()
-        self.assertTrue(self.run_sync()["ready"])
-        self.assertEqual({}, self.sidecar()["projects"])
-
-    def test_removed_project_without_saved_tabs_keeps_live_orphan_terminal(self):
-        self.assertTrue(self.run_sync()["ready"])
-        repo = self.rpc.repos[0]
-        repo["projectGroupId"] = None
-        shutil.rmtree(self.root.parent)
-        self.rpc.terminals = [{"ptyId": "live", "worktreeId": repo["id"] + "::" + repo["path"],
-                               "executionHostId": "local", "connected": True}]
-        report = self.run_sync()
-        self.assertFalse(report["ready"])
-        self.assertIn(repo, self.rpc.repos)
-        self.assertEqual("live terminals are retained", report["cleanup"][0]["reason"])
         self.rpc.terminals.clear()
         self.assertTrue(self.run_sync()["ready"])
+        self.assertEqual({}, self.sidecar()["projects"])
 
     def test_removed_confirmed_identity_excludes_replacement_foreign_and_remote(self):
         for changes, reason in (({"id": "replacement"}, "repository identity changed"),
@@ -1024,7 +1026,8 @@ class ReconcileTests(unittest.TestCase):
                 report = self.run_sync()
                 self.assertTrue(report["ready"], report)
                 self.assertIn(repo, self.rpc.repos)
-                self.assertFalse(any(method == "terminal.list" for method, _ in self.rpc.calls))
+                self.assertFalse(any(method in ("session.tabs.close", "terminal.close", "terminal.stopExact")
+                                     for method, _ in self.rpc.calls))
 
     def test_cleanup_retains_stale_layout_for_a_different_worktree(self):
         repo = self.prepare_missing_repo()
@@ -1204,10 +1207,15 @@ class ReconcileTests(unittest.TestCase):
 
         self.rpc.call = refused
         report = self.run_sync()
-        self.assertFalse(report["ready"], report)
+        item = next(item for item in report["cleanup"] if item["repoId"] == repo["id"])
+        # A definitive refusal keeps the record protected and asks for a manual close.
+        self.assertEqual(("Orca refused a session close; repository is retained", "protected", True),
+                         (item["reason"], item["retention"], item["attention"]))
+        self.assertIn("by hand", item["nextAction"])
         self.assertIn(repo, self.rpc.repos)
         self.assertTrue(self.rpc.snapshots[0]["tabs"])
         self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
+        self.assertEqual(1, sum(method == "session.tabs.close" for method, _ in self.rpc.calls))
 
     def test_stale_layout_close_keeps_repo_if_followup_tab_identity_is_invalid(self):
         repo = self.prepare_missing_repo()
@@ -1219,9 +1227,11 @@ class ReconcileTests(unittest.TestCase):
 
         self.rpc.after = malformed
         report = self.run_sync()
-        self.assertFalse(report["ready"], report)
+        # A tab without identity cannot be addressed exactly: the record stays protected.
         self.assertIn(repo, self.rpc.repos)
-        self.assertIn("Orca returned an invalid session tab identity; cleanup skipped", report["errors"])
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == repo["id"]))
         self.assertFalse(any(method == "repo.rm" for method, _ in self.rpc.calls))
 
     def test_timed_out_saved_tab_read_retries_once_and_positive_result_preserves_repo(self):
@@ -1386,7 +1396,7 @@ class ReconcileTests(unittest.TestCase):
         self.rpc.snapshots = []
         def reappear(method, params):
             if method == "session.tabs.listAll":
-                (self.root / "gone").mkdir()
+                (self.root / "gone").mkdir(exist_ok=True)
         self.rpc.after = reappear
         self.assertFalse(self.run_sync()["ready"])
         self.assertEqual(2, len(self.rpc.repos))
@@ -1809,3 +1819,864 @@ class ReconcileTests(unittest.TestCase):
             return original(method, params, **kwargs)
         self.rpc.call = invalid
         self.assertFalse(self.run_sync()["ready"])
+
+
+class RemovedProjectSessionTests(unittest.TestCase):
+    """A project whose whole workspace directory is absent was removed from Subyard."""
+
+    def setUp(self):
+        from discovery import discover
+        from reconcile import reconcile
+        from transport import RpcError
+        self.discover = discover
+        self.reconcile = reconcile
+        self.error = RpcError
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self.tmp.cleanup)
+        self.workspaces = Path(self.tmp.name) / "workspaces"
+        self.state = Path(self.tmp.name) / "state"
+        self.root = project(self.workspaces)
+        init_git(self.root / "linked")
+        self.other_root = project(self.workspaces, "other-id", "Other")
+        self.rpc = Catalog()
+        self.assertTrue(self.run_sync()["ready"])
+        self.repo = self.repo_at(self.root)
+        self.linked = self.repo_at(self.root / "linked")
+        self.other = self.repo_at(self.other_root)
+        # A foreign record whose ID extends this repository ID must never match it.
+        self.neighbour = dict(self.other, id=self.repo["id"] + "0", path=str(self.other_root) + "-neighbour",
+                              projectGroupId=None)
+        self.rpc.repos.append(self.neighbour)
+
+    def run_sync(self, apply=True, scan=None):
+        return self.reconcile(scan or self.discover(self.workspaces), self.rpc, self.state,
+                              apply=apply, host_name="owner-host")
+
+    def repo_at(self, path):
+        return next(repo for repo in self.rpc.repos if repo["path"] == str(path))
+
+    def terminal(self, repo, pty, handle, worktree=None):
+        return {"ptyId": pty, "worktreeId": worktree or repo["id"] + "::" + repo["path"], "handle": handle,
+                "executionHostId": "local", "connected": True}
+
+    def sessions(self):
+        self.rpc.snapshots = [
+            {"worktree": self.repo["id"] + "::" + self.repo["path"],
+             "tabs": [{"id": "agent", "type": "terminal", "ptyId": "agent-pty", "sessionId": "s"},
+                      {"id": "split", "parentTabId": "agent", "ptyId": "split-pty"}]},
+            # A saved linked worktree of the same record is closed too.
+            {"worktree": self.repo["id"] + "::/srv/linked-elsewhere", "tabs": [{"id": "linked-tab"}]},
+            {"worktree": self.other["id"] + "::" + self.other["path"], "tabs": [{"id": "other-tab"}]},
+            {"worktree": self.neighbour["id"] + "::" + self.neighbour["path"], "tabs": [{"id": "neighbour-tab"}]},
+        ]
+        self.rpc.terminals = [
+            self.terminal(self.repo, "orphan-pty", "orphan"),
+            self.terminal(self.other, "other-pty", "other"),
+            self.terminal(self.neighbour, "neighbour-pty", "neighbour"),
+        ]
+
+    def closes(self):
+        return [(method, params) for method, params in self.rpc.calls
+                if method in ("session.tabs.close", "terminal.close", "terminal.stopExact")]
+
+    def assert_untouched(self):
+        tabs = {tab["id"] for item in self.rpc.snapshots for tab in item["tabs"]}
+        self.assertTrue({"other-tab", "neighbour-tab"} <= tabs)
+        self.assertEqual({"other", "neighbour"} & {t["handle"] for t in self.rpc.terminals}, {"other", "neighbour"})
+        self.assertIn(self.other, self.rpc.repos)
+        self.assertIn(self.neighbour, self.rpc.repos)
+
+    def test_whole_directory_absent_closes_exact_sessions_and_deletes_record(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        status = self.run_sync(apply=False)
+        self.assertFalse(status["settled"])
+        self.assertTrue(all(item["retention"] == "pending" for item in status["cleanup"]), status["cleanup"])
+        self.assertEqual([], self.closes())
+        report = self.run_sync()
+        self.assertTrue(report["ready"], report)
+        self.assertTrue(report["settled"])
+        # The live orphan PTY is stopped through the server-side worktree fence first.
+        self.assertEqual([("terminal.stopExact", {"worktree": "id:" + self.repo["id"] + "::" + self.repo["path"],
+                                                 "expectedPtyIds": ["orphan-pty"], "targetOnly": True}),
+                          ("session.tabs.close", {"worktree": "id:" + self.repo["id"] + "::/srv/linked-elsewhere",
+                                                 "tabId": "linked-tab", "reason": "user"}),
+                          ("session.tabs.close", {"worktree": "id:" + self.repo["id"] + "::" + self.repo["path"],
+                                                 "tabId": "agent", "reason": "user"})], self.closes())
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertNotIn(self.linked["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertNotIn("sample-id", self.sidecar()["projects"])
+        self.assert_untouched()
+
+    def sidecar(self):
+        return json.loads((self.state / "subyard-registration.json").read_text())
+
+    def assert_protected_without_close(self, report):
+        self.assertEqual([], self.closes())
+        self.assertIn(self.repo, self.rpc.repos)
+        self.assertTrue(report["cleanup"])
+        self.assertTrue(all(item["retention"] == "protected" for item in report["cleanup"]), report["cleanup"])
+        self.assertTrue(report["settled"], report)
+        self.assert_untouched()
+
+    def test_only_missing_checkout_of_active_project_keeps_sessions(self):
+        self.sessions()
+        shutil.rmtree(self.root)
+        self.assert_protected_without_close(self.run_sync())
+
+    def test_remaining_project_directory_keeps_sessions(self):
+        # A bind mountpoint or other project files at the address are not a removal.
+        self.sessions()
+        shutil.rmtree(self.root)
+        (self.root.parent / ".subyard-meta.json").unlink()
+        report = self.run_sync()
+        self.assertFalse(report["ready"])
+        self.assertTrue(all(item["removedProject"] for item in report["cleanup"]))
+        self.assert_protected_without_close(report)
+
+    def test_changed_workspace_boundary_or_scan_error_closes_nothing(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        changed = self.discover(self.workspaces)
+        changed.identity = (0, 0)
+        failed = self.discover(self.workspaces)
+        failed.errors.append("Directory scan failed: fixture")
+        for scan in (changed, failed):
+            report = self.run_sync(scan=scan)
+            self.assertFalse(report["settled"])
+            self.assertTrue(all(item["retention"] == "undetermined" for item in report["cleanup"]), report["cleanup"])
+            self.assertEqual([], self.closes())
+            self.assertIn(self.repo, self.rpc.repos)
+            self.assert_untouched()
+
+    def test_recreated_project_directory_before_close_refuses_send(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+
+        def recreate(method, params):
+            if method == "terminal.list" and not self.root.parent.exists():
+                self.root.parent.mkdir()
+        self.rpc.after = recreate
+        report = self.run_sync()
+        # Files at the address again mean the project is not removed: protected, nothing sent.
+        self.assertEqual([], self.closes())
+        self.assertIn(self.repo, self.rpc.repos)
+        self.assertEqual("protected", next(item for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"])["retention"])
+
+    def test_unknown_close_reply_uses_readback(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def lost_reply(method, params=None, **kwargs):
+            result = original(method, params, **kwargs)
+            if method in ("session.tabs.close", "terminal.close"):
+                raise self.error("lost reply", unknown=True)
+            return result
+        self.rpc.call = lost_reply
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+
+    def test_unresolved_terminal_close_keeps_record(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def ignored(method, params=None, **kwargs):
+            if method == "terminal.stopExact":
+                raise self.error("Orca runtime rejected terminal.stopExact", rejected=True)
+            if method == "terminal.close":
+                raise self.error("lost reply", unknown=True)
+            return original(method, params, **kwargs)
+        self.rpc.call = ignored
+        import time
+        report = self.reconcile(self.discover(self.workspaces), self.rpc, self.state,
+                                deadline=time.monotonic() + 1.5, host_name="owner-host")
+        self.assertFalse(report["settled"])
+        self.assertIn("session cleanup is unconfirmed", " ".join(report["errors"]))
+        self.assertIn(self.repo, self.rpc.repos)
+        self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
+
+    def test_pty_attributed_to_another_record_closes_nothing(self):
+        self.sessions()
+        self.rpc.terminals.append(self.terminal(self.other, "agent-pty", "foreign"))
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertTrue(report["settled"])
+        self.assertEqual("protected", next(item for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"])["retention"])
+        self.assertFalse(any(params["worktree"].startswith("id:" + self.repo["id"] + "::")
+                             for method, params in self.closes() if method == "session.tabs.close"))
+        self.assertIn("foreign", {t["handle"] for t in self.rpc.terminals})
+        self.assertIn(self.repo, self.rpc.repos)
+
+    def test_unvisited_record_after_cold_session_read_is_never_protected(self):
+        # Outcomes are keyed by repository ID: a sibling whose path prefixes another's never inherits it.
+        shutil.rmtree(self.root.parent)
+        self.rpc.repos.sort(key=lambda repo: repo["path"] != self.linked["path"])
+        original = self.rpc.call
+        reads = 0
+
+        def cold(method, params=None, **kwargs):
+            nonlocal reads
+            if method == "session.tabs.listAll":
+                reads += 1
+                if reads == 1:
+                    raise self.error("cold read timed out", timed_out=True)
+                return {"snapshots": [{"worktree": self.linked["id"] + "::/saved", "tabs": [{"id": "t"}]}]}
+            return original(method, params, **kwargs)
+        self.rpc.call = cold
+        report = self.run_sync()
+        self.assertFalse(report["settled"])
+        reasons = {item["path"]: (item["reason"], item["retention"]) for item in report["cleanup"]}
+        self.assertEqual(("cleanup safety checks are incomplete; repository is retained", "undetermined"),
+                         reasons[self.repo["path"]])
+        self.assertEqual([], self.closes())
+        self.assertIn(self.repo, self.rpc.repos)
+
+    def test_exhausted_budget_never_settles(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        report = self.reconcile(self.discover(self.workspaces), self.rpc, self.state,
+                                deadline=0, host_name="owner-host")
+        self.assertFalse(report["settled"])
+        self.assertFalse(report["ready"])
+        self.assertIn(self.repo, self.rpc.repos)
+
+    def test_retention_classes(self):
+        from reconcile import RemovalEvidence, retention
+        scan = self.discover(self.workspaces)
+        evidence = RemovalEvidence(scan, [])
+        root = str(self.root)
+        for reason, removed, expected in (
+                ("repository identity changed", True, "protected"),
+                ("repository belongs to another execution host", True, "protected"),
+                ("repository belongs to another project group", True, "protected"),
+                ("legacy repository identity is unconfirmed", True, "protected"),
+                ("repository path changed", True, "protected"),
+                ("session tabs are retained", False, "protected"),
+                ("live terminals are retained", False, "protected"),
+                ("session tabs are retained", True, "protected"),
+                ("project root is missing; repository is retained", False, "protected"),
+                ("repository removal is pending", True, "pending"),
+                ("project group removal is pending", True, "pending"),
+                ("workspace absence is unverified", True, "undetermined"),
+                ("session inventory is unavailable; cleanup is retained", True, "undetermined"),
+                ("cleanup safety checks are incomplete; repository is retained", True, "undetermined"),
+                ("repository creation identity is pending", True, "undetermined"),
+                ("an unknown future reason", True, "undetermined")):
+            self.assertEqual(expected, retention("sample-id", root, removed, reason, evidence), reason)
+        shutil.rmtree(self.root.parent)
+        self.assertEqual("pending", retention("sample-id", root, True, "session tabs are retained", evidence))
+        self.assertEqual("undetermined", retention("sample-id", root, True, "session tabs are retained",
+                                                   RemovalEvidence(scan, ["scan error"])))
+
+    def during_send(self, method, effect):
+        """Run effect(nested_method) after each read made inside method's pre-send check."""
+        original = self.rpc.call
+
+        def call(name, params=None, before_send=None):
+            if before_send is None or name != method:
+                return original(name, params, before_send=before_send)
+
+            def checked(runtime_id):
+                previous = self.rpc.after
+                self.rpc.after = lambda nested, _: effect(nested)
+                try:
+                    before_send(runtime_id)
+                finally:
+                    self.rpc.after = previous
+            return original(name, params, before_send=checked)
+        self.rpc.call = call
+
+    def test_address_reappearing_during_any_pre_send_read_refuses_send(self):
+        for method, read in (("session.tabs.close", "session.tabs.listAll"), ("session.tabs.close", "terminal.list"),
+                             ("session.tabs.close", "repo.list"), ("terminal.stopExact", "terminal.list"),
+                             ("terminal.stopExact", "session.tabs.listAll")):
+            with self.subTest(method=method, read=read):
+                self.setUp()
+                self.sessions()
+                if method == "terminal.stopExact":
+                    self.rpc.snapshots = [item for item in self.rpc.snapshots
+                                          if not item["worktree"].startswith(self.repo["id"] + "::")]
+                shutil.rmtree(self.root.parent)
+                self.during_send(method, lambda nested, read=read: nested == read
+                                 and self.root.parent.mkdir(exist_ok=True))
+                report = self.run_sync()
+                self.assertFalse(report["settled"])
+                self.assertFalse(any(name == method for name, _ in self.closes()), self.closes())
+                self.assertIn(self.repo, self.rpc.repos)
+
+    def test_pty_attributed_elsewhere_before_a_close_refuses_it(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        foreign = self.terminal(self.other, "split-pty", "foreign")
+
+        def appear(nested):
+            if nested == "session.tabs.listAll" and foreign not in self.rpc.terminals:
+                self.rpc.terminals.append(foreign)
+        self.during_send("session.tabs.close", appear)
+        report = self.run_sync()
+        self.assertTrue(report["settled"])
+        self.assertFalse(any(method == "session.tabs.close" for method, _ in self.closes()))
+        self.assertEqual("session identity is ambiguous; repository is retained",
+                         next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])["reason"])
+        self.assertIn("foreign", {t["handle"] for t in self.rpc.terminals})
+
+    def test_own_terminal_whose_pty_is_saved_by_another_record_closes_nothing(self):
+        self.sessions()
+        self.rpc.snapshots[2]["tabs"][0]["ptyId"] = "orphan-pty"
+        shutil.rmtree(self.root.parent)
+        for apply in (False, True):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                             (item["reason"], item["retention"]))
+            self.assertIn("shares with another repository", item["nextAction"])
+        self.assertTrue(report["settled"])
+        self.assertEqual([], self.closes())
+        self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
+
+    def test_remote_terminal_sharing_a_saved_pty_protects_the_record(self):
+        self.sessions()
+        remote = dict(self.terminal(self.repo, "agent-pty", "remote"), executionHostId="ssh-1")
+        self.rpc.terminals.append(remote)
+        shutil.rmtree(self.root.parent)
+        for apply in (False, True):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual("protected", item["retention"])
+        self.assertEqual([], self.closes())
+
+    def test_unrelated_rootless_project_does_not_block_removed_cleanup(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        shutil.rmtree(self.other_root)
+        report = self.run_sync()
+        self.assertTrue(report["settled"], report)
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+        other = next(item for item in report["cleanup"] if item["repoId"] == self.other["id"])
+        self.assertEqual(("project root is missing; repository is retained", "protected", False),
+                         (other["reason"], other["retention"], other["removedProject"]))
+        self.assert_untouched()
+
+    def test_close_readback_polls_until_teardown_finishes(self):
+        import reconcile
+        self.sessions()
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+        closing = []
+        reads = 0
+
+        def slow_teardown(method, params=None, **kwargs):
+            nonlocal reads
+            if method == "session.tabs.close":
+                snapshot = next(item for item in self.rpc.snapshots if item["worktree"] == params["worktree"][3:])
+                kept = copy.deepcopy(snapshot["tabs"])
+                result = original(method, params, **kwargs)
+                closing.append((snapshot, snapshot["tabs"]))
+                snapshot["tabs"] = kept
+                reads = 0
+                return result
+            if method == "session.tabs.listAll" and closing:
+                reads += 1
+                if reads == 5:
+                    for snapshot, tabs in closing:
+                        snapshot["tabs"] = tabs
+                    closing.clear()
+            return original(method, params, **kwargs)
+        self.rpc.call = slow_teardown
+        with mock.patch.object(reconcile, "READBACK_INTERVAL", 0.01), \
+                mock.patch.object(reconcile, "READBACK_MAX_INTERVAL", 0.02):
+            report = self.run_sync()
+        self.assertTrue(report["settled"], report)
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+
+    def test_incomplete_pass_of_an_active_project_never_settles(self):
+        init_git(self.root / "second")
+        self.assertTrue(self.run_sync()["ready"])
+        second = self.repo_at(self.root / "second")
+        shutil.rmtree(self.root / "linked")
+        shutil.rmtree(self.root / "second")
+        self.rpc.repos.sort(key=lambda repo: repo["path"] != self.linked["path"])
+        original = self.rpc.call
+        reads = 0
+
+        def cold(method, params=None, **kwargs):
+            nonlocal reads
+            if method == "session.tabs.listAll":
+                reads += 1
+                if reads == 1:
+                    raise self.error("cold read timed out", timed_out=True)
+                return {"snapshots": [{"worktree": self.linked["id"] + "::/saved", "tabs": [{"id": "t"}]}]}
+            return original(method, params, **kwargs)
+        self.rpc.call = cold
+        report = self.run_sync()
+        item = next(item for item in report["cleanup"] if item["repoId"] == second["id"])
+        self.assertEqual(("undetermined", False), (item["retention"], item["removedProject"]))
+        self.assertFalse(report["settled"])
+
+
+    def test_attribution_or_shared_pty_changing_during_pre_send_reads_refuses_send(self):
+        def reattribute(nested):
+            if nested == "session.tabs.listAll":
+                for terminal in self.rpc.terminals:
+                    if terminal["handle"] == "orphan":
+                        terminal["worktreeId"] = self.other["id"] + "::" + self.other["path"]
+        for method, effect in (("terminal.stopExact", reattribute), ("terminal.close", reattribute)):
+            with self.subTest(method=method):
+                self.setUp()
+                self.sessions()
+                self.rpc.snapshots = [item for item in self.rpc.snapshots
+                                      if not item["worktree"].startswith(self.repo["id"] + "::")]
+                shutil.rmtree(self.root.parent)
+                original = self.rpc.call
+                if method == "terminal.close":
+                    def refuse_stop(name, params=None, **kwargs):
+                        if name == "terminal.stopExact":
+                            raise self.error("Orca runtime rejected terminal.stopExact", rejected=True)
+                        return original(name, params, **kwargs)
+                    self.rpc.call = refuse_stop
+                self.during_send(method, effect)
+                self.run_sync()
+                # The re-attributed terminal is no longer this record's; it is never addressed.
+                self.assertFalse(any(name == method for name, _ in self.closes()), self.closes())
+                self.assertIn("orphan", {t["handle"] for t in self.rpc.terminals})
+                self.assertNotIn("orphan-pty", self.rpc.killed)
+
+    def test_foreign_shared_pty_added_during_catalog_read_refuses_tab_close(self):
+        self.sessions()
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+        shutil.rmtree(self.root.parent)
+        foreign = self.terminal(self.other, "split-pty", "foreign")
+        self.during_send("session.tabs.close", lambda nested: nested == "repo.list"
+                         and foreign not in self.rpc.terminals and self.rpc.terminals.append(foreign))
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == self.repo["id"]))
+
+    def test_linked_worktree_tab_inside_an_active_project_is_closed_with_its_record(self):
+        # The tab belongs to the removed record by repository ID, wherever its path lives.
+        self.sessions()
+        inside = self.repo["id"] + "::" + str(self.other_root / "linked-checkout")
+        self.rpc.snapshots.append({"worktree": inside, "tabs": [{"id": "inside-tab"}]})
+        shutil.rmtree(self.root.parent)
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertIn(("session.tabs.close", {"worktree": "id:" + inside, "tabId": "inside-tab", "reason": "user"}),
+                      self.closes())
+        self.assert_untouched()
+
+    def test_terminal_rows_sharing_a_pty_across_records_protect_without_any_send(self):
+        # Astra r3: no saved tabs; two local live rows share one PTY across a removed and an active record.
+        self.rpc.snapshots = []
+        self.rpc.terminals = [self.terminal(self.repo, "shared", "h-removed"),
+                              self.terminal(self.other, "shared", "h-active")]
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(set(), self.rpc.killed)
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == self.repo["id"]))
+        self.assertTrue(report["settled"])
+
+    def test_definitive_refusals_protect_and_lost_replies_stay_undetermined(self):
+        import time
+        for case in ("rejected", "refused-reply", "lost"):
+            with self.subTest(case=case):
+                self.setUp()
+                self.sessions()
+                self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+                shutil.rmtree(self.root.parent)
+                original = self.rpc.call
+
+                def close(method, params=None, before_send=None):
+                    if method != "session.tabs.close":
+                        return original(method, params, before_send=before_send)
+                    before_send(self.rpc.runtime_id)
+                    self.rpc.calls.append((method, params))
+                    if case == "rejected":
+                        raise self.error("Orca runtime rejected session.tabs.close", rejected=True)
+                    if case == "refused-reply":
+                        return {"closed": True, "refused": True, "refusalReason": "live-host-pty"}
+                    raise self.error("lost reply", unknown=True, timed_out=True)
+                self.rpc.call = close
+                report = self.reconcile(self.discover(self.workspaces), self.rpc, self.state,
+                                        deadline=time.monotonic() + 1.5, host_name="owner-host")
+                item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+                self.assertIn(self.repo, self.rpc.repos)
+                self.assertEqual(1, sum(method == "session.tabs.close" for method, _ in self.rpc.calls))
+                if case == "lost":
+                    self.assertEqual("undetermined", item["retention"])
+                    self.assertFalse(report["settled"])
+                else:
+                    self.assertEqual(("protected", True), (item["retention"], item.get("attention")))
+                    self.assertIn("by hand", item["nextAction"])
+                    self.assertTrue(report["settled"], report)
+
+    def fail_pre_send_read(self, write_method, read_method="terminal.list", rejected=False):
+        """Fail one read inside write_method's pre-send check: a cold, incomplete or rejected read."""
+        original = self.rpc.call
+        state = {"armed": False, "done": False}
+
+        def call(method, params=None, before_send=None):
+            if method == write_method and not state["done"]:
+                state["armed"] = True
+            if method == read_method and state["armed"] and not state["done"]:
+                state["armed"], state["done"] = False, True
+                if rejected:
+                    raise self.error("Orca runtime rejected " + read_method, rejected=True)
+                raise self.error("Orca runtime request timed out: " + read_method, timed_out=True)
+            return original(method, params, before_send=before_send)
+        self.rpc.call = call
+
+    def test_pre_send_failure_is_neither_a_refusal_nor_a_fallback(self):
+        for method, rejected in itertools.product(("session.tabs.close", "terminal.stopExact"), (False, True)):
+            with self.subTest(method=method, rejected_read=rejected):
+                self.setUp()
+                self.sessions()
+                if method == "session.tabs.close":
+                    self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+                shutil.rmtree(self.root.parent)
+                self.fail_pre_send_read(method, rejected=rejected)
+                report = self.run_sync()
+                item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+                # Nothing was sent, so this pass is undetermined: no protection, no attention,
+                # and no unfenced terminal.close in place of the failed fenced stop.
+                self.assertEqual("undetermined", item["retention"])
+                self.assertNotIn("attention", item)
+                self.assertFalse(report["settled"])
+                self.assertFalse(any(name in ("terminal.close", method) for name, _ in self.closes()),
+                                 self.closes())
+                self.assertIn(self.repo, self.rpc.repos)
+
+    def test_record_turning_protected_just_before_removal_is_kept_and_the_pass_continues(self):
+        self.sessions()
+        shutil.rmtree(self.root.parent)
+        state = {"reads": 0, "done": False}
+
+        def after(method, params):
+            empty = (not any(t["worktreeId"].startswith(self.repo["id"] + "::") for t in self.rpc.terminals)
+                     and not any(i["worktree"].startswith(self.repo["id"] + "::") and i["tabs"]
+                                 for i in self.rpc.snapshots))
+            if method == "session.tabs.listAll" and empty and not state["done"]:
+                state["reads"] += 1
+                if state["reads"] == 3:
+                    # Inside repo.rm's pre-send read: a PTY now shared with another record appears.
+                    state["done"] = True
+                    self.rpc.terminals += [self.terminal(self.repo, "shared", "h-a"),
+                                           self.terminal(self.other, "shared", "h-b")]
+        self.rpc.after = after
+        report = self.run_sync()
+        self.assertTrue(state["done"])
+        self.assertEqual([], report["errors"])
+        self.assertEqual(("session identity is ambiguous; repository is retained", "protected"),
+                         next((item["reason"], item["retention"]) for item in report["cleanup"]
+                              if item["repoId"] == self.repo["id"]))
+        self.assertIn(self.repo, self.rpc.repos)
+        self.assertNotIn("shared", self.rpc.killed)
+        self.assertNotIn(self.linked["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertTrue(report["settled"], report)
+
+    def test_identified_and_unidentified_tabs_of_one_worktree_protect_without_failing(self):
+        from reconcile import _ownership
+        snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],
+                      "tabs": [{"id": "t1"}, {"title": "no identity"}]}]
+        closable, tabs, _ = _ownership(self.repo, self.rpc.repos, snapshots, [])
+        self.assertFalse(closable)
+        self.assertEqual(2, len(tabs))
+        self.rpc.snapshots = snapshots
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], report["errors"])
+        self.assertEqual([], self.closes())
+        self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"]))
+
+    def refuse_tab_closes(self):
+        original = self.rpc.call
+
+        def close(method, params=None, before_send=None):
+            if method != "session.tabs.close":
+                return original(method, params, before_send=before_send)
+            before_send(self.rpc.runtime_id)
+            self.rpc.calls.append((method, params))
+            return {"closed": True, "refused": True, "refusalReason": "live-host-pty"}
+        self.rpc.call = close
+        return original
+
+    def test_refused_close_stays_protected_across_passes_until_its_target_is_gone(self):
+        self.sessions()
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+        shutil.rmtree(self.root.parent)
+        original = self.refuse_tab_closes()
+        first = self.run_sync()
+        sent = len(self.closes())
+        self.assertEqual(1, sent)
+        for apply in (False, True, False):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual(("Orca refused a session close; repository is retained", "protected", True),
+                             (item["reason"], item["retention"], item.get("attention")), apply)
+            self.assertIn("by hand", item["nextAction"])
+            self.assertTrue(report["settled"], report)
+            self.assertEqual(sent, len(self.closes()), "a refused close was sent again")
+        self.assertTrue(first["settled"])
+        refused = self.sidecar()["projects"]["sample-id"]["refused_closes"][self.repo["id"]]
+        self.assertEqual([["tab", self.repo["id"] + "::/srv/linked-elsewhere", "linked-tab"]], refused)
+        # Once the refused tab is gone (closed in Orca by hand), the marker clears and cleanup completes.
+        self.rpc.call = original
+        for snapshot in self.rpc.snapshots:
+            snapshot["tabs"] = [tab for tab in snapshot["tabs"] if tab["id"] != "linked-tab"]
+        report = self.run_sync()
+        self.assertTrue(report["settled"], report)
+        self.assertNotIn(self.repo["id"], {repo["id"] for repo in self.rpc.repos})
+        self.assertNotIn("sample-id", self.sidecar()["projects"])
+
+    def test_refused_close_marker_clears_when_its_target_is_gone_but_the_record_remains(self):
+        self.sessions()
+        self.rpc.terminals = [t for t in self.rpc.terminals if t["handle"] != "orphan"]
+        shutil.rmtree(self.root.parent)
+        self.refuse_tab_closes()
+        self.run_sync()
+        for snapshot in self.rpc.snapshots:
+            snapshot["tabs"] = [tab for tab in snapshot["tabs"] if tab["id"] != "linked-tab"]
+        report = self.run_sync()
+        # The next target is refused too: only it is remembered now.
+        self.assertEqual([["tab", self.repo["id"] + "::" + self.repo["path"], "agent"]],
+                         self.sidecar()["projects"]["sample-id"]["refused_closes"][self.repo["id"]])
+        self.assertTrue(report["settled"])
+
+    def test_state_without_refusals_loads_and_malformed_refusals_are_rejected(self):
+        from state import State, StateError
+        import time
+        path = self.state / "subyard-registration.json"
+        data = self.sidecar()
+        self.assertNotIn("refused_closes", data["projects"]["sample-id"])
+        with State(self.state, False, time.monotonic() + 5):
+            pass
+        for value in ({"x": []}, {"x": [["tab", "w"]]}, {"": [["tab", "w", "t"]]}, []):
+            data["projects"]["sample-id"]["refused_closes"] = value
+            path.write_text(json.dumps(data))
+            with self.assertRaises(StateError):
+                with State(self.state, False, time.monotonic() + 5):
+                    pass
+
+    def test_foreign_tab_without_identity_still_shares_its_pty(self):
+        self.rpc.snapshots = [
+            {"worktree": self.repo["id"] + "::" + self.repo["path"],
+             "tabs": [{"id": "mine", "type": "terminal", "ptyId": "shared"}]},
+            {"worktree": self.other["id"] + "::" + self.other["path"], "tabs": [{"type": "terminal", "ptyId": "shared"}]},
+        ]
+        self.rpc.terminals = [self.terminal(self.repo, "shared", "h")]
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(set(), self.rpc.killed)
+        self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"]))
+
+    def test_refused_fenced_stop_falls_back_to_the_handle_close_before_any_tab_close(self):
+        self.rpc.snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],
+                               "tabs": [{"id": "tab", "type": "terminal", "ptyId": "live"}]}]
+        self.rpc.terminals = [self.terminal(self.repo, "live", "h-live")]
+        shutil.rmtree(self.root.parent)
+        original = self.rpc.call
+
+        def refuse_stop(method, params=None, **kwargs):
+            if method == "terminal.stopExact":
+                raise self.error("Orca runtime rejected terminal.stopExact", rejected=True)
+            return original(method, params, **kwargs)
+        self.rpc.call = refuse_stop
+        self.assertTrue(self.run_sync()["settled"])
+        methods = [method for method, _ in self.closes()]
+        self.assertEqual(["terminal.close", "session.tabs.close"], methods)
+
+    def attempts(self, refuse):
+        """Record every destructive attempt in order; refuse(method, params) rejects definitively."""
+        original = self.rpc.call
+        attempted = []
+
+        def call(method, params=None, before_send=None):
+            if method in ("terminal.stopExact", "terminal.close", "session.tabs.close"):
+                attempted.append((method, params))
+                if refuse(method, params):
+                    if before_send:
+                        before_send(self.rpc.runtime_id)
+                    raise self.error("Orca runtime rejected " + method, rejected=True)
+            return original(method, params, before_send=before_send)
+        self.rpc.call = call
+        return attempted
+
+    def test_refused_stop_is_followed_directly_by_its_handle_close_with_two_live_ptys(self):
+        self.rpc.snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],
+                               "tabs": [{"id": "tab", "type": "terminal", "ptyId": "p"}]}]
+        self.rpc.terminals = [self.terminal(self.repo, "p", "h-p"), self.terminal(self.repo, "q", "h-q")]
+        shutil.rmtree(self.root.parent)
+        attempted = self.attempts(lambda method, params: method == "terminal.stopExact"
+                                  and params["expectedPtyIds"] == ["p"])
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertEqual([("terminal.stopExact", "p"), ("terminal.close", "h-p"), ("terminal.stopExact", "q"),
+                          ("session.tabs.close", "tab")],
+                         [(method, (params.get("expectedPtyIds") or [params.get("terminal") or params.get("tabId")])[0])
+                          for method, params in attempted])
+
+    def test_refused_terminal_close_persists_and_handle_turnover_resumes_with_one_resend(self):
+        self.rpc.snapshots = []
+        self.rpc.terminals = [self.terminal(self.repo, "p", "h-old")]
+        shutil.rmtree(self.root.parent)
+        attempted = self.attempts(lambda method, params: method in ("terminal.stopExact", "terminal.close"))
+        closes = lambda: [params["terminal"] for method, params in attempted if method == "terminal.close"]
+        refused = lambda: self.sidecar()["projects"]["sample-id"]["refused_closes"][self.repo["id"]]
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertEqual(["h-old"], closes())
+        self.assertEqual([["close", "h-old", "p"]], refused())
+        before = len(attempted)
+        for apply in (True, False, True):
+            report = self.run_sync(apply=apply)
+            item = next(item for item in report["cleanup"] if item["repoId"] == self.repo["id"])
+            self.assertEqual(("protected", True), (item["retention"], item.get("attention")))
+        self.assertEqual(before, len(attempted), "a refused terminal close was sent again")
+        # An Orca restart issues a new handle for the same PTY: the old marker no longer matches.
+        self.rpc.terminals = [self.terminal(self.repo, "p", "h-new")]
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertEqual(["h-old", "h-new"], closes())
+        self.assertEqual([["close", "h-new", "p"]], refused())
+        self.run_sync()
+        self.assertEqual(["h-old", "h-new"], closes())
+
+    def test_foreign_tab_without_identity_still_shares_its_terminal_handle(self):
+        self.rpc.snapshots = [
+            {"worktree": self.other["id"] + "::" + self.other["path"], "tabs": [{"type": "terminal", "terminal": "h"}]},
+        ]
+        self.rpc.terminals = [self.terminal(self.repo, "mine", "h")]
+        shutil.rmtree(self.root.parent)
+        report = self.run_sync()
+        self.assertEqual([], self.closes())
+        self.assertEqual(set(), self.rpc.killed)
+        self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
+                                           if item["repoId"] == self.repo["id"]))
+
+    def test_refusal_markers_clear_when_the_record_is_no_longer_a_cleanup_candidate(self):
+        for case in ("directory-reappears", "record-gone"):
+            with self.subTest(case=case):
+                self.setUp()
+                self.rpc.snapshots = []
+                self.rpc.terminals = [self.terminal(self.repo, "p", "h")]
+                shutil.rmtree(self.root.parent)
+                self.attempts(lambda method, params: True)
+                self.run_sync()
+                self.assertIn("refused_closes", self.sidecar()["projects"]["sample-id"])
+                if case == "directory-reappears":
+                    # Project files at the address again: the project is active once more.
+                    project(self.workspaces)
+                else:
+                    self.rpc.repos = [repo for repo in self.rpc.repos if repo["id"] != self.repo["id"]]
+                self.run_sync()
+                self.assertNotIn("refused_closes", self.sidecar()["projects"].get("sample-id", {}))
+
+class StateLockTests(unittest.TestCase):
+    def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
+        import fcntl
+        import time
+        from state import State, StateError
+        with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+            with State(directory, True, time.monotonic() + 5):
+                pass
+            holder = os.open(Path(directory) / "subyard-registration.lock", os.O_RDWR)
+            self.addCleanup(os.close, holder)
+            fcntl.flock(holder, fcntl.LOCK_EX)
+            with self.assertRaisesRegex(StateError, "holds the lock"):
+                with State(directory, True, time.monotonic() + 0.2):
+                    pass
+            release = threading.Timer(0.3, fcntl.flock, (holder, fcntl.LOCK_UN))
+            release.start()
+            self.addCleanup(release.join)
+            started = time.monotonic()
+            with State(directory, True, time.monotonic() + 5):
+                self.assertGreaterEqual(time.monotonic() - started, 0.25)
+
+
+class OwnershipInvariantTests(unittest.TestCase):
+    """Enumerated small states under the PTY-kill effect model: cleaning removed record A never
+    affects an object with another or unknown owner, and a completed cleanup leaves A empty."""
+
+    A = {"id": "a", "path": "/w/a/src", "executionHostId": "local", "connectionId": None}
+    B = {"id": "b", "path": "/w/b/src", "executionHostId": "local", "connectionId": None}
+    WT = {"A": "a::/w/a/src", "B": "b::/w/b/src"}
+
+    class Fence:
+        def __init__(self, rpc):
+            self.rpc = rpc
+
+        def same_runtime(self, runtime_id):
+            pass
+
+        def read(self):
+            from reconcile import _records, _session_snapshots, _terminal_census
+            return (_records(self.rpc, "repo.list", "repos"), _session_snapshots(self.rpc),
+                    _terminal_census(self.rpc))
+
+        def authorize(self, read_set):
+            pass
+
+    def states(self):
+        tab_opts = [None] + [(o, p, h, True) for o in "AB" for p in ("p", "q", None) for h in (None, "hx")]
+        # The second tab may also lack any identity while still naming a PTY.
+        second = tab_opts[:7] + [(o, p, None, False) for o in "AB" for p in ("p", "q")]
+        row_opts = [None] + [(o, host, p, h) for o in "AB" for host in ("local", "remote")
+                             for p in ("p", "q") for h in ("unique", "hx")]
+        for t1, t2, r1, r2 in itertools.product(tab_opts, second, row_opts, row_opts):
+            snapshots = {}
+            for index, tab in enumerate((t1, t2)):
+                if tab:
+                    item = {"ptyId": tab[1]}
+                    if tab[3]:
+                        item["id"] = "t%d" % index
+                    if tab[2]:
+                        item["terminal"] = tab[2]
+                    snapshots.setdefault(self.WT[tab[0]], []).append(item)
+            rows = [{"ptyId": row[2], "worktreeId": self.WT[row[0]], "executionHostId": row[1],
+                     "handle": "h%d" % index if row[3] == "unique" else "hx", "connected": True}
+                    for index, row in enumerate((r1, r2)) if row]
+            yield [{"worktree": w, "tabs": tabs} for w, tabs in snapshots.items()], rows
+
+    def test_no_foreign_object_is_ever_affected(self):
+        import reconcile
+        from reconcile import _ownership, _remove_sessions
+        counts = {"states": 0, "cleaned": 0, "protected": 0, "unresolved": 0, "violations": 0}
+        with mock.patch.object(reconcile, "READBACK_INTERVAL", 0.0001), \
+                mock.patch.object(reconcile, "READBACK_MAX_INTERVAL", 0.0001):
+            for snapshots, rows in self.states():
+                counts["states"] += 1
+                rpc = Catalog()
+                rpc.repos = [dict(self.A), dict(self.B)]
+                rpc.snapshots, rpc.terminals = copy.deepcopy(snapshots), copy.deepcopy(rows)
+                own_a = lambda worktree, host="local": worktree.startswith("a::") and host == "local"
+                foreign_tabs = [tab for item in snapshots if not own_a(item["worktree"]) for tab in item["tabs"]]
+                foreign_rows = [row for row in rows if not own_a(row["worktreeId"], row["executionHostId"])]
+                foreign_keys = ({tab.get("ptyId") for tab in foreign_tabs} | {row["ptyId"] for row in foreign_rows}) - {None}
+                try:
+                    _remove_sessions(rpc, self.A, self.Fence(rpc), time.monotonic() + 0.05)
+                    outcome = "cleaned"
+                except reconcile.AmbiguousSession:
+                    outcome = "protected"
+                except reconcile.RpcError:
+                    outcome = "unresolved"
+                counts[outcome] += 1
+                remaining_tabs = [tab for item in rpc.snapshots for tab in item["tabs"]]
+                violated = (bool(foreign_keys & rpc.killed)
+                            or any(tab not in remaining_tabs for tab in foreign_tabs)
+                            or any(row not in rpc.terminals for row in foreign_rows))
+                if outcome == "cleaned":
+                    _, tabs, own_rows = _ownership(self.A, rpc.repos, rpc.snapshots, rpc.terminals)
+                    violated = violated or bool(tabs or own_rows)
+                counts["violations"] += violated
+                self.assertFalse(violated, (snapshots, rows, outcome, rpc.killed))
+        print("\nownership invariant:", counts)
+        self.assertGreater(counts["cleaned"], 0)
+        self.assertGreater(counts["protected"], 0)
