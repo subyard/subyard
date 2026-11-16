@@ -257,20 +257,20 @@ func TestAdmittedRepairRechecksReleaseAfterConsent(t *testing.T) {
 	}
 }
 
-// A declared shutdown verb is a repair command of a yard limited to repair,
-// for the direct CLI and RPC alike; other verbs are not.
+// A declared shutdown verb is, before prepare, a candidate repair of a yard
+// limited to repair, for the direct CLI and RPC alike; other verbs are not.
+// Its prepared plan then decides whether it is that repair.
 func TestShutdownVerbIsARepairCommandForCLIAndRPC(t *testing.T) {
 	scenario := newYardFailureScenario(t, true, true, "default", "named")
 	program, _, _, _ := scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
 	gate := yardGate{yards: map[string]*yardGateState{"named": {failed: true}}, order: []string{"named"}}
 	definition := resource.Definition{Command: "relay", Shutdown: "down"}
 	admits := func(verb string) bool {
-		admitted, _ := program.yardGateAdmits(gate, gateRequest{yard: "named", arguments: []string{verb}, definition: definition, profileResource: true})
-		return admitted
+		verdict := gate.verdict("named", program.provisionalSubject(gateRequest{yard: "named", arguments: []string{verb}, definition: definition, profileResource: true}))
+		return verdict.err() == nil
 	}
-	// A definition without prepared actions has no exact shutdown plan.
-	if admits("down") || admits("up") {
-		t.Fatal("shutdown without a prepared plan or another verb was admitted")
+	if !admits("down") || admits("up") {
+		t.Fatal("the declared shutdown is not the candidate repair, or another verb is")
 	}
 	request := program.rpcGateRequest("named", command.Definition{Name: "stop", Handler: "@lifecycle"}, nil)
 	if !program.boundedStopRequest(request) || request.profileResource {
@@ -317,9 +317,10 @@ func TestAggregateApplySkipsPendingAndInvalidYards(t *testing.T) {
 	scenario := newYardFailureScenario(t, true, true, "default", "named")
 	program, _, _, stderr := scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
 	gate := yardGate{yards: map[string]*yardGateState{"named": {pending: true}}, order: []string{"named"}}
-	program.gateAdmitted = &gateAdmission{gate: &gate}
+	prepared := &preparedCommand{CLI: program, gateRecord: &gateAdmission{kind: admissionOpen, request: gateRequest{yard: "default"}, gate: &gate}}
+	prepared.setGateSubject(gateSubject{declared: true, member: memberConfig, acts: []yardAction{{yard: "default", optional: true}, {yard: "named", optional: true}}})
 	targets := []configTarget{{Name: "default"}, {Name: "named"}}
-	if kept := program.skipGatedYards(targets, "default", true); len(kept) != 1 || kept[0].Name != "default" ||
+	if kept := prepared.gateSkipped(targets, true); len(kept) != 1 || kept[0].Name != "default" ||
 		!strings.Contains(stderr.String(), "skipped yard named") {
 		t.Fatalf("pending yard kept: %v %s", kept, stderr)
 	}
@@ -356,7 +357,7 @@ func TestHostSettingWaitsForAnotherYardsPendingInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "a host or shared setting reaches yard named") ||
+	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "writes the desired configuration of yard named, whose pending configuration refuses it") ||
 		!strings.Contains(stderr.String(), "next: yard -Y named init") && !strings.Contains(stderr.String(), "next: 'yard' '-Y' 'named' 'init'") {
 		t.Fatalf("host setting beside a pending yard: code=%d %s%s", code, stdout.String(), stderr.String())
 	}

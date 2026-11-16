@@ -281,7 +281,6 @@ step = dict(id='relay', target='fixture relay', observed='stopped' if done else 
 print(json.dumps(dict(schema='yard.resource-action-assessment.v2', action=verb, changed=not done,
     consequences=[] if done else ['stop fixture relay'], steps=[step], binding='a' * 64)))
 `), 0o700)
-	harness.configs = nil
 	return marker
 }
 
@@ -312,37 +311,37 @@ type repairRow struct {
 // consent, a journal flipped during the confirmation refuses it as plan-stale
 // with no effect at all.
 func TestRepairSetTable(t *testing.T) {
-	rows := map[string]repairRow{
-		"init":         {arguments: []string{"-Y", "named", "init"}},
-		"init --reset": {arguments: []string{"-Y", "named", "init", "--reset"}},
-		"teardown": {arguments: []string{"-Y", "named", "teardown"}, prepare: func(_ *testing.T, harness *repairHarness) (func() int, []string) {
+	rows := map[repairMember]repairRow{
+		memberInit:      {arguments: []string{"-Y", "named", "init"}},
+		memberInitReset: {arguments: []string{"-Y", "named", "init", "--reset"}},
+		memberTeardown: {arguments: []string{"-Y", "named", "teardown"}, prepare: func(_ *testing.T, harness *repairHarness) (func() int, []string) {
 			harness.scenario.fixture.cli.options.Incus.(*testkit.Incus).Reconcile.InstanceFound = true
 			return nil, nil
 		}},
-		"start": {arguments: []string{"-Y", "named", "start"}, underBarrier: true, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
+		memberStart: {arguments: []string{"-Y", "named", "start"}, underBarrier: true, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
 			harness.scenario.fixture.setPower(t, "named", "Stopped")
 			return nil, nil
 		}},
-		"stop": {arguments: []string{"-Y", "named", "stop"}},
-		"shell": {arguments: []string{"-Y", "named", "shell", "--", "true"}, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
+		memberStop: {arguments: []string{"-Y", "named", "stop"}},
+		memberShell: {arguments: []string{"-Y", "named", "shell", "--", "true"}, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
 			log, environment := harness.installIncusCLI(t)
 			return func() int { return len(mustReadConfigFixtureOrEmpty(log)) }, environment
 		}},
-		"config":              {arguments: []string{"-Y", "named", "config", "set", "--scope", "yard", "--local", "SSH_PORT", "2230"}},
-		"profile disable":     {arguments: []string{"-Y", "named", "profile", "disable", "owned"}},
-		"integration disable": {arguments: []string{"-Y", "named", "integration", "disable", "codex"}},
-		"resource shutdown": {arguments: []string{"-Y", "named", "relay", "down"}, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
+		memberConfig:             {arguments: []string{"-Y", "named", "config", "set", "--scope", "yard", "--local", "SSH_PORT", "2230"}},
+		memberProfileDisable:     {arguments: []string{"-Y", "named", "profile", "disable", "owned"}},
+		memberIntegrationDisable: {arguments: []string{"-Y", "named", "integration", "disable", "codex"}},
+		memberResourceShutdown: {arguments: []string{"-Y", "named", "relay", "down"}, prepare: func(t *testing.T, harness *repairHarness) (func() int, []string) {
 			marker := harness.installRelay(t)
 			return func() int { return len(mustReadConfigFixtureOrEmpty(marker)) }, nil
 		}},
 	}
-	for _, entry := range yardRepairSet {
-		if _, ok := rows[entry.name]; !ok {
-			t.Errorf("repair set member %q has no row", entry.name)
+	for _, member := range repairMembers {
+		if _, ok := rows[member]; !ok {
+			t.Errorf("repair set member %q has no row", member)
 		}
 	}
-	for _, entry := range yardRepairSet {
-		row := rows[entry.name]
+	for _, member := range repairMembers {
+		row := rows[member]
 		setup := func(t *testing.T) (*repairHarness, func() int, []string) {
 			harness := newRepairHarness(t)
 			var extra func() int
@@ -359,7 +358,7 @@ func TestRepairSetTable(t *testing.T) {
 			}
 			return harness, effects, environment
 		}
-		t.Run(entry.name+"/positive", func(t *testing.T) {
+		t.Run(member.String()+"/positive", func(t *testing.T) {
 			harness, effects, environment := setup(t)
 			before := effects()
 			code, output := harness.runWith(t, environment, func() {}, row.arguments...)
@@ -367,10 +366,11 @@ func TestRepairSetTable(t *testing.T) {
 				t.Fatalf("repair did not reach its effect: code=%d effects %d->%d\n%s", code, before, effects(), output[max(0, len(output)-800):])
 			}
 		})
-		if !entry.consent {
+		// Shell has no prepared execution: its admission is its only check.
+		if member == memberShell {
 			continue
 		}
-		t.Run(entry.name+"/flipped", func(t *testing.T) {
+		t.Run(member.String()+"/flipped", func(t *testing.T) {
 			harness, effects, environment := setup(t)
 			flipped := harness.flippedJournal(t)
 			before := effects()
@@ -964,7 +964,7 @@ func TestEffectGuardRefusesAnUncheckedRepair(t *testing.T) {
 	harness := newRepairHarness(t)
 	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
 	orchestrator := program.operationPlanner("guard")
-	program.gateAdmitted = &gateAdmission{repair: true}
+	program.gateAdmitted = &gateAdmission{kind: admissionRepair}
 	if err := orchestrator.BeforeEffects(context.Background()); err == nil {
 		t.Fatal("an unchecked repair admission passed the effect guard")
 	}
@@ -972,7 +972,7 @@ func TestEffectGuardRefusesAnUncheckedRepair(t *testing.T) {
 	if err := orchestrator.BeforeEffects(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	program.gateAdmitted = &gateAdmission{}
+	program.gateAdmitted = &gateAdmission{kind: admissionOpen}
 	if err := orchestrator.BeforeEffects(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1051,16 +1051,20 @@ func TestConfigWritesReachingEveryYardOrGit(t *testing.T) {
 		{[]string{"import", "AGENT_codex_RULES", "/tmp/rules", "--scope", "yard", "--local"}, false, true},
 		{[]string{"set", "SSH_PORT", "2230", "--scope", "yard", "--local"}, false, true},
 	} {
-		program := &CLI{}
-		if got := configWritesEveryYard(test.arguments); got != test.everyYard {
+		requests, err := parseConfigAuthoringRequests(test.arguments[0], test.arguments[1:], false)
+		if err != nil {
+			t.Fatalf("%v: %v", test.arguments, err)
+		}
+		subject := configAuthoringSubject("default", requests)
+		if got := subject.scope == scopeEvery; got != test.everyYard {
 			t.Errorf("%v reaches every yard=%t, want %t", test.arguments, got, test.everyYard)
 		}
-		if got := configRepairInvocation(program, test.arguments); got != test.repairShape {
+		if got := subject.member == memberConfig && subject.unfit == nil; got != test.repairShape {
 			t.Errorf("%v repair member=%t, want %t", test.arguments, got, test.repairShape)
 		}
 		pending := yardGate{yards: map[string]*yardGateState{"named": {pending: true}}, order: []string{"named"}}
-		if admitted, _ := program.yardGateAdmits(pending, gateRequest{yard: "default", handler: "@config", name: "config", arguments: test.arguments}); admitted == test.everyYard {
-			t.Errorf("%v beside a pending yard admitted=%t", test.arguments, admitted)
+		if refused := len(pending.verdict("default", subject).refusals) != 0; refused != test.everyYard {
+			t.Errorf("%v beside a pending yard refused=%t", test.arguments, refused)
 		}
 	}
 	harness := newRepairHarness(t)
@@ -1177,40 +1181,205 @@ func filesUnder(t *testing.T, root string) []string {
 	return files
 }
 
-// After config sync publishes a change for a healthy yard beside one that
-// needs repair, the refresh of that yard follows the yard-scoped gate: its own
-// drift is what the refresh repairs, in this process, while the broken yard and
-// any host cause keep it refused.
-func TestConfigSyncConsumersFollowTheYardScopedGate(t *testing.T) {
-	harness := newRepairHarnessWith(t, func(scenario yardFailureScenario, _ string) {
-		observeFailing(t, scenario, "named", true)
-		// The published change leaves the healthy yard drifted.
-		testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("d", 64)), 0o600)
-	})
-	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
-	program.ownerMutationLock = &uninstall.Tree{} // held by the publishing command
-	program.sourceBinding = harness.bindSources
-	admission, err := program.configConsumerAdmission(context.Background(), "default", []string{"default"})
-	if err != nil || admission == nil || !admission.repair || !admission.rechecked {
-		t.Fatalf("refresh of the drifted healthy yard: %#v %v", admission, err)
+// A sync is gated by the yards its plan writes and the yards whose consumers
+// it refreshes. As a configuration repair it may write and refresh a yard that
+// needs repair; a written pending yard refuses it before publication, and a
+// change it cannot place in one yard reaches every yard.
+func TestConfigSyncIsGatedByTheYardsItWrites(t *testing.T) {
+	gate := yardGate{yards: map[string]*yardGateState{"named": {failed: true}, "pending": {pending: true}}, order: []string{"named", "pending"}}
+	for _, test := range []struct {
+		name      string
+		paths     []string
+		consumers []string
+		refused   []string
+	}{
+		{"healthy target", []string{"yards/default/config.env"}, []string{"default"}, nil},
+		{"written pending yard", []string{"yards/pending/config.env"}, nil, []string{"pending"}},
+		{"written yard that needs repair", []string{"yards/named/config.env"}, nil, nil},
+		{"consumer that needs repair", []string{"yards/default/config.env"}, []string{"default", "named"}, nil},
+		{"shared change", []string{"shared/config.env"}, nil, []string{"pending"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			verdict := gate.verdict("default", configSyncSubject(test.paths, test.consumers))
+			var refused []string
+			for _, refusal := range verdict.refusals {
+				for _, yard := range []string{"named", "pending"} {
+					if strings.Contains(refusal.Error(), "yard "+yard) {
+						refused = append(refused, yard)
+					}
+				}
+			}
+			if !slices.Equal(refused, test.refused) {
+				t.Fatalf("refused %v, want %v: %v", refused, test.refused, verdict.err())
+			}
+		})
 	}
-	if admission, err := program.configConsumerAdmission(context.Background(), "default", []string{"default", "named"}); err != nil || admission != nil {
-		t.Fatalf("refresh including the failed yard: %#v %v", admission, err)
-	}
-	var response releasetransition.ProcessResponse
-	if err := json.Unmarshal(mustReadConfigFixture(t, harness.inspect), &response); err != nil {
+}
+
+// installPool gives the sample profile a resource whose declared shutdown
+// destroys persistent data: never a repair of a yard that needs one.
+func (harness *repairHarness) installPool(t *testing.T) string {
+	t.Helper()
+	root := harness.scenario.fixture.cli.options.RepositoryRoot
+	directory := filepath.Join(root, "config/profiles/sample/resources/pool")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	inspection := *response.Inspection
-	inspection.Blockers = append(slices.Clone(inspection.Blockers), releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable,
-		Resource: "activation.host-power", Message: "host power reconciler failed", Retry: "run yard migrate"})
-	response.Inspection = &inspection
-	payload, err := json.Marshal(response)
+	testkit.WriteFile(t, filepath.Join(root, "config/profiles/sample/resources/pool.res"), []byte(strings.Join([]string{
+		"COMMAND=pool", "HANDLER=resources/pool/handler.sh", "TITLE=Sample pool",
+		`ACTION="up up host-change reversible"`, `ACTION="purge purge persistent-data-destruction irreversible"`,
+		"BRINGUP=up", "SHUTDOWN=purge",
+	}, "\n")+"\n"), 0o600)
+	marker := filepath.Join(root, "pool-purged")
+	testkit.WriteFile(t, filepath.Join(directory, "handler.sh"), []byte(`#!/usr/bin/env python3
+import json, os, pathlib, sys
+marker = pathlib.Path('`+marker+`')
+mode = os.environ.get('SUBYARD_RESOURCE_MODE')
+verb = sys.argv[1]
+if mode == 'apply':
+    marker.write_text(verb)
+    sys.exit(0)
+done = marker.exists()
+step = dict(id='pool', target='fixture pool', observed='absent' if done else 'present', desired='absent',
+            decision='skip' if done else 'apply', verify='read fixture pool', consequence='purge fixture pool')
+print(json.dumps(dict(schema='yard.resource-action-assessment.v2', action=verb, changed=not done,
+    consequences=[] if done else ['purge fixture pool'], steps=[step], binding='b' * 64)))
+`), 0o700)
+	return marker
+}
+
+// The gate is flipped between plan and execute in each direction, for each
+// prepared repair member, an unsafe declared shutdown and a writer outside the
+// repair set, on the direct CLI (consent) and RPC (plan, then execute). The
+// effects follow the verdict at execute: the CLI's open admission is decided
+// once on its snapshot; a repair is rechecked on fresh state; for RPC the
+// execute-time admission is of record, so an open plan executed on a yard
+// that now needs repair runs only as that repair.
+func TestGateFlipBetweenPlanAndExecute(t *testing.T) {
+	type command struct {
+		name      string
+		arguments []string // after -Y named
+		rpc       string   // RPC command; arguments follow
+	}
+	commands := []command{
+		{"stop", []string{"stop"}, "stop"},
+		{"init", []string{"init"}, "init"},
+		{"config set", []string{"config", "set", "SSH_PORT", "2231", "--scope", "yard", "--local"}, "config"},
+		{"safe shutdown", []string{"relay", "down"}, "relay"},
+		{"unsafe shutdown", []string{"pool", "purge"}, "pool"},
+		{"writer outside the set", []string{"integration", "enable", "codex"}, "integration"},
+	}
+	// Outcome per command: open→repair and repair→open, for CLI then RPC.
+	// effect: reaches its effect; none: refused with no effect.
+	want := map[string][4]string{
+		"stop":                   {"effect", "effect", "effect", "effect"},
+		"init":                   {"effect", "effect", "effect", "effect"},
+		"config set":             {"effect", "effect", "effect", "effect"},
+		"safe shutdown":          {"effect", "effect", "effect", "effect"},
+		"unsafe shutdown":        {"effect", "none", "none", "none"},
+		"writer outside the set": {"effect", "none", "none", "none"},
+	}
+	for _, test := range commands {
+		for index, mode := range []string{"cli open→repair", "cli repair→open", "rpc open→repair", "rpc repair→open"} {
+			t.Run(test.name+"/"+mode, func(t *testing.T) {
+				harness := newRepairHarness(t)
+				relay, pool := harness.installRelay(t), harness.installPool(t)
+				failed := mustReadConfigFixture(t, harness.inspect)
+				before, after := harness.ready, failed
+				if strings.Contains(mode, "repair→open") {
+					before, after = failed, harness.ready
+				}
+				testkit.WriteFile(t, harness.inspect, before, 0o600)
+				effects := func() int {
+					return harness.effects() + len(mustReadConfigFixtureOrEmpty(relay)) + len(mustReadConfigFixtureOrEmpty(pool))
+				}
+				start := effects()
+				flip := func() { testkit.WriteFile(t, harness.inspect, after, 0o600) }
+				var output string
+				if strings.HasPrefix(mode, "cli") {
+					_, output = harness.run(t, flip, append([]string{"-Y", "named"}, test.arguments...)...)
+				} else {
+					output = harness.rpcPlanExecute(t, test.rpc, test.arguments[1:], flip)
+				}
+				got := "none"
+				if effects() != start {
+					got = "effect"
+				}
+				if got != want[test.name][index] {
+					t.Fatalf("%s: %s, want %s\n%s", mode, got, want[test.name][index], output)
+				}
+			})
+		}
+	}
+}
+
+// rpcPlanExecute plans one operation on yard named, runs between, then
+// executes it, and returns what both returned.
+func (harness *repairHarness) rpcPlanExecute(t *testing.T, name string, arguments []string, between func()) string {
+	t.Helper()
+	options := harness.scenario.fixture.cli.options
+	options.AdapterRunner, options.InitPlatform, options.NetworkPolicy = harness.adapter, harness.platform, allowTestNetworkPolicy()
+	integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("c", 64), Scope: strings.Repeat("c", 64)}}
+	options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return integrations }
+	program, err := New(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, harness.inspect, payload, 0o600)
-	if admission, err := program.configConsumerAdmission(context.Background(), "default", []string{"default"}); err != nil || admission != nil {
-		t.Fatalf("refresh over a host cause: %#v %v", admission, err)
+	program.sourceBinding = harness.bindSources
+	loaded, err := program.loadContext("named")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
+	t.Cleanup(handler.closePlans)
+	params, err := json.Marshal(map[string]any{"command": name, "arguments": arguments, "exact": name == "integration"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan any
+	if plan, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "flip", Params: params}, nil); err != nil {
+		return "plan: " + err.Error()
+	}
+	between()
+	executeParams := map[string]any{"confirmed": true}
+	if exact, ok := plan.(exactOperationPlan); ok {
+		executeParams["digest"] = exact.Digest
+	}
+	payload, err := json.Marshal(executeParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "flip", Params: payload},
+		func(string, any) (uint64, error) { return 0, nil }); err != nil {
+		return "execute: " + err.Error()
+	}
+	return "executed"
+}
+
+// A prepared command admitted as read-only cannot run an effect in Execute,
+// whatever argv made admission take it for a reader.
+func TestReadAdmissionRunsNoEffect(t *testing.T) {
+	harness := newRepairHarnessWith(t, func(yardFailureScenario, string) {})
+	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
+	loaded, err := program.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.manifest.Lookup("config")
+	program.gateAdmitted = &gateAdmission{kind: admissionRead}
+	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition,
+		Arguments: []string{"set", "SSH_PORT", "2232", "--scope", "yard", "--local"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	orchestrator := program.operationOrchestrator(prepared.Plan.OperationID, loaded, nil, &definition)
+	if _, err := prepared.Confirm(context.Background(), orchestrator, true); err != nil {
+		t.Fatal(err)
+	}
+	before := harness.effects()
+	if _, err := prepared.Execute(context.Background(), orchestrator, io.Discard); err == nil || !strings.Contains(err.Error(), "admitted as read-only") ||
+		harness.effects() != before {
+		t.Fatalf("read admission ran an effect: %v effects %d->%d", err, before, harness.effects())
 	}
 }

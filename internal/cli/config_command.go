@@ -1119,6 +1119,11 @@ func (cli *CLI) applyConfig(
 	definition := nativeConfigCommandDefinition()
 	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: definition, Loaded: targets[0].Loaded, Arguments: []string{"apply"}}
 	prepared.policy = commandPolicy(definition, prepared.Loaded.Context, prepared.Arguments, nil)
+	subject := gateSubject{declared: true, member: memberConfig}
+	for _, target := range targets {
+		subject.acts = append(subject.acts, yardAction{yard: target.Name})
+	}
+	prepared.setGateSubject(subject)
 	prepared.attachConfigApply(execution)
 	if err := prepared.preparePlan(ctx); err != nil {
 		return cli.reportPreparationError(definition, err)

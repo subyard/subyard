@@ -122,6 +122,7 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 	if err != nil {
 		return err
 	}
+	prepared.setGateSubject(verbSubject(request.verb, memberIntegrationDisable))
 	if prepared.Loaded.Context.AccessKind == domain.AccessRemote {
 		return errors.New("remote integration requires an owner-built operation plan")
 	}

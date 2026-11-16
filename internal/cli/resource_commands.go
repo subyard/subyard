@@ -172,7 +172,7 @@ func (cli *CLI) runResourceCommand(
 
 	// A yard that needs repair runs only a shutdown with a prepared plan, which
 	// is rechecked after consent; this older path has no such plan.
-	if admission := cli.gateAdmitted; admission != nil && admission.repair {
+	if cli.gateAdmitted.repair() {
 		cli.errorf("%s: yard %s needs repair; its handler has no prepared shutdown plan; run yard -Y %s stop or teardown", definition.Command, loaded.Context.YardName, loaded.Context.YardName)
 		return 1
 	}

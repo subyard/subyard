@@ -124,9 +124,7 @@ var handlerAdmissions = map[string]handlerAdmission{
 	"@network": {readOnly: argumentsOnly(func(arguments []string) bool {
 		return len(arguments) > 0 && arguments[0] == "status"
 	})},
-	"@update": {readOnly: argumentsOnly(func(arguments []string) bool {
-		return slices.Contains(arguments, "--check")
-	})},
+	"@update": {readOnly: argumentsOnly(updateCheckInvocation)},
 	// Revocation must remain available during release recovery. Treat it like a
 	// reader only for preflight; its own typed action still audits the bounded
 	// mutation and never grants access.
@@ -260,16 +258,6 @@ func earlyDispatch(definition command.Definition, arguments []string, explicit, 
 	return earlyNone, nil
 }
 
-// recoveryPermits are the release-recovery grants of one invocation. The gate returns
-// them as a value; Run installs them once as the invocation's permits, which prepared
-// handlers read through their CLI. RPC operations and release-transition children copy
-// the CLI and clear the grants that do not apply to them.
-type recoveryPermits struct {
-	// configApply is installed by a bounded configuration repair inside its
-	// handler (config sync consumers, completed scalar authoring), never by admission.
-	configApply *configApplyRepairPermit
-}
-
 // admitReleaseGate consults the release mutation gate for an invocation that requires it.
 // A non-ready gate admits by the selected yard, or a fallback repair completes the
 // invocation. When done is true, Run returns code without dispatch.
@@ -280,42 +268,36 @@ func (cli *CLI) admitReleaseGate(
 	resourceDefinition resource.Definition,
 	arguments []string,
 	yes bool,
-) (permits recoveryPermits, code int, done bool) {
+) (code int, done bool) {
 	request := gateRequest{yard: yard, handler: admission.handler, name: admission.name, arguments: arguments,
 		definition: resourceDefinition, profileResource: admission.handler == ""}
-	admitted, outcome, gateInspection, gate, scoped, gateErr := cli.admitGate(ctx, request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+	admitted, outcome, gateInspection, refusal, scoped, gateErr := cli.admitGate(ctx, request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
 		return cli.inspectCommandMutationGate(ctx, yard, admission.handler, arguments)
 	})
 	if gateErr != nil {
 		cli.errorf("inspect release transition: %v", gateErr)
-		return permits, 1, true
-	}
-	if outcome == nil {
-		return permits, 0, false
+		return 1, true
 	}
 	if admitted != nil {
 		cli.gateAdmitted = admitted
-		return permits, 0, false
+		return 0, false
 	}
 	if scoped {
-		cli.writeYardGateRefusal(yard, gate)
-		if admission.handler == "@config" && gate.state(yard).repairOnly() {
-			cli.errorf("a setting this repair cannot write is corrected by editing its file, then yard -Y %s config validate", firstNonempty(yard, "default"))
-		}
-		return permits, 1, true
+		cli.writeYardGateRefusal(refusal)
+		return 1, true
 	}
 	if admission.completedScalarAuthoring {
 		if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, arguments, yes, *outcome, gateInspection); handled {
-			return permits, code, true
+			return code, true
 		}
 	}
 	if admission.activationSelectionRepair {
 		if handled, code := cli.runActivationSelectionRepair(ctx, yard, admission.handler, arguments, yes, *outcome, gateInspection); handled {
-			return permits, code, true
+			return code, true
 		}
 	}
 	cli.writeMutationGateRefusal(outcome, gateInspection)
-	return permits, 1, true
+	return 1, true
 }
 
 // writeMutationGateRefusal renders a host-wide refusal as text: the release
@@ -325,8 +307,8 @@ func (cli *CLI) writeMutationGateRefusal(outcome *releasetransition.Outcome, ins
 	fmt.Fprint(cli.options.Stderr, mutationGateRefusalText(outcome, inspection))
 }
 
-func (cli *CLI) writeYardGateRefusal(yard string, gate yardGate) {
-	for _, line := range strings.Split(yardGateRefusal(yard, gate), "\n") {
+func (cli *CLI) writeYardGateRefusal(refusal error) {
+	for _, line := range strings.Split(refusal.Error(), "\n") {
 		cli.errorf("%s", line)
 	}
 }
@@ -372,20 +354,18 @@ const mutationGateRefusalPrefix = "yard: release gate:"
 // admitTeardownGate consults the deferred teardown gate after scope selection.
 func (cli *CLI) admitTeardownGate(ctx context.Context, yard string, arguments []string) (int, bool) {
 	request := gateRequest{yard: yard, handler: "@teardown", name: "teardown", arguments: arguments}
-	admitted, outcome, gateInspection, gate, scoped, gateErr := cli.admitGate(ctx, request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+	admitted, outcome, gateInspection, refusal, scoped, gateErr := cli.admitGate(ctx, request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
 		return cli.inspectMutationGateInspection(ctx, yard)
 	})
 	switch {
 	case gateErr != nil:
 		cli.errorf("inspect release transition: %v", gateErr)
 		return 1, true
-	case outcome == nil:
-		return 0, false
 	case admitted != nil:
 		cli.gateAdmitted = admitted
 		return 0, false
 	case scoped:
-		cli.writeYardGateRefusal(yard, gate)
+		cli.writeYardGateRefusal(refusal)
 		return 1, true
 	}
 	cli.writeMutationGateRefusal(outcome, gateInspection)
@@ -453,32 +433,24 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 		return operationRPCError(rpc.CodeIdentityRecoveryFailed, err)
 	}
 	if definition.Handler == "@update" || definition.Handler == "@current-migration" || cleanupRecovery || identityRecovery {
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 		return nil
 	}
 	planned := cli.gateAdmitted
-	cli.gateAdmitted = nil
+	cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	admitted, outcome, gateInspection, _, _, err := cli.admitGate(ctx, cli.rpcGateRequest(yard, definition, arguments), func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
 		return cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
 	})
 	if err != nil {
 		return operationRPCError(rpcMutationGateFailedCode, err)
 	}
-	// A repair admitted at plan time was consented to by the client: execute
-	// must see the same history and installed source, as the direct CLI
-	// requires after its prompt, and keeps that admission for the recheck in
-	// preparedCommand.Execute.
-	if execute && planned != nil && planned.repair {
+	// The execute-time admission is the one of record. A plan made under a
+	// repair still requires the history and installed source it was made on,
+	// as the direct CLI requires after its prompt.
+	if execute && planned.repair() {
 		if fault := cli.plannedRepairCurrent(ctx, planned); fault != nil {
 			return fault
 		}
-		if outcome != nil && admitted == nil {
-			return mutationGateRPCError(outcome, gateInspection)
-		}
-		cli.gateAdmitted = planned
-		return nil
-	}
-	if outcome == nil {
-		return nil
 	}
 	if admitted == nil {
 		return mutationGateRPCError(outcome, gateInspection)
@@ -502,4 +474,20 @@ func (cli *CLI) plannedRepairCurrent(ctx context.Context, planned *gateAdmission
 		}
 	}
 	return nil
+}
+
+// updateCheckInvocation reports update --check as the update option parser
+// reads it: the value of --channel, --version or --runtime-root is never an
+// option, so update --version --check is not a check.
+func updateCheckInvocation(arguments []string) bool {
+	check := false
+	for index := 0; index < len(arguments); index++ {
+		switch arguments[index] {
+		case "--channel", "--version", "--runtime-root":
+			index++
+		case "--check":
+			check = true
+		}
+	}
+	return check
 }

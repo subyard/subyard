@@ -284,19 +284,6 @@ func readConfigApplyRegistry(root string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(file, releasetransition.MaxRegistryV2Bytes+1))
 }
 
-func (permit *configApplyRepairPermit) matchesRequestedConfigs(assessments []configTargetAssessment) bool {
-	if len(permit.requestedTargets) != len(assessments) {
-		return false
-	}
-	for _, assessment := range assessments {
-		expected, exists := permit.requestedTargets[assessment.Target.Name]
-		if !exists || expected != assessment.DesiredFingerprint {
-			return false
-		}
-	}
-	return true
-}
-
 // lockConfigApplyRepair holds the protected update lock from the final
 // observation through apply verification. The caller must always invoke the
 // returned unlock function.

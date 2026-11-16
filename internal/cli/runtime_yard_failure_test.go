@@ -861,7 +861,7 @@ func TestProfileResourceVerbPassesPendingOnlyGate(t *testing.T) {
 			}
 			var stderr bytes.Buffer
 			fixture.cli.options.Stderr = &stderr
-			_, code, done := fixture.cli.admitReleaseGate(context.Background(), "default", admission, definition, []string{"remove"}, true)
+			code, done := fixture.cli.admitReleaseGate(context.Background(), "default", admission, definition, []string{"remove"}, true)
 			if admitted := !done && code == 0; admitted != test.admitted {
 				t.Fatalf("resource verb admitted=%t want %t: code=%d done=%t %s", admitted, test.admitted, code, done, stderr.String())
 			}

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -339,45 +338,6 @@ func TestConfigApplyRepairIgnoresLegacyFiles(t *testing.T) {
 	permit, err := fixture.cli.prepareConfigApplyRepair(context.Background(), "default", false, *gate)
 	if err != nil || permit == nil {
 		t.Fatalf("legacy corruption blocked repair: permit=%#v err=%v", permit, err)
-	}
-}
-
-func TestConfigApplyRepairRejectsDifferentCommandDesiredBeforeConfirmation(t *testing.T) {
-	fixture := newConfigApplyRepairFixture(t, false)
-	root := fixture.cli.options.RepositoryRoot
-	alternate := filepath.Join(root, "alternate.rules")
-	writeCLIFile(t, alternate, "different_rule()\n", 0o600)
-	fixture.cli.baseEnv["AGENT_codex_RULES"] = alternate
-	fixture.cli.env["AGENT_codex_RULES"] = alternate
-	permit, err := fixture.cli.prepareConfigApplyRepair(context.Background(), "default", false, fixture.outcome)
-	if err != nil || permit == nil {
-		t.Fatalf("prepare persisted repair: permit=%#v err=%v", permit, err)
-	}
-	loaded, err := fixture.cli.loadContext("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := configTarget{Name: "default", Loaded: loaded}
-	assessment, err := fixture.cli.assessConfigTarget(context.Background(), target, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if permit.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
-		t.Fatal("command override matched persisted repair")
-	}
-	fixture.cli.permits.configApply = permit
-	appendMismatchedHashSteps(t, fixture.cli.options.Executor.(*testkit.Incus), loaded, "0")
-	var diagnostics bytes.Buffer
-	fixture.cli.options.Stderr = &diagnostics
-	selector := func() ([]configTarget, error) {
-		t.Fatal("mismatching desired reached post-confirmation target revalidation")
-		return nil, nil
-	}
-	if code := fixture.cli.applyConfig(context.Background(), []configTarget{target}, true, selector); code == 0 {
-		t.Fatal("different command desired was accepted")
-	}
-	if !strings.Contains(diagnostics.String(), "remove differing command overrides") {
-		t.Fatalf("wrong refusal: %s", diagnostics.String())
 	}
 }
 

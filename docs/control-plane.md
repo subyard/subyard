@@ -1431,52 +1431,71 @@ after plan binding and only for completed history: decisions with scope `yard-at
 `config` or `unreachable`. It emits all of them or none; the existing activation decisions are
 unchanged, so an older CLI stays closed. The CLI accepts only its own yard-scoped owners (profile
 runtimes, core guest runtime, materialized configuration), reads the journal and ledger itself, and
-treats anything outside the grammar as host-wide. A yard that is not converged admits only its
-repair commands: plain `init` and `init --reset` (other init modes change what the yard is or do
-only part of its convergence), `teardown`, `start`, `stop`, `shell`, `config`, `profile` or
-`integration disable` and profile resource shutdown verbs; the refusal names its next step, usually its own init. A yard
-with only typed pending findings keeps unrelated commands, its plain init and resource verbs. Other
-yards and host commands stay open. `config apply --all-local` skips and reports yards limited to
-repair, yards with pending findings and yards whose own configuration cannot be loaded; a host or
-shared setting waits while any yard has pending findings; `network link` refuses a yard limited to
-repair at prepare, naming each such endpoint, and `network isolation` names such yards. An owner's
+treats anything outside the grammar as host-wide.
+
+The gate decides on facts the command itself prepared (`internal/cli/yard_gate_verdict.go`). Each
+prepare attaches a gate subject from the request its handler already parsed and from its plan: the
+repair set member it is, why it cannot be that repair, whether a yard with only pending findings
+keeps it, the yards whose desired configuration it writes, and the other yards it acts on. One pure
+verdict decides a subject against the yard gate and reports every refusal in a stable order: the
+selected yard, the other yards it writes, then the yards it acts on. Three rules fix the contract:
+
+1. A command is gated by every yard whose desired configuration it writes or that it acts on: a
+   host, shared or Git setting writes every yard; a sync writes the yards its plan changes, and every
+   yard for a change it cannot place in one yard or a push to Git; `network link` acts on both
+   endpoints; `config apply --all-local` skips and reports the other yards that need repair or have
+   pending findings. A command that declares no subject writes every yard and is never a repair.
+2. A yard that needs repair admits only its repair set: plain `init` and `init --reset` (other init
+   modes change what the yard is or do only part of its convergence), `teardown`, `start`, `stop`,
+   `shell`, `config`, `profile` or `integration disable` and a profile resource's declared shutdown
+   whose prepared assessment is a reversible shutdown without persistent data or external effects;
+   the refusal names its next step, usually its own init. `config` is local authoring at any scope,
+   `apply` and `sync`, and as a repair it may write or refresh other yards that need repair; Git
+   authoring is refused with the manual repair (edit the file, then `yard -Y NAME config validate`).
+   A yard with only typed pending findings keeps unrelated commands, its plain init and resource
+   verbs, and refuses every write of its desired configuration. Other yards and host commands stay
+   open.
+3. For RPC the admission at `operation.execute` is the one of record. A plan made under a repair is
+   refused as plan-stale when the release history or installed source changed by execute.
+
+Admission before dispatch decides by handler identity and the handler's own parser on the selected
+yard only, so an invocation that cannot be admitted is refused before its prepare; it records an
+explicit kind (ready, read, exempt, open, repair or bounded stop) that travels with the prepared
+command. The early verdict runs on that admission's snapshot before consent. The binding decision
+runs in `preparedCommand.Execute` after the owner barrier: an open admission decides its subject on
+its snapshot without a new inspection; a repair is rechecked against fresh release state and its
+subject decided on that state; a read admission runs no plan with an effect. Non-prepared mutators
+(`shell`, `ssh-agent`, `_authorize`, `_state`, `_project-state`, `_vm-start-policy` and older
+resource handlers) are a closed list decided by handler identity; an older resource handler on a yard
+that needs repair is refused before consent. `--check` makes a reader only where the handler's parser
+reads it as the flag: bare `config sync` and `update`, never as another option's value. An owner's
 failure in one yard carries what it observed in the others, and a named yard whose configuration or
 installed context cannot be loaded is that yard's finding, so one failed yard never hides another's
-finding. The direct CLI and RPC share this admission. An RPC repair admitted at
-`operation.plan` keeps that admission through `operation.execute`, which refuses it when the release
-history or installed source changed since the plan and admits it again only when the gate still
-does; `preparedCommand.Execute` then rechecks it as for the direct CLI.
+finding.
 
-A repair admission, of a member of the repair set other than `shell` on a yard that needs repair
-or of the bounded stop below, records the release history (journal, ledger projection and
-checkpoint) it inspected, read before and after the inspection. Except for the bounded stop, it also
-binds the running tooling to the installed source: the CLI must be the published runtime of the
-completed journal's target, under `releases/<target>`, and its source proof must name that journal's
-transaction and artifact, so a development build or another staged or retained runtime with the
-same registry and catalog is refused. `preparedCommand.Execute` rechecks it once, right after it
-acquires the owner barrier that every journal writer holds: the history and the source binding must
-be unchanged and a fresh inspection, which binds the runtime links to that history, must admit the
-command again; otherwise it is refused as plan-stale before any effect. Still under the barrier, the
-history must be unchanged after the effect, and a repair other than init and teardown names what its
-yard still needs. Every other admission is decided once, as on a ready release; `shell` has no
-prepared execution, so its admission is its only check. Configuration admits its prepared verbs:
-`apply`, `sync` and local `set`, `unset`, `import` and `edit`; Git authoring and other verbs are
-refused with the manual repair (edit the file, then `yard -Y NAME config validate`). After
-`config sync` publishes a change, the refresh of its target yards follows this gate: targets that
-are open or limited to repair only by drift are refreshed in process, while another yard's finding
-waits for its own repair. A resource admits only its declared shutdown with a
-prepared plan whose assessment is a reversible shutdown without persistent data or external effects;
-an older resource handler on such a yard is refused before consent. An adapter never runs for a
-repair admission that has not passed its recheck. Admission never takes the release update lock; the
-lock order stays owner barrier, release update lock (converge and bounded in-handler configuration
-repairs), per-yard lock. A `config apply` admitted as a repair applies in its own process with the
-migration child's integration ownership checks; on an open yard it runs the ordinary child, which
-inherits the owner barrier and is admitted on its own. An init succeeds when its own yard converged
-and reports the other yards' findings. The default yard's own invalid configuration underlies every
-yard, so then every yard admits only its repair commands. An invalid configuration of another yard
-is that yard's finding; host power and host key tools serve the yards that load. `yard status`
-states the release once, as `release active and complete; yard NAME needs attention`, and each
-finding under its yard; it never prints the protocol word `ready` for a non-ready status.
+A repair admission, or the bounded stop below, records the release history (journal, ledger
+projection and checkpoint) it inspected, read before and after the inspection. Except for the
+bounded stop, it also binds the running tooling to the installed source: the CLI must be the
+published runtime of the completed journal's target, under `releases/<target>`, and its source proof
+must name that journal's transaction and artifact, so a development build or another staged or
+retained runtime with the same registry and catalog is refused. `preparedCommand.Execute` rechecks it
+once, right after it acquires the owner barrier that every journal writer holds: the history and the
+source binding must be unchanged and a fresh inspection, which binds the runtime links to that
+history, must admit the command again; otherwise it is refused as plan-stale before any effect. Still
+under the barrier, the history must be unchanged after the effect, and a repair other than init and
+teardown names what its yard still needs. An adapter never runs for a repair admission that has not
+passed its recheck. Admission never takes the release update lock; the lock order stays owner
+barrier, release update lock (converge and bounded in-handler configuration repairs), per-yard lock.
+A `config apply` admitted as a repair applies in its own process with the migration child's
+integration ownership checks; on an open yard it runs the ordinary child, which inherits the owner
+barrier and is admitted on its own. After `config sync` publishes a change, its consumer refresh runs
+in process when the publication left the release not ready, since the gate already decided its
+yards. An init succeeds when its own yard converged and reports the other yards' findings. The default
+yard's own invalid configuration underlies every yard, so then every yard admits only its repair
+commands. An invalid configuration of another yard is that yard's finding; host power and host key
+tools serve the yards that load. `yard status` states the release once, as `release active and
+complete; yard NAME needs attention`, and each finding under its yard; it never prints the protocol
+word `ready` for a non-ready status.
 
 A yard whose last init did not finish is left to that init, as described under
 [release migrations](#release-migrations); release repair of a yard holds the per-yard lock init

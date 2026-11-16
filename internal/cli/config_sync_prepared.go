@@ -75,6 +75,7 @@ func configPreparedStale(err error) error {
 func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution) {
 	cli, loaded := prepared.CLI, prepared.Loaded
 	execution.current = execution.approved
+	prepared.setGateSubject(execution.gateSubject())
 	prepared.exactState = operationStateDigest(struct {
 		Native string
 		Steps  []domain.OperationStep
@@ -414,7 +415,31 @@ func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request 
 		}
 	}
 	prepared.attachConfigSync(execution)
+	if len(request.authoring) != 0 {
+		prepared.setGateSubject(configAuthoringSubject(loaded.Context.YardName, request.authoring))
+	}
 	return nil
+}
+
+// gateSubject is what a sync writes: the yards its plan changes, and every
+// yard for a change it cannot place in one yard or a write to Git. Its
+// consumer refreshes act on their yards.
+func (execution *configSyncExecution) gateSubject() gateSubject {
+	paths := make([]string, 0, len(execution.approved.Changes))
+	for _, change := range execution.approved.Changes {
+		paths = append(paths, change.Path)
+	}
+	var consumers []string
+	if execution.consumers != nil && execution.consumers.execution != nil {
+		for _, assessment := range execution.consumers.execution.approved {
+			consumers = append(consumers, assessment.Target.Name)
+		}
+	}
+	subject := configSyncSubject(paths, consumers)
+	if execution.action == "config.sync.push" {
+		subject.scope, subject.named = scopeEvery, nil
+	}
+	return subject
 }
 
 func (cli *CLI) configRegistrationGuard(loaded config.Loaded) (func(context.Context) error, error) {

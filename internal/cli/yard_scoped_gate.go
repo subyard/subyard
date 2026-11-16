@@ -239,43 +239,6 @@ func (cli *CLI) completedHistoryClean(outcome releasetransition.Outcome) bool {
 	return err == nil && len(pending) == 0
 }
 
-// hostCommandHandlers act on the host, not on one yard, and stay open.
-var hostCommandHandlers = []string{"@host", "@keys", "@test-vms", "@network", "@client-projects", "@project-state"}
-
-// yardGateAdmits decides one invocation on the selected yard. repair reports
-// an admission through the repair-only branch, which carries a post-consent
-// recheck when its member has consent.
-func (cli *CLI) yardGateAdmits(gate yardGate, request gateRequest) (admitted, repair bool) {
-	if !request.profileResource && slices.Contains(hostCommandHandlers, request.handler) {
-		return true, false
-	}
-	// A host or shared setting reaches every yard's desired configuration, so it
-	// waits while any yard's pending contract refuses configuration.
-	if !request.profileResource && request.handler == "@config" && configWritesEveryYard(request.arguments) {
-		for _, name := range gate.order {
-			if gate.state(name).pending {
-				return false, false
-			}
-		}
-	}
-	state := gate.state(request.yard)
-	switch {
-	case state.repairOnly():
-		entry, ok := cli.yardRepair(request)
-		return ok, ok && entry.consent
-	case state.pending:
-		// The pending-configuration contract: unrelated commands, the yard's
-		// plain init and profile resource verbs such as orca remove.
-		if request.handler == "@init" && !request.profileResource {
-			parsed, err := parseInitArguments(request.arguments)
-			return err == nil && parsed.mode == initReconcile && parsed.profile == "", false
-		}
-		return request.profileResource || ordinaryCommandDuringPendingConfiguration(request.handler), false
-	default:
-		return true, false
-	}
-}
-
 // yardNextStep is the one next step of an implicated yard.
 func yardNextStep(yard string, state yardGateState) string {
 	switch {
@@ -291,15 +254,6 @@ func yardNextStep(yard string, state yardGateState) string {
 		return state.retry
 	}
 	return "yard -Y " + yard + " init"
-}
-
-// yardRepairSetText names the repair set in its order.
-func yardRepairSetText() string {
-	names := make([]string, 0, len(yardRepairSet))
-	for _, entry := range yardRepairSet {
-		names = append(names, entry.name)
-	}
-	return strings.Join(names, ", ")
 }
 
 // yardGateRefusal is the one text refusal of a yard that admits only repair.
@@ -349,17 +303,35 @@ func (cli *CLI) rpcGateRequest(yard string, definition command.Definition, argum
 	return request
 }
 
-// gateAdmission is how a non-ready gate admitted an invocation. A repair
-// admission, of a repair command on a yard that needs repair or of the
-// bounded stop over an unfinished activation, carries the release history it
-// was decided on; preparedCommand.Execute rechecks it once under the owner
-// barrier. Every other admission is decided once, as on a ready release.
+// admissionKind is how an invocation passed the release gate before
+// dispatch. The kind travels with the prepared command; Execute decides
+// on it under the owner barrier.
+type admissionKind int
+
+const (
+	// admissionReady: the release is ready, or no gate applies.
+	admissionReady admissionKind = iota
+	// admissionRead: a reader that skipped the gate; it may run no effect.
+	admissionRead
+	// admissionExempt: the handler owns its own release admission.
+	admissionExempt
+	// admissionOpen: a non-ready yard-scoped gate admitted it as an ordinary
+	// command; Execute decides its subject on the stored snapshot.
+	admissionOpen
+	// admissionRepair: a repair on a yard that needs repair; Execute rechecks
+	// it against fresh release state.
+	admissionRepair
+	// admissionBounded: stop of one yard over an unfinished activation.
+	admissionBounded
+)
+
+// gateAdmission is the admission of one invocation. A repair or bounded
+// admission carries the release history it was decided on, and a repair the
+// installed source binding; preparedCommand.Execute rechecks them once.
 type gateAdmission struct {
+	kind    admissionKind
 	request gateRequest
 	gate    *yardGate
-	repair  bool
-	// bounded marks the stop admitted over an unfinished activation.
-	bounded bool
 	history releaseHistoryToken
 	// sources binds the running tooling to the installed source of the
 	// completed release, for every repair but the bounded stop.
@@ -367,162 +339,123 @@ type gateAdmission struct {
 	rechecked bool
 }
 
-// decideGate is the one admission decision of the direct CLI and RPC behind a
-// non-ready gate. scoped reports a yard-scoped refusal the caller renders by
-// yard.
-func (cli *CLI) decideGate(ctx context.Context, request gateRequest, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) (*gateAdmission, yardGate, bool) {
+func (admission *gateAdmission) repair() bool {
+	return admission != nil && (admission.kind == admissionRepair || admission.kind == admissionBounded)
+}
+
+// decideGate is the one pre-dispatch admission decision of the direct CLI and
+// RPC behind a non-ready gate. It decides by handler identity and the
+// handler's own parser, on the selected yard only: what else a prepared
+// command writes or acts on is its subject, decided before consent and again
+// in Execute. refusal is a yard-scoped refusal; scoped is false for a
+// host-wide one.
+func (cli *CLI) decideGate(ctx context.Context, request gateRequest, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) (*gateAdmission, yardGate, error, bool) {
 	if cli.boundedStopRequest(request) && cli.unfinishedActivationStop(ctx, request.yard, outcome, inspection) {
-		return &gateAdmission{request: request, repair: true, bounded: true}, yardGate{}, false
+		return &gateAdmission{kind: admissionBounded, request: request}, yardGate{}, nil, false
 	}
 	gate, ok := cli.yardScopedGate(outcome, inspection)
 	if !ok {
-		return nil, gate, false
+		return nil, gate, nil, false
 	}
-	admitted, repair := cli.yardGateAdmits(gate, request)
-	if !admitted {
-		return nil, gate, true
+	subject := cli.provisionalSubject(request)
+	subject.scope, subject.named, subject.acts = scopeSelected, nil, nil
+	verdict := gate.verdict(request.yard, subject)
+	if err := verdict.err(); err != nil {
+		return nil, gate, err, true
 	}
-	return &gateAdmission{request: request, gate: &gate, repair: repair}, gate, true
+	kind := admissionOpen
+	if verdict.repair {
+		kind = admissionRepair
+	}
+	return &gateAdmission{kind: kind, request: request, gate: &gate}, gate, nil, true
+}
+
+// provisionalSubject is the subject handler identity and the handler's real
+// parser give before prepare. It is final for a non-prepared mutator; a
+// prepared command replaces it with the subject its prepare attaches.
+func (cli *CLI) provisionalSubject(request gateRequest) gateSubject {
+	if request.profileResource {
+		subject := gateSubject{declared: true, pending: true}
+		if invocation, err := parseResourceInvocation(request.arguments); err == nil && request.definition.Shutdown != "" && invocation.verb == request.definition.Shutdown {
+			subject.member = memberResourceShutdown
+		}
+		return subject
+	}
+	if subject, ok := nonPreparedMutators[request.handler]; ok {
+		return subject
+	}
+	switch request.handler {
+	case "@init":
+		parsed, err := parseInitArguments(request.arguments)
+		if err != nil {
+			return gateSubject{declared: true, member: memberInit, unfit: err}
+		}
+		return initSubject(parsed)
+	case "@teardown":
+		return gateSubject{declared: true, member: memberTeardown, pending: true}
+	case "@lifecycle":
+		return lifecycleSubject(request.name)
+	case "@config":
+		// Authoring verbs read their requests with the handler's own parser.
+		if verbs := configArguments(request.arguments); len(verbs) != 0 && slices.Contains([]string{"set", "unset", "import", "edit"}, verbs[0]) {
+			if requests, err := parseConfigAuthoringRequests(verbs[0], verbs[1:], false); err == nil {
+				return configAuthoringSubject(request.yard, requests)
+			}
+		}
+		return gateSubject{declared: true, member: memberConfig}
+	case "@profile":
+		parsed, err := parseProfileArguments(request.arguments)
+		if err != nil {
+			return gateSubject{declared: true, member: memberProfileDisable, unfit: err}
+		}
+		return verbSubject(parsed.verb, memberProfileDisable)
+	case "@integration":
+		parsed, err := parseIntegrationArguments(request.arguments)
+		if err != nil {
+			return gateSubject{declared: true, member: memberIntegrationDisable, unfit: err}
+		}
+		return verbSubject(parsed.verb, memberIntegrationDisable)
+	}
+	if subject, ok := handlerSubjects[request.handler]; ok {
+		return subject
+	}
+	return gateSubject{}
 }
 
 // admitGate is the one constructor of a gate admission. It reads the release
 // history before and after the inspection; a repair admission requires both
 // to agree, so its decision and token describe the same history. An outcome
-// of nil is a ready release, admitted as before.
+// of nil is a ready release.
 func (cli *CLI) admitGate(
 	ctx context.Context, request gateRequest,
 	inspect func() (*releasetransition.Outcome, *releasetransition.Inspection, error),
-) (admitted *gateAdmission, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection, gate yardGate, scoped bool, err error) {
+) (admitted *gateAdmission, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection, refusal error, scoped bool, err error) {
 	before, beforeErr := cli.readReleaseHistory()
 	outcome, inspection, err = inspect()
-	if err != nil || outcome == nil {
-		return nil, outcome, inspection, gate, false, err
+	if err != nil {
+		return nil, outcome, inspection, nil, false, err
 	}
-	admitted, gate, scoped = cli.decideGate(ctx, request, outcome, inspection)
-	if admitted == nil || !admitted.repair {
-		return admitted, outcome, inspection, gate, scoped, nil
+	if outcome == nil {
+		return &gateAdmission{kind: admissionReady, request: request}, nil, inspection, nil, false, nil
+	}
+	admitted, _, refusal, scoped = cli.decideGate(ctx, request, outcome, inspection)
+	if admitted == nil || !admitted.repair() {
+		return admitted, outcome, inspection, refusal, scoped, nil
 	}
 	after, afterErr := cli.readReleaseHistory()
 	if err = errors.Join(beforeErr, afterErr); err != nil {
-		return nil, outcome, inspection, gate, scoped, err
+		return nil, outcome, inspection, nil, scoped, err
 	}
 	if before == nil || after == nil || *before != *after {
-		return nil, outcome, inspection, gate, scoped, fmt.Errorf("%w: the release changed during admission; rerun the command", domain.ErrPlanStale)
+		return nil, outcome, inspection, nil, scoped, fmt.Errorf("%w: the release changed during admission; rerun the command", domain.ErrPlanStale)
 	}
 	admitted.history = *after
-	if !admitted.bounded {
+	if admitted.kind == admissionRepair {
 		if admitted.sources, err = cli.repairSources(ctx); err != nil {
-			return nil, outcome, inspection, gate, scoped, err
+			return nil, outcome, inspection, nil, scoped, err
 		}
 	}
-	return admitted, outcome, inspection, gate, scoped, nil
-}
-
-// yardRepairEntry is one member of the repair set of a yard that is not
-// converged. A member with consent runs its effects through
-// preparedCommand.Execute, which rechecks its admission under the owner
-// barrier; shell has no prepared execution, so its gate admission is its only
-// check.
-type yardRepairEntry struct {
-	name    string
-	consent bool
-	admits  func(*CLI, gateRequest) bool
-}
-
-// yardRepairSet is the closed repair set: plain init repeats the yard's whole
-// convergence and --reset rebuilds it, while --configs, --profile, --adopt and
-// --continue-legacy change what the yard is or do only part of the work; the
-// other members stop, remove, configure or diagnose the yard. Configuration
-// admits its prepared verbs only, which pass the recheck; a resource admits
-// only its declared shutdown with a prepared plan.
-var yardRepairSet = []yardRepairEntry{
-	{"init", true, func(_ *CLI, request gateRequest) bool { return initRepairMode(request, initReconcile) }},
-	{"init --reset", true, func(_ *CLI, request gateRequest) bool { return initRepairMode(request, initReset) }},
-	{"teardown", true, func(_ *CLI, request gateRequest) bool { return request.handler == "@teardown" }},
-	{"start", true, func(_ *CLI, request gateRequest) bool {
-		return request.handler == "@lifecycle" && request.name == "start"
-	}},
-	{"stop", true, func(_ *CLI, request gateRequest) bool {
-		return request.handler == "@lifecycle" && request.name == "stop"
-	}},
-	{"shell", false, func(_ *CLI, request gateRequest) bool { return request.handler == "@shell" }},
-	{"config", true, func(cli *CLI, request gateRequest) bool {
-		return request.handler == "@config" && configRepairInvocation(cli, request.arguments)
-	}},
-	{"profile disable", true, func(_ *CLI, request gateRequest) bool {
-		return request.handler == "@profile" && firstVerb(request.arguments) == "disable"
-	}},
-	{"integration disable", true, func(_ *CLI, request gateRequest) bool {
-		return request.handler == "@integration" && firstVerb(request.arguments) == "disable"
-	}},
-	{"resource shutdown", true, func(cli *CLI, request gateRequest) bool {
-		invocation, err := parseResourceInvocation(request.arguments)
-		return request.profileResource && err == nil && request.definition.Shutdown != "" && invocation.verb == request.definition.Shutdown &&
-			cli.resourceExactInvocation(request.definition, request.arguments)
-	}},
-}
-
-// configRepairInvocation is a configuration verb that runs as a prepared
-// command: exact apply and sync, and local set, unset, import and edit. Git
-// authoring and the other verbs stay refused on a yard that needs repair.
-func configRepairInvocation(cli *CLI, arguments []string) bool {
-	verbs := configArguments(arguments)
-	if len(verbs) == 0 || commandHelpRequested(verbs) {
-		return false
-	}
-	switch verbs[0] {
-	case "set", "unset", "import", "edit":
-		requests, ok := configAuthoringRequests(verbs)
-		if !ok || len(requests) == 0 || (verbs[0] == "import" || verbs[0] == "edit") && len(requests) != 1 {
-			return false
-		}
-		for _, request := range requests {
-			if request.git {
-				return false
-			}
-		}
-		return true
-	case "apply", "sync":
-		return configExactInvocation(config.Loaded{Catalog: cli.catalog}, arguments)
-	}
-	return false
-}
-
-// configAuthoringRequests parses the authoring requests of a set, unset,
-// import or edit invocation.
-func configAuthoringRequests(verbs []string) ([]configAuthoringRequest, bool) {
-	requests, err := parseConfigAuthoringRequests(verbs[0], verbs[1:], false)
-	return requests, err == nil
-}
-
-func initRepairMode(request gateRequest, mode initMode) bool {
-	if request.handler != "@init" {
-		return false
-	}
-	parsed, err := parseInitArguments(request.arguments)
-	return err == nil && !parsed.adopt && !parsed.continueLegacy && parsed.profile == "" && parsed.mode == mode
-}
-
-func firstVerb(arguments []string) string {
-	for _, argument := range arguments {
-		if !strings.HasPrefix(argument, "-") {
-			return argument
-		}
-	}
-	return ""
-}
-
-// yardRepair returns the repair set member an invocation is, if any.
-func (cli *CLI) yardRepair(request gateRequest) (yardRepairEntry, bool) {
-	if commandHelpRequested(request.arguments) {
-		return yardRepairEntry{}, false
-	}
-	for _, entry := range yardRepairSet {
-		if entry.admits(cli, request) {
-			return entry, true
-		}
-	}
-	return yardRepairEntry{}, false
+	return admitted, outcome, inspection, nil, scoped, nil
 }
 
 // boundedStopRequest is stop of one yard, the one exit over an unfinished activation.
@@ -625,7 +558,7 @@ func (cli *CLI) completedSourceBindings(ctx context.Context, journal releasetran
 // and a fresh inspection, which binds the installed source and runtime links
 // to that history, must admit the invocation again. It runs once.
 func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
-	if admission == nil || !admission.repair || admission.rechecked {
+	if !admission.repair() || admission.rechecked {
 		return nil
 	}
 	if cli.ownerMutationLock == nil {
@@ -649,10 +582,16 @@ func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
 		return err
 	}
 	if outcome != nil {
-		again, _, _ := cli.decideGate(ctx, admission.request, outcome, inspection)
+		again, gate, _, _ := cli.decideGate(ctx, admission.request, outcome, inspection)
 		if again == nil {
 			return fmt.Errorf("%w: the release changed after confirmation: %s", domain.ErrPlanStale, strings.TrimSpace(mutationGateRefusalText(outcome, inspection)))
 		}
+		if again.kind == admissionBounded {
+			gate = yardGate{}
+		}
+		admission.gate = &gate
+	} else {
+		admission.gate = &yardGate{}
 	}
 	if current, err = cli.readReleaseHistory(); err != nil {
 		return err
@@ -667,7 +606,7 @@ func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
 // verifyAfterEffect checks, still under the owner barrier, that a repair left
 // release history as admitted, and names what the yard still needs.
 func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI) error {
-	if admission == nil || !admission.repair || !admission.rechecked {
+	if !admission.repair() || !admission.rechecked {
 		return nil
 	}
 	current, err := cli.readReleaseHistory()
@@ -677,7 +616,7 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 	if current == nil || *current != admission.history {
 		return errors.New("the repair changed release history; run yard migrate --check")
 	}
-	if admission.bounded || admission.request.handler == "@init" || admission.request.handler == "@teardown" {
+	if admission.kind == admissionBounded || admission.request.handler == "@init" || admission.request.handler == "@teardown" {
 		return nil // init verifies its own readiness; a removed yard has none
 	}
 	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, admission.request.yard)
@@ -692,47 +631,10 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 	return nil
 }
 
-// configConsumerAdmission admits the refresh a published configuration change
-// needs on its own target yards when the gate is yard-scoped: each target is
-// open or limited to repair only by drift, which this refresh repairs, and
-// other yards' findings wait for their own repair. The admission applies in
-// this process under the owner barrier the publishing command holds. It is
-// nil when the gate is not yard-scoped or a target has another finding.
-func (cli *CLI) configConsumerAdmission(ctx context.Context, yard string, names []string) (*gateAdmission, error) {
-	if cli.ownerMutationLock == nil {
-		return nil, nil
-	}
-	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
-	if err != nil || outcome == nil {
-		return nil, err
-	}
-	gate, ok := cli.yardScopedGate(outcome, inspection)
-	if !ok {
-		return nil, nil
-	}
-	for _, name := range names {
-		state := gate.state(name)
-		if state.failed || state.config || state.unreachable || state.pending {
-			return nil, nil
-		}
-	}
-	history, err := cli.readReleaseHistory()
-	if err != nil || history == nil {
-		return nil, err
-	}
-	// Like every repair, the refresh runs only with the installed tooling.
-	sources, err := cli.repairSources(ctx)
-	if err != nil {
-		return nil, nil
-	}
-	return &gateAdmission{request: gateRequest{yard: yard, handler: "@config", name: "config"}, gate: &gate,
-		repair: true, history: *history, sources: sources, rechecked: true}, nil
-}
-
 // guardEffects refuses an adapter while a repair admission has not passed its
 // recheck, so no repair reaches an effect outside preparedCommand.Execute.
 func (cli *CLI) guardEffects(context.Context) error {
-	if admission := cli.gateAdmitted; admission != nil && admission.repair && !admission.rechecked {
+	if admission := cli.gateAdmitted; admission.repair() && !admission.rechecked {
 		return errors.New("a repair admitted behind the release gate runs only through its confirmed plan")
 	}
 	return nil
@@ -753,27 +655,6 @@ func (gate yardGate) otherYardFindings(yard string) []releasetransition.Blocker 
 		findings = append(findings, releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable, Message: message, Retry: yardNextStep(name, state)})
 	}
 	return findings
-}
-
-// skipGatedYards leaves out, and reports once, the other yards a multi-yard
-// verb must not touch: those limited to repair and those whose pending
-// contract refuses configuration.
-func (cli *CLI) skipGatedYards(targets []configTarget, selected string, report bool) []configTarget {
-	if cli.gateAdmitted == nil || cli.gateAdmitted.gate == nil {
-		return targets
-	}
-	gate := cli.gateAdmitted.gate
-	kept := slices.DeleteFunc(slices.Clone(targets), func(target configTarget) bool {
-		state := gate.state(target.Name)
-		if target.Name == selected || !state.repairOnly() && !state.pending {
-			return false
-		}
-		if report {
-			fmt.Fprintf(cli.options.Stderr, "yard: skipped yard %s: it needs attention; next: %s\n", target.Name, yardNextStep(target.Name, state))
-		}
-		return true
-	})
-	return kept
 }
 
 // skipInvalidYards keeps a multi-yard verb going when other yards' own
@@ -882,43 +763,4 @@ func (cli *CLI) unfinishedActivationStop(ctx context.Context, yard string, outco
 	}
 	loaded, err := cli.loadContext(yard)
 	return err == nil && loaded.Context.AccessKind == domain.AccessLocal
-}
-
-// configWritesEveryYard reports a configuration write at host or shared scope,
-// or to Git, which every yard's desired configuration can read: set, unset,
-// import and edit alike. A write that cannot be parsed is treated as one.
-func configWritesEveryYard(arguments []string) bool {
-	arguments = configArguments(arguments)
-	if len(arguments) == 0 || !slices.Contains([]string{"set", "unset", "import", "edit"}, arguments[0]) {
-		return false
-	}
-	requests, ok := configAuthoringRequests(arguments)
-	if !ok || len(requests) == 0 {
-		return true
-	}
-	for _, request := range requests {
-		if request.git || request.scope == config.ScopeHost || request.scope == config.ScopeShared {
-			return true
-		}
-	}
-	return false
-}
-
-// repairOnlyYards names, in order, the given yards the admitting gate limits
-// to their own repair commands.
-func (cli *CLI) repairOnlyYards(names []string) []string {
-	if cli.gateAdmitted == nil || cli.gateAdmitted.gate == nil {
-		return nil
-	}
-	var blocked []string
-	for _, name := range names {
-		if cli.gateAdmitted.gate.state(name).repairOnly() {
-			blocked = append(blocked, name)
-		}
-	}
-	return blocked
-}
-
-func (cli *CLI) repairNextStep(yard string) string {
-	return yardNextStep(yard, cli.gateAdmitted.gate.state(yard))
 }

@@ -128,7 +128,6 @@ type CLI struct {
 	retainedAdapterCompatibility bool
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
-	permits                      recoveryPermits
 	// gateAdmitted records how a non-ready release gate admitted this
 	// invocation; a repair admission is rechecked once after consent.
 	gateAdmitted *gateAdmission
@@ -216,10 +215,9 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 			return err
 		}
 	}
-	operation.permits = recoveryPermits{}
 	// The parent's admission is the one of record; it holds the owner barrier
 	// and rechecked its repair before this in-process child runs.
-	operation.gateAdmitted = nil
+	operation.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
 		// Keep the native execution error in process. Only the outer command
 		// boundary renders it or converts it to an exit status.
@@ -474,7 +472,6 @@ func New(options Options) (*CLI, error) {
 func (cli *CLI) Run(ctx context.Context) int {
 	cli.localMetadataDiagnostics = !cli.releaseTransitionChild
 	cli.configResources, cli.configResourcesRoot = nil, ""
-	cli.permits = recoveryPermits{}
 	cli.gateAdmitted = nil
 	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
@@ -612,12 +609,16 @@ func (cli *CLI) Run(ctx context.Context) int {
 			cli.registeredInitMigrated = true
 		}
 	}
-	if admission.gate == gateRequired && !cli.releaseTransitionChild && !identityRecovery {
-		permits, code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes)
-		if done {
+	// Every invocation carries an explicit admission kind to its prepared command.
+	switch {
+	case admission.gate == gateRequired && !cli.releaseTransitionChild && !identityRecovery:
+		if code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes); done {
 			return code
 		}
-		cli.permits = permits
+	case admission.gate == gateSkipRead:
+		cli.gateAdmitted = &gateAdmission{kind: admissionRead}
+	default:
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	}
 	ownerDataHome := cli.env["SUBYARD_HOME"]
 	if ownerDataHome == "" {
@@ -814,6 +815,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		if slices.Contains(commandArguments, "--full") {
 			cli.env["SUBYARD_NO_AUDIT"] = "1"
+			cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 		} else if !cli.releaseTransitionChild {
 			if code, done := cli.admitTeardownGate(ctx, yard, commandArguments); done {
 				return code
@@ -1158,14 +1160,27 @@ func configSyncInvocation(arguments []string) (bool, bool, bool) {
 				return true, false, true
 			case "help", "--help", "-h", "path":
 				return false, false, false
+			case "pull", "push", "connect":
+				// Only the bare sync parser has --check; these verbs read it, if
+				// at all, as an option value, such as push -m --check.
+				return true, false, false
 			}
 		}
+		// The bare sync parser takes no option values: a --check token is the
+		// flag. A shape it would refuse is no reader.
+		check := false
 		for _, argument := range arguments[1:] {
-			if argument == "--check" {
-				return true, true, false
+			switch argument {
+			case "--check":
+				check = true
+			case "--adopt", "--apply", "-y", "--yes":
+			default:
+				if strings.HasPrefix(argument, "-") {
+					return true, false, false
+				}
 			}
 		}
-		return true, false, false
+		return true, check, false
 	default:
 		return false, false, false
 	}
@@ -4371,9 +4386,13 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
 			return nil, &rpc.Error{Code: rpc.CodeExactPlanRequired, Message: "no exact plan is bound to this operation"}
 		}
+		planned.CLI.gateAdmitted = planned.gateAdmission()
 		if fault := planned.CLI.admitRPCOperation(ctx, planned.Loaded, planned.Definition, planned.Arguments, true); fault != nil {
 			return nil, fault
 		}
+		// The execute-time admission is the one of record; Execute decides the
+		// plan's subject on it.
+		planned.gateRecord = planned.CLI.gateAdmitted
 		if planned.Plan.Target == domain.TargetRemoteOwner {
 			return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "execute this plan through owner-host SSH stdio"}
 		}

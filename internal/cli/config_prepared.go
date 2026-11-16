@@ -102,7 +102,6 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 		return prepared.prepareConfigScalar(ctx, arguments[0], arguments[1:])
 	case "apply":
 		_, allLocal := configApplyInvocation(arguments)
-		selected := prepared.Loaded.Context.YardName
 		targets, err := prepared.CLI.localConfigTargets(prepared.Loaded, allLocal)
 		if allLocal {
 			targets, err = prepared.CLI.skipInvalidYards(targets, err, prepared.Loaded, true)
@@ -110,13 +109,21 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 		if err != nil {
 			return err
 		}
-		targets = prepared.CLI.skipGatedYards(targets, selected, true)
+		// Apply materializes; it writes no desired configuration. The other
+		// yards of --all-local are optional actions: one that needs repair or
+		// has pending findings is skipped and reported.
+		subject := gateSubject{declared: true, member: memberConfig}
+		for _, target := range targets {
+			subject.acts = append(subject.acts, yardAction{yard: target.Name, optional: true})
+		}
+		prepared.setGateSubject(subject)
+		targets = prepared.gateSkipped(targets, true)
 		execution, err := prepared.CLI.prepareConfigApply(ctx, targets, func() ([]configTarget, error) {
 			refreshed, err := prepared.CLI.refreshLocalConfigTargets(prepared.Loaded, allLocal)
 			if allLocal {
 				refreshed, err = prepared.CLI.skipInvalidYards(refreshed, err, prepared.Loaded, false)
 			}
-			return prepared.CLI.skipGatedYards(refreshed, selected, false), err
+			return prepared.gateSkipped(refreshed, false), err
 		})
 		if err != nil {
 			return err
@@ -133,6 +140,7 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	if err != nil {
 		return configUsage(err)
 	}
+	defer prepared.setGateSubject(configAuthoringSubject(prepared.Loaded.Context.YardName, requests))
 	if len(requests) > 1 {
 		if err := prepared.CLI.configGitScalarsRefusal(prepared.Loaded, requests); err != nil {
 			return configUsage(err)
@@ -385,6 +393,10 @@ type configApplyExecution struct {
 	approved []configTargetAssessment
 	current  []configTargetAssessment
 	selector configTargetSelector
+	// inProcess applies in this process under the barrier the command holds,
+	// with the migration child's ownership semantics: for a repair, and for
+	// consumers refreshed after a publication left the release not ready.
+	inProcess bool
 }
 
 func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, selector configTargetSelector) (*configApplyExecution, error) {
@@ -407,9 +419,6 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 			return nil, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome}
 		}
 		execution.approved = append(execution.approved, assessment)
-	}
-	if cli.permits.configApply != nil && !cli.permits.configApply.matchesRequestedConfigs(execution.approved) {
-		return nil, errors.New("config apply: release repair requires the persisted configuration; remove differing command overrides")
 	}
 	execution.current = slices.Clone(execution.approved)
 	return execution, nil
@@ -489,6 +498,7 @@ func (prepared *preparedCommand) attachConfigApply(execution *configApplyExecuti
 	prepared.executeNoOp = true
 
 	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, output io.Writer) (domain.AdapterResult, error) {
+		execution.inProcess = prepared.repairing
 		if err := cli.executeConfigApply(ctx, execution, prepared.Plan.Steps, output); err != nil {
 			return domain.AdapterResult{}, err
 		}
@@ -499,13 +509,6 @@ func (prepared *preparedCommand) attachConfigApply(execution *configApplyExecuti
 func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyExecution, approvedSteps []domain.OperationStep, output io.Writer) error {
 	copyCLI := *cli
 	copyCLI.options.Stdout, copyCLI.options.Stderr = output, output
-	if cli.permits.configApply != nil {
-		unlock, err := cli.lockConfigApplyRepair(ctx, cli.permits.configApply)
-		if err != nil {
-			return err
-		}
-		defer unlock()
-	}
 	if err := cli.refreshConfigApply(ctx, execution); err != nil {
 		return err
 	}
@@ -521,11 +524,10 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		}
 	}
 	applier := cli.options.Config
-	// A repair on a yard that needs repair applies in this process, with the
-	// migration child's ownership semantics, under the barrier its recheck
-	// holds: one admission per operator command. Every other apply runs the
-	// ordinary child, which is admitted on its own as on a ready release.
-	if applier == nil && (cli.permits.configApply != nil || cli.gateAdmitted != nil && cli.gateAdmitted.repair) {
+	// An in-process apply uses the migration child's ownership semantics under
+	// the barrier this command holds: one admission per operator command.
+	// Every other apply runs the ordinary child, admitted on its own.
+	if applier == nil && execution.inProcess {
 		applier = releaseTransitionConfigApplier{cli: &copyCLI}
 	}
 	if applier == nil {
@@ -551,11 +553,6 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 			fmt.Fprintln(output, "config apply: no running local yards to refresh")
 		}
 	}
-	if cli.permits.configApply != nil {
-		pending, err := copyCLI.finishConfigApplyRepair(ctx, cli.permits.configApply)
-		reportStillPending(output, pending)
-		return err
-	}
 	return nil
 }
 
@@ -577,6 +574,7 @@ func (cli *CLI) runPreparedConfigMutation(ctx context.Context, loaded config.Loa
 
 func (prepared *preparedCommand) attachConfigFileDraft(request configAuthoringRequest, path string, baseline config.PersistentFileSnapshot, content []byte) error {
 	loaded := prepared.Loaded
+	prepared.setGateSubject(configAuthoringSubject(loaded.Context.YardName, []configAuthoringRequest{request}))
 	desired := config.PersistentFileSnapshot{Exists: true, Content: slices.Clone(content)}
 	prospective, err := prepared.CLI.prepareConfigProspective(loaded, request, path, desired)
 	if err != nil {

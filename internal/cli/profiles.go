@@ -191,6 +191,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 	if err != nil {
 		return err
 	}
+	prepared.setGateSubject(verbSubject(request.verb, memberProfileDisable))
 	if loaded.Context.AccessKind != domain.AccessLocal {
 		return errors.New("profile commands require the owner host; setup uses a protected owner-local credential file")
 	}
