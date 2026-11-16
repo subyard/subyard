@@ -418,16 +418,15 @@ base_image=subyard-e2e-debian-13-cloud-container
 if ! incus image info "$base_image" --project default >/dev/null 2>&1; then
   base_image=images:debian/13
 fi
-# Host-wide settings are not yard state: the installation stays cold.
+# Host-wide settings are not yard state: the installation stays cold. Host
+# paths stay per-yard derivations, so the new yard shares none with default.
 cat > "$OPERATOR_HOME/.config/subyard/config.env" <<EOF
 # $MARKER
 YARD_IMAGE=$base_image
 YARD_IMAGE_FALLBACK=images:ubuntu/24.04
 CODING_TOOL_INTEGRATIONS=
 ENVIRONMENT_PROFILES=
-HOST_BASE=$OPERATOR_HOME/host
 HOST_MOUNTS=
-RESTRICTED_DISK_PATHS=$OPERATOR_HOME/host
 FORWARD_SSH_AGENT=0
 # Release readiness observes persisted power paths, not command overrides.
 SUBYARD_POWER_RECONCILER_PATH=$POWER_RECONCILER
