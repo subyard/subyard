@@ -712,7 +712,8 @@ protected_tab="$(orca_rpc session.tabs.createTerminal "$(rpc_params --arg select
 hold_registration_lock
 yard remove "$protected_name" --yes >"$STATE/protected-remove.out" 2>"$STATE/protected-remove.err" \
   || { show_output "$STATE/protected-remove.out" "$STATE/protected-remove.err"; die 'protected fixture removal failed'; }
-# A directory without project metadata at the address, such as a bind mountpoint.
+# A bare directory without project metadata or src at the address, such as an empty bind
+# mountpoint, keeps the record protected; a remaining src would leave it undetermined instead.
 guest_dev mkdir "/srv/workspaces/$protected_name"
 release_registration_lock
 yard orca status >"$STATE/protected-status.out" 2>"$STATE/protected-status.err" \

@@ -475,8 +475,10 @@ A project removed from Subyard loses its Orca sessions. When the project's whole
 directory `/srv/workspaces/<project-id>` is absent, sync closes every saved tab and live
 terminal of that project's owned records and removes the records; processes in those
 terminals end. Deleting a project directory inside the yard by hand counts as removal too.
-Absence is checked below the same workspace boundary as the completed scan; any remaining
-directory at that address, such as a bind mountpoint, keeps the sessions. A missing `src` alone,
+Absence is checked below the same workspace boundary as the completed scan. A bare directory
+left at the address without project metadata, such as an empty bind mountpoint, keeps the
+record protected with its sessions. A remaining `<project-id>/src` leaves the checkout's absence
+unverified, so its record stays undetermined. A missing `src` of a registered project alone,
 a scan error or a changed workspace boundary closes nothing. Tabs are selected by the exact
 repository ID, including linked worktrees of that record wherever their path is, and closed
 by worktree and tab ID. Each live PTY of the record is first stopped through Orca's fenced

@@ -1536,7 +1536,7 @@ STEPS
     if [ "$observed" = unavailable ]; then observed=unknown; decision=conditional; fi
   fi
   orca_step_add registration workspace-driver/srv/workspaces "$observed" registered "$decision" \
-    'native verified local roots registered in their project groups; native saved-tab retention and removal checks succeed' \
+    'native verified local roots registered in their project groups; sessions of removed projects closed and their records removed, or kept as protected' \
     'reconcile only the captured native verified-root catalog, or the bounded catalog revealed by approved startup'
   orca_steps_emit up "$ORCA_STEPS"
 }
@@ -1586,7 +1586,7 @@ emit_sync_assessment() {
     fi
   fi
   orca_step_add registration workspace-driver/srv/workspaces "$observed" registered "$decision" \
-    'captured native verified-root catalog converged with saved-tab retention' 'reconcile the captured native verified-root catalog'
+    'captured native verified-root catalog converged; sessions of removed projects closed and their records removed' 'reconcile the captured native verified-root catalog'
   orca_steps_emit sync "$ORCA_STEPS"
 }
 
