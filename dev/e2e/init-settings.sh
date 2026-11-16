@@ -227,9 +227,10 @@ grep -Fq "next: yard -Y $name init" "$STATE/retry-refusal.log"
 yard init --yes
 printf 'PASS: a failed integration hook is repaired by the yard init\n'
 guest python3 -c 'import json; p="/var/lib/subyard/integrations/inventory.json"; value=json.load(open(p)); value.pop("applied_settings",None); open(p,"w").write(json.dumps(value))'
-yard init --yes
+# The init converged the yard, so integration enable is an ordinary command again.
+yard integration enable claude --yes
 guest python3 -c 'import json; value=json.load(open("/var/lib/subyard/integrations/inventory.json")); assert value["applied_settings"]["AGENT_claude_COMMAND"] == "fixture-agent-next"'
-printf 'PASS: yard init restores the applied baseline\n'
+printf 'PASS: converged integration retry restores the applied baseline\n'
 guest mv /usr/local/libexec/subyard/projects-changed /usr/local/libexec/subyard/projects-changed.fixture-backup
 # The missing owned dispatcher is this yard's finding: stop stays one of its
 # repair commands, while a command outside that set is refused with the yard.
