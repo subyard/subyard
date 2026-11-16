@@ -176,7 +176,7 @@ func NewCoreActionRegistry() (*domain.ActionRegistry, error) {
 			Recovery: domain.RecoveryRecreatable,
 		},
 		{
-			Action: "yard.init.project-hooks", Summary: "Retry installed project hooks", Effect: domain.ActionBoundedWrite,
+			Action: "yard.init.project-hooks", Summary: "Retry installed project hooks and retire resolved local pending activation records", Effect: domain.ActionBoundedWrite,
 			Impacts:  []domain.ActionImpact{domain.ImpactYardRuntime},
 			Recovery: domain.RecoveryNotNeeded,
 		},

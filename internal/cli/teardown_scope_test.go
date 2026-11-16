@@ -640,6 +640,27 @@ func TestLifecycleOnlyManagedPathsWaitForInstallationCleanup(t *testing.T) {
 	}
 }
 
+// The yard-scoped pending activation records live under the configuration
+// root; full teardown owns that directory, so it is removed, not preserved.
+func TestFullTeardownOwnsPendingActivationRecords(t *testing.T) {
+	const root = "/config-home"
+	namespaces, scoped, err := fullRootNamespaces(root, uninstall.Installation{ConfigHome: root}, &fullTeardown{}, nil)
+	if err != nil || !scoped {
+		t.Fatalf("namespaces scoped=%v err=%v", scoped, err)
+	}
+	record, err := activationPendingRecordPath(root, "default", "sample-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(root, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if top := strings.Split(filepath.ToSlash(relative), "/")[0]; !slices.Contains(namespaces, top) || top != "activation-pending" {
+		t.Fatalf("pending records %s are not owned by full teardown: %v", relative, namespaces)
+	}
+}
+
 func TestFullTeardownOwnsReplacedJournalEvidence(t *testing.T) {
 	const root = "/config-home"
 	namespaces, scoped, err := fullRootNamespaces(root, uninstall.Installation{ConfigHome: root}, &fullTeardown{}, nil)

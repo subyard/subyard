@@ -1,0 +1,164 @@
+package cli
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/Subyard/Subyard/internal/testkit"
+)
+
+func TestActivationPendingRecordBindsExactFacts(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := activationPendingRecord{Yard: "named", Project: "subyard-named", Instance: "yard-named", Owner: "sample-runtime",
+		Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "inputs-1", Message: "yard named: sample-runtime failed"}
+	if _, found, err := pendingActivation(home, record); err != nil || found {
+		t.Fatalf("absent record matched: %v %v", found, err)
+	}
+	if err := writeActivationPendingRecord(home, record); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := activationPendingRecordPath(home, "named", "sample-runtime")
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("record mode: %v %v", info, err)
+	}
+	stored, found, err := pendingActivation(home, record)
+	if err != nil || !found || stored.Message != record.Message {
+		t.Fatalf("exact facts did not match: %#v %v %v", stored, found, err)
+	}
+	for name, change := range map[string]func(*activationPendingRecord){
+		"actual":   func(r *activationPendingRecord) { r.Actual = strings.Repeat("e", 64) },
+		"desired":  func(r *activationPendingRecord) { r.Desired = strings.Repeat("c", 64) },
+		"inputs":   func(r *activationPendingRecord) { r.Inputs = "inputs-2" },
+		"instance": func(r *activationPendingRecord) { r.Instance = "yard-other" },
+		"project":  func(r *activationPendingRecord) { r.Project = "subyard-other" },
+	} {
+		current := record
+		change(&current)
+		if _, found, err := pendingActivation(home, current); err != nil || found {
+			t.Fatalf("%s change still matched: %v", name, err)
+		}
+	}
+	if err := removeActivationPendingRecord(home, "named", "sample-runtime"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := pendingActivation(home, record); err != nil || found {
+		t.Fatalf("removed record matched: %v %v", found, err)
+	}
+	for _, payload := range []string{"{broken\n", `{"schemaVersion":1,"yard":"named","owner":"sample-runtime","extra":1}`, `{"schemaVersion":1,"yard":"other","project":"p","instance":"i","owner":"sample-runtime","actual":"a","desired":"b","inputs":"x","message":""}`} {
+		testkit.WriteFile(t, path, []byte(payload), 0o600)
+		if _, _, err := pendingActivation(home, record); err == nil {
+			t.Fatalf("invalid record accepted: %s", payload)
+		}
+	}
+	for _, invalid := range []activationPendingRecord{
+		{Yard: "../x", Project: "p", Instance: "i", Owner: "o", Actual: "a", Desired: "b", Inputs: "x"},
+		{Yard: "named", Project: "p", Instance: "i", Owner: "o", Actual: "a", Desired: "a", Inputs: "x"},
+		{Yard: "named", Project: "p", Instance: "i", Owner: "o", Actual: "a", Desired: "b", Inputs: "x", Message: "line\nbreak"},
+	} {
+		if err := writeActivationPendingRecord(home, invalid); err == nil {
+			t.Fatalf("invalid record written: %#v", invalid)
+		}
+	}
+}
+
+// Retirement removes only known owners' records through the protected
+// writer: other entries stay untouched, and an unsafe entry at a record path,
+// such as a symbolic link, refuses and keeps its target.
+func TestYardRecordRetirementTouchesOnlyKnownRecords(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := activationPendingRecord{Yard: "named", Project: "p", Instance: "i", Owner: "sample-runtime",
+		Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "x"}
+	if err := writeActivationPendingRecord(home, record); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(home, "activation-pending", "v1", "named")
+	foreign := filepath.Join(directory, "foreign.txt")
+	debris := filepath.Join(directory, ".sample-runtime.json.tmp-123456")
+	testkit.WriteFile(t, foreign, []byte("x"), 0o600)
+	testkit.WriteFile(t, debris, []byte("partial"), 0o600)
+	if err := removeYardActivationPendingRecords(home, "named", []string{"sample-runtime", "other-runtime"}); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := activationPendingRecordPath(home, "named", "sample-runtime")
+	for file, kept := range map[string]bool{path: false, foreign: true, debris: true} {
+		if _, err := os.Lstat(file); (err == nil) != kept {
+			t.Fatalf("%s kept=%v: %v", file, !kept, err)
+		}
+	}
+	target := filepath.Join(home, "elsewhere.json")
+	testkit.WriteFile(t, target, []byte("{}"), 0o600)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeYardActivationPendingRecords(home, "named", []string{"sample-runtime"}); err == nil {
+		t.Fatal("a symbolic link at a record path was accepted")
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("symbolic link was removed: %v", err)
+	}
+	if payload, err := os.ReadFile(target); err != nil || string(payload) != "{}" {
+		t.Fatalf("link target changed: %q %v", payload, err)
+	}
+}
+
+// An unreadable or misplaced record fails closed and names the record, relative
+// to the configuration root, so the operator knows what to inspect or remove.
+func TestInvalidActivationPendingRecordNamesItsPath(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record := activationPendingRecord{Yard: "named", Project: "subyard-named", Instance: "yard-named", Owner: "sample-runtime",
+		Actual: strings.Repeat("d", 64), Desired: strings.Repeat("b", 64), Inputs: "inputs-1", Message: "yard named: sample-runtime failed"}
+	if err := writeActivationPendingRecord(home, record); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := activationPendingRecordPath(home, "named", "sample-runtime")
+	for name, payload := range map[string]string{"undecodable": "{not json\n", "another owner": `{"schemaVersion":1}`} {
+		t.Run(name, func(t *testing.T) {
+			if name == "another owner" {
+				other := record
+				other.Owner = "other-runtime"
+				payloadBytes, err := json.Marshal(other)
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload = string(payloadBytes) + "\n"
+			}
+			testkit.WriteFile(t, path, []byte(payload), 0o600)
+			_, _, err := pendingActivation(home, record)
+			if err == nil || !strings.Contains(err.Error(), "activation-pending/v1/named/sample-runtime.json") {
+				t.Fatalf("invalid record did not fail closed with its path: %v", err)
+			}
+		})
+	}
+}
+
+// A record location that cannot be read names each record relative to the
+// configuration root and reports every owner's refusal, not only the first.
+func TestUnreadablePendingRecordsAreAllNamed(t *testing.T) {
+	home := filepath.Join(testkit.TempDir(t), "config")
+	if err := os.MkdirAll(filepath.Join(home, "activation-pending", "v1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The yard's record directory is a file, so no record under it can be read.
+	testkit.WriteFile(t, filepath.Join(home, "activation-pending", "v1", "named"), []byte("not a directory\n"), 0o600)
+	_, err := yardActivationPendingRecords(home, "named", []string{"sample-runtime", "other-runtime"})
+	if err == nil {
+		t.Fatal("unreadable pending records were not refused")
+	}
+	for _, path := range []string{"activation-pending/v1/named/sample-runtime.json", "activation-pending/v1/named/other-runtime.json"} {
+		if !strings.Contains(err.Error(), "pending activation record "+path) {
+			t.Fatalf("refusal omitted %s: %v", path, err)
+		}
+	}
+}

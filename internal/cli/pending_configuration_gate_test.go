@@ -86,7 +86,7 @@ func TestCompletedPendingOwnershipSelectionReductionPreservesHistory(t *testing.
 }
 
 func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.T) {
-	for _, scenario := range []string{"pending", "history", "untyped", "resuming", "different-target", "different-inspection", "no-blockers", "other-owner-drift"} {
+	for _, scenario := range []string{"pending", "runtime-owners", "history", "untyped", "qualified", "resuming", "different-target", "different-inspection", "no-blockers", "other-owner-drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			outcome := &releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired, Code: releasetransition.CodeDependencyUnavailable, Active: "0.26.0-fixture", Target: "0.26.0-fixture"}
 			inspection := &releasetransition.Inspection{Outcome: outcome, Blockers: []releasetransition.Blocker{{Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.materialized-config.pending-configuration"}}}
@@ -94,8 +94,12 @@ func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.
 			switch scenario {
 			case "history":
 				inspection.Blockers = append(inspection.Blockers, releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable, Resource: "transition.source-metadata"})
+			case "runtime-owners":
+				inspection.Blockers = append(inspection.Blockers, releasetransition.Blocker{Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.sample-runtime.pending-configuration"})
 			case "untyped":
 				inspection.Blockers[0].Resource = "activation.materialized-config"
+			case "qualified":
+				inspection.Blockers[0].Resource = "activation.materialized-config.native-target.pending-configuration"
 			case "resuming":
 				inspection.Resume = &tx
 			case "different-target":
@@ -108,7 +112,7 @@ func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.
 			case "other-owner-drift":
 				inspection.Decisions = []releasetransition.RedactedDecision{{Resource: "activation.sample-runtime", Scope: "activation", Decision: releasetransition.DecisionCanonicalize, Result: "converged"}}
 			}
-			if got := pendingIntegrationConfigurationShape(outcome, inspection); got != (scenario == "pending") {
+			if got := pendingIntegrationConfigurationShape(outcome, inspection); got != (scenario == "pending" || scenario == "runtime-owners") {
 				t.Fatalf("pending admission=%t", got)
 			}
 		})

@@ -3,10 +3,13 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -181,6 +184,30 @@ func (runtime Runtime) ObserveProfileRuntime(ctx context.Context, id string) (po
 	return ports.RuntimeObservation{}, errors.New("profile runtime owner is unavailable")
 }
 
+// ProfileRuntimeObservation observes one profile runtime afresh. An Incus that
+// cannot be reached (not installed, not running or not yet permitted) leaves the
+// runtime deferred, as profile runtime planning does: it was not observed.
+func (runtime Runtime) ProfileRuntimeObservation(ctx context.Context, activationID string) (ports.RuntimeObservation, error) {
+	definitions, err := runtime.profileRuntimeDefinitions()
+	if err != nil {
+		return ports.RuntimeObservation{}, err
+	}
+	for _, definition := range definitions {
+		if definition.Runtime == nil || definition.Runtime.ActivationID != activationID {
+			continue
+		}
+		observations, err := runtime.observeProfileRuntimes(ctx, []profile.Definition{definition})
+		if err != nil {
+			if runtime.nativeObservationUnavailable(err) {
+				return ports.RuntimeObservation{State: ports.RuntimeStateDeferred}, nil
+			}
+			return ports.RuntimeObservation{}, err
+		}
+		return observations[activationID], nil
+	}
+	return ports.RuntimeObservation{State: ports.RuntimeStateAbsent}, nil
+}
+
 func (runtime Runtime) observeProfileRuntimes(
 	ctx context.Context,
 	definitions []profile.Definition,
@@ -332,12 +359,17 @@ func (runtime Runtime) applyProfileRuntime(
 	if observation.State != ports.RuntimeStateStale || observation.Actual != actual || observation.Desired != desired {
 		return fmt.Errorf("%w: profile runtime assessment changed before apply", domain.ErrPlanStale)
 	}
-	stdout, stderr, err := runtime.runProfileRuntimeHandler(ctx, definition, "apply", operationID, actual, desired)
+	nonce, err := profileRuntimeDiagnosticNonce()
+	if err != nil {
+		return err
+	}
+	environment := append(slices.Clone(runtime.Environment), profileRuntimeNonceVariable+"="+nonce)
+	stdout, stderr, err := runtime.runShippedHandler(ctx, definition, definition.Runtime.Handler, environment, profileRuntimeApplyLimit, "apply", operationID, actual, desired)
 	if err != nil {
 		if runtime.Stderr != nil && len(stderr) != 0 {
 			_, _ = runtime.Stderr.Write(stderr)
 		}
-		return err
+		return runtime.profileRuntimeApplyFailure(definition, err, stderr, nonce)
 	}
 	applied, err := decodeProfileRuntimeObservation(stdout)
 	if err != nil {
@@ -355,6 +387,57 @@ func (runtime Runtime) applyProfileRuntime(
 		return errors.New("profile runtime refresh did not retain the expected contract")
 	}
 	return nil
+}
+
+// Runtime hooks share the lifecycle reason vocabulary and add yard-local: a
+// failure of an apply or verify that affects only its yard.
+var profileRuntimeDiagnosticProtocol = func() nativeDiagnosticProtocol {
+	reasons := maps.Clone(lifecycleReasons)
+	reasons["yard-local"] = "yard-local failure; yard init repeats the same apply"
+	return nativeDiagnosticProtocol{name: "subyard-profile-runtime-diagnostic-v1", reasons: reasons, effectOnly: map[string]bool{"yard-local": true}}
+}()
+
+// ProfileRuntimeYardFailure is a typed failure of a runtime that declares the
+// yard failure scope. The handler failed its own apply or verify and reported
+// exactly one yard-local record; yard init repeats the same apply. Cancellation,
+// timeouts, output overflow, verification by the core and undeclared owners
+// never produce it.
+type ProfileRuntimeYardFailure struct {
+	Yard, ActivationID, Phase string
+	cause                     error
+}
+
+func (failure *ProfileRuntimeYardFailure) Error() string {
+	return fmt.Sprintf("profile runtime %s %s failed in yard %s: %v", failure.ActivationID, failure.Phase, failure.Yard, failure.cause)
+}
+
+func (failure *ProfileRuntimeYardFailure) Unwrap() error { return failure.cause }
+
+// profileRuntimeNonceVariable names the per-apply nonce that opens a typed
+// record. The handler must not pass it to guests or other relayed output.
+const profileRuntimeNonceVariable = "SUBYARD_PROFILE_RUNTIME_DIAGNOSTIC_NONCE"
+
+func profileRuntimeDiagnosticNonce() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func (runtime Runtime) profileRuntimeApplyFailure(definition profile.Definition, cause error, stderr []byte, nonce string) error {
+	var exit *exec.ExitError
+	if definition.Runtime == nil || definition.Runtime.FailureScope != profile.FailureScopeYard || !errors.As(cause, &exit) ||
+		errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) || !domain.SafeName(runtime.Yard.YardName) {
+		return cause
+	}
+	protocol := profileRuntimeDiagnosticProtocol
+	protocol.nonce = nonce
+	phase, reason := protocol.failure(stderr, "apply")
+	if reason != "yard-local" {
+		return cause
+	}
+	return &ProfileRuntimeYardFailure{Yard: runtime.Yard.YardName, ActivationID: definition.Runtime.ActivationID, Phase: phase, cause: cause}
 }
 
 func (runtime Runtime) profileRuntimeDefinitions() ([]profile.Definition, error) {

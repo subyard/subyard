@@ -279,7 +279,7 @@ func TestPreparedProjectHooksRejectScopeExpansionBeforeInvocation(t *testing.T) 
 }
 
 func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
-	for _, scenario := range []string{"project added", "hook added", "source swapped", "large unrelated metadata", "command name", "command source swapped", "PATH shadow", "success", "hook failure"} {
+	for _, scenario := range []string{"project added", "hook added", "hook removed", "source swapped", "large unrelated metadata", "command name", "command source swapped", "PATH shadow", "success", "hook failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			source, err := os.ReadFile("../../../config/projects-changed.sh")
@@ -304,6 +304,11 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 				body += "exit 1\n"
 			}
 			testkit.WriteFile(t, hook, []byte(body), 0o700)
+			// A deselected profile's runtime removes its approved hook before hooks run.
+			removed := filepath.Join(hookdir, "removed-profile")
+			if scenario == "hook removed" {
+				testkit.WriteFile(t, removed, []byte("#!/bin/sh\nexit 1\n"), 0o700)
+			}
 			if scenario == "large unrelated metadata" {
 				workspace := filepath.Join(root, "workspaces", "large")
 				if err := os.Mkdir(workspace, 0o700); err != nil {
@@ -344,6 +349,11 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 			if scenario == "source swapped" {
 				testkit.WriteFile(t, hook, []byte(body+"# changed\n"), 0o700)
 			}
+			if scenario == "hook removed" {
+				if err := os.Remove(removed); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if scenario == "hook added" {
 				testkit.WriteFile(t, filepath.Join(hookdir, "new"), []byte(body), 0o700)
 			}
@@ -361,7 +371,7 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 				command.Env = append(command.Env, "PATH="+attacker+":"+os.Getenv("PATH"))
 			}
 			output, err := command.CombinedOutput()
-			if (err != nil) != (scenario != "success" && scenario != "large unrelated metadata" && scenario != "command name" && scenario != "PATH shadow") {
+			if (err != nil) != (scenario != "success" && scenario != "hook removed" && scenario != "large unrelated metadata" && scenario != "command name" && scenario != "PATH shadow") {
 				t.Fatalf("native dispatcher outcome: err=%v output=%s", err, output)
 			}
 			_, statErr := os.Stat(log)
@@ -587,6 +597,52 @@ func TestTemporaryStoppedProjectHooksRetainScopeAndIntentGuards(t *testing.T) {
 				}
 			} else if err == nil || executor.calls != 0 {
 				t.Fatalf("unapproved change reached hooks: calls=%d err=%v", executor.calls, err)
+			}
+		})
+	}
+}
+
+// A profile runtime that removes its own project hook before hooks run (a
+// deselected profile's removal) narrows the installed hook set. The checks
+// before writes saw the hook; after the runtime stage init still runs the
+// remaining approved hooks, while any added hook still refuses.
+func TestProjectHooksAcceptHookRemovedByEarlierRuntimeStage(t *testing.T) {
+	for _, scenario := range []string{"removed", "added"} {
+		t.Run(scenario, func(t *testing.T) {
+			owned, removed := "/usr/local/libexec/subyard/projects-changed.d/owned", "/usr/local/libexec/subyard/projects-changed.d/removed-profile"
+			executor := &hookPlanExecutor{observation: hookObservation{Projects: testRuntimeOldDigest, Wiring: testRuntimeNewDigest,
+				Hooks: []string{removed, owned}, Facts: map[string]string{owned: testRuntimeOldDigest, removed: testRuntimeOldDigest},
+				Resolved: map[string]string{owned: owned, removed: removed}}}
+			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "running"}}}
+			runtime := Runtime{RepositoryRoot: "../../..", Profiles: []profile.Definition{}, Integrations: []profile.IntegrationDefinition{}, Incus: incus, Executor: executor,
+				Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1000}}
+			plan, err := runtime.PrepareProjectHooks(context.Background(), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.HookPlan = plan
+			if err := runtime.CheckProjectHookPlan(context.Background(), true); err != nil {
+				t.Fatalf("approved hook scope refused before writes: %v", err)
+			}
+			// The runtime stage removes the hook and its wiring changes.
+			executor.observation.Hooks = []string{owned}
+			delete(executor.observation.Facts, removed)
+			delete(executor.observation.Resolved, removed)
+			executor.observation.Wiring = testRuntimeOldDigest
+			if scenario == "added" {
+				added := "/usr/local/libexec/subyard/projects-changed.d/new"
+				executor.observation.Hooks = append(executor.observation.Hooks, added)
+				executor.observation.Facts[added], executor.observation.Resolved[added] = testRuntimeOldDigest, added
+			}
+			err = runtime.RunProjectHooks(context.Background())
+			if scenario == "added" {
+				if !errors.Is(err, domain.ErrPlanStale) || executor.calls != 0 {
+					t.Fatalf("an added hook reached effects: calls=%d err=%v", executor.calls, err)
+				}
+				return
+			}
+			if err != nil || executor.calls != 1 {
+				t.Fatalf("narrowed hook set refused: calls=%d err=%v", executor.calls, err)
 			}
 		})
 	}

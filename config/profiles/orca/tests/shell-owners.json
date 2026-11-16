@@ -3,6 +3,7 @@
   "owners": [
     {"path": "config/profiles/orca/resources/orca/handler.sh", "kind": "profile", "owner": "config/profiles/orca/resources/orca.res", "reference": "HANDLER=resources/orca/handler.sh"},
     {"path": "config/profiles/orca/resources/orca/registration-contract.sh", "kind": "library", "owner": "config/profiles/orca/resources/orca/handler.sh", "reference": "registration-contract.sh"},
-    {"path": "config/profiles/orca/resources/orca/registration-observer.bash", "kind": "embedded", "owner": "config/profiles/orca/resources/orca/handler.sh", "reference": "registration-observer.bash"}
+    {"path": "config/profiles/orca/resources/orca/registration-observer.bash", "kind": "embedded", "owner": "config/profiles/orca/resources/orca/handler.sh", "reference": "registration-observer.bash"},
+    {"path": "config/profiles/orca/resources/orca/fixed-paths.bash", "kind": "library", "owner": "config/profiles/orca/resources/orca/handler.sh", "reference": "fixed-paths.bash"}
   ]
 }

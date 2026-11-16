@@ -1,9 +1,11 @@
 package reconcileruntime
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -31,6 +33,67 @@ func (failure *integrationLifecycleError) ActivationDiagnostic() (string, string
 	return failure.message, failure.retry
 }
 func (failure *integrationLifecycleError) ActivationConflict() bool { return failure.conflict }
+
+// nativeDiagnosticProtocol is one source-owned stderr record family of native
+// hooks: "<name> [NONCE] PHASE REASON", with a closed reason vocabulary.
+type nativeDiagnosticProtocol struct {
+	name    string
+	reasons map[string]string
+	// effectOnly reasons are valid only for an apply or verify record.
+	effectOnly map[string]bool
+	// nonce, when set, must open the record. Only the handler process receives
+	// it, so output that the handler relays from elsewhere cannot forge one.
+	nonce string
+}
+
+// record validates one record line for an operation phase and returns its
+// reported phase and reason.
+func (protocol nativeDiagnosticProtocol) record(line []byte, phase string) (string, string, bool) {
+	fields := strings.Split(strings.TrimPrefix(string(line), protocol.name+" "), " ")
+	if protocol.nonce != "" {
+		if len(fields) == 0 || fields[0] != protocol.nonce {
+			return "", "", false
+		}
+		fields = fields[1:]
+	}
+	if !bytes.HasPrefix(line, []byte(protocol.name+" ")) || len(fields) != 2 ||
+		fields[0] != "inspect" && fields[0] != "apply" && fields[0] != "verify" {
+		return "", "", false
+	}
+	if phase != "apply" && fields[0] != "inspect" || phase == "apply" && fields[0] == "inspect" {
+		return "", "", false
+	}
+	if _, ok := protocol.reasons[fields[1]]; !ok || protocol.effectOnly[fields[1]] && fields[0] == "inspect" {
+		return "", "", false
+	}
+	return fields[0], fields[1], true
+}
+
+// failure selects the reason of exactly one well-formed record. Native output
+// is private; duplicate, malformed or contradictory records fall back safely,
+// including historical handlers without this optional transport.
+func (protocol nativeDiagnosticProtocol) failure(stderr []byte, phase string) (string, string) {
+	reportedPhase, reason := phase, "operation-failed"
+	count := 0
+	for _, line := range bytes.Split(stderr, []byte{'\n'}) {
+		if !bytes.HasPrefix(line, []byte(protocol.name)) {
+			continue
+		}
+		count++
+		recorded, recordedReason, ok := protocol.record(line, phase)
+		if !ok {
+			return phase, "operation-failed"
+		}
+		reason = recordedReason
+		if phase == "apply" {
+			reportedPhase = recorded
+		}
+	}
+	if count != 1 {
+		return phase, "operation-failed"
+	}
+	return reportedPhase, reason
+}
 
 func (runtime Runtime) integrationDiagnostic(cause error, definition profile.IntegrationDefinition, phase, reason string) error {
 	if cause == nil {
