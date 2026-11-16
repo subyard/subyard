@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -85,7 +86,7 @@ func TestNetworkGuardReportsConfigBridgeStateAndRouteTogether(t *testing.T) {
 	for _, want := range []string{
 		"[device-subyard] match-device lacks interface-name:incusbr0",
 		"NetworkManager manages yard bridge incusbr0",
-		"then rerun yard start",
+		"run yard init",
 		`unsafe host default route uses "veth1234"`,
 	} {
 		if err == nil || !strings.Contains(err.Error(), want) {
@@ -162,22 +163,16 @@ func TestRouteDevicesAreSubyardsOwn(t *testing.T) {
 	}
 }
 
-// The shell reader in scripts/lib-power.sh reads the same vectors in tests/lib-power-network.sh.
-func TestNetworkManagerGuardPendingSharedVectors(t *testing.T) {
-	vectors, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "nm-guard-pending.txt"))
+// The shell rule in scripts/lib-power.sh reads the same vectors in tests/lib-power-network.sh.
+func TestNetworkManagerGuardStateSharedVectors(t *testing.T) {
+	vectors, err := os.ReadFile(filepath.Join("..", "..", "..", "tests", "fixtures", "nm-guard-state.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(vectors)), "\n") {
 		fields := strings.Split(line, "|")
-		directory := testkit.TempDir(t)
-		pending, boot := filepath.Join(directory, "pending"), filepath.Join(directory, "boot_id")
-		if fields[0] != "" {
-			testkit.WriteFile(t, pending, []byte(fields[0]+"\n"), 0o644)
-		}
-		testkit.WriteFile(t, boot, []byte(fields[1]+"\n"), 0o644)
-		if got := NetworkManagerGuardPending(pending, boot, func() string { return fields[2] }); got != fields[3] {
-			t.Errorf("%q: kind %q, want %q", line, got, fields[3])
+		if got := NetworkManagerGuardState(fields[0], fields[1], fields[2], fields[3], fields[4] == "1"); got != fields[5] {
+			t.Errorf("%q: state %q, want %q", line, got, fields[5])
 		}
 	}
 }
@@ -208,9 +203,9 @@ func TestNetworkManagerGuardFormatSharedFixtures(t *testing.T) {
 func TestNetworkGuardNamesThePendingReboot(t *testing.T) {
 	config := strings.Replace(currentGuardConfig, ",interface-name:incusbr0", "", 1)
 	guard := activeGuard(config, "incusbr0:unmanaged\n", `[]`)
-	guard.Pending = func() string { return "lists" }
+	guard.State = func() string { return "unread-migration" }
 	err := guard.Check(context.Background(), []string{"incusbr0"})
-	if err == nil || !strings.Contains(err.Error(), "waits for a host reboot: reboot the host once") {
+	if err == nil || !strings.Contains(err.Error(), "reboot the host once, then rerun yard start") {
 		t.Fatalf("expected the pending reboot in %v", err)
 	}
 }
@@ -264,13 +259,13 @@ func TestNetworkManagerGuardCurrentCountsADanglingLegacyLink(t *testing.T) {
 
 func TestNetworkGuardRefusesAnUnreadGuard(t *testing.T) {
 	guard := activeGuard(currentGuardConfig, "incusbr0:unmanaged\n", `[]`)
-	guard.Pending = func() string { return "unread" }
+	guard.State = func() string { return "unread-init" }
 	err := guard.Check(context.Background(), []string{"incusbr0"})
 	if err == nil || !strings.Contains(err.Error(), "has not read the Subyard guard") ||
 		!strings.Contains(err.Error(), "restart NetworkManager") {
 		t.Fatalf("an unread guard did not refuse the start: %v", err)
 	}
-	guard.Pending = func() string { return "lists" }
+	guard.State = func() string { return "loaded-reboot" }
 	if err := guard.Check(context.Background(), []string{"incusbr0"}); err != nil {
 		t.Fatalf("a migrated guard waiting for the reboot blocked the start: %v", err)
 	}
@@ -284,5 +279,38 @@ func TestNetworkManagerGuardCurrentTreatsADanglingGuardLinkAsReleased(t *testing
 	}
 	if current, err := NetworkManagerGuardCurrent(conf); err != nil || current {
 		t.Fatalf("dangling guard link: current=%v err=%v", current, err)
+	}
+}
+
+// Removing any one rendered entry fails the rule (the shell twin runs in tests/lib-power-network.sh).
+func TestNetworkManagerGuardRuleRequiresEveryRenderedEntry(t *testing.T) {
+	entries := append(slices.Clone(NetworkManagerGuardStaticEntries), "interface-name:incusbr0")
+	for index := range entries {
+		kept := slices.Delete(slices.Clone(entries), index, index+1)
+		config := "[device-subyard]\nmatch-device=" + strings.Join(kept, ",") + "\nmanaged=0\n"
+		if violations := networkManagerConfigViolations(config, []string{"incusbr0"}); len(violations) == 0 {
+			t.Errorf("a guard without %s passed", entries[index])
+		}
+	}
+}
+
+func TestLocalNetworkManagerGuardStateNeverLoadsFromAnUnreadableRecord(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file")
+	}
+	directory := testkit.TempDir(t)
+	guard, boot, record := filepath.Join(directory, "zz.conf"), filepath.Join(directory, "boot_id"), filepath.Join(directory, "state")
+	testkit.WriteFile(t, guard, []byte("[device-subyard]\n"), 0o644)
+	testkit.WriteFile(t, boot, []byte("b1\n"), 0o644)
+	fileID := networkManagerFileID(guard)
+	testkit.WriteFile(t, record, []byte("b1 "+fileID+" nm1 held init\n"), 0o000)
+	if got := networkManagerGuardStateAt(record, guard, boot, "nm1", func(string) bool { return true }); got != "unread-init" {
+		t.Fatalf("an unreadable record gave %q", got)
+	}
+	if err := os.Chmod(record, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := networkManagerGuardStateAt(record, guard, boot, "nm1", func(string) bool { return false }); got != "loaded" {
+		t.Fatalf("a readable held record gave %q", got)
 	}
 }

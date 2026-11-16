@@ -96,7 +96,7 @@ conf_dir=/etc/NetworkManager/conf.d
 guard="$conf_dir/zz-subyard-unmanaged.conf"
 admin_conf="$conf_dir/00-keep-uplink.conf"
 pin=/etc/udev/rules.d/00-subyard-e2e-uplink-pin.rules
-pending=/run/subyard/nm-guard-reboot-pending
+state_record=/run/subyard/nm-guard-state
 launcher="$STATE/bin/yard"
 export SUBYARD_OPERATOR_HOME="$STATE/home" SUBYARD_CONFIG_HOME="$STATE/config" SUBYARD_HOME="$STATE/data"
 export YARD_RUNTIME_ROOT="$STATE/runtime" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
@@ -301,20 +301,31 @@ prepare)
   grep -q '^unmanaged-devices' "$guard" && die 'the update kept the released guard'
   grep -q '^\[device-subyard\]' "$guard" || die 'the update wrote no guard section'
   [ ! -e /etc/systemd/system/subyard-power-reconcile.service ] || die 'the guard-only migration installed the boot reconciler'
-  [ "$(cut -d ' ' -f1 "$pending")" = "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the update recorded no pending reboot'
+  # Every up Incus bridge the released guard named was unmanaged: evidence that NetworkManager held
+  # an adequate guard, so the migration is `held` and only waits for the reboot.
+  [ "$(cut -d ' ' -f1 "$state_record")" = "$(cat /proc/sys/kernel/random/boot_id)" ] \
+    && [ "$(cut -d ' ' -f4,5 "$state_record")" = 'held migration' ] || die "the update record: $(cat "$state_record" 2>/dev/null)"
   [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the update restarted NetworkManager'
   [ "$(nm_reloads_since "$since")" = 0 ] || die "the update reloaded NetworkManager: $(sudo -n journalctl -u NetworkManager --since "@$since" -q | tail -5)"
   [ "$(managedness)" = "$before_table" ] || die 'the update changed a device managed state'
   if owner "$launcher" update --rollback --yes >"$STATE/rollback.log" 2>&1; then
     die 'rollback to the released guard was accepted'
   fi
-  # The refusal must come from the NetworkManager device guard boundary: the ledger is at
-  # power-metadata epoch 4 with that migration applied, which 0.29.0 cannot read.
-  owner "$launcher" migrate --check --json >"$STATE/migrate-check.json" 2>"$STATE/migrate-check.log" || true
-  jq -e '[.domains[] | select(.domain == "power-metadata" and .epoch == 4 and (.applied | index("introduce-nm-device-guard-v4") != null))] | length == 1' \
-    "$STATE/migrate-check.json" >/dev/null || die "the ledger did not cross the NetworkManager guard boundary: $(head -c 600 "$STATE/migrate-check.json")"
-  grep -Fq 'code=rollback-incompatible' "$STATE/rollback.log" \
-    || die "the rollback refusal was not rollback-incompatible: $(tail -5 "$STATE/rollback.log")"
+  # The refusal comes from the NetworkManager device guard boundary: the installed 0.29.0 and the
+  # candidate registries differ only by that migration and power-metadata 3 -> 4, and the rollback
+  # check reports the rollback-compatibility blocker.
+  installed_registry="$(find "$STATE/runtime/releases" -path "*$OLD_VERSION*/config/release-transition.json" -print -quit)"
+  [ -n "$installed_registry" ] || die 'cannot find the installed 0.29.0 release-transition.json'
+  jq -S '.currentEpochs["power-metadata"] = 3 | .migrations |= map(select(.id != "introduce-nm-device-guard-v4"))' \
+    "$ROOT/config/release-transition.json" > "$STATE/candidate-registry.json"
+  jq -S . "$installed_registry" > "$STATE/installed-registry.json"
+  cmp -s "$STATE/candidate-registry.json" "$STATE/installed-registry.json" \
+    || die "the registries differ beyond the device guard boundary: $(diff "$STATE/installed-registry.json" "$STATE/candidate-registry.json" | head -20)"
+  jq -e '.currentEpochs["power-metadata"] == 4 and ([.migrations[] | select(.id == "introduce-nm-device-guard-v4" and .fromEpoch == 3 and .toEpoch == 4)] | length == 1)' \
+    "$ROOT/config/release-transition.json" >/dev/null || die 'the candidate registry lacks the device guard boundary'
+  owner "$launcher" update --rollback --check --json >"$STATE/rollback-check.json" 2>"$STATE/rollback-check.log" || true
+  jq -e '[.. | objects | select(.resource? == "transition.rollback-compatibility")] | length >= 1' "$STATE/rollback-check.json" >/dev/null \
+    || die "the rollback check named no rollback-compatibility blocker: $(head -c 800 "$STATE/rollback-check.json") $(tail -3 "$STATE/rollback-check.log")"
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
   pass 'rollback to the published release is refused before activation'
   owner "$launcher" status >"$STATE/status.log" 2>&1 || true
@@ -360,7 +371,7 @@ prepare)
 resume)
   load_uplink
   watchdog_start
-  [ ! -e "$pending" ] || [ "$(cut -d ' ' -f1 "$pending")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the reminder pending'
+  [ ! -e "$state_record" ] || [ "$(cut -d ' ' -f1 "$state_record")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the reminder pending'
   owner "$launcher" status >"$STATE/status-after.log" 2>&1 || true
   ! grep -Fq 'Reminder: reboot the host once' "$STATE/status-after.log" || die 'yard status still asks for a reboot'
   uplink_admins 'after the reboot'
@@ -476,8 +487,12 @@ fresh-prepare)
   [ "$(systemctl show -p InvocationID --value NetworkManager)" = "$invocation" ] || die 'the first init restarted NetworkManager'
   [ "$(managedness)" = "$before_table" ] || die 'the first init changed a device managed state'
   [ "$(address_of "$UP")" = "$UP_ADDRESS" ] && [ "$(device_state br0)" = connected ] || die 'the first init touched the uplink or br0'
-  [ "$(cut -d ' ' -f3 "$pending")" = unread ] || die 'the first init recorded no unread guard'
+  [ "$(cut -d ' ' -f4,5 "$state_record")" = 'unread init' ] || die "the first init record: $(cat "$state_record" 2>/dev/null)"
   grep -q '^\[device-subyard\]' "$guard" || die 'the first init wrote no guard'
+  # Without the record the guard is still provably unread: it is newer than NetworkManager.
+  sudo -n rm -f "$state_record"
+  if yard init --yes >"$STATE/init-no-record.log" 2>&1; then die 'init continued after the unread record was deleted'; fi
+  grep -Fq 'Reboot the host or restart NetworkManager' "$STATE/init-no-record.log" || die 'init without the record did not ask for the NetworkManager start'
   sudo -n rm -f "$conf_dir/50-e2e-later.conf"
   pass 'the first init writes the guard and stops without touching NetworkManager, devices or the uplink'
   ;;
@@ -486,7 +501,7 @@ fresh-resume)
   load_uplink
   watchdog_start
   launcher="$STATE/bin/yard"
-  [ ! -e "$pending" ] || [ "$(cut -d ' ' -f1 "$pending")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the guard unread'
+  [ ! -e "$state_record" ] || [ "$(cut -d ' ' -f1 "$state_record")" != "$(cat /proc/sys/kernel/random/boot_id)" ] || die 'the reboot left the guard unread'
   yard init --yes >"$STATE/init.log" 2>&1 || die 'init failed after the reboot'
   yard start --yes >"$STATE/start.log" 2>&1 || die 'start failed after the reboot'
   settle
@@ -518,6 +533,34 @@ fresh-resume)
   [ "$(device_state e2ebr1)" = unmanaged ] && [ "$(address_of e2ebr1)" = 198.18.9.1/24 ] \
     || die "the second bridge is $(device_state e2ebr1) with $(address_of e2ebr1)"
   pass 'a second Incus bridge is listed and unmanaged with its address intact'
+
+  # A yard whose INCUS_BRIDGE names the administrator's br0 refuses; br0 is never guarded or pinned.
+  other="nmguardother$TOKEN"
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$other"
+  sed "s/^SSH_PORT=.*/SSH_PORT=$((37000 + TOKEN % 10000))/" "$SUBYARD_CONFIG_HOME/yards/$name/config.env" > "$SUBYARD_CONFIG_HOME/yards/$other/config.env"
+  printf 'INCUS_BRIDGE=br0\n' >> "$SUBYARD_CONFIG_HOME/yards/$other/config.env"
+  chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$other/config.env"
+  if owner "$launcher" -Y "$other" init --yes >"$STATE/init-br0.log" 2>&1; then die 'init accepted INCUS_BRIDGE=br0'; fi
+  grep -Fq 'the yard bridge br0 is not an Incus-managed bridge' "$STATE/init-br0.log" \
+    || die "INCUS_BRIDGE=br0 refusal: $(tail -5 "$STATE/init-br0.log")"
+  [ "$(device_state br0)" = connected ] && [ "$(address_of br0)" = 198.19.0.1/24 ] || die 'INCUS_BRIDGE=br0 touched br0'
+  grep -Eq 'interface-name:br0(,|$)' "$guard" && die 'the guard lists br0'
+  rm -rf "$SUBYARD_CONFIG_HOME/yards/$other"
+  pass 'INCUS_BRIDGE=br0 refuses and leaves the administrator bridge untouched'
+
+  # A guard whose veth entries were edited out, read by a restarted NetworkManager: init repairs
+  # the file and stops again until NetworkManager reads the repair.
+  sudo -n sed -i 's/type:veth,driver:veth,//' "$guard"
+  sudo -n systemctl restart NetworkManager
+  settle
+  if yard init --yes >"$STATE/init-repair.log" 2>&1; then die 'init continued after repairing an unread guard'; fi
+  grep -Fq 'Reboot the host or restart NetworkManager' "$STATE/init-repair.log" || die "repair stop: $(tail -5 "$STATE/init-repair.log")"
+  grep -Fq 'type:veth,driver:veth' "$guard" || die 'init did not repair the veth entries'
+  sudo -n systemctl restart NetworkManager
+  settle
+  yard init --yes >"$STATE/init-repaired.log" 2>&1 || die 'init failed after NetworkManager read the repaired guard'
+  uplink_admins 'after the repair'
+  pass 'an edited-out guard is repaired and init waits for NetworkManager to read it'
   watchdog_clean
   ;;
 

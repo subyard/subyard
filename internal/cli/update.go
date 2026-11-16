@@ -304,7 +304,7 @@ func (cli *CLI) printUpdateResult(execution *releaseExecution, success bool) {
 		fmt.Fprintln(output, "  Next: run yard update again to check for and install a newer release")
 	}
 	// A migrated guard waits for its reboot even when a later update stage failed.
-	if hostruntime.LocalNetworkManagerRebootPending() {
+	if hostruntime.LocalNetworkManagerGuardRelevant() && hostruntime.LocalNetworkManagerRebootPending() {
 		fmt.Fprintf(output, "  Next: %s\n", hostruntime.NetworkManagerRebootReminder)
 	}
 	if newer := execution.newerRelease; !success && newer.Command != "" {

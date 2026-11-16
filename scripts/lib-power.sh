@@ -129,39 +129,26 @@ power_nm_print_config() {
   fi
 }
 
+# The entries every guard lists besides the Incus-managed bridges; scripts/lib/host.sh renders
+# them and both validators require them (hostruntime.NetworkManagerGuardStaticEntries).
+POWER_NM_GUARD_STATIC="type:veth driver:veth interface-name:tap????????"
+POWER_NM_GUARD_CONF=/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf
+# Which guard NetworkManager has read: boot ID, guard file ID (inode:ctime), NetworkManager
+# invocation, held|unread and init|migration. See power_nm_guard_state.
+POWER_NM_GUARD_STATE=/run/subyard/nm-guard-state
+
 # Guard rule, shared with internal/adapters/hostruntime and the vectors in
 # tests/fixtures/nm-guard-vectors: NetworkManager prints [device*] sections in priority order,
 # except the plain [device] section, which it always considers last. [device-subyard] must set
-# managed=0 for type:veth, driver:veth and every bridge without except: entries, and no section
-# printed before it may set managed=1 or stop-match for devices the guard covers. Each violation
-# is printed on its own line; nothing is printed when the configuration is safe.
+# managed false and list every static entry and every bridge without except: entries (the
+# released `interface-name:tap*` also covers the tap entry), and no other [device*] section
+# printed before it may set managed or stop-match true. Each violation is printed on its own
+# line; nothing is printed when the configuration is safe.
 power_nm_config_violations() { # <bridge...>; stdin: NetworkManager --print-config
-  awk -v bridge_list="$*" '
+  awk -v bridge_list="$*" -v static_list="$POWER_NM_GUARD_STATIC" '
     function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
     function truthy(value) { value = tolower(value); return value == "1" || value == "true" || value == "yes" || value == "on" }
     function falsy(value) { value = tolower(value); return value == "0" || value == "false" || value == "no" || value == "off" }
-    function related(name,    index_) {
-      if (name ~ /^veth/ || name ~ /^tap........$/) return 1
-      for (index_ = 1; index_ <= bridge_count; index_++) if (name == bridges[index_]) return 1
-      return 0
-    }
-    # A section only reaches unrelated devices when every entry is an exact, unrelated name.
-    function unrelated_only(list,    count, entries, index_, entry, name) {
-      count = split(list, entries, /[,;]/)
-      if (trim(list) == "") return 0
-      for (index_ = 1; index_ <= count; index_++) {
-        entry = trim(entries[index_])
-        if (entry == "") continue
-        if (entry ~ /^interface-name:=/) name = substr(entry, 17)
-        else if (entry ~ /^interface-name:~/) name = substr(entry, 17)
-        else if (entry ~ /^interface-name:/) name = substr(entry, 16)
-        else if (entry !~ /:/) name = entry
-        else return 0
-        if (entry !~ /^interface-name:=/ && name ~ /[*?]/) return 0
-        if (name == "" || related(name)) return 0
-      }
-      return 1
-    }
     BEGIN { bridge_count = split(bridge_list, bridges, " "); current = 0 }
     /^[[:space:]]*\[/ {
       name = trim($0); gsub(/^\[|\]$/, "", name)
@@ -170,7 +157,7 @@ power_nm_config_violations() { # <bridge...>; stdin: NetworkManager --print-conf
     }
     current && /=/ {
       key = trim(substr($0, 1, index($0, "=") - 1)); value = trim(substr($0, index($0, "=") + 1))
-      values[current, key] = value; present[current, key] = 1
+      values[current, key] = value
     }
     END {
       for (index_ = 1; index_ <= section_count; index_++) if (sections[index_] == "device-subyard") { guard = index_; break }
@@ -182,16 +169,16 @@ power_nm_config_violations() { # <bridge...>; stdin: NetworkManager --print-conf
         entry = trim(entries[index_]); if (entry != "") listed[entry] = 1
         if (entry ~ /^except:/) print "[device-subyard] match-device has the exception " entry
       }
-      required_count = split("type:veth driver:veth", required, " ")
+      if ("interface-name:tap*" in listed) listed["interface-name:tap????????"] = 1
+      required_count = split(static_list, required, " ")
       for (index_ = 1; index_ <= bridge_count; index_++) required[++required_count] = "interface-name:" bridges[index_]
       for (index_ = 1; index_ <= required_count; index_++)
         if (!(required[index_] in listed)) print "[device-subyard] match-device lacks " required[index_]
       for (index_ = 1; index_ < guard; index_++) {
         name = sections[index_]
         if (name !~ /^device/ || name == "device") continue
-        if (!truthy(values[index_, "managed"]) && !truthy(values[index_, "stop-match"])) continue
-        if (unrelated_only(values[index_, "match-device"])) continue
-        print "[" name "] has priority over [device-subyard] and sets " (truthy(values[index_, "managed"]) ? "managed=1" : "stop-match") " for devices the guard covers"
+        if (truthy(values[index_, "managed"])) print "[" name "] has priority over [device-subyard] and sets managed=1"
+        else if (truthy(values[index_, "stop-match"])) print "[" name "] has priority over [device-subyard] and sets stop-match"
       }
     }
   '
@@ -212,27 +199,65 @@ power_nm_managed_bridges() { # <bridge...>
 }
 
 POWER_NM_GUARD_COMMAND="${POWER_NM_GUARD_COMMAND:-yard init}"
-# The pending NetworkManager guard record: boot ID, NetworkManager invocation and kind. `unread`:
-# NetworkManager has not started since the guard was first written, so no yard may start.
-# `lists`: a migrated guard waits for the host reboot. Both clear on a new boot or a new
-# NetworkManager invocation, since NetworkManager reads every file when it starts.
-POWER_NM_REBOOT_PENDING=/run/subyard/nm-guard-reboot-pending
 
 power_nm_boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
+power_nm_invocation() { systemctl show -p InvocationID --value NetworkManager 2>/dev/null; }
+power_nm_file_id() { stat -c '%i:%.9Z' "$1" 2>/dev/null; } # inode:ctime of a guard file
 
-power_nm_guard_pending() { # prints the kind while the record is pending
-  local boot invocation kind current
-  [ -r "$POWER_NM_REBOOT_PENDING" ] || return 0
-  read -r boot invocation kind < "$POWER_NM_REBOOT_PENDING" || [ -n "${boot:-}" ] || return 0
-  [ -n "$boot" ] && [ "$boot" = "$(power_nm_boot_id)" ] || return 0
-  if [ -n "${invocation:-}" ] && [ "$invocation" != unknown ]; then
-    current="$(systemctl show -p InvocationID --value NetworkManager 2>/dev/null)" || current=''
-    [ -z "$current" ] || [ "$current" = "$invocation" ] || return 0
+# The pure read-state rule, shared with hostruntime.NetworkManagerGuardState and checked on
+# tests/fixtures/nm-guard-state.txt. A record applies only with five fields, the same boot, the
+# same guard file and a readable invocation: `held`, or another NetworkManager invocation since,
+# means loaded; `unread` means not. Anything the record does not describe falls back to the age
+# test. Prints loaded, loaded-reboot (a held migration waiting for the reboot), unread-init or
+# unread-migration.
+power_nm_guard_state_rule() { # <record> <boot> <file id> <invocation> <age loaded: 1|0>
+  local boot file invocation state kind extra
+  read -r boot file invocation state kind extra <<< "$1"
+  if [ -n "$kind" ] && [ -z "$extra" ] && [ "$boot" = "$2" ] && [ -n "$3" ] && [ "$file" = "$3" ] \
+    && [ -n "$4" ] && { [ "$state" = held ] || [ "$state" = unread ]; } \
+    && { [ "$kind" = init ] || [ "$kind" = migration ]; }; then
+    if [ "$invocation" != "$4" ]; then printf 'loaded\n'; return; fi
+    if [ "$state" = held ]; then
+      [ "$kind" = migration ] && printf 'loaded-reboot\n' || printf 'loaded\n'
+    else
+      printf 'unread-%s\n' "$kind"
+    fi
+    return
   fi
-  case "${kind:-lists}" in unread) printf 'unread\n' ;; *) printf 'lists\n' ;; esac
+  [ "$5" = 1 ] && printf 'loaded\n' || printf 'unread-init\n'
 }
 
-power_nm_reboot_pending() { [ "$(power_nm_guard_pending)" = lists ]; }
+# The age test: NetworkManager's main process started at least 2 s after the guard file's ctime,
+# so the daemon read those bytes. Any failed read means not loaded.
+power_nm_guard_age_loaded() { # <conf>
+  local ctime now uptime pid stat start ticks
+  ctime="$(stat -c '%.9Z' "$1" 2>/dev/null)" || return 1
+  pid="$(systemctl show -p MainPID --value NetworkManager 2>/dev/null)" || return 1
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+  start="$(awk '{ sub(/^.*\) /, ""); print $20 }' <<< "$stat")"
+  ticks="$(getconf CLK_TCK 2>/dev/null)" || return 1
+  read -r uptime _ < /proc/uptime || return 1
+  now="$(date +%s.%N)" || return 1
+  [[ "$start" =~ ^[0-9]+$ && "$ticks" =~ ^[1-9][0-9]*$ ]] || return 1
+  awk -v now="$now" -v ctime="$ctime" -v uptime="$uptime" -v start="$start" -v ticks="$ticks" \
+    'BEGIN { exit !(now - ctime >= uptime - start / ticks + 2) }'
+}
+
+# shellcheck disable=SC2120 # callers name another conf only in tests
+power_nm_guard_state() { # [conf]: the read state of the guard on disk
+  local conf="${1:-$POWER_NM_GUARD_CONF}" record='' age=0
+  # An unreadable record never yields loaded.
+  if [ -e "$POWER_NM_GUARD_STATE" ] || [ -L "$POWER_NM_GUARD_STATE" ]; then
+    { IFS= read -r record < "$POWER_NM_GUARD_STATE"; } 2>/dev/null || [ -n "$record" ] || { printf 'unread-init\n'; return; }
+  fi
+  ! power_nm_guard_age_loaded "$conf" || age=1
+  power_nm_guard_state_rule "$record" "$(power_nm_boot_id)" "$(power_nm_file_id "$conf")" "$(power_nm_invocation)" "$age"
+}
+
+power_nm_reboot_pending() { # a migrated guard waits for the host reboot
+  case "$(power_nm_guard_state)" in loaded-reboot|unread-migration) return 0 ;; *) return 1 ;; esac
+}
 
 power_join() { # stdin lines -> one "; "-separated line
   local out='' line
@@ -247,7 +272,7 @@ power_join_comma() { # stdin lines -> one ", "-separated line
 }
 
 power_nm_guard_effective() { # <bridge...>
-  local config violations managed rc
+  local config violations managed rc state remedy
   if power_nm_active; then :; else
     rc=$?; [ "$rc" -eq 1 ] && return 0
     return "$rc"
@@ -261,9 +286,17 @@ power_nm_guard_effective() { # <bridge...>
     return 1
   }
   violations="$(printf '%s\n' "$config" | power_nm_config_violations "$@")"
-  if [ "$(power_nm_guard_pending)" = unread ]; then
-    violations+="${violations:+$'\n'}NetworkManager has not read the Subyard guard since it was written"
-  fi
+  remedy="correct the NetworkManager configuration, then restart NetworkManager or reboot so it drops what it still holds, then rerun $POWER_NM_GUARD_COMMAND"
+  if grep -Eq 'no \[device-subyard\]|match-device lacks' <<< "$violations"; then remedy="run yard init"; fi
+  state="$(power_nm_guard_state)"
+  case "$state" in
+    unread-init)
+      violations+="${violations:+$'\n'}NetworkManager has not read the Subyard guard since it was written"
+      remedy="reboot the host or restart NetworkManager ('sudo systemctl restart NetworkManager'), then rerun $POWER_NM_GUARD_COMMAND" ;;
+    unread-migration)
+      violations+="${violations:+$'\n'}NetworkManager has not read the migrated Subyard guard"
+      remedy="reboot the host once, then rerun $POWER_NM_GUARD_COMMAND" ;;
+  esac
   if ! managed="$(power_nm_managed_bridges "$@")"; then
     violations+="${violations:+$'\n'}cannot read NetworkManager's devices with nmcli"
   elif [ -n "$managed" ]; then
@@ -272,15 +305,7 @@ power_nm_guard_effective() { # <bridge...>
     done <<< "$managed"
   fi
   [ -z "$violations" ] && return 0
-  case "$(power_nm_guard_pending)" in
-    unread)
-      power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — reboot the host or restart NetworkManager ('sudo systemctl restart NetworkManager'), then rerun $POWER_NM_GUARD_COMMAND"
-      return 1 ;;
-    lists)
-      power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — a migrated NetworkManager guard waits for a host reboot: reboot the host once, then rerun $POWER_NM_GUARD_COMMAND"
-      return 1 ;;
-  esac
-  power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — correct the NetworkManager configuration, then rerun $POWER_NM_GUARD_COMMAND"
+  power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — $remedy"
 }
 
 # Subyard's own devices only: yard bridges, veths and Incus tap devices.

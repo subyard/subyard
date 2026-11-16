@@ -157,12 +157,13 @@ well as interface naming and verify effective configuration; guards must precede
 creation/start and rerun during setup. The guard is a self-contained `[device-subyard]` section
 with `managed=0` for Subyard's own devices only: veths, Incus `tap` devices and Incus-managed
 bridges. It never writes the administrator's `unmanaged-devices` or `no-auto-default` lists and
-reads them only to refuse an unsafe migration. Subyard never reloads or restarts NetworkManager, and no yard starts until NetworkManager
-has started after the guard was first written: on a host where it runs, the first init writes
-the guard and stops for a host reboot or NetworkManager restart. Its only state-changing
-NetworkManager call marks an existing own bridge unmanaged. A guard written by a released version
-is rewritten during update, refusing while NetworkManager provably manages a device the
-administrator's list marks unmanaged; the host then reboots once to apply it.
+reads them only to refuse an unsafe migration. Subyard never reloads or restarts NetworkManager,
+and no yard starts until NetworkManager has provably read the guard (its file's ctime is older
+than NetworkManager's start): on a host where it runs, the first init writes the guard and stops
+for a host reboot or NetworkManager restart. Bridge names come only from the Incus-managed bridges
+of the same run, and the only state-changing NetworkManager call marks such a bridge unmanaged. A
+guard written by a released version is rewritten during update, refusing while NetworkManager
+provably manages a device the administrator's list marks unmanaged; the host then reboots once.
 Bridge-scoped DHCP/DNS and forwarding rules coexist with UFW/host Docker, without broad host
 input openings or hardcoded subnets. Package installation/upgrade and networking must be
 reproducible through product reconciliation, not unexplained manual host repair. Install

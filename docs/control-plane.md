@@ -1914,10 +1914,12 @@ The compiled `nm-device-guard-v1` capability advances `power-metadata` from epoc
 is the reader boundary of the `[device-subyard]` NetworkManager guard; the
 `host-network-guard` activation owner rewrites a released guard file without reloading
 NetworkManager and records one pending host reboot. Subyard never reloads or restarts
-NetworkManager; `/run/subyard/nm-guard-reboot-pending` holds the boot ID, NetworkManager's
-invocation and a kind: `unread` blocks every yard start until NetworkManager has started after
-the guard was first written, `lists` only reminds about the reboot after a migration. Both clear
-on a new boot or a new NetworkManager invocation. Released power readers reject the new
+NetworkManager. Whether NetworkManager read the guard is proven by order: the guard file's ctime
+is at least 2 s older than the start of NetworkManager's main process. `/run/subyard/nm-guard-state`
+(`boot_id inode:ctime invocation held|unread init|migration`) describes one guard file and one
+NetworkManager invocation, written after each publish; anything it does not describe falls back to
+that age test, and any failed read means "not read". No yard starts while the guard is unread: init
+stops for a reboot or NetworkManager restart, a migration waits for the reboot. Released power readers reject the new
 guard, and their init would rewrite the released guard and reload NetworkManager, so
 rollback to a release below this epoch is refused before activation as `rollback-incompatible`.
 `yard update --rollback` does not cross this boundary.

@@ -127,6 +127,9 @@ case "$*" in
   "-d -o link show dev "*)
     device="${*: -1}"
     case " ${MOCK_VETHS:-} " in *" $device "*) printf '9: %s@if8: <UP> mtu 1500 veth\n' "$device" ;; *) printf '2: %s: <UP>\n' "$device" ;; esac ;;
+  "-o link show dev "*)
+    device="${*: -1}"
+    case " ${MOCK_DOWN:-} " in *" $device "*) printf '5: %s: <BROADCAST,MULTICAST> mtu 1500 state DOWN\n' "$device" ;; *) printf '5: %s: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n' "$device" ;; esac ;;
   *) exit 1 ;;
 esac
 SH
@@ -198,6 +201,9 @@ export PATH="$tmp/bin:$PATH"
 . "$ROOT/scripts/lib-power.sh"
 power_nm_binary() { printf '%s\n' "$tmp/bin/NetworkManager"; }
 power_operator_terminal() { [ "$MOCK_TERMINAL" = 1 ]; }
+# Until the guard section, the read state is not under test.
+original_guard_state="$(declare -f power_nm_guard_state)"
+power_nm_guard_state() { printf 'loaded\n'; }
 
 ROOT="$ROOT" bash -c '
   set -euo pipefail
@@ -481,181 +487,285 @@ fi
 [ "$((SECONDS - started))" -le 2 ] || fail "hung instance agent probe exceeded its deadline"
 
 # --- NetworkManager guard: shared rule vectors (also run by the Go hostruntime tests) ---
+eval "$original_guard_state"
 for vector in "$ROOT"/tests/fixtures/nm-guard-vectors/*/; do
   read -r -a vector_bridges < "$vector/bridges" || vector_bridges=()
   got="$(power_nm_config_violations "${vector_bridges[@]}" < "$vector/config")"
   [ "$got" = "$(cat "$vector/violations")" ] || fail "guard vector $(basename "$vector"): $got"
 done
+# The read-state rule matches the Go rule.
+while IFS='|' read -r record boot file invocation age want; do
+  got="$(power_nm_guard_state_rule "$record" "$boot" "$file" "$invocation" "$age")"
+  [ "$got" = "$want" ] || fail "state '$record' boot=$boot file=$file nm=$invocation age=$age gave $got, want $want"
+done < "$ROOT/tests/fixtures/nm-guard-state.txt"
 
 conf_dir="$tmp/NetworkManager/conf.d"
 guard_conf="$conf_dir/zz-subyard-unmanaged.conf"
 legacy_conf="$conf_dir/99-subyard-unmanaged.conf"
 mkdir -p "$conf_dir" "$tmp/run"
-POWER_NM_REBOOT_PENDING="$tmp/run/nm-guard-reboot-pending"
+POWER_NM_GUARD_CONF="$guard_conf" NM_GUARD_CONF="$guard_conf"
+POWER_NM_GUARD_STATE="$tmp/run/nm-guard-state"
 printf 'boot-1\n' > "$tmp/boot_id"
 power_nm_boot_id() { cat "$tmp/boot_id"; }
+# The age test reads /proc and the clock; MOCK_AGE_LOADED stands for its answer.
+power_nm_guard_age_loaded() { [ "${MOCK_AGE_LOADED:-0}" = 1 ]; }
+# Invocations come from MOCK_NM_INVOCATIONS (one per call) or MOCK_NM_INVOCATION.
+power_nm_invocation() {
+  local next
+  if [ -s "${MOCK_NM_INVOCATIONS:-/nonexistent}" ]; then
+    next="$(head -n 1 "$MOCK_NM_INVOCATIONS")"; sed -i 1d "$MOCK_NM_INVOCATIONS"; printf '%s\n' "$next"
+  else
+    printf '%s\n' "${MOCK_NM_INVOCATION-invocation-1}"
+  fi
+}
 incus_networks='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true},{"name":"br0","type":"bridge","managed":false},{"name":"docker0","type":"bridge","managed":false},{"name":"incusnet1","type":"ovn","managed":true}]'
 guard_case() {
   reset_case
-  export MOCK_UID=0 MOCK_NM_CONF_DIR="$conf_dir" MOCK_INCUS_NETWORKS="$incus_networks"
-  export MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp5s0:ethernet:connected\nincusbr0:bridge:unmanaged\nbr0:bridge:connected'
+  export MOCK_UID=0 MOCK_NM_CONF_DIR="$conf_dir" MOCK_INCUS_NETWORKS="$incus_networks" MOCK_AGE_LOADED=0 MOCK_DOWN=''
+  export MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp5s0:ethernet:connected\nincusbr0:bridge:unmanaged\nnestedbr0:bridge:unmanaged\nbr0:bridge:connected'
+  rm -f "$POWER_NM_GUARD_STATE" "$tmp/invocations"
+  MOCK_NM_INVOCATIONS="$tmp/invocations"
 }
 hash_of() { if [ -e "$1" ]; then sha256sum "$1" | cut -d ' ' -f1; else printf absent; fi; }
-pending_kind() { power_nm_guard_pending; }
+state_of() { power_nm_guard_state "$guard_conf"; }
+record_state() { cut -d ' ' -f4,5 "$POWER_NM_GUARD_STATE" 2>/dev/null; }
 no_reload() { # NetworkManager is never reloaded or restarted, by any path.
   ! grep -q '^FORBIDDEN' "$MOCK_NMCLI_LOG" && [ ! -s "$MOCK_SYSTEMCTL_LOG" ] \
     || fail "$1 reloaded or restarted NetworkManager: $(cat "$MOCK_NMCLI_LOG" "$MOCK_SYSTEMCTL_LOG")"
 }
+render() { nm_guard_render "$1"; }
 expected_guard='# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.
 [device-subyard]
 match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0,interface-name:nestedbr0
 managed=0'
 
-# First write with NetworkManager running: the record says `unread` before the file exists, the
-# exact guard is written, and init stops until NetworkManager starts; starts refuse meanwhile.
+# Removing any one rendered entry fails the rule.
+rendered_entries="$(render $'incusbr0' | sed -n 's/^match-device=//p' | tr ',' '\n')"
+while IFS= read -r entry; do
+  kept="$(grep -Fxv -- "$entry" <<< "$rendered_entries" | paste -sd ',')"
+  [ -n "$(printf '[device-subyard]\nmatch-device=%s\nmanaged=0\n' "$kept" | power_nm_config_violations incusbr0)" ] \
+    || fail "a guard without $entry passed the rule"
+done <<< "$rendered_entries"
+
+# First install with NetworkManager running: the early call writes the static section, records
+# `unread init` and stops; planning, starts and init refuse until NetworkManager starts again,
+# even without the record (the file is newer than NetworkManager).
 guard_case
-rm -f "$guard_conf" "$POWER_NM_REBOOT_PENDING"
+rm -f "$guard_conf"
 umask 077
-original_write_file="$(declare -f nm_guard_write_file)"
-nm_guard_write_file() {
-  [ "$1" != "$guard_conf" ] || [ "$(cut -d ' ' -f3 "$POWER_NM_REBOOT_PENDING" 2>/dev/null)" = unread ] \
-    || fail "the guard was written before its unread record"
-  temporary="${1%/*}/.${1##*/}.$$.tmp"; printf '%s\n' "$2" > "$temporary" && chmod 0644 "$temporary" && mv -f "$temporary" "$1"
-}
-if (POWER_NM_GUARD_COMMAND='yard init' nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out" 2>&1); then
+if (POWER_NM_GUARD_COMMAND='yard init' nm_unmanaged_guard_early "$guard_conf" >"$tmp/guard.out" 2>&1); then
   fail "init continued before NetworkManager read the guard"
 fi
-eval "$original_write_file"
 grep -Fq "Reboot the host or restart NetworkManager ('sudo systemctl restart NetworkManager'), then rerun yard init" "$tmp/guard.out" \
   || fail "the first write did not ask for a reboot or NetworkManager restart: $(cat "$tmp/guard.out")"
-[ "$(cat "$guard_conf")" = "$expected_guard" ] || fail "guard bytes for two Incus bridges: $(cat "$guard_conf")"
+[ "$(sed -n 3p "$guard_conf")" = 'match-device=type:veth,driver:veth,interface-name:tap????????' ] \
+  || fail "the early call wrote bridges: $(cat "$guard_conf")"
 [ "$(stat -c '%a' "$guard_conf")" = 644 ] || fail "NetworkManager drop-in mode is not 0644"
-[ "$(cat "$POWER_NM_REBOOT_PENDING")" = 'boot-1 invocation-1 unread' ] || fail "unread record: $(cat "$POWER_NM_REBOOT_PENDING")"
-! ls "$conf_dir"/.*tmp >/dev/null 2>&1 || fail "atomic write left a temporary file"
-grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "the unread first write pinned a device"
-if nm_guard_file_current "$guard_conf" incusbr0; then fail "planning accepted an unread guard"; fi
-if power_host_safe incusbr0; then fail "a start was accepted before NetworkManager read the guard"; fi
-case "$POWER_ERROR" in *'has not read the Subyard guard'*'restart NetworkManager'*) ;; *) fail "unread start refusal: $POWER_ERROR" ;; esac
-# A rerun before NetworkManager starts stops again without changes.
-if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "a rerun continued while the guard is unread"; fi
-[ "$(pending_kind)" = unread ] || fail "the rerun lost the unread record"
-# NetworkManager restarted, or the host rebooted: the guard is read and init continues.
+[ "$(record_state)" = 'unread init' ] || fail "record: $(cat "$POWER_NM_GUARD_STATE" 2>/dev/null)"
+grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "the early call pinned a device"
+[ "$(state_of)" = unread-init ] || fail "the first write did not read as unread"
+for attempt in record no-record; do
+  [ "$attempt" = record ] || rm -f "$POWER_NM_GUARD_STATE"
+  if nm_guard_file_current "$guard_conf" incusbr0; then fail "planning accepted an unread guard ($attempt)"; fi
+  if power_host_safe incusbr0; then fail "a start was accepted before NetworkManager read the guard ($attempt)"; fi
+  case "$POWER_ERROR" in *'has not read the Subyard guard'*'restart NetworkManager'*) ;; *) fail "unread start refusal ($attempt): $POWER_ERROR" ;; esac
+  if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "init continued while the guard is unread ($attempt)"; fi
+done
+# NetworkManager restarted (a new invocation, or its start is newer than the file): loaded.
+nm_guard_write_file "$POWER_NM_GUARD_STATE" "boot-1 $(power_nm_file_id "$guard_conf") invocation-1 unread init"
 MOCK_NM_INVOCATION="invocation-2"
-[ -z "$(pending_kind)" ] || fail "a NetworkManager restart did not clear the unread record"
-nm_guard_file_current "$guard_conf" incusbr0 || fail "the read guard reported drift"
-power_host_safe incusbr0 || fail "a start was refused after NetworkManager read the guard: $POWER_ERROR"
-nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out"
-grep -Fq 'already current' "$tmp/guard.out" || fail "steady state was not reported"
+[ "$(state_of)" = loaded ] || fail "a NetworkManager restart did not load the guard"
 MOCK_NM_INVOCATION="invocation-1"
-printf 'boot-2\n' > "$tmp/boot_id"
-[ -z "$(pending_kind)" ] || fail "a new boot did not clear the unread record"
-printf 'boot-1\n' > "$tmp/boot_id"
-rm -f "$POWER_NM_REBOOT_PENDING"
-no_reload 'the first write'
+rm -f "$POWER_NM_GUARD_STATE"
+MOCK_AGE_LOADED=1
+[ "$(state_of)" = loaded ] || fail "a NetworkManager start after the write did not load the guard"
+# The late call continues once NetworkManager has read the guard.
+nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null || fail "the late call failed after NetworkManager read the guard"
+[ "$(cat "$guard_conf")" = "$expected_guard" ] || fail "guard bytes for two Incus bridges: $(cat "$guard_conf")"
+# A new bridge rewrites a guard NetworkManager already held: the record says `held init`.
+nm_guard_write_file "$guard_conf" "$(render incusbr0)"
+sleep 0.01
+nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null || fail "a new bridge on a loaded guard stopped init"
+[ "$(record_state)" = 'held init' ] || fail "late record: $(cat "$POWER_NM_GUARD_STATE" 2>/dev/null)"
+MOCK_AGE_LOADED=0
+[ "$(state_of)" = loaded ] || fail "a held record did not read as loaded"
+power_host_safe incusbr0 || fail "a start was refused after NetworkManager read the guard: $POWER_ERROR"
+inode_before="$(stat -c '%i:%Z' "$guard_conf")"
+nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out"
+grep -Fq 'already current' "$tmp/guard.out" && [ "$(stat -c '%i:%Z' "$guard_conf")" = "$inode_before" ] \
+  || fail "equal bytes touched the guard inode"
+no_reload 'the first install'
 
-# A guard NetworkManager has read: a new bridge rewrites the file and pins only own bridges that
-# NetworkManager still manages, verifying each; a failed pin refuses.
+# A guard whose static entries were edited out: the repair is not held and init stops again.
 guard_case
-MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp5s0:ethernet:connected\nincusbr0:bridge:unmanaged\nnestedbr0:bridge:connected (externally)\nbr0:bridge:connected'
+MOCK_AGE_LOADED=1
+printf '[device-subyard]\nmatch-device=interface-name:incusbr0,interface-name:nestedbr0\nmanaged=0\n' > "$guard_conf"
+if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "a repair of the static entries continued without a NetworkManager start"; fi
+[ "$(record_state)" = 'unread init' ] && [ "$(cat "$guard_conf")" = "$expected_guard" ] || fail "repair record: $(cat "$POWER_NM_GUARD_STATE")"
+MOCK_AGE_LOADED=0
+[ "$(state_of)" = unread-init ] || fail "the repair read as loaded"
+# NetworkManager restarted between the two samples of a write that was held: `unread`.
+guard_case
+MOCK_AGE_LOADED=1
+nm_guard_write_file "$guard_conf" "$(render incusbr0)"
+printf 'invocation-1\ninvocation-1\ninvocation-1\ninvocation-2\ninvocation-2\ninvocation-2\n' > "$tmp/invocations"
+if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then :; fi
+[ "$(record_state)" = 'unread init' ] || fail "a NetworkManager restart during the write recorded: $(cat "$POWER_NM_GUARD_STATE")"
+# A failed record write leaves no record; the age test still refuses the start.
+guard_case
+nm_guard_write_file "$guard_conf" "$(render incusbr0)"
+POWER_NM_GUARD_STATE="$tmp/run-readonly/nm-guard-state"
+mkdir -p "$tmp/run-readonly" && chmod 0500 "$tmp/run-readonly"
+if (MOCK_UID=1000 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then :; fi
+[ ! -e "$POWER_NM_GUARD_STATE" ] || fail "a failed record write left a record"
+if power_host_safe incusbr0; then fail "a start passed after a failed record write"; fi
+chmod 0700 "$tmp/run-readonly"
+POWER_NM_GUARD_STATE="$tmp/run/nm-guard-state"
+# An unreadable record never yields loaded.
+nm_guard_write_file "$POWER_NM_GUARD_STATE" "boot-1 $(power_nm_file_id "$guard_conf") invocation-1 held init"
+if [ "$(id -u)" != 0 ]; then
+  chmod 0000 "$POWER_NM_GUARD_STATE"
+  MOCK_AGE_LOADED=1
+  [ "$(state_of)" = unread-init ] || fail "an unreadable record read as loaded"
+  chmod 0644 "$POWER_NM_GUARD_STATE"
+fi
+no_reload 'the read state'
+
+# Bridge ownership: names come only from this run's Incus inventory, and only bridges are pinned.
+guard_case
+MOCK_AGE_LOADED=1
+nm_guard_write_file "$guard_conf" "$(render incusbr0)"
+if (nm_unmanaged_guard br0 "$guard_conf" >"$tmp/guard.out" 2>&1); then fail "init accepted a yard bridge Incus does not manage"; fi
+grep -Fq 'the yard bridge br0 is not an Incus-managed bridge' "$tmp/guard.out" || fail "non-Incus bridge refusal: $(cat "$tmp/guard.out")"
+grep -Eq 'interface-name:br0(,|$)' "$guard_conf" && fail "the guard lists the administrator's br0"
+grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "a non-Incus bridge was pinned"
+MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nincusbr0:bridge:unmanaged\nnestedbr0:bridge:connected (externally)\nbr0:bridge:connected\nnestedbr0x:ethernet:connected'
 MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true}]'
-nm_guard_write_file "$guard_conf" "$(nm_guard_render incusbr0)"
-nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
-[ "$(cat "$guard_conf")" = "$expected_guard" ] || fail "the new bridge was not added"
+nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null || fail "init failed with a second Incus bridge: $POWER_ERROR"
 [ "$(cat "$MOCK_NMCLI_PINS")" = nestedbr0 ] || fail "pins: $(cat "$MOCK_NMCLI_PINS" 2>/dev/null)"
-MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true},{"name":"thirdbr0","type":"bridge","managed":true}]'
-if nm_guard_file_current "$guard_conf" incusbr0; then fail "planning missed a new Incus bridge"; fi
-MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true}]'
-nm_guard_file_current "$guard_conf" incusbr0 || fail "planning reported drift for a complete guard"
-[ -z "$(pending_kind)" ] || fail "a read guard wrote a pending record"
 rm -f "$MOCK_NMCLI_PINS"
 if (MOCK_PIN_RC=1 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "a failed pin was accepted"; fi
 if (MOCK_PIN_NOEFFECT=1 nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/pin.out" 2>&1); then fail "an ineffective pin was accepted"; fi
-grep -Fq 'still manages the yard bridge nestedbr0' "$tmp/pin.out" || fail "ineffective pin unreported: $(cat "$tmp/pin.out")"
-no_reload 'a new bridge'
+grep -Fq 'still manages the Incus bridge nestedbr0' "$tmp/pin.out" || fail "ineffective pin unreported: $(cat "$tmp/pin.out")"
+# A failed inventory: planning reports drift, the late call dies, the early call keeps what is listed.
+guard_case
+MOCK_AGE_LOADED=1
+nm_guard_write_file "$guard_conf" "$(render $'incusbr0\nnestedbr0')"
+before_hash="$(hash_of "$guard_conf")"
+if MOCK_INCUS_NETWORK_RC=7 nm_guard_file_current "$guard_conf" incusbr0; then fail "planning accepted a failed inventory"; fi
+if (MOCK_INCUS_NETWORK_RC=7 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "the late call accepted a failed inventory"; fi
+MOCK_INCUS_NETWORK_RC=7 nm_unmanaged_guard_early "$guard_conf" >/dev/null || fail "the early call failed on a failed inventory: $POWER_ERROR"
+[ "$(hash_of "$guard_conf")" = "$before_hash" ] || fail "a failed inventory changed the guard"
+MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true},{"name":"thirdbr0","type":"bridge","managed":true}]'
+if nm_guard_file_current "$guard_conf" incusbr0; then fail "planning missed a new Incus bridge"; fi
+# Without incus no Incus bridge exists: the early call writes the static section.
+(power_cmd_incus_off() { :; }; PATH="$tmp/noincus:$PATH"; hash -r
+ mkdir -p "$tmp/noincus"; for tool in bash awk sed sort cat grep mktemp chmod cp rm mv install stat head tr paste comm cut python3 date getconf systemctl nmcli NetworkManager ip id sha256sum; do
+   command -v "$tool" >/dev/null && ln -sf "$(command -v "$tool")" "$tmp/noincus/$tool"; done
+ PATH="$tmp/noincus" nm_unmanaged_guard_early "$guard_conf" >/dev/null) || fail "the early call failed without incus"
+[ "$(sed -n 3p "$guard_conf")" = 'match-device=type:veth,driver:veth,interface-name:tap????????' ] || fail "no-incus early call: $(cat "$guard_conf")"
+no_reload 'bridge ownership'
 
 # Every refusal is reported together; nothing is written.
 guard_case
-nm_guard_write_file "$guard_conf" "$(nm_guard_render incusbr0)"
+MOCK_AGE_LOADED=1
+nm_guard_write_file "$guard_conf" "$(render incusbr0)"
 before_hash="$(hash_of "$guard_conf")"
-printf '[device-later]\nmatch-device=type:veth\nmanaged=1\n' > "$conf_dir/zzz-admin.conf"
+printf '[device-later]\nmatch-device=interface-name:eth9\nmanaged=1\n' > "$conf_dir/zzz-admin.conf"
 MOCK_NM_DEVICES=$'veth1234:ethernet:connected\nincusbr0:bridge:unmanaged\nnestedbr0:bridge:unmanaged'
 MOCK_VETHS=veth1234 MOCK_DEFAULT_ROUTES=$'default via 192.0.2.1 dev nestedbr0\n'
-if nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null; then fail "unsafe guard change was applied"; fi
-for expected in '[device-later] has priority over [device-subyard]' \
+if (nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out" 2>&1); then fail "unsafe guard change was applied"; fi
+for expected in '[device-later] has priority over [device-subyard] and sets managed=1' \
   'NetworkManager manages veth1234, which the guard covers; release it first: sudo nmcli device set veth1234 managed no' \
   'the host default route uses nestedbr0' 'then rerun yard init'; do
-  case "$POWER_ERROR" in *"$expected"*) ;; *) fail "refusal lacks '$expected': $POWER_ERROR" ;; esac
+  grep -Fq -- "$expected" "$tmp/guard.out" || fail "refusal lacks '$expected': $(cat "$tmp/guard.out")"
 done
 [ "$(hash_of "$guard_conf")" = "$before_hash" ] || fail "a refusal changed the guard"
 rm -f "$conf_dir/zzz-admin.conf"
 MOCK_VETHS='' MOCK_DEFAULT_ROUTES=''
-if (MOCK_NM_PROPOSED_RC=7 nm_guard_apply "$guard_conf" write nestedbr0 >/dev/null); then fail "an invalid proposal was applied"; fi
-MOCK_NM_PROPOSED_RC=7 nm_guard_apply "$guard_conf" write nestedbr0 >/dev/null || true
-case "$POWER_ERROR" in *'NetworkManager rejects the proposed configuration'*) ;; *) fail "invalid proposal unreported" ;; esac
-[ "$(hash_of "$guard_conf")" = "$before_hash" ] || fail "an invalid proposal changed the guard"
-# Failed nmcli reads refuse; they never stand for an empty inventory.
-if (MOCK_NMCLI_READ_RC=10 nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null 2>&1); then fail "a failed device read was accepted"; fi
-MOCK_NM_DEVICES='' nm_guard_apply "$guard_conf" write $'incusbr0\nnestedbr0' >/dev/null && fail "an empty device list was accepted"
-case "$POWER_ERROR" in *"cannot read NetworkManager's devices"*) ;; *) fail "empty read unreported: $POWER_ERROR" ;; esac
+if (MOCK_NM_PROPOSED_RC=7 nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out" 2>&1); then fail "an invalid proposal was applied"; fi
+grep -Fq 'NetworkManager rejects the proposed configuration' "$tmp/guard.out" || fail "invalid proposal unreported"
+if (MOCK_NMCLI_READ_RC=10 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "a failed device read was accepted"; fi
+if (MOCK_NM_INVOCATION='' nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out" 2>&1); then fail "an unreadable invocation was accepted"; fi
+grep -Fq "cannot read NetworkManager's invocation" "$tmp/guard.out" || fail "unreadable invocation unreported: $(cat "$tmp/guard.out")"
 if MOCK_NMCLI_READ_RC=10 power_nm_guard_effective incusbr0; then fail "the validator accepted a failed device read"; fi
-[ "$(hash_of "$guard_conf")" = "$before_hash" ] || fail "a failed read changed the guard"
+[ "$(hash_of "$guard_conf")" = "$before_hash" ] || fail "a refusal changed the guard"
+# A higher-priority override and a missing entry name their remedies.
+printf '[device-later]\nmatch-device=interface-name:eth9\nmanaged=1\n' > "$conf_dir/zzz-admin.conf"
+if power_nm_guard_effective incusbr0; then fail "a higher-priority override passed"; fi
+case "$POWER_ERROR" in *'then restart NetworkManager or reboot'*) ;; *) fail "override remedy: $POWER_ERROR" ;; esac
+rm -f "$conf_dir/zzz-admin.conf"
+nm_guard_write_file "$guard_conf" "$(render '')"
+if power_nm_guard_effective incusbr0; then fail "a guard without the yard bridge passed"; fi
+case "$POWER_ERROR" in *'match-device lacks interface-name:incusbr0'*'run yard init'*) ;; *) fail "missing entry remedy: $POWER_ERROR" ;; esac
 no_reload 'refusals'
 
-# NetworkManager inactive: the file is written for its next start, with no record and no pins.
+# NetworkManager inactive, or not installed: the file is written, no record, no stop, no pins.
 guard_case
 MOCK_NM_STATE=inactive
 rm -f "$guard_conf"
-nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
-[ -f "$guard_conf" ] && [ ! -e "$POWER_NM_REBOOT_PENDING" ] || fail "inactive guard write is wrong"
+nm_unmanaged_guard_early "$guard_conf" >/dev/null && nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null \
+  || fail "an inactive NetworkManager stopped init"
+[ "$(cat "$guard_conf")" = "$expected_guard" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] || fail "inactive guard write is wrong"
 grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "an inactive NetworkManager was asked to pin"
 nm_guard_file_current "$guard_conf" incusbr0 || fail "inactive guard reported drift"
+(power_nm_binary() { return 1; }; nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null) || fail "no NetworkManager binary failed"
+rm -f "$guard_conf"
+(power_nm_binary() { return 1; }; nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null)
+[ ! -e "$guard_conf" ] || fail "a host without NetworkManager got a guard"
 no_reload 'an inactive NetworkManager'
 
-# Teardown keeps the guard for surviving Incus bridges and removes it after the last one,
-# dropping an unread record with the file.
+# Teardown keeps the guard for surviving Incus bridges and removes it, the legacy file and the
+# record after the last one; a failed inventory keeps everything.
 guard_case
+MOCK_AGE_LOADED=1
 MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true},{"name":"nestedbr0","type":"bridge","managed":true}]'
-nm_guard_write_file "$guard_conf" "$(nm_guard_render incusbr0)"
-nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null
+nm_guard_write_file "$guard_conf" "$(render incusbr0)"
+nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null || fail "teardown failed: $POWER_ERROR"
 grep -Fq 'interface-name:nestedbr0' "$guard_conf" || fail "teardown dropped a surviving bridge"
 before_hash="$(hash_of "$guard_conf")"
 if (MOCK_INCUS_NETWORK_RC=7 nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null 2>&1); then fail "teardown accepted a failed inventory"; fi
 [ "$(hash_of "$guard_conf")" = "$before_hash" ] || fail "a failed inventory changed the guard"
-printf 'boot-1 invocation-1 unread\n' > "$POWER_NM_REBOOT_PENDING"
+nm_guard_write_file "$POWER_NM_GUARD_STATE" "boot-1 x invocation-1 unread init"
 MOCK_INCUS_NETWORKS='[{"name":"br0","type":"bridge","managed":false}]' nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null
-[ ! -e "$guard_conf" ] && [ ! -e "$POWER_NM_REBOOT_PENDING" ] || fail "teardown kept the guard or its unread record"
+[ ! -e "$guard_conf" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] || fail "teardown kept the guard or its record"
 no_reload 'teardown'
 
-# Migration: a provable takeover refuses with nothing changed; the hand-back then migrates without
-# touching NetworkManager, recording `lists`, which blocks nothing.
-guard_case
-released_spec='type:veth;driver:veth;interface-name:veth*;interface-name:docker*;interface-name:br-*;interface-name:virbr*;interface-name:vnet*;interface-name:tap*;interface-name:macvtap*;interface-name:incusbr0'
+# Migration of a released guard.
+released_spec='type:veth;driver:veth;interface-name:veth*;interface-name:docker*;interface-name:br-*;interface-name:virbr*;interface-name:vnet*;interface-name:tap*;interface-name:macvtap*;interface-name:incusbr0;interface-name:br0'
 write_released() {
   printf '[main]\nno-auto-default=%s\n\n[keyfile]\nunmanaged-devices=%s\n\n[device-subyard]\nmatch-device=%s\nmanaged=0\n' \
     "$released_spec" "$released_spec" "${released_spec//;/,}" > "$guard_conf"
   printf '[keyfile]\nunmanaged-devices=interface-name:legacybr0\n' > "$legacy_conf"
+  rm -f "$POWER_NM_GUARD_STATE"
 }
-migration_refuses() { # <admin list> <description>
+guard_case
+MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true}]'
+write_released
+MOCK_AGE_LOADED=1 power_nm_guard_effective incusbr0 || fail "a released guard NetworkManager read failed the rule: $POWER_ERROR"
+migration_refuses() { # <admin list> <description> [teardown]
   write_released
   printf '[keyfile]\nunmanaged-devices=%s\n' "$1" > "$conf_dir/00-admin.conf"
   before_hash="$(hash_of "$guard_conf")"
-  if (POWER_NM_GUARD_COMMAND='yard update' nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1); then
+  if [ -n "${3:-}" ]; then
+    if MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_reconcile "$guard_conf" >"$tmp/migrate.out" 2>&1; then fail "teardown removed a guard over a hijack ($2)"; fi
+  elif (POWER_NM_GUARD_COMMAND='yard update' nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1); then
     fail "migration applied with a hijacked device ($2)"
   fi
   grep -Fq "NetworkManager manages enp6s0, which the administrator's unmanaged-devices list marks unmanaged" "$tmp/migrate.out" \
     && grep -Fq "'sudo nmcli device set enp6s0 managed no' (or the administrator's own way)" "$tmp/migrate.out" \
-    && grep -Fq 'then rerun yard update' "$tmp/migrate.out" || fail "hijack refusal ($2): $(cat "$tmp/migrate.out")"
-  [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ -e "$legacy_conf" ] && [ ! -e "$POWER_NM_REBOOT_PENDING" ] \
+    || fail "hijack refusal ($2): $(cat "$tmp/migrate.out")"
+  [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ -e "$legacy_conf" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] \
     || fail "a refused migration changed the host ($2)"
 }
 MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp6s0:ethernet:connected\nincusbr0:bridge:unmanaged'
-write_released
-power_nm_guard_effective incusbr0 || fail "the released guard failed the rule before its migration: $POWER_ERROR"
 migration_refuses 'interface-name:enp6s0' 'exact name'
 migration_refuses '*' 'match-all'
+migration_refuses 'interface-name:*' 'interface-name match-all'
 migration_refuses 'except:interface-name:wlan0' 'except-only'
 migration_refuses 'type:ethernet' 'type'
 migration_refuses '*,except:type:wifi,except:type:gsm,except:type:cdma' 'Ubuntu stock list'
+migration_refuses 'interface-name:enp6s0' 'teardown' teardown
 # Lists Subyard cannot decide migrate with a notice naming the list and the managed devices.
 for undecided in 'interface-name:docker*;interface-name:virbr*' 'mac:00:11:22:33:44:55'; do
   write_released
@@ -664,32 +774,50 @@ for undecided in 'interface-name:docker*;interface-name:virbr*' 'mac:00:11:22:33
   grep -Fq "cannot decide whether the administrator's unmanaged-devices list (${undecided//;/,}) marks these devices NetworkManager manages: enp6s0" "$tmp/migrate.out" \
     && grep -Fq 'Do not reload or restart NetworkManager before the reboot' "$tmp/migrate.out" \
     || fail "undecidable-list notice: $(cat "$tmp/migrate.out")"
-  rm -f "$POWER_NM_REBOOT_PENDING"
 done
-# After the hand-back the migration rewrites the guard and asks for the reboot.
-write_released
+# After the hand-back: with evidence (every up Incus bridge the released guard names is unmanaged)
+# the record says `held migration` and starts work until the reboot; without it, `unread`.
 printf '[keyfile]\nunmanaged-devices=interface-name:enp6s0\n' > "$conf_dir/00-admin.conf"
-MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp6s0:ethernet:unmanaged\nincusbr0:bridge:unmanaged'
-nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out"
+MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp6s0:ethernet:unmanaged\nincusbr0:bridge:unmanaged\nbr0:bridge:connected'
+write_released
+nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" || fail "migration failed: $POWER_ERROR"
 nm_guard_format_current "$guard_conf" && [ ! -e "$legacy_conf" ] || fail "migration did not rewrite the guard"
-[ "$(cat "$POWER_NM_REBOOT_PENDING")" = 'boot-1 invocation-1 lists' ] || fail "lists record: $(cat "$POWER_NM_REBOOT_PENDING")"
+grep -Eq 'interface-name:br0(,|$)' "$guard_conf" && fail "the migrated guard kept the administrator's br0"
+[ "$(record_state)" = 'held migration' ] || fail "evidence record: $(cat "$POWER_NM_GUARD_STATE")"
 grep -Fq 'reboot the host once' "$tmp/migrate.out" || fail "migration did not ask for the reboot"
 grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "migration pinned a device"
-power_host_safe incusbr0 || fail "a lists record blocked the start: $POWER_ERROR"
+[ "$(state_of)" = loaded-reboot ] || fail "migrated state: $(state_of)"
+power_nm_reboot_pending || fail "the reboot reminder is not pending"
+power_host_safe incusbr0 || fail "a held migration blocked the start: $POWER_ERROR"
 nm_guard_file_current "$guard_conf" incusbr0 || fail "planning reported drift while the migration waits for the reboot"
 nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null || fail "init failed while the migration waits for the reboot"
-nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out"
-grep -Fq 'no released form' "$tmp/migrate.out" || fail "a repeated migration was not a no-op"
-power_nm_reboot_pending || fail "the reboot reminder is not pending"
-MOCK_NM_INVOCATION=invocation-2 power_nm_reboot_pending && fail "a NetworkManager restart did not clear the reboot reminder"
-printf 'boot-2\n' > "$tmp/boot_id"
-power_nm_reboot_pending && fail "the reboot reminder survived a new boot"
-printf 'boot-1\n' > "$tmp/boot_id"
-rm -f "$POWER_NM_REBOOT_PENDING" "$conf_dir/00-admin.conf"
-# NetworkManager inactive during the migration: rewrite with no record.
+MOCK_NM_INVOCATION="invocation-2"
+power_nm_reboot_pending && fail "a NetworkManager restart did not clear the reboot reminder"
+MOCK_NM_INVOCATION="invocation-1"
+for evidence in down managed; do
+  write_released
+  if [ "$evidence" = down ]; then MOCK_DOWN=incusbr0; else MOCK_NM_DEVICES=$'enp6s0:ethernet:unmanaged\nincusbr0:bridge:connected (externally)'; fi
+  nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1 || fail "migration without evidence failed ($evidence): $(cat "$tmp/migrate.out")"
+  [ "$(record_state)" = 'unread migration' ] || fail "no-evidence record ($evidence): $(cat "$POWER_NM_GUARD_STATE")"
+  if power_host_safe incusbr0; then fail "a start passed before the reboot without evidence ($evidence)"; fi
+  case "$POWER_ERROR" in *'reboot the host once'*) ;; *) fail "unread migration remedy: $POWER_ERROR" ;; esac
+  MOCK_DOWN='' MOCK_NM_DEVICES=$'lo:loopback:connected (externally)\nenp6s0:ethernet:unmanaged\nincusbr0:bridge:unmanaged'
+done
+# Without incus, and with NetworkManager inactive, the migration writes the static section.
 write_released
-MOCK_NM_STATE=inactive nm_unmanaged_guard_migrate "$guard_conf" >/dev/null
-nm_guard_format_current "$guard_conf" && [ ! -e "$POWER_NM_REBOOT_PENDING" ] || fail "inactive migration is wrong"
+MOCK_NM_STATE=inactive
+PATH="$tmp/noincus" nm_unmanaged_guard_migrate "$guard_conf" >/dev/null || fail "migration without incus failed"
+[ "$(sed -n 3p "$guard_conf")" = 'match-device=type:veth,driver:veth,interface-name:tap????????' ] && [ ! -e "$POWER_NM_GUARD_STATE" ] \
+  || fail "no-incus migration: $(cat "$guard_conf")"
+MOCK_NM_STATE=active
+write_released
+PATH="$tmp/noincus" nm_unmanaged_guard_early "$guard_conf" >/dev/null || fail "the early call failed on a released guard without incus"
+nm_guard_format_current "$guard_conf" || fail "the early call did not migrate the released guard"
+# Teardown of a released guard without a hijack removes both files and the record.
+write_released
+MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_reconcile "$guard_conf" >/dev/null || fail "teardown of a released guard failed: $POWER_ERROR"
+! nm_path_exists "$guard_conf" && ! nm_path_exists "$legacy_conf" && [ ! -e "$POWER_NM_GUARD_STATE" ] || fail "teardown kept a released file"
+rm -f "$conf_dir/00-admin.conf"
 no_reload 'the migration'
 
 # NetworkManager device-list semantics: order-independent, exceptions win, types from nmcli.
@@ -699,39 +827,19 @@ while IFS='|' read -r list device type want; do
   [ "$got" = "$want" ] || fail "nm_list_selects '$list' $device $type returned $got, want $want"
 done < "$ROOT/tests/fixtures/nm-list-selects.txt"
 
-# Pending record kinds match the Go reader.
-while IFS='|' read -r record boot invocation want; do
-  if [ -n "$record" ]; then printf '%s\n' "$record" > "$POWER_NM_REBOOT_PENDING"; else rm -f "$POWER_NM_REBOOT_PENDING"; fi
-  printf '%s\n' "$boot" > "$tmp/boot_id"
-  got="$(MOCK_NM_INVOCATION="$invocation" pending_kind)"
-  [ "$got" = "$want" ] || fail "pending record '$record' boot=$boot nm=$invocation gave '$got', want '$want'"
-done < "$ROOT/tests/fixtures/nm-guard-pending.txt"
-printf 'boot-1\n' > "$tmp/boot_id"
-rm -f "$POWER_NM_REBOOT_PENDING"
-
 # Guard format classification matches the Go fixtures, dangling links included.
 while IFS=' ' read -r name want; do
   cp "$ROOT/tests/fixtures/nm-guard-formats/$name.conf" "$tmp/format.conf"
   if nm_guard_format_current "$tmp/format.conf"; then got=current; else got=released; fi
   [ "$got" = "$want" ] || fail "guard format $name classified $got, want $want"
 done < "$ROOT/tests/fixtures/nm-guard-formats/expected"
-guard_case
 rm -f "$guard_conf" "$legacy_conf"
 ln -sfn "$tmp/missing" "$guard_conf"
 nm_guard_released "$guard_conf" || fail "a dangling guard link was not treated as released"
 rm -f "$guard_conf"
 ln -sfn "$tmp/missing" "$legacy_conf"
 nm_guard_released "$guard_conf" || fail "a dangling legacy link was not treated as released"
-MOCK_NM_STATE=inactive MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_migrate "$guard_conf" >/dev/null
-nm_path_exists "$legacy_conf" && fail "migration kept the dangling legacy link"
-[ "$(sed -n 3p "$guard_conf")" = 'match-device=type:veth,driver:veth,interface-name:tap????????' ] \
-  || fail "an empty inventory did not keep the veth and tap entries"
-
-# No NetworkManager on the host: nothing to guard.
-guard_case
-rm -f "$guard_conf" "$legacy_conf"
-(power_nm_binary() { return 1; }; MOCK_NM_STATE=inactive; nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null)
-[ ! -e "$guard_conf" ] || fail "a host without NetworkManager got a guard"
+rm -f "$legacy_conf"
 
 # The guard and the route checks both report.
 guard_case

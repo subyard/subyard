@@ -63,7 +63,7 @@ func (cli *CLI) networkService(yards []domain.Context) *yardnetwork.Service {
 			}
 		}
 		service = &yardnetwork.Service{Host: host, Lock: networkruntime.HostLock{}, Guard: func(ctx context.Context) error {
-			return (hostruntime.NetworkGuard{Pending: hostruntime.LocalNetworkManagerGuardPending}).Check(ctx, bridges)
+			return (hostruntime.NetworkGuard{State: hostruntime.LocalNetworkManagerGuardState}).Check(ctx, bridges)
 		}}
 	}
 	if service.ContractSource != nil {

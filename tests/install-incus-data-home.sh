@@ -61,7 +61,10 @@ case "${1:-}" in
     printf 'Client version: %s\nServer version: %s\n' "${TEST_INCUS_VERSION:-6.0.6}" "$server"
     exit "${TEST_SERVER_QUERY_RC:-0}"
     ;;
-  storage|network) exit 0 ;;
+  network)
+    [ "${2:-}" != list ] || printf '[{"name":"incusbr0","type":"bridge","managed":true}]\n'
+    exit 0 ;;
+  storage) exit 0 ;;
   *) exit 0 ;;
 esac
 SH
@@ -83,6 +86,7 @@ case "${1:-}" in
     fi
     printf '%s\n' "${TEST_NM_STATE:-inactive}"
     ;;
+  show) [ "$*" != 'show -p InvocationID --value NetworkManager' ] || printf 'nm-fixture\n' ;;
   try-restart)
     if [ "${TEST_RESTART_RC:-0}" != 0 ]; then
       printf 'fixture restart refused: injected service failure\n' >&2
@@ -141,9 +145,21 @@ cat > "$TMP/bin/dispatcher" <<'SH'
 SH
 chmod 0755 "$TMP/bin"/*
 
+# NetworkManager already read this guard (a held record), so active-NetworkManager cases continue
+# instead of stopping for the first NetworkManager start, which tests/lib-power-network.sh covers.
+seed_read_guard() {
+  mkdir -p "$TMP/etc/NetworkManager/conf.d" "$TMP/run/subyard"
+  printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
+    'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' \
+    > "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
+  printf '%s %s nm-fixture held init\n' "$(cat /proc/sys/kernel/random/boot_id)" \
+    "$(stat -c '%i:%.9Z' "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf")" > "$TMP/run/subyard/nm-guard-state"
+}
+
 run_installer() (
   local data_home="$1" command_path installer_path operator_user operator_group
   shift
+  [ "${TEST_NM_STATE:-inactive}" != active ] || seed_read_guard
   command_path="${TEST_COMMAND_PATH:-$TMP/bin:$PATH}"
   installer_path="${TEST_INSTALLER_PATH:-$ROOT/scripts/01-install-incus.sh}"
   operator_user="$(id -un)"
@@ -434,7 +450,7 @@ if [ "${1:-}" = --config-dir ]; then dir="$2"; shift 2; fi
 cat "$dir/zz-subyard-unmanaged.conf"
 SH
 # Retain the real reader/guard logic, redirecting only its absolute binary peer.
-sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/run/subyard/|$TMP/run/subyard/|g" \
+sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/run/subyard/|$TMP/run/subyard/|g; s|/etc/NetworkManager/|$TMP/etc/NetworkManager/|g" \
   "$TMP/version-scripts/lib-power.sh"
 # The package replaces the initial executable, keeping installed and final
 # versions separate without making package effects implicit in --version.
@@ -442,6 +458,7 @@ cat > "$TMP/incus-initial" <<'SH'
 #!/usr/bin/env bash
 [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'incus %s\n' "$*" >> "$TEST_EFFECT_LOG"
 if [ "${1:-}" = --version ]; then printf '%s\n' "${TEST_INITIAL_INCUS_VERSION:-6.0.5}"; fi
+if [ "${1:-} ${2:-}" = "network list" ]; then printf '[{"name":"incusbr0","type":"bridge","managed":true}]\n'; fi
 SH
 chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get" "$version_bin/curl" \
   "$version_bin/dpkg" "$version_bin/install" "$version_bin/NetworkManager" "$version_bin/nmcli" "$TMP/incus-initial"
@@ -583,10 +600,11 @@ for installed in 6.0.6 7.0.0 6.0.5 none; do
           ! grep -Fq 'could not list existing Incus bridges' "$source_output" \
             || fail "$label emitted a spurious Incus inventory warning"
           guard_count="$(grep -c '^systemctl is-active NetworkManager$' "$effect_log")"
+          # Each guard run checks NetworkManager's state, before and again after a file write.
           expected_guards=1
           [ "$mode" != normal ] || expected_guards=2
-          # The guard never reloads NetworkManager, so an active one adds no verification pass.
-          [ "$guard_count" -eq "$expected_guards" ] || fail "$label omitted or repeated a guard reconcile"
+          [ "$guard_count" -ge "$expected_guards" ] && [ "$guard_count" -le $((expected_guards * 2)) ] \
+            || fail "$label omitted or repeated a guard reconcile"
           ! grep -Eq '^(systemctl (reload|restart|try-restart|reload-or-restart) NetworkManager|nmcli general reload)' "$effect_log" \
             || fail "$label reloaded or restarted NetworkManager"
         done

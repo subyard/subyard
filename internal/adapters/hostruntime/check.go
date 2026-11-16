@@ -313,9 +313,11 @@ func collectHostFacts(ctx context.Context, check HostCheck) (HostFacts, error) {
 	}
 	_, dockerErr := exec.LookPath("docker")
 	facts.DockerPresent = dockerErr == nil
-	pending := LocalNetworkManagerGuardPending()
-	facts.NetworkManagerRebootPending = pending == "lists"
-	facts.NetworkManagerGuardUnread = pending == "unread"
+	if _, err := os.Lstat(NetworkManagerGuardPath); err == nil && networkManagerActiveLocally() {
+		state := LocalNetworkManagerGuardState()
+		facts.NetworkManagerRebootPending = state == "loaded-reboot" || state == "unread-migration"
+		facts.NetworkManagerGuardUnread = state == "unread-init"
+	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(check.Yard.SSHPort))
 	connection, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "tcp", address)
 	if err == nil {

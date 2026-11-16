@@ -348,7 +348,7 @@ func main() {
 		os.Exit(cli.RunBootPower(ctx, os.Args[2:], os.Stdout, os.Stderr,
 			application.BootPowerReconciler{
 				Inventory: client, Instances: client, Power: client,
-				Network:       hostruntime.NetworkGuard{Pending: hostruntime.LocalNetworkManagerGuardPending},
+				Network:       hostruntime.NetworkGuard{State: hostruntime.LocalNetworkManagerGuardState},
 				NetworkPolicy: bootPolicy,
 				AfterStart:    bootPolicy.ClearBootStaleUDP,
 				ReconcilePublications: func(ctx context.Context, yard yardnetwork.Yard) ([]string, error) {
