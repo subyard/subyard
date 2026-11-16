@@ -73,6 +73,8 @@ if [ "${RUNNER_FAIL_NATIVE:-0}" -ne 0 ]; then
 fi
 SH
 chmod +x "$fixture/dev/build-profiles.sh"
+# The Makefile gates build and verify on the RPC vocabulary check; the fixture has no vocabulary.
+printf '#!/usr/bin/env python3\n' > "$fixture/dev/generate-rpc-vocabulary.py"
 cp "$ROOT/Makefile" "$fixture/Makefile"
 cat > "$fixture/dev/package-engine.sh" <<'SH'
 #!/usr/bin/env bash
