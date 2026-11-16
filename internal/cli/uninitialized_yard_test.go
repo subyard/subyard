@@ -12,6 +12,8 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/migration"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -182,11 +184,9 @@ func TestUninitializedYardDecisionOnlyNarrows(t *testing.T) {
 	if left, err := operation.releaseYardUninitialized(context.Background(), target); err != nil || !left {
 		t.Fatalf("decision widened within the process: left=%t err=%v", left, err)
 	}
-	// Host key tools never defer a yard with a warning; they leave out only
-	// the unobserved context of a yard left to its init.
 	keyTools := &profileRuntimeActivationReconciler{cli: operation, request: scenario.request, id: "key-tools-runtime"}
-	if kept, uninitialized, failures := keyTools.splitUninitialized(context.Background(), operation, []configTarget{target}); len(kept) != 0 || len(uninitialized) != 0 || len(failures) != 0 {
-		t.Fatalf("key tools: kept=%d uninitialized=%v failures=%v", len(kept), uninitialized, failures)
+	if kept, uninitialized, failures := keyTools.splitUninitialized(context.Background(), operation, []configTarget{target}); len(kept) != 1 || len(uninitialized) != 0 || len(failures) != 0 {
+		t.Fatalf("key tools deferred a yard: kept=%d uninitialized=%v failures=%v", len(kept), uninitialized, failures)
 	}
 	fresh, err := New(scenario.fixture.cli.options)
 	if err != nil {
@@ -297,8 +297,7 @@ func TestReleaseRepairDefersUninitializedYardWithDeadAgent(t *testing.T) {
 // A yard left to its init is decided before any part of context resolution
 // that can read its guest: with a missing desired provisioning source, whose
 // discovery would otherwise read the applied guest state, and a dead agent,
-// repair of the other yards still completes. Owners that never defer a yard
-// do not take its unobserved desired context as installed state.
+// repair of the other yards still completes.
 func TestReleaseRepairDefersUninitializedYardBeforeContextResolution(t *testing.T) {
 	scenario := newYardFailureScenario(t, false, false, "default", "named")
 	markYard(t, scenario.fixture, "default", "true")
@@ -323,19 +322,11 @@ func TestReleaseRepairDefersUninitializedYardBeforeContextResolution(t *testing.
 	if !operation.unobservedReleaseYard("named", scenario.request.ConfigHome) || operation.unobservedReleaseYard("default", scenario.request.ConfigHome) {
 		t.Fatal("only the uninitialized yard is unobserved")
 	}
-	keyTools := &profileRuntimeActivationReconciler{cli: operation, request: scenario.request, id: "key-tools-runtime"}
-	_, targets, err := operation.releaseActivationTargets(context.Background(), "default", scenario.request.ConfigHome, true, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	kept, _, failures := keyTools.splitUninitialized(context.Background(), operation, targets)
-	for _, target := range kept {
-		if target.Name == "named" {
-			t.Fatal("host key tools took the unobserved yard as installed input")
-		}
-	}
-	if len(kept) == 0 || len(failures) != 0 {
-		t.Fatalf("key tools targets: kept=%d failures=%v", len(kept), failures)
+	// Registered-yard migration changes only host-side Incus metadata and is
+	// not deferred: the yard left to its init is still its target.
+	migrationOwner := operation.registeredYardMigration(scenario.request, false, "named").(*migration.RegisteredYardMigration)
+	if targets, err := migrationOwner.LoadTargets(context.Background(), nil); err != nil || len(targets) != 1 || targets[0].Loaded.Context.YardName != "named" {
+		t.Fatalf("registered-yard migration targets of the uninitialized yard: %d %v", len(targets), err)
 	}
 	if hits != 0 {
 		t.Fatalf("context resolution entered the uninitialized yard's guest %d times", hits)
@@ -350,5 +341,28 @@ func TestReleaseRepairDefersUninitializedYardBeforeContextResolution(t *testing.
 	}
 	if hits != 0 {
 		t.Fatalf("release work entered the uninitialized yard's guest %d times", hits)
+	}
+}
+
+// Host key tools are never deferred: a recovery prepared beside a yard left to
+// its init binds every yard, and its reconcile is not stale.
+func TestKeyToolsRecoveryBesideUninitializedYardIsNotStale(t *testing.T) {
+	scenario := newYardFailureScenario(t, false, false, "default", "named")
+	markYard(t, scenario.fixture, "default", "true")
+	markYard(t, scenario.fixture, "named", "false")
+	program, err := New(scenario.fixture.cli.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyTools := program.profileActivationReconciler(scenario.request, "key-tools-runtime").(*profileRuntimeActivationReconciler)
+	releases := releasetransition.ReleasePair{Target: scenario.request.Target}
+	if _, err := keyTools.PrepareActivationRecovery(context.Background(), releases, releasetransition.ReleaseLinks{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, bound := keyTools.recovery["named"]; !bound || len(keyTools.recovery) != 2 {
+		t.Fatalf("key tools recovery binds %v", keyTools.recovery)
+	}
+	if err := keyTools.Reconcile(context.Background(), releasetransition.ReleaseLinks{}); errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("key tools recovery beside an uninitialized yard is stale: %v", err)
 	}
 }

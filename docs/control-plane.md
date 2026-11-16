@@ -673,9 +673,9 @@ guest pause, resume and removal; `stop` checks SSH sessions for all users; and `
 profile runtimes like a stopped yard's, plans its project hooks conditionally and reads its
 applied integration state as absent only if no integration inventory exists. Release repair
 decides that a yard is left to its init from a context loaded without any guest read, before
-every part of context resolution that can read the guest; that context stays marked unobserved,
-and owners that never defer a yard (host key tools, service registration, registered-yard
-migrations) leave it out instead of treating it as installed state. A working yard whose
+every part of context resolution that can read the guest. Host key tools and registered-yard
+migrations, which change only host state, are not deferred and use that desired context; service
+registration withholds itself while such a yard may hold the service. A working yard whose
 re-init failed keeps the strict checks. Boot rechecks each yard under the host network policy
 lock right before every power or runtime effect, holding only the lock for a stop so a policy
 failure never blocks it, and init marks an existing yard uninitialized under that lock. Boot's

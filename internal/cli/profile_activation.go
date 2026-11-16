@@ -96,12 +96,7 @@ func (reconciler *profileRuntimeActivationReconciler) splitUninitialized(
 	ctx context.Context, operation *CLI, targets []configTarget,
 ) ([]configTarget, []string, []error) {
 	if reconciler.id == "key-tools-runtime" {
-		// Host key tools are never deferred, but a yard left to its init has
-		// only a desired context that no guest read confirmed; it is not an
-		// installed input of the host installation.
-		return slices.DeleteFunc(slices.Clone(targets), func(target configTarget) bool {
-			return operation.unobservedReleaseYard(target.Name, reconciler.request.ConfigHome)
-		}), nil, nil
+		return targets, nil, nil
 	}
 	kept := make([]configTarget, 0, len(targets))
 	var uninitialized []string
