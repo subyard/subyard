@@ -105,9 +105,6 @@ type initPlatformFixture struct {
 	// runtimeDeferred models a stopped yard: its profile runtimes are deferred,
 	// never observed converged.
 	runtimeDeferred bool
-	// convergeOnRefresh marks these stages converged on the first execution-time
-	// recheck, as if another init finished them while this plan awaited approval.
-	convergeOnRefresh []ports.ReconcileStageID
 	// runtimeObserveErr fails every fresh profile runtime observation;
 	// observeAfterIncus clears it once the Incus stage is applied, and
 	// failObserveAfterRuntime sets it once the profile runtime stage is applied.
