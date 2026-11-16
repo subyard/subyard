@@ -968,6 +968,22 @@ def _prune_missing(report, scan, state, rpc, cleanup_pass, evidence, approved_id
                 del entry["pending_repos"][path]
                 state.save()
     candidates = _cleanup_records(scan, state, groups, repos)
+    # A refusal marker lives only while its repository is still a cleanup candidate in the
+    # catalog: a reappearing directory, a reactivated project or a vanished record drops it.
+    live_ids = {repo["id"] for repo in repos}
+    eligible = {(project_id, repo["id"]) for project_id, _, repo, reason in candidates
+                if not reason and project_id not in rootless and verify_missing(scan, repo["path"])}
+    for project_id, entry in state.data["projects"].items():
+        refused = entry.get("refused_closes")
+        if refused:
+            kept = {repo_id: targets for repo_id, targets in refused.items()
+                    if repo_id in live_ids and (project_id, repo_id) in eligible}
+            if kept != refused:
+                if kept:
+                    entry["refused_closes"] = kept
+                else:
+                    del entry["refused_closes"]
+                state.save()
     for project_id, entry, repo, reason in candidates:
         if reason or project_id in rootless or not verify_missing(scan, repo["path"]):
             continue

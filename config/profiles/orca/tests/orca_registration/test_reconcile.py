@@ -2512,7 +2512,6 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.rpc.call = call
         return attempted
 
-
     def test_refused_stop_is_followed_directly_by_its_handle_close_with_two_live_ptys(self):
         self.rpc.snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],
                                "tabs": [{"id": "tab", "type": "terminal", "ptyId": "p"}]}]
@@ -2525,7 +2524,6 @@ class RemovedProjectSessionTests(unittest.TestCase):
                           ("session.tabs.close", "tab")],
                          [(method, (params.get("expectedPtyIds") or [params.get("terminal") or params.get("tabId")])[0])
                           for method, params in attempted])
-
 
     def test_refused_terminal_close_persists_and_handle_turnover_resumes_with_one_resend(self):
         self.rpc.snapshots = []
@@ -2551,7 +2549,6 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.run_sync()
         self.assertEqual(["h-old", "h-new"], closes())
 
-
     def test_foreign_tab_without_identity_still_shares_its_terminal_handle(self):
         self.rpc.snapshots = [
             {"worktree": self.other["id"] + "::" + self.other["path"], "tabs": [{"type": "terminal", "terminal": "h"}]},
@@ -2564,6 +2561,23 @@ class RemovedProjectSessionTests(unittest.TestCase):
         self.assertEqual("protected", next(item["retention"] for item in report["cleanup"]
                                            if item["repoId"] == self.repo["id"]))
 
+    def test_refusal_markers_clear_when_the_record_is_no_longer_a_cleanup_candidate(self):
+        for case in ("directory-reappears", "record-gone"):
+            with self.subTest(case=case):
+                self.setUp()
+                self.rpc.snapshots = []
+                self.rpc.terminals = [self.terminal(self.repo, "p", "h")]
+                shutil.rmtree(self.root.parent)
+                self.attempts(lambda method, params: True)
+                self.run_sync()
+                self.assertIn("refused_closes", self.sidecar()["projects"]["sample-id"])
+                if case == "directory-reappears":
+                    # Project files at the address again: the project is active once more.
+                    project(self.workspaces)
+                else:
+                    self.rpc.repos = [repo for repo in self.rpc.repos if repo["id"] != self.repo["id"]]
+                self.run_sync()
+                self.assertNotIn("refused_closes", self.sidecar()["projects"].get("sample-id", {}))
 
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
