@@ -769,6 +769,31 @@ fi
 [ ! -s "$P0_FAKE_INCUS_LOG" ] || fail "foreign unavailable pool was deleted"
 find "$HOME/.cache/subyard-p0-126" -depth -delete
 
+# The daemon-line check reads the running daemon, not the client package.
+daemon_line_bin="$TMP/daemon-line-bin"
+install -d -m 0700 "$daemon_line_bin"
+daemon_line_check() { # <client> <daemon> -> rc
+  printf '#!/bin/sh\nif [ "$1" = query ]; then printf "{\\"environment\\":{\\"server_version\\":\\"%%s\\"}}\\n" %s; else printf "%%s\\n" %s; fi\n' "$2" "$1" \
+    > "$daemon_line_bin/incus"
+  chmod 0700 "$daemon_line_bin/incus"
+  (
+    PATH="$daemon_line_bin:$PATH"
+    export SUBYARD_E2E_VM=1
+    die() { printf '%s\n' "$*" >&2; exit 1; }
+    eval "$(sed -n '/^P0_INCUS_DAEMON_MIN=/,/^}/p' "$ROOT/dev/e2e/p0-guest.sh")"
+    assert_incus_daemon_line
+  ) >/dev/null 2>&1
+}
+for accepted in 6.0.7 6.0.12; do
+  daemon_line_check 6.0.7 "$accepted" || fail "P0 refused the LTS 6.0 daemon $accepted"
+done
+for refused in 6.0.6 6.21 7.0.0 bogus; do
+  ! daemon_line_check 6.0.7 "$refused" || fail "P0 accepted the unsupported daemon $refused"
+done
+! daemon_line_check 6.0.7 6.0.6 || fail 'P0 trusted the client version over a stale daemon'
+grep -Fq 'peer-prepare-resume) peer_incus_ready; peer_prepare_finish ;;' "$ROOT/dev/e2e/p0-guest.sh" \
+  || fail 'P0 peer group re-exec skips the daemon-line check'
+
 nested_bin="$TMP/nested-bin"
 nested_probe="$TMP/nested-cache-probe"
 install -d -m 0700 "$nested_bin"
@@ -778,6 +803,7 @@ printf '%s\n' \
   'case "$*" in' \
   '  info) ;;' \
   '  --version) printf "6.0.7\n" ;;' \
+  '  "query /1.0") printf "{\"environment\":{\"server_version\":\"6.0.7\"}}\n" ;;' \
   '  "storage show default --project default") ;;' \
   '  "network show incusbr0 --project default") ;;' \
   '  "admin waitready") ;;' \
