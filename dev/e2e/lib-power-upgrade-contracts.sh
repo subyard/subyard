@@ -368,10 +368,18 @@ verify_legacy_rollback_refusal() {
   if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
     die "incompatible published v$OLD_VERSION rollback unexpectedly succeeded"
   fi
-  # The rollback-compatibility blocker (the device-guard epoch), not another rollback-incompatible one.
+  # The rollback-compatibility blocker (the device-guard epoch), not another rollback-incompatible
+  # one. The source provenance check runs before it and may refuse a published target first; the
+  # CLI exposes no check past it, so that case is a stated limit (the blocker is proven host-free).
   grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
-    && grep -Fq 'the retained release cannot safely accept the current migration ledger' "$STATE_ROOT/predecessor-rollback.log" \
     || die 'published predecessor rollback failed for an unexpected reason'
+  if grep -Fq 'the retained release cannot safely accept the current migration ledger' "$STATE_ROOT/predecessor-rollback.log"; then
+    info 'published predecessor rollback refused by the rollback-compatibility blocker'
+  elif grep -Fq 'source release has invalid or foreign V2 registry provenance' "$STATE_ROOT/predecessor-rollback.log"; then
+    info 'LIMIT: published predecessor rollback refused by the provenance check before the rollback-compatibility blocker'
+  else
+    die 'published predecessor rollback was refused by another rollback-incompatible blocker'
+  fi
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   index=0
   for path in "${paths[@]}"; do
