@@ -129,8 +129,28 @@ power_nm_print_config() {
   fi
 }
 
-power_nm_guard_effective() { # <bridge>
-  local bridge="$1" config unmanaged no_auto rc
+# The effective [keyfile] unmanaged-devices entries, one per line. NetworkManager joins values
+# merged through "+=" with commas, so both list separators are accepted.
+power_nm_unmanaged_entries() { # stdin: NetworkManager --print-config
+  awk '
+    /^[[:space:]]*\[/ { section = $0; gsub(/[[:space:]]/, "", section); next }
+    section == "[keyfile]" && /^[[:space:]]*unmanaged-devices[[:space:]]*=/ {
+      value = $0; sub(/^[^=]*=/, "", value); last = value
+    }
+    END {
+      count = split(last, entries, /[;,]/)
+      for (entry_index = 1; entry_index <= count; entry_index++) {
+        entry = entries[entry_index]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", entry)
+        if (entry != "") print entry
+      }
+    }
+  '
+}
+
+power_nm_guard_effective() { # <bridge...>
+  local config entries required rc
+  local -a missing=()
   if power_nm_active; then :; else
     rc=$?; [ "$rc" -eq 1 ] && return 0
     return "$rc"
@@ -143,22 +163,22 @@ power_nm_guard_effective() { # <bridge>
     fi
     return 1
   }
-  unmanaged="$(printf '%s\n' "$config" | sed -n 's/^[[:space:]]*unmanaged-devices[[:space:]]*=[[:space:]]*//p' | tail -n1)"
-  no_auto="$(printf '%s\n' "$config" | sed -n 's/^[[:space:]]*no-auto-default[[:space:]]*=[[:space:]]*//p' | tail -n1)"
-  case ";$unmanaged;" in *';type:veth;'*) ;; *) power_fail "NM effective unmanaged-devices lacks type:veth"; return 1 ;; esac
-  case ";$unmanaged;" in *';driver:veth;'*) ;; *) power_fail "NM effective unmanaged-devices lacks driver:veth"; return 1 ;; esac
-  case ";$unmanaged;" in *";interface-name:$bridge;"*) ;; *) power_fail "NM effective unmanaged-devices lacks bridge $bridge"; return 1 ;; esac
-  case ";$no_auto;" in *';type:veth;'*) ;; *) power_fail "NM effective no-auto-default lacks type:veth"; return 1 ;; esac
-  case ";$no_auto;" in *";interface-name:$bridge;"*) ;; *) power_fail "NM effective no-auto-default lacks bridge $bridge"; return 1 ;; esac
-  printf '%s\n' "$config" | grep -Eq '^[[:space:]]*managed[[:space:]]*=[[:space:]]*0([[:space:]]|$)' \
-    || { power_fail "NM effective config lacks the managed=0 device guard"; return 1; }
+  entries="$(printf '%s\n' "$config" | power_nm_unmanaged_entries)"
+  for required in type:veth driver:veth "${@/#/interface-name:}"; do
+    grep -Fxq -- "$required" <<< "$entries" || missing+=("$required")
+  done
+  [ "${#missing[@]}" -eq 0 ] && return 0
+  local IFS=,
+  power_fail "NM effective [keyfile] unmanaged-devices lacks ${missing[*]}; a NetworkManager conf.d file that sets unmanaged-devices= replaces the Subyard guard list — use unmanaged-devices+= there, then rerun yard init"
 }
 
 power_route_device_unsafe() { # <device> [bridge...]
   local dev="$1" bridge details
   shift
   for bridge in "$@"; do [ "$dev" = "$bridge" ] && return 0; done
-  case "$dev" in veth*|tap*|macvtap*|vnet*|docker*|br-*|virbr*) return 0 ;; esac
+  case "$dev" in veth*|tap*|macvtap*|vnet*|docker*|virbr*) return 0 ;; esac
+  # Docker's own bridges only: an admin bridge such as br-lan may carry the host uplink.
+  [[ "$dev" =~ ^br-[0-9a-f]{12}$ ]] && return 0
   details="$(ip -d link show dev "$dev" 2>/dev/null)" || details=
   case " $details " in *' veth '*|*' veth@'*) return 0 ;; esac
   return 1
@@ -191,9 +211,8 @@ power_routes_safe() { # [bridge...]
 }
 
 power_host_safe() { # <bridge...>
-  local bridge
   [ "$#" -gt 0 ] || { power_fail "power_host_safe needs at least one managed bridge"; return 1; }
-  for bridge in "$@"; do power_nm_guard_effective "$bridge" || return 1; done
+  power_nm_guard_effective "$@" || return 1
   power_routes_safe "$@"
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -130,58 +131,46 @@ func (guard NetworkGuard) run(ctx context.Context, name string, arguments ...str
 	return exec.CommandContext(ctx, name, arguments...).CombinedOutput()
 }
 
+// validateNetworkManagerConfig checks the effective [keyfile] unmanaged-devices list. Values
+// merged through "+=" are comma-joined by NetworkManager, so both separators are accepted.
 func validateNetworkManagerConfig(contents string, bridges []string) error {
-	values := make(map[string]string)
+	section, value := "", ""
 	scanner := bufio.NewScanner(strings.NewReader(contents))
-	managed := false
 	for scanner.Scan() {
-		name, value, found := strings.Cut(scanner.Text(), "=")
-		if !found {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "[") {
+			section = strings.ReplaceAll(line, " ", "")
 			continue
 		}
-		name = strings.TrimSpace(name)
-		value = strings.TrimSpace(value)
-		values[name] = value
-		if name == "managed" && value == "0" {
-			managed = true
+		name, entry, found := strings.Cut(line, "=")
+		if found && section == "[keyfile]" && strings.TrimSpace(name) == "unmanaged-devices" {
+			value = entry
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	unmanaged := semicolonSet(values["unmanaged-devices"])
-	noAuto := semicolonSet(values["no-auto-default"])
-	for _, value := range []string{"type:veth", "driver:veth"} {
-		if !unmanaged[value] {
-			return fmt.Errorf("NetworkManager unmanaged-devices lacks %s", value)
+	unmanaged := make(map[string]bool)
+	for _, entry := range strings.FieldsFunc(value, func(character rune) bool { return character == ';' || character == ',' }) {
+		if entry = strings.TrimSpace(entry); entry != "" {
+			unmanaged[entry] = true
 		}
 	}
-	if !noAuto["type:veth"] {
-		return errors.New("NetworkManager no-auto-default lacks type:veth")
+	var missing []string
+	for _, required := range []string{"type:veth", "driver:veth"} {
+		if !unmanaged[required] {
+			missing = append(missing, required)
+		}
 	}
 	for _, bridge := range bridges {
-		value := "interface-name:" + bridge
-		if !unmanaged[value] {
-			return fmt.Errorf("NetworkManager unmanaged-devices lacks bridge %s", bridge)
-		}
-		if !noAuto[value] {
-			return fmt.Errorf("NetworkManager no-auto-default lacks bridge %s", bridge)
+		if !unmanaged["interface-name:"+bridge] {
+			missing = append(missing, "interface-name:"+bridge)
 		}
 	}
-	if !managed {
-		return errors.New("NetworkManager effective config lacks managed=0")
+	if len(missing) != 0 {
+		return fmt.Errorf("NetworkManager effective [keyfile] unmanaged-devices lacks %s; a NetworkManager conf.d file that sets unmanaged-devices= replaces the Subyard guard list — use unmanaged-devices+= there, then rerun yard init", strings.Join(missing, ","))
 	}
 	return nil
-}
-
-func semicolonSet(value string) map[string]bool {
-	result := make(map[string]bool)
-	for _, part := range strings.Split(value, ";") {
-		if part = strings.TrimSpace(part); part != "" {
-			result[part] = true
-		}
-	}
-	return result
 }
 
 func safeInterfaceName(value string) bool {
@@ -204,10 +193,59 @@ func unsafeDeviceName(device string, bridges []string) bool {
 			return true
 		}
 	}
-	for _, prefix := range []string{"veth", "tap", "macvtap", "vnet", "docker", "br-", "virbr"} {
+	for _, prefix := range []string{"veth", "tap", "macvtap", "vnet", "docker", "virbr"} {
 		if strings.HasPrefix(device, prefix) {
 			return true
 		}
 	}
-	return false
+	return dockerBridgeName(device)
+}
+
+// dockerBridgeName matches Docker's user-defined bridges, "br-" plus 12 network-ID hex
+// characters; an admin bridge such as br-lan may carry the host uplink.
+func dockerBridgeName(device string) bool {
+	suffix, found := strings.CutPrefix(device, "br-")
+	if !found || len(suffix) != 12 {
+		return false
+	}
+	for _, character := range suffix {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// NetworkManagerGuardPath is the Subyard guard drop-in that scripts/lib/host.sh owns.
+const NetworkManagerGuardPath = "/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
+
+// NetworkManagerGuardCurrent reports whether no released guard format remains: the guard is
+// absent or holds only its appending [keyfile] key, and the legacy 99- file is gone.
+func NetworkManagerGuardCurrent(conf string) (bool, error) {
+	if _, err := os.Lstat(filepath.Join(filepath.Dir(conf), "99-subyard-unmanaged.conf")); err == nil {
+		return false, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	contents, err := os.ReadFile(conf)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	sections, keys := 0, 0
+	for _, line := range strings.Split(string(contents), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "" || strings.HasPrefix(line, "#"):
+		case line == "[keyfile]":
+			sections++
+		case strings.HasPrefix(line, "unmanaged-devices+=") && sections == 1:
+			keys++
+		default:
+			return false, nil
+		}
+	}
+	return sections == 1 && keys == 1, nil
 }

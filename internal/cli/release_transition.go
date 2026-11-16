@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -876,7 +877,16 @@ func (cli *CLI) powerActivationReconciler(
 			), nil
 		},
 		authorize: cli.releaseTransitionPrivilegeAuthorization,
+		planned:   plannedNetworkManagerGuardMigration,
 	}
+}
+
+// The host-power stage rewrites a guard left by a released version; disclose that host change.
+func plannedNetworkManagerGuardMigration() []string {
+	if current, err := hostruntime.NetworkManagerGuardCurrent(hostruntime.NetworkManagerGuardPath); err == nil && current {
+		return nil
+	}
+	return []string{"rewrite the released Subyard NetworkManager guard to append to other unmanaged-devices lists, keeping its bridges, and reload NetworkManager"}
 }
 
 func (cli *CLI) releaseTransitionPrivilegeAuthorization(ctx context.Context) error {

@@ -73,17 +73,31 @@ mode="${MOCK_NM_MODE:-valid}"
 [ "$mode" != valid-then-invalid ] || { if [ "$n" -eq 1 ]; then mode=valid; else mode=invalid; fi; }
 [ "$mode" != fail ] || exit 7
 if [ -n "${MOCK_NM_CONFIG_FILE:-}" ]; then
-  cat "$MOCK_NM_CONFIG_FILE"
+  # Like NetworkManager, merge "+=" onto earlier values and join merged lists with commas.
+  awk '
+    /^\[/ { section = $0; next }
+    /^[a-z-]+[+]?=/ {
+      name = $0; sub(/[+]?=.*/, "", name); value = $0; sub(/^[^=]*=/, "", value)
+      key = section SUBSEP name
+      if ($0 ~ /^[a-z-]+[+]=/ && key in merged) value = merged[key] "," value
+      gsub(/;/, ",", value); merged[key] = value
+      if (!(key in order)) { order[key] = ++count; keys[count] = key }
+    }
+    END {
+      for (index_ = 1; index_ <= count; index_++) {
+        split(keys[index_], parts, SUBSEP)
+        print parts[1]; print parts[2] "=" merged[keys[index_]]
+      }
+    }
+  ' ${MOCK_NM_ADMIN_FILE:+"$MOCK_NM_ADMIN_FILE"} "$MOCK_NM_CONFIG_FILE" ${MOCK_NM_LATER_FILE:+"$MOCK_NM_LATER_FILE"}
   exit 0
 fi
 if [ "$mode" = valid ]; then
   cat <<'CFG'
 [main]
-no-auto-default=type:veth;interface-name:incusbr0;
+no-auto-default=none
 [keyfile]
-unmanaged-devices=type:veth;driver:veth;interface-name:incusbr0;
-[device-subyard]
-managed=0
+unmanaged-devices=interface-name:enp5s0,type:veth,driver:veth,interface-name:incusbr0
 CFG
 else
   printf '[main]\nno-auto-default=none\n'
@@ -159,7 +173,8 @@ reset_case() {
   export MOCK_TERMINAL=1 MOCK_NM_STATE=active MOCK_UID=1000 MOCK_SUDO_V_RC=0 MOCK_SUDO_N_RC=0 \
     MOCK_SUDO_REQUIRE_V=1 MOCK_NM_MODE=valid MOCK_RELOAD_RC=0 MOCK_NMCLI_RC=1 \
     MOCK_INCUS_STOP_RC=0 MOCK_INCUS_EXEC_READY_AFTER=1 MOCK_INCUS_EXEC_HANG=0 \
-    MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS='' MOCK_NM_CONFIG_FILE='' MOCK_NM_REQUIRE_ROOT=1
+    MOCK_INCUS_NETWORK_RC=0 MOCK_INCUS_NETWORKS='' MOCK_NM_CONFIG_FILE='' MOCK_NM_REQUIRE_ROOT=1 \
+    MOCK_NM_ADMIN_FILE='' MOCK_NM_LATER_FILE=''
 }
 
 reset_case
@@ -486,6 +501,85 @@ MOCK_UID=0 MOCK_RELOAD_RC=1 MOCK_NMCLI_RC=1
 if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then
   fail "setup accepted a failed NetworkManager reload"
 fi
+
+# The guard is one appending [keyfile] key; an admin's earlier list survives the merge.
+reset_case
+MOCK_UID=0 MOCK_NM_CONFIG_FILE="$guard_conf"
+admin_conf="$tmp/NetworkManager/conf.d/00-keep-uplink.conf"
+printf '[keyfile]\nunmanaged-devices=interface-name:enp5s0\n' > "$admin_conf"
+MOCK_NM_ADMIN_FILE="$admin_conf"
+rm -f "$guard_conf"
+nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null
+expected_guard='# Subyard: keep yard bridges and veth/tap devices unmanaged. "+=" keeps other conf.d lists.
+[keyfile]
+unmanaged-devices+=type:veth;driver:veth;interface-name:veth*;interface-name:docker*;interface-name:br-????????????;interface-name:virbr*;interface-name:vnet*;interface-name:tap*;interface-name:macvtap*;interface-name:incusbr0'
+[ "$(cat "$guard_conf")" = "$expected_guard" ] || fail "guard is not the single appending key"
+merged="$(NetworkManager --print-config)"
+grep -Fxq 'unmanaged-devices=interface-name:enp5s0,type:veth,driver:veth,interface-name:veth*,interface-name:docker*,interface-name:br-????????????,interface-name:virbr*,interface-name:vnet*,interface-name:tap*,interface-name:macvtap*,interface-name:incusbr0' <<< "$merged" \
+  || fail "guard replaced the admin unmanaged-devices list"
+power_nm_guard_effective incusbr0 || fail "comma-merged effective list was rejected: $POWER_ERROR"
+nm_guard_file_current "$guard_conf" incusbr0 || fail "fresh guard reported drift"
+if nm_guard_file_current "$guard_conf" nestedbr0; then fail "guard without the yard bridge was current"; fi
+
+# A later plain "=" replaces the Subyard list: every missing entry and the next step are reported.
+later_conf="$tmp/NetworkManager/conf.d/zzz-admin.conf"
+printf '[keyfile]\nunmanaged-devices=interface-name:enp5s0\n' > "$later_conf"
+MOCK_NM_LATER_FILE="$later_conf"
+if power_nm_guard_effective incusbr0 nestedbr0; then fail "later plain unmanaged-devices= was accepted"; fi
+case "$POWER_ERROR" in
+  *'lacks type:veth,driver:veth,interface-name:incusbr0,interface-name:nestedbr0;'*'use unmanaged-devices+= there'*) ;;
+  *) fail "override diagnostic is incomplete: $POWER_ERROR" ;;
+esac
+MOCK_NM_LATER_FILE=''
+# Only the [keyfile] key counts.
+printf '[main]\nunmanaged-devices=type:veth;driver:veth;interface-name:incusbr0\n' > "$later_conf"
+MOCK_NM_ADMIN_FILE='' MOCK_NM_CONFIG_FILE="$later_conf"
+if power_nm_guard_effective incusbr0; then fail "unmanaged-devices outside [keyfile] was accepted"; fi
+MOCK_NM_CONFIG_FILE="$guard_conf"
+rm -f "$later_conf" "$admin_conf"
+
+# A released guard (plain "=" keys, [device-subyard], legacy 99- file) is rewritten in place,
+# keeping every bridge either file listed; broad br-* is not carried over.
+reset_case
+MOCK_UID=0 MOCK_NM_CONFIG_FILE="$guard_conf"
+released_spec='type:veth;driver:veth;interface-name:veth*;interface-name:docker*;interface-name:br-*;interface-name:virbr*;interface-name:vnet*;interface-name:tap*;interface-name:macvtap*;interface-name:incusbr0;interface-name:nestedbr0'
+printf '[main]\nno-auto-default=%s\n\n[keyfile]\nunmanaged-devices=%s\n\n[device-subyard]\nmatch-device=%s\nmanaged=0\n' \
+  "$released_spec" "$released_spec" "${released_spec//;/,}" > "$guard_conf"
+legacy_conf="$tmp/NetworkManager/conf.d/99-subyard-unmanaged.conf"
+printf '[keyfile]\nunmanaged-devices=interface-name:legacybr0\n' > "$legacy_conf"
+power_nm_guard_effective incusbr0 nestedbr0 || fail "released guard was rejected before its migration"
+if nm_guard_file_current "$guard_conf"; then fail "released guard was reported current"; fi
+nm_unmanaged_guard_migrate "$guard_conf" >/dev/null
+[ ! -e "$legacy_conf" ] || fail "migration retained the legacy 99- guard"
+nm_guard_file_current "$guard_conf" nestedbr0 || fail "migrated guard is not current"
+for bridge in incusbr0 nestedbr0 legacybr0; do
+  grep -Fq "interface-name:$bridge;" <<< "$(cat "$guard_conf");" || fail "migration dropped bridge $bridge"
+done
+if grep -Eq 'br-\*|no-auto-default|device-subyard|managed=|^unmanaged-devices=' "$guard_conf"; then
+  fail "migration kept a released guard element"
+fi
+[ "$(grep -c reload "$MOCK_SYSTEMCTL_LOG")" -eq 1 ] || fail "migration did not reload NetworkManager once"
+migrated="$(sha256sum "$guard_conf")"
+nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out"
+[ "$(sha256sum "$guard_conf")" = "$migrated" ] || fail "repeated migration changed the guard"
+[ "$(grep -c reload "$MOCK_SYSTEMCTL_LOG")" -eq 1 ] || fail "repeated migration reloaded NetworkManager"
+grep -Fq 'already uses its appending form' "$tmp/migrate.out" || fail "repeated migration was not a no-op"
+rm -f "$guard_conf"
+nm_unmanaged_guard_migrate "$guard_conf" >/dev/null
+[ ! -e "$guard_conf" ] || fail "migration created a guard where none existed"
+
+# An inactive NetworkManager still gets the current form, without a reload.
+reset_case
+MOCK_UID=0 MOCK_NM_STATE=inactive
+printf '[keyfile]\nunmanaged-devices=%s\n' "$released_spec" > "$guard_conf"
+nm_unmanaged_guard_migrate "$guard_conf" >/dev/null
+nm_guard_file_current "$guard_conf" incusbr0 || fail "inactive NetworkManager kept a released guard"
+[ ! -s "$MOCK_SYSTEMCTL_LOG" ] || fail "inactive NetworkManager was reloaded"
+rm -f "$guard_conf"
+
+# Docker's br-<12 hex> bridges are unsafe route devices; an admin bridge such as br-lan is not.
+if power_route_device_unsafe br-lan; then fail "admin bridge br-lan was treated as a yard device"; fi
+power_route_device_unsafe br-0123456789ab || fail "Docker bridge was accepted as a route device"
 
 if grep -Fq 'incus launch' "$ROOT/scripts/03-create-subyard.sh"; then
   fail "instance creation still bypasses the guarded start"

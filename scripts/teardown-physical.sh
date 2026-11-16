@@ -39,7 +39,7 @@ case "${1:-apply}" in
       [ -n "$removed_bridge" ] || continue
       ufw_yard_rules_remove "$removed_bridge" || die "approved bridge firewall cleanup failed"
     done <<< "$removed_bridges"
-    nm_unmanaged_guard_reconcile --yes
+    nm_unmanaged_guard_reconcile
     exit 0 ;;
   remove-files)
     if python3 - "$SUBYARD_TEARDOWN_PLAN" <<'PY_NEEDS_ROOT'

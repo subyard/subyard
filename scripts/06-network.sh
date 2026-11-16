@@ -48,6 +48,12 @@ if [ "$mode" != apply ]; then
   fi
   command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1 || exit 1
   power_host_safe "$BRIDGE" || exit 1
+  # A guard left by a released version is drift even while its effective list is complete.
+  if power_nm_active; then
+    nm_guard_file_current "$NM_GUARD_CONF" "$BRIDGE" || exit 1
+  else
+    [ "$?" -eq 1 ] && nm_guard_file_current "$NM_GUARD_CONF" || exit 1
+  fi
   [ "$ufw_active" = 0 ] || ufw_yard_rules_present "$BRIDGE" || exit 1
   instance_exists=0
   incus info "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" >/dev/null 2>&1 && instance_exists=1

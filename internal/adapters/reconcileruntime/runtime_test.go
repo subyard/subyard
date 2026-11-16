@@ -674,6 +674,26 @@ exec bash "$1/scripts/install-power-reconciler.sh" --yes
 	}
 	runtime.Environment[4] = "POWER_LOAD_STATE=loaded"
 	runtime.Environment[5] = "POWER_NEED_RELOAD=no"
+	// A guard left by a released version keeps the host-power stage pending, so
+	// update activation migrates it; the current appending form converges.
+	guardDirectory := testkit.TempDir(t)
+	defer func(previous string) { networkManagerGuardPath = previous }(networkManagerGuardPath)
+	networkManagerGuardPath = filepath.Join(guardDirectory, "zz-subyard-unmanaged.conf")
+	for _, test := range []struct {
+		name, guard string
+		want        bool
+	}{
+		{name: "released guard", guard: "[keyfile]\nunmanaged-devices=type:veth\n\n[device-subyard]\nmanaged=0\n"},
+		{name: "appending guard", guard: "[keyfile]\nunmanaged-devices+=type:veth\n", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			write(networkManagerGuardPath, test.guard, 0o644)
+			verified, err := runtime.VerifyStage(context.Background(), "power")
+			if err != nil || verified != test.want {
+				t.Fatalf("guard verified=%v error=%v, want %v", verified, err, test.want)
+			}
+		})
+	}
 	incus.Reconcile.Instance.Config["user.subyard.initialized"] = "false"
 	assertStage(t, runtime, "power", false, "unfinished desired-power transaction")
 	verified, err := runtime.VerifyStage(context.Background(), "power")

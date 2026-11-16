@@ -2314,7 +2314,15 @@ func (runtime Runtime) powerReadyForFinalize(ctx context.Context) (bool, error) 
 	return runtime.powerReconcilerConverged(ctx), nil
 }
 
+// networkManagerGuardPath is replaced only by tests.
+var networkManagerGuardPath = hostruntime.NetworkManagerGuardPath
+
 func (runtime Runtime) powerReconcilerConverged(ctx context.Context) bool {
+	// The host-power helper also rewrites a guard left by a released version, so
+	// update activation migrates it through this stage.
+	if current, err := hostruntime.NetworkManagerGuardCurrent(networkManagerGuardPath); err != nil || !current {
+		return false
+	}
 	reconciler := runtime.environmentDefault("SUBYARD_POWER_RECONCILER_PATH",
 		"/usr/local/libexec/subyard/yard-boot-reconcile")
 	engineSource := runtime.environmentValue("SUBYARD_POWER_ENGINE_SOURCE")

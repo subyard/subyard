@@ -806,6 +806,20 @@ SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
   bash dev/e2e/operator-extras-upgrade.sh
 ```
 
+The NetworkManager admin-uplink lane installs NetworkManager behind an administrator conf.d file
+that keeps the VM uplink unmanaged, then published 0.29.0, whose guard replaced that list. A
+temporary udev pin and a restoring watchdog keep the uplink reachable until the candidate update
+rewrites the guard; afterwards the administrator's file alone must keep the uplink unmanaged across
+reload, restart, repeat init, start and teardown, with yard bridges and veths strictly unmanaged:
+
+```sh
+bash dev/e2e/nm-admin-uplink.sh --preflight
+SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
+SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
+  dev/agent-e2e.sh --slot "$slot" --purpose nm-admin-uplink --vm-count 1 --vm 1 -- \
+  bash dev/e2e/nm-admin-uplink.sh
+```
+
 `dev/e2e/p0-acceptance.sh --slot N` runs the release smoke; `--lane full` runs the exhaustive
 compatibility and recovery matrix. Release collection requests these long VM runs explicitly;
 its default performs host-free/local checks without allocating. The skill defines when each applies. GitHub workflows do not

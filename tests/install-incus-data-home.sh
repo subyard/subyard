@@ -418,7 +418,8 @@ SH
 cat > "$version_bin/NetworkManager" <<'SH'
 #!/usr/bin/env bash
 [ "$*" = --print-config ] || exit 99
-cat "$TEST_FIXTURE_ROOT/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
+# NetworkManager prints "+=" values merged, as one "=" key.
+sed 's/^unmanaged-devices+=/unmanaged-devices=/' "$TEST_FIXTURE_ROOT/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
 SH
 # Retain the real reader/guard logic, redirecting only its absolute binary peer.
 sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g" \
