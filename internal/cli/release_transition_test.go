@@ -2053,6 +2053,18 @@ func TestPowerActivationReloadsRegisteredYardSelection(t *testing.T) {
 	if program.baseEnv["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatal("candidate power observation mutated the caller's environment")
 	}
+	if slices.Contains(runtime.Environment, "SUBYARD_SUDO_PREAUTHORIZED=1") {
+		t.Fatal("power activation claimed sudo authorization before it was verified")
+	}
+	program.env["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
+	platform, err = reconciler.platform(context.Background(), activationApplicability{state: "installed", applies: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(platform.(reconcileruntime.Runtime).Environment, "SUBYARD_SUDO_PREAUTHORIZED=1") {
+		t.Fatal("power activation dropped the verified sudo authorization")
+	}
+	delete(program.env, "SUBYARD_SUDO_PREAUTHORIZED")
 	writeCLIFile(t, registration, "YARD_TEMPLATE=test-vms\nSSH_PORT=2224\nCODING_TOOL_INTEGRATIONS=codex\n", 0o600)
 	if _, err := reconciler.platform(context.Background(), activationApplicability{state: "installed", applies: true}); err == nil || !strings.Contains(err.Error(), "yard role forbids") || !strings.Contains(err.Error(), registration) {
 		t.Fatalf("candidate accepted forbidden persistent selection: %v", err)
@@ -3176,6 +3188,35 @@ func TestActivationStageReconcilerRepairsOnlyItsStableStage(t *testing.T) {
 	}
 	if authorized != 1 || len(platform.applied) != 1 {
 		t.Fatalf("fixed point reapplied: authorized=%d applied=%v", authorized, platform.applied)
+	}
+}
+
+// Platforms built before authorization lack its verified sudo flag; apply must use a rebuilt one.
+func TestActivationStageReconcilerAppliesPlatformBuiltAfterAuthorization(t *testing.T) {
+	before, after := newInitPlatformFixture(), newInitPlatformFixture()
+	before.converged[ports.ReconcileStageTestVMs] = false
+	authorized := false
+	reconciler := &activationStageReconciler{
+		id: "test-vm-broker", stage: ports.ReconcileStageTestVMs,
+		inspectApplicability: func(context.Context) (activationApplicability, error) {
+			return activationApplicability{state: "active", applies: true}, nil
+		},
+		platform: func(context.Context, activationApplicability) (ports.ReconcileStageRunner, error) {
+			if authorized {
+				return after, nil
+			}
+			return before, nil
+		},
+		authorize: func(context.Context) error {
+			authorized = true
+			return nil
+		},
+	}
+	if err := reconciler.Reconcile(context.Background(), releasetransition.ReleaseLinks{Active: "release-b"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(before.applied) != 0 || !slices.Equal(after.applied, []ports.ReconcileStageID{ports.ReconcileStageTestVMs}) {
+		t.Fatalf("apply used a platform built before authorization: before=%v after=%v", before.applied, after.applied)
 	}
 }
 

@@ -642,6 +642,10 @@ func (reconciler *activationStageReconciler) Reconcile(
 			if err := reconciler.authorize(ctx); err != nil {
 				return reconciler.failure("authorization", err)
 			}
+			// Rebuild so the guarded scripts receive the verified sudo authorization.
+			if platform, err = reconciler.platform(ctx, applicability); err != nil {
+				return reconciler.failure("platform", err)
+			}
 		}
 		if err := platform.ApplyStage(ctx, reconciler.stage); err != nil {
 			return reconciler.failure("apply", err)
@@ -851,6 +855,10 @@ func (cli *CLI) powerActivationReconciler(
 			operation := *cli
 			operation.baseEnv = cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
 			operation.env = maps.Clone(operation.baseEnv)
+			// The fresh environment drops inherited flags; keep only this process's verified one.
+			if cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
+				operation.env["SUBYARD_SUDO_PREAUTHORIZED"] = "1"
+			}
 			loaded, targets, err := operation.releaseActivationTargets(ctx, "default", request.ConfigHome, true, nil)
 			powerYards := make([]domain.Context, 0, len(targets))
 			for _, target := range targets {

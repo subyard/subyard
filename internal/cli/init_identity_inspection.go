@@ -229,6 +229,11 @@ func (prepared *preparedCommand) prepareStoppedIdentityInspection(ctx context.Co
 			if err != nil {
 				return err
 			}
+			// The runtime was built before sudo preparation; its guarded start and
+			// finalize scripts need the verified result. Bindings exclude this flag.
+			if cli.env["SUBYARD_SUDO_PREAUTHORIZED"] == "1" {
+				runtime.Environment = environmentList(environmentMap(runtime.Environment), map[string]string{"SUBYARD_SUDO_PREAUTHORIZED": "1"})
+			}
 			// Ensure imports legacy missing intent from the captured stopped instance,
 			// before temporary startup can make it appear intentionally running.
 			expected, err := startIdentityInspectionPower(ctx, power, runtime.Yard, instance, func() error { return runtime.RunMigrationPhysicalLifecycle(ctx, "start") })
