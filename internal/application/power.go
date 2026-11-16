@@ -96,6 +96,16 @@ func (service PowerService) Set(
 	desired domain.DesiredPower,
 	initialized bool,
 ) error {
+	return service.set(ctx, yard, desired, initialized, nil)
+}
+
+func (service PowerService) set(
+	ctx context.Context,
+	yard domain.Context,
+	desired domain.DesiredPower,
+	initialized bool,
+	extra map[string]string,
+) error {
 	if service.Instances == nil || service.Config == nil {
 		return errors.New("Incus instance reader and config writer are required")
 	}
@@ -110,23 +120,28 @@ func (service PowerService) Set(
 		return err
 	}
 	name, bridge := powerIdentity(yard)
-	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.YardInstanceName, map[string]string{
+	values := map[string]string{
 		powerAutostartKey:   "false",
 		powerManagedKey:     "true",
 		powerYardNameKey:    name,
 		powerBridgeKey:      bridge,
 		powerDesiredKey:     string(desired),
 		powerInitializedKey: fmt.Sprint(initialized),
-	})
+	}
+	for key, value := range extra {
+		values[key] = value
+	}
+	return service.Config.SetInstanceConfig(ctx, yard.IncusProject, yard.YardInstanceName, values)
 }
 
-// Commit records the desired power of a finished init and marks the yard initialized.
+// Commit records the desired power of a finished init and marks the yard
+// initialized, and once and for all as having finished an init.
 func (service PowerService) Commit(
 	ctx context.Context,
 	yard domain.Context,
 	desired domain.DesiredPower,
 ) error {
-	return service.Set(ctx, yard, desired, true)
+	return service.set(ctx, yard, desired, true, map[string]string{powerEverInitializedKey: "true"})
 }
 
 type LifecycleRunner struct {

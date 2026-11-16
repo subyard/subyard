@@ -660,6 +660,13 @@ tools are never deferred. An engine without this rule observes the yard and fail
 The boot power reconciler never starts or stops such a yard, in any state, except for its
 fail-closed stop of every running yard after a host network policy failure; it reports the yard
 as not initialized with `yard -Y NAME init` as the next step and restores the other yards.
+The first finished init also writes `user.subyard.ever_initialized=true`, which nothing clears;
+a yard from a release before that mark counts as ever initialized when `initialized=true`. A
+yard that has never finished init has no installed owner services or integration state: its
+`stop` and `teardown` keep the SSH listener fence and session check but skip the profile
+owner-service pause, and `init` reads its applied integration state as absent only when the
+guest also lacks the integration substrate and inventory. A working yard whose re-init failed
+keeps both strict checks.
 
 Declared persist directories are adopted by a separate guest program
 (`internal/adapters/reconcileruntime/integration_persist.py`), not by the artifact

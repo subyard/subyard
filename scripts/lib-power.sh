@@ -16,6 +16,8 @@ POWER_KEY_BRIDGE=user.subyard.bridge
 POWER_KEY_DESIRED=user.subyard.desired_power
 # shellcheck disable=SC2034 # exported to sourced callers
 POWER_KEY_INITIALIZED=user.subyard.initialized
+# Written by the first finished init and never cleared; a re-init keeps it.
+POWER_KEY_EVER_INITIALIZED=user.subyard.ever_initialized
 POWER_ERROR=
 
 power_fail() {
@@ -37,6 +39,17 @@ incus_instance_columns() { # <project> <instance> <columns> [timeout]
 }
 
 power_state() { incus_instance_columns "$1" "$2" s; } # <project> <instance>
+
+# Succeeds only for a managed instance whose init has never finished:
+# initialized=false without the completion mark. A yard from a release before
+# the mark has initialized=true. Any failed read is not never-initialized.
+power_never_initialized() { # <project> <instance>
+  local managed initialized ever
+  managed="$(incus config get "$2" "$POWER_KEY_MANAGED" --project "$1" 2>/dev/null)" || return 1
+  initialized="$(incus config get "$2" "$POWER_KEY_INITIALIZED" --project "$1" 2>/dev/null)" || return 1
+  ever="$(incus config get "$2" "$POWER_KEY_EVER_INITIALIZED" --project "$1" 2>/dev/null)" || return 1
+  [ "$managed" = true ] && [ "$initialized" = false ] && [ "$ever" != true ]
+}
 
 # Validate the effective NetworkManager configuration, not merely our drop-in file: a later distro
 # file can override unmanaged-devices and recreate the route-hijack incident. No active NM is safe.

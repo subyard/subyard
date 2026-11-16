@@ -104,8 +104,14 @@ case "$action" in
           2) die "cannot safely pause new SSH connections: ssh.service KillMode is not 'process'; use '$(yard_cmd_hint) stop --force' only for emergency shutdown" ;;
           *) die "could not pause new SSH connections before checking VS Code; retry, or use '$(yard_cmd_hint) stop --force' for emergency shutdown" ;;
         esac
-        paused_profiles="$("$SCRIPT_DIR/profile-services.sh" --pause)" \
-          || die 'could not pause profile owner services before checking SSH sessions'
+        # A yard whose init never finished has no installed owner services to
+        # pause; its guest may lack what their handlers need. The SSH listener
+        # fence above and the session check below still apply.
+        paused_profiles=
+        if ! power_never_initialized "$INCUS_PROJECT" "$YARD_INSTANCE_NAME"; then
+          paused_profiles="$("$SCRIPT_DIR/profile-services.sh" --pause)" \
+            || die 'could not pause profile owner services before checking SSH sessions'
+        fi
         [ -z "$paused_profiles" ] || PROFILE_RESTORE_NEEDED=1
         vcstate="$(vscode_remote_state)"
         # Remote sshd children can briefly outlive the closed transport.

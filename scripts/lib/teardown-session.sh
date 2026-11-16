@@ -29,7 +29,11 @@ teardown_session_guard() {
   }
   trap teardown_session_restore EXIT
   ssh_listener_fence || die "could not fence new SSH sessions before teardown"
-  paused="$("$SCRIPT_DIR/profile-services.sh" --pause)" || die "could not pause profile owner services before teardown"
+  # A yard whose init never finished has no installed owner services to pause;
+  # the SSH listener fence and session check still apply.
+  if ! power_never_initialized "$INCUS_PROJECT" "$instance"; then
+    paused="$("$SCRIPT_DIR/profile-services.sh" --pause)" || die "could not pause profile owner services before teardown"
+  fi
   TEARDOWN_SESSION_PROFILES="$paused"
   # The same all-user SSH probe works before the developer account exists.
   result="$(teardown_ssh_state)"
