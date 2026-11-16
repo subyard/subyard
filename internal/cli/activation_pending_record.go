@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -142,6 +143,24 @@ func removeActivationPendingRecord(configHome, yard, owner string) error {
 		return err
 	}
 	return config.RemovePersistentFileSnapshot(configHome, path, snapshot)
+}
+
+// yardActivationPendingRecords lists the known owners with a pending activation
+// record for the yard; it never inspects other entries of the record directory.
+func yardActivationPendingRecords(configHome, yard string, owners []string) ([]string, error) {
+	var present []string
+	for _, owner := range owners {
+		path, err := activationPendingRecordPath(configHome, yard, owner)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := os.Lstat(path); err == nil {
+			present = append(present, owner)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	return present, nil
 }
 
 // removeYardActivationPendingRecords retires the records of the known yard-scoped

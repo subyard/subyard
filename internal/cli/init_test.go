@@ -1358,7 +1358,9 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 	// "converged": the fault was fixed and the runtime converged elsewhere (for
 	// example by the profile's own command), so init takes its hooks-only path.
-	for _, scenario := range []string{"repair", "converged", "failure", "declined"} {
+	// "converged-no-hooks": the same with no project hook work left (for
+	// example after the profile removed itself), which is otherwise a no-op init.
+	for _, scenario := range []string{"repair", "converged", "converged-no-hooks", "failure", "declined"} {
 		t.Run(scenario, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			// A recorded yard-scoped runtime failure of this yard.
@@ -1374,7 +1376,7 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				t.Fatal(err)
 			}
 			record, _ := activationPendingRecordPath(configHome, "default", "sample-runtime")
-			if scenario == "converged" {
+			if scenario == "converged" || scenario == "converged-no-hooks" {
 				// A published owner HostID leaves no host step pending.
 				writeCLIFile(t, filepath.Join(configHome, "host-id"), "owner-a\n", 0o600)
 			}
@@ -1383,7 +1385,8 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 				platform.converged[stage] = true
 			}
 			platform.converged[ports.ReconcileStageFinalize] = true
-			platform.converged[ports.ReconcileStageProfileRuntimes] = scenario == "converged"
+			platform.converged[ports.ReconcileStageProfileRuntimes] = scenario == "converged" || scenario == "converged-no-hooks"
+			platform.hooksApplicable = scenario != "converged-no-hooks"
 			if scenario == "failure" {
 				platform.applyErr = errors.New("injected ProfileRuntime installation failure")
 			}
@@ -1400,11 +1403,13 @@ func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 			}
 			code := program.Run(context.Background())
 			// Only a converged init resolves the recorded failure.
-			resolved := scenario == "repair" || scenario == "converged"
+			resolved := scenario == "repair" || scenario == "converged" || scenario == "converged-no-hooks"
 			if _, err := os.Stat(record); (err == nil) != !resolved {
 				t.Fatalf("pending record kept=%v after %s: %v", err == nil, scenario, err)
 			}
-			if scenario == "converged" {
+			if scenario == "converged" || scenario == "converged-no-hooks" {
+				// The fixture counts every hook retry; the native runner skips
+				// one without hook work.
 				if code != 0 || platform.projectHooks != 1 || len(platform.applied) != 0 {
 					t.Fatalf("hooks-only init: code=%d hooks=%d applied=%v output=%s", code, platform.projectHooks, platform.applied, output.String())
 				}

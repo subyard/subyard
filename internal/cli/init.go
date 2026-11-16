@@ -52,34 +52,37 @@ type initBootstrap struct {
 
 type initExecution struct {
 	// approvedPersist binds provisioning to the persist plan confirmed by init.
-	approvedPersist       *string
-	legacyContinuation    *initLegacyContinuation
-	resourceCommand       string
-	resourceArguments     []string
-	provisionProfile      string
-	requestedProfile      string
-	profileProvision      *provisionExecution
-	profileSetup          *initProfileSet
-	operationID           string
-	integrationSelection  *initIntegrationSelection
-	integrationBaseline   *initIntegrationBaseline
-	integrationAdoption   reconcileruntime.IntegrationPlan
-	integrationWarnings   []string
-	loaded                config.Loaded
-	mode                  initMode
-	bootstrap             *initBootstrap
-	plan                  application.ReconcilePlan
-	approvedPlan          application.ReconcilePlan
-	approvedFinalize      application.ReconcilePlan
-	inputBaseline         *ownerInputBaseline
-	teardownResources     []ports.TeardownResource
-	resetBaseline         *resetTeardownBaseline
-	platform              ports.InitPlatform
-	powerYards            []domain.Context
-	hostID                string
-	hostIDPending         bool
-	configsChanged        bool
-	hooksApplicable       bool
+	approvedPersist      *string
+	legacyContinuation   *initLegacyContinuation
+	resourceCommand      string
+	resourceArguments    []string
+	provisionProfile     string
+	requestedProfile     string
+	profileProvision     *provisionExecution
+	profileSetup         *initProfileSet
+	operationID          string
+	integrationSelection *initIntegrationSelection
+	integrationBaseline  *initIntegrationBaseline
+	integrationAdoption  reconcileruntime.IntegrationPlan
+	integrationWarnings  []string
+	loaded               config.Loaded
+	mode                 initMode
+	bootstrap            *initBootstrap
+	plan                 application.ReconcilePlan
+	approvedPlan         application.ReconcilePlan
+	approvedFinalize     application.ReconcilePlan
+	inputBaseline        *ownerInputBaseline
+	teardownResources    []ports.TeardownResource
+	resetBaseline        *resetTeardownBaseline
+	platform             ports.InitPlatform
+	powerYards           []domain.Context
+	hostID               string
+	hostIDPending        bool
+	configsChanged       bool
+	hooksApplicable      bool
+	// pendingRecords are this yard's recorded yard-scoped runtime failures, which
+	// a converged init retires, so an otherwise converged init is not a no-op.
+	pendingRecords        []string
 	orphanIngress         *orphanIngressPlan
 	orphanIngressDeferred bool
 	runtimePlan           *reconcileruntime.ProfileRuntimePlan
@@ -662,6 +665,12 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 		}
 		execution.platform = runtime
 	}
+	if loaded.Context.AccessKind == domain.AccessLocal {
+		execution.pendingRecords, err = yardActivationPendingRecords(loaded.Context.Paths.ConfigHome, loaded.Context.YardName, cli.yardScopedRuntimeIDs())
+		if err != nil {
+			return nil, err
+		}
+	}
 	if execution.hooksOnly() {
 		execution.hooksApplicable, err = execution.projectHooksApplicable(ctx, cli, true)
 		if err != nil {
@@ -746,7 +755,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 	switch execution.mode {
 	case initReconcile:
 		if execution.hooksOnly() {
-			action, changed = "yard.init.project-hooks", execution.hooksApplicable
+			action, changed = "yard.init.project-hooks", execution.hooksApplicable || len(execution.pendingRecords) != 0
 		}
 	case initConfigs:
 		action = "yard.init.configs"
