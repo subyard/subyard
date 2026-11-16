@@ -858,31 +858,110 @@ rpc_negotiate "$artifact_two" 1.1.0-test 1 compatible artifact-two-v1
     && [ -x "$YARD_BIN_DIR/yard" ] && [ -x "$YARD_BIN_DIR/sy" ] \
     || fail 'other-version retry omitted readiness, protected history or entrypoints'
 )
-# A completed first install keeps its journal; losing ledger and checkpoint is
-# engine-classified damage, never a fresh initial activation before the update.
-(
-  export HOME="$TMP/bootstrap-damaged-home" SUBYARD_OPERATOR_HOME="$TMP/bootstrap-damaged-home"
+# Retry fixtures for an installation whose first runtime link has no previous release.
+retry_environment() { # <home>
+  export HOME="$1" SUBYARD_OPERATOR_HOME="$1"
   export SUBYARD_HOME="$HOME/.subyard" SUBYARD_CONFIG_HOME="$HOME/.config/subyard"
   export YARD_RUNTIME_ROOT="$SUBYARD_HOME/runtime" YARD_BIN_DIR="$HOME/.local/bin"
-  export YARD_RELEASE_BASE_URL="file://$release"
   mkdir -m 0700 "$HOME"
+}
+publish_first() { # <bundle>
+  "$release/subyard-install-runtime-release.sh" --runtime-root "$YARD_RUNTIME_ROOT" \
+    --bundle "$1" --checksum "$1.sha256" --manifest "$1.manifest.json" \
+    --provenance "$1.provenance.json" >/dev/null
+}
+installation_state() {
+  find "$SUBYARD_CONFIG_HOME" "$YARD_BIN_DIR" -type f -exec sha256sum {} + 2>/dev/null | sort
+  readlink "$YARD_RUNTIME_ROOT/current"
+  readlink "$YARD_RUNTIME_ROOT/previous" || true
+}
+# A completed first install that keeps its journal but lost ledger and checkpoint
+# is refused by its own engine. With every protected record and previous absent
+# it is a fresh installation and is initialized; no user data is deleted.
+(
+  retry_environment "$TMP/bootstrap-damaged-home"
+  export YARD_RELEASE_BASE_URL="file://$release"
   YARD_RELEASE_VERSION=1.0.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-damaged-install.log" 2>&1 \
     || { cat "$TMP/bootstrap-damaged-install.log" >&2; fail 'damaged-history fixture install failed'; }
   protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
-  [ ! -e "$YARD_RUNTIME_ROOT/previous" ] && [ -f "$protected/journal.json" ] \
+  [ ! -e "$YARD_RUNTIME_ROOT/previous" ] && jq -e '.checkpoint == "complete"' "$protected/journal.json" >/dev/null \
     || fail 'damaged-history precondition was not established'
   rm -f -- "$protected/ledger.json" "$protected/history-checkpoint.json"
-  damaged_journal="$(sha256sum "$protected/journal.json")"
-  damaged_current="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  damaged_state="$(installation_state)"
   if YARD_RELEASE_VERSION=1.1.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-damaged-retry.log" 2>&1; then
-    fail 'installer accepted a completed install without protected history'
+    fail 'installer accepted a completed journal without protected history'
   fi
   grep -Fq 'protected migration history is absent' "$TMP/bootstrap-damaged-retry.log" \
-    && [ "$(sha256sum "$protected/journal.json")" = "$damaged_journal" ] \
-    && [ ! -e "$protected/ledger.json" ] && [ ! -e "$protected/history-checkpoint.json" ] \
-    && [ "$(readlink "$YARD_RUNTIME_ROOT/current")" = "$damaged_current" ] \
-    && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
-    || { cat "$TMP/bootstrap-damaged-retry.log" >&2; fail 'damaged completed install was not refused unchanged'; }
+    && [ "$(installation_state)" = "$damaged_state" ] \
+    || { cat "$TMP/bootstrap-damaged-retry.log" >&2; fail 'completed journal without history was not refused unchanged'; }
+  rm -f -- "$protected/journal.json"
+  YARD_RELEASE_VERSION=1.1.0-test "$release/subyard-install.sh" --yes > "$TMP/bootstrap-fresh-again.log" 2>&1 \
+    || { cat "$TMP/bootstrap-fresh-again.log" >&2; fail 'installation without any protected record was not initialized'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-fresh-again.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && jq -e '.domains["power-metadata"] == {"epoch": 3, "applied": []}' "$protected/ledger.json" >/dev/null \
+    && [ -f "$protected/history-checkpoint.json" ] \
+    || fail 'fresh initialization of an installation without protected records was incomplete'
+)
+# The installed release's own migrate resumes its initial journal after an
+# interruption; a retry with another version must not hand that journal to the
+# newer release. A non-directory transactions entry stops the first run right
+# after the authorized journal and before baseline evidence or ledger publication.
+(
+  retry_environment "$TMP/bootstrap-killed-home"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+  publish_first "$bundle_one"
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  install -d -m 0700 "$SUBYARD_CONFIG_HOME" "$SUBYARD_CONFIG_HOME/release-transition" "$protected"
+  : > "$protected/transactions"
+  if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-killed.log" 2>&1; then
+    fail 'interrupted initial activation fixture unexpectedly completed'
+  fi
+  rm -f -- "$protected/transactions"
+  [ "$(find "$SUBYARD_CONFIG_HOME" -mindepth 1 -not -type d -printf '%P\n' | sort)" = $'migrations/update.lock\nrelease-transition/v2/journal.json' ] \
+    && jq -e '.checkpoint == "authorized" and ([.steps[] | .id + ":" + .checkpoint] == ["initialize-ledger-v2.initialize:intent"])' \
+      "$protected/journal.json" >/dev/null \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.0.0-test-* ]] && [ ! -e "$YARD_RUNTIME_ROOT/previous" ] \
+    || { cat "$TMP/bootstrap-killed.log" >&2; fail 'interrupted initial activation precondition was not established'; }
+  "$release/subyard-install.sh" --yes > "$TMP/bootstrap-killed-retry.log" 2>&1 \
+    || { cat "$TMP/bootstrap-killed-retry.log" >&2; fail 'interrupted initial activation did not resume through its installed owner'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-killed-retry.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.1.0-test-* ]] \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/previous")" == releases/1.0.0-test-* ]] \
+    && [ -f "$protected/ledger.json" ] && [ -f "$protected/history-checkpoint.json" ] \
+    && [ -x "$YARD_BIN_DIR/yard" ] \
+    || fail 'resumed initial activation omitted readiness, history or entrypoints'
+)
+# The exact release version decides: a prerelease current is not its release.
+final_release="$TMP/final-release"
+"$ROOT/dev/package-engine.sh" --output-dir "$final_release" --version 1.0.0 \
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" >/dev/null
+(
+  retry_environment "$TMP/bootstrap-prerelease-home"
+  export YARD_RELEASE_BASE_URL="file://$final_release" YARD_RELEASE_VERSION=1.0.0
+  publish_first "$bundle_one"
+  "$final_release/subyard-install.sh" --yes > "$TMP/bootstrap-prerelease.log" 2>&1 \
+    || { cat "$TMP/bootstrap-prerelease.log" >&2; fail 'prerelease current was treated as its release version'; }
+  grep -Fq 'Status: ready' "$TMP/bootstrap-prerelease.log" \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.0.0-[0-9a-f]* ]] \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/previous")" == releases/1.0.0-test-* ]] \
+    || fail 'prerelease current did not finish before the release update'
+)
+# An unparsable installed version never runs its migrate before the update refusal.
+malformed_release="$TMP/malformed-release"
+"$ROOT/dev/package-engine.sh" --output-dir "$malformed_release" --version 1.0.bad \
+  --migration-registry "$ROOT/tests/fixtures/migrations/layout-1.json" >/dev/null
+(
+  retry_environment "$TMP/bootstrap-malformed-home"
+  export YARD_RELEASE_BASE_URL="file://$release" YARD_RELEASE_VERSION=1.1.0-test
+  publish_first "$malformed_release/subyard-1.0.bad-linux-amd64.tar.gz"
+  if "$release/subyard-install.sh" --yes > "$TMP/bootstrap-malformed.log" 2>&1; then
+    fail 'installer updated an unparsable installed version'
+  fi
+  protected="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  [ ! -e "$protected/journal.json" ] && [ ! -e "$protected/ledger.json" ] && [ ! -e "$protected/history-checkpoint.json" ] \
+    && [[ "$(readlink "$YARD_RUNTIME_ROOT/current")" == releases/1.0.bad-* ]] \
+    || { cat "$TMP/bootstrap-malformed.log" >&2; fail 'unparsable installed version received protected writes'; }
 )
 
 # A verified standalone bootstrap is the one-time bridge for an active runtime

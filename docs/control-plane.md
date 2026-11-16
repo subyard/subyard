@@ -810,9 +810,11 @@ The standalone installer completes the supported current-release transition afte
 the first runtime link and before publishing CLI entrypoints. Its initial installation
 consent includes this boundary. An interrupted first installation retains protected recovery
 evidence; rerunning the installer uses the existing-runtime transition to resume it before
-publishing entrypoints. If the first link of a v0.28.0+ release was published before any
-journal, ledger or checkpoint and the rerun selects another version, the installer first runs
-that release's own `yard migrate`, then updates; the engine still refuses damaged history.
+publishing entrypoints. When the rerun selects another version and the v0.28.0+ release at
+`current` has no `previous` link, no `ledger.json` and no `history-checkpoint.json`, the installer
+first runs that release's own `yard migrate`, then updates. That migrate resumes an unfinished
+initial journal; with journal, ledger and checkpoint all absent the installation is fresh and is
+initialized, while a completed journal without ledger and checkpoint is refused by the engine.
 Plain `yard update` has no such step: finish an interrupted first install by rerunning the
 installer (any version) or `yard migrate --yes` before `yard update`.
 Publication-only staging leaves migration state untouched.

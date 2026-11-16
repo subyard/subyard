@@ -492,26 +492,31 @@ if [ "$existing_runtime" = 0 ] || [ ! -d "$CONFIG_HOME" ]; then
   install -d -m 0700 "$CONFIG_HOME"
 fi
 unset SUBYARD_INSTALL_ENTRYPOINTS SUBYARD_INSTALL_VERIFIED_HELPER
-# A first install interrupted before its first journal leaves only current.
-# A retry with another version first lets that supported release finish its own
-# initial activation; its engine still classifies and refuses damaged history.
+# A first install interrupted before its authority was published leaves current
+# without ledger and checkpoint. A retry with another version first runs that
+# supported release's own migrate: it resumes its unfinished initial journal and
+# refuses a journal whose history was lost. With no journal, ledger, checkpoint
+# or previous link at all, the installation is fresh and is initialized.
 uninitialized_current=0
 if [ "$run_transition" = 1 ] && [ -z "$SOURCE_INGRESS_ROOT" ] &&
    [ ! -e "$RUNTIME_ROOT/previous" ] && [ ! -L "$RUNTIME_ROOT/previous" ]; then
   current_release="$(readlink -- "$RUNTIME_ROOT/current")" || current_release=''
-  current_version="${current_release#releases/}"
-  current_version="${current_version%-*}"
-  IFS=. read -r current_major current_minor _ <<<"${current_version%%-*}"
-  if [[ "$current_release" == releases/* && "$current_release" != releases/"$VERSION"-* &&
-        "$current_major" =~ ^[0-9]+$ && "$current_minor" =~ ^[0-9]+$ ]] &&
-     (( 10#$current_major > 0 || 10#$current_minor >= 28 )); then
-    uninitialized_current=1
-    for protected_record in journal.json ledger.json history-checkpoint.json; do
-      if [ -e "$CONFIG_HOME/release-transition/v2/$protected_record" ] ||
-         [ -L "$CONFIG_HOME/release-transition/v2/$protected_record" ]; then
-        uninitialized_current=0
-      fi
-    done
+  # The publisher names each release <version>-<first 12 hex digits of its digest>.
+  if [[ "$current_release" =~ ^releases/((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?)-[0-9a-f]{12}$ ]]; then
+    current_version="${BASH_REMATCH[1]}" current_major="${BASH_REMATCH[2]}"
+    current_minor="${BASH_REMATCH[3]}" current_patch="${BASH_REMATCH[4]}" current_prerelease="${BASH_REMATCH[5]}"
+    # Supported installations start at v0.28.0; its prereleases precede it.
+    if [ "$current_version" != "$VERSION" ] &&
+       { [ "$current_major" -gt 0 ] || [ "$current_minor" -gt 28 ] ||
+         { [ "$current_minor" -eq 28 ] && { [ "$current_patch" -gt 0 ] || [ -z "$current_prerelease" ]; }; }; }; then
+      uninitialized_current=1
+      for protected_record in ledger.json history-checkpoint.json; do
+        if [ -e "$CONFIG_HOME/release-transition/v2/$protected_record" ] ||
+           [ -L "$CONFIG_HOME/release-transition/v2/$protected_record" ]; then
+          uninitialized_current=0
+        fi
+      done
+    fi
   fi
 fi
 if [ "$uninitialized_current" = 1 ]; then
