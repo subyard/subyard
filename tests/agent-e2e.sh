@@ -1207,7 +1207,25 @@ set -eu
 printf 'PRIVATE_SYNTHETIC_PAYLOAD\n'
 [ "$DOCKER_READY_CASE" != capture-bounds ] || printf '%070000d\n' 0
 EOF_DOCKER_READY_JOURNAL
-chmod 0700 "$docker_ready_bin/incus" "$docker_ready_bin/systemctl" "$docker_ready_bin/docker" "$docker_ready_bin/journalctl"
+cat > "$docker_ready_bin/sleep" <<'EOF_DOCKER_READY_SLEEP'
+#!/usr/bin/env bash
+set -eu
+# The expiry case reaches its deadline while waiting, as the guest timeout would.
+[ "$DOCKER_READY_CASE" != expiry ] || { printf 'sleep\n' >> "$DOCKER_READY_LOG"; exit 124; }
+exec /bin/sleep "$@"
+EOF_DOCKER_READY_SLEEP
+cat > "$docker_ready_bin/timeout" <<'EOF_DOCKER_READY_TIMEOUT'
+#!/usr/bin/env bash
+set -eu
+if [ "$DOCKER_READY_CASE" = expiry ]; then
+  arguments=("$@")
+  while [[ "${arguments[0]}" == -* ]]; do arguments=("${arguments[@]:1}"); done
+  printf 'timeout %s %s\n' "${arguments[0]}" "${arguments[1]}" >> "$DOCKER_READY_LOG"
+fi
+exec /usr/bin/timeout "$@"
+EOF_DOCKER_READY_TIMEOUT
+chmod 0700 "$docker_ready_bin/incus" "$docker_ready_bin/systemctl" "$docker_ready_bin/docker" "$docker_ready_bin/journalctl" \
+  "$docker_ready_bin/sleep" "$docker_ready_bin/timeout"
 for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnostic-overflow diagnostic-empty diagnostic-duplicate query-timeout invalid-enum unexpected-field \
   active activating failed inactive load-unknown malformed duplicate active-exited unavailable expiry \
   enumeration-failure enumeration-timeout capture-foreign-vm capture-query-failure capture-followup-failure capture-bounds capture-inactive capture-failed \
@@ -1226,9 +1244,9 @@ for docker_ready_case in diagnostic-utf8-overflow diagnostic-injection diagnosti
         die() { printf "fixture failure: %s\n" "$*" >&2; exit 2; }
         nested_monotonic_seconds() {
           [ "$DOCKER_READY_CASE" != clock-failure ] || return 17
-          # Leave one real second for an activating guest in the expiry case.
+          # Keep the expiry case bounded; its wait reaches the deadline without real time.
           if [ "$DOCKER_READY_CASE" = expiry ] && [ -s "$DOCKER_READY_LOG" ]; then
-            printf "59\n"
+            printf "56\n"
           else
             printf "0\n"
           fi
@@ -1371,7 +1389,11 @@ if case in ('capture-inactive', 'capture-failed'):
 PY
       ;;
     expiry)
-      [ "$docker_ready_rc" = 124 ] && ! grep -Fxq enumeration "$docker_ready_log" \
+      # Both readiness timeouts carry the four seconds left before the absolute deadline.
+      [ "$docker_ready_rc" = 124 ] && grep -Fxq sleep "$docker_ready_log" \
+        && ! grep -Fxq enumeration "$docker_ready_log" \
+        && [ "$(sed -n '/^pool$/,/^state$/{p;/^state$/q}' "$docker_ready_log")" = "$(
+          printf 'pool\ntimeout 4 incus\nexec\ntimeout 4 bash\ntimeout 3 systemctl\nstate')" ] \
         || fail 'Docker prerequisite exceeded its absolute budget or enumerated while activating'
       ;;
     *)
