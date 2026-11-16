@@ -483,7 +483,8 @@ a scan error or a changed workspace boundary closes nothing. Tabs are selected b
 repository ID, including linked worktrees of that record wherever their path is, and closed
 by worktree and tab ID. Each live PTY of the record is first stopped through Orca's fenced
 exact stop, which acts only while that PTY is still live in the record's worktree. When Orca
-refuses that stop, and for remaining orphan terminals, the terminal is closed by native handle.
+refuses that stop, the terminal is closed by native handle next, before any other stop or tab
+close; remaining orphan terminals are also closed by native handle, after the tabs.
 Ownership is decided by one rule. Every PTY ID, terminal handle and tab identity belongs to
 each saved tab and terminal row that mentions it: the local repository its worktree names, or
 an unknown owner for another execution host or an unregistered repository. A record is

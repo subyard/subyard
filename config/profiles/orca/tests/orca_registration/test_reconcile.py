@@ -2496,6 +2496,37 @@ class RemovedProjectSessionTests(unittest.TestCase):
         methods = [method for method, _ in self.closes()]
         self.assertEqual(["terminal.close", "session.tabs.close"], methods)
 
+    def attempts(self, refuse):
+        """Record every destructive attempt in order; refuse(method, params) rejects definitively."""
+        original = self.rpc.call
+        attempted = []
+
+        def call(method, params=None, before_send=None):
+            if method in ("terminal.stopExact", "terminal.close", "session.tabs.close"):
+                attempted.append((method, params))
+                if refuse(method, params):
+                    if before_send:
+                        before_send(self.rpc.runtime_id)
+                    raise self.error("Orca runtime rejected " + method, rejected=True)
+            return original(method, params, before_send=before_send)
+        self.rpc.call = call
+        return attempted
+
+
+    def test_refused_stop_is_followed_directly_by_its_handle_close_with_two_live_ptys(self):
+        self.rpc.snapshots = [{"worktree": self.repo["id"] + "::" + self.repo["path"],
+                               "tabs": [{"id": "tab", "type": "terminal", "ptyId": "p"}]}]
+        self.rpc.terminals = [self.terminal(self.repo, "p", "h-p"), self.terminal(self.repo, "q", "h-q")]
+        shutil.rmtree(self.root.parent)
+        attempted = self.attempts(lambda method, params: method == "terminal.stopExact"
+                                  and params["expectedPtyIds"] == ["p"])
+        self.assertTrue(self.run_sync()["settled"])
+        self.assertEqual([("terminal.stopExact", "p"), ("terminal.close", "h-p"), ("terminal.stopExact", "q"),
+                          ("session.tabs.close", "tab")],
+                         [(method, (params.get("expectedPtyIds") or [params.get("terminal") or params.get("tabId")])[0])
+                          for method, params in attempted])
+
+
 class StateLockTests(unittest.TestCase):
     def test_applying_pass_waits_for_another_invocation_within_its_budget(self):
         import fcntl

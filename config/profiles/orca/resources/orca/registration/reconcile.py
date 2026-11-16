@@ -689,9 +689,9 @@ def _ownership(repo, catalog, snapshots, terminals):
 
 def _cleanup_plan(repo, read_set, refused_stops=frozenset()):
     """Pure plan over one read set: None when R is protected, else the ordered actions that
-    remove R's session state. Live PTYs are stopped through the fenced exact stop first; when
-    that stop was refused, the PTY's handle close follows at once, before any tab close. Tabs
-    close next, then remaining terminal handles."""
+    remove R's session state. A PTY whose fenced exact stop was refused is closed by handle
+    first, so that close directly follows the refused stop; the remaining live PTYs are then
+    stopped through the fenced exact stop, tabs close next, then the remaining terminal handles."""
     catalog, snapshots, terminals = read_set
     closable, tabs, rows = _ownership(repo, catalog, snapshots, terminals)
     if not closable:
@@ -699,9 +699,9 @@ def _cleanup_plan(repo, read_set, refused_stops=frozenset()):
     rows = sorted(rows, key=lambda row: (row["ptyId"], str(row.get("handle"))))
     close = lambda row: ("close", row.get("handle"), row["ptyId"])
     fallback = [row for row in rows if row["ptyId"] in refused_stops]
-    return ([("stop", row["worktreeId"], row["ptyId"]) for row in rows
-             if row["connected"] and row["ptyId"] not in refused_stops]
-            + [close(row) for row in fallback]
+    return ([close(row) for row in fallback]
+            + [("stop", row["worktreeId"], row["ptyId"]) for row in rows
+               if row["connected"] and row["ptyId"] not in refused_stops]
             + [("tab", worktree, parent) for worktree, parent in tabs]
             + [close(row) for row in rows if row not in fallback])
 
