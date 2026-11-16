@@ -238,7 +238,17 @@ assert_v2_transition() {
     ($direction != "activate-previous" or .catalogDigest == $catalog) and
     (.steps | type == "array") and all(.steps[]; .checkpoint == "verified")
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json" >/dev/null \
-    || die 'candidate v2 transition journal is not complete for the exact release goal'
+    || {
+      # Capture allowlisted journal facts and the expected values before cleanup.
+      printf 'power-reconciler-upgrade: expected direction=%s target=%s artifact=%s registry=%s catalog=%s\n' \
+        "$direction" "$target" "$artifact_digest" "$registry_digest" "$expected_catalog" >&2
+      operator_env jq -c '{schemaVersion, checkpoint, goal, releases, hasRollbackTarget: has("rollbackTarget"),
+        artifactDigest, registryDigest, catalogDigest,
+        steps: [(.steps // [])[] | {id, kind, checkpoint}]}' \
+        "$OPERATOR_HOME/.config/subyard/release-transition/v2/journal.json" >&2 \
+        || printf 'power-reconciler-upgrade: transition journal unavailable\n' >&2
+      die 'candidate v2 transition journal is not complete for the exact release goal'
+    }
 }
 
 write_fixture_value() {
