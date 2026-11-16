@@ -810,7 +810,7 @@ The NetworkManager admin-uplink lane installs NetworkManager behind an administr
 that keeps the VM uplink unmanaged, then published 0.29.0, whose guard replaced that list. A
 temporary udev pin and a restoring watchdog keep the uplink reachable until the candidate update
 rewrites the guard; afterwards the administrator's file alone must keep the uplink unmanaged across
-reload, restart, repeat init, start and teardown, with yard bridges and veths strictly unmanaged:
+reload, restart, start, repeat init and teardown, with yard bridges and veths strictly unmanaged:
 
 ```sh
 bash dev/e2e/nm-admin-uplink.sh --preflight

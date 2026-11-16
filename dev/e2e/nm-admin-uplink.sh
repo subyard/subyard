@@ -209,20 +209,21 @@ nm_settle
 uplink_intact 'NetworkManager restart'
 pass 'the admin conf.d list alone keeps the uplink unmanaged across reload and restart'
 
+# Published init leaves the yard stopped; start it first so init needs no inspection startup.
+yard start --yes >"$STATE/start.log" 2>&1 || die 'candidate start failed'
+nm_settle
+uplink_intact 'candidate start'
 guard_before="$(sha256sum "$guard")"
 yard init --yes >"$STATE/candidate-init.log" 2>&1 || die 'candidate init failed'
 nm_settle
 [ "$(sha256sum "$guard")" = "$guard_before" ] || die 'repeat init changed the current guard'
 uplink_intact 'candidate init'
-yard start --yes >"$STATE/start.log" 2>&1 || die 'candidate start failed'
-nm_settle
-uplink_intact 'candidate start'
 yard_devices_unmanaged 'running yard'
 veth="$(nmcli -t -f DEVICE device | grep -m1 '^veth')" || die 'no yard veth is present'
 sudo -n nmcli device set "$veth" managed yes || true
 sleep 4
 [ "$(device_state "$veth")" = unmanaged ] || die "runtime override made $veth managed"
-pass 'repeat init and start keep the uplink; yard bridge and veths stay strictly unmanaged'
+pass 'start and repeat init keep the uplink; yard bridge and veths stay strictly unmanaged'
 
 yard teardown --yes >"$STATE/teardown.log" 2>&1 || die 'teardown failed'
 launcher=''
