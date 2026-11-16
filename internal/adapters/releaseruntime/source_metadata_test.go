@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -170,12 +171,12 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 				t.Fatal(err)
 			}
 			oldEngine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.3\\n';; _release-transition) cat >/dev/null; printf called >> %q; exit 99;; *) exit 64;; esac\n", oldCalls)
-			if strings.HasPrefix(drift, "current repair") || strings.HasPrefix(drift, "private draft") {
+			if strings.HasPrefix(drift, "current repair") || strings.HasPrefix(drift, "private draft") || missingHistory {
 				mode := "repair"
 				if drift == "current repair old-wire" {
 					mode = "old-wire"
 				}
-				if strings.HasPrefix(drift, "private draft") {
+				if strings.HasPrefix(drift, "private draft") || missingHistory {
 					mode = "ready"
 				}
 				oldEngine = fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.3\\n';; _release-transition) printf called >> %q; %s=%s exec %q -test.run '^TestSourceAdmissionCandidateProcessHelper$';; *) exit 64;; esac\n", oldCalls, sourceAdmissionProcessEnvironment, mode, executable)
@@ -234,7 +235,8 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			}
 			installer := filepath.Join(root, "installer")
 			testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nwhile [ $# -gt 0 ]; do case \"$1\" in --runtime-root) shift; destination=$1;; esac; shift; done\nmkdir -p \"$destination/releases\"\ncp -a %q \"$destination/releases/%s\"\n%sprintf 'releases/%s\\n'\n", candidate.root, candidateID, audit, candidateID)), 0o700)
-			adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}), Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+			var engineDiagnostics bytes.Buffer
+			adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}), Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &engineDiagnostics})
 			defer adapter.Close()
 			if drift == "catalog" || strings.HasPrefix(drift, "unfinished") {
 				journal, err := releasetransition.ParseJournal(before)
@@ -287,16 +289,15 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 			}
 			prepared, err := adapter.PrepareTransition(ctx, []string{"--offline", "--version", version}, home, "default")
 			if missingHistory {
-				if audit, readErr := os.ReadFile(draftWrites); readErr == nil {
-					t.Errorf("installer wrote private draft before refusal:\n%s", audit)
-				} else if !os.IsNotExist(readErr) {
-					t.Fatal(readErr)
-				}
-				if !errors.Is(err, releasetransition.ErrMigrationLedgerAbsent) || err.Error() != releasetransition.ErrMigrationLedgerAbsent.Error() {
-					t.Errorf("wrong missing-history refusal: %v", err)
+				if err == nil || !strings.Contains(engineDiagnostics.String(), releasetransition.ErrMigrationLedgerAbsent.Error()) {
+					t.Errorf("engine did not refuse missing history: %v, diagnostic=%q", err, engineDiagnostics.String())
 				}
 				if !reflect.DeepEqual(beforeTree, sourceAdmissionTreeSnapshot(t, root)) {
-					t.Error("missing-history refusal changed installation, cache or protected bytes")
+					t.Error("missing-history refusal changed installation, cache, protected bytes or links")
+				}
+				drafts, globErr := filepath.Glob(filepath.Join(root, ".subyard-release-draft-*"))
+				if globErr != nil || len(drafts) != 0 {
+					t.Errorf("refusal left a private draft: %v %v", drafts, globErr)
 				}
 				return
 			}
@@ -596,5 +597,63 @@ func TestInitialBootstrapRoutesResumeWithAbsentLedger(t *testing.T) {
 	ledger, err = store.ReadLedger()
 	if err != nil || !ledger.Exists {
 		t.Fatalf("resumed bootstrap did not publish baseline: %v", err)
+	}
+}
+
+// The real installer retries update, rather than migrate, after publishing the
+// first current link and before creating configuration or a protected journal.
+func TestPrepareTransitionBootstrapsPublishedCurrentWithoutHistory(t *testing.T) {
+	ctx := context.Background()
+	root := testkit.TempDir(t)
+	home, runtimeRoot := filepath.Join(root, "config"), filepath.Join(root, "runtime")
+	version := "0.29.0"
+	bundle := []byte("synthetic verified bootstrap publication")
+	id := fmt.Sprintf("%s-%x", version, sha256.Sum256(bundle))[:len(version)+13]
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine %s\\n';; _release-transition) %s=ready exec %q -test.run '^TestSourceAdmissionCandidateProcessHelper$';; *) exit 64;; esac\n", version, sourceAdmissionProcessEnvironment, executable)
+	candidate := writeVersionedRuntimeCandidate(t, runtimeRoot, id, version, engine)
+	sealSourceAdmissionCandidate(t, candidate)
+	if err := os.Symlink("releases/"+id, filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(root, "cache", version)
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("subyard-%s-linux-%s.tar.gz", version, runtime.GOARCH)
+	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
+		testkit.WriteFile(t, filepath.Join(cache, name+suffix), bundle, 0600)
+	}
+	installer := filepath.Join(root, "installer")
+	testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nwhile [ $# -gt 0 ]; do case \"$1\" in --runtime-root) shift; destination=$1;; esac; shift; done\nmkdir -p \"$destination/releases\"\ncp -a %q \"$destination/releases/%s\"\nprintf 'releases/%s\\n'\n", candidate.root, id, id)), 0700)
+	adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RUNTIME_ROOT": runtimeRoot, "YARD_RELEASE_CACHE": filepath.Dir(cache)}), Installer: installer, Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	defer adapter.Close()
+	if _, err := os.Lstat(home); !os.IsNotExist(err) {
+		t.Fatalf("config already exists before first transition: %v", err)
+	}
+	prepared, err := adapter.PrepareTransition(ctx, []string{"--offline", "--version", version}, home, "default")
+	if err != nil {
+		t.Fatal("first-publication retry did not reach bootstrap", err)
+	}
+	if prepared.Close != nil {
+		defer prepared.Close()
+	}
+	inspection, err := prepared.check(ctx)
+	if err != nil || inspection.Outcome == nil || inspection.Outcome.Status != releasetransition.StatusMigrationRequired || inspection.Outcome.ReachedGoal {
+		t.Fatalf("bootstrap retry inspection: %#v %v", inspection, err)
+	}
+	if !slices.ContainsFunc(inspection.Decisions, func(d releasetransition.RedactedDecision) bool {
+		return d.Resource == "ledger.bootstrap" && d.Result == "initialize-ledger"
+	}) {
+		t.Fatal("retry did not plan the baseline publication")
+	}
+	if _, err := os.Lstat(home); !os.IsNotExist(err) {
+		t.Fatalf("read-only bootstrap retry created config: %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(runtimeRoot, "current")); err != nil || target != "releases/"+id {
+		t.Fatalf("bootstrap inspection changed current: %q %v", target, err)
 	}
 }

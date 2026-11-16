@@ -1070,8 +1070,9 @@ A ledger below the live floor or an unfinished unverified historical migration s
 `migration-manual-repair-required` before any write. If both `ledger.json` and
 `history-checkpoint.json` are missing, reading authority reports `protected migration history is absent:
 ledger.json and history-checkpoint.json are missing`; it does not infer a below-floor baseline.
-Completed sources at or above v0.28.0 refuse missing authority before staging a candidate. Only
-initial bootstrap or an unfinished baseline publication can admit absence for planning.
+Only initial bootstrap or an unfinished baseline publication can admit absence for planning.
+Candidate staging may precede an engine refusal; its temporary draft is removed without changing
+protected history or runtime links.
 Manual repair must preserve the runtime, user data and protected evidence; do not uninstall.
 Ordinary installed-owner resume remains available when no retired handler is needed.
 

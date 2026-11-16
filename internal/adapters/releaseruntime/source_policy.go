@@ -339,7 +339,7 @@ func (runtime *Runtime) unfinishedSourceAnchorError(ctx context.Context, runtime
 
 // The current caller must refuse retired source work even when the ordinary
 // protected route would delegate inspection/resume to an installed older owner.
-func (runtime *Runtime) retiredSourceWorkError(ctx context.Context, root, configHome string, requireAuthority bool) error {
+func (runtime *Runtime) retiredSourceWorkError(ctx context.Context, root, configHome string) error {
 	links, err := releasetransition.NewRuntimeLinkStore(root)
 	if err != nil {
 		return nil
@@ -365,13 +365,5 @@ func (runtime *Runtime) retiredSourceWorkError(ctx context.Context, root, config
 	if err != nil {
 		return err
 	}
-	if err := store.RequireRetiredMigrationCompletion(registry, verified.registryDigest); err != nil {
-		return err
-	}
-	// New update plans need installed authority; an owned unfinished operation
-	// and initial current-release bootstrap remain classified by their engine.
-	if requireAuthority {
-		_, err = store.ReadMigrationLedger(registry, verified.registryDigest)
-	}
-	return err
+	return store.RequireRetiredMigrationCompletion(registry, verified.registryDigest)
 }

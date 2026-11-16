@@ -194,9 +194,9 @@ deletion) starts from these facts of the current candidate:
   A ledger below the new floor, or an unfinished journal with any unverified historical migration
   step, requires manual repair before updating. If both `ledger.json` and `history-checkpoint.json`
   are missing, reading authority instead reports `protected migration history is absent: ledger.json and
-  history-checkpoint.json are missing`, without inferring a below-floor baseline. A completed
-  source at or above v0.28.0 refuses absent authority before staging a candidate; initial bootstrap
-  uses the engine ledger-publication step. Neither refusal replays handlers or suggests uninstall. All-verified
+  history-checkpoint.json are missing`, without inferring a below-floor baseline. A temporary
+  candidate draft may be staged and removed before the engine refuses; protected history and
+  runtime links remain unchanged. Initial bootstrap uses the engine ledger-publication step. Neither refusal replays handlers or suggests uninstall. All-verified
   v0.28.x first transitions remain supported,
   including a top-epoch ledger whose history checkpoint has not yet been published.
 - **Readers an install completed on the anchor still needs:** the V2 journal and runtime links, the

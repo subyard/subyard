@@ -604,7 +604,7 @@ func (runtime *Runtime) PrepareTransition(
 			return Prepared{}, refusal
 		}
 	}
-	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome, protected == nil || protected.journal.Checkpoint == releasetransition.JournalComplete); refusal != nil {
+	if refusal := runtime.retiredSourceWorkError(ctx, parsed.root, configHome); refusal != nil {
 		return Prepared{}, refusal
 	}
 	var completedAdmission *SourceAdmission
