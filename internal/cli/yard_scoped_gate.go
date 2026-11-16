@@ -303,13 +303,10 @@ func yardGateRefusal(yard string, gate yardGate) string {
 		yard, cause, yardNextStep(yard, state))
 }
 
-// gateAdmitsOrdinary is the one admission the direct CLI and RPC share before
-// any bounded recovery: the yard-scoped gate, then pending configuration.
+// gateAdmitsOrdinary is the one admission the direct CLI and RPC share.
 func (cli *CLI) gateAdmitsOrdinary(yard, handler string, arguments []string, outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {
-	if gate, ok := cli.yardScopedGate(outcome, inspection); ok {
-		return cli.yardGateAdmits(gate, yard, handler, arguments, resource.Definition{}, false)
-	}
-	return cli.ordinaryCommandAdmitted(handler, outcome, inspection)
+	gate, ok := cli.yardScopedGate(outcome, inspection)
+	return ok && cli.yardGateAdmits(gate, yard, handler, arguments, resource.Definition{}, false)
 }
 
 // otherYardFindings reports each other implicated yard once, with its step.

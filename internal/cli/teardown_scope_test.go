@@ -137,46 +137,6 @@ func TestTeardownPendingRecoveryRejectsOriginalInvalidFlags(t *testing.T) {
 	}
 }
 
-func TestFullTeardownRecoveryAssessmentBindsReleaseRepairPermit(t *testing.T) {
-	program, loaded, _, _ := teardownResetFixture(t)
-	directory := loaded.Context.Paths.DataHome + ".uninstall"
-	if err := os.Mkdir(directory, 0700); err != nil {
-		t.Fatal(err)
-	}
-	original := uninstall.RecoveryPlan{Schema: 1, Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()), DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: filepath.Join(program.options.RepositoryRoot, "runtime"), CacheRoot: filepath.Join(program.options.RepositoryRoot, "cache")}, Stage: uninstall.RecoveryPrepared}
-	store := uninstall.RecoveryStore{Directory: directory, UID: uint32(os.Getuid())}
-	if _, err := store.Save(original, nil); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(filepath.Join(directory, "plan.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	program.fullTeardownRecovery = directory
-	program.permits.teardown = &configApplyRepairPermit{factsFingerprint: "approved-history"}
-	definition, _ := program.manifest.Lookup("teardown")
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded, Definition: definition, Arguments: []string{"--full"}}
-	if err := prepared.prepareTeardown(context.Background(), nil); err != nil {
-		t.Fatal(err)
-	}
-	action, delta, err := prepared.assess(context.Background())
-	if err != nil || action != "yard.teardown.full" || !delta.Changed {
-		t.Fatalf("full recovery assessment unavailable: %s, %#v, %v", action, delta, err)
-	}
-	approved := prepared.exactState
-	program.permits.teardown.factsFingerprint = "changed-history"
-	if _, _, err := prepared.refresh(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if prepared.exactState == approved {
-		t.Fatal("full consent did not bind the original release repair facts")
-	}
-	after, err := os.ReadFile(filepath.Join(directory, "plan.json"))
-	if err != nil || !bytes.Equal(before, after) {
-		t.Fatal("assessment replaced the original retry plan", err)
-	}
-}
-
 type fullOwnershipFixture struct {
 	*testkit.Incus
 	owner       ports.InstallationYard

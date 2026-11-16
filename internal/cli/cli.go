@@ -163,8 +163,6 @@ func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation.env["SUBYARD_OPERATION_ID"] = operationID
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
 	operation.discoveredOwners = maps.Clone(cli.discoveredOwners)
-	operation.permits.teardown = nil
-	operation.permits.resourceShutdown = nil
 	return &operation
 }
 
@@ -836,11 +834,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if slices.Contains(commandArguments, "--full") {
 			cli.env["SUBYARD_NO_AUDIT"] = "1"
 		} else if !cli.releaseTransitionChild {
-			permit, code, done := cli.admitTeardownGate(ctx, yard, loaded, commandArguments)
-			if done {
+			if code, done := cli.admitTeardownGate(ctx, yard, commandArguments); done {
 				return code
 			}
-			cli.permits.teardown = permit
 		}
 	}
 	cli.ensureOperationID()
@@ -4324,18 +4320,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
 			if outcome != nil && !operationCLI.gateAdmitsOrdinary(operationLoaded.Context.YardName, definition.Handler, params.Arguments, outcome, gateInspection) {
-				if definition.Handler == "@init" {
-					var permit *configApplyRepairPermit
-					permit, outcome, gateErr = operationCLI.prepareInitAdmission(
-						ctx, operationLoaded.Context.YardName, params.Arguments, *outcome)
-					operationCLI.permits.profileInit = permit
-					if gateErr != nil {
-						return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
-					}
-				}
-				if outcome != nil {
-					return nil, mutationGateRPCError(outcome, gateInspection)
-				}
+				return nil, mutationGateRPCError(outcome, gateInspection)
 			}
 		}
 		var prepared *preparedCommand
@@ -4457,10 +4442,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 				return nil, operationRPCError(rpcMutationGateFailedCode, gateErr)
 			}
 			if outcome != nil && !planned.CLI.gateAdmitsOrdinary(planned.Loaded.Context.YardName, planned.Definition.Handler, planned.Arguments, outcome, gateInspection) {
-				if planned.Definition.Handler != "@init" || planned.CLI.permits.profileInit == nil ||
-					!sameConfigApplyGate(planned.CLI.permits.profileInit.gate, *outcome) {
-					return nil, mutationGateRPCError(outcome, gateInspection)
-				}
+				return nil, mutationGateRPCError(outcome, gateInspection)
 			}
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {

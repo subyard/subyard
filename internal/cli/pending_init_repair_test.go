@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -13,10 +11,8 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
-	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -42,7 +38,8 @@ func pendingInitGateFixtureFor(t *testing.T, named bool, yard, resource string, 
 		{`"status":"migration-required"`, `"status":"operator-action-required"`},
 		{`"code":"transition-required"`, `"code":"dependency-unavailable"`},
 		{`"message":"activation drift","retry":"run yard update"`, `"message":"` + message + `","retry":"` + quoted + `","transaction":"tx-0123456789abcdef"`},
-		{`"consequences":["repair release activation"]},"outcome"`, `"consequences":["repair release activation"]},"blockers":[` + blockers + `],"outcome"`},
+		{`"consequences":["repair release activation"]},"outcome"`,
+			`"consequences":["repair release activation"]},"blockers":[` + blockers + `],"decisions":[{"resource":"` + strings.TrimSuffix(resource, ".pending-configuration") + `","scope":"yard-attribution","decision":"preserve","result":"pending ` + yard + `"}],"outcome"`},
 	} {
 		if !strings.Contains(payload, replacement[0]) {
 			t.Fatalf("engine fixture lacks %s", replacement[0])
@@ -106,100 +103,6 @@ func convergedRepairPlatform(fixture configApplyRepairFixture) *sampleRepairPlat
 	}
 	fixture.cli.options.InitPlatform = platform
 	return platform
-}
-
-func TestPendingPersistAdoptionAdmitsPlainInitWithoutConfigDrift(t *testing.T) {
-	fixture := pendingInitGateFixture(t, false, "activation.materialized-config.pending-configuration", "")
-	convergedRepairPlatform(fixture)
-	runtime := pendingAdoptionRuntime(t, fixture)
-	fake := fixture.cli.options.Executor.(*testkit.Incus)
-	fake.ExecSteps = nil
-	loaded, err := fixture.cli.resolveReleaseTransitionContext(context.Background(), "default", fixture.cli.env["SUBYARD_CONFIG_HOME"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	targets, err := fixture.cli.localConfigTargets(loaded, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range 4 {
-		for _, target := range targets {
-			appendHashSteps(t, fake, target.Loaded)
-		}
-	}
-	journalBefore := mustReadConfigFixture(t, fixture.journalPath)
-	ledgerPath := filepath.Join(filepath.Dir(fixture.journalPath), "ledger.json")
-	ledgerBefore := mustReadConfigFixture(t, ledgerPath)
-
-	// The refusal's next step is admitted as the profile-init repair.
-	permit, remaining, err := fixture.cli.prepareInitAdmission(context.Background(), "default", nil, fixture.outcome)
-	if err != nil || permit == nil || remaining != nil {
-		t.Fatalf("pending adoption refused its own next step: permit=%v remaining=%#v err=%v", permit, remaining, err)
-	}
-	if len(permit.driftedTargetNames) != 1 || permit.driftedTargetNames[0] != "default" {
-		t.Fatal("pending item is not the selected yard's drift", permit.driftedTargetNames)
-	}
-	unlock, err := fixture.cli.lockConfigApplyRepair(context.Background(), permit)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The ordinary init applies the adoption under the permit.
-	if err := runtime.ApplyIntegrations(context.Background(), runtime.plan); err != nil {
-		t.Fatal(err)
-	}
-	_, err = fixture.cli.finishConfigApplyRepair(context.Background(), permit)
-	unlock()
-	if err != nil {
-		t.Fatalf("adoption did not restore readiness: %v", err)
-	}
-	if !bytes.Equal(journalBefore, mustReadConfigFixture(t, fixture.journalPath)) ||
-		!bytes.Equal(ledgerBefore, mustReadConfigFixture(t, ledgerPath)) {
-		t.Fatal("pending init repair changed completed release history")
-	}
-	// The gate is clear and a repeat init is ordinary and has nothing to repair.
-	if outcome, err := fixture.cli.inspectMutationGate(context.Background(), "default"); err != nil || outcome != nil {
-		t.Fatalf("gate after adoption: %#v %v", outcome, err)
-	}
-	if runtime.plan.Changed {
-		t.Fatal("repeat init would change persist state")
-	}
-}
-
-func TestPendingInitRepairRefusesEverythingElse(t *testing.T) {
-	for _, scenario := range []string{"different-yard", "untyped-blocker", "history-blocker", "profile-argument", "other-next-step"} {
-		t.Run(scenario, func(t *testing.T) {
-			resource, extra := "activation.materialized-config.pending-configuration", ""
-			switch scenario {
-			case "untyped-blocker":
-				resource = "activation.materialized-config"
-			case "history-blocker":
-				extra = `,{"code":"dependency-unavailable","resource":"transition.source-metadata","message":"history","retry":"run yard update --check"}`
-			case "other-next-step":
-				extra = `,{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"fixture unowned selected artifact","retry":"move fixture file aside"}`
-			}
-			fixture := pendingInitGateFixture(t, scenario == "different-yard", resource, extra)
-			convergedRepairPlatform(fixture)
-			pendingAdoptionRuntime(t, fixture)
-			yard, arguments := "default", []string(nil)
-			switch scenario {
-			case "different-yard":
-				yard = "named"
-			case "profile-argument":
-				arguments = []string{"--profile", "sample"}
-			}
-			permit, err := fixture.cli.prepareProfileInitRepair(context.Background(), yard, arguments, fixture.outcome)
-			if permit != nil {
-				t.Fatalf("pending init repair admitted %s (err=%v)", scenario, err)
-			}
-			if scenario == "profile-argument" {
-				return
-			}
-			_, remaining, _ := fixture.cli.prepareInitAdmission(context.Background(), yard, arguments, fixture.outcome)
-			if remaining == nil {
-				t.Fatalf("%s: init admitted without a permit", scenario)
-			}
-		})
-	}
 }
 
 // Integrations, persist adoption included, are applied by the provision stage.
@@ -268,69 +171,6 @@ func TestPendingPersistAdoptionInitCommandCompletes(t *testing.T) {
 	}
 }
 
-func TestPendingInitRepairAdmitsANamedYard(t *testing.T) {
-	fixture := pendingInitGateFixtureFor(t, true, "named", "activation.materialized-config.pending-configuration", "")
-	convergedRepairPlatform(fixture)
-	settled := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("d", 64), Scope: strings.Repeat("e", 64)}}
-	pending := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Changed: true, Fingerprint: strings.Repeat("a", 64), Scope: strings.Repeat("b", 64)}}
-	fixture.cli.options.IntegrationRuntime = func(loaded config.Loaded) IntegrationRuntime {
-		if loaded.Context.YardName == "named" {
-			return pending
-		}
-		return settled
-	}
-	matchingConfigHashes(t, fixture, 4)
-	permit, remaining, err := fixture.cli.prepareInitAdmission(context.Background(), "named", nil, fixture.outcome)
-	if err != nil || permit == nil || remaining != nil || len(permit.driftedTargetNames) != 1 || permit.driftedTargetNames[0] != "named" {
-		t.Fatalf("named yard init was not admitted: permit=%v remaining=%#v err=%v", permit, remaining, err)
-	}
-	// The gate names the named yard; init of the default yard is not its next step.
-	if other, err := fixture.cli.prepareProfileInitRepair(context.Background(), "default", nil, fixture.outcome); other != nil || err != nil {
-		t.Fatalf("default yard init admitted for another yard's gate: %v %v", other, err)
-	}
-}
-
-func TestPendingInitRepairShowsTheAdoptionRefusal(t *testing.T) {
-	for _, mode := range []string{"permit", "command"} {
-		t.Run(mode, func(t *testing.T) {
-			fixture := pendingInitGateFixture(t, false, "activation.materialized-config.pending-configuration", "")
-			writeCLIFile(t, filepath.Join(fixture.cli.env["SUBYARD_CONFIG_HOME"], "host-id"), "owner-a\n", 0o600)
-			convergedRepairPlatform(fixture)
-			// What the ordinary init plan reports for an unsafe recreated source: every
-			// refusal, each with its own next step.
-			refusal := &initIntegrationRepairFixture{integrationRuntimeFixture: &integrationRuntimeFixture{}, err: domain.CollectRefusals(
-				errors.New(`persist transfer in yard default: unsafe persist data at "/home/dev/.claude/projects" (must be owned by the developer and not writable by group or others); data was preserved. Next: chmod`),
-				errors.New(`persist transfer in yard default: "/home/dev/.claude/projects/mnt" is a mount point inside persist data. Next: findmnt`),
-			)}
-			fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return refusal }
-			var text string
-			if mode == "permit" {
-				permit, remaining, err := fixture.cli.prepareInitAdmission(context.Background(), "default", nil, fixture.outcome)
-				if permit != nil || remaining != nil || err == nil {
-					t.Fatalf("refused adoption was hidden behind the gate: permit=%v remaining=%#v err=%v", permit, remaining, err)
-				}
-				text = err.Error()
-			} else {
-				var output bytes.Buffer
-				fixture.cli.options.Stdout, fixture.cli.options.Stderr = &output, &output
-				fixture.cli.options.Arguments = []string{"init", "--yes"}
-				if code := fixture.cli.Run(context.Background()); code == 0 {
-					t.Fatal("init with a refused adoption succeeded")
-				}
-				text = output.String()
-			}
-			for _, want := range []string{"unsafe persist data", "Next: chmod", "is a mount point", "Next: findmnt"} {
-				if !strings.Contains(text, want) {
-					t.Fatalf("refusal omitted %q: %s", want, text)
-				}
-			}
-			if strings.Contains(text, "release activation does not start data transfers") {
-				t.Fatalf("init reprinted the gate instead of the cause: %s", text)
-			}
-		})
-	}
-}
-
 // No configuration drift on any yard: every assessment reads matching hashes.
 func matchingConfigHashes(t *testing.T, fixture configApplyRepairFixture, rounds int) {
 	t.Helper()
@@ -348,105 +188,5 @@ func matchingConfigHashes(t *testing.T, fixture configApplyRepairFixture, rounds
 		for _, target := range targets {
 			appendHashSteps(t, fake, target.Loaded)
 		}
-	}
-}
-
-// Each yard with its own pending finding is repaired by its own init. Another
-// yard's finding waits for that yard's init: it is neither drift of this init
-// nor a failure of it, and the init reports it as still pending.
-func TestPendingInitRepairAdmitsEachPendingYardAndLeavesTheOthersPending(t *testing.T) {
-	named := strings.ReplaceAll(shellquote.Command([]string{"yard", "-Y", "named", "init"}), "'", `'\''`)
-	other := `,{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"yard named: fixture finding","retry":"` + named + `"}`
-	fixture := pendingInitGateFixtureFor(t, true, "default", "activation.materialized-config.pending-configuration", other)
-	convergedRepairPlatform(fixture)
-	pending := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Changed: true, Fingerprint: strings.Repeat("a", 64), Scope: strings.Repeat("b", 64)}}
-	fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return pending }
-	matchingConfigHashes(t, fixture, 8)
-	for _, yard := range []string{"default", "named"} {
-		permit, remaining, err := fixture.cli.prepareInitAdmission(context.Background(), yard, nil, fixture.outcome)
-		if err != nil || permit == nil || remaining != nil || len(permit.driftedTargetNames) != 1 || permit.driftedTargetNames[0] != yard {
-			t.Fatalf("yard %s init was not admitted beside another pending yard: permit=%v remaining=%#v err=%v", yard, permit, remaining, err)
-		}
-	}
-
-	remaining := pendingInitGateFixtureFor(t, true, "named", "activation.materialized-config.pending-configuration", "")
-	if pending, err := remaining.cli.verifyInitReleaseReadiness(context.Background(), "default"); err != nil || len(pending) != 1 ||
-		!strings.HasPrefix(pending[0].Message, "persist adoption") || pending[0].Retry != shellquote.Command([]string{"yard", "-Y", "named", "init"}) {
-		t.Fatalf("another yard's pending finding failed this init: %v %#v", err, pending)
-	}
-	if pending, err := remaining.cli.verifyInitReleaseReadiness(context.Background(), "named"); err == nil || pending != nil {
-		t.Fatal("init accepted its own remaining pending finding")
-	}
-}
-
-// After one pending yard's init, another yard's finding remains. The direct CLI
-// reports it on stdout; RPC reports it on the operation's diagnostics stream and
-// never writes it into the framed protocol stream.
-func TestInitReportsOtherYardsStillPendingThroughItsBoundary(t *testing.T) {
-	for _, transport := range []string{"CLI", "RPC"} {
-		t.Run(transport, func(t *testing.T) {
-			named := strings.ReplaceAll(shellquote.Command([]string{"yard", "-Y", "named", "init"}), "'", `'\''`)
-			other := `{"code":"dependency-unavailable","resource":"activation.materialized-config.pending-configuration","message":"yard named: fixture finding","retry":"` + named + `"}`
-			fixture := pendingInitGateFixture(t, true, "activation.materialized-config.pending-configuration", ","+other)
-			// After this yard's init, completed readiness still names the other yard.
-			engine := filepath.Join(fixture.cli.env["YARD_RUNTIME_ROOT"], "current", "bin", "yard-engine")
-			payload := string(mustReadConfigFixture(t, engine))
-			start := strings.Index(payload, `'{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-bbbb`)
-			pending := strings.Index(payload, `'{"schemaVersion":1,"activationReconciliationOwned":true,"inspection":{"plan":"plan-v1-aaaa`)
-			if start < 0 || pending < 0 {
-				t.Fatal("engine fixture lacks its inspections")
-			}
-			end, pendingEnd := start+strings.Index(payload[start:], "}}}'")+4, pending+strings.Index(payload[pending:], "}}}'")+4
-			remaining := payload[pending:pendingEnd]
-			blockers := strings.Index(remaining, `"blockers":[`) + len(`"blockers":[`)
-			remaining = remaining[:blockers] + other + remaining[blockers+strings.Index(remaining[blockers:], `],"outcome"`):]
-			own := strings.ReplaceAll(shellquote.Command([]string{"yard", "-Y", "default", "init"}), "'", `'\''`)
-			remaining = strings.NewReplacer(`persist adoption of \"/home/dev/.claude/projects\" in yard default is pending: release activation does not start data transfers; data was preserved`,
-				"yard named: fixture finding", own, named).Replace(remaining)
-			sealCurrentEngine(t, fixture, payload[:start]+remaining+payload[end:])
-			writeCLIFile(t, filepath.Join(fixture.cli.env["SUBYARD_CONFIG_HOME"], "host-id"), "owner-a\n", 0o600)
-			sample := convergedRepairPlatform(fixture)
-			sample.converged[ports.ReconcileStageFinalize] = true
-			runtime := pendingAdoptionRuntime(t, fixture)
-			fixture.cli.options.InitPlatform = &adoptingPlatform{sampleRepairPlatformFixture: sample, runtime: runtime}
-			matchingConfigHashes(t, fixture, 16)
-			var stdout, stderr bytes.Buffer
-			fixture.cli.options.Stdout, fixture.cli.options.Stderr = &stdout, &stderr
-			if transport == "CLI" {
-				fixture.cli.options.Arguments = []string{"init", "--yes"}
-				program, err := New(fixture.cli.options)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if code := program.Run(context.Background()); code != 0 || runtime.applied != 1 {
-					t.Fatalf("init code=%d applied=%d stdout=%s stderr=%s", code, runtime.applied, stdout.String(), stderr.String())
-				}
-				if !strings.Contains(stdout.String(), "Still pending: yard named: fixture finding; next: 'yard' '-Y' 'named' 'init'\n") {
-					t.Fatalf("CLI init omitted the other yard's pending finding: %s", stdout.String())
-				}
-				return
-			}
-			program, err := New(fixture.cli.options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			loaded, err := program.loadContext("default")
-			if err != nil {
-				t.Fatal(err)
-			}
-			handler := &rpcHandler{cli: program, loaded: loaded, plans: make(map[string]*preparedCommand)}
-			defer handler.closePlans()
-			if _, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "pending-init", Params: json.RawMessage(`{"command":"init","arguments":[]}`)}, nil); err != nil {
-				t.Fatalf("RPC plan: %v stderr=%s", err, stderr.String())
-			}
-			_, err = handler.Handle(context.Background(), rpc.Call{Method: "operation.execute", OperationID: "pending-init", Params: json.RawMessage(`{"confirmed":true}`)},
-				func(string, any) (uint64, error) { return 1, nil })
-			if err != nil || runtime.applied != 1 {
-				t.Fatalf("RPC execute=%v applied=%d stderr=%s", err, runtime.applied, stderr.String())
-			}
-			if stdout.Len() != 0 || !strings.Contains(stderr.String(), "Still pending: yard named: fixture finding; next: 'yard' '-Y' 'named' 'init'\n") {
-				t.Fatalf("RPC init reported pending state outside its diagnostics: framed=%q diagnostics=%q", stdout.String(), stderr.String())
-			}
-		})
 	}
 }

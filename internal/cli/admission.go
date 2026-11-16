@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/command"
-	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 )
@@ -32,17 +31,6 @@ const (
 	// gateAfterScope defers the gate to teardown scope selection; full uninstall
 	// uses its own ownership and cleanup guards without requiring migrations.
 	gateAfterScope
-)
-
-// gateRecovery is the bounded repair that may admit an invocation behind a blocked gate.
-type gateRecovery int
-
-const (
-	recoveryNone gateRecovery = iota
-	recoveryConfigApply
-	recoveryProfileInit
-	recoveryIntegrationRetry
-	recoveryResourceShutdown
 )
 
 // earlyPath is a dispatch that completes before the release gate.
@@ -72,8 +60,6 @@ type invocationAdmission struct {
 	readOnly           bool
 	registrationRepair bool
 	gate               gatePolicy
-	recovery           gateRecovery
-	configApplyAll     bool // config apply --all-local, for recoveryConfigApply
 	// Fallback repairs tried, in order, when the gate remains blocked.
 	completedScalarAuthoring  bool
 	activationSelectionRepair bool
@@ -98,7 +84,6 @@ type handlerAdmission struct {
 	readOnly func(command.Definition, []string) bool
 	// readOnlyOnly makes readOnly the whole classification, ignoring help and manifest effect.
 	readOnlyOnly bool
-	recovery     gateRecovery
 	// ownsRecovery skips generic owner recovery; the handler performs its own.
 	ownsRecovery bool
 	// readOnlyRoute resolves remote canonical selectors without owner writes.
@@ -114,13 +99,11 @@ var handlerAdmissions = map[string]handlerAdmission{
 			_, check, status := configSyncInvocation(arguments)
 			return configReadOnlyInvocation(arguments) || check || status
 		},
-		recovery: recoveryConfigApply,
 	},
 	"@test-vms": {readOnly: argumentsOnly(func(arguments []string) bool {
 		return testVMStatusInvocation(arguments) || testVMLogsInvocation(arguments)
 	})},
 	"@integration": {
-		recovery:     recoveryIntegrationRetry,
 		readOnly:     argumentsOnly(integrationReadOnlyInvocation),
 		ownsRecovery: true, readOnlyRoute: true,
 	},
@@ -144,7 +127,6 @@ var handlerAdmissions = map[string]handlerAdmission{
 		invocation, err := parseSSHAgentArguments(arguments)
 		return err != nil || invocation.verb != "unlock" || invocation.help
 	})},
-	"@init":     {recovery: recoveryProfileInit},
 	"@teardown": {ownsRecovery: true, readOnlyRoute: true},
 	"@cleanup":  {ownsRecovery: true, readOnlyRoute: true},
 	"@project":  {readOnlyRoute: true},
@@ -214,18 +196,8 @@ func (cli *CLI) admission(
 		result.gate = gateRequired
 	}
 	if result.gate == gateRequired && core {
-		result.recovery = policy.recovery
-		if result.recovery == recoveryConfigApply {
-			apply, allLocal := configApplyInvocation(arguments)
-			if !apply {
-				result.recovery = recoveryNone
-			}
-			result.configApplyAll = allLocal
-		}
 		result.completedScalarAuthoring = definition.Handler == "@config"
 		result.activationSelectionRepair = true
-	} else if result.gate == gateRequired && profileResource {
-		result.recovery = recoveryResourceShutdown
 	}
 
 	result.stop = core && definition.Handler == "@lifecycle" && definition.Name == "stop" && !help
@@ -284,11 +256,9 @@ func earlyDispatch(definition command.Definition, arguments []string, explicit, 
 // handlers read through their CLI. RPC operations and release-transition children copy
 // the CLI and clear the grants that do not apply to them.
 type recoveryPermits struct {
-	configApply      *configApplyRepairPermit
-	profileInit      *configApplyRepairPermit
-	integrationRetry *configApplyRepairPermit
-	teardown         *configApplyRepairPermit
-	resourceShutdown *resourceShutdownPermit
+	// configApply is installed by a bounded configuration repair inside its
+	// handler (config sync consumers, completed scalar authoring), never by admission.
+	configApply *configApplyRepairPermit
 }
 
 // admitReleaseGate consults the release mutation gate for an invocation that requires it.
@@ -317,52 +287,6 @@ func (cli *CLI) admitReleaseGate(
 		}
 		cli.writeYardGateRefusal(yard, gate)
 		return permits, 1, true
-	}
-	if cli.ordinaryCommandAdmitted(admission.handler, outcome, gateInspection) {
-		return permits, 0, false
-	}
-	switch admission.recovery {
-	case recoveryConfigApply:
-		permit, err := cli.prepareConfigApplyRepair(ctx, yard, admission.configApplyAll, *outcome)
-		if err != nil {
-			cli.errorf("config apply: %v", err)
-			return permits, 1, true
-		}
-		permits.configApply = permit
-		if permit != nil {
-			outcome = nil
-		}
-	case recoveryProfileInit:
-		permit, remaining, err := cli.prepareInitAdmission(ctx, yard, arguments, *outcome)
-		permits.profileInit = permit
-		if err != nil {
-			cli.errorf("init release repair: %v", err)
-			return permits, 1, true
-		}
-		outcome = remaining
-	case recoveryIntegrationRetry:
-		permit, err := cli.prepareIntegrationRetryRepair(ctx, yard, arguments, *outcome)
-		if err != nil {
-			cli.errorf("integration retry release repair: %v", err)
-			return permits, 1, true
-		}
-		permits.integrationRetry = permit
-		if permit != nil {
-			outcome = nil
-		}
-	case recoveryResourceShutdown:
-		permit, err := cli.prepareResourceShutdownRepair(ctx, yard, resourceDefinition, arguments, *outcome)
-		if err != nil {
-			cli.errorf("resource shutdown recovery: %v", err)
-			return permits, 1, true
-		}
-		permits.resourceShutdown = permit
-		if permit != nil {
-			outcome = nil
-		}
-	}
-	if outcome == nil {
-		return permits, 0, false
 	}
 	if admission.completedScalarAuthoring {
 		if handled, code := cli.runCompletedConfigScalarAuthoring(ctx, yard, arguments, yes, *outcome, gateInspection); handled {
@@ -433,35 +357,23 @@ const mutationGateRefusalPrefix = "yard: release gate:"
 func (cli *CLI) admitTeardownGate(
 	ctx context.Context,
 	yard string,
-	loaded config.Loaded,
 	arguments []string,
-) (*configApplyRepairPermit, int, bool) {
+) (int, bool) {
 	outcome, gateInspection, gateErr := cli.inspectMutationGateInspection(ctx, yard)
 	if gateErr != nil {
 		cli.errorf("inspect release transition: %v", gateErr)
-		return nil, 1, true
+		return 1, true
 	}
 	if outcome == nil {
-		return nil, 0, false
+		return 0, false
 	}
 	if gate, ok := cli.yardScopedGate(outcome, gateInspection); ok {
 		if cli.yardGateAdmits(gate, yard, "@teardown", arguments, resource.Definition{}, false) {
-			return nil, 0, false
+			return 0, false
 		}
 		cli.writeYardGateRefusal(yard, gate)
-		return nil, 1, true
+		return 1, true
 	}
-	if cli.ordinaryCommandAdmitted("@teardown", outcome, gateInspection) {
-		return nil, 0, false
-	}
-	permit, err := cli.prepareTeardownRepair(ctx, loaded, arguments, *outcome)
-	if err != nil {
-		cli.errorf("teardown release admission: %v", err)
-		return nil, 1, true
-	}
-	if permit == nil {
-		cli.writeMutationGateRefusal(outcome, gateInspection)
-		return nil, 1, true
-	}
-	return permit, 0, false
+	cli.writeMutationGateRefusal(outcome, gateInspection)
+	return 1, true
 }

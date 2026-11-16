@@ -885,26 +885,8 @@ func (execution *initExecution) actionFacts(action domain.ActionID) string {
 		execution.bootstrap != nil, execution.hostIDPending, execution.integrationSelection != nil, execution.orphanIngress != nil, execution.orphanIngressDeferred)
 }
 
-func (execution *initExecution) validateProfileRepair(ctx context.Context, cli *CLI) error {
-	if cli.permits.profileInit == nil {
-		return nil
-	}
-	if execution.mode != initReconcile || execution.bootstrap != nil || execution.hostIDPending {
-		return errors.New("release repair requires ordinary init of an existing yard; run yard update first")
-	}
-	assessment, err := cli.assessConfigTarget(ctx,
-		configTarget{Name: execution.loaded.Context.YardName, Loaded: execution.loaded}, true)
-	if err != nil {
-		return err
-	}
-	if !cli.permits.profileInit.matchesRequestedConfigs([]configTargetAssessment{assessment}) {
-		return errors.New("init release repair requires the persisted yard configuration without overrides")
-	}
-	return nil
-}
-
 func (execution *initExecution) projectHooksApplicable(ctx context.Context, cli *CLI, allowNoWork bool) (bool, error) {
-	if allowNoWork && cli.permits.profileInit == nil && execution.hookPlan.NoProjectHookWork() {
+	if allowNoWork && execution.hookPlan.NoProjectHookWork() {
 		return false, nil
 	}
 	return execution.platform.ProjectHooksApplicable(ctx)
@@ -1201,9 +1183,6 @@ func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) ([]
 		if state := gate.state(yard); !state.repairOnly() && !state.pending {
 			return gate.otherYardFindings(yard), nil
 		}
-	}
-	if cli.otherYardsPendingOnly(outcome, inspection, yard) {
-		return slices.Clone(inspection.Blockers), nil
 	}
 	payload, err := json.Marshal(publicMutationGateOutcome(*outcome))
 	if err != nil {

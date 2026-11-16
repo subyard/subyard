@@ -197,9 +197,6 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 		Runtime string
 		Write   *config.YardIntegrationWrite
 	}{plan.StateBinding(), write})
-	if permit := cli.permits.integrationRetry; permit != nil {
-		prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
-	}
 	prepared.stepsComplete = plan.Scope != ""
 	selectionConsequence := "store requested integrations for yard " + loaded.Context.YardName + ": "
 	if value == "" {
@@ -247,13 +244,6 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 	}
 	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
 		result := domain.AdapterResult{Schema: 1, OperationID: prepared.Plan.OperationID, Status: "ok"}
-		if permit := cli.permits.integrationRetry; permit != nil {
-			unlock, err := cli.lockConfigApplyRepair(ctx, permit)
-			if err != nil {
-				return result, err
-			}
-			defer unlock()
-		}
 		unlock, err := lockIntegrationYard(ctx, loaded)
 		if err != nil {
 			return result, err
@@ -288,13 +278,6 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 		final, err := cli.persistentIntegrationContext(candidate)
 		if err != nil || integrationConfigurationFingerprint(final) != integrationConfigurationFingerprint(candidate) {
 			return result, fmt.Errorf("%w: configuration changed during integration reconciliation; inspect status and retry", domain.ErrPlanStale)
-		}
-		if permit := cli.permits.integrationRetry; permit != nil {
-			pending, err := cli.finishConfigApplyRepair(ctx, permit)
-			if err != nil {
-				return result, err
-			}
-			reportStillPending(diagnostics, pending)
 		}
 		return result, nil
 	}

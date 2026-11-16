@@ -98,7 +98,6 @@ func (cli *CLI) runResourceCommand(
 		cli.printResourceEndpoint(loaded, definition)
 	}
 
-	desired := loaded
 	loaded = cli.resourceShutdownContext(ctx, loaded, definition, invocation.verb)
 	output, err := cli.prepareResource(ctx, loaded, definition, invocation.arguments)
 	if err != nil {
@@ -113,10 +112,6 @@ func (cli *CLI) runResourceCommand(
 	)
 	if err != nil {
 		cli.errorf("%s: %v", definition.Command, err)
-		return 1
-	}
-	if err := cli.validateResourceShutdownRepair(definition, invocation.verb, desired, native); err != nil {
-		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
 		return 1
 	}
 	assessment := native.Assessment
@@ -187,13 +182,6 @@ func (cli *CLI) runResourceCommand(
 		(assessment.Effect == domain.ActionMutation || assessment.Effect == domain.ActionDestruction) {
 		return 0
 	}
-	unlockShutdown, err := cli.lockResourceShutdownRepair(ctx)
-	if err != nil {
-		cli.errorf("%s: shutdown recovery: %v", definition.Command, err)
-		return 1
-	}
-	defer unlockShutdown()
-	runner.shutdownLocked = true
 	if ingress != nil && assessment.Changed {
 		unlock, lockErr := lockIntegrationYard(ctx, loaded)
 		if lockErr != nil {
@@ -510,21 +498,20 @@ func localResourceAction(definition resource.Definition, action domain.ActionID)
 }
 
 type resourceApplyRunner struct {
-	cli            *CLI
-	loaded         config.Loaded
-	definition     resource.Definition
-	verb           string
-	localAction    string
-	effect         domain.ActionEffect
-	arguments      []string
-	bootstrap      *profileBootstrap
-	consequences   []string
-	ingress        *resourceIngress
-	startupIntent  *resourceStartupIntent
-	exact          *resourceExecution
-	verify         *resourceExecution
-	skipHandler    bool
-	shutdownLocked bool
+	cli           *CLI
+	loaded        config.Loaded
+	definition    resource.Definition
+	verb          string
+	localAction   string
+	effect        domain.ActionEffect
+	arguments     []string
+	bootstrap     *profileBootstrap
+	consequences  []string
+	ingress       *resourceIngress
+	startupIntent *resourceStartupIntent
+	exact         *resourceExecution
+	verify        *resourceExecution
+	skipHandler   bool
 }
 
 type resourceSessionExitError struct{ code int }
@@ -548,27 +535,6 @@ func (runner *resourceApplyRunner) Run(
 	}
 	if err := validateResourceHandler(runner.definition.HandlerPath()); err != nil {
 		return result, "", err
-	}
-	if !runner.shutdownLocked {
-		unlock, err := runner.cli.lockResourceShutdownRepair(ctx)
-		if err != nil {
-			return result, "", err
-		}
-		defer unlock()
-		runner.shutdownLocked = true
-		defer func() { runner.shutdownLocked = false }()
-	}
-	if runner.cli.permits.resourceShutdown != nil {
-		defer func() {
-			if checkErr := runner.cli.finishResourceShutdownRepair(ctx); checkErr != nil {
-				result.Status = "error"
-				if err == nil {
-					err = checkErr
-				} else {
-					err = fmt.Errorf("%w; shutdown release binding changed: %v", err, checkErr)
-				}
-			}
-		}()
 	}
 	if runner.exact != nil {
 		return runner.runExactResource(ctx, request)
