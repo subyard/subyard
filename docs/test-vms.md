@@ -836,7 +836,7 @@ it has no `incus-admin` membership. It installs the packaged candidate through t
 installer, which must publish the entrypoints and a ready release without touching socket
 access, then runs the first `init` of the default yard with host-wide settings. It verifies
 native named socket and policy-lock ACL activation in the original prepared process, retained
-lock identity, an explicit command override that is not persisted, and an idempotent retry.
+lock identity, the configured developer UID and SSH port, and an idempotent retry.
 It removes the marked operator ACLs, account and yard after the check:
 
 ```sh

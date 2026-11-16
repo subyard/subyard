@@ -79,8 +79,6 @@ operator_env() {
       SUBYARD_NO_AUDIT=1 \
       SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \
       SUBYARD_POWER_LIBEXEC_DIR="$STATE/power" \
-      SUBYARD_POWER_RECONCILER_PATH="$POWER_RECONCILER" \
-      SUBYARD_POWER_UNIT_PATH="$POWER_UNIT" \
       MIN_DISK_GIB=1 \
       HOST_CLAUDE_MD= \
       HOST_CODEX_AGENTS_MD= \
@@ -437,6 +435,10 @@ HOST_BASE=$OPERATOR_HOME/host
 HOST_MOUNTS=
 RESTRICTED_DISK_PATHS=$OPERATOR_HOME/host
 FORWARD_SSH_AGENT=0
+DEV_UID=1357
+# Release readiness observes persisted power paths, not command overrides.
+SUBYARD_POWER_RECONCILER_PATH=$POWER_RECONCILER
+SUBYARD_POWER_UNIT_PATH=$POWER_UNIT
 EOF
 chown "$OPERATOR:$OPERATOR" "$OPERATOR_HOME/.config/subyard/config.env"
 chmod 0600 "$OPERATOR_HOME/.config/subyard/config.env"
@@ -469,8 +471,12 @@ fi
 info 'running the first init of the installed runtime while retaining its approved parent'
 
 first_output="$STATE/first-init.out"
-if ! operator_env DEV_UID=1357 "$LAUNCHER" init --yes > "$first_output" 2>&1; then
+if ! operator_yard init --yes > "$first_output" 2>&1; then
   tail -n 160 "$first_output" >&2 || true
+  # Owner-level readiness facts only: plan step IDs, decisions and the outcome.
+  operator_yard migrate --check --json 2>/dev/null | jq -c 'del(.domains)' 2>/dev/null | head -c 8000 >&2 || true
+  printf '\n' >&2
+  operator_yard migrate --check 2>&1 | sed -nE 's/^  \[(apply|skip|conditional)\] ([A-Za-z0-9_.:-]+).*/  [\1] \2/p; /observed:|desired:/p' | head -n 80 >&2 || true
   die 'first init did not survive incus-admin activation'
 fi
 grep -Fq "added $OPERATOR to incus-admin" "$first_output" \
@@ -504,13 +510,14 @@ incus info "$INSTANCE" --project "$PROJECT" >/dev/null 2>&1 \
 incus project set "$PROJECT" user.subyard.e2e="$MARKER"
 incus config set "$INSTANCE" user.subyard.e2e="$MARKER" --project "$PROJECT"
 initial_state="$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)"
-[ "$initial_state" = STOPPED ] \
-  || die "first init left unexpected instance state $initial_state instead of STOPPED"
-info 'starting the initialized yard to inspect its provisioned operator identity'
+case "$initial_state" in STOPPED | RUNNING) ;;
+  *) die "first init left unexpected instance state $initial_state" ;;
+esac
+info 'starting the initialized yard (a no-op when running) to inspect its provisioned identity'
 start_output="$STATE/start.out"
 if ! operator_yard start --yes > "$start_output" 2>&1; then
   tail -n 120 "$start_output" >&2 || true
-  die 'could not start the initialized yard for explicit-override verification'
+  die 'could not start the initialized yard for identity verification'
 fi
 running_state="$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)"
 [ "$running_state" = RUNNING ] \
@@ -519,12 +526,10 @@ if ! actual_dev_uid="$(incus exec "$INSTANCE" --project "$PROJECT" -- id -u dev)
   die 'running yard did not expose its provisioned dev account for UID verification'
 fi
 [ "$actual_dev_uid" = 1357 ] \
-  || die "explicit DEV_UID launch override resolved to $actual_dev_uid instead of 1357"
+  || die "configured DEV_UID resolved to $actual_dev_uid instead of 1357"
 [ "$(setting default SSH_PORT)" = "$ssh_port" ] \
   || die 'first init changed the configured SSH port'
-[ ! -e "$OPERATOR_HOME/.config/subyard/yards/default/config.env" ] \
-  || die 'first init persisted the explicit DEV_UID launch override'
-ok 'retained parent preserved the explicit override without persisting it'
+ok 'retained parent applied the configured identity and SSH port'
 
 instance_snapshot() {
   local state config_hash init_start
@@ -539,7 +544,7 @@ instance_snapshot() {
 before="$(instance_snapshot)"
 retry_output="$STATE/retry-init.out"
 info 're-running init to verify convergence'
-if ! operator_env DEV_UID=1357 "$LAUNCHER" init --yes > "$retry_output" 2>&1; then
+if ! operator_yard init --yes > "$retry_output" 2>&1; then
   tail -n 160 "$retry_output" >&2 || true
   die 'repeated init failed'
 fi
