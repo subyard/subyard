@@ -322,7 +322,7 @@ prepare)
   grep -Fq "cannot decide whether the administrator's unmanaged-devices list" "$STATE/update.log" \
     && grep -Eq 'manages: ([^ ]+, )*br0' "$STATE/update.log" \
     && grep -Fq 'Do not reload or restart NetworkManager before the reboot' "$STATE/update.log" \
-    || die 'the update gave no notice for the docker* list and the NM-managed br0'
+    || die "the update gave no notice for the docker* list and the NM-managed br0; devices before the update: $before_table; now: $(nmcli -t -f DEVICE,TYPE,STATE device | tr '\n' ' '); list: $(effective_unmanaged)"
   [ "$(device_state br0)" = connected ] || die 'the migration touched br0'
   pass 'after the hand-back the update rewrote the guard without a reload or restart; status and check ask for a reboot; the docker* list gave a notice'
 
