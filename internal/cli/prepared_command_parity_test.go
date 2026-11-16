@@ -196,7 +196,7 @@ func TestCoreManifestPreparationRPCRefusalsBaseline(t *testing.T) {
 			Method: "operation.plan", OperationID: "negative-" + test.command, Params: params,
 		}, nil)
 		fault, ok := err.(*rpc.Error)
-		if !ok || fault.Code != test.code {
+		if !ok || fault.Code != rpc.ErrorCode(test.code) {
 			t.Errorf("RPC %s error=%#v, want %s", test.command, err, test.code)
 		}
 	}

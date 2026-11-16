@@ -11,6 +11,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerservice"
+	"github.com/Subyard/Subyard/internal/rpc"
 )
 
 func (cli *CLI) reportPreparationError(definition command.Definition, err error) int {
@@ -65,14 +66,14 @@ func (cli *CLI) reportPreparationError(definition command.Definition, err error)
 
 func preparationRPCError(definition command.Definition, err error) error {
 	if errors.Is(err, errNetworkUsage) || errors.Is(err, errHostUsage) || errors.Is(err, errConfigUsage) {
-		return operationRPCError("invalid_params", err)
+		return operationRPCError(rpc.CodeInvalidParams, err)
 	}
-	code := "plan_failed"
+	code := rpc.CodePlanFailed
 	var failure *commandPreparationError
 	if errors.As(err, &failure) {
 		switch failure.phase {
 		case "project":
-			code = "invalid_params"
+			code = rpc.CodeInvalidParams
 		case "prepare":
 			behavior, _ := resolveCoreCommand(definition)
 			code = behavior.prepareRPCCode

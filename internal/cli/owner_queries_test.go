@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/state"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -688,6 +689,26 @@ func TestOwnerSettingsGoldenPreservesNativeMultilineValuesAndProvenance(t *testi
 }
 
 func TestYardRPCGoldenFrames(t *testing.T) {
+	compiler := rpcSchemaCompiler(t)
+	contract := filepath.Join(repositoryRoot(t), "api/yard-rpc/v1")
+	validate := func(t *testing.T, name string, value any) {
+		t.Helper()
+		schema, err := compiler.Compile(filepath.Join(contract, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := schema.Validate(value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results := map[string]string{
+		"negotiate": "negotiate.schema.json", "context": "context.schema.json",
+		"owner-inventory": "owner-inventory.schema.json", "yard-status": "core-results.schema.json#/$defs/status",
+		"profile-list": "profile-list.schema.json", "settings-list": "settings-list.schema.json",
+		"host-sync-status": "host-sync-status.schema.json", "operation-exact": "operation-exact.schema.json",
+		"session-shell": "session-prepare.schema.json", "session-vscode": "session-prepare.schema.json",
+	}
+
 	files, err := filepath.Glob(filepath.Join(repositoryRoot(t), "api/yard-rpc/v1/fixtures/*.json"))
 	if err != nil || len(files) < 4 {
 		t.Fatalf("fixtures=%v err=%v", files, err)
@@ -701,6 +722,17 @@ func TestYardRPCGoldenFrames(t *testing.T) {
 			var value any
 			if err := json.Unmarshal(payload, &value); err != nil {
 				t.Fatal(err)
+			}
+			schemaValue, err := jsonschema.UnmarshalJSON(bytes.NewReader(payload))
+			if err != nil {
+				t.Fatal(err)
+			}
+			validate(t, "frame.schema.json", schemaValue)
+			name := strings.TrimSuffix(filepath.Base(path), ".json")
+			if resultSchema, ok := results[name]; ok {
+				validate(t, resultSchema, schemaValue.(map[string]any)["result"])
+			} else if name != "snapshot-ready" {
+				t.Fatalf("fixture lacks result schema: %s", name)
 			}
 			var frame bytes.Buffer
 			if err := rpc.NewCodec(nil, &frame).Write(value); err != nil {

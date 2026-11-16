@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "negotiate.schema.json",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "protocolMin": {
+      "const": 1
+    },
+    "protocolMax": {
+      "const": 1
+    },
+    "engineVersion": {
+      "type": "string",
+      "maxLength": 8192
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 8192
+      },
+      "maxItems": 1024
+    }
+  },
+  "required": [
+    "version",
+    "protocolMin",
+    "protocolMax",
+    "engineVersion",
+    "capabilities"
+  ],
+  "additionalProperties": false
+}

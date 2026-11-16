@@ -192,7 +192,7 @@ func TestRPCOperationGateRecoverySkip(t *testing.T) {
 	}
 	fault := func(err error) (string, string) {
 		if fault, ok := err.(*rpc.Error); ok {
-			return fault.Code, fault.Message
+			return string(fault.Code), fault.Message
 		}
 		return "", ""
 	}

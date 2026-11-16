@@ -1,0 +1,540 @@
+{
+  "revision": 1,
+  "rpcVersion": 1,
+  "capabilities": {
+    "snapshot": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "ordered-events": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "cancellation": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    },
+    "deadlines": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    },
+    "commands": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "context": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "projects": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "yard-status": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "yard-status-profile-dashboards-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "credential-metadata": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "credential-status": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "operation-plan": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    },
+    "operation-execute": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    },
+    "resync": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "owner-inventory-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "release-readiness-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "profile-list-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "settings-list-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "host-sync-status-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "session-prepare-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "yard-bootstrap-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "credential-prepare-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace"
+      ]
+    },
+    "operation-exact-plan-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    },
+    "operation-steps-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    },
+    "owner-services-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    },
+    "rpc-v1": {
+      "since": 1,
+      "stability": "stable",
+      "sessions": [
+        "workspace",
+        "owner-services"
+      ]
+    }
+  },
+  "methods": {
+    "rpc.negotiate": {
+      "capability": "rpc-v1"
+    },
+    "command.list": {
+      "capability": "commands"
+    },
+    "context.get": {
+      "capability": "context"
+    },
+    "operation.route": {
+      "capability": "commands"
+    },
+    "operation.plan": {
+      "capability": "operation-plan"
+    },
+    "operation.execute": {
+      "capability": "operation-execute"
+    },
+    "operation.discard": {
+      "capability": "operation-plan"
+    },
+    "project.copy.finalize": {
+      "capability": "projects"
+    },
+    "project.copy.abort": {
+      "capability": "projects"
+    },
+    "keys.prepare": {
+      "capability": "credential-prepare-v1"
+    },
+    "integration.status": {
+      "capability": "context"
+    },
+    "project.list": {
+      "capability": "projects"
+    },
+    "owner.inventory": {
+      "capability": "owner-inventory-v1"
+    },
+    "release.readiness": {
+      "capability": "release-readiness-v1"
+    },
+    "yard.status": {
+      "capability": "yard-status"
+    },
+    "yard.status.profile-dashboards": {
+      "capability": "yard-status-profile-dashboards-v1"
+    },
+    "credential.list": {
+      "capability": "credential-metadata"
+    },
+    "credential.status": {
+      "capability": "credential-status"
+    },
+    "incus.events": {
+      "capability": "ordered-events"
+    },
+    "system.snapshot": {
+      "capability": "snapshot"
+    },
+    "system.resync": {
+      "capability": "resync"
+    },
+    "system.ping": {
+      "capability": "ordered-events"
+    },
+    "profile.list": {
+      "capability": "profile-list-v1"
+    },
+    "settings.list": {
+      "capability": "settings-list-v1"
+    },
+    "host.sync.status": {
+      "capability": "host-sync-status-v1"
+    },
+    "session.prepare": {
+      "capability": "session-prepare-v1"
+    }
+  },
+  "errorCodes": {
+    "action_policy_invalid": {
+      "since": 1
+    },
+    "activation-ambiguous": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "adapter_failed": {
+      "since": 1
+    },
+    "cancelled": {
+      "since": 1
+    },
+    "capability_missing": {
+      "since": 1
+    },
+    "cleanup_recovery_failed": {
+      "since": 1
+    },
+    "command_not_found": {
+      "since": 1
+    },
+    "command_not_mutating": {
+      "since": 1
+    },
+    "confirmation-required": {
+      "since": 1,
+      "group": "release-gate",
+      "ident": "ConfirmationRequiredGate"
+    },
+    "confirmation_failed": {
+      "since": 1
+    },
+    "confirmation_required": {
+      "since": 1
+    },
+    "deadline_exceeded": {
+      "since": 1
+    },
+    "dependency-unavailable": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "duplicate_operation": {
+      "since": 1
+    },
+    "duplicate_plan": {
+      "since": 1
+    },
+    "exact_plan_required": {
+      "since": 1
+    },
+    "host_sync_status_failed": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "identity_recovery_failed": {
+      "since": 1
+    },
+    "incompatible_version": {
+      "since": 1
+    },
+    "incus_disconnected": {
+      "since": 1
+    },
+    "interactive_or_payload_command": {
+      "since": 1
+    },
+    "internal": {
+      "since": 1
+    },
+    "invalid_params": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "invalid_request": {
+      "since": 1
+    },
+    "journal-invalid": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "method_not_found": {
+      "since": 1
+    },
+    "migration-stale": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "mutation_gate_failed": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "negotiation_required": {
+      "since": 1
+    },
+    "operation-declined": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "operation_capacity": {
+      "since": 1
+    },
+    "operation_failed": {
+      "since": 1
+    },
+    "operation_not_found": {
+      "since": 1
+    },
+    "operation_steps_unsupported": {
+      "since": 1
+    },
+    "owner_configuration_invalid": {
+      "since": 1
+    },
+    "owner_context_changed": {
+      "since": 1
+    },
+    "owner_inventory_failed": {
+      "since": 1
+    },
+    "plan-stale": {
+      "since": 1,
+      "group": "release-gate",
+      "ident": "PlanStaleGate"
+    },
+    "plan_binding_invalid": {
+      "since": 1
+    },
+    "plan_cleanup_failed": {
+      "since": 1
+    },
+    "plan_failed": {
+      "since": 1
+    },
+    "plan_not_found": {
+      "since": 1
+    },
+    "plan_stale": {
+      "since": 1
+    },
+    "precondition-blocked": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "profile_catalog_invalid": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "project_copy_failed": {
+      "since": 1
+    },
+    "query_too_large": {
+      "since": 1
+    },
+    "recovery-ambiguous": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "recovery-pending": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "registry-invalid": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "remote_owner_required": {
+      "since": 1
+    },
+    "resource-conflict": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "rollback-expired": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "rollback-incompatible": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "route_denied": {
+      "since": 1
+    },
+    "secret_forbidden": {
+      "since": 1
+    },
+    "session_host_key_unavailable": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "session_project_forbidden": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "session_project_unavailable": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "session_ssh_unavailable": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "session_tool_unavailable": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "session_yard_unavailable": {
+      "since": 1,
+      "group": "owner-query"
+    },
+    "state_commit_failed": {
+      "since": 1
+    },
+    "too_many_plans": {
+      "since": 1
+    },
+    "transition-required": {
+      "since": 1,
+      "group": "release-gate",
+      "ident": "TransitionRequiredGate"
+    },
+    "transition_required": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "unsupported-epoch": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "unsupported-kind": {
+      "since": 1,
+      "group": "release-gate"
+    },
+    "verification-failed": {
+      "since": 1,
+      "group": "release-gate"
+    }
+  },
+  "events": {
+    "snapshot.ready": {
+      "since": 1
+    },
+    "operation.started": {
+      "since": 1
+    },
+    "operation.finished": {
+      "since": 1
+    },
+    "incus.lifecycle": {
+      "since": 1
+    },
+    "incus.operation": {
+      "since": 1
+    },
+    "incus.logging": {
+      "since": 1
+    },
+    "incus.network-acl": {
+      "since": 1
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "vocabulary.schema.json",
+  "description": "Yard RPC vocabulary. Additional sections and metadata are allowed.",
+  "type": "object",
+  "required": ["revision", "rpcVersion", "capabilities", "methods", "errorCodes", "events"],
+  "properties": {
+    "revision": {"type": "integer", "minimum": 1},
+    "rpcVersion": {"type": "integer", "minimum": 1},
+    "capabilities": {
+      "type": "object", "minProperties": 1,
+      "additionalProperties": {
+        "allOf": [{"$ref": "#/$defs/entry"}],
+        "required": ["since", "stability", "sessions"],
+        "properties": {
+          "stability": {"enum": ["experimental", "stable"]},
+          "sessions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["workspace", "owner-services"]}},
+          "deprecated": {"type": "object", "required": ["since"], "properties": {"since": {"type": "integer", "minimum": 1}}}
+        }
+      }
+    },
+    "methods": {
+      "type": "object", "minProperties": 1,
+      "additionalProperties": {
+        "type": "object", "required": ["capability"],
+        "properties": {"capability": {"type": "string", "minLength": 1}, "ident": {"$ref": "#/$defs/ident"}}
+      }
+    },
+    "errorCodes": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/entry"}},
+    "events": {"type": "object", "minProperties": 1, "additionalProperties": {"$ref": "#/$defs/entry"}}
+  },
+  "$defs": {
+    "ident": {"type": "string", "pattern": "^[A-Z][A-Za-z0-9]*$"},
+    "entry": {
+      "type": "object", "required": ["since"],
+      "properties": {"since": {"type": "integer", "minimum": 1}, "ident": {"$ref": "#/$defs/ident"}, "group": {"type": "string"}}
+    }
+  }
+}

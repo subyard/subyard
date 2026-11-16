@@ -21,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -31,31 +32,31 @@ type coreCommandBehavior struct {
 	shellActions   func(string) map[string]map[string]shelladapter.Action
 	nonRPCReason   string
 	prepareExit    int
-	prepareRPCCode string
+	prepareRPCCode rpc.ErrorCode
 }
 
 func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, error) {
-	behavior := coreCommandBehavior{prepareExit: 2, prepareRPCCode: "invalid_params"}
+	behavior := coreCommandBehavior{prepareExit: 2, prepareRPCCode: rpc.CodeInvalidParams}
 	switch definition.Handler {
 	case "@client-projects":
 		behavior.prepare = (*preparedCommand).prepareClientProjects
 		behavior.nonRPCReason = "desktop integration requires the native controller"
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@profile":
 		behavior.prepare = (*preparedCommand).prepareProfile
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@integration":
 		behavior.prepare = (*preparedCommand).prepareIntegration
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@init":
 		behavior.prepare = (*preparedCommand).prepareInit
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@lifecycle":
 		behavior.prepare = (*preparedCommand).prepareLifecycle
 		behavior.shellActions = lifecycleShellActions
 	case "@cleanup":
 		behavior.prepare = (*preparedCommand).prepareCleanup
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@provision":
 		behavior.prepare = (*preparedCommand).prepareProvision
 		behavior.shellActions = func(root string) map[string]map[string]shelladapter.Action {
@@ -96,33 +97,33 @@ func resolveCoreCommand(definition command.Definition) (coreCommandBehavior, err
 		behavior.prepareExit = 1
 	case "@update":
 		behavior.prepare = (*preparedCommand).prepareUpdate
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@current-migration":
 		behavior.prepare = (*preparedCommand).prepareCurrentMigration
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@keys":
 		behavior.prepare = (*preparedCommand).prepareKeys
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@ssh-agent":
 		behavior.nonRPCReason = "protected owner-host credential transport"
 	case "@shell":
 		behavior.nonRPCReason = "interactive terminal session"
 	case "@config":
 		behavior.prepare = (*preparedCommand).prepareConfig
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@host":
 		behavior.prepare = (*preparedCommand).prepareHost
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@network":
 		behavior.prepare = (*preparedCommand).prepareNetwork
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@resource":
 		if definition.Name == "svc" {
 			behavior.nonRPCReason = "resource selector resolves its dedicated invocation"
 			break
 		}
 		behavior.prepare = (*preparedCommand).prepareResourceInvocation
-		behavior.prepareExit, behavior.prepareRPCCode = 1, "plan_failed"
+		behavior.prepareExit, behavior.prepareRPCCode = 1, rpc.CodePlanFailed
 	case "@check", "@security", "@status", "@space", "@info", "@yards", "@logs", "@usage", "@list", "@help", "@version":
 		behavior.nonRPCReason = "read-only query"
 	case "@rpc", "@authorize", "@state", "@project-state", "@migrate", "@release-transition", "@vm-start-policy":

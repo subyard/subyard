@@ -16,8 +16,6 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 )
 
-const credentialPrepareCapability = "credential-prepare-v1"
-
 type credentialAdapter struct{ prepared credentialruntime.Prepared }
 
 func (adapter credentialAdapter) Run(

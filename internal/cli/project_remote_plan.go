@@ -19,6 +19,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/state"
 )
 
@@ -239,7 +240,7 @@ func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) e
 		return err
 	}
 	var exact exactOperationPlan
-	if err := session.call(ctx, "operation.plan", cli.ensureOperationID(), struct {
+	if err := session.call(ctx, rpc.MethodOperationPlan, cli.ensureOperationID(), struct {
 		Command    string                       `json:"command"`
 		Exact      bool                         `json:"exact"`
 		Source     *ProjectCopySourceDescriptor `json:"source"`
@@ -295,7 +296,7 @@ func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) e
 		if err != nil || result.Status != "ok" {
 			return result, err
 		}
-		if err := session.call(ctx, "project.copy.finalize", exact.Plan.OperationID, struct {
+		if err := session.call(ctx, rpc.MethodProjectCopyFinalize, exact.Plan.OperationID, struct {
 			Digest string `json:"digest"`
 		}{exact.Digest}, &response); err != nil {
 			return result, err

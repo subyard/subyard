@@ -13,16 +13,16 @@ import (
 )
 
 const (
-	profileListCapability    = "profile-list-v1"
-	settingsListCapability   = "settings-list-v1"
-	hostSyncStatusCapability = "host-sync-status-v1"
-	sessionPrepareCapability = "session-prepare-v1"
-	yardBootstrapCapability  = "yard-bootstrap-v1"
+	profileListCapability    = rpc.CapabilityProfileListV1
+	settingsListCapability   = rpc.CapabilitySettingsListV1
+	hostSyncStatusCapability = rpc.CapabilityHostSyncStatusV1
+	sessionPrepareCapability = rpc.CapabilitySessionPrepareV1
+	yardBootstrapCapability  = rpc.CapabilityYardBootstrapV1
 )
 
 func (handler *rpcHandler) requireQueryOwner() error {
 	if handler.loaded.Context.AccessKind != domain.AccessLocal {
-		return &rpc.Error{Code: "remote_owner_required", Message: "request this query on the owner host"}
+		return &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "request this query on the owner host"}
 	}
 	return nil
 }
@@ -36,11 +36,11 @@ func (handler *rpcHandler) currentOwnerQuery() (*rpcHandler, error) {
 		RepositoryRoot: handler.cli.options.RepositoryRoot, OperatorHome: bound.Paths.OperatorHome,
 		YardName: bound.YardName, Environment: handler.cli.baseEnv})
 	if err != nil {
-		return nil, &rpc.Error{Code: "owner_configuration_invalid", Message: "current owner configuration is unavailable or invalid"}
+		return nil, &rpc.Error{Code: rpc.CodeOwnerConfigurationInvalid, Message: "current owner configuration is unavailable or invalid"}
 	}
 	if loaded.Context.AccessKind != bound.AccessKind || loaded.Context.Paths.ConfigHome != bound.Paths.ConfigHome ||
 		loaded.Context.IncusProject != bound.IncusProject || loaded.Context.YardInstanceName != bound.YardInstanceName {
-		return nil, &rpc.Error{Code: "owner_context_changed", Message: "owner context changed; reconnect before querying this yard"}
+		return nil, &rpc.Error{Code: rpc.CodeOwnerContextChanged, Message: "owner context changed; reconnect before querying this yard"}
 	}
 	return &rpcHandler{cli: handler.cli, loaded: loaded}, nil
 }
@@ -77,7 +77,7 @@ func (handler *rpcHandler) ownerQueries() ownerapi.Service {
 func ownerQueryError(err error) error {
 	var query *ownerapi.Error
 	if errors.As(err, &query) {
-		return &rpc.Error{Code: query.Code, Message: query.Message}
+		return &rpc.Error{Code: rpc.ErrorCode(query.Code), Message: query.Message}
 	}
 	return err
 }
@@ -122,7 +122,7 @@ func boundedOwnerQuery(value any, err error) (any, error) {
 	encoded, err := json.Marshal(value)
 	var decoded any
 	if err != nil || len(encoded) > rpc.MaxFrameSize-4096 || json.Unmarshal(encoded, &decoded) != nil || !boundedQueryValue(decoded) {
-		return nil, &rpc.Error{Code: "query_too_large", Message: "owner query exceeds the protocol response bound"}
+		return nil, &rpc.Error{Code: rpc.CodeQueryTooLarge, Message: "owner query exceeds the protocol response bound"}
 	}
 	return value, nil
 }

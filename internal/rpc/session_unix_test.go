@@ -27,7 +27,7 @@ func TestStalledBlockingPipeCancelsOperationsAndEndsWhenPeerCloses(t *testing.T)
 	cancelled := make(chan struct{})
 	large := strings.Repeat("x", 512*1024)
 	handler := HandlerFunc(func(ctx context.Context, call Call, _ Emit) (any, error) {
-		if call.Method == "hold" {
+		if call.Method == MethodOperationPlan {
 			<-ctx.Done()
 			close(cancelled)
 			return nil, ctx.Err()
@@ -38,15 +38,15 @@ func TestStalledBlockingPipeCancelsOperationsAndEndsWhenPeerCloses(t *testing.T)
 	defer client.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- (Session{Handler: handler, WriteStallTimeout: 100 * time.Millisecond}).Serve(
+		done <- (Session{Capabilities: CapabilitiesForSession("workspace"), Handler: handler, WriteStallTimeout: 100 * time.Millisecond}).Serve(
 			context.Background(), server, output)
 	}()
 	requests := NewCodec(nil, client)
 	responses := NewCodec(peerOutput, nil)
 	writeRequest(t, requests, Request{Version: 1, Type: "request", ID: "n", Method: "rpc.negotiate"})
 	_ = readResponse(t, responses)
-	writeRequest(t, requests, Request{Version: 1, Type: "request", ID: "hold", Method: "hold"})
-	writeRequest(t, requests, Request{Version: 1, Type: "request", ID: "large", Method: "large"})
+	writeRequest(t, requests, Request{Version: 1, Type: "request", ID: "hold", Method: MethodOperationPlan})
+	writeRequest(t, requests, Request{Version: 1, Type: "request", ID: "large", Method: MethodOwnerInventory})
 	select {
 	case <-cancelled:
 	case <-time.After(5 * time.Second):

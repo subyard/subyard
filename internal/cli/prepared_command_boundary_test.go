@@ -74,7 +74,7 @@ func TestRPCPlanLimitAndDuplicatePreserveOwnedPlans(t *testing.T) {
 	first := handler.plans["plan-0"]
 	for _, test := range []struct{ id, code string }{{"plan-0", "duplicate_plan"}, {"overflow", "too_many_plans"}} {
 		err := plan(test.id)
-		if rpcErr, ok := err.(*rpc.Error); !ok || rpcErr.Code != test.code {
+		if rpcErr, ok := err.(*rpc.Error); !ok || rpcErr.Code != rpc.ErrorCode(test.code) {
 			t.Fatalf("%s error = %v", test.id, err)
 		}
 	}
@@ -110,7 +110,7 @@ func TestRPCDisconnectClosesPreparedResourcesWithoutExecution(t *testing.T) {
 	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
 	done := make(chan error, 1)
 	go func() {
-		err := (rpc.Session{Handler: gated}).Serve(context.Background(), server, server)
+		err := (rpc.Session{Capabilities: rpc.CapabilitiesForSession("workspace"), Handler: gated}).Serve(context.Background(), server, server)
 		handler.closePlans()
 		done <- err
 	}()

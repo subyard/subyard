@@ -29,7 +29,7 @@ func exactOwnerSessionFixture(t *testing.T, handler *rpcHandler) *ownerRPCSessio
 	client, server := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := (rpc.Session{Handler: handler, Capabilities: []string{exactPlanCapability, operationStepsCapability}}).Serve(context.Background(), server, server)
+		err := (rpc.Session{Capabilities: rpc.CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
 		handler.closePlans()
 		done <- err
 	}()
@@ -378,7 +378,7 @@ func TestInfrastructureServiceExactOwnerRPCRejectsStaleTargets(t *testing.T) {
 				if kind == "ownership" {
 					code = "internal"
 				}
-				if !errors.As(err, &fault) || fault.Code != code || len(runner.Requests) != 0 {
+				if !errors.As(err, &fault) || fault.Code != rpc.ErrorCode(code) || len(runner.Requests) != 0 {
 					t.Fatalf("stale owner target applied: %v calls=%d", err, len(runner.Requests))
 				}
 			}

@@ -164,7 +164,7 @@ fn run_actor(actor: &str, observing: bool) {
             "VERANDA_REOPEN_FRAMES",
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../api/yard-rpc/v1/fixtures"
+                "/../contract/yard-rpc/v1/fixtures"
             ),
         )
         .stdout(Stdio::from(output.try_clone().unwrap()))

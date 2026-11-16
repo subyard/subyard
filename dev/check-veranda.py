@@ -76,6 +76,9 @@ def main():
                 return code
         else:
             print("Linux resource probe isolation: skipped on this platform", flush=True)
+    code = check("generated Rust RPC vocabulary", [sys.executable, "veranda/dev/generate-vocabulary.py", "--check"], env)
+    if code:
+        return code
     code = rust_lint(env)
     test_code = rust_check(env)
     code = code or test_code

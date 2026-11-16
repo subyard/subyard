@@ -8,6 +8,7 @@ require (
 	github.com/blang/semver/v4 v4.0.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/lxc/incus/v7 v7.6.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	go.opentelemetry.io/collector/component v1.69.0
 	go.opentelemetry.io/collector/component/componentstatus v0.163.0
 	go.opentelemetry.io/collector/config/configauth v1.69.0

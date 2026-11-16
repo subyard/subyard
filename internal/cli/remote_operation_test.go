@@ -94,7 +94,7 @@ func TestExactRPCRequiresCapabilityAndDiscardsOnDisconnect(t *testing.T) {
 	client, server := net.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := (rpc.Session{Handler: handler, Capabilities: []string{exactPlanCapability, operationStepsCapability}}).Serve(context.Background(), server, server)
+		err := (rpc.Session{Capabilities: rpc.CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
 		handler.closePlans()
 		done <- err
 	}()

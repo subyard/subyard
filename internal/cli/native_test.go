@@ -322,7 +322,7 @@ func TestRPCResyncReturnsFullSnapshotAndContinuesMonotonicSessionEvents(t *testi
 	client, server := net.Pipe()
 	sessionDone := make(chan error, 1)
 	go func() {
-		sessionDone <- (rpc.Session{Handler: handler}).Serve(context.Background(), server, server)
+		sessionDone <- (rpc.Session{Capabilities: rpc.CapabilitiesForSession("workspace"), Handler: handler}).Serve(context.Background(), server, server)
 	}()
 	codec := rpc.NewCodec(client, client)
 	write := func(request rpc.Request) {

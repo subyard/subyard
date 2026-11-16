@@ -453,12 +453,12 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 		_, err := cli.boundHardCleanupRecovery(ctx, loaded, arguments)
 		cleanupRecovery, _ = cleanupMode(arguments)
 		if err != nil {
-			return operationRPCError("cleanup_recovery_failed", err)
+			return operationRPCError(rpc.CodeCleanupRecoveryFailed, err)
 		}
 	}
 	identityRecovery, err := cli.admitDeveloperIdentity(ctx, yard, definition.Handler, arguments)
 	if err != nil {
-		return operationRPCError("identity_recovery_failed", err)
+		return operationRPCError(rpc.CodeIdentityRecoveryFailed, err)
 	}
 	if definition.Handler == "@update" || definition.Handler == "@current-migration" || cleanupRecovery || identityRecovery {
 		return nil

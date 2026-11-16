@@ -359,7 +359,7 @@ fn separate_process_store_lock_and_removal_reject_stale_cached_trust() {
 
 fn fixture(name: &str) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../api/yard-rpc/v1/fixtures")
+        .join("../contract/yard-rpc/v1/fixtures")
         .join(format!("{name}.json"));
     serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["result"].clone()
 }
@@ -907,7 +907,7 @@ impl ManagerFixture {
             let directory = owner.store_root().with_file_name("noop-fixtures");
             std::fs::create_dir(&directory).unwrap();
             let public =
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../api/yard-rpc/v1/fixtures");
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../contract/yard-rpc/v1/fixtures");
             for name in ["negotiate", "operation-exact", "owner-inventory"] {
                 std::fs::copy(
                     public.join(format!("{name}.frame")),

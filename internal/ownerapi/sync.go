@@ -55,7 +55,7 @@ func (service Service) HostSyncStatus(ctx context.Context) (HostSyncStatus, erro
 		Credentials: SyncCredentials{State: "unavailable", Peers: []domain.CredentialPeerStatus{}}}
 	status, err := configsync.ReadStatus(service.Loaded.Context.Paths.ConfigHome, service.Environment)
 	if err != nil {
-		return result, &Error{Code: "host_sync_status_failed", Message: "configuration sync metadata is unavailable or invalid"}
+		return result, &Error{Code: codeHostSyncStatusFailed, Message: "configuration sync metadata is unavailable or invalid"}
 	}
 	result.HostID, result.HostIDPending = status.HostID, status.HostIDPending
 	result.RecoveryRequired, result.Generation, result.AppliedCommit = status.RecoveryRequired, status.Generation, status.SourceCommit
