@@ -29,8 +29,10 @@ Do not rely on umask for exact file modes. Preserve permission validation; use
 `testkit.WriteFile` for exact fixture modes and `testkit.TempDir` for private roots.
 
 ## Private overlay
-If `private/AGENTS.md` exists locally (it is gitignored and lives in the separate private repo),
-read and follow it **in addition** to this file. It carries private, non-public working rules
+An operator may keep private rules, task plans and notes in `private/`, a separate repository
+ignored here. If `private/AGENTS.md` exists, read and follow it in addition to this file and sync
+`private/` only with [subyard-private-sync](.agents/skills/subyard-private-sync/SKILL.md). If it is
+missing and no other instructions say where task plans and notes live, ask the operator.
 
 @private/AGENTS.md
 

@@ -13,7 +13,7 @@ AREA_RULES = (
                "*_tests.rs")),
     ("product", ("config/skills/*", "config/*SKILL.md")),
     ("fixtures and tools", ("*/testdata/*", "*/fixtures/*", "dev/*", "internal/testkit/*", ".github/*",
-                            "Makefile", ".golangci.yml", ".gitignore", "rust-toolchain.toml", "sync-repos.sh")),
+                            "Makefile", ".golangci.yml", ".gitignore", "rust-toolchain.toml")),
     ("documentation", (".agents/*", ".claude/*", "docs/*", "*.md", "LICENSE")),
     ("product", ("cmd/*", "internal/*", "scripts/*", "config/*", "bin/*", "api/*", "completions/*",
                  "veranda/*", "go.mod", "go.sum")),

@@ -35,8 +35,8 @@ Read by task; links are relative to this skill.
 | Live host or release behavior | [Real-host acceptance](../../../docs/real-host-acceptance.md): physical-boundary and release checks. |
 | Configuration or credentials | [Configuration](../../../docs/configuration.md) and [Keys](../../../docs/keys.md), respectively. |
 
-An absent private overlay does not block public-only work. Ask for missing
-requirements when the task depends on them.
+Without a private overlay or other instructions on where task plans and notes live, ask the
+operator. Ask for missing requirements when the task depends on them.
 
 ## Work
 
@@ -45,9 +45,8 @@ the engineering and testing rules within their assignment, report remaining work
 coordinator, and do not create or close shared task files or start another full role cycle.
 
 1. Establish the requested outcome, scope, plan steps, and acceptance checks before
-   editing. Unless other instructions specify a location, keep task plans in
-   `private/tasks/`, creating it as needed; `private/` is gitignored by the public repository
-   and may be its own repository. Follow the overlay's task-file workflow when present. Keep
+   editing. Keep task plans where the private overlay or other instructions say; otherwise ask
+   the operator. Follow the overlay's task-file workflow when present. Keep
    remaining steps current; change the agreed scope only with the user's agreement.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
@@ -68,7 +67,8 @@ coordinator, and do not create or close shared task files or start another full 
 
 - Branch each task from the default branch, or from the release branch for a release in
   preparation, and target that base; branch from an unmerged PR branch only with the operator's
-  agreement. Commit and push your branch without asking. Never commit or push the private overlay.
+  agreement. Commit and push your branch without asking. Sync the private overlay only with
+  [subyard-private-sync](../subyard-private-sync/SKILL.md).
 - After review accepts the candidate, commit it. A fresh [describer](roles/describer.md) session
   returns the title and body from the diff and your short public brief: problem, expected
   behavior, checks run and known limits, without private details. Save the body outside the
