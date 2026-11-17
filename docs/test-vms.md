@@ -31,6 +31,13 @@ for ownership checks and recovery. Service update reconciles the broker against 
 runtime; ordinary runtime update installs releases. Acquisition never starts a stopped outer yard
 or changes its desired power state.
 
+Client delivery: the opt-in `test-vms-client` profile delivers the client and the `subyard-test-vms`
+skill without a Subyard checkout or coding-tool integration; owner-side `yard -Y NAME provision
+test-vms-client` adds it to the yard's local selection, and a role with `ALLOWS_HOST_ACCESS=false`
+refuses it. Client and skill live in `/usr/local/share/subyard/skills/subyard-test-vms/`; static
+skill refresh updates their discovery links, and removing the profile from `ENVIRONMENT_PROFILES`
+and reconciling the yard retires them (a held lease's keeper still releases it after the idle limit).
+
 For use from any yard without a checkout, see the
 [`subyard-test-vms` skill](../config/profiles/test-vms-client/skills/subyard-test-vms/SKILL.md).
 `dev/agent-e2e.sh` sources that same client and adds worktree copying, lanes and phase evidence;
