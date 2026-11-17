@@ -104,6 +104,9 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 			}
 			response := `{"schemaVersion":1,"inspection":{"plan":"plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","assessment":{"action":"release.transition.v2","effect":"mutation","changed":true,"impacts":["local-metadata","persistent-data","yard-runtime"],"recovery":"reversible","consequences":["apply the inspected rollback"]},"outcome":{"status":"migration-required","reachedGoal":false,"active":"release-a","previous":"release-b","target":"release-b","code":"transition-required","message":"confirmation required","retry":"confirm the inspected rollback"}}}`
 			candidate := writeRuntimeCandidateFixture(t, root, response)
+			if err := os.MkdirAll(filepath.Join(root, "releases", "release-a"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			bindRollbackFixtureRegistry(t, candidate, registryPayload)
 			for link, target := range map[string]string{"current": "releases/release-a", "previous": "releases/release-b"} {
 				if err := os.Symlink(target, filepath.Join(root, link)); err != nil {
