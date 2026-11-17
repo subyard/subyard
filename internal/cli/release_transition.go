@@ -122,6 +122,32 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		cli.errorf("release transition: %v", err)
 		return 1
 	}
+	if recovery == nil && request.Direction == releasetransition.DirectionActivatePrevious {
+		store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+		if err != nil {
+			cli.errorf("rollback recovery: %v", err)
+			return 1
+		}
+		links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
+		if err != nil {
+			cli.errorf("rollback recovery: %v", err)
+			return 1
+		}
+		runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{}))
+		defer runtime.Close()
+		response, handled, err := store.ProcessSourceRollbackActivation(ctx, request, cli.options.RepositoryRoot, links.Activate, runtime.InvokeRollbackTarget)
+		if err != nil {
+			cli.errorf("rollback recovery: %v", err)
+			return 1
+		}
+		if handled {
+			if err := json.NewEncoder(protocolOutput).Encode(response); err != nil {
+				cli.errorf("rollback recovery response: %v", err)
+				return 1
+			}
+			return 0
+		}
+	}
 	operation := cli.releaseActivationOperation(request)
 	reconcilers := operation.bindServiceRegistrationActivation(request, operation.activationReconcilers(request))
 	ownerRegistration := operation.ownerRegistrationTransition(request)
