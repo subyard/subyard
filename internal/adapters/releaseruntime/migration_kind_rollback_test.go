@@ -61,6 +61,9 @@ func TestMigrationKindRollbackRefusesBeforeTargetInspectionAndCollectsLayout(t *
 	if !errors.As(err, &failure) || failure.outcome.Code != releasetransition.CodeRollbackIncompatible {
 		t.Fatalf("refusal = %v", err)
 	}
+	if err := releasetransition.ValidateProcessOutcome(releasetransition.Goal{Target: request.Target, Direction: request.Direction}, failure.outcome); err != nil {
+		t.Fatalf("refusal violates the frozen outcome contract: %v", err)
+	}
 	if !strings.Contains(failure.outcome.Message, "migration canonicalize") || !strings.Contains(failure.outcome.Message, "Git configuration cache") {
 		t.Fatalf("independent findings lost: %s", failure.outcome.Message)
 	}
