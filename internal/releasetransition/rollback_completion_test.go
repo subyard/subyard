@@ -129,8 +129,6 @@ func TestCompletedRollbackRequiresExactClosureAndNativeSnapshots(t *testing.T) {
 			case "artifact-evidence":
 				testkit.WriteFile(t, filepath.Join(store.configHome, "release-transition", "v2", "transactions", string(closure.Transaction), "evidence", RollbackTargetActivationStep+".verified.json"), []byte("{}\n"), 0o600)
 			case "missing-closure":
-				// Absence conveys no foreign-history admission. The ordinary
-				// strict reader must remain responsible for this case.
 				store.configHome = testkit.TempDir(t)
 				selected, err := store.ReadCurrentJournal()
 				if err != nil {
@@ -141,7 +139,7 @@ func TestCompletedRollbackRequiresExactClosureAndNativeSnapshots(t *testing.T) {
 				}
 			}
 			proof, err := store.InspectCompletedRollback(registry, digest, artifact)
-			if proof != nil || err == nil && change != "missing-closure" {
+			if proof != nil || err == nil {
 				t.Fatalf("changed completion was accepted: %+v, %v", proof, err)
 			}
 		})

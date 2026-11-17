@@ -9,9 +9,8 @@ type CompletedRollback struct {
 	Ledger  MigrationLedgerSnapshot
 }
 
-// InspectSealedCompletedRollback introduces native target admission only when
-// protected closure evidence exists. Historical targets retain their original
-// read-only completion path, including their historical registry codecs.
+// InspectSealedCompletedRollback keeps the historical codec path for unmarked
+// journals and requires protected closure for source-owned completion.
 func (store *POSIXV2Store) InspectSealedCompletedRollback(registryPayload []byte, artifact Fingerprint) (*CompletedRollback, error) {
 	snapshot, err := store.ReadCurrentJournal()
 	if err != nil || !snapshot.Exists {
@@ -25,8 +24,11 @@ func (store *POSIXV2Store) InspectSealedCompletedRollback(registryPayload []byte
 		return nil, nil
 	}
 	closure, err := store.readRecord(rollbackClosureParts, string(journal.Transaction)+".json")
-	if err != nil || !closure.Exists {
+	if err != nil {
 		return nil, err
+	}
+	if !closure.Exists {
+		return nil, checkMissingRollbackClosure(journal)
 	}
 	registry, digest, err := ParseRegistryV2(registryPayload, BuiltinCapabilityCatalog())
 	if err != nil {
@@ -36,8 +38,7 @@ func (store *POSIXV2Store) InspectSealedCompletedRollback(registryPayload []byte
 }
 
 // InspectCompletedRollback recognizes only an exactly closed foreign rollback.
-// A missing receipt is not compatibility evidence. Callers keep their ordinary
-// strict admission in that case and must observe current links and activation.
+// Callers must also observe current links and activation.
 func (store *POSIXV2Store) InspectCompletedRollback(registry RegistryV2, digest, artifact Fingerprint) (*CompletedRollback, error) {
 	if err := registry.Validate(BuiltinCapabilityCatalog()); err != nil {
 		return nil, err
@@ -54,8 +55,11 @@ func (store *POSIXV2Store) InspectCompletedRollback(registry RegistryV2, digest,
 		return nil, nil
 	}
 	closure, err := store.readRollbackClosure(journal.Transaction)
-	if err != nil || closure == nil {
+	if err != nil {
 		return nil, err
+	}
+	if closure == nil {
+		return nil, checkMissingRollbackClosure(journal)
 	}
 	if closure.Retirement != nil || !bytes.Equal(closure.RollbackJournal, snapshot.Payload) || closure.Completion.TargetRegistry != digest || closure.Completion.TargetArtifact != artifact || closure.ActivationRequest.ConfigHome != store.configHome {
 		return nil, invalid("completed rollback does not bind this target and protected home")
@@ -76,4 +80,11 @@ func (store *POSIXV2Store) InspectCompletedRollback(registry RegistryV2, digest,
 		return nil, invalid("completed rollback has pending target migrations")
 	}
 	return &CompletedRollback{Journal: journal, Ledger: state}, nil
+}
+
+func checkMissingRollbackClosure(journal JournalRecord) error {
+	if HasRollbackSourceOwner(journal) {
+		return invalid("completed source-owned rollback has no protected closure")
+	}
+	return nil
 }

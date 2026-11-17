@@ -716,11 +716,11 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 	if err := visit([]string{"release-transition"}); err != nil {
 		return "", err
 	}
-	closures, present, err := store.readDirectoryEntries(rollbackClosureParts, maxTransactionGraphEntries)
+	closures, present, err := store.readDirectoryEntries(rollbackClosureParts, 2*maxTransactionGraphEntries)
 	if err != nil {
 		return "", err
 	}
-	if len(closures) > maxTransactionGraphEntries {
+	if len(closures) > 2*maxTransactionGraphEntries {
 		return "", invalid("rollback closure namespace exceeds its entry bound")
 	}
 	// Preserve historical source bindings when this new auxiliary namespace
@@ -730,8 +730,14 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 			return "", err
 		}
 	}
+	seenClosures := make(map[TransactionID]bool, len(closures))
 	for _, entry := range closures {
-		transaction := TransactionID(strings.TrimSuffix(entry.Name(), ".json"))
+		name := strings.TrimPrefix(entry.Name(), rollbackRetirementPrefix)
+		transaction := TransactionID(strings.TrimSuffix(name, ".json"))
+		if seenClosures[transaction] {
+			continue
+		}
+		seenClosures[transaction] = true
 		if _, err := store.readRollbackClosure(transaction); err != nil {
 			return "", err
 		}
@@ -770,7 +776,8 @@ func sourceMetadataDirectory(parts []string) bool {
 
 func sourceMetadataFile(parts []string) bool {
 	if len(parts) == 5 && slices.Equal(parts[:4], rollbackClosureParts) {
-		return strings.HasSuffix(parts[4], ".json") && validateTransactionID(TransactionID(strings.TrimSuffix(parts[4], ".json"))) == nil
+		name := strings.TrimPrefix(parts[4], rollbackRetirementPrefix)
+		return strings.HasSuffix(name, ".json") && validateTransactionID(TransactionID(strings.TrimSuffix(name, ".json"))) == nil
 	}
 	if len(parts) == 4 && slices.Equal(parts[:2], []string{"reconcile", "native-identities"}) {
 		return validateTransactionID(TransactionID(parts[2])) == nil && strings.HasSuffix(parts[3], ".json") && validateSafeID(strings.TrimSuffix(parts[3], ".json"), "closed native identity") == nil

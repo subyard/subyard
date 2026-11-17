@@ -3,6 +3,9 @@ package releasetransition
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"maps"
+	"slices"
 )
 
 // rollbackClosureV1 is per-transaction evidence of closed artifact bytes. It
@@ -22,7 +25,7 @@ type rollbackClosureV1 struct {
 	Completion         RollbackTargetCompletion `json:"completion"`
 	ProjectionProducer Fingerprint              `json:"projectionProducer,omitempty"`
 	Artifacts          []rollbackArtifact       `json:"artifacts"`
-	Retirement         *rollbackRetirementV1    `json:"retirement,omitempty"`
+	Retirement         *rollbackRetirement      `json:"-"`
 }
 
 var rollbackClosureParts = []string{"reconcile", "rollback", "v1", "closures"}
@@ -43,6 +46,9 @@ func parseRollbackClosure(payload []byte) (rollbackClosureV1, error) {
 }
 
 func marshalRollbackClosure(closure rollbackClosureV1) ([]byte, error) {
+	if closure.Retirement != nil {
+		return nil, invalid("rollback retirement is a separate record format")
+	}
 	if err := closure.validate(); err != nil {
 		return nil, err
 	}
@@ -77,15 +83,8 @@ func (closure rollbackClosureV1) validate() error {
 	if err != nil {
 		return err
 	}
-	for domain, epoch := range target.CurrentEpochs {
-		left, err := source.MigrationPrefixDigest(domain, epoch)
-		if err != nil {
-			return err
-		}
-		right, err := target.MigrationPrefixDigest(domain, epoch)
-		if err != nil || left != right {
-			return invalid("rollback closure changes the target migration prefix")
-		}
+	if err := CheckRollbackTargetPrefixes(source, target); err != nil {
+		return err
 	}
 	journal, err := ParseJournal(closure.RollbackJournal)
 	if err != nil {
@@ -162,10 +161,22 @@ func (closure rollbackClosureV1) validate() error {
 		}
 		last = artifact.Path
 	}
-	if closure.Retirement != nil {
-		return closure.Retirement.validate(closure)
-	}
 	return nil
+}
+
+// CheckRollbackTargetPrefixes compares the complete native target frontier to
+// the structurally verified source registry, including retained dependencies.
+func CheckRollbackTargetPrefixes(source, target RegistryV2) error {
+	var refusals []error
+	for _, domain := range slices.Sorted(maps.Keys(target.CurrentEpochs)) {
+		epoch := target.CurrentEpochs[domain]
+		left, leftErr := source.MigrationPrefixDigest(domain, epoch)
+		right, rightErr := target.MigrationPrefixDigest(domain, epoch)
+		if leftErr != nil || rightErr != nil || left != right {
+			refusals = append(refusals, invalid("rollback target has a different migration prefix for domain %q", domain))
+		}
+	}
+	return errors.Join(refusals...)
 }
 
 func (store *POSIXV2Store) readRollbackClosure(transaction TransactionID) (*rollbackClosureV1, error) {
@@ -173,8 +184,24 @@ func (store *POSIXV2Store) readRollbackClosure(transaction TransactionID) (*roll
 		return nil, err
 	}
 	snapshot, err := store.readRecord(rollbackClosureParts, string(transaction)+".json")
-	if err != nil || !snapshot.Exists {
+	if err != nil {
 		return nil, err
+	}
+	retirement, receipt, err := store.readRollbackRetirement(transaction)
+	if err != nil {
+		return nil, err
+	}
+	if !snapshot.Exists {
+		if receipt.Exists {
+			remaining, err := store.rollbackArtifactInventory(transaction)
+			if err != nil {
+				return nil, err
+			}
+			if len(remaining) != 0 {
+				return nil, invalid("rollback retirement lost the closure for remaining artifacts")
+			}
+		}
+		return nil, nil
 	}
 	closure, err := parseRollbackClosure(snapshot.Payload)
 	if err != nil {
@@ -183,14 +210,25 @@ func (store *POSIXV2Store) readRollbackClosure(transaction TransactionID) (*roll
 	if closure.Transaction != transaction {
 		return nil, invalid("rollback closure is filed under a different transaction")
 	}
-	if err := store.checkClosedRollbackArtifacts(closure); err != nil {
+	if receipt.Exists {
+		inventory, err := json.Marshal(closure.Artifacts)
+		if err != nil || retirement.Original != snapshot.Fingerprint || retirement.Inventory != fingerprintPayload(inventory) || retirement.ProjectionProducer != closure.ProjectionProducer {
+			return nil, invalid("rollback retirement does not bind the original closure and inventory")
+		}
+		closure.Retirement = &retirement
+		if _, err := store.remainingRetiringRollbackArtifacts(closure); err != nil {
+			return nil, err
+		}
+		return &closure, nil
+	}
+	if err := store.checkRollbackArtifactInventory(transaction, closure.Artifacts); err != nil {
 		return nil, err
 	}
 	journal, err := ParseJournal(closure.RollbackJournal)
 	if err != nil {
 		return nil, err
 	}
-	if transaction == journal.Transaction && closure.Retirement == nil {
+	if transaction == journal.Transaction {
 		if err := store.sourceTransactionArtifacts(journal); err != nil {
 			return nil, err
 		}

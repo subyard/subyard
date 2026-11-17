@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -40,6 +41,7 @@ func nextRollbackRetentionCycle(t *testing.T, store *POSIXV2Store, previous roll
 		t.Fatal(err)
 	}
 	journal.Transaction = transaction
+	journal.RegistryDigest = closure.ActivationRequest.SourceRegistry
 	journal.AuthorizationPlan = PlanToken("plan-v1-" + string(fingerprintPayload([]byte(transaction))))
 	target, _, err := ParseRegistryV2Provenance(closure.TargetRegistry)
 	if err != nil {
@@ -113,6 +115,122 @@ func nextRollbackRetentionCycle(t *testing.T, store *POSIXV2Store, previous roll
 		t.Fatal(err)
 	}
 	return closure
+}
+
+func TestRollbackRetentionMakesRenamedIntentDurableBeforeRetryUnlinks(t *testing.T) {
+	store, registry, previous := rollbackRetentionFixture(t)
+	current := nextRollbackRetentionCycle(t, store, previous, "tx-new-cycle")
+	interrupted := errors.New("stopped after rename before directory fsync")
+	store.fault = func(point string) error {
+		if point == "after-publish-before-dir-fsync" {
+			return interrupted
+		}
+		return nil
+	}
+	if err := cleanupRollbackCycle(store, registry, current); !errors.Is(err, interrupted) {
+		t.Fatalf("retirement publication = %v", err)
+	}
+	fresh, err := NewPOSIXV2Store(store.configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockedFsync := errors.New("closure directory fsync unavailable")
+	fresh.fault = func(point string) error {
+		if point == "before-rollback-retirement-dir-fsync" {
+			return blockedFsync
+		}
+		return nil
+	}
+	if err := cleanupRollbackCycle(fresh, registry, current); !errors.Is(err, blockedFsync) {
+		t.Fatalf("retirement retry = %v", err)
+	}
+	if err := fresh.checkRollbackArtifactInventory(previous.Transaction, previous.Artifacts); err != nil {
+		t.Fatalf("retry touched artifacts before the directory fsync: %v", err)
+	}
+	fresh.fault = nil
+	if err := cleanupRollbackCycle(fresh, registry, current); err != nil {
+		t.Fatal(err)
+	}
+	if closed, err := fresh.readRollbackClosure(previous.Transaction); err != nil || closed != nil {
+		t.Fatalf("old cycle remains after a durable retry: %+v, %v", closed, err)
+	}
+}
+
+func TestRollbackRetentionBindsTwoLargeCyclesWithoutCopyingThem(t *testing.T) {
+	store, registry, template := rollbackRetentionFixture(t)
+	template.SourceRegistry = append(bytes.Clone(template.SourceRegistry), bytes.Repeat([]byte(" "), 430<<10)...)
+	template.ActivationRequest.SourceRegistry = fingerprintPayload(template.SourceRegistry)
+	previous := nextRollbackRetentionCycle(t, store, template, "tx-large-old")
+	current := nextRollbackRetentionCycle(t, store, previous, "tx-large-new")
+	oldBytes, err := marshalRollbackClosure(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBytes, err := marshalRollbackClosure(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldBytes)+len(newBytes) <= MaxProtectedRecordBytes {
+		t.Fatal("fixture does not exceed the combined record limit")
+	}
+	interrupted := errors.New("stop at durable retirement")
+	store.fault = func(point string) error {
+		if point == "after-rollback-retirement-publication" {
+			return interrupted
+		}
+		return nil
+	}
+	if err := cleanupRollbackCycle(store, registry, current); !errors.Is(err, interrupted) {
+		t.Fatalf("large old cycle could not publish retirement: %v", err)
+	}
+	retired, err := store.readRollbackClosure(previous.Transaction)
+	if err != nil || retired == nil || retired.Retirement == nil {
+		t.Fatalf("large cycle retirement = %+v, %v", retired, err)
+	}
+	receipt := retired.Retirement
+	if receipt.Original != fingerprintPayload(oldBytes) || receipt.Superseding != fingerprintPayload(newBytes) || receipt.SelectedJournal != fingerprintPayload(current.RollbackJournal) {
+		t.Fatal("compact retirement lost its closure or successor binding")
+	}
+	_, intent, err := store.readRollbackRetirement(previous.Transaction)
+	if err != nil || len(intent.Payload) == 0 || len(intent.Payload) > maxRollbackRetirementBytes {
+		t.Fatalf("retirement record is not compact: %d bytes, %v", len(intent.Payload), err)
+	}
+	store.fault = nil
+	if err := cleanupRollbackCycle(store, registry, current); err != nil {
+		t.Fatal(err)
+	}
+	if closed, err := store.readRollbackClosure(previous.Transaction); err != nil || closed != nil {
+		t.Fatalf("old large cycle remains: %+v, %v", closed, err)
+	}
+}
+
+func TestRollbackRetentionFinishesAfterDeletingOriginalClosure(t *testing.T) {
+	store, registry, previous := rollbackRetentionFixture(t)
+	current := nextRollbackRetentionCycle(t, store, previous, "tx-new-cycle")
+	interrupted := errors.New("stopped after closure removal")
+	store.fault = func(point string) error {
+		if point == "after-rollback-closure-retirement" {
+			return interrupted
+		}
+		return nil
+	}
+	if err := cleanupRollbackCycle(store, registry, current); !errors.Is(err, interrupted) {
+		t.Fatalf("closure removal = %v", err)
+	}
+	fresh, err := NewPOSIXV2Store(store.configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh.InspectSourceMetadata(registry, current.Completion.TargetRegistry); err != nil {
+		t.Fatalf("remaining retirement intent blocks source metadata: %v", err)
+	}
+	if err := cleanupRollbackCycle(fresh, registry, current); err != nil {
+		t.Fatal(err)
+	}
+	entries, _, err := fresh.readDirectoryEntries(rollbackClosureParts, 2)
+	if err != nil || len(entries) != 1 || entries[0].Name() != string(current.Transaction)+".json" {
+		t.Fatalf("cleanup retained old closure or retirement records: %v, %v", entries, err)
+	}
 }
 
 func TestRollbackRetentionDoesNotSupersedeADifferentSealedPair(t *testing.T) {

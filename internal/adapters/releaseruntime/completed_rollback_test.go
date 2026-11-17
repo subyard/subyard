@@ -69,6 +69,22 @@ func TestCompletedRollbackRoutesToTargetAndAdmitsNativeSourceMetadata(t *testing
 	}
 }
 
+func TestCompletedSourceOwnedRollbackRefusesMissingClosure(t *testing.T) {
+	adapter, runtimeRoot, home, source, _, journal := completedRollbackRuntimeFixture(t, []byte(futureRollbackSourceRegistry))
+	if err := os.Remove(filepath.Join(home, "reconcile", "rollback", "v1", "closures", string(journal.Transaction)+".json")); err != nil {
+		t.Fatal(err)
+	}
+	// A fallback to S would try to verify its now-unavailable engine.
+	if err := os.Remove(filepath.Join(source.root, "bin", "yard-engine")); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := adapter.inspectProtectedTransition(context.Background(), runtimeRoot, home, "default", nil)
+	var refusal publicReleaseInspectionError
+	if inspection != nil || !errors.As(err, &refusal) || !strings.Contains(refusal.cause.Error(), "no protected closure") {
+		t.Fatalf("readiness without closure = %+v, %v", inspection, err)
+	}
+}
+
 func TestUnfinishedRollbackVerifiesExactSourceBeforeExecution(t *testing.T) {
 	for _, sameRegistry := range []bool{false, true} {
 		t.Run(fmt.Sprint(sameRegistry), func(t *testing.T) {

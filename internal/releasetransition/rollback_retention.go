@@ -2,66 +2,74 @@ package releasetransition
 
 import (
 	"bytes"
+	"encoding/json"
 	"slices"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
-// Retirement is durable deletion intent, never history or execution authority.
-// The original inventory stays intact until all its bytes have been retired.
-type rollbackRetirementV1 struct {
-	Original        Fingerprint  `json:"original"`
-	SelectedJournal []byte       `json:"selectedJournal"`
-	Endpoints       ReleaseLinks `json:"endpoints"`
-	Projection      Fingerprint  `json:"projection"`
-	Superseding     []byte       `json:"superseding,omitempty"`
+// Retirement records share the closure directory so one fsync makes intent
+// durable. The prefix cannot collide with an ordinary transaction ID.
+const (
+	rollbackRetirementPrefix   = "-retire-"
+	maxRollbackRetirementBytes = 1024
+)
+
+// Retirement pins the old closure and inventory, selected journal and verified
+// successor. The original closure supplies the inventory during deletion.
+type rollbackRetirement struct {
+	SchemaVersion       int           `json:"schemaVersion"`
+	Transaction         TransactionID `json:"transaction"`
+	Original            Fingerprint   `json:"original"`
+	Inventory           Fingerprint   `json:"inventory"`
+	SelectedJournal     Fingerprint   `json:"selectedJournal"`
+	SelectedTransaction TransactionID `json:"selectedTransaction"`
+	Superseding         Fingerprint   `json:"superseding,omitempty"`
+	Projection          Fingerprint   `json:"projection"`
+	ProjectionProducer  Fingerprint   `json:"projectionProducer,omitempty"`
 }
 
-func (retirement rollbackRetirementV1) validate(closure rollbackClosureV1) error {
-	original := closure
-	original.Retirement = nil
-	payload, err := marshalRollbackClosure(original)
-	if err != nil || fingerprintPayload(payload) != retirement.Original {
-		return invalid("rollback retirement does not bind the original closure")
+func parseRollbackRetirement(payload []byte, transaction TransactionID) (rollbackRetirement, error) {
+	var retirement rollbackRetirement
+	if err := decodeBoundedRecord(payload, maxRollbackRetirementBytes, &retirement); err != nil {
+		return retirement, err
 	}
-	selected, err := ParseJournal(retirement.SelectedJournal)
-	if err != nil {
-		return err
+	if retirement.SchemaVersion != 1 || retirement.Transaction != transaction || retirement.SelectedTransaction == transaction {
+		return retirement, invalid("rollback retirement has inconsistent transaction bindings")
 	}
-	canonical, err := MarshalJournal(selected)
-	if err != nil || !bytes.Equal(canonical, retirement.SelectedJournal) || selected.Checkpoint != JournalComplete || selected.Transaction == closure.Transaction {
-		return invalid("rollback retirement has no distinct completed current journal")
+	if err := validateTransactionID(retirement.SelectedTransaction); err != nil {
+		return retirement, err
 	}
-	if err := validateFingerprint(retirement.Projection, "rollback retirement projection"); err != nil {
-		return err
-	}
-	if !activatedReleaseLinks(retirement.Endpoints, selected.Releases) && !initialReleaseLinks(retirement.Endpoints, selected.Releases) {
-		return invalid("rollback retirement endpoints differ from the selected journal")
-	}
-	if len(retirement.Superseding) != 0 {
-		var successor rollbackClosureV1
-		if err := decodeBoundedRecord(retirement.Superseding, MaxProtectedRecordBytes, &successor); err != nil {
-			return err
+	for _, digest := range []Fingerprint{retirement.Original, retirement.Inventory, retirement.SelectedJournal, retirement.Projection} {
+		if err := validateFingerprint(digest, "rollback retirement binding"); err != nil {
+			return retirement, err
 		}
-		// Forbid nested certificates before validation, bounding recursion and
-		// preventing a chain of receipts from becoming a permanent retention root.
-		if successor.Retirement != nil {
-			return invalid("rollback retirement contains nested retirement evidence")
-		}
-		if _, err := parseRollbackClosure(retirement.Superseding); err != nil {
-			return err
-		}
-		if !bytes.Equal(successor.RollbackJournal, retirement.SelectedJournal) || !sameRollbackPair(original, successor) || original.Completion.Transaction == successor.Completion.Transaction {
-			return invalid("rollback retirement does not bind a newer completion of the same sealed pair")
-		}
-	} else if closure.Releases.Target == retirement.Endpoints.Active || retirement.Endpoints.Previous != nil && closure.Releases.Target == *retirement.Endpoints.Previous {
-		return invalid("rollback retirement has no supersession proof for a retained endpoint")
 	}
-	if closure.ProjectionProducer != "" && closure.ProjectionProducer == retirement.Projection {
-		return invalid("rollback retirement would remove the pinned projection producer")
+	for _, digest := range []Fingerprint{retirement.Superseding, retirement.ProjectionProducer} {
+		if digest != "" {
+			if err := validateFingerprint(digest, "rollback retirement binding"); err != nil {
+				return retirement, err
+			}
+		}
 	}
-	return nil
+	if retirement.ProjectionProducer == retirement.Projection {
+		return retirement, invalid("rollback retirement would remove the pinned projection producer")
+	}
+	canonical, err := json.Marshal(retirement)
+	if err != nil || !bytes.Equal(append(canonical, '\n'), payload) {
+		return retirement, invalid("rollback retirement is not canonical")
+	}
+	return retirement, nil
+}
+
+func (store *POSIXV2Store) readRollbackRetirement(transaction TransactionID) (rollbackRetirement, ProtectedSnapshot, error) {
+	snapshot, err := store.readRecord(rollbackClosureParts, rollbackRetirementPrefix+string(transaction)+".json")
+	if err != nil || !snapshot.Exists {
+		return rollbackRetirement{}, snapshot, err
+	}
+	retirement, err := parseRollbackRetirement(snapshot.Payload, transaction)
+	return retirement, snapshot, err
 }
 
 func sameRollbackPair(left, right rollbackClosureV1) bool {
@@ -72,20 +80,17 @@ func sameRollbackPair(left, right rollbackClosureV1) bool {
 		left.Completion.Projection == right.Completion.Projection && left.Completion.NativeHistory == right.Completion.NativeHistory
 }
 
-func (store *POSIXV2Store) checkClosedRollbackArtifacts(closure rollbackClosureV1) error {
-	if closure.Retirement == nil {
-		return store.checkRollbackArtifactInventory(closure.Transaction, closure.Artifacts)
-	}
+func (store *POSIXV2Store) remainingRetiringRollbackArtifacts(closure rollbackClosureV1) ([]rollbackArtifact, error) {
 	actual, err := store.rollbackArtifactInventory(closure.Transaction)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, remaining := range actual {
 		if !slices.Contains(closure.Artifacts, remaining) {
-			return invalid("retiring rollback artifacts contain changed or unbound bytes")
+			return nil, invalid("retiring rollback artifacts contain changed or unbound bytes")
 		}
 	}
-	return nil
+	return actual, nil
 }
 
 func (store *POSIXV2Store) prepareRollbackRetirement(transaction TransactionID, selected ProtectedSnapshot, state MigrationLedgerSnapshot, endpoints ReleaseLinks, successor *rollbackClosureV1) error {
@@ -105,19 +110,48 @@ func (store *POSIXV2Store) prepareRollbackRetirement(transaction TransactionID, 
 	if !sameProtectedSnapshot(current, selected) {
 		return ErrProtectedStoreStale
 	}
-	retirement := &rollbackRetirementV1{Original: expected.Fingerprint, SelectedJournal: selected.Payload, Endpoints: endpoints, Projection: state.ProjectionSnapshot.Fingerprint}
-	if successor != nil && sameRollbackPair(*closure, *successor) && closure.Completion.Transaction != successor.Completion.Transaction {
-		retirement.Superseding, err = marshalRollbackClosure(*successor)
-		if err != nil {
-			return err
-		}
-	}
-	closure.Retirement = retirement
-	payload, err := marshalRollbackClosure(*closure)
+	journal, err := ParseJournal(selected.Payload)
 	if err != nil {
 		return err
 	}
-	if err := store.compareAndSwap(rollbackClosureParts, name, expected, payload); err != nil {
+	canonical, err := MarshalJournal(journal)
+	if err != nil || !bytes.Equal(canonical, selected.Payload) || journal.Checkpoint != JournalComplete || journal.Transaction == transaction {
+		return invalid("rollback retirement requires a distinct completed selected journal")
+	}
+	if !activatedReleaseLinks(endpoints, journal.Releases) && !initialReleaseLinks(endpoints, journal.Releases) {
+		return invalid("rollback retirement endpoints differ from the selected journal")
+	}
+	inventory, err := json.Marshal(closure.Artifacts)
+	if err != nil {
+		return err
+	}
+	retirement := rollbackRetirement{
+		SchemaVersion: 1, Transaction: transaction, Original: expected.Fingerprint,
+		Inventory:       fingerprintPayload(inventory),
+		SelectedJournal: selected.Fingerprint, SelectedTransaction: journal.Transaction,
+		Projection: state.ProjectionSnapshot.Fingerprint, ProjectionProducer: closure.ProjectionProducer,
+	}
+	if successor != nil && sameRollbackPair(*closure, *successor) && closure.Completion.Transaction != successor.Completion.Transaction {
+		if !bytes.Equal(successor.RollbackJournal, selected.Payload) {
+			return invalid("rollback retirement successor differs from the selected journal")
+		}
+		payload, err := marshalRollbackClosure(*successor)
+		if err != nil {
+			return err
+		}
+		retirement.Superseding = fingerprintPayload(payload)
+	} else if closure.Releases.Target == endpoints.Active || endpoints.Previous != nil && closure.Releases.Target == *endpoints.Previous {
+		return invalid("rollback retirement has no supersession proof for a retained endpoint")
+	}
+	payload, err := json.Marshal(retirement)
+	if err != nil {
+		return err
+	}
+	payload = append(payload, '\n')
+	if _, err := parseRollbackRetirement(payload, transaction); err != nil {
+		return err
+	}
+	if err := store.createImmutable(rollbackClosureParts, rollbackRetirementPrefix+name, payload); err != nil {
 		return err
 	}
 	return store.inject("after-rollback-retirement-publication")
@@ -127,14 +161,40 @@ func (store *POSIXV2Store) prepareRollbackRetirement(transaction TransactionID, 
 // Exact conditional removals preserve any byte changed after the inventory read.
 func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction TransactionID) (bool, error) {
 	closure, err := store.readRollbackClosure(transaction)
-	if err != nil || closure == nil {
-		return false, err
-	}
-	if closure.Retirement == nil {
-		return true, invalid("rollback artifacts have no durable retirement evidence")
-	}
-	actual, err := store.rollbackArtifactInventory(transaction)
 	if err != nil {
+		return true, err
+	}
+	retirement, receipt, err := store.readRollbackRetirement(transaction)
+	if err != nil {
+		return true, err
+	}
+	if !receipt.Exists {
+		if closure != nil {
+			return true, invalid("rollback artifacts have no durable retirement evidence")
+		}
+		return false, nil
+	}
+	var actual []rollbackArtifact
+	if closure != nil {
+		actual, err = store.remainingRetiringRollbackArtifacts(*closure)
+		if err != nil {
+			return true, err
+		}
+	}
+	// A previous attempt may have stopped between the rename and its fsync.
+	// Make the deletion intent durable before touching any covered artifact.
+	parent, present, err := store.openParent(rollbackClosureParts, false)
+	if err != nil {
+		return true, err
+	}
+	if !present {
+		return true, ErrProtectedStoreStale
+	}
+	defer unix.Close(parent)
+	if err := store.inject("before-rollback-retirement-dir-fsync"); err != nil {
+		return true, err
+	}
+	if err := unix.Fsync(parent); err != nil {
 		return true, err
 	}
 	// Descendants precede their directory marker in reverse lexical order.
@@ -175,11 +235,23 @@ func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction Transacti
 			return true, err
 		}
 	}
-	payload, err := marshalRollbackClosure(*closure)
-	if err != nil {
-		return true, err
+	if closure != nil {
+		name := string(transaction) + ".json"
+		original, err := store.readRecord(rollbackClosureParts, name)
+		if err != nil {
+			return true, err
+		}
+		if original.Fingerprint != retirement.Original {
+			return true, ErrProtectedStoreStale
+		}
+		if err := store.removeProtectedRecord(rollbackClosureParts, name, original.Payload); err != nil {
+			return true, err
+		}
+		if err := store.inject("after-rollback-closure-retirement"); err != nil {
+			return true, err
+		}
 	}
-	return true, store.removeProtectedRecord(rollbackClosureParts, string(transaction)+".json", payload)
+	return true, store.removeProtectedRecord(rollbackClosureParts, rollbackRetirementPrefix+string(transaction)+".json", receipt.Payload)
 }
 
 func rollbackArtifactLocation(transaction TransactionID, path string) ([]string, string, bool, error) {
@@ -245,30 +317,27 @@ func (store *POSIXV2Store) finishRollbackRetirements(current TransactionID, reta
 	if err := retain(graph); err != nil {
 		return err
 	}
-	entries, _, err := store.readDirectoryEntries(rollbackClosureParts, maxTransactionGraphEntries)
+	entries, _, err := store.readDirectoryEntries(rollbackClosureParts, 2*maxTransactionGraphEntries)
 	if err != nil {
 		return err
 	}
-	if len(entries) > maxTransactionGraphEntries {
+	if len(entries) > 2*maxTransactionGraphEntries {
 		return invalid("rollback closure namespace exceeds its entry bound")
 	}
 	removed := 0
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
+		name, retiring := strings.CutPrefix(entry.Name(), rollbackRetirementPrefix)
+		if !retiring {
+			continue
+		}
+		transaction := TransactionID(strings.TrimSuffix(name, ".json"))
+		if err := validateTransactionID(transaction); err != nil || !strings.HasSuffix(name, ".json") {
 			return invalid("rollback retirement namespace contains an unsupported record")
 		}
-		transaction := TransactionID(strings.TrimSuffix(entry.Name(), ".json"))
 		if _, present := graph.directories[transaction]; present {
 			continue
 		}
 		if _, protected := graph.protected[string(transaction)]; protected {
-			continue
-		}
-		closure, err := store.readRollbackClosure(transaction)
-		if err != nil {
-			return err
-		}
-		if closure == nil || closure.Retirement == nil {
 			continue
 		}
 		if _, err := store.removeRetiringRollbackArtifacts(transaction); err != nil {
