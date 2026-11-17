@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -86,7 +87,11 @@ func observeProjectHookInputs(ctx context.Context, root string, yard domain.Cont
 	if err != nil {
 		return hookObservation{}, err
 	}
-	result, err := execute(callContext, ports.InstanceExecRequest{Command: []string{"bash", "-s", "--", "--observe"}, Stdin: source, User: uint32(yard.DevUID), Group: uint32(yard.DevUID)})
+	if yard.DevUID < 0 || int64(yard.DevUID) > math.MaxUint32 {
+		return hookObservation{}, fmt.Errorf("project hook observation requires a UID in the uint32 range")
+	}
+	uid := uint32(yard.DevUID)
+	result, err := execute(callContext, ports.InstanceExecRequest{Command: []string{"bash", "-s", "--", "--observe"}, Stdin: source, User: uid, Group: uid})
 	if err != nil || result.ExitCode != 0 {
 		return hookObservation{}, fmt.Errorf("project hook inputs could not be observed")
 	}
