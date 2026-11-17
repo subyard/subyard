@@ -23,8 +23,13 @@ func TestMigrationKindRollbackPublishedTarget(t *testing.T) {
 		{ID: "canonical", Kind: "test-vms-settings-v1-to-v2", Domain: "settings"},
 	}}
 	target := &verifiedPublishedCandidate{version: "0.29.0", manifestDigest: "4591220831f78d5893a50bdc2ff59e4f21f09a2b5a4f99a15390cb1107eb6cdb", registryDigest: "bound"}
-	findings := migrationKindRollbackFindings(target, source, releasetransition.RegistryV2{}, nil)
-	if len(findings) != 2 || !strings.Contains(findings[0], "release 0.29.0 does not know migration a-guard (kind nm-device-guard-v1)") || !strings.Contains(findings[1], "z-future") {
+	retained := releasetransition.RegistryV2{
+		MinimumEpochs: map[string]int{"settings": 1, "power-metadata": 1},
+		CurrentEpochs: map[string]int{"settings": 1, "power-metadata": 1},
+	}
+	ledger := releasetransition.BaselineLedgerV2(retained)
+	findings := migrationKindRollbackFindings(target, source, retained, ledger)
+	if len(findings) != 2 || !strings.Contains(findings[0], "release 0.29.0 has no verified support for migration a-guard (kind nm-device-guard-v1)") || !strings.Contains(findings[1], "z-future") {
 		t.Fatalf("findings = %q", findings)
 	}
 	for _, change := range []string{"manifest", "version"} {
@@ -34,8 +39,8 @@ func TestMigrationKindRollbackPublishedTarget(t *testing.T) {
 		} else {
 			changed.version = "0.30.0"
 		}
-		unknown := migrationKindRollbackFindings(&changed, source, releasetransition.RegistryV2{}, nil)
-		if len(unknown) != 3 || !strings.Contains(unknown[0], "cannot verify support") {
+		unknown := migrationKindRollbackFindings(&changed, source, retained, ledger)
+		if len(unknown) != 3 || !strings.Contains(unknown[0], "no verified support") {
 			t.Fatalf("%s inferred capabilities: %q", change, unknown)
 		}
 	}
@@ -45,13 +50,16 @@ func TestMigrationKindRollbackRegisteredKindsAreOnlyLowerBound(t *testing.T) {
 	migration := releasetransition.MigrationDefinitionV2{ID: "source", Kind: "test-vms-settings-v1-to-v2", Domain: "settings"}
 	source := releasetransition.RegistryV2{Migrations: []releasetransition.MigrationDefinitionV2{migration}}
 	retained := source
+	retained.MinimumEpochs = map[string]int{"settings": 1}
+	retained.CurrentEpochs = map[string]int{"settings": 1}
+	ledger := releasetransition.BaselineLedgerV2(retained)
 	retained.Migrations = []releasetransition.MigrationDefinitionV2{{ID: "different-id", Kind: migration.Kind, Domain: migration.Domain}}
 	target := &verifiedPublishedCandidate{version: "custom", registryDigest: "bound"}
-	if findings := migrationKindRollbackFindings(target, source, retained, nil); len(findings) != 0 {
+	if findings := migrationKindRollbackFindings(target, source, retained, ledger); len(findings) != 0 {
 		t.Fatalf("registered support refused: %q", findings)
 	}
 	retained.Migrations[0].Domain = "power-metadata"
-	if findings := migrationKindRollbackFindings(target, source, retained, nil); len(findings) != 1 {
+	if findings := migrationKindRollbackFindings(target, source, retained, ledger); len(findings) != 1 {
 		t.Fatalf("wrong domain accepted: %q", findings)
 	}
 }
@@ -62,6 +70,8 @@ func TestMigrationKindRollbackRefusesBeforeTargetInspectionAndCollectsLayout(t *
 	writeConfigLayoutManifest(t, request.ConfigHome, 2, true)
 	manifest := filepath.Join(request.ConfigHome, ".sync", "manifest.json")
 	before := mustReadFile(t, manifest)
+	ledger := filepath.Join(request.ConfigHome, "release-transition/v2/ledger.json")
+	beforeLedger := mustReadFile(t, ledger)
 	_, err := runtime.prepareRetainedTransition(context.Background(), parsed, request.ConfigHome, request.Yard, nil)
 	failure := assertMigrationRollbackRefused(t, request, err, "migration canonicalize", "Git configuration cache")
 	if failure.Active != "release-a" || failure.Previous == nil || *failure.Previous != "release-b" {
@@ -71,8 +81,8 @@ func TestMigrationKindRollbackRefusesBeforeTargetInspectionAndCollectsLayout(t *
 	if !bytes.Equal(before, mustReadFile(t, manifest)) {
 		t.Fatal("refusal changed the configuration manifest")
 	}
-	if _, err := os.Stat(filepath.Join(request.ConfigHome, "release-transition")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("inspection created migration history: %v", err)
+	if !bytes.Equal(beforeLedger, mustReadFile(t, ledger)) {
+		t.Fatal("refusal changed the migration ledger")
 	}
 }
 
@@ -136,6 +146,16 @@ func TestMigrationKindRollbackRefusesMissingActiveRegistry(t *testing.T) {
 	if !bytes.Equal(before, mustReadFile(t, manifest)) {
 		t.Fatal("refusal modified the active manifest")
 	}
+}
+
+func TestMigrationKindRollbackRefusesMissingAuthoritativeHistory(t *testing.T) {
+	runtime, parsed, _, request, called := configLayoutRollbackFixture(t, "--scope")
+	if err := os.Remove(filepath.Join(request.ConfigHome, "release-transition/v2/ledger.json")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runtime.prepareRetainedTransition(context.Background(), parsed, request.ConfigHome, request.Yard, nil)
+	assertMigrationRollbackRefused(t, request, err, "authoritative active migration history is missing")
+	assertMigrationRollbackUnchanged(t, request, called)
 }
 
 func TestMigrationKindRollbackRefusesExplicitVersionSelectingPrevious(t *testing.T) {
@@ -207,80 +227,110 @@ func retainedVersionFixture(t *testing.T) (*Runtime, publishedCandidate, release
 	return runtime, candidate, request, called, args
 }
 
-func TestMigrationKindRollbackAcceptsRetainedTargetWithMatchingRetiredPrefix(t *testing.T) {
-	runtime, candidate, request, called, updateArgs := retainedVersionFixture(t)
-	catalog := releasetransition.BuiltinCapabilityCatalog()
-	source, sourceDigest, err := releasetransition.ParseRegistryV2([]byte(migrationRollbackSettingsRegistry), catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prefix, err := source.MigrationPrefixDigest("settings", 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpointMarker := mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-checkpoint.json"))
-	testkit.WriteFile(t, filepath.Join(candidate.root, "config", "release-checkpoint.json"), checkpointMarker, 0o600)
-	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state, err := store.ReadMigrationLedger(source, sourceDigest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledger, err := state.Ledger.Advance(source, source.Migrations[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.CompareAndSwapMigrationLedger(state, ledger, source, sourceDigest); err != nil {
-		t.Fatal(err)
-	}
-	state, err = store.ReadMigrationLedger(source, sourceDigest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ConvertMigrationLedger(state, source, sourceDigest, source, sourceDigest); err != nil {
-		t.Fatal(err)
-	}
+func TestMigrationKindRollbackProvesRetiredHistoryBeforeDelegation(t *testing.T) {
 	for _, scenario := range []struct {
-		name      string
-		args      []string
-		direction releasetransition.Direction
+		name          string
+		applied       bool
+		sourceRetired bool
+		matching      bool
+		refusal       string
 	}{
-		{"rollback", []string{"--rollback", "--runtime-root", request.RuntimeRoot}, releasetransition.DirectionActivatePrevious},
-		{"explicit update", updateArgs, releasetransition.DirectionActivateTarget},
+		{name: "matching applied prefix", applied: true, matching: true},
+		{name: "matching retired prefixes", applied: true, sourceRetired: true, matching: true},
+		{name: "active epoch below retained floor", matching: true, refusal: "cannot read settings epoch 1 (readable epochs 2 to 2)"},
+		{name: "different retired prefixes", applied: true, sourceRetired: true, refusal: "retired migration history for settings does not match through active epoch 2"},
+		{name: "different live and retired prefixes", applied: true, refusal: "retired migration history for settings does not match through active epoch 2"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
-			for _, digest := range []releasetransition.Fingerprint{releasetransition.Fingerprint(strings.Repeat("f", 64)), prefix} {
-				registry := []byte(fmt.Sprintf(`{"schemaVersion":2,"minimumEpochs":{"settings":2},"currentEpochs":{"settings":2},"migrations":[],"retiredPrefixes":{"settings":{"throughEpoch":2,"digest":%q}}}`, digest))
-				retained, registryDigest, err := releasetransition.ParseRegistryV2(registry, catalog)
+			runtime, candidate, request, called, updateArgs := retainedVersionFixture(t)
+			catalog := releasetransition.BuiltinCapabilityCatalog()
+			source, sourceDigest, err := releasetransition.ParseRegistryV2([]byte(migrationRollbackSettingsRegistry), catalog)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix, err := source.MigrationPrefixDigest("settings", 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.ReadMigrationLedger(source, sourceDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario.applied {
+				ledger, err := state.Ledger.Advance(source, source.Migrations[0])
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := store.ReadMigrationLedger(retained, registryDigest); (err == nil) != (digest == prefix) {
-					t.Fatalf("checkpoint reader disagreed with the fixture's prefix match: %v", err)
+				if err := store.CompareAndSwapMigrationLedger(state, ledger, source, sourceDigest); err != nil {
+					t.Fatal(err)
 				}
-				bindRollbackFixtureRegistry(t, candidate, registry)
-				rewriteReleaseOwnerManifest(t, candidate)
-				request.Direction = scenario.direction
-				prepared, err := runtime.PrepareTransition(context.Background(), scenario.args, request.ConfigHome, request.Yard)
-				if digest != prefix {
-					assertMigrationRollbackRefused(t, request, err, "migration canonicalize")
-					continue
+				state, err = store.ReadMigrationLedger(source, sourceDigest)
+				if err != nil {
+					t.Fatal(err)
 				}
-				if err != nil || !prepared.Changed || prepared.Request.Direction != scenario.direction {
-					t.Fatalf("compatible retained release did not produce a plan: %+v, %v", prepared, err)
-				}
-				if prepared.Close != nil {
-					if err := prepared.Close(); err != nil {
-						t.Fatal(err)
+			}
+			if err := store.ConvertMigrationLedger(state, source, sourceDigest, source, sourceDigest); err != nil {
+				t.Fatal(err)
+			}
+
+			retiredRegistry := func(digest releasetransition.Fingerprint) []byte {
+				return []byte(fmt.Sprintf(`{"schemaVersion":2,"minimumEpochs":{"settings":2},"currentEpochs":{"settings":2},"migrations":[],"retiredPrefixes":{"settings":{"throughEpoch":2,"digest":%q}}}`, digest))
+			}
+			if scenario.sourceRetired {
+				writeMigrationRollbackSource(t, candidate, request, retiredRegistry(prefix))
+			}
+			retainedPrefix := prefix
+			if !scenario.matching {
+				retainedPrefix = releasetransition.Fingerprint(strings.Repeat("f", 64))
+			}
+			bindRollbackFixtureRegistry(t, candidate, retiredRegistry(retainedPrefix))
+			checkpointMarker := mustReadFile(t, filepath.Join("..", "..", "..", "config", "release-checkpoint.json"))
+			testkit.WriteFile(t, filepath.Join(candidate.root, "config", "release-checkpoint.json"), checkpointMarker, 0o600)
+			rewriteReleaseOwnerManifest(t, candidate)
+			checkpoint, err := store.ReadMigrationCheckpoint()
+			if err != nil || !checkpoint.Exists {
+				t.Fatalf("checkpoint setup: %v", err)
+			}
+
+			for _, entry := range []struct {
+				name      string
+				args      []string
+				direction releasetransition.Direction
+			}{
+				{"rollback", []string{"--rollback", "--runtime-root", request.RuntimeRoot}, releasetransition.DirectionActivatePrevious},
+				{"explicit update", updateArgs, releasetransition.DirectionActivateTarget},
+			} {
+				t.Run(entry.name, func(t *testing.T) {
+					request := request
+					request.Direction = entry.direction
+					prepared, err := runtime.PrepareTransition(context.Background(), entry.args, request.ConfigHome, request.Yard)
+					if scenario.refusal != "" {
+						assertMigrationRollbackRefused(t, request, err, scenario.refusal)
+						assertMigrationRollbackUnchanged(t, request, called)
+					} else if err != nil || !prepared.Changed || prepared.Request.Direction != entry.direction {
+						t.Fatalf("compatible retained release did not produce a plan: %+v, %v", prepared, err)
 					}
+					if prepared.Close != nil {
+						if err := prepared.Close(); err != nil {
+							t.Fatal(err)
+						}
+					}
+				})
+			}
+			after, err := store.ReadMigrationCheckpoint()
+			if err != nil || !sameProtectedSnapshot(checkpoint, after) {
+				t.Fatalf("inspection changed checkpoint: %v", err)
+			}
+			if scenario.refusal == "" {
+				if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
+					t.Fatalf("retained transition inspections = %q, want two", got)
 				}
 			}
 		})
-	}
-	if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
-		t.Fatalf("retained transition inspections = %q, want two", got)
 	}
 }
 
@@ -354,22 +404,6 @@ func TestMigrationKindRollbackRefusesNetworkManagerEpochBeforeCheckpointGate(t *
 				t.Fatalf("refusal changed ledger: %v", err)
 			}
 		})
-	}
-}
-
-func TestMigrationKindRollbackReportsAppliedState(t *testing.T) {
-	target := &verifiedPublishedCandidate{version: "0.29.0", manifestDigest: "4591220831f78d5893a50bdc2ff59e4f21f09a2b5a4f99a15390cb1107eb6cdb"}
-	source := releasetransition.RegistryV2{Migrations: []releasetransition.MigrationDefinitionV2{{ID: "future", Kind: "future-v1", Domain: "settings", FromEpoch: 3, ToEpoch: 4}}}
-	for _, epoch := range []int{3, 4} {
-		ledger := releasetransition.LedgerV2{Domains: map[string]releasetransition.DomainLedgerV2{"settings": {Epoch: epoch}}}
-		findings := migrationKindRollbackFindings(target, source, releasetransition.RegistryV2{}, &ledger)
-		want := "the registration has not been applied"
-		if epoch == 4 {
-			want = "the migration is applied"
-		}
-		if len(findings) != 1 || !strings.Contains(findings[0], want) {
-			t.Fatalf("epoch %d: %q", epoch, findings)
-		}
 	}
 }
 

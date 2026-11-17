@@ -87,8 +87,8 @@ Subyard retains the previous verified runtime. Swap back to it with:
 yard update --rollback
 ```
 
-Rollback refuses before applying changes if the previous release lacks support for a registered
-migration kind, including the NetworkManager guard introduced at power-metadata epoch 4.
+Subyard verifies that the previous release can read the active migration history before delegating rollback.
+This includes registered migration kinds, retired history, and the NetworkManager guard introduced at power-metadata epoch 4.
 
 An installed release can also report migrations or runtime repairs that still need to finish.
 Inspect them without changing state, then apply them with the already installed release:

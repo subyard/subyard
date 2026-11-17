@@ -45,6 +45,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			sourceRegistryPayload := registryPayload
 			ledger := releasetransition.BaselineLedgerV2(registry)
 			for _, migration := range registry.Migrations {
 				if migration.Kind == kind || kind == "known-old-pending" || kind == "pending-checkpoint" && migration.Kind == "registered-guest-disk-tmp-v2-to-v3" {
@@ -72,6 +73,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					sourceRegistryPayload = newer
 					registry, digest, err = releasetransition.ParseRegistryV2(newer, releasetransition.BuiltinCapabilityCatalog())
 					if err != nil {
 						t.Fatal(err)
@@ -89,8 +91,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if kind == "invalid-ledger" || kind == "known-old-pending" {
-				// The known old producer contract does not require a ledger read.
+			if kind == "invalid-ledger" {
 				testkit.WriteFile(t, ledgerPath, []byte("{invalid"), 0600)
 			}
 			if kind == "invalid-checkpoint" {
@@ -118,7 +119,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 			beforeLedger := mustReadFile(t, ledgerPath)
 			beforeCheckpoint, beforeErr := os.ReadFile(checkpointPath)
 			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: home, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious}
-			writeMigrationRollbackSource(t, candidate, request, nil)
+			writeMigrationRollbackSource(t, candidate, request, sourceRegistryPayload)
 			var output bytes.Buffer
 			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": filepath.Dir(home)}), Stdout: &output, Stderr: &output})
 			defer runtime.Close()

@@ -903,7 +903,7 @@ func TestUpdateReportsPreparationDiagnosticWithoutReinspection(t *testing.T) {
 
 func TestRollbackDoesNotExecuteRetainedEngineBeforeVerification(t *testing.T) {
 	root, environment, runtimeRoot := updateReleaseFixture(t)
-	prepareCLIReleaseLinks(t, runtimeRoot, true)
+	prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
 	marker := filepath.Join(root, "unverified-retained-engine-ran")
 	engine := filepath.Join(runtimeRoot, "releases", "previous-b", "bin", "yard-engine")
 	writeCLIFile(t, engine, fmt.Sprintf("#!/bin/sh\n: > %q\nprintf 'yard-engine 1.2.3\\n'\n", marker), 0o700)
@@ -1118,7 +1118,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				prepareCLIOldRelease(t, runtimeRoot)
 			}
 			if test.sameVersion {
-				prepareCLIReleaseLinks(t, runtimeRoot, false)
+				prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), false)
 				installer := exec.Command("sh", filepath.Join(root, "scripts", "install-runtime-release.sh"), "--runtime-root", runtimeRoot, "--publish-only")
 				installer.Env = environment
 				if output, err := installer.CombinedOutput(); err != nil {
@@ -1126,7 +1126,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 				}
 			}
 			if test.rollback {
-				prepareCLIReleaseLinks(t, runtimeRoot, true)
+				prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
 			}
 			oldDispatcher := filepath.Join(root, "old-dispatcher")
 			oldLog := filepath.Join(root, "old-dispatcher.log")
@@ -1173,7 +1173,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 	}
 }
 
-func prepareCLIReleaseLinks(t *testing.T, root string, withPrevious bool) {
+func prepareCLIReleaseLinks(t *testing.T, root, configHome string, withPrevious bool) {
 	t.Helper()
 	for _, name := range []string{"current", "previous"} {
 		if err := os.Remove(filepath.Join(root, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1265,6 +1265,11 @@ esac
 		if err := os.Symlink("releases/previous-b", filepath.Join(root, "previous")); err != nil {
 			t.Fatal(err)
 		}
+		history := filepath.Join(configHome, "release-transition", "v2")
+		if err := os.MkdirAll(history, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeCLIFile(t, filepath.Join(history, "ledger.json"), `{"schemaVersion":2,"domains":{"settings":{"epoch":1,"applied":[]}}}`, 0o600)
 	}
 }
 
