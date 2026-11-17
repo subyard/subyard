@@ -295,7 +295,9 @@ func TestNetworkManagerDeviceGuardForbidsRollbackToReleasedReaders(t *testing.T)
 	if !ok || descriptor.Domain != "power-metadata" || descriptor.RollbackCompatibility != "" {
 		t.Fatalf("NetworkManager device guard descriptor = %#v, %v", descriptor, ok)
 	}
-	if _, supported := SupportedBuiltinCatalog(registeredYardsCapabilityCatalog().Digest()); !supported {
+	const publishedSixKindDigest Fingerprint = "ed0b321ebbdcc81f039d6d25ff67800736be13af18b048ba837ea79fae8ccd3c"
+	catalog, supported := SupportedBuiltinCatalog(publishedSixKindDigest)
+	if !supported || len(catalog.Descriptors()) != 6 {
 		t.Fatal("journals sealed by the previous catalog are no longer recognized")
 	}
 }

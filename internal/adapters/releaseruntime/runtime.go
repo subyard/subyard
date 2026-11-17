@@ -1284,6 +1284,23 @@ func (runtime *Runtime) prepareRetainedTransition(
 	if err := sourceVersionError(verified.version); err != nil {
 		return Prepared{}, err
 	}
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect,
+		RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
+		Target: release, Direction: releasetransition.DirectionActivatePrevious,
+		ArtifactDigest:      verified.manifestDigest,
+		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
+	}
+	// Check migration kind support before probing retained recovery or asking
+	// the retained registry to account for the current migration checkpoint.
+	if err := runtime.inspectRollbackCompatibility(ctx, verified, request); err != nil {
+		var refusal publicReleaseInspectionError
+		if parsed.check && errors.As(err, &refusal) {
+			return runtime.preparePublicInspectionOutcome(parsed, refusal.outcome), nil
+		}
+		return Prepared{}, verifiedPreparation(err)
+	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// Absence of the optional query advertises no profile owners. Identical
 	// public core payloads retain their existing historical compatibility path.
@@ -1310,14 +1327,6 @@ func (runtime *Runtime) prepareRetainedTransition(
 	if err != nil {
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
 			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
-	}
-	request := releasetransition.ProcessRequest{
-		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
-		Mode:          releasetransition.ProcessInspect,
-		RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
-		Target: release, Direction: releasetransition.DirectionActivatePrevious,
-		ArtifactDigest:      verified.manifestDigest,
-		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 	}
 	// A pre-v2 target remains the verified rollback artifact, but it has no
 	// transition registry. The verified active v2 release owns that exact goal.
@@ -1347,7 +1356,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 			)))
 		}
 	}
-	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
+	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, owner, verified, request, nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return Prepared{}, verifiedPreparation(err)
@@ -1507,6 +1516,17 @@ func (runtime *Runtime) prepareVerifiedTransition(
 		}
 		return Prepared{}, err
 	}
+	return runtime.inspectVerifiedTransition(ctx, parsed, owner, target, request, revalidation)
+}
+
+func (runtime *Runtime) inspectVerifiedTransition(
+	ctx context.Context,
+	parsed options,
+	owner *verifiedPublishedCandidate,
+	target *verifiedPublishedCandidate,
+	request releasetransition.ProcessRequest,
+	revalidation *replacementRevalidation,
+) (Prepared, error) {
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
 	if err != nil {
 		return Prepared{}, err

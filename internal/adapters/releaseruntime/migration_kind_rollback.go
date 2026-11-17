@@ -49,6 +49,11 @@ func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, r
 	})
 	var findings []string
 	for _, migration := range migrations {
+		nmBoundary := migration.Kind == "nm-device-guard-v1" && migration.Domain == "power-metadata"
+		if target.registryDigest == "" && !published && !nmBoundary {
+			// The active owner keeps responsibility for legacy rollback policies.
+			continue
+		}
 		supported := false
 		if published {
 			supported = publishedRollbackSupports(migration.Kind, migration.Domain)
@@ -70,8 +75,13 @@ func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, r
 		}
 		if published {
 			findings = append(findings, fmt.Sprintf("release %s does not know migration %s (kind %s); %s; rollback is incompatible", target.version, migration.ID, migration.Kind, state))
+		} else if nmBoundary {
+			findings = append(findings, fmt.Sprintf("retained release %s cannot verify support for migration %s (kind %s); %s; rollback is incompatible", target.version, migration.ID, migration.Kind, state))
 		} else {
 			findings = append(findings, fmt.Sprintf("migration %s (kind %s): rollback compatibility with retained release %s cannot be established from its verified artifact; its registry is not a complete capability declaration", migration.ID, migration.Kind, target.version))
+		}
+		if nmBoundary {
+			findings[len(findings)-1] += "; older runtimes can replace the NetworkManager device guard during init"
 		}
 	}
 	return findings
@@ -124,9 +134,12 @@ func (runtime *Runtime) inspectMigrationKindRollback(ctx context.Context, target
 	if err != nil {
 		return nil, err
 	}
-	retained, _, err := readVerifiedTransitionRegistry(target)
-	if err != nil {
-		return nil, err
+	var retained releasetransition.RegistryV2
+	if target.registryDigest != "" {
+		retained, _, err = readVerifiedTransitionRegistry(target)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if findings := migrationKindRollbackFindings(target, registry, retained, nil); len(findings) == 0 {
 		return nil, nil

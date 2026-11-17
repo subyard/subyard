@@ -77,15 +77,8 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		messages = append([]string{layout.Message}, messages...)
 	}
 	messages = append(migrationMessages, messages...)
-	if migrationErr != nil || layoutErr != nil || vmErr != nil {
-		causes := []error{migrationErr, layoutErr, vmErr}
-		for _, message := range messages {
-			causes = append(causes, errors.New(message))
-		}
-		return domain.CollectRefusals(causes...)
-	}
 	if len(messages) == 0 {
-		return nil
+		return domain.CollectRefusals(migrationErr, layoutErr, vmErr)
 	}
 	var outcome releasetransition.Outcome
 	if layout != nil {
@@ -120,5 +113,5 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 	if complete != outcome.Message {
 		cause = fmt.Errorf("%w; %s", cause, complete)
 	}
-	return publicReleaseInspectionError{cause: cause, outcome: outcome}
+	return publicReleaseInspectionError{cause: domain.CollectRefusals(cause, migrationErr, layoutErr, vmErr), outcome: outcome}
 }
