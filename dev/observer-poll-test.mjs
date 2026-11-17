@@ -306,9 +306,11 @@ checks = {'verify': ['true'], 'compatibility': ['true']}
 receipt = {'version': 'test', 'profiles': {}, 'source_fingerprint': 'a'*64,
            'candidate_bundle_sha256': 'b'*64, 'external_obligations': {},
            'checks': {name: {'status': 'pending'} for name in checks}}
-with patch.object(m, 'load_bound', return_value=(output, receipt)), patch.object(m, 'commands', return_value=checks), patch.object(m, 'source_fingerprint', return_value='a'*64), patch.object(m, 'execution_environment', return_value={}):
+# Attempt binding is covered by release-acceptance.sh; this fixture exercises observation.
+with patch.object(m, 'completed_attempt', return_value={'id': 'a'*32, 'sha256': 'b'*64}), patch.object(m, 'load_bound', return_value=(output, receipt)), patch.object(m, 'commands', return_value=checks), patch.object(m, 'source_fingerprint', return_value='a'*64), patch.object(m, 'execution_environment', return_value={}):
     sys.exit(m.run_checks(output, [], ['verify'], False))
 `, root, produced], {encoding: 'utf8'});
+  assert.equal(producer.stderr, '');
   assert.equal(producer.status, 1, producer.stderr);
   const producerNative = {...native(producer.status), output: producer.stdout};
   const integrated = fixture([['producer', '', [async () => producerNative]]]);
