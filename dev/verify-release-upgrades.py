@@ -531,17 +531,28 @@ def verify_legacy(release, version, baseline, arch, root, baseline_version=LEGAC
 
 
 def verify_source_anchor_refusal(fixture, installer=None):
+    shims = fixture.root / "refusal-tools"
+    shims.mkdir()
+    calls = fixture.root / "incus-calls"
+    incus = shims / "incus"
+    incus.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + str(calls) + "\nexit 97\n")
+    incus.chmod(0o700)
     before = snapshot(fixture.config)
     links = {name: os.readlink(fixture.runtime / name) if (fixture.runtime / name).is_symlink() else None
              for name in ("current", "previous", "next")}
     marker = fixture.project_marker.read_bytes()
     # Select the local packaged target without a GitHub latest-release lookup.
     # Both invocations otherwise use the real released caller's ordinary path.
-    environment = dict(fixture.env, YARD_RELEASE_VERSION=fixture.version)
+    environment = dict(fixture.env, YARD_RELEASE_VERSION=fixture.version,
+                       PATH=str(shims) + ":" + fixture.env["PATH"])
     attempts = [(arguments, [str(fixture.old_launcher), "update", *arguments])
                 for arguments in ([], ["--check"])]
     if installer is not None:
         attempts.append((["installer"], ["bash", str(installer), "--version", fixture.version, "--yes"]))
+    read_only = fixture.root.parent / "refusal-read-only"
+    read_only.touch()
+    api_calls = fixture.root.parent / "incus-requests"
+    api_before = api_calls.read_text() if api_calls.exists() else ""
     for arguments, command in attempts:
         refused = run_process(command, environment, timeout=180)
         reported_refusal = refused.returncode != 0
@@ -567,6 +578,14 @@ def verify_source_anchor_refusal(fixture, installer=None):
                 and all((os.readlink(fixture.runtime / name) if (fixture.runtime / name).is_symlink() else None) == value
                         for name, value in links.items()),
                 "source-anchor refusal changed protected config, runtime links or project data")
+    require(not calls.exists(), "released caller invoked Incus CLI before refusal: " +
+            (calls.read_text() if calls.exists() else ""))
+    read_only.unlink()
+    api_after = api_calls.read_text() if api_calls.exists() else ""
+    observed = api_after[len(api_before):].splitlines()
+    require(all(line.startswith("GET ") for line in observed), "Incus API mutation before refusal")
+    print(f"Incus API before refusal: {fixture.baseline_version}: {observed}", flush=True)
+    print(f"Incus CLI before refusal: {fixture.baseline_version}: none", flush=True)
     # Immutable release staging is allowed; config/journal, stable links and data are not.
     print(f"PASS: released {fixture.baseline_version} update/check" + ("/installer" if installer else "")
           + " refuse below-anchor admission without mutation (immutable staging allowed)",
@@ -723,18 +742,24 @@ def main():
 
 
 def baseline_assets(root, directory, version, hashes, arch):
-    baseline = directory.resolve() if directory else root / f"baseline-{version}"
+    cache = os.environ.get("SUBYARD_TEST_BASELINE_CACHE")
+    baseline = directory.resolve() if directory else (Path(cache).resolve() / version / arch if cache else root / f"baseline-{version}")
     bundle_name = f"subyard-{version}-linux-{arch}.tar.gz"
     if directory is None:
-        baseline.mkdir()
+        baseline.mkdir(parents=True, exist_ok=True)
         print(f"Downloading pinned official {version} baseline for linux/{arch}", flush=True)
         names = [bundle_name + suffix for suffix in ("", ".sha256", ".manifest.json", ".provenance.json")]
         if version in RETIRED_BASELINES:
             names.append("subyard-install-runtime-release.sh")
         for name in names:
             url = f"https://github.com/Subyard/Subyard/releases/download/v{version}/{name}"
-            with urllib.request.urlopen(url, timeout=60) as response:
-                (baseline / name).write_bytes(response.read())
+            target = baseline / name
+            if not target.is_file():
+                with urllib.request.urlopen(url, timeout=60) as response:
+                    payload = response.read()
+                temporary = target.with_suffix(target.suffix + ".pending")
+                temporary.write_bytes(payload)
+                temporary.replace(target)
     require(digest(baseline / bundle_name) == hashes[arch],
             "official baseline checksum does not match the pinned release")
     if version in RETIRED_BASELINES:
