@@ -45,6 +45,7 @@ case "${1:-}" in
   *) exit 96 ;;
 esac
 `, capture, capture, capture, candidateProtocolFixtureResponse))
+	linkActiveTransitionFixture(t, root, engine)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
 	defer runtime.Close()
 	for _, mode := range []releasetransition.ProcessMode{

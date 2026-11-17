@@ -135,6 +135,7 @@ case "${1:-}" in
 esac
 `, capture, capture, candidateProtocolFixtureResponse)
 	candidate := writeRuntimeCandidatePayload(t, root, payload)
+	linkActiveTransitionFixture(t, root, candidate)
 	runtime := New(Config{})
 	for _, mode := range []releasetransition.ProcessMode{
 		releasetransition.ProcessInspect,

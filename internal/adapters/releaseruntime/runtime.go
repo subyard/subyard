@@ -641,7 +641,7 @@ func (runtime *Runtime) PrepareTransition(
 			); qualified {
 				defer recovery.candidate.Close()
 				return runtime.prepareVerifiedReplacementTransition(
-					ctx, parsed, recovery.candidate, recovery.request, recovery.revalidation,
+					ctx, parsed, recovery.candidate, recovery.request, &recovery.revalidation,
 				)
 			}
 			if unfinished {
@@ -671,12 +671,7 @@ func (runtime *Runtime) PrepareTransition(
 		if verified, standalone := runtime.verifiedStandaloneCandidateRoot(ctx, parsed.root); standalone {
 			defer verified.Close()
 			if verified.version == parsed.version {
-				linksBefore, err := runtime.inspectRuntimeLinks(parsed.root)
-				if err != nil {
-					return Prepared{}, err
-				}
-				parsed.expectedLinks = &linksBefore
-				return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, releasetransition.ProcessRequest{
+				prepared, err := runtime.prepareVerifiedReplacementTransition(ctx, parsed, verified, releasetransition.ProcessRequest{
 					SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 					Mode:          releasetransition.ProcessInspect,
 					RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
@@ -685,6 +680,10 @@ func (runtime *Runtime) PrepareTransition(
 					InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 					SourceIngress:       sourceIngress, Replacement: newerRelease,
 				}, nil)
+				if err != nil {
+					return runtime.inspectionFailure(parsed, err)
+				}
+				return prepared, nil
 			}
 		}
 	}
@@ -815,13 +814,11 @@ func (runtime *Runtime) PrepareTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       sourceIngress, Replacement: newerRelease,
 	}
-	if newerRelease == nil && (canonicalPresent || parsed.versionExplicit) {
-		parsed.selection, err = runtime.captureReleaseSelection(ctx, inspectionCandidate, request, linksBefore)
-		if err != nil {
-			return runtime.inspectionFailure(parsed, err)
-		}
-		ctx = selectionContext(ctx, parsed.selection)
+	parsed.selection, err = runtime.captureReleaseSelection(ctx, inspectionCandidate, request, linksBefore)
+	if err != nil {
+		return runtime.inspectionFailure(parsed, err)
 	}
+	ctx = selectionContext(ctx, parsed.selection)
 	runtime.progress(parsed, "Checking update requirements...")
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
 	if err == nil && completedAdmission != nil {
@@ -932,11 +929,11 @@ func (runtime *Runtime) PrepareTransition(
 					}
 					existing, verifyErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: candidate.release, root: canonical}, parsed.root, &fresh.manifestDigest)
 					if verifyErr != nil {
-						return fmt.Errorf("%w: existing release differs from approved draft", domain.ErrPlanStale)
+						return staleRetainedSelection(request.RuntimeRoot, request.Target)
 					}
 					defer existing.Close()
 					if existing.version != fresh.version || existing.registryDigest != fresh.registryDigest {
-						return fmt.Errorf("%w: existing release differs from approved draft", domain.ErrPlanStale)
+						return staleRetainedSelection(request.RuntimeRoot, request.Target)
 					}
 					if err := runtime.Close(); err != nil {
 						return err
@@ -1361,6 +1358,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 }
 
 type candidateVerification struct {
+	selection      *releaseSelection
 	candidate      publishedCandidate
 	digest         releasetransition.Fingerprint
 	version        string
@@ -1442,11 +1440,18 @@ func (runtime *Runtime) prepareVerifiedReplacementTransition(
 	parsed options,
 	verified *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
-	revalidation replacementRevalidation,
+	revalidation *replacementRevalidation,
 ) (Prepared, error) {
-	return runtime.prepareVerifiedTransition(
-		ctx, parsed, verified, verified, request, &revalidation,
-	)
+	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
+	if err != nil {
+		return Prepared{}, err
+	}
+	parsed.expectedLinks = &links
+	parsed.selection, err = runtime.captureReleaseSelection(ctx, verified, request, links)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request, revalidation)
 }
 
 func (runtime *Runtime) prepareVerifiedTransition(

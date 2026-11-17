@@ -155,17 +155,10 @@ func (runtime *Runtime) revalidateReleaseSelection(selection *releaseSelection, 
 	}
 	// The draft and its published destination share the same selected manifest.
 	targetRoot := filepath.Dir(filepath.Dir(target.candidate.root))
-	installed, err := runtime.verifyPublishedCandidateFiles(target.candidate, targetRoot, &selection.targetArtifact, false)
-	if err != nil {
+	if !runtime.installedTransitionEngine(target, targetRoot) {
 		return stale()
 	}
-	defer installed.Close()
-	pinnedInfo, pinnedErr := target.root.Stat()
-	installedInfo, installedErr := installed.root.Stat()
-	if pinnedErr != nil || installedErr != nil || !os.SameFile(pinnedInfo, installedInfo) {
-		return stale()
-	}
-	_, targetIdentity, err := selectedRegistry(installed)
+	_, targetIdentity, err := selectedRegistry(target)
 	if err != nil || targetIdentity != selection.targetRegistry {
 		return stale()
 	}
@@ -199,4 +192,78 @@ func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releaset
 		}
 	}
 	return "", nil
+}
+
+// admitTransitionLaunch is the last admission check before a transition child
+// starts. Its caller holds the owner barrier through the child invocation.
+func (runtime *Runtime) admitTransitionLaunch(ctx context.Context, engine *verifiedPublishedCandidate, request releasetransition.ProcessRequest) error {
+	if selection, _ := ctx.Value(releaseSelectionKey{}).(*releaseSelection); selection != nil {
+		if request.RuntimeRoot != selection.request.RuntimeRoot || request.ConfigHome != selection.request.ConfigHome {
+			return staleRetainedSelection(request.RuntimeRoot, request.Target)
+		}
+		if selection.refusal != "" {
+			outcome := observedPublicReleaseOutcome(request.RuntimeRoot, request.Target, nil, releasetransition.CodeRollbackIncompatible,
+				selection.refusal, "keep the current release active and resolve all reported release compatibility requirements before retrying")
+			return publicReleaseInspectionError{cause: domain.CollectRefusals(transitionOutcomeError(outcome), selection.cause), outcome: outcome}
+		}
+		if selection.activeRegistry != selection.targetRegistry {
+			return staleRetainedSelection(request.RuntimeRoot, request.Target)
+		}
+		return runtime.revalidateReleaseSelection(selection, engine)
+	}
+	if current, err := inspectRuntimeLink(request.RuntimeRoot, "current"); err == nil &&
+		current.target == "releases/"+string(engine.candidate.release) && runtime.installedTransitionEngine(engine, request.RuntimeRoot) {
+		return nil
+	}
+	if runtime.exactJournalTransitionOwner(engine, request) {
+		return nil
+	}
+	return staleRetainedSelection(request.RuntimeRoot, request.Target)
+}
+
+func (runtime *Runtime) installedTransitionEngine(engine *verifiedPublishedCandidate, runtimeRoot string) bool {
+	installed, err := runtime.verifyPublishedCandidateFiles(engine.candidate, runtimeRoot, &engine.manifestDigest, false)
+	if err != nil {
+		return false
+	}
+	defer installed.Close()
+	pinned, pinnedErr := engine.root.Stat()
+	current, currentErr := installed.root.Stat()
+	return pinnedErr == nil && currentErr == nil && os.SameFile(pinned, current)
+}
+
+func (runtime *Runtime) exactJournalTransitionOwner(engine *verifiedPublishedCandidate, request releasetransition.ProcessRequest) bool {
+	if request.Replacement != nil || request.MigrationOwnerReplacement != nil || request.ConfigHome == "" {
+		return false
+	}
+	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+	if err != nil {
+		return false
+	}
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return false
+	}
+	journal, err := releasetransition.ParseJournal(snapshot.Payload)
+	if err != nil || journal.Goal.Target != request.Target || journal.Goal.Direction != request.Direction ||
+		journal.ArtifactDigest != request.ArtifactDigest || journal.RegistryDigest != request.RegistryDigest ||
+		journal.RegistryDigest != engine.registryDigest || journal.CheckIngressSupport() != nil || store.ValidateCurrentRecovery(journal) != nil {
+		return false
+	}
+	if engine.candidate.release == journal.Goal.Target {
+		return engine.manifestDigest == journal.ArtifactDigest &&
+			engine.candidate.root == filepath.Join(request.RuntimeRoot, "releases", string(journal.Goal.Target))
+	}
+	// Historical rollback can bind the source engine to a registryless target.
+	if journal.Goal.Direction != releasetransition.DirectionActivatePrevious || engine.candidate.release != journal.Releases.From {
+		return false
+	}
+	target := publishedCandidate{release: journal.Goal.Target, root: filepath.Join(request.RuntimeRoot, "releases", string(journal.Goal.Target))}
+	verifiedTarget, err := runtime.verifyPublishedCandidateFiles(target, request.RuntimeRoot, &journal.ArtifactDigest, false)
+	if err != nil {
+		return false
+	}
+	defer verifiedTarget.Close()
+	return verifiedTarget.registryDigest != journal.RegistryDigest &&
+		engine.candidate.root == filepath.Join(request.RuntimeRoot, "releases", string(journal.Releases.From))
 }

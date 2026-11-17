@@ -259,6 +259,7 @@ func TestRollbackSourceCapabilityPreservesCompatibleAndPinnedPaths(t *testing.T)
 			var prepared Prepared
 			if scenario.registryless {
 				owner := writeVersionedRuntimeCandidate(t, root, "release-a", "1.2.3", engine)
+				linkActiveTransitionFixture(t, root, owner)
 				unbindCandidateRegistry(t, candidate, true)
 				verifiedOwner, verifyErr := runtime.verifyPublishedCandidate(context.Background(), owner, root, nil)
 				if verifyErr != nil {

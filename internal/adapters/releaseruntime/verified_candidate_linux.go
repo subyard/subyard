@@ -474,7 +474,7 @@ func (runtime *Runtime) runVerifiedCandidate(
 	grant releasetransition.Authorization,
 ) error {
 	return runtime.runVerifiedRuntimeEngine(
-		ctx, candidate, candidate, runtimeRoot, arguments, stdin, stdout, grant,
+		ctx, candidate, candidate, runtimeRoot, arguments, stdin, stdout, grant, nil,
 	)
 }
 
@@ -486,19 +486,21 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	stdin io.Reader,
 	stdout io.Writer,
 	grant releasetransition.Authorization,
+	request *releasetransition.ProcessRequest,
 ) error {
 	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
 		return errors.New("verified published runtime is unavailable")
 	}
-	selection, _ := ctx.Value(releaseSelectionKey{}).(*releaseSelection)
-	if selection != nil && len(arguments) != 0 && arguments[0] == "_release-transition" {
+	transition := len(arguments) != 0 && arguments[0] == "_release-transition"
+	if transition {
+		if request == nil || request.RuntimeRoot != runtimeRoot {
+			return staleRetainedSelection(runtimeRoot, engine.candidate.release)
+		}
 		unlock, err := runtime.lockReleaseSelection(ctx)
 		if err != nil {
 			return err
 		}
 		defer unlock()
-	} else {
-		selection = nil
 	}
 	extra := make([]*os.File, 0, 3)
 	var grantReader *os.File
@@ -566,8 +568,8 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		command.ExtraFiles = append(command.ExtraFiles, runtime.config.OperatorInput)
 	}
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, runtime.config.Stderr
-	if selection != nil {
-		if err := runtime.revalidateReleaseSelection(selection, assets); err != nil {
+	if transition {
+		if err := runtime.admitTransitionLaunch(ctx, engine, *request); err != nil {
 			return err
 		}
 	}
@@ -620,7 +622,7 @@ func (runtime *Runtime) invokeVerifiedRuntimeTransition(
 	var stdout boundedResponseBuffer
 	if err := runtime.runVerifiedRuntimeEngine(
 		ctx, assets, engine, request.RuntimeRoot, []string{"_release-transition"},
-		bytes.NewReader(append(payload, '\n')), &stdout, grant,
+		bytes.NewReader(append(payload, '\n')), &stdout, grant, &request,
 	); err != nil {
 		return releasetransition.ProcessResponse{},
 			fmt.Errorf("candidate release transition failed: %w", err)

@@ -43,6 +43,7 @@ case "${1:-}" in
 esac
 `, marker, response)
 	candidate := writeDelegateRuntimeFixture(t, root, "1.2.3-owner", "owner", []byte("{}\n"), engine)
+	linkActiveTransitionFixture(t, root, candidate)
 	var stderr bytes.Buffer
 	runtime := New(Config{Stderr: &stderr})
 	defer runtime.Close()
@@ -96,6 +97,7 @@ case "${1:-}" in
   *) exit 98 ;;
 esac
 `, candidateProtocolFixtureResponse))
+	linkActiveTransitionFixture(t, root, candidate)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
 	defer runtime.Close()
 	owner, err := runtime.verifyPublishedCandidate(ctx, candidate, root, nil)
@@ -129,6 +131,7 @@ case "${1:-}" in
 esac
 `, response, exitCode)
 			candidate := writeDelegateRuntimeFixture(t, root, "1.2.3-owner", "owner", []byte("{}\n"), engine)
+			linkActiveTransitionFixture(t, root, candidate)
 			runtime := New(Config{Stderr: &bytes.Buffer{}})
 			defer runtime.Close()
 			owner, err := runtime.verifyPublishedCandidate(context.Background(), candidate, root, nil)

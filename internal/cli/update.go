@@ -102,7 +102,6 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 		RuntimeRoot:  loaded.Environment["YARD_RUNTIME_ROOT"],
 		OperationID:  cli.env["SUBYARD_OPERATION_ID"],
 	})
-	runtimeConfig.OwnerLockHeld = func() bool { return cli.ownerMutationLock != nil }
 	runtimeConfig.ConfigurationState = func() []config.ConfigurationState { return cli.localConfigurationState(loaded) }
 	runtime := releaseruntime.New(runtimeConfig)
 	prepared, err := runtime.PrepareTransition(
@@ -123,6 +122,7 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContext) releaseruntime.Config {
 	operatorInput, _ := cli.options.Stdin.(*os.File)
 	return releaseruntime.Config{
+		OwnerLockHeld:  func() bool { return cli.ownerMutationLock != nil },
 		OperatorInput:  operatorInput,
 		Inputs:         cli.commandInputs,
 		Context:        runtimeContext,

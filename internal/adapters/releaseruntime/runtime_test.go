@@ -931,6 +931,7 @@ esac
 func TestCandidateTransitionRejectsTrailingResponseJSON(t *testing.T) {
 	root := t.TempDir()
 	candidate := writeRuntimeCandidateFixture(t, root, `{"schemaVersion":1}{}`)
+	linkActiveTransitionFixture(t, root, candidate)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
 	verified, err := runtime.verifyPublishedCandidate(
 		context.Background(), candidate, root, nil,
@@ -1004,6 +1005,7 @@ esac
 `, capture, response)
 	candidate := writeRuntimeCandidatePayload(t, root, payload)
 	registry := []byte("{}\n")
+	linkActiveTransitionFixture(t, root, candidate)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
 	verified, err := runtime.verifyPublishedCandidate(
 		context.Background(), candidate, root, nil,
@@ -2825,6 +2827,13 @@ esac
 	return writeRuntimeCandidatePayload(t, root, payload)
 }
 
+func linkActiveTransitionFixture(t *testing.T, root string, candidate publishedCandidate) {
+	t.Helper()
+	if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(root, "current")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func prepareCandidateTransitionForTest(
 	runtime *Runtime,
 	ctx context.Context,
@@ -2844,7 +2853,17 @@ func prepareCandidateTransitionForTest(
 	if request.ArtifactDigest == "" {
 		request.ArtifactDigest = verified.manifestDigest
 	}
-	if links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot); err == nil && links.previous.target == "releases/"+string(candidate.release) {
+	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
+	if err != nil {
+		return Prepared{}, err
+	}
+	// Protocol fixtures with no runtime links exercise the active engine.
+	if !links.current.present && !links.previous.present {
+		if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(request.RuntimeRoot, "current")); err != nil {
+			return Prepared{}, err
+		}
+	}
+	if links.previous.target == "releases/"+string(candidate.release) {
 		selection, err := runtime.captureReleaseSelection(ctx, verified, request, links)
 		if err != nil {
 			return Prepared{}, err
@@ -2973,6 +2992,10 @@ esac
 	fixture.candidate = writeVersionedRuntimeCandidate(
 		t, fixture.runtimeRoot, fixture.candidateID, fixture.candidateVersion, candidatePayload,
 	)
+
+	bindRollbackFixtureRegistry(t, fixture.source, []byte(sourceAdmissionRegistry))
+	bindRollbackFixtureRegistry(t, fixture.candidate, []byte(sourceAdmissionRegistry))
+	writeRollbackFixtureBaselineLedger(t, fixture.configHome)
 
 	sourceManifest, err := os.ReadFile(filepath.Join(fixture.source.root, "runtime-files.sha256"))
 	if err != nil {
@@ -3164,6 +3187,7 @@ esac
 	writeVersionedRuntimeCandidate(
 		t, fixture.runtimeRoot, fixture.candidateID, fixture.candidateVersion, candidatePayload,
 	)
+	bindRollbackFixtureRegistry(t, fixture.candidate, []byte(sourceAdmissionRegistry))
 }
 
 func (fixture *v0111CandidateRoutingFixture) writeSourceBlocker(

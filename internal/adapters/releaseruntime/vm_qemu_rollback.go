@@ -89,16 +89,6 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		messages = append([]string{layout.Message}, messages...)
 	}
 	messages = append(migrationMessages, messages...)
-	if selection != nil && selection.refusal == "" {
-		unlock, err := runtime.lockReleaseSelection(ctx)
-		if err != nil {
-			return err
-		}
-		defer unlock()
-		if err := runtime.revalidateReleaseSelection(selection, target); err != nil {
-			return err
-		}
-	}
 	if len(messages) == 0 {
 		return domain.CollectRefusals(migrationErr, layoutErr, vmErr)
 	}

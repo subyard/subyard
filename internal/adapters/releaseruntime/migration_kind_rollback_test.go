@@ -135,9 +135,13 @@ func TestMigrationKindRollbackRefusesExplicitVersionSelectingPrevious(t *testing
 
 func retainedVersionFixture(t *testing.T) (*Runtime, publishedCandidate, releasetransition.ProcessRequest, string, []string) {
 	t.Helper()
+	return retainedFixtureAtVersion(t, "0.29.0")
+}
+
+func retainedFixtureAtVersion(t *testing.T, version string) (*Runtime, publishedCandidate, releasetransition.ProcessRequest, string, []string) {
+	t.Helper()
 	runtime, _, candidate, request, called := configLayoutRollbackFixture(t, "--scope")
 	bundle := []byte("retained release fixture")
-	version := "0.29.0"
 	root := filepath.Dir(request.RuntimeRoot)
 	cache := filepath.Join(root, "cache")
 	if err := os.MkdirAll(filepath.Join(cache, version), 0o700); err != nil {
@@ -570,9 +574,10 @@ func TestEnvironmentPinnedInstalledReleaseRefusesNewPreviousBeforeInspection(t *
 	}
 }
 
-func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithoutSelection(t *testing.T) {
+func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithDifferentArtifact(t *testing.T) {
 	runtime, candidate, request, called, _ := retainedVersionFixture(t)
 	runtime.config.Inputs.values["YARD_RELEASE_VERSION"] = "0.29.0"
+	writeMigrationRollbackSource(t, candidate, request, []byte(sourceAdmissionRegistry))
 	if err := os.Remove(filepath.Join(request.RuntimeRoot, "previous")); err != nil {
 		t.Fatal(err)
 	}
@@ -593,6 +598,8 @@ func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithoutSelection(t *t
 	if err := os.Rename(template, candidate.root); err != nil {
 		t.Fatal(err)
 	}
+	bindRollbackFixtureRegistry(t, candidate, []byte(migrationRollbackSettingsRegistry))
+	rewriteReleaseOwnerManifest(t, candidate)
 	testkit.WriteFile(t, runtime.config.Installer, installer, 0o700)
 	assertReleaseSelectionStale(t, prepared.Execute(ctx))
 	if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
@@ -608,4 +615,68 @@ func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithoutSelection(t *t
 	if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
 		t.Fatalf("fresh selection delegated to the incompatible installed release: %q", got)
 	}
+}
+
+func TestUnfinishedJournalCannotDelegateToIncompatiblePrevious(t *testing.T) {
+	for _, standalone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("standalone=%t", standalone), func(t *testing.T) {
+			runtime, candidate, request, called, _ := retainedFixtureAtVersion(t, "2.0.0")
+			unfinished := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+			owner := filepath.Join("releases", unfinished.target)
+			if err := os.Rename(filepath.Join(unfinished.runtimeRoot, owner), filepath.Join(request.RuntimeRoot, owner)); err != nil {
+				t.Fatal(err)
+			}
+			journal := mustReadFile(t, unfinished.journalPath)
+			journalPath := filepath.Join(request.ConfigHome, "release-transition", "v2", "journal.json")
+			testkit.WriteFile(t, journalPath, journal, 0o600)
+			ctx := context.Background()
+			protected, err := runtime.inspectProtectedTransition(ctx, request.RuntimeRoot, request.ConfigHome, "default", nil)
+			if err != nil || protected == nil || protected.inspection.Resume == nil {
+				t.Fatalf("exact journal owner could not inspect its unfinished transaction: %v", err)
+			}
+
+			args := []string{"--version", "2.0.0", "--runtime-root", request.RuntimeRoot}
+			if standalone {
+				runtime.config.RepositoryRoot = candidate.root
+				args = append(args, "--offline")
+				testkit.WriteFile(t, runtime.config.Installer, []byte("#!/bin/sh\nexit 97\n"), 0o700)
+			} else {
+				cache := runtime.config.Inputs.values["YARD_RELEASE_CACHE"]
+				runtime.config.Inputs.values["YARD_RELEASE_BASE_URL"] = "file://" + filepath.Join(cache, "2.0.0")
+			}
+			request.Direction = releasetransition.DirectionActivateTarget
+			_, err = runtime.PrepareTransition(ctx, args, request.ConfigHome, request.Yard)
+			assertMigrationRollbackRefused(t, request, err, "migration registry differs")
+			if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("incompatible previous release inspected the unfinished transaction: %v", err)
+			}
+			if !bytes.Equal(journal, mustReadFile(t, journalPath)) {
+				t.Fatal("refusal changed the unfinished journal")
+			}
+		})
+	}
+}
+
+func TestTransitionLaunchRefusesNonActiveEngineWithoutSelection(t *testing.T) {
+	runtime, candidate, request, called, _ := retainedVersionFixture(t)
+	writeMigrationRollbackSource(t, candidate, request, []byte(sourceAdmissionRegistry))
+	ctx := context.Background()
+	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, request.RuntimeRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verified.Close()
+	request.ArtifactDigest = verified.manifestDigest
+	_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
+	assertReleaseSelectionStale(t, err)
+
+	active := publishedCandidate{release: "release-a", root: filepath.Join(request.RuntimeRoot, "releases", "release-a")}
+	assets, err := runtime.verifyPublishedCandidate(ctx, active, request.RuntimeRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer assets.Close()
+	_, err = runtime.invokeVerifiedRuntimeTransition(ctx, assets, verified, request, "")
+	assertReleaseSelectionStale(t, err)
+	assertMigrationRollbackUnchanged(t, request, called)
 }
