@@ -3149,8 +3149,8 @@ while True: time.sleep(1)
         self.assertEqual(default["lease"], {})
         for entry in catalog["checks"]:
             self.assertTrue((root / entry["command"][1]).is_file(), entry["id"])
-        tags = subprocess.check_output(["git", "tag", "--list", "v[0-9]*"], cwd=root, text=True).split()
-        previous = max((tag[1:] for tag in tags if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag)),
+        baselines = (root / "dev/e2e/published-upgrade-baselines.tsv").read_text().splitlines()
+        previous = max((line.split("\t")[0] for line in baselines),
                        key=lambda version: tuple(map(int, version.split("."))))
         self.assertEqual(published_baseline_refusals(root, catalog, previous), [])
         self.assertEqual({entry["id"]: entry["command"][2:] for entry in catalog["checks"]
