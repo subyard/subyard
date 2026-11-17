@@ -350,11 +350,12 @@ assert {kind: {"include": [entry for entry in group["include"] if entry not in (
 workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
-for only in ("", config_sync["id"]):
+for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0"):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
         env=dict(os.environ, ONLY=only, plan=json.dumps(plan))))
-    expected = ({"checks": {"include": [config_sync]}, "nested": {"include": []}} if only else
+    expected = ({kind: {"include": [entry for entry in group["include"] if entry["id"] == only]}
+                 for kind, group in plan.items()} if only else
                 {kind: {"include": [entry for entry in group["include"] if not entry.get("manual")]}
                  for kind, group in plan.items()})
     assert selected == expected
@@ -373,8 +374,14 @@ baselines = [(fields[0], fields[3]) for line in (root / "dev/e2e/published-upgra
 assert {name for name in entries if name.startswith("published:")} == {
     "published:" + version for version, role in baselines
     if "vm:published-upgrade/" + (role if role in ("anchor", "hop") else version) not in commands}
+# Unsupported-source VM checks run by default and remain nonblocking on release and PR paths.
+optional = {entry["id"] for group in plan.values() for entry in group["include"] if entry.get("optional")}
+assert optional == {"p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0"}
+assert not {"vm:p0-source-upgrade", *("vm:published-upgrade/" + v for v in ("0.11.0", "0.17.3", "0.27.0"))} & set(commands)
+assert entries["p0:source-upgrade"] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "source-upgrade", "--slot", "1"]
+assert "    continue-on-error: ${{ matrix.optional || false }}\n" in workflow.split("  check:\n", 1)[1].split("    steps:", 1)[0]
 # Full P0 lanes that release acceptance runs as separate hosted checks keep one periodic lane run each.
-for lane in ("source-upgrade", "power-systemd", "legacy-continuation"):
+for lane in ("power-systemd", "legacy-continuation"):
     assert "vm:p0-" + lane in a.CI_HOSTED_CHECKS and "vm:p0-" + lane not in entries
     assert entries["p0:" + lane] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane", lane, "--slot", "1"]
 import subprocess

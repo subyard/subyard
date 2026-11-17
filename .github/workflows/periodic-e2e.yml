@@ -305,6 +305,7 @@ jobs:
 
   # Waits for the Veranda bundle job, but runs whatever its result: the Veranda checks then fail.
   check:
+    continue-on-error: ${{ matrix.optional || false }}
     name: ${{ matrix.id }}
     needs: [candidate, pool, veranda-bundle]
     if: ${{ !cancelled() && needs.candidate.outputs.checks && needs.pool.result == 'success' }}

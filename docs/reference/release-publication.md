@@ -100,7 +100,9 @@ such paths exist; when the baseline or diff is unavailable locally it needs an e
 changes supply it, runs every VM check, and its attestation refuses an untouched `not-run` VM profile
 or core VM check; only an explicit `--defer-profile` operator deferral can leave a profile check unrun, and publication prints
 it. The level is a local receipt record: the publication workflow does not recheck it. Before a full release, fix a red continuous
-run before freezing the candidate.
+run before freezing the candidate. Optional unsupported-source VM checks listed in
+[Periodic E2E](../testing.md#periodic-e2e-on-hosted-runners) are excluded from this requirement
+and never gate a release or PR.
 Local long VM smoke and shipped-profile VM checks run on explicit request:
 
 ```sh

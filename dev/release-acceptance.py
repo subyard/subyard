@@ -282,14 +282,11 @@ CI_HOSTED_CHECKS = frozenset({
     "profile:orca/projects", "profile:orca/ssh-agent", "profile:orca/codex-permissions",
     "profile:orca/managed-agents", "profile:orca/identity-rename",
     "vm:published-upgrade/anchor",
-    "vm:published-upgrade/0.11.0",
-    "vm:published-upgrade/0.17.3",
-    "vm:published-upgrade/0.27.0",
     "vm:integration-selection/container",
     "vm:integration-selection/special", "vm:disabled-components",
     "profile:test-vms/full-uninstall", "profile:github", "vm:p0-full-uninstall",
     # Split from vm:p0-full, whose --split-covered matrix keeps only the nested-VM stages.
-    "vm:p0-source-upgrade", "vm:p0-power-systemd", "vm:p0-legacy-continuation",
+    "vm:p0-power-systemd", "vm:p0-legacy-continuation",
     "profile:subyard-dev", "profile:openclaw", "profile:git-fetch", "profile:hermes",
 })
 # release-vm.yml Git blobs reviewed to execute one exact collector selection per job.

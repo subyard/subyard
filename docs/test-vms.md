@@ -996,7 +996,7 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
 | `newer-release` | VM1; published v0.28.0 direct pin, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
-| `source-upgrade` | VM1 when targeted; VM2 worker in full; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-source-upgrade` |
+| `source-upgrade` | VM1 when targeted; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | optional Periodic-only `p0:source-upgrade`; runnable on demand, outside full P0 and release acceptance |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-power-systemd` |
 | `reboot-verify` | VM1, real Incus and cached image preparation; published v0.28.0 upgrade, incompatible rollback refusal and authentic v0.28.0 compatible rollback/candidate fixture; two boot checks with bounded power reconciliation | marked upgrade fixture, two guest reboots, snapshotted/restored host power runtime | targeted transport/recovery diagnostic |
 | `legacy-continuation` | VM1 when targeted; VM2 worker in full; frozen installed candidate and two bounded reboots | explicitly synthetic unmarked native project, protected continuation grant and snapshotted/restored host power runtime | targeted grant lifecycle acceptance; required in full; release acceptance runs it as `vm:p0-legacy-continuation` |
@@ -1520,7 +1520,7 @@ SUBYARD_P0_WAIT_SECONDS=1200 \
 Release acceptance runs `vm:p0-full` as `--lane full --smoke-covered`: its required
 `p0-release-smoke` runs on the same candidate bundle, so the full check reports newer-release,
 release smoke and peer as covered instead of repeating them. It also adds `--split-covered`:
-source-upgrade, power-systemd and legacy-continuation run as the separate `vm:p0-source-upgrade`,
+power-systemd and legacy-continuation run as the separate
 `vm:p0-power-systemd` and `vm:p0-legacy-continuation` checks of the same candidate (hosted in
 release preparation), so VM2 runs only nested teardown. A standalone `--lane full` runs them all.
 

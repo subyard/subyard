@@ -1650,9 +1650,9 @@ while IFS= read -r lane; do
   grep -Fq "\`$lane\`" <<<"$lane_table" \
     || fail "public P0 lane table omitted $lane"
 done <<<"$lane_inventory"
-grep -Fq $'full\tboundary transport nested-teardown release source-upgrade power-systemd legacy-continuation newer-release release-smoke peer cleanup' <<<"$lane_inventory" \
+grep -Fq $'full\tboundary transport nested-teardown release power-systemd legacy-continuation newer-release release-smoke peer cleanup' <<<"$lane_inventory" \
   || fail 'continuous P0 gate lost a mandatory public-contract phase'
-grep -Fxq $'split-covered\tsource-upgrade power-systemd legacy-continuation' <<<"$lane_inventory" \
+grep -Fxq $'split-covered\tpower-systemd legacy-continuation' <<<"$lane_inventory" \
   || fail 'P0 lane listing lost the lanes release acceptance runs as separate checks'
 
 (
@@ -4547,23 +4547,23 @@ full_matrix_case() { # <name> <failing stages> <VMs whose recovery fails> <expec
     || fail "full matrix $name: calls=$(cat "$dir/calls") evidence=$(cat "$dir/evidence") failures=$(cat "$dir/failures") log=$(cat "$dir/log")"
 }
 full_matrix_case passing '' '' "$(printf '%s\n' "${FULL_AUX_STAGES[@]}")" \
-  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation passed 0\nparallel-matrix passed 0' ''
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation passed 0\nparallel-matrix passed 0' ''
 [ ! -e "$TMP/full-matrix-passing/full-source-vm" ] && [ ! -e "$TMP/full-matrix-passing/full-power-vm" ] \
   || fail 'passing full matrix retained an armed fixture'
-full_matrix_case owner-and-stage 'owner source-upgrade' '' \
-  $'nested-teardown\nfixture-platform\nsource-upgrade\nrecover-vm2\npower-systemd\nlegacy-continuation' \
-  $'parallel-matrix/release failed 31\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade failed 32\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation passed 0\nparallel-matrix failed 1' \
-  $'parallel-matrix/release:31\nparallel-matrix/source-upgrade:32'
+full_matrix_case owner-and-stage 'owner power-systemd' '' \
+  $'nested-teardown\nfixture-platform\npower-systemd\nrecover-vm2\nlegacy-continuation' \
+  $'parallel-matrix/release failed 31\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/power-systemd failed 33\nparallel-matrix/legacy-continuation passed 0\nparallel-matrix failed 1' \
+  $'parallel-matrix/release:31\nparallel-matrix/power-systemd:33'
 grep -qx recover-vm1 "$TMP/full-matrix-owner-and-stage/calls" \
   || fail 'failed full owner did not recover VM1 before later phases'
 full_matrix_case platform fixture-platform '' $'nested-teardown\nfixture-platform\nrecover-vm2' \
-  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform failed 31\nparallel-matrix/source-upgrade blocked null\nparallel-matrix/power-systemd blocked null\nparallel-matrix/legacy-continuation blocked null\nparallel-matrix failed 1' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform failed 31\nparallel-matrix/power-systemd blocked null\nparallel-matrix/legacy-continuation blocked null\nparallel-matrix failed 1' \
   'parallel-matrix/fixture-platform:31'
 grep -Fq 'blocked: depends on failed fixture-platform' "$TMP/full-matrix-platform/log" \
   || fail 'full matrix did not name the failed prerequisite of blocked stages'
 [ "$(cat "$TMP/full-matrix-platform/dirty")" = '' ] || fail 'platform failure marked a recovered VM dirty'
 full_matrix_case unrecovered nested-teardown 2 $'nested-teardown\nrecover-vm2' \
-  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown failed 31\nparallel-matrix/fixture-platform blocked null\nparallel-matrix/source-upgrade blocked null\nparallel-matrix/power-systemd blocked null\nparallel-matrix/legacy-continuation blocked null\nparallel-matrix failed 1' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown failed 31\nparallel-matrix/fixture-platform blocked null\nparallel-matrix/power-systemd blocked null\nparallel-matrix/legacy-continuation blocked null\nparallel-matrix failed 1' \
   'parallel-matrix/nested-teardown:31'
 [ "$(cat "$TMP/full-matrix-unrecovered/dirty")" = 2 ] || fail 'unverified VM2 did not block later phases'
 # A failed source upgrade leaves its project, which the power fixture's clean refuses to accept.
@@ -4578,8 +4578,8 @@ armed_cleanup_order="$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" cleanu
 [ "$armed_cleanup_order" = $'source\npower' ] || fail "armed fixtures were not cleaned source first: $armed_cleanup_order"
 # The last stage has no later stage to report its unverified VM.
 full_matrix_case unrecovered-last legacy-continuation 2 \
-  $'nested-teardown\nfixture-platform\nsource-upgrade\npower-systemd\nlegacy-continuation\nrecover-vm2' \
-  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/source-upgrade passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation failed 34\nparallel-matrix failed 1' \
+  $'nested-teardown\nfixture-platform\npower-systemd\nlegacy-continuation\nrecover-vm2' \
+  $'parallel-matrix/release passed 0\nparallel-matrix/nested-teardown passed 0\nparallel-matrix/fixture-platform passed 0\nparallel-matrix/power-systemd passed 0\nparallel-matrix/legacy-continuation failed 34\nparallel-matrix failed 1' \
   'parallel-matrix/legacy-continuation:34'
 [ "$(cat "$TMP/full-matrix-unrecovered-last/dirty")" = 2 ] || fail 'unverified VM2 after the last stage did not block later phases'
 # Release acceptance runs the VM2 upgrade stages as separate checks: only nested teardown remains, unarmed.
@@ -4602,7 +4602,7 @@ for split_mutation in none extra-stage missing-split foreign-lane; do
     # shellcheck disable=SC2034 # read by the evaluated assert_split_lanes
     case "$split_mutation" in
       extra-stage) FULL_AUX_STAGES+=(future-stage) ;;
-      missing-split) FULL_SPLIT_LANES=(source-upgrade power-systemd) ;;
+      missing-split) FULL_SPLIT_LANES=(power-systemd) ;;
       foreign-lane) FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd) ;;
     esac
     assert_split_lanes
