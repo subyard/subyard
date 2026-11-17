@@ -955,24 +955,40 @@ runpy.run_path(bridge, run_name='__main__')
                     log.unlink()
                     log.touch()
                     log.chmod(0o644)
+                    event_log = root / 'events.jsonl'
+
+                    def error_events():
+                        return [event for line in event_log.read_text().splitlines()
+                                if (event := json.loads(line))['type'] == 'error']
+
+                    error_event = {'type': 'error', 'message': 'unsafe state file'}
+                    previous = error_events()
                     refused = self.cli('resume', root, success=False)
                     self.assertIn('unsafe state file', refused.stderr)
                     self.done(root, 'failed')
                     self.assertEqual(self.result(root)['error'], 'unsafe state file')
-                    with lock_path.open() as lock:
-                        fcntl.flock(lock, fcntl.LOCK_EX)
-                        refused = self.cli('resume', root, *timeout, success=False)
-                        self.assertEqual(refused.returncode, 124)
-                        self.assertIn('inbox lock', refused.stderr)
-                        failed = json.loads(self.cli('status', root).stdout)
-                        self.assertEqual(failed['status'], 'failed')
-                        self.assertEqual(failed['error'], 'unsafe state file')
-                        self.assertNotIn('result_file', failed)
-                    stopped = json.loads(self.cli('stop', root).stdout)
-                    self.assertEqual(stopped['cleanup'], 'verified')
-                    self.assertEqual(self.result(root)['error'], 'unsafe state file')
-                    event = json.loads(self.cli('tail', root, '-n', '1').stdout)
-                    self.assertEqual(event, {'type': 'error', 'message': 'unsafe state file'})
+                    self.assertEqual(error_events(), previous + [error_event])
+
+                    for unsafe_events in (False, True):
+                        with self.subTest(unsafe_events=unsafe_events):
+                            if unsafe_events:
+                                event_log.chmod(0o644)
+                            previous = error_events()
+                            with lock_path.open() as lock:
+                                fcntl.flock(lock, fcntl.LOCK_EX)
+                                refused = self.cli('resume', root, *timeout, success=False)
+                                self.assertEqual(refused.returncode, 124)
+                                self.assertIn('inbox lock', refused.stderr)
+                                self.assertIn('use stop to recover', refused.stderr)
+                                failed = json.loads(self.cli('status', root).stdout)
+                                self.assertEqual(failed['status'], 'failed')
+                                self.assertEqual(failed['error'], 'unsafe state file')
+                                self.assertNotIn('result_file', failed)
+                            stopped = json.loads(self.cli('stop', root).stdout)
+                            self.assertEqual(stopped['cleanup'], 'verified')
+                            self.assertEqual(self.result(root)['error'], 'unsafe state file')
+                            expected = previous if unsafe_events else previous + [error_event]
+                            self.assertEqual(error_events(), expected)
 
     def test_bridge_crash_is_failed_and_stop_cleans_worker(self):
         root = self.start('codex', 'pending')

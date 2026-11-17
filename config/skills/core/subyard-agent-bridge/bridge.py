@@ -2,7 +2,7 @@
 
 import argparse
 from collections import deque
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
 import fcntl
 import json
 import math
@@ -736,7 +736,8 @@ def launch(root, state, config, task, deadline):
             state['status'] = 'failed'
             published = publish_failure(root, state, deadline)
             if isinstance(error, BridgeError):
-                record_event(root, 'error', message=reason)
+                with suppress(OSError, BridgeError):
+                    record_event(root, 'error', message=reason)
             if not published:
                 print('Launch failed and the bridge inbox lock timed out; use stop to recover.', file=sys.stderr)
                 return 124
