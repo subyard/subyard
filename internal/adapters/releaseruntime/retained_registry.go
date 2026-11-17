@@ -250,6 +250,9 @@ func (runtime *Runtime) exactJournalTransitionOwner(engine *verifiedPublishedCan
 		journal.RegistryDigest != engine.registryDigest || journal.CheckIngressSupport() != nil || store.ValidateCurrentRecovery(journal) != nil {
 		return false
 	}
+	if !runtime.installedTransitionEngine(engine, request.RuntimeRoot) {
+		return false
+	}
 	if engine.candidate.release == journal.Goal.Target {
 		return engine.manifestDigest == journal.ArtifactDigest &&
 			engine.candidate.root == filepath.Join(request.RuntimeRoot, "releases", string(journal.Goal.Target))

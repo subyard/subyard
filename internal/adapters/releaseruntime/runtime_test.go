@@ -2190,10 +2190,11 @@ func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) 
 	}
 }
 
-func TestMutationGateExecutesTheVerifiedEngineAcrossPathReplacement(t *testing.T) {
+func TestMutationGateRefusesJournalEngineReplacedAfterVerification(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
 	started := filepath.Join(filepath.Dir(fixture.runtimeRoot), "verified-engine-started")
 	proceed := filepath.Join(filepath.Dir(fixture.runtimeRoot), "verified-engine-proceed")
+	originalCalled := filepath.Join(filepath.Dir(fixture.runtimeRoot), "original-engine-called")
 	replacementCalled := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-engine-called")
 	original := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
@@ -2202,10 +2203,10 @@ case "${1:-}" in
     while [ ! -e %q ]; do sleep 0.01; done
     printf 'yard-engine 1.2.3\n'
     ;;
-  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  _release-transition) : > %q; cat >/dev/null; printf '%%s\n' %q ;;
   *) exit 64 ;;
 esac
-`, started, proceed, fixture.recoveringResponse())
+`, started, proceed, originalCalled, fixture.recoveringResponse())
 	writeProtectedRuntimeFixtureEngine(t, fixture, original)
 	replacement := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-yard-engine")
 	replacementPayload := fmt.Sprintf(`#!/bin/sh
@@ -2258,7 +2259,8 @@ esac
 	select {
 	case observed := <-result:
 		if observed.err != nil || observed.outcome == nil ||
-			observed.outcome.Status != releasetransition.StatusRecovering {
+			observed.outcome.Status != releasetransition.StatusOperatorActionRequired ||
+			observed.outcome.Code != releasetransition.CodeDependencyUnavailable {
 			cause := observed.err
 			for cause != nil && errors.Unwrap(cause) != nil {
 				cause = errors.Unwrap(cause)
@@ -2269,8 +2271,87 @@ esac
 	case <-time.After(5 * time.Second):
 		t.Fatal("mutation gate did not finish after releasing the verified engine")
 	}
-	if _, err := os.Stat(replacementCalled); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("replacement engine executed after verification: %v", err)
+	for _, called := range []string{originalCalled, replacementCalled} {
+		if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("journal engine executed after replacement: %v", err)
+		}
+	}
+}
+
+func TestJournalOwnerLaunchRevalidatesInstalledEngine(t *testing.T) {
+	for _, sourceOwner := range []bool{false, true} {
+		name := "changed target registry"
+		if sourceOwner {
+			name = "replaced historical source directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+			owner := publishedCandidate{
+				release: releasetransition.ReleaseID(fixture.target),
+				root:    filepath.Dir(filepath.Dir(fixture.engine)),
+			}
+			called := filepath.Join(filepath.Dir(fixture.runtimeRoot), "journal-owner-calls")
+			engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.3\\n';; _release-transition) cat >/dev/null; printf 'called\\n' >> %q; printf '%%s\\n' %q;; *) exit 64;; esac\n", called, fixture.recoveringResponse())
+			writeProtectedRuntimeFixtureEngine(t, fixture, engine)
+			journal, err := releasetransition.ParseJournal(mustReadFile(t, fixture.journalPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Stderr: &bytes.Buffer{}})
+			defer runtime.Close()
+			if sourceOwner {
+				// The historical rollback's target is now current. Its registryless
+				// artifact is bound separately from the source engine's registry.
+				target := writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, "release-a", "1.2.3", engine)
+				unbindCandidateRegistry(t, target, true)
+				journal.Goal = releasetransition.Goal{Target: target.release, Direction: releasetransition.DirectionActivatePrevious}
+				journal.Releases = releasetransition.ReleasePair{From: owner.release, Target: target.release}
+				journal.Checkpoint = releasetransition.JournalComplete
+				journal.ArtifactDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(mustReadFile(t, filepath.Join(target.root, "runtime-files.sha256")))))
+				if err := os.Symlink("releases/"+string(owner.release), filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+					t.Fatal(err)
+				}
+				payload, err := releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
+			}
+			request := releasetransition.ProcessRequest{
+				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+				RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Yard: "default",
+				Target: journal.Goal.Target, Direction: journal.Goal.Direction,
+				ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest,
+			}
+			verified, err := runtime.verifyPublishedCandidate(ctx, owner, fixture.runtimeRoot, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verified.Close()
+			if _, err := runtime.invokeVerifiedCandidateTransition(ctx, verified, request, ""); err != nil {
+				t.Fatalf("unchanged journal owner refused: %v", err)
+			}
+
+			if sourceOwner {
+				if err := os.Rename(owner.root, owner.root+".pinned"); err != nil {
+					t.Fatal(err)
+				}
+				writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, string(owner.release), "1.2.3", engine)
+				replacement, err := runtime.verifyPublishedCandidateFiles(owner, fixture.runtimeRoot, &verified.manifestDigest, false)
+				if err != nil {
+					t.Fatalf("replacement must preserve the manifest digest: %v", err)
+				}
+				replacement.Close()
+			} else {
+				testkit.WriteFile(t, filepath.Join(owner.root, "config", "release-transition.json"), []byte(sourceAdmissionRegistry), 0o600)
+			}
+			_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
+			assertReleaseSelectionStale(t, err)
+			if got := string(mustReadFile(t, called)); got != "called\n" {
+				t.Fatalf("changed journal owner received an inspection: %q", got)
+			}
+		})
 	}
 }
 
