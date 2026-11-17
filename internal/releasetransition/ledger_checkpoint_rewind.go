@@ -46,6 +46,12 @@ func rewindCheckpointPayload(expected MigrationLedgerSnapshot, source RegistryV2
 	if err := expected.Checkpoint.Validate(source, sourceDigest, expected.ProjectionSnapshot); err != nil {
 		return nil, err
 	}
+	return rollbackCheckpointForLedger(expected, after, source, sourceDigest, target, targetDigest)
+}
+
+// The caller supplies either a checked reverse edge's result or the unchanged
+// authenticated source ledger. This helper itself grants no storage authority.
+func rollbackCheckpointForLedger(expected MigrationLedgerSnapshot, after LedgerV2, source RegistryV2, sourceDigest Fingerprint, target RegistryV2, targetDigest Fingerprint) ([]byte, error) {
 	checkpoint, err := newLedgerCheckpointV1(after, source, sourceDigest, expected.ProjectionSnapshot, expected.Checkpoint.LegacyProjection.Epochs)
 	if err != nil {
 		return nil, err
