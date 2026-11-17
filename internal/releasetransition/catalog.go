@@ -88,23 +88,22 @@ func NewCapabilityCatalog(descriptors []CapabilityDescriptor) (CapabilityCatalog
 const nmDeviceGuardMigration = "nm-device-guard-v1"
 
 func preRegisteredYardsCapabilityCatalog() CapabilityCatalog {
-	previous := PreviousBuiltinCapabilityCatalog()
-	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
-		CapabilityDescriptor{Kind: "local-ssh-port-settings-v2-to-v3", Domain: "settings", Version: 1},
-		// Epoch-1 owners cannot honor detached optional listener state.
-		// No backward-compatible policy means their rollback is forbidden.
-		CapabilityDescriptor{Kind: "owner-publication-state-v1", Domain: "power-metadata", Version: 1},
-	))
-	if err != nil {
-		panic(err)
-	}
-	return catalog
+	return authoredCatalogThrough(builtinMigrationDefinitions(), 1)
 }
 
 func BuiltinCapabilityCatalog() CapabilityCatalog {
+	return authoredCatalogThrough(builtinMigrationDefinitions(), -1)
+}
+
+// A negative generation selects the complete current catalog. Earlier release
+// checkpoints stay exact when a successor adds an authored capability.
+func authoredCatalogThrough(definitions []migrationDefinition, generation int) CapabilityCatalog {
 	var descriptors []CapabilityDescriptor
 	seen := map[string]CapabilityDescriptor{}
-	for _, definition := range builtinMigrationDefinitions() {
+	for _, definition := range definitions {
+		if generation >= 0 && definition.catalogGeneration > generation {
+			continue
+		}
 		if previous, exists := seen[definition.capability.Kind]; exists {
 			if previous != definition.capability {
 				panic("authored migrations disagree on a compiled capability")
@@ -122,40 +121,31 @@ func BuiltinCapabilityCatalog() CapabilityCatalog {
 }
 
 func registeredYardsCapabilityCatalog() CapabilityCatalog {
-	previous := preRegisteredYardsCapabilityCatalog()
-	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
-		CapabilityDescriptor{Kind: registeredYardsMigration, Domain: "owner-registration", Version: 1},
-		CapabilityDescriptor{Kind: guestDiskTmpMigration, Domain: "power-metadata", Version: 1},
-	))
-	if err != nil {
-		panic(err)
-	}
-	return catalog
+	return authoredCatalogThrough(builtinMigrationDefinitions(), 2)
 }
 
 // Retained sealed owners keep their exact compiled catalog identity.
 func PreviousBuiltinCapabilityCatalog() CapabilityCatalog {
-	catalog, err := NewCapabilityCatalog([]CapabilityDescriptor{
-		{
-			Kind: "test-vms-settings-v1-to-v2", Domain: "settings", Version: 1,
-			RollbackCompatibility: RollbackCompatibilityBackwardCompatibleNoOp,
-			LegacyMinimumVersion:  "0.8.0",
-		},
-		{
-			Kind: "test-yard-owner-v1-to-v2", Domain: "owner-registration", Version: 1,
-			RollbackCompatibility: RollbackCompatibilityBackwardCompatibleNoOp,
-			LegacyMinimumVersion:  "0.8.0",
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-	return catalog
+	return authoredCatalogThrough(builtinMigrationDefinitions(), 0)
 }
 
 func SupportedBuiltinCatalog(digest Fingerprint) (CapabilityCatalog, bool) {
-	current, previous := BuiltinCapabilityCatalog(), PreviousBuiltinCapabilityCatalog()
-	catalogs := []CapabilityCatalog{current, previous, preRegisteredYardsCapabilityCatalog(), registeredYardsCapabilityCatalog()}
+	return supportedAuthoredCatalog(builtinMigrationDefinitions(), digest)
+}
+
+func supportedAuthoredCatalog(definitions []migrationDefinition, digest Fingerprint) (CapabilityCatalog, bool) {
+	current, previous := authoredCatalogThrough(definitions, -1), authoredCatalogThrough(definitions, 0)
+	var generations []int
+	for _, definition := range definitions {
+		if !slices.Contains(generations, definition.catalogGeneration) {
+			generations = append(generations, definition.catalogGeneration)
+		}
+	}
+	slices.Sort(generations)
+	catalogs := []CapabilityCatalog{current}
+	for _, generation := range generations {
+		catalogs = append(catalogs, authoredCatalogThrough(definitions, generation))
+	}
 	// Both independently introduced implementations may own sealed journals.
 	// Recognize only their exact compiled catalogs, never arbitrary subsets.
 	for _, kind := range []string{"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1"} {

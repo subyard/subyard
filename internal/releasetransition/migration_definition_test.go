@@ -48,7 +48,7 @@ func TestAuthoredMigrationsExactlyCoverRegistryAndRollbackPolicy(t *testing.T) {
 }
 
 func TestAuthoredMigrationsRejectIncompletePolicies(t *testing.T) {
-	for _, change := range []string{"missing", "missing verifier", "missing inverse", "contradictory descriptor", "duplicate", "missing planner"} {
+	for _, change := range []string{"missing", "missing verifier", "missing inverse", "contradictory descriptor", "duplicate", "missing planner", "negative catalog generation", "changed catalog generation"} {
 		t.Run(change, func(t *testing.T) {
 			definitions := builtinMigrationDefinitions()
 			switch change {
@@ -64,11 +64,43 @@ func TestAuthoredMigrationsRejectIncompletePolicies(t *testing.T) {
 				definitions = append(definitions, definitions[0])
 			case "missing planner":
 				definitions[0].forward = nil
+			case "negative catalog generation":
+				definitions[0].catalogGeneration = -1
+			case "changed catalog generation":
+				another := definitions[0]
+				another.migration.ID = "another-settings-migration"
+				another.catalogGeneration = 1
+				definitions = append(definitions, another)
 			}
 			if err := validateMigrationDefinitions(definitions); err == nil {
 				t.Fatal("incomplete compiled definition accepted")
 			}
 		})
+	}
+}
+
+func TestAuthoredCatalogCheckpointsSurviveANewMigrationKind(t *testing.T) {
+	const frozenR = Fingerprint("022b6400661c2d277c77712122f6e40e29644de32ae5cb3de2fe1240d1f5fc63")
+	definitions := builtinMigrationDefinitions()
+	if got := authoredCatalogThrough(definitions, 3).Digest(); got != frozenR {
+		t.Fatalf("the seven-kind catalog checkpoint changed: %s", got)
+	}
+	future := definitions[0]
+	future.migration.ID, future.migration.Kind = "future-fixture-migration", "future-fixture-kind"
+	future.capability = CapabilityDescriptor{Kind: future.migration.Kind, Domain: future.migration.Domain, Version: 1}
+	future.rollback = rollbackPolicy{class: rollbackIrreversible, reason: "fixture only"}
+	future.catalogGeneration = 4
+	definitions = append(definitions, future)
+	if err := validateMigrationDefinitions(definitions); err != nil {
+		t.Fatal(err)
+	}
+	current := authoredCatalogThrough(definitions, -1)
+	if current.Digest() == frozenR || !current.Supports(future.migration.Kind, future.migration.Domain) {
+		t.Fatal("the new authored kind did not enter the successor catalog")
+	}
+	original, supported := supportedAuthoredCatalog(definitions, frozenR)
+	if !supported || original.Digest() != frozenR || original.Supports(future.migration.Kind, future.migration.Domain) {
+		t.Fatal("adding a kind changed or lost the retained owner's exact catalog")
 	}
 }
 
