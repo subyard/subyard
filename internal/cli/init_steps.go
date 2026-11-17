@@ -77,6 +77,9 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		appendStep("init.selection", execution.integrationSelection.path, "requested integrations ["+strings.Join(execution.loaded.Integrations.Requested, ", ")+"]",
 			"read exact canonical integration settings", "record the selected yard's requested integration set", false, false)
 	}
+	if execution.powerPaths != nil {
+		appendStep("init.power-paths", execution.powerPaths.Path, fmt.Sprintf("persist effective command power paths as desired host settings: reconciler %s; unit %s; retain them if later initialization fails", execution.loaded.Environment["SUBYARD_POWER_RECONCILER_PATH"], execution.loaded.Environment["SUBYARD_POWER_UNIT_PATH"]), "protected compare-and-swap preserves unrelated assignments", "persist effective command power paths; retain them if later initialization fails", false, false)
+	}
 	if execution.bootstrap != nil {
 		appendStep("init.registration", execution.bootstrap.targetPath, execution.bootstrap.description()+fmt.Sprintf("; owner-local SSH port %d", yard.SSHPort),
 			"read exact published registration bytes and validate protected mode", execution.bootstrap.description(), false, false)
@@ -235,6 +238,7 @@ func (execution *initExecution) stateBinding() string {
 		Bootstrap *registration
 		Selection *selection
 		Profiles  []profileSetup
+		Power     *config.PowerPathsWrite
 		HostID    string
 		Peers     []domain.Context
 		Stages    any
@@ -244,7 +248,7 @@ func (execution *initExecution) stateBinding() string {
 		Runtimes  string
 		Hooks     string
 	}{
-		execution.legacyContinuation.binding(), bootstrap, integration, setups, execution.hostID, slices.Clone(execution.powerYards), execution.approvedPlan, execution.teardownResources, execution.resetBinding(), execution.profileProvision.stateBinding(), execution.runtimePlan.Binding(), execution.hookPlan.Binding()})
+		execution.legacyContinuation.binding(), bootstrap, integration, setups, execution.powerPaths, execution.hostID, slices.Clone(execution.powerYards), execution.approvedPlan, execution.teardownResources, execution.resetBinding(), execution.profileProvision.stateBinding(), execution.runtimePlan.Binding(), execution.hookPlan.Binding()})
 }
 
 func (execution *initExecution) resetBinding() string {
