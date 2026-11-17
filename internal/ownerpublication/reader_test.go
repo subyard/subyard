@@ -63,12 +63,12 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 			checkedEpoch2 = true
 		}
 	}
-	if !checkedEpoch2 || ledger.Domains["power-metadata"].Epoch != 3 {
-		t.Fatal("fixture must cover known reader epochs 2 and 3")
+	if !checkedEpoch2 || ledger.Domains["power-metadata"].Epoch != 4 {
+		t.Fatal("fixture must cover known reader epochs 2, 3 and 4")
 	}
 	write()
 	if err := RequireReader(root, home); err != nil {
-		t.Fatalf("committed epoch-3 reader not admitted: %v", err)
+		t.Fatalf("committed epoch-4 reader not admitted: %v", err)
 	}
 	if err := os.Chmod(path, 0644); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(futureRoot, "config"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	future := releasetransition.RegistryV2{SchemaVersion: 2, MinimumEpochs: map[string]int{"power-metadata": 4}, CurrentEpochs: map[string]int{"power-metadata": 4}, Migrations: []releasetransition.MigrationDefinitionV2{}}
+	future := releasetransition.RegistryV2{SchemaVersion: 2, MinimumEpochs: map[string]int{"power-metadata": 5}, CurrentEpochs: map[string]int{"power-metadata": 5}, Migrations: []releasetransition.MigrationDefinitionV2{}}
 	futurePayload, err := json.Marshal(future)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +102,7 @@ func TestPublicationWritesRequireCommittedProtectedReaderEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state, err := store.ReadMigrationLedger(future, digest); err != nil || state.Ledger.Domains["power-metadata"].Epoch != 4 {
+	if state, err := store.ReadMigrationLedger(future, digest); err != nil || state.Ledger.Domains["power-metadata"].Epoch != 5 {
 		t.Fatalf("future fixture did not reach consumer boundary: %v", err)
 	}
 	if err := RequireReader(futureRoot, home); err == nil || !strings.Contains(err.Error(), "supported power-metadata") {

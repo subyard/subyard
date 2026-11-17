@@ -1,0 +1,3 @@
+[device-subyard]
+match-device=interface-name:incusbr0
+managed=0

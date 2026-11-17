@@ -13,6 +13,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 # shellcheck source=scripts/lib/ssh-config.sh
 . "$SCRIPT_DIR/lib/ssh-config.sh"
+# shellcheck disable=SC2034 # read by lib-power.sh diagnostics
+POWER_NM_GUARD_COMMAND="yard teardown"
 
 # The same physical owner handles the aggregate full-cleanup phases. Parsing,
 # exact inventory and the single authorization stay at the prepared boundary.
@@ -39,7 +41,7 @@ case "${1:-apply}" in
       [ -n "$removed_bridge" ] || continue
       ufw_yard_rules_remove "$removed_bridge" || die "approved bridge firewall cleanup failed"
     done <<< "$removed_bridges"
-    nm_unmanaged_guard_reconcile --yes
+    nm_unmanaged_guard_reconcile
     exit 0 ;;
   remove-files)
     if python3 - "$SUBYARD_TEARDOWN_PLAN" <<'PY_NEEDS_ROOT'

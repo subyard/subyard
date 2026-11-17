@@ -3482,3 +3482,4 @@ class HostedInventory(unittest.TestCase):
 
 unittest.main()
 PY
+node "$ROOT/dev/observer-poll-test.mjs"

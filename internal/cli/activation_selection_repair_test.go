@@ -599,7 +599,7 @@ func completedSourceAuthoringFixture(t *testing.T, migrateSSH bool, extraAssets 
 			t.Fatalf("actual SSH history: %#v %v", outcome, err)
 		}
 		journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, f.journalPath))
-		if err != nil || journal.Checkpoint != releasetransition.JournalComplete || len(journal.Steps) != 5 {
+		if err != nil || journal.Checkpoint != releasetransition.JournalComplete || len(journal.Steps) != 6 {
 			t.Fatalf("actual completed pin evidence: steps=%d err=%v", len(journal.Steps), err)
 		}
 		for _, step := range journal.Steps {

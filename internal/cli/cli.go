@@ -1485,6 +1485,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			cli.printReleaseReadiness(releases[index], owner)
 		}
 	}
+	cli.printNetworkManagerRebootReminder()
 	return code
 }
 
@@ -1598,10 +1599,27 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	if gate, ok := cli.statusYardGate(ctx, readiness); ok {
 		fmt.Fprintln(cli.options.Stdout, "  "+gate.releaseLine())
 		cli.printYardAttention(gate, loaded.Context.YardName)
+		cli.printNetworkManagerRebootReminder()
 		return 0
 	}
 	cli.printReleaseReadiness(readiness, "")
+	cli.printNetworkManagerRebootReminder()
 	return 0
+}
+
+// A migrated NetworkManager guard waits for one host reboot; remind until the boot ID changes.
+func (cli *CLI) printNetworkManagerRebootReminder() {
+	if !hostruntime.LocalNetworkManagerGuardRelevant() {
+		return
+	}
+	switch hostruntime.LocalNetworkManagerGuardState() {
+	case "loaded-reboot", "unread-migration":
+		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerRebootReminder)
+	case "unread-init":
+		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerUnreadReminder)
+	case "unbound":
+		fmt.Fprintf(cli.options.Stdout, "Reminder: %s\n", hostruntime.NetworkManagerUnboundReminder)
+	}
 }
 
 func integrationTunnelArguments(

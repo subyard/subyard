@@ -13,6 +13,8 @@ subyard_require_engine_context
 . "$SCRIPT_DIR/lib/host.sh"
 # shellcheck source=scripts/lib/ssh-listener.sh
 . "$SCRIPT_DIR/lib/ssh-listener.sh"
+# shellcheck disable=SC2034 # read by lib-power.sh diagnostics
+POWER_NM_GUARD_COMMAND="yard start"
 INCUS_PROJECT="${INCUS_PROJECT:-subyard}"
 YARD_INSTANCE_NAME="${YARD_INSTANCE_NAME:-yard}"
 DEV_USER="${DEV_USER:-dev}"

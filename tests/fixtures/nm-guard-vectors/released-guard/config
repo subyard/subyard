@@ -1,0 +1,7 @@
+[main]
+no-auto-default=type:veth;driver:veth;interface-name:veth*;interface-name:br-*;interface-name:incusbr0
+[keyfile]
+unmanaged-devices=type:veth;driver:veth;interface-name:veth*;interface-name:br-*;interface-name:incusbr0
+[device-subyard]
+match-device=type:veth,driver:veth,interface-name:veth*,interface-name:docker*,interface-name:br-*,interface-name:virbr*,interface-name:vnet*,interface-name:tap*,interface-name:macvtap*,interface-name:incusbr0
+managed=0

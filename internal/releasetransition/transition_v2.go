@@ -2107,6 +2107,19 @@ func (transition *V2Transition) observeFresh(
 			})
 			observation.activationConsequences = append(observation.activationConsequences,
 				"preserve exact optional publication state; rollback to an epoch-1 power reader becomes unavailable")
+		case nmDeviceGuardMigration:
+			// A ledger-only reader boundary, like owner-publication-state-v1: released power
+			// readers reject the [device-subyard] guard and their init would rewrite the
+			// released guard and reload NetworkManager, so rollback to them is refused.
+			if migration.Domain != "power-metadata" || migration.FromEpoch != 3 || migration.ToEpoch != 4 {
+				return invalid("NetworkManager device guard migration requires power-metadata 3 to 4")
+			}
+			observation.decisions = append(observation.decisions, RedactedDecision{
+				Resource: "power-metadata", Scope: "power-metadata", Decision: DecisionTransform,
+				Result: "nm-device-guard-reader-v1",
+			})
+			observation.activationConsequences = append(observation.activationConsequences,
+				"accept only the [device-subyard] NetworkManager guard; rollback to a release that requires the released guard becomes unavailable")
 		case localSSHPortMigration:
 			plan, inspectErr := transition.inspectLocalSSHPorts(settingsView)
 			if inspectErr != nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -388,5 +389,56 @@ func TestOwnerPublicationOrderRefusesChangedAuthorizedRegistryWithoutMutation(t 
 	}
 	if !bytes.Equal(journal.Payload, afterJournal.Payload) || !bytes.Equal(ledger.Payload, afterLedger.Payload) || !bytes.Equal(settings, afterSettings) {
 		t.Fatal("changed registry mutated authorized state")
+	}
+}
+
+// Releases before the NetworkManager device guard boundary carry the registry without it. Their
+// registry cannot parse a ledger past the boundary, which is the condition that makes rollback
+// refuse before assessment (TestV2RollbackCompatibilityBlocksBeforeAssessmentAuthorizationOrMutation,
+// "v2 target registry rejects current ledger prefix"); a ledger before the boundary still parses.
+func TestNetworkManagerDeviceGuardLedgerIsUnreadableBelowTheBoundary(t *testing.T) {
+	current, err := os.ReadFile(filepath.Join("..", "..", "config", "release-transition.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRegistry, _, err := ParseRegistryV2(current, BuiltinCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var released RegistryV2
+	if err := json.Unmarshal(current, &released); err != nil {
+		t.Fatal(err)
+	}
+	released.CurrentEpochs["power-metadata"] = 3
+	released.Migrations = slices.DeleteFunc(released.Migrations, func(m MigrationDefinitionV2) bool { return m.Kind == nmDeviceGuardMigration })
+	releasedPayload, err := json.Marshal(released)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasedRegistry, _, err := ParseRegistryV2(releasedPayload, registeredYardsCapabilityCatalog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := BaselineLedgerV2(currentRegistry)
+	for _, migration := range currentRegistry.Migrations {
+		if migration.Kind == nmDeviceGuardMigration {
+			before, _, err := MarshalLedgerV2(ledger, currentRegistry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := ParseLedgerV2(before, releasedRegistry); err != nil {
+				t.Fatalf("a ledger before the boundary no longer parses for the released registry: %v", err)
+			}
+		}
+		if ledger, err = ledger.Advance(currentRegistry, migration); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, _, err := MarshalLedgerV2(ledger, currentRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ParseLedgerV2(after, releasedRegistry); err == nil {
+		t.Fatal("the released registry accepted a ledger past the NetworkManager device guard boundary")
 	}
 }

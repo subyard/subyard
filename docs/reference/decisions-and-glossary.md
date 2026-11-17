@@ -154,11 +154,24 @@ that agents can change Incus device configuration.
 
 Host NetworkManager must leave managed bridges/veth/tap devices unmanaged. Match type/driver as
 well as interface naming and verify effective configuration; guards must precede instance
-creation/start and rerun during setup. Bridge-scoped DHCP/DNS and forwarding rules coexist with
-UFW/host Docker, without broad host input openings or hardcoded subnets. Package
-installation/upgrade and networking must be reproducible through product reconciliation, not
-unexplained manual host repair. Install optional dependencies only at the point of need, through
-detect/advise/offer.
+creation/start and rerun during setup. The guard is a self-contained `[device-subyard]` section
+with `managed=0` for Subyard's own devices only: veths, Incus `tap` devices and Incus-managed
+bridges. It never writes the administrator's `unmanaged-devices` or `no-auto-default` lists and
+reads them only to refuse an unsafe migration. Subyard never reloads or restarts NetworkManager,
+and no yard starts until NetworkManager has provably read the guard: a persistent record ties the
+guard's static content to the boot that wrote it, and only a later boot (or NetworkManager being
+inactive across the write) proves the read. On a host where it runs, the first init and a
+migration without evidence wait for one host reboot. The record binds only the guard file and
+trusts systemd's view of NetworkManager: an administrator who restarts NetworkManager on a
+different configuration and then restores the files on disk (a swapped `conf.d`, a temporary
+higher-priority file) is outside what it can detect, so reboot after such changes. Bridge names come only from the Incus-managed bridges
+of the same run, and the only state-changing NetworkManager call marks such a bridge unmanaged. A
+guard written by a released version is rewritten during update, refusing while NetworkManager
+provably manages a device the administrator's list marks unmanaged; the host then reboots once.
+Bridge-scoped DHCP/DNS and forwarding rules coexist with UFW/host Docker, without broad host
+input openings or hardcoded subnets. Package installation/upgrade and networking must be
+reproducible through product reconciliation, not unexplained manual host repair. Install
+optional dependencies only at the point of need, through detect/advise/offer.
 
 Init is idempotent/resumable ordered check/plan/apply/verify. Desired configuration converges
 add/update/remove, rather than merely adding. Potentially disruptive yard changes appear in the
@@ -408,7 +421,8 @@ Already accepted V2 history with legacy provenance remains readable. Process V1,
 supported V2 recovery and checkpoint-reader contracts remain independent; see the
 [support policy](legacy-migration-support.md).
 
-For releases above 0.28.x, direct update and new rollback targets require v0.28.0 or newer.
+For releases above 0.28.x, direct update requires v0.28.0 or newer; new rollback targets must be
+at the current migration epochs, which since `power-metadata` epoch 4 excludes v0.29.0 and older.
 Sources from v0.11.0 to below that anchor first run `yard update --version 0.28.1`, then
 `yard update` again. The hop is a separate fix release of the anchor series because published
 0.28.0 can stop with a running VM yard; installs completed on 0.28.0 stay accepted. The published
