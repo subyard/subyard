@@ -322,4 +322,3 @@ VM, provisions the profile into a Hermes-preset yard and checks the client, the 
 link and the unregistered-broker diagnostic, then checks retirement after deselection and the
 refusal in a role without host access. The second runs an installed client copy outside the
 checkout against the pool; the third runs `--verify-boundary`.
-
