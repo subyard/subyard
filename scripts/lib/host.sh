@@ -455,22 +455,27 @@ nm_guard_preflight() { # <conf> <desired or empty for removal> <bridges> <active
 }
 
 # Released guards replaced the administrator's device lists. Restoring either list can
-# remove a device's connectivity at the next start. Refuse provable matches; notice unknowns.
+# remove a device's connectivity at the next start. Only unmanaged-devices proves a
+# takeover; no-auto-default does not affect explicit profiles, so it only gets notices.
 NM_GUARD_NOTICES=''
 nm_guard_hijack_check() {
-  local device type state rc key section list undecided effect
+  local device type state rc key section list undecided
   NM_GUARD_NOTICES=''
   [ -n "$NM_GUARD_PROPOSED" ] && [ -n "$NM_DEVICES" ] || return 0
   for key in unmanaged-devices no-auto-default; do
-    section=keyfile effect="marks unmanaged"
-    [ "$key" != no-auto-default ] || { section=main; effect="denies an auto-default connection"; }
+    section=keyfile
+    [ "$key" != no-auto-default ] || section=main
     list="$(printf '%s\n' "$NM_GUARD_PROPOSED" | nm_config_list "$section" "$key")"
     undecided=''
     while IFS=: read -r device type state; do
       [ -n "$device" ] && [ "$type" != loopback ] && [ "$state" != unmanaged ] || continue
       if nm_list_selects "$list" "$device" "$type"; then rc=0; else rc=$?; fi
+      if [ "$key" = no-auto-default ] && [ "$rc" = 0 ]; then
+        NM_GUARD_NOTICES+="the administrator's no-auto-default list selects $device; if $device relies on an automatic connection, create an explicit profile before the reboot"$'\n'
+        continue
+      fi
       case "$rc" in
-        0) NM_GUARD_REFUSALS+="NetworkManager manages $device, which the administrator's $key list $effect; the released Subyard guard replaced that list, and restoring it could leave $device without connectivity after reboot. Hand $device back first with 'sudo nmcli device set $device managed no' (or the administrator's own way), or change the administrator's own $key list if NetworkManager should keep the device"$'\n' ;;
+        0) NM_GUARD_REFUSALS+="NetworkManager manages $device, which the administrator's $key list marks unmanaged; the released Subyard guard replaced that list, and restoring it could leave $device without connectivity after reboot. Hand $device back first with 'sudo nmcli device set $device managed no' (or the administrator's own way), or change the administrator's own $key list if NetworkManager should keep the device"$'\n' ;;
         2) undecided+="$device"$'\n' ;;
       esac
     done <<< "$NM_DEVICES"

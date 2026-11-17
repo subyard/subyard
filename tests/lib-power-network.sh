@@ -927,20 +927,18 @@ guard_case
 MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true}]'
 write_released
 if power_nm_guard_effective incusbr0; then fail "a released guard without a record passed the rule"; fi
-migration_refuses() { # <admin list> <description> [teardown] [key]
-  local key="${4:-unmanaged-devices}" section=keyfile effect="marks unmanaged"
-  [ "$key" != no-auto-default ] || { section=main; effect="denies an auto-default connection"; }
+migration_refuses() { # <admin list> <description> [teardown]
   write_released
-  printf '[%s]\n%s=%s\n' "$section" "$key" "$1" > "$conf_dir/00-admin.conf"
+  printf '[keyfile]\nunmanaged-devices=%s\n' "$1" > "$conf_dir/00-admin.conf"
   before_hash="$(hash_of "$guard_conf")"
   if [ -n "${3:-}" ]; then
     if MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_reconcile "$guard_conf" >"$tmp/migrate.out" 2>&1; then fail "teardown removed a guard over a hijack ($2)"; fi
   elif (POWER_NM_GUARD_COMMAND='yard update' nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1); then
     fail "migration applied with a hijacked device ($2)"
   fi
-  grep -Fq "NetworkManager manages enp6s0, which the administrator's $key list $effect" "$tmp/migrate.out" \
+  grep -Fq "NetworkManager manages enp6s0, which the administrator's unmanaged-devices list marks unmanaged" "$tmp/migrate.out" \
     && grep -Fq "'sudo nmcli device set enp6s0 managed no' (or the administrator's own way)" "$tmp/migrate.out" \
-    && grep -Fq "change the administrator's own $key list if NetworkManager should keep the device" "$tmp/migrate.out" \
+    && grep -Fq "change the administrator's own unmanaged-devices list if NetworkManager should keep the device" "$tmp/migrate.out" \
     || fail "hijack refusal ($2): $(cat "$tmp/migrate.out")"
   [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ -e "$legacy_conf" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] \
     || fail "a refused migration changed the host ($2)"
@@ -953,10 +951,23 @@ migration_refuses 'except:interface-name:wlan0' 'except-only'
 migration_refuses 'type:ethernet' 'type'
 migration_refuses '*,except:type:wifi,except:type:gsm,except:type:cdma' 'Ubuntu stock list'
 migration_refuses 'interface-name:enp6s0' 'teardown' teardown
+# Connection metadata is not inspected: this inventory covers explicit persisted profiles
+# (including a server with no-auto-default=*) and automatic connections alike. Neither refuses.
 for listed in 'interface-name:enp6s0' '*' 'except:interface-name:wlan0' 'type:ethernet'; do
-  migration_refuses "$listed" 'no-auto-default' '' no-auto-default
+  write_released
+  printf '[main]\nno-auto-default=%s\n' "$listed" > "$conf_dir/00-admin.conf"
+  nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1 \
+    || fail "no-auto-default refused a device with an explicit profile: $(cat "$tmp/migrate.out")"
+  grep -Fq "the administrator's no-auto-default list selects enp6s0; if enp6s0 relies on an automatic connection, create an explicit profile before the reboot" "$tmp/migrate.out" \
+    || fail "no-auto-default notice missing: $(cat "$tmp/migrate.out")"
+  [ -z "$NM_GUARD_REFUSALS" ] && [ ! -e "$legacy_conf" ] || fail "no-auto-default prevented migration"
+  grep -Fq 'device set' "$MOCK_NMCLI_LOG" && fail "no-auto-default changed device management"
 done
-migration_refuses 'interface-name:enp6s0' 'no-auto-default teardown' teardown no-auto-default
+# Teardown also leaves a selected managed NIC alone.
+write_released
+MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_reconcile "$guard_conf" >"$tmp/migrate.out" 2>&1 \
+  || fail "no-auto-default refused teardown: $(cat "$tmp/migrate.out")"
+[ ! -e "$guard_conf" ] && [ ! -e "$legacy_conf" ] || fail "no-auto-default kept a retired guard"
 # Lists Subyard cannot decide migrate with a notice naming the list and the managed devices.
 for key in unmanaged-devices no-auto-default; do
   section=keyfile

@@ -157,8 +157,11 @@ well as interface naming and verify effective configuration; guards must precede
 creation/start and rerun during setup. The guard is a self-contained `[device-subyard]` section
 with `managed=0` for Subyard's own devices only: veths, Incus `tap` devices and Incus-managed
 bridges. It never writes the administrator's `unmanaged-devices` or `no-auto-default` lists and
-reads them only to refuse an unsafe migration. Subyard never reloads or restarts NetworkManager,
-and no yard starts until NetworkManager has provably read the guard: a persistent record ties the
+reads them only for migration safety. A managed device selected by `unmanaged-devices` refuses
+migration. `no-auto-default` is notice-only: explicit persisted profiles remain safe, and Subyard
+does not inspect whether the active connection is generated. For a selected device relying on an
+automatic connection, create an explicit profile before rebooting. Subyard never reloads or
+restarts NetworkManager, and no yard starts until NetworkManager has provably read the guard: a persistent record ties the
 guard's static content to the boot that wrote it, and only a later boot (or NetworkManager being
 inactive across the write) proves the read. On a host where it runs, the first init and a
 migration without evidence wait for one host reboot. The record binds only the guard file and
