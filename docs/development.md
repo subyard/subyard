@@ -60,10 +60,10 @@ daily with up to 30 minutes of randomized delay and persistent catch-up. Set
 `SUBYARD_GOCACHE_LIMIT` in the profile configuration (default `30G`, positive integer
 with optional binary K/M/G/T suffix), then provision again to apply it. Above the
 limit, the helper removes oldest entries, including cached executable directories,
-toward 80%, retaining entries used within the last two hours (Go coalesces usage
-timestamps for up to an hour). Fresh entries can keep usage above the target until
-a later run;
-this is a periodic limit, not a hard quota. Root permissions and other filesystems
+toward 80%, retaining entries whose mtime is newer than two hours before trim
+started. Go coalesces mtime updates hourly, so this cutoff includes a safety margin
+beyond that granularity. Protected entries can keep usage above the target until
+a later run; this is a periodic limit, not a hard quota. Root permissions and other filesystems
 are preserved. Manual soft cleanup retains its existing behavior.
 
 Rust runners use `dev/cargo_cache.py` before Cargo, supplying the owning manifest and a
