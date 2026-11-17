@@ -835,8 +835,9 @@ acquire_lease() {
   command -v jq >/dev/null 2>&1 || die "jq is required"
   [ -n "$LOCAL_TEMP" ] || die "lease temporary directory is not initialized"
   # Periodic E2E sets a default for controllers that acquire through this client.
-  if [ -z "$IMAGE_REQUESTED" ] && [ -n "${SUBYARD_E2E_LEASE_IMAGE:-}" ]; then
-    allocation_option --image "$SUBYARD_E2E_LEASE_IMAGE"
+  local hosted_image="${SUBYARD_E2E_LEASE_IMAGE:-debian-13}"
+  if [ -z "$IMAGE_REQUESTED" ] && [ "$hosted_image" != debian-13 ]; then
+    allocation_option --image "$hosted_image"
   fi
   ensure_identity
   CLIENT_CONFIG="$LOCAL_TEMP/ssh_config"

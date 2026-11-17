@@ -37,8 +37,8 @@ for scenario in unsupported legacy wrong-image; do
     LOCAL_TEMP="$fixture/$scenario"
     IMAGE_REQUESTED='' VM_COUNT_REQUESTED=1 LEASE_RUN=1234abcd
     LEASE_REQUESTED_SLOT='slot-001'
-    unset SUBYARD_E2E_LEASE_IMAGE
-    [ "$scenario" = legacy ] || export SUBYARD_E2E_LEASE_IMAGE=ubuntu-26.04
+    export SUBYARD_E2E_LEASE_IMAGE=debian-13
+    [ "$scenario" = legacy ] || SUBYARD_E2E_LEASE_IMAGE=ubuntu-26.04
     ensure_identity() { IDENTITY="$LOCAL_TEMP/lease_id_ed25519"; }
     resolve_bastion_route() { :; }
     ensure_client_id() { printf client; }
@@ -74,6 +74,7 @@ for scenario in unsupported legacy wrong-image; do
       ;;
     legacy)
       [ "$rc" = 0 ] || fail 'default image failed with old broker'
+      rg -q '^acquire-v3 .* slot-001 1$' "$fixture/$scenario/requests" || fail 'Debian fallback changed the legacy wire format'
       [ -f "$fixture/$scenario/config-written" ] || fail 'legacy grant did not reach guest configuration'
       ;;
     wrong-image)
