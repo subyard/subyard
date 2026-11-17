@@ -3147,9 +3147,6 @@ while True: time.sleep(1)
         self.assertEqual({entry["id"]: entry["command"][2:] for entry in catalog["checks"]
                           if entry["command"][1] == "dev/e2e/published-upgrade.sh"}, {
             "published-upgrade/anchor": ["anchor", "all"],
-            "published-upgrade/0.11.0": ["0.11.0", "refusal"],
-            "published-upgrade/0.17.3": ["0.17.3", "refusal"],
-            "published-upgrade/0.27.0": ["0.27.0", "refusal"],
         })
         verifier = importlib.util.spec_from_file_location("upgrade_verifier", root / "dev/verify-release-upgrades.py")
         module = importlib.util.module_from_spec(verifier)
@@ -3475,7 +3472,7 @@ class FullSplitRequirement(unittest.TestCase):
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 25)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 21)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):

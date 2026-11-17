@@ -98,14 +98,14 @@ The host-free `tests/engine-release.sh` proves engine and full-runtime checksums
 offline and incomplete-download behavior, atomic upgrade/rollback layout, stdio half-close and
 supported/unsupported protocol negotiation. On the E2E lane, install two versioned runtimes on VM1,
 connect from VM2 over SSH stdio, upgrade the owner while the controller stays on the previous
-version, and then run `yard update --rollback`. The upgrade path
-also retains the [source-upgrade lane](../dev/e2e/p0-source-upgrade.sh) from a checksum-pinned
+version, and then run `yard update --rollback`. Separate optional Periodic coverage
+retains the [source-upgrade lane](../dev/e2e/p0-source-upgrade.sh) from a checksum-pinned
 installed v0.11.0 predecessor. Its legacy `e2e-yard` remains intact until the operator
 executes the printed recreation commands; the ordinary yard retains its data, identity
 and power state. Two reboots, a second candidate update and rollback/roll-forward
-exercise the resulting installed runtime. This lane starts at
-[the v0.11.0 support floor](reference/legacy-migration-support.md); earlier installations
-require full uninstall and a separate clean installation.
+exercise the resulting installed runtime. This lane starts below the
+[supported v0.28.0 anchor](reference/legacy-migration-support.md) and is outside release acceptance
+and full P0; its failure never blocks a release or PR.
 
 If guarded yard restoration fails during an owner-host boot, inspect the bounded host-side journal
 before running `yard init` or manually starting the yard:

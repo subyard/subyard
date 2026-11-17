@@ -53,12 +53,12 @@ declare -A P0_DIRTY_VM=()
 P0_FAILURE_LOG_MODE=truncate
 P0_ACTIVE_PHASE_VMS=''
 FULL_AUX_RESULTS_FILE=''
-FULL_P0_LANES=(boundary transport nested-teardown release source-upgrade power-systemd legacy-continuation newer-release release-smoke peer cleanup)
+FULL_P0_LANES=(boundary transport nested-teardown release power-systemd legacy-continuation newer-release release-smoke peer cleanup)
 # VM2 chain of the full matrix, in order.
-FULL_AUX_STAGES=(nested-teardown fixture-platform source-upgrade power-systemd legacy-continuation)
+FULL_AUX_STAGES=(nested-teardown fixture-platform power-systemd legacy-continuation)
 # Release acceptance runs these full-matrix lanes as their own catalog checks of the same candidate.
 # They must be exactly the VM2 chain after nested teardown and its platform prerequisite.
-FULL_SPLIT_LANES=(source-upgrade power-systemd legacy-continuation)
+FULL_SPLIT_LANES=(power-systemd legacy-continuation)
 
 # Reuse one ordinary broker lease for the full matrix. This avoids the retired raw SSH-config
 # export and ensures every direct and bundled command addresses the same disposable allocation.
@@ -111,7 +111,7 @@ The --slot N form runs the release smoke. Use --lane full for the complete compa
 recovery matrix. Targeted lanes are diagnostics; they do not replace the release smoke.
 Release acceptance adds --smoke-covered to --lane full: its required smoke runs on the same
 candidate bundle, so newer-release, release-smoke and peer are not repeated there. It also adds
---split-covered: source-upgrade, power-systemd and legacy-continuation run as separate release
+--split-covered: power-systemd and legacy-continuation run as separate release
 checks of the same candidate, so the full matrix runs only release and nested-teardown.
 Every lane sets up its own prerequisites on clean VMs. Record passed, failed and pending
 lanes with source/baseline identity and evidence in the current task plan; invoke remaining
@@ -1090,9 +1090,6 @@ full_aux_lane() (
   [ "${P0_SPLIT_COVERED:-0}" = 0 ] || exit 0
   run_full_aux_stage fixture-platform run_vm 2 fixture-platform
   [ "$FULL_AUX_LAST_STATUS" != failed ] || FULL_AUX_BLOCKED="${FULL_AUX_BLOCKED:-depends on failed fixture-platform}"
-  [ -e "$FULL_SOURCE_ARM_FILE" ] || arm_full_fixture "$FULL_SOURCE_ARM_FILE" 2
-  run_full_aux_stage source-upgrade source_upgrade_lane 2
-  [ "$FULL_AUX_LAST_STATUS" != passed ] || find "$FULL_SOURCE_ARM_FILE" -delete
   [ -e "$FULL_POWER_ARM_FILE" ] || arm_full_fixture "$FULL_POWER_ARM_FILE" 2
   run_full_aux_stage power-systemd power_systemd_lane 2
   [ -e "$FULL_POWER_ARM_FILE" ] || arm_full_fixture "$FULL_POWER_ARM_FILE" 2
