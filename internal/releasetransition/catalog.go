@@ -101,7 +101,8 @@ func preRegisteredYardsCapabilityCatalog() CapabilityCatalog {
 	return catalog
 }
 
-func registeredYardsCapabilityCatalog() CapabilityCatalog {
+// PublishedSixKindCapabilityCatalog identifies the compiled capabilities of v0.28.0 through v0.29.0.
+func PublishedSixKindCapabilityCatalog() CapabilityCatalog {
 	previous := preRegisteredYardsCapabilityCatalog()
 	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
 		CapabilityDescriptor{Kind: registeredYardsMigration, Domain: "owner-registration", Version: 1},
@@ -114,7 +115,7 @@ func registeredYardsCapabilityCatalog() CapabilityCatalog {
 }
 
 func BuiltinCapabilityCatalog() CapabilityCatalog {
-	previous := registeredYardsCapabilityCatalog()
+	previous := PublishedSixKindCapabilityCatalog()
 	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
 		// Released power readers reject the [device-subyard] NetworkManager guard and their init
 		// rewrites the released guard. No backward-compatible policy forbids rollback to them.
@@ -148,7 +149,7 @@ func PreviousBuiltinCapabilityCatalog() CapabilityCatalog {
 
 func SupportedBuiltinCatalog(digest Fingerprint) (CapabilityCatalog, bool) {
 	current, previous := BuiltinCapabilityCatalog(), PreviousBuiltinCapabilityCatalog()
-	catalogs := []CapabilityCatalog{current, previous, preRegisteredYardsCapabilityCatalog(), registeredYardsCapabilityCatalog()}
+	catalogs := []CapabilityCatalog{current, previous, preRegisteredYardsCapabilityCatalog(), PublishedSixKindCapabilityCatalog()}
 	// Both independently introduced implementations may own sealed journals.
 	// Recognize only their exact compiled catalogs, never arbitrary subsets.
 	for _, kind := range []string{"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1"} {

@@ -398,12 +398,14 @@ func (runtime *Runtime) inspectProtectedTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       journal.SourceIngress,
 	}
-	if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
-		var public publicReleaseInspectionError
-		if errors.As(err, &public) {
-			return nil, err
+	if request.Direction == releasetransition.DirectionActivatePrevious {
+		if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
+			var public publicReleaseInspectionError
+			if errors.As(err, &public) {
+				return nil, err
+			}
+			return nil, publicCandidateFailure(err)
 		}
-		return nil, publicCandidateFailure(err)
 	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
 	if err != nil {
@@ -878,6 +880,9 @@ func (runtime *Runtime) PrepareTransition(
 				return fmt.Errorf("reverify draft candidate: %w", err)
 			}
 			defer fresh.Close()
+			if err := runtime.inspectRollbackCompatibility(ctx, fresh, request); err != nil {
+				return err
+			}
 			rechecked, err := runtime.invokeVerifiedCandidateTransition(ctx, fresh, request, "")
 			if err != nil {
 				return err
@@ -1510,10 +1515,6 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	if err := runtime.inspectRollbackCompatibility(ctx, target, request); err != nil {
-		var public publicReleaseInspectionError
-		if parsed.check && errors.As(err, &public) {
-			return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
-		}
 		return Prepared{}, err
 	}
 	return runtime.inspectVerifiedTransition(ctx, parsed, owner, target, request, revalidation)
@@ -1698,8 +1699,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			if verifiedTarget.registryDigest != target.registryDigest {
 				return fmt.Errorf("%w: target runtime registry changed after inspection", domain.ErrPlanStale)
 			}
-			if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
-				return err
+			if inspection.Resume == nil || request.Direction == releasetransition.DirectionActivatePrevious {
+				if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
+					return err
+				}
 			}
 			verifiedOwner := verifiedTarget
 			if owner.candidate.release != target.candidate.release {

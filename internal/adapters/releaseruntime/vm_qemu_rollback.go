@@ -16,9 +16,6 @@ import (
 // inspectVMQEMURollback refuses an older reader before it can mutate rollback
 // state when a reporting VM already carries the headless owner value.
 func (runtime *Runtime) inspectVMQEMURollback(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest) ([]string, error) {
-	if request.Direction != releasetransition.DirectionActivatePrevious {
-		return nil, nil
-	}
 	var output boundedResponseBuffer
 	metadataErr := runtime.runVerifiedCandidate(ctx, target, request.RuntimeRoot, []string{"--command-effect", "_vm-start-policy"}, nil, &output, "")
 	if ctx.Err() != nil {
@@ -69,7 +66,20 @@ func (runtime *Runtime) inspectVMQEMURollback(ctx context.Context, target *verif
 // public error cause. Only its protocol outcome is bounded; the operation boundary
 // renders the complete cause once, including for a new rollback's planning refusal.
 func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest) error {
-	migrationMessages, migrationErr := runtime.inspectMigrationKindRollback(ctx, target, request)
+	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	observed := releaseLinksFromRuntimeSnapshot(links)
+	retained := observed.Previous != nil && *observed.Previous == request.Target
+	if !retained && request.Direction != releasetransition.DirectionActivatePrevious {
+		return nil
+	}
+	var migrationMessages []string
+	var migrationErr error
+	if retained {
+		migrationMessages, migrationErr = runtime.inspectMigrationKindRollback(ctx, target, request, links)
+	}
 	layout, layoutErr := runtime.inspectConfigLayoutRollback(ctx, target, request)
 	messages, vmErr := runtime.inspectVMQEMURollback(ctx, target, request)
 	vmRefused := len(messages) != 0
@@ -84,15 +94,11 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 	if layout != nil {
 		outcome = *layout
 	} else {
-		links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
-		if err != nil {
-			return err
-		}
-		outcome = publicReleaseOutcome(releaseLinksFromRuntimeSnapshot(links), request.Target, nil, releasetransition.CodeRollbackIncompatible,
+		outcome = publicReleaseOutcome(observed, request.Target, nil, releasetransition.CodeRollbackIncompatible,
 			"", "retain a release supporting headless VMs with free page reporting, then run yard update --rollback")
 	}
 	if len(migrationMessages) != 0 {
-		outcome.Retry = "keep the current release active and select a verified retained release supporting all registered migrations before retrying yard update --rollback"
+		outcome.Retry = "keep the current release active and resolve all reported release compatibility requirements before retrying"
 	}
 	if layout != nil && vmRefused && len(migrationMessages) == 0 {
 		outcome.Retry = "retain a release supporting the installed configuration and reporting VM values, then run yard update --rollback"
@@ -107,7 +113,11 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		if len(migrationMessages) != 0 {
 			reason = "rollback requires support for registered migration kinds and installed state"
 		}
-		outcome.Message = fmt.Sprintf("%s; %d findings omitted; full details: stderr of yard update --rollback", reason, len(messages))
+		command := "yard update --version"
+		if request.Direction == releasetransition.DirectionActivatePrevious {
+			command = "yard update --rollback"
+		}
+		outcome.Message = fmt.Sprintf("%s; %d findings omitted; full details: stderr of %s", reason, len(messages), command)
 	}
 	cause := transitionOutcomeError(outcome)
 	if complete != outcome.Message {

@@ -15,9 +15,6 @@ import (
 // Inspect the installed layout before handing rollback to a retained engine:
 // older v2 transition owners do not know that settings may live in the Git cache.
 func (runtime *Runtime) inspectConfigLayoutRollback(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest) (*releasetransition.Outcome, error) {
-	if request.Direction != releasetransition.DirectionActivatePrevious {
-		return nil, nil
-	}
 	manifestPath := filepath.Join(request.ConfigHome, ".sync", "manifest.json")
 	if _, err := os.Lstat(manifestPath); errors.Is(err, os.ErrNotExist) {
 		return nil, nil

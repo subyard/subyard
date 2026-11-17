@@ -3,9 +3,12 @@ package releaseruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -75,22 +78,30 @@ func TestMigrationKindRollbackRefusesBeforeTargetInspectionAndCollectsLayout(t *
 
 func assertMigrationRollbackRefused(t *testing.T, request releasetransition.ProcessRequest, err error, messages ...string) releasetransition.Outcome {
 	t.Helper()
-	var failure publicReleaseInspectionError
-	if !errors.As(err, &failure) || failure.outcome.Code != releasetransition.CodeRollbackIncompatible {
+	outcome, ok := TransitionOutcome(err)
+	if !ok || outcome.Code != releasetransition.CodeRollbackIncompatible {
 		t.Fatalf("refusal = %v", err)
 	}
-	if err := releasetransition.ValidateProcessOutcome(releasetransition.Goal{Target: request.Target, Direction: request.Direction}, failure.outcome); err != nil {
+	assertMigrationRollbackOutcome(t, request, outcome, messages...)
+	return outcome
+}
+
+func assertMigrationRollbackOutcome(t *testing.T, request releasetransition.ProcessRequest, outcome releasetransition.Outcome, messages ...string) {
+	t.Helper()
+	if outcome.Code != releasetransition.CodeRollbackIncompatible {
+		t.Fatalf("outcome = %+v", outcome)
+	}
+	if err := releasetransition.ValidateProcessOutcome(releasetransition.Goal{Target: request.Target, Direction: request.Direction}, outcome); err != nil {
 		t.Fatalf("refusal violates the frozen outcome contract: %v", err)
 	}
 	for _, message := range messages {
-		if !strings.Contains(failure.outcome.Message, message) {
-			t.Fatalf("refusal message %q lacks %q", failure.outcome.Message, message)
+		if !strings.Contains(outcome.Message, message) {
+			t.Fatalf("refusal message %q lacks %q", outcome.Message, message)
 		}
 	}
-	if want := "keep the current release active and select a verified retained release supporting all registered migrations before retrying yard update --rollback"; failure.outcome.Retry != want {
-		t.Fatalf("next action = %q, want %q", failure.outcome.Retry, want)
+	if want := "keep the current release active and resolve all reported release compatibility requirements before retrying"; outcome.Retry != want {
+		t.Fatalf("next action = %q, want %q", outcome.Retry, want)
 	}
-	return failure.outcome
 }
 
 func assertMigrationRollbackUnchanged(t *testing.T, request releasetransition.ProcessRequest, called string) {
@@ -101,12 +112,91 @@ func assertMigrationRollbackUnchanged(t *testing.T, request releasetransition.Pr
 	if _, err := os.Stat(filepath.Join(request.ConfigHome, "release-transition/v2/journal.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("inspection created a journal: %v", err)
 	}
-	for link, want := range map[string]string{"current": "releases/release-a", "previous": "releases/release-b"} {
+	for link, want := range map[string]string{"current": "releases/release-a", "previous": "releases/" + string(request.Target)} {
 		got, err := os.Readlink(filepath.Join(request.RuntimeRoot, link))
 		if err != nil || got != want {
 			t.Fatalf("%s link = %q, %v, want %q", link, got, err, want)
 		}
 	}
+}
+
+func TestMigrationKindRollbackRefusesMissingActiveRegistry(t *testing.T) {
+	runtime, parsed, candidate, request, called := configLayoutRollbackFixture(t, "--scope")
+	writeMigrationRollbackSource(t, candidate, request, []byte(migrationRollbackSettingsRegistry))
+	active := filepath.Join(request.RuntimeRoot, "releases", "release-a")
+	registryPath := filepath.Join(active, "config", "release-transition.json")
+	manifest := filepath.Join(active, "runtime-files.sha256")
+	before := mustReadFile(t, manifest)
+	if err := os.Remove(registryPath); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runtime.prepareRetainedTransition(context.Background(), parsed, request.ConfigHome, request.Yard, nil)
+	assertMigrationRollbackRefused(t, request, err, "active release's sealed migration inventory cannot be verified", "restore the exact active release files")
+	assertMigrationRollbackUnchanged(t, request, called)
+	if !bytes.Equal(before, mustReadFile(t, manifest)) {
+		t.Fatal("refusal modified the active manifest")
+	}
+}
+
+func TestMigrationKindRollbackRefusesExplicitVersionSelectingPrevious(t *testing.T) {
+	runtime, _, candidate, request, called := configLayoutRollbackFixture(t, "--scope")
+	bundle := []byte("retained release fixture")
+	version := "0.29.0"
+	root := filepath.Dir(request.RuntimeRoot)
+	cache := filepath.Join(root, "cache")
+	if err := os.MkdirAll(filepath.Join(cache, version), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	name := fmt.Sprintf("subyard-%s-linux-%s.tar.gz", version, goruntime.GOARCH)
+	for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
+		testkit.WriteFile(t, filepath.Join(cache, version, name+suffix), bundle, 0o600)
+	}
+	target, _, err := releaseBundleIdentity(version, filepath.Join(cache, version, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := filepath.Join(candidate.root, "bin", "yard-engine")
+	testkit.WriteFile(t, engine, bytes.ReplaceAll(mustReadFile(t, engine), []byte("1.2.3"), []byte(version)), 0o700)
+	rewriteReleaseOwnerManifest(t, candidate)
+	candidate.release = releasetransition.ReleaseID(filepath.Base(target))
+	destination := filepath.Join(request.RuntimeRoot, target)
+	if err := os.Rename(candidate.root, destination); err != nil {
+		t.Fatal(err)
+	}
+	candidate.root = destination
+	previous := filepath.Join(request.RuntimeRoot, "previous")
+	if err := os.Remove(previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, previous); err != nil {
+		t.Fatal(err)
+	}
+	writeMigrationRollbackSource(t, candidate, request, []byte(migrationRollbackSettingsRegistry))
+	request.Target, request.Direction = candidate.release, releasetransition.DirectionActivateTarget
+	installer := filepath.Join(root, "installer")
+	testkit.WriteFile(t, installer, []byte(fmt.Sprintf("#!/bin/sh\n# --publish-only\nset -eu\nmkdir -p \"$2/releases\"\ncp -a %q \"$2/%s\"\nprintf '%%s\\n' %q\n", destination, target, target)), 0o700)
+	stdout := &bytes.Buffer{}
+	runtime.config.Installer = installer
+	runtime.config.Stdout = stdout
+	runtime.config.Inputs = fixtureCommandInputs(map[string]string{"HOME": root, "YARD_RELEASE_CACHE": cache})
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	args := []string{"--offline", "--version", version, "--runtime-root", request.RuntimeRoot}
+	_, err = runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+	assertMigrationRollbackRefused(t, request, err, "migration canonicalize")
+	prepared, err := runtime.PrepareTransition(context.Background(), append(args, "--check", "--json"), request.ConfigHome, request.Yard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepared.Execute(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var report struct{ Outcome releasetransition.Outcome }
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationRollbackOutcome(t, request, report.Outcome, "migration canonicalize")
+	assertMigrationRollbackUnchanged(t, request, called)
 }
 
 func TestMigrationKindRollbackRefusesNetworkManagerEpochBeforeCheckpointGate(t *testing.T) {
@@ -151,24 +241,42 @@ func TestMigrationKindRollbackRefusesNetworkManagerEpochBeforeCheckpointGate(t *
 		t.Fatalf("checkpoint setup: %v", err)
 	}
 
-	_, err = runtime.prepareRetainedTransition(context.Background(), parsed, request.ConfigHome, request.Yard, nil)
-	assertMigrationRollbackRefused(t, request, err, "introduce-nm-device-guard-v4", "the migration is applied", "older runtimes can replace the NetworkManager device guard during init")
-	assertMigrationRollbackUnchanged(t, request, called)
-	after, err := store.ReadMigrationCheckpoint()
-	if err != nil || !after.Exists || !bytes.Equal(before.Payload, after.Payload) {
-		t.Fatalf("refusal changed checkpoint: %v", err)
+	prefix, err := registry.MigrationPrefixDigest("power-metadata", 4)
+	if err != nil {
+		t.Fatal(err)
 	}
-	raw, err = store.ReadLedger()
-	if err != nil || !raw.Exists || !bytes.Equal(raw.Payload, projection) {
-		t.Fatalf("refusal changed ledger: %v", err)
+	for _, shape := range []string{"live migration", "retired prefix"} {
+		t.Run(shape, func(t *testing.T) {
+			if shape == "retired prefix" {
+				registry.MinimumEpochs["power-metadata"] = 4
+				registry.Migrations = nil
+				registry.RetiredPrefixes = map[string]releasetransition.RetiredMigrationPrefixV2{"power-metadata": {ThroughEpoch: 4, Digest: prefix}}
+				payload, err := json.Marshal(registry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeMigrationRollbackSource(t, candidate, request, payload)
+			}
+			_, err := runtime.prepareRetainedTransition(context.Background(), parsed, request.ConfigHome, request.Yard, nil)
+			assertMigrationRollbackRefused(t, request, err, "cannot read power-metadata epoch 4", "older runtimes can replace the guard during init")
+			assertMigrationRollbackUnchanged(t, request, called)
+			after, err := store.ReadMigrationCheckpoint()
+			if err != nil || !after.Exists || !bytes.Equal(before.Payload, after.Payload) {
+				t.Fatalf("refusal changed checkpoint: %v", err)
+			}
+			raw, err := store.ReadLedger()
+			if err != nil || !raw.Exists || !bytes.Equal(raw.Payload, projection) {
+				t.Fatalf("refusal changed ledger: %v", err)
+			}
+		})
 	}
 }
 
 func TestMigrationKindRollbackReportsAppliedState(t *testing.T) {
 	target := &verifiedPublishedCandidate{version: "0.29.0", manifestDigest: "4591220831f78d5893a50bdc2ff59e4f21f09a2b5a4f99a15390cb1107eb6cdb"}
-	source := releasetransition.RegistryV2{Migrations: []releasetransition.MigrationDefinitionV2{{ID: "guard", Kind: "nm-device-guard-v1", Domain: "power-metadata", FromEpoch: 3, ToEpoch: 4}}}
+	source := releasetransition.RegistryV2{Migrations: []releasetransition.MigrationDefinitionV2{{ID: "future", Kind: "future-v1", Domain: "settings", FromEpoch: 3, ToEpoch: 4}}}
 	for _, epoch := range []int{3, 4} {
-		ledger := releasetransition.LedgerV2{Domains: map[string]releasetransition.DomainLedgerV2{"power-metadata": {Epoch: epoch}}}
+		ledger := releasetransition.LedgerV2{Domains: map[string]releasetransition.DomainLedgerV2{"settings": {Epoch: epoch}}}
 		findings := migrationKindRollbackFindings(target, source, releasetransition.RegistryV2{}, &ledger)
 		want := "the registration has not been applied"
 		if epoch == 4 {
@@ -196,7 +304,9 @@ func writeMigrationRollbackSource(t *testing.T, candidate publishedCandidate, re
 	if err := os.MkdirAll(filepath.Join(source.root, "config"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	bindRollbackFixtureRegistry(t, source, registry)
+	if registry != nil {
+		testkit.WriteFile(t, filepath.Join(source.root, "config", "release-transition.json"), registry, 0o600)
+	}
 	rewriteReleaseOwnerManifest(t, source)
 }
 

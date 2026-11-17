@@ -415,7 +415,7 @@ func TestNetworkManagerDeviceGuardLedgerIsUnreadableBelowTheBoundary(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	releasedRegistry, _, err := ParseRegistryV2(releasedPayload, registeredYardsCapabilityCatalog())
+	releasedRegistry, _, err := ParseRegistryV2(releasedPayload, PublishedSixKindCapabilityCatalog())
 	if err != nil {
 		t.Fatal(err)
 	}

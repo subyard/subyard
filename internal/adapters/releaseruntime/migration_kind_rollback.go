@@ -2,9 +2,7 @@ package releaseruntime
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 
@@ -23,20 +21,12 @@ var publishedRollbackCatalogs = map[releasetransition.Fingerprint]string{
 	"46f7d72290c6dea090f944728d1a5e7bd72a792e7d1c458498d73fa1819116eb": "0.29.0",
 }
 
-func publishedRollbackSupports(kind, domain string) bool {
-	switch kind {
-	case "test-vms-settings-v1-to-v2", "local-ssh-port-settings-v2-to-v3":
-		return domain == "settings"
-	case "test-yard-owner-v1-to-v2", "registered-yards-v2-to-v3":
-		return domain == "owner-registration"
-	case "owner-publication-state-v1", "registered-guest-disk-tmp-v2-to-v3":
-		return domain == "power-metadata"
-	}
-	return false
-}
-
 func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, retained releasetransition.RegistryV2, ledger *releasetransition.LedgerV2) []string {
 	published := publishedRollbackCatalogs[target.manifestDigest] == target.version && target.version != ""
+	var publishedCatalog releasetransition.CapabilityCatalog
+	if published {
+		publishedCatalog = releasetransition.PublishedSixKindCapabilityCatalog()
+	}
 	migrations := slices.Clone(source.Migrations)
 	slices.SortFunc(migrations, func(a, b releasetransition.MigrationDefinitionV2) int {
 		if a.ID < b.ID {
@@ -48,15 +38,24 @@ func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, r
 		return 0
 	})
 	var findings []string
+	// Epoch 4 remains an irreversible reader boundary after its migration is
+	// retired from the registry. The target's registry bounds what it can read.
+	crossesNM := ledger != nil && ledger.Domains["power-metadata"].Epoch >= 4 && retained.CurrentEpochs["power-metadata"] < 4
+	if crossesNM {
+		findings = append(findings, fmt.Sprintf("retained release %s cannot read power-metadata epoch %d across the NetworkManager device guard boundary at epoch 4; older runtimes can replace the guard during init", target.version, ledger.Domains["power-metadata"].Epoch))
+	}
 	for _, migration := range migrations {
 		nmBoundary := migration.Kind == "nm-device-guard-v1" && migration.Domain == "power-metadata"
+		if nmBoundary && crossesNM {
+			continue
+		}
 		if target.registryDigest == "" && !published && !nmBoundary {
 			// The active owner keeps responsibility for legacy rollback policies.
 			continue
 		}
 		supported := false
 		if published {
-			supported = publishedRollbackSupports(migration.Kind, migration.Domain)
+			supported = publishedCatalog.Supports(migration.Kind, migration.Domain)
 		} else {
 			// A registered kind is a lower bound, never the complete compiled catalog.
 			for _, known := range retained.Migrations {
@@ -87,10 +86,7 @@ func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, r
 	return findings
 }
 
-func (runtime *Runtime) inspectMigrationKindRollback(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest) ([]string, error) {
-	if request.Direction != releasetransition.DirectionActivatePrevious {
-		return nil, nil
-	}
+func (runtime *Runtime) inspectMigrationKindRollback(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, links runtimeLinkSnapshot) ([]string, error) {
 	store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
 	if err != nil {
 		return nil, err
@@ -104,50 +100,50 @@ func (runtime *Runtime) inspectMigrationKindRollback(ctx context.Context, target
 		if err != nil {
 			return nil, err
 		}
-		// Accepted journals keep their exact recovery contract. This guard is for
-		// fresh delegation, never a new admission floor for an authorized owner.
+		// Accepted journals keep their exact recovery contract.
 		if journal.Goal.Target == request.Target && journal.Goal.Direction == request.Direction && journal.ArtifactDigest == request.ArtifactDigest {
 			return nil, nil
 		}
 	}
-	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
-	if err != nil {
-		return nil, err
-	}
+	const sourceRefusal = "the active release's sealed migration inventory cannot be verified; restore the exact active release files"
 	if !links.current.present {
-		return nil, nil
+		return []string{sourceRefusal}, nil
 	}
 	sourceRoot := filepath.Join(request.RuntimeRoot, links.current.target)
-	// Registryless sources retain their existing admission path. This check adds
-	// diagnostics for registered kinds; it cannot authorize missing provenance.
-	if _, err := os.Lstat(filepath.Join(sourceRoot, "config", "release-transition.json")); errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	} else if err != nil {
-		return nil, err
-	}
-	source, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: releasetransition.ReleaseID(filepath.Base(links.current.target)), root: sourceRoot}, request.RuntimeRoot, nil)
+	source, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: releaseLinksFromRuntimeSnapshot(links).Active, root: sourceRoot}, request.RuntimeRoot, nil)
 	if err != nil {
-		return nil, fmt.Errorf("verify migration rollback source: %w", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return []string{sourceRefusal}, err
 	}
 	defer source.Close()
+	if source.registryDigest == "" {
+		return nil, nil
+	}
 	registry, _, err := readVerifiedTransitionRegistry(source)
 	if err != nil {
-		return nil, err
+		return []string{sourceRefusal}, nil
 	}
 	var retained releasetransition.RegistryV2
 	if target.registryDigest != "" {
 		retained, _, err = readVerifiedTransitionRegistry(target)
 		if err != nil {
-			return nil, err
+			return []string{"the retained release's sealed migration registry cannot be verified"}, nil
 		}
 	}
-	if findings := migrationKindRollbackFindings(target, registry, retained, nil); len(findings) == 0 {
+
+	findings := migrationKindRollbackFindings(target, registry, retained, nil)
+	checkNMEpoch := registry.CurrentEpochs["power-metadata"] >= 4 && retained.CurrentEpochs["power-metadata"] < 4
+	if len(findings) == 0 && !checkNMEpoch {
 		return nil, nil
 	}
 	state, historyErr := store.ReadMigrationLedger(registry, source.registryDigest)
-	var ledger *releasetransition.LedgerV2
-	if historyErr == nil {
-		ledger = &state.Ledger
+	if historyErr != nil {
+		if checkNMEpoch && len(findings) == 0 {
+			findings = append(findings, "the NetworkManager device guard epoch cannot be verified from active migration history")
+		}
+		return findings, historyErr
 	}
-	return migrationKindRollbackFindings(target, registry, retained, ledger), historyErr
+	return migrationKindRollbackFindings(target, registry, retained, &state.Ledger), nil
 }

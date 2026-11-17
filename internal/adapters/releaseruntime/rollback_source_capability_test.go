@@ -118,6 +118,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 			beforeLedger := mustReadFile(t, ledgerPath)
 			beforeCheckpoint, beforeErr := os.ReadFile(checkpointPath)
 			request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: root, ConfigHome: home, Target: "release-b", Direction: releasetransition.DirectionActivatePrevious}
+			writeMigrationRollbackSource(t, candidate, request, nil)
 			var output bytes.Buffer
 			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": filepath.Dir(home)}), Stdout: &output, Stderr: &output})
 			defer runtime.Close()
