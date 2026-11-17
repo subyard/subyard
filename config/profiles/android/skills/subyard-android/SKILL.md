@@ -9,7 +9,7 @@ Gradle cache `/srv/cache/gradle`; L2 Gradle cache: `/home/dev/.gradle`. Exports 
 
 The shared SDK is read-only; use `android-broker sdk list` and `android-broker sdk install`
 for missing packages, rather than a private SDK. Installs are add-only;
-Google SDK licenses are accepted automatically and logged. Package grammar/defaults: [Android guide](https://github.com/Subyard/Subyard/blob/master/docs/android.md).
+Google SDK licenses are accepted automatically and logged. Package grammar/defaults: [Android guide](https://github.com/Subyard/Subyard/blob/master/docs/android.md#additional-sdk-packages).
 
 `timeout 30 android-broker catalog` lists device/API choices;
 `timeout 30 android-broker status` checks availability. Failed checks mean readiness is unknown;

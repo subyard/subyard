@@ -67,8 +67,8 @@ coordinator, and do not create or close shared task files or start another full 
 
 - Branch each task from the default branch, or from the release branch for a release in
   preparation, and target that base; branch from an unmerged PR branch only with the operator's
-  agreement. Commit and push your branch without asking. Sync the private overlay only with
-  [subyard-private-sync](../subyard-private-sync/SKILL.md).
+  agreement. Commit and push your branch without asking. The operator invokes
+  [subyard-private-sync](../subyard-private-sync/SKILL.md) manually to sync the private overlay.
 - After review accepts the candidate, commit it. A fresh [describer](roles/describer.md) session
   returns the title and body from the diff and your short public brief: problem, expected
   behavior, checks run and known limits, without private details. Save the body outside the

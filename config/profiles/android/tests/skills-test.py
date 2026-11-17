@@ -24,7 +24,7 @@ class AndroidSkill(unittest.TestCase):
             skill = home/'.agents/skills/subyard-android/SKILL.md'
             content = skill.read_text()
             self.assertTrue(content.startswith('---\nname: subyard-android\ndescription: Build or test Android apps'))
-            for term in ('/srv/cache/android-sdk','/opt/jdk-17','/srv/cache/gradle','/home/dev/.gradle','/etc/profile.d/subyard-android.sh','ANDROID_SERIAL','ADB_SERVER_SOCKET','timeout 30 android-broker status','readiness is unknown','./gradlew :app:connectedDebugAndroidTest','org.gradle.daemon=false','ANDROID_ADB_SERVER_PORT','android-broker sdk install','android-broker sdk list','licenses are accepted automatically','https://github.com/Subyard/Subyard/blob/master/docs/android.md'):
+            for term in ('/srv/cache/android-sdk','/opt/jdk-17','/srv/cache/gradle','/home/dev/.gradle','/etc/profile.d/subyard-android.sh','ANDROID_SERIAL','ADB_SERVER_SOCKET','timeout 30 android-broker status','readiness is unknown','./gradlew :app:connectedDebugAndroidTest','org.gradle.daemon=false','ANDROID_ADB_SERVER_PORT','android-broker sdk install','android-broker sdk list','licenses are accepted automatically','https://github.com/Subyard/Subyard/blob/master/docs/android.md#additional-sdk-packages'):
                 self.assertIn(term,content)
             self.assertEqual(skill.resolve(),(home/'.claude/skills/subyard-android/SKILL.md').resolve())
             args.mode='remove'

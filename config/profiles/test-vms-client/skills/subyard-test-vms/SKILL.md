@@ -3,10 +3,6 @@ name: subyard-test-vms
 description: Get a disposable VM with root from the operator's test-VM pool, run commands in it across separate calls, then release it.
 ---
 
-The opt-in `test-vms-client` profile installs this skill and client without a checkout
-or coding-tool integration; roles with `ALLOWS_HOST_ACCESS=false` refuse it.
-Removing it from `ENVIRONMENT_PROFILES` and reconciling retires the client/skill;
-a held lease's keeper still releases it after idle expiry.
 [Delivery and owner setup](https://github.com/Subyard/Subyard/blob/master/docs/test-vms.md#pool-facts-for-agents).
 
 Client (use the full path across separate calls; `--help` lists options):
@@ -26,9 +22,7 @@ yard, project, run, purpose and expiry;
 `capacity`: wait, optionally `acquire --slot N --wait 20m`;
 `quarantined`, `stopped`, `legacy*`, `unavailable`: ask the operator.
 
-A keeper renews every 5 minutes. Without `exec`, `--idle` (default 20m, maximum 2h)
-releases the lease; `exec HANDLE -- true` resets idle time. If the keeper stops,
-expiry is 20 minutes after the last renewal. `client.sh leases` lists handles;
+Running `exec HANDLE -- true` resets the idle timer. `client.sh leases` lists handles;
 release `lost`/`no-keeper` handles and acquire again.
 
 The VM has root and public Internet egress; it cannot reach this yard, the broker,

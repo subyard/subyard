@@ -4,8 +4,10 @@ description: Inspect disk usage and clean explicitly disposable caches, or recre
 ---
 
 `yard status --space` measures storage; use `yard cleanup --help` for options.
+Select the yard explicitly when several yards exist.
 Soft cleanup removes only profile-declared `CLEANUP_CACHES`, preserving roots,
-permissions and nested mounts without following symlinks. Toolchains are not caches.
+permissions and nested mounts without following symlinks. Installed toolchains, SDKs
+and browser runtimes (e.g. `~/.cache/ms-playwright`) are not disposable caches.
 
 Before manual deletion, identify the directory's owner and purpose; path checks do not prove disposability.
 Use a literal path or an empty-safe variable (`rm -rf -- "${dir:?}"/*`).
@@ -24,3 +26,5 @@ After interruption, keep the same configuration/runtime and rerun hard cleanup f
 same yard. Do not delete its backup or recovery checkpoint; cleanup retires them after verification.
 
 [Hard-cleanup plans and recovery limits](https://github.com/Subyard/Subyard/blob/master/docs/control-plane.md#selected-yard-cleanup).
+
+Report measured space changes as observations: active builds, hardlinks, open files and shared storage affect them.
