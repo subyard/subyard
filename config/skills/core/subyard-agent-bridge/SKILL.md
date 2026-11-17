@@ -32,9 +32,9 @@ omitted. The detached bridge owns the worker's stdio; commands return promptly.
 `wait` blocks until terminal state, a pending approval or its timeout. Exit codes:
 done `0`, failed `1`, pending approval `2`, interrupted `130`, timeout `124`.
 Use one background/event wait call for long waits; no coordinator polling loop is
-needed. `stop` waits for interruption, verifies the turn's scope is empty or gone,
-and is idempotent. The `--timeout` budget covers waiting for the turn and its lock.
-When it expires, `stop` stops the scope directly and verifies cleanup.
+needed. `--timeout` also bounds lock waits for commands. `stop` waits for
+interruption and is idempotent. If waiting for the turn or worker lock times out,
+`stop` stops the scope directly and verifies it is empty or gone.
 A crashed run reports `failed`. If scope cleanup cannot be verified, `stop` and
 `resume` fail with a cleanup diagnostic. If `resume` times out waiting for a
 lock, run `stop` to recover the scope before retrying.

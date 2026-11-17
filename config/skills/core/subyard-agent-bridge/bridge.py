@@ -704,7 +704,11 @@ def launch(root, state, config, task, deadline):
                                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         except OSError:
             state.update(status='failed', error='Systemd user scope launcher could not start.')
-            with locked(root / 'inbox.lock'):
+            lock = lock_until(root / 'inbox.lock', deadline)
+            if lock is None:
+                print('Launch failed and the bridge inbox lock timed out; use stop to recover.', file=sys.stderr)
+                return 124
+            with lock:
                 publish_result(root, state, config['model'])
             raise
         state.update(pid=child.pid, process_start=process_identity(child.pid))
@@ -762,6 +766,8 @@ def main():
         workers = []
         for path in sorted(root.rglob('state')):
             try:
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    continue
                 directory(path.parent)
                 state = snapshot(path.parent)
                 workers.append({'dir': str(path.parent), **state})
@@ -843,21 +849,30 @@ def main():
         print(json.dumps(requests))
         return 0
     if args.command == 'send':
+        hint = 'send requires an active turn; use resume to continue a stopped worker.'
+        if not (root / 'state').exists() or snapshot(root)['status'] not in ACTIVE_STATES:
+            print(hint, file=sys.stderr)
+            return 1
         if args.message is None and sys.stdin.isatty():
             raise ValueError('send requires --message or piped stdin')
         message = args.message if args.message is not None else sys.stdin.read()
-        with locked(root / 'inbox.lock'):
-            if not (root / 'state').exists() or snapshot(root)['status'] not in ACTIVE_STATES:
-                print('send requires an active turn; use resume to continue a stopped worker.', file=sys.stderr)
-                return 1
-            write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
-        return 0
+        lock = lock_until(root / 'inbox.lock', time.monotonic() + args.timeout)
+        if lock is not None:
+            with lock:
+                if snapshot(root)['status'] in ACTIVE_STATES:
+                    write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
+                    return 0
+        elif snapshot(root)['status'] in ACTIVE_STATES:
+            print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
+            return 124
+        print(hint, file=sys.stderr)
+        return 1
     deadline = time.monotonic() + args.timeout
-    command_lock = root / 'command.lock'
-    lock = lock_until(command_lock, deadline) if args.command in ('stop', 'resume') else locked(command_lock)
+    lock = lock_until(root / 'command.lock', deadline)
     if lock is None:
         print('Timed out waiting for the bridge command lock.', file=sys.stderr)
-        print(json.dumps(snapshot(root)))
+        if args.command in ('stop', 'resume') and (root / 'state').exists():
+            print(json.dumps(snapshot(root)))
         return 124
     with lock:
         if args.command in ('approve', 'deny'):

@@ -317,8 +317,8 @@ class Bridge(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
         return result
 
-    def start(self, vendor, task, *args, preset=False):
-        root = self.root / str(len(self.workers))
+    def start(self, vendor, task, *args, preset=False, dirname=None):
+        root = self.root / (dirname or str(len(self.workers)))
         root.mkdir(mode=0o700)
         root.chmod(0o700)
         (root / 'task.md').write_text(task)
@@ -714,13 +714,16 @@ runpy.run_path(bridge, run_name='__main__')
                 self.cli('stop', pending)
 
     def test_approval_commands_and_independent_named_workers(self):
-        roots = [self.start(vendor, 'approval', '--name', vendor + '-worker') for vendor in ('codex', 'claude')]
+        roots = [self.start('codex', 'approval', '--name', 'codex-worker', dirname='state'),
+                 self.start('claude', 'approval', '--name', 'claude-worker')]
         for root in roots:
             self.approval(root)
         result = subprocess.run([sys.executable, str(BRIDGE), 'list', '--root', str(self.root)],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual({item['name'] for item in json.loads(result.stdout)}, {'codex-worker', 'claude-worker'})
+        listed = json.loads(result.stdout)
+        self.assertEqual({item['dir'] for item in listed}, {str(root) for root in roots})
+        self.assertEqual({item['name'] for item in listed}, {'codex-worker', 'claude-worker'})
         for root, command in zip(roots, ('approve', 'deny')):
             requests = json.loads(self.cli('approvals', root).stdout)
             self.assertEqual(len(requests), 1)
@@ -783,16 +786,52 @@ runpy.run_path(bridge, run_name='__main__')
             sender.wait(timeout=2)
             sender.stdin.close()
 
-    def test_stop_times_out_if_command_lock_is_held(self):
+    def test_commands_time_out_if_command_lock_is_held(self):
         root = self.start('codex', 'pending')
-        self.approval(root)
+        request = self.approval(root)
         with (root / 'command.lock').open('r') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            waiting = self.cli('stop', root, '--timeout', '0.1', success=False)
-            self.assertEqual(waiting.returncode, 124)
-            self.assertIn('command lock', waiting.stderr)
+            for command in ('start', 'resume', 'interrupt', 'stop', 'approve', 'deny'):
+                with self.subTest(command=command):
+                    approval = [request.stem] if command in ('approve', 'deny') else []
+                    waiting = self.cli(command, root, *approval, '--timeout', '0.1', success=False)
+                    self.assertEqual(waiting.returncode, 124)
+                    self.assertIn('command lock', waiting.stderr)
             self.assertFalse((self.turn(root) / 'interrupt').exists())
+            self.assertFalse(request.with_suffix('.reply').exists())
         self.cli('stop', root, '--timeout', '0.1')
+
+    def test_send_times_out_if_active_worker_inbox_lock_is_held(self):
+        root = self.start('claude', 'pending')
+        self.approval(root)
+        lock_path = root / 'inbox.lock'
+        with lock_path.open('a') as lock:
+            lock_path.chmod(0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            waiting = self.cli('send', root, '--message', 'late', '--timeout', '0.1', success=False)
+            self.assertEqual(waiting.returncode, 124)
+            self.assertIn('inbox lock', waiting.stderr)
+            self.assertFalse(list((root / 'inbox').iterdir()))
+
+    def test_resume_launch_failure_times_out_if_inbox_lock_is_held(self):
+        root = self.start('codex', 'complete')
+        self.done(root)
+        self.cli('stop', root)
+        log = root / 'bridge.log'
+        log.unlink()
+        log.symlink_to(root / 'task.md')
+        with (root / 'inbox.lock').open('r') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            resumed = self.cli('resume', root, '--timeout', '0.1', success=False)
+            self.assertEqual(resumed.returncode, 124)
+            self.assertIn('Launch failed', resumed.stderr)
+            self.assertIn('inbox lock', resumed.stderr)
+        status = json.loads(self.cli('status', root).stdout)
+        self.assertEqual(status['status'], 'failed')
+        self.assertNotIn('result_file', status)
+        stopped = json.loads(self.cli('stop', root).stdout)
+        self.assertEqual(stopped['cleanup'], 'verified')
+        self.assertEqual(self.result(root)['state'], 'failed')
 
     def test_bridge_crash_is_failed_and_stop_cleans_worker(self):
         root = self.start('codex', 'pending')
@@ -959,6 +998,9 @@ main()
             stat_file = Path('/proc') / str(pid) / 'stat'
             self.until(lambda: stat_file.read_text().rsplit(') ', 1)[1].startswith('T '))
             result = self.result(root)
+            late = self.cli('send', root, '--message', 'late', '--timeout', '0', success=False)
+            self.assertEqual(late.returncode, 1)
+            self.assertIn('use resume', late.stderr)
             resumed = self.cli('resume', root, '--timeout', '0.1', success=False)
             self.assertEqual(resumed.returncode, 124)
             self.assertIn('worker lock', resumed.stderr)
