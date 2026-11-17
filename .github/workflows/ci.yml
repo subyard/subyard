@@ -56,7 +56,7 @@ jobs:
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build/published-baselines
-          key: published-baselines-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('dev/verify-release-upgrades.py', 'dev/e2e/published-upgrade-baselines.tsv') }}
+          key: published-baselines-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('dev/verify-release-upgrades.py', '**/published-upgrade-baselines.tsv') }}
       - name: Verify released updater compatibility
         run: |
           set -o pipefail
