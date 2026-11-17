@@ -1,8 +1,10 @@
 """File-based cross-vendor workers using native stdio protocols."""
 
 import argparse
+from collections import deque
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import selectors
@@ -14,6 +16,33 @@ import sys
 import tempfile
 import time
 import uuid
+
+
+EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
+MODELS = {'codex': {'developer': 'gpt-6.1-sol', 'reviewer': 'gpt-6.1-sol', 'observer': 'gpt-6-luna'},
+          'claude': {'developer': 'opus', 'reviewer': 'opus', 'observer': 'haiku'}}
+
+
+def role_arguments(config, env):
+    if config.get('role') != 'reviewer':
+        return []
+    cwd = config['cwd']
+    scratch = str(Path(env.get('TMPDIR', '/tmp')).resolve())
+    if cwd in ('/tmp', scratch) or Path(cwd) in Path('/tmp').parents or Path(cwd) in Path(scratch).parents:
+        raise ValueError('reviewer cwd must be distinct from temporary roots')
+    if config['vendor'] == 'codex':
+        filesystem = {'/tmp': 'write', scratch: 'write', cwd: 'read'}
+        return ['-c', 'default_permissions="bridge-reviewer"',
+                '-c', 'permissions.bridge-reviewer.extends=":read-only"',
+                '-c', 'permissions.bridge-reviewer.filesystem={' + ','.join(
+                    json.dumps(path) + '=' + json.dumps(mode) for path, mode in filesystem.items()) + '}']
+    # Bash is sandboxed; file tools use explicit deny rules for repository writes.
+    settings = {'sandbox': {'enabled': True, 'failIfUnavailable': True,
+                           'allowUnsandboxedCommands': False, 'excludedCommands': [],
+                           'autoAllowBashIfSandboxed': False,
+                           'filesystem': {'denyWrite': [cwd], 'allowWrite': ['/tmp', scratch]}},
+                'permissions': {'deny': ['Edit(/' + cwd + '/**)']}}
+    return ['--settings', json.dumps(settings)]
 
 
 def read(path):
@@ -72,6 +101,15 @@ def append(path):
     return stream
 
 
+def publish_result(root, state, model, tokens=None, duration=None):
+    result = {'state': state['status'], 'exit_code': EXIT_CODES[state['status']],
+              'session_id': state.get('session_id'), 'vendor': state['vendor'],
+              'model': model, 'duration_seconds': duration, 'tokens': tokens}
+    if state.get('error'):
+        result['error'] = state['error']
+    write(root / 'result.json', json.dumps(result) + '\n')
+
+
 class Codex:
     def __init__(self, worker):
         self.w = worker
@@ -98,6 +136,7 @@ class Codex:
         self.request(method, params, self.thread)
 
     def thread(self, result):
+        self.w.model = result.get('model', self.w.model)
         session = result['thread']['id']
         if self.w.state.get('session_id') not in (None, session):
             raise ValueError('Codex resumed a different session')
@@ -153,6 +192,8 @@ class Codex:
         elif method == 'turn/completed':
             status = event['params']['turn']['status']
             self.w.outcome = {'completed': 'done', 'interrupted': 'interrupted', 'failed': 'failed'}[status]
+        elif method == 'thread/tokenUsage/updated':
+            self.w.tokens = event['params']['tokenUsage']
         elif 'id' in event and method:
             # Unknown approval/user-input protocols must never be silently approved.
             raise ValueError('unsupported Codex server request')
@@ -192,6 +233,7 @@ class Claude:
                                     'response': ({'behavior': 'allow', 'updatedInput': inputs} if allow else
                                                  {'behavior': 'deny', 'message': 'Operator denied this request.'})}}))
         elif kind == 'system' and event.get('subtype') == 'init':
+            self.w.model = event.get('model', self.w.model)
             session = event['session_id']
             if self.w.state.get('session_id') not in (None, session):
                 raise ValueError('Claude resumed a different session')
@@ -200,11 +242,16 @@ class Claude:
         elif kind == 'assistant':
             for block in event['message']['content']:
                 if block['type'] == 'text':
+                    self.w.answer = block['text']
                     self.w.record('message', text=block['text'])
                 elif block['type'] == 'tool_use':
                     self.w.record('tool', tool=block['name'])
         elif kind == 'result':
-            self.w.answer = event.get('result', '')
+            self.w.tokens = event.get('usage')
+            answer = event.get('result', self.w.answer)
+            if answer and answer != self.w.answer:
+                self.w.record('message', text=answer)
+            self.w.answer = answer
             self.w.outcome = 'failed' if event.get('is_error') or event.get('subtype') != 'success' else 'done'
 
 
@@ -215,12 +262,18 @@ class Worker:
         self.state = json.loads(read(root / 'state'))
         self.state['pid'] = os.getpid()
         self.task = read(root / 'task.md')
+        if self.config.get('role') == 'reviewer':
+            self.task = 'Review read-only. Do not modify the repository. Write test/build outputs only in /tmp or TMPDIR.\n' + self.task
+        elif self.config.get('role') == 'observer':
+            self.task = 'Observe the assigned checks. Do not change repository sources.\n' + self.task
         self.pending = {}
         self.approval_ids = set()
         self.sent = set()
         self.ready = False
         self.outcome = None
         self.answer = ''
+        self.model = self.config['model']
+        self.tokens = None
         self.interrupted = False
         self.adapter = Codex(self) if self.config['vendor'] == 'codex' else Claude(self)
 
@@ -281,19 +334,26 @@ class Worker:
                     self.adapter.message(path, read(path))
 
     def run(self):
-        executable = shutil.which(self.config['vendor'])
+        env = {**os.environ, **self.config.get('env', {})}
+        executable = self.config.get('executable')
+        if not executable:
+            installed = '/usr/local/bin/' + self.config['vendor']
+            executable = installed if Path(installed).is_file() else shutil.which(self.config['vendor'], path=env.get('PATH'))
         if not executable:
             raise ValueError('worker executable missing')
-        argv = [executable, 'app-server'] if self.config['vendor'] == 'codex' else [
+        extra = role_arguments(self.config, env) + self.config.get('vendor_args', [])
+        argv = [executable, *extra, 'app-server'] if self.config['vendor'] == 'codex' else [
             executable, '-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
-            '--verbose', '--permission-prompt-tool', 'stdio', '--model', self.config['model'],
-            '--effort', self.config['effort']]
+            '--verbose', '--model', self.config['model'], '--effort', self.config['effort'],
+            *extra, '--permission-prompt-tool', 'stdio']
         if self.config['vendor'] == 'claude' and self.state.get('session_id'):
             argv.append('--resume=' + self.state['session_id'])
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'interrupted', True))
         signal.signal(signal.SIGINT, lambda *_: setattr(self, 'interrupted', True))
         self.child = subprocess.Popen(argv, cwd=self.config['cwd'], stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE, start_new_session=True, bufsize=0)
+                                      stdout=subprocess.PIPE, env=env, start_new_session=True, bufsize=0)
+        self.state['worker_pid'] = self.child.pid
+        self.state['worker_start'] = process_identity(self.child.pid)
         selector = selectors.DefaultSelector()
         selector.register(self.child.stdout, selectors.EVENT_READ)
         buffer = b''
@@ -348,33 +408,136 @@ class Worker:
         if self.outcome == 'done':
             write(self.root / 'final.md', self.answer + '\n')
         self.state['status'] = self.outcome or 'failed'
+        publish_result(self.root, self.state, self.model, self.tokens,
+                       round(time.time() - self.state['started_at'], 3))
         self.record(self.state['status'])
         self.save()
+
+
+def process_identity(pid):
+    try:
+        fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
+        return None if fields[0] == 'Z' else fields[19]
+    except (FileNotFoundError, ProcessLookupError):
+        return None
 
 
 def snapshot(root):
     state = json.loads(read(root / 'state'))
     if state['status'] == 'running' and state.get('pid'):
-        try:
-            os.kill(state['pid'], 0)
-        except ProcessLookupError:
-            state.update(status='failed', error='Bridge process exited without a terminal state.')
+        if process_identity(state['pid']) != state.get('process_start'):
+            state.update(status='failed', pending_approvals=[], error='Bridge process exited without a terminal state.')
     state['queued_messages'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
     return state
 
 
+def launch(root, state, config, task):
+    config.setdefault('name', root.name)
+    with locked(root / 'worker.lock'):
+        stop_orphan(state)
+        for path in (root / 'approvals').glob('*.json'):
+            path.unlink()
+            path.with_suffix('.reply').unlink(missing_ok=True)
+        write(root / 'task.md', task)
+        write(root / 'config.json', json.dumps(config) + '\n')
+        state.pop('error', None)
+        state.pop('queued_messages', None)
+        state.update(status='running', pid=None, turn_id=None, pending_approvals=[],
+                     generation=uuid.uuid4().hex, vendor=config['vendor'], name=config['name'], model=config['model'],
+                     started_at=time.time(), worker_pid=None, worker_start=None)
+        write(root / 'state', json.dumps(state) + '\n')
+        for name in ('final.md', 'result.json', 'interrupt'):
+            (root / name).unlink(missing_ok=True)
+        for name in ('events.jsonl', 'bridge.log'):
+            if not (root / name).exists():
+                write(root / name, '')
+        try:
+            with append(root / 'bridge.log') as log:
+                child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_run', '--dir', str(root)],
+                                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        except OSError:
+            state.update(status='failed', error='Bridge process could not start.')
+            publish_result(root, state, config['model'])
+            write(root / 'state', json.dumps(state) + '\n')
+            raise
+        state.update(pid=child.pid, process_start=process_identity(child.pid))
+        write(root / 'state', json.dumps(state) + '\n')
+    print(json.dumps({'status': 'running', 'pid': child.pid, 'dir': str(root)}))
+
+
+def wait(root, timeout, stopping=False):
+    deadline = time.monotonic() + timeout
+    while True:
+        state = snapshot(root)
+        if state['status'] != 'running':
+            break
+        if state['pending_approvals'] and not stopping:
+            print(json.dumps(state))
+            return 2
+        if time.monotonic() >= deadline:
+            print(json.dumps(state))
+            return 124
+        time.sleep(0.1)
+    print(json.dumps(state))
+    return 0 if stopping else EXIT_CODES[state['status']]
+
+
+def stop_orphan(state):
+    pid = state.get('worker_pid')
+    if pid and state.get('worker_start') and process_identity(pid) == state['worker_start']:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['start', 'send', 'interrupt', 'status', 'wait', 'resume', '_run'])
-    parser.add_argument('--dir', required=True, type=Path)
+    parser.add_argument('command', choices=['start', 'send', 'interrupt', 'stop', 'status', 'wait', 'resume',
+                                          'tail', 'approvals', 'approve', 'deny', 'list', '_run'])
+    parser.add_argument('approval_id', nargs='?')
+    parser.add_argument('--dir', type=Path)
+    parser.add_argument('--root', type=Path, help='parent of worker directories for list')
     parser.add_argument('--vendor', choices=['codex', 'claude'])
     parser.add_argument('--model')
     parser.add_argument('--effort')
     parser.add_argument('--cwd', type=Path)
+    parser.add_argument('--task', type=Path, help='assignment file for start or resume')
+    parser.add_argument('--role', choices=['developer', 'reviewer', 'observer'])
+    parser.add_argument('--name')
+    parser.add_argument('--env', action='append', default=[], metavar='K=V')
+    parser.add_argument('--executable', type=Path, help='explicit native CLI path (otherwise /usr/local/bin, then PATH)')
+    parser.add_argument('-n', type=int, default=20, help='number of summarized events for tail')
     parser.add_argument('--message', help='send text; defaults to stdin')
     parser.add_argument('--timeout', type=float, default=60, help='maximum wait seconds (default: 60)')
-    args = parser.parse_args()
+    arguments = sys.argv[1:]
+    separator = arguments.index('--') if '--' in arguments else len(arguments)
+    args = parser.parse_args(arguments[:separator])
+    if args.timeout < 0 or not math.isfinite(args.timeout):
+        raise ValueError('timeout must be finite and nonnegative')
+    vendor_args = arguments[separator + 1:]
+    if vendor_args and args.command != 'start':
+        raise ValueError('vendor arguments are set at start and retained on resume')
+    if args.command == 'list':
+        root = args.root or args.dir
+        if root is None:
+            raise ValueError('list requires --root or --dir')
+        directory(root)
+        workers = []
+        for path in sorted(root.rglob('state')):
+            try:
+                directory(path.parent)
+                state = snapshot(path.parent)
+                workers.append({'dir': str(path.parent), **state})
+            except (OSError, ValueError, KeyError):
+                workers.append({'dir': str(path.parent), 'status': 'failed'})
+        print(json.dumps(workers))
+        return 0
+    if args.dir is None:
+        raise ValueError('--dir is required')
     root = args.dir.absolute()
+    if args.command == 'stop' and not (root / 'state').exists():
+        return 0
     directory(root)
     for name in ('inbox', 'approvals'):
         directory(root / name)
@@ -384,78 +547,113 @@ def main():
             try:
                 worker = Worker(root)
                 worker.run()
-            except Exception:
+            except Exception as error:
                 # Native errors and protocol bodies can contain credentials. Keep diagnostics generic.
                 if worker is None:
                     state = json.loads(read(root / 'state'))
                     state.update(status='failed', error='Worker initialization failed.')
+                    publish_result(root, state, state.get('model'))
                     write(root / 'state', json.dumps(state) + '\n')
                     return 1
-                worker.outcome = 'failed'
-                worker.record('error', message='Worker executable, protocol or state operation failed.')
+                worker.outcome = 'interrupted' if worker.interrupted else 'failed'
+                worker.record('error', message='Worker executable, protocol or state operation failed.',
+                              error_type=type(error).__name__)
             worker.finish()
         return 0
-    if args.command in ('status', 'wait'):
-        initial = snapshot(root)
-        state = initial
-        deadline = time.monotonic() + args.timeout
-        while args.command == 'wait' and state['status'] == 'running' and state == initial:
-            if time.monotonic() >= deadline:
-                print(json.dumps(state))
-                return 124
-            time.sleep(0.1)
-            state = snapshot(root)
-        print(json.dumps(state))
+    if args.command == 'wait':
+        return wait(root, args.timeout)
+    if args.command == 'status':
+        print(json.dumps(snapshot(root)))
+        return 0
+    if args.command == 'tail':
+        if args.n < 0:
+            raise ValueError('tail count must not be negative')
+        lines = deque(maxlen=args.n)
+        for line in read(root / 'events.jsonl').splitlines():
+            event = json.loads(line)
+            if event['type'] in ('message', 'tool'):
+                lines.append(line)
+        print('\n'.join(lines), end='\n' if lines else '')
+        return 0
+    if args.command == 'approvals':
+        requests = []
+        for name in snapshot(root)['pending_approvals']:
+            path = root / 'approvals' / (name + '.json')
+            try:
+                request = json.loads(read(path))
+            except FileNotFoundError:
+                continue
+            requests.append({'id': name, **{key: request[key] for key in ('vendor', 'tool', 'command', 'reason')},
+                             'file': str(path)})
+        print(json.dumps(requests))
         return 0
     with locked(root / 'command.lock'):
-        if args.command in ('start', 'resume'):
+        if args.command in ('approve', 'deny'):
+            name = args.approval_id
+            if not name or not name.isascii() or not name.isdigit() or len(name) < 6 or name not in snapshot(root)['pending_approvals']:
+                raise ValueError('approval is not pending')
+            reply = root / 'approvals' / (name + '.reply')
+            if os.path.lexists(reply):
+                raise ValueError('approval already answered')
+            read(reply.with_suffix('.json'))
+            write(reply, 'allow\n' if args.command == 'approve' else 'deny\n')
+            return 0
+        if args.command in ('start', 'resume', 'send'):
+            text = None
+            if args.command == 'send':
+                if args.message is None and sys.stdin.isatty():
+                    raise ValueError('send requires --message or piped stdin')
+                text = args.message if args.message is not None else sys.stdin.read()
+                state = snapshot(root)
+                if state['status'] == 'running':
+                    write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), text)
+                    return 0
             if args.command == 'start':
                 if (root / 'state').exists():
                     raise ValueError('worker already exists; use resume')
-                if not all((args.vendor, args.model, args.effort, args.cwd)):
-                    raise ValueError('start requires --vendor, --model, --effort and --cwd')
+                if not args.vendor or not args.cwd:
+                    raise ValueError('start requires --vendor and --cwd')
+                if args.role:
+                    args.model = args.model or MODELS[args.vendor][args.role]
+                    args.effort = args.effort or ('low' if args.role == 'observer' else 'high')
+                if not args.model or not args.effort:
+                    raise ValueError('start requires --role or explicit --model and --effort')
                 if not args.cwd.is_dir():
                     raise ValueError('worker cwd is not a directory')
-                config = dict(vendor=args.vendor, model=args.model, effort=args.effort, cwd=str(args.cwd.resolve()))
+                env = {}
+                for entry in args.env:
+                    key, value = entry.split('=', 1)
+                    if not key or '\0' in key + value:
+                        raise ValueError('invalid environment override')
+                    env[key] = value
+                config = dict(vendor=args.vendor, model=args.model, effort=args.effort, cwd=str(args.cwd.resolve()),
+                              role=args.role, name=args.name or root.name, env=env, vendor_args=vendor_args,
+                              executable=str(args.executable.resolve()) if args.executable else None)
+                role_arguments(config, {**os.environ, **env})
                 state = dict(session_id=None, approval_sequence=0)
             else:
                 state = snapshot(root)
                 if state['status'] == 'running' or not state['session_id']:
                     raise ValueError('resume requires a stopped worker with a session id')
                 config = json.loads(read(root / 'config.json'))
-            read(root / 'task.md')
-            with locked(root / 'worker.lock'):
-                if args.command == 'resume':
-                    for path in (root / 'approvals').glob('*.json'):
-                        path.unlink()
-                        path.with_suffix('.reply').unlink(missing_ok=True)
-                write(root / 'config.json', json.dumps(config) + '\n')
-                state.pop('error', None)
-                state.pop('queued_messages', None)
-                state.update(status='running', pid=None, turn_id=None, pending_approvals=[],
-                             generation=uuid.uuid4().hex, vendor=config['vendor'])
-                write(root / 'state', json.dumps(state) + '\n')
-                (root / 'final.md').unlink(missing_ok=True)
-                (root / 'interrupt').unlink(missing_ok=True)
-                for name in ('events.jsonl', 'bridge.log'):
-                    if not (root / name).exists():
-                        write(root / name, '')
-                with append(root / 'bridge.log') as log:
-                    child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_run', '--dir', str(root)],
-                                             stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-                # The child acquires worker.lock after this block; it owns all subsequent state writes.
-                child_pid = child.pid
-                state['pid'] = child_pid
-                write(root / 'state', json.dumps(state) + '\n')
-            print(json.dumps({'status': 'running', 'pid': child_pid, 'dir': str(root)}))
+            task = text if text is not None else read(args.task if args.task else root / 'task.md')
+            launch(root, state, config, task)
         else:
-            if snapshot(root)['status'] != 'running':
+            state = snapshot(root)
+            if state['status'] != 'running':
+                if args.command == 'stop':
+                    stop_orphan(state)
+                    if state.get('error'):
+                        for path in (root / 'approvals').glob('*.json'):
+                            path.unlink()
+                            path.with_suffix('.reply').unlink(missing_ok=True)
+                        publish_result(root, state, state.get('model'))
+                        write(root / 'state', json.dumps(state) + '\n')
+                    return 0
                 raise ValueError('worker is not running')
-            if args.command == 'send':
-                text = args.message if args.message is not None else sys.stdin.read()
-                write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), text)
-            else:
-                write(root / 'interrupt', '')
+            write(root / 'interrupt', '')
+    if args.command == 'stop':
+        return wait(root, args.timeout, stopping=True)
     return 0
 
 
