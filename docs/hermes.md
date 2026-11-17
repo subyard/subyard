@@ -74,7 +74,7 @@ yard -Y hermes provision test-vms-client
 This adds the shared broker client and the `subyard-test-vms` skill, linked as
 `~/.hermes/skills/subyard-test-vms`. Hermes then acquires a VM, runs root commands in it across
 separate calls with one lease handle, and releases it; see the
-[client for any yard](test-vms.md#client-for-any-yard). Remove `test-vms-client` from
+[subyard-test-vms skill](../config/profiles/test-vms-client/skills/subyard-test-vms/SKILL.md). Remove `test-vms-client` from
 `ENVIRONMENT_PROFILES` and run `yard -Y hermes init` to retire the client and skill.
 
 ## Optional browser route over Tailscale

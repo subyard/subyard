@@ -38,8 +38,8 @@ missing and no other instructions say where task plans and notes live, ask the o
 
 ## Testing
 
-Before building, running, or changing tests, read and follow the
-[testing guide](docs/testing.md) and the [agent E2E VM guide](docs/test-vms.md).
+Use the [testing reading map](docs/testing.md#reading-map-by-task-type) to choose the
+sections to read for the task.
 
 Host-free tests and manual local reproductions must keep disposable Git repositories and
 short-lived test worktrees under `/tmp`, outside managed workspace trees, even when `TMPDIR`
