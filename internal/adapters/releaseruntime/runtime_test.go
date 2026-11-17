@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -2226,6 +2227,14 @@ esac
 	runtime := New(Config{
 		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
 	})
+	defer runtime.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, releaseOwner, err := uninstall.OwnerLock(ctx, runtime.ownerDataHome(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseOwner()
 	type gateResult struct {
 		outcome *releasetransition.Outcome
 		err     error
@@ -2233,7 +2242,7 @@ esac
 	result := make(chan gateResult, 1)
 	go func() {
 		outcome, err := runtime.InspectMutationGate(
-			context.Background(), fixture.runtimeRoot, fixture.configHome, "default",
+			ctx, fixture.runtimeRoot, fixture.configHome, "default",
 		)
 		result <- gateResult{outcome: outcome, err: err}
 	}()

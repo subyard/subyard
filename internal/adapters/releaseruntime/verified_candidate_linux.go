@@ -492,15 +492,19 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		return errors.New("verified published runtime is unavailable")
 	}
 	transition := len(arguments) != 0 && arguments[0] == "_release-transition"
+	readOnlyGate := transition && grant == "" && journalGateLaunch(ctx, request) != nil &&
+		(runtime.config.OwnerLockHeld == nil || !runtime.config.OwnerLockHeld())
 	if transition {
 		if request == nil || request.RuntimeRoot != runtimeRoot {
 			return staleRetainedSelection(runtimeRoot, engine.candidate.release)
 		}
-		unlock, err := runtime.lockReleaseSelection(ctx)
-		if err != nil {
-			return err
+		if !readOnlyGate {
+			unlock, err := runtime.lockReleaseSelection(ctx)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 		}
-		defer unlock()
 	}
 	extra := make([]*os.File, 0, 3)
 	var grantReader *os.File
@@ -553,14 +557,16 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	if grant != "" {
 		command.Env = append(command.Env, "SUBYARD_RELEASE_TRANSITION_GRANT_FD=3")
 	}
-	owner, borrowErr := uninstall.BorrowOwnerLock(runtime.ownerDataHome())
-	if borrowErr != nil {
-		return borrowErr
-	}
-	if owner != nil {
-		defer owner.Close()
-		command.Env = append(command.Env, fmt.Sprintf("SUBYARD_OWNER_LOCK_FD=%d", 3+len(command.ExtraFiles)))
-		command.ExtraFiles = append(command.ExtraFiles, owner)
+	if !readOnlyGate {
+		owner, borrowErr := uninstall.BorrowOwnerLock(runtime.ownerDataHome())
+		if borrowErr != nil {
+			return borrowErr
+		}
+		if owner != nil {
+			defer owner.Close()
+			command.Env = append(command.Env, fmt.Sprintf("SUBYARD_OWNER_LOCK_FD=%d", 3+len(command.ExtraFiles)))
+			command.ExtraFiles = append(command.ExtraFiles, owner)
+		}
 	}
 	// Operator input is distinct from the JSON protocol and never grants assent.
 	if grant != "" && runtime.config.OperatorInput != nil {

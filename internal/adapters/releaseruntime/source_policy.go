@@ -40,9 +40,15 @@ func sourceVersionError(version string) error {
 		return errors.New(LegacyReinstallGuidance)
 	}
 	if parsed.LT(semver.MustParse(UpdateAnchorVersion)) {
-		return fmt.Errorf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer; next: yard update --version %s && yard update", version, UpdateAnchorVersion, UpdateHopVersion)
+		message, retry := sourceAnchorGuidance(version)
+		return fmt.Errorf("%s; next: %s", message, retry)
 	}
 	return nil
+}
+
+func sourceAnchorGuidance(version string) (message, retry string) {
+	return fmt.Sprintf("source-anchor-required: installed v%s. Direct update requires installed v%s or newer", version, UpdateAnchorVersion),
+		"yard update --version " + UpdateHopVersion + " && yard update"
 }
 
 // unfinishedBelowAnchorError routes an unfinished transition only through the

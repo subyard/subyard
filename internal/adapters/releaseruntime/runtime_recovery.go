@@ -157,6 +157,9 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 		if selection, _ := ctx.Value(releaseSelectionKey{}).(*releaseSelection); selection != nil {
 			launch.ConfigHome = selection.request.ConfigHome
 		}
+		if gate, _ := ctx.Value(journalGateInspectionKey{}).(*journalGateInspection); gate != nil {
+			launch = gate.request
+		}
 	}
 	if err := processRuntime.runVerifiedRuntimeEngine(ctx, owner, owner, runtimeRoot, []string{"_release-transition"},
 		bytes.NewReader(append(payload, '\n')), &stdout, grant, &launch); err != nil {

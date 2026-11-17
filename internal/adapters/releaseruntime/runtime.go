@@ -235,6 +235,7 @@ func (runtime *Runtime) InspectMutationGateInspection(
 	ctx context.Context, runtimeRoot, configHome, yard string,
 ) (*releasetransition.Inspection, error) {
 	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
+	ctx = context.WithValue(ctx, journalGateInspectionKey{}, &journalGateInspection{})
 	inspection, err := runtime.inspectProtectedTransition(
 		ctx, runtimeRoot, configHome, yard, inheritedSettingIDs,
 	)
@@ -410,9 +411,26 @@ func (runtime *Runtime) inspectProtectedTransition(
 			return nil, publicCandidateFailure(err)
 		}
 	}
+	// Command admission must inspect before waiting for the owner barrier.
+	// Bind this read-only launch to the exact journal we already inspected.
+	_, gate := ctx.Value(journalGateInspectionKey{}).(*journalGateInspection)
+	var before currentSnapshot
+	if gate {
+		before, err = runtime.readCurrentSnapshot(root, configHome)
+		if err != nil || !sameProtectedSnapshot(before.journal, snapshot) {
+			return nil, staleRetainedSelection(root, request.Target)
+		}
+		ctx = context.WithValue(ctx, journalGateInspectionKey{}, &journalGateInspection{request: request, fingerprint: snapshot.Fingerprint})
+	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
 	if err != nil {
 		return nil, publicCandidateFailure(err)
+	}
+	if gate {
+		after, err := runtime.readCurrentSnapshot(root, configHome)
+		if err != nil || !sameCurrentSnapshot(before, after) {
+			return nil, staleRetainedSelection(root, request.Target)
+		}
 	}
 	if response.Inspection == nil && response.Outcome != nil &&
 		journal.Goal.Direction == releasetransition.DirectionActivatePrevious {
@@ -814,7 +832,7 @@ func (runtime *Runtime) PrepareTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       sourceIngress, Replacement: newerRelease,
 	}
-	parsed.selection, err = runtime.captureReleaseSelection(ctx, inspectionCandidate, request, linksBefore)
+	parsed.selection, err = runtime.captureTransitionSelection(ctx, inspectionCandidate, request, linksBefore, !canonicalPresent)
 	if err != nil {
 		return runtime.inspectionFailure(parsed, err)
 	}
@@ -924,20 +942,7 @@ func (runtime *Runtime) PrepareTransition(
 					if !errors.Is(err, unix.EEXIST) {
 						return fmt.Errorf("publish approved release: %w", err)
 					}
-					if parsed.selection == nil {
-						return staleRetainedSelection(request.RuntimeRoot, request.Target)
-					}
-					existing, verifyErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: candidate.release, root: canonical}, parsed.root, &fresh.manifestDigest)
-					if verifyErr != nil {
-						return staleRetainedSelection(request.RuntimeRoot, request.Target)
-					}
-					defer existing.Close()
-					if existing.version != fresh.version || existing.registryDigest != fresh.registryDigest {
-						return staleRetainedSelection(request.RuntimeRoot, request.Target)
-					}
-					if err := runtime.Close(); err != nil {
-						return err
-					}
+					return staleRetainedSelection(request.RuntimeRoot, request.Target)
 				}
 				if runtime.relocatedCandidates == nil {
 					runtime.relocatedCandidates = map[string]string{}

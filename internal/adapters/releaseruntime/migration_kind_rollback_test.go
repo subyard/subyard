@@ -602,8 +602,8 @@ func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithDifferentArtifact
 	rewriteReleaseOwnerManifest(t, candidate)
 	testkit.WriteFile(t, runtime.config.Installer, installer, 0o700)
 	assertReleaseSelectionStale(t, prepared.Execute(ctx))
-	if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
-		t.Fatalf("expected draft inspection and reinspection only, got %q", got)
+	if got := string(mustReadFile(t, called)); got != "called\n" {
+		t.Fatalf("expected only the initial draft inspection, got %q", got)
 	}
 	if current, err := os.Readlink(filepath.Join(request.RuntimeRoot, "current")); err != nil || current != "releases/release-a" {
 		t.Fatalf("collision changed the active release: %q, %v", current, err)
@@ -612,8 +612,77 @@ func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithDifferentArtifact
 	request.Direction = releasetransition.DirectionActivateTarget
 	_, err = runtime.PrepareTransition(ctx, args, request.ConfigHome, request.Yard)
 	assertMigrationRollbackRefused(t, request, err, "migration registry differs")
-	if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
+	if got := string(mustReadFile(t, called)); got != "called\n" {
 		t.Fatalf("fresh selection delegated to the incompatible installed release: %q", got)
+	}
+}
+
+func TestForwardUpdateUsesFreshDraftAcrossRegistryChange(t *testing.T) {
+	runtime, candidate, request, called, args := retainedVersionFixture(t)
+	if err := os.Remove(filepath.Join(request.RuntimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture normally returns an inspection. Give the convergence call
+	// its own response so the test exercises the same draft after publication.
+	engine := filepath.Join(candidate.root, "bin", "yard-engine")
+	ready := fmt.Sprintf(`{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":"release-a","target":%q,"code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}`,
+		candidate.release, candidate.release)
+	converge := fmt.Sprintf(`if grep -q '"mode":"converge"'; then printf 'called\n' >> %q; printf '%%s\n' '%s'; exit 0; fi;`, called, ready)
+	enginePayload := bytes.Replace(mustReadFile(t, engine), []byte("cat >/dev/null;"), []byte(converge), 1)
+	testkit.WriteFile(t, engine, enginePayload, 0o700)
+	rewriteReleaseOwnerManifest(t, candidate)
+	template := filepath.Join(filepath.Dir(request.RuntimeRoot), "forward-template")
+	if err := os.Rename(candidate.root, template); err != nil {
+		t.Fatal(err)
+	}
+	installer := mustReadFile(t, runtime.config.Installer)
+	testkit.WriteFile(t, runtime.config.Installer, bytes.ReplaceAll(installer, []byte(candidate.root), []byte(template)), 0o700)
+	prepared, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+	if err != nil || !prepared.Changed {
+		t.Fatalf("the fresh draft could not plan its migration: changed=%t, %v", prepared.Changed, err)
+	}
+	t.Cleanup(func() { _ = prepared.Close() })
+	if got := string(mustReadFile(t, called)); got != "called\n" {
+		t.Fatalf("expected the draft inspection, got %q", got)
+	}
+	if _, err := os.Lstat(candidate.root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("inspection published the draft: %v", err)
+	}
+	if err := prepared.Execute(context.Background()); err != nil {
+		t.Fatalf("the published draft could not converge: %v", err)
+	}
+	if got := string(mustReadFile(t, called)); got != "called\ncalled\ncalled\n" {
+		t.Fatalf("expected inspection, reinspection and convergence, got %q", got)
+	}
+}
+
+func TestPreStagedUpdatePreservesVerifiedSourceHopGuidance(t *testing.T) {
+	runtime, candidate, request, called, args := retainedVersionFixture(t)
+	if err := os.Remove(filepath.Join(request.RuntimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	active := filepath.Join(request.RuntimeRoot, "releases", "0.11.0-aaaaaaaaaaaa")
+	old := filepath.Join(request.RuntimeRoot, "releases", "release-a")
+	engine := filepath.Join(old, "bin", "yard-engine")
+	testkit.WriteFile(t, engine, bytes.ReplaceAll(mustReadFile(t, engine), []byte("yard-engine 0.29.0"), []byte("yard-engine 0.11.0")), 0o700)
+	rewriteReleaseOwnerManifest(t, publishedCandidate{root: old})
+	if err := os.Rename(old, active); err != nil {
+		t.Fatal(err)
+	}
+	current := filepath.Join(request.RuntimeRoot, "current")
+	if err := os.Remove(current); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("releases/"+filepath.Base(active), current); err != nil {
+		t.Fatal(err)
+	}
+	_, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+	if err == nil || !strings.Contains(err.Error(), "source-anchor-required: installed v0.11.0") ||
+		!strings.Contains(err.Error(), "next: yard update --version "+UpdateHopVersion+" && yard update") {
+		t.Fatalf("pre-staged %s lost source hop guidance: %v", candidate.release, err)
+	}
+	if _, err := os.Lstat(called); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a candidate transition ran before the source hop refusal: %v", err)
 	}
 }
 

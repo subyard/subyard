@@ -74,7 +74,7 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		return err
 	}
 	observed := releaseLinksFromRuntimeSnapshot(links)
-	if selection == nil && request.Direction != releasetransition.DirectionActivatePrevious {
+	if (selection == nil || selection.draft != nil) && request.Direction != releasetransition.DirectionActivatePrevious {
 		return nil
 	}
 	var migrationMessages []string

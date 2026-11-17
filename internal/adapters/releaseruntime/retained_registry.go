@@ -10,9 +10,16 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
+	"github.com/blang/semver/v4"
 )
 
 type releaseSelectionKey struct{}
+type journalGateInspectionKey struct{}
+
+type journalGateInspection struct {
+	request     releasetransition.ProcessRequest
+	fingerprint releasetransition.Fingerprint
+}
 
 // releaseSelection is immutable after selection. Capturing both history records
 // also pins the projection when the checkpoint is authoritative.
@@ -22,6 +29,8 @@ type releaseSelection struct {
 	activeArtifact, targetArtifact releasetransition.Fingerprint
 	activeRegistry, targetRegistry releasetransition.Fingerprint
 	state                          currentSnapshot
+	draft                          os.FileInfo
+	draftPath                      string
 	refusal                        string
 	cause                          error
 }
@@ -67,6 +76,10 @@ func staleRetainedSelection(root string, target releasetransition.ReleaseID) err
 }
 
 func (runtime *Runtime) captureReleaseSelection(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, links runtimeLinkSnapshot) (*releaseSelection, error) {
+	return runtime.captureTransitionSelection(ctx, target, request, links, false)
+}
+
+func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, links runtimeLinkSnapshot, freshDraft bool) (*releaseSelection, error) {
 	unlock, err := runtime.lockReleaseSelection(ctx)
 	if err != nil {
 		return nil, err
@@ -76,6 +89,13 @@ func (runtime *Runtime) captureReleaseSelection(ctx context.Context, target *ver
 	if observed, err := runtime.inspectRuntimeLinks(request.RuntimeRoot); err != nil || observed != links {
 		return nil, staleRetainedSelection(request.RuntimeRoot, request.Target)
 	}
+	if freshDraft {
+		selection.draftPath = target.candidate.root
+		selection.draft, err = target.root.Stat()
+		if err != nil || !runtime.matchesReleaseDraft(selection, target) {
+			return nil, staleRetainedSelection(request.RuntimeRoot, request.Target)
+		}
+	}
 	active, err := runtime.verifySelectedActive(selection, nil)
 	if err != nil {
 		selection.refusal, selection.cause = "the active release's sealed migration registry cannot be verified", err
@@ -83,6 +103,19 @@ func (runtime *Runtime) captureReleaseSelection(ctx context.Context, target *ver
 	}
 	defer active.Close()
 	selection.activeArtifact = active.manifestDigest
+	selection.state, err = runtime.readCurrentSnapshot(request.RuntimeRoot, request.ConfigHome)
+	if err != nil {
+		selection.refusal, selection.cause = "the selected release cannot verify the authoritative active migration history", err
+		return selection, nil
+	}
+	if selection.state.links != selection.links {
+		return nil, staleRetainedSelection(request.RuntimeRoot, request.Target)
+	}
+	// A newly downloaded forward candidate has its own migration planner.
+	// Registry identity is required when selecting an already installed engine.
+	if freshDraft {
+		return selection, nil
+	}
 	_, selection.activeRegistry, err = selectedRegistry(active)
 	if err != nil {
 		selection.refusal, selection.cause = "the active release's sealed migration registry cannot be verified", err
@@ -94,15 +127,10 @@ func (runtime *Runtime) captureReleaseSelection(ctx context.Context, target *ver
 		return selection, nil
 	}
 	selection.targetRegistry = identity
-	selection.state, err = runtime.readCurrentSnapshot(request.RuntimeRoot, request.ConfigHome)
-	if err != nil {
-		selection.refusal, selection.cause = "the selected release cannot verify the authoritative active migration history", err
-		return selection, nil
-	}
-	if selection.state.links != selection.links {
-		return nil, staleRetainedSelection(request.RuntimeRoot, request.Target)
-	}
 	if selection.activeRegistry != selection.targetRegistry {
+		if err := runtime.stagedSourceRefusal(ctx, selection, active); err != nil {
+			return nil, err
+		}
 		selection.refusal = "the selected release's migration registry differs from the active release's registry"
 		return selection, nil
 	}
@@ -110,6 +138,35 @@ func (runtime *Runtime) captureReleaseSelection(ctx context.Context, target *ver
 		selection.refusal, selection.cause = verifyRetainedHistory(target, retained, selection.state.ledger, selection.state.checkpoint)
 	}
 	return selection, nil
+}
+
+// Bootstrap stages its launcher before invoking update. Preserve the source
+// floor's upgrade advice without admitting an already published engine.
+func (runtime *Runtime) stagedSourceRefusal(ctx context.Context, selection *releaseSelection, active *verifiedPublishedCandidate) error {
+	request := selection.request
+	if request.Direction != releasetransition.DirectionActivateTarget || request.Replacement != nil ||
+		request.MigrationOwnerReplacement != nil || selection.links.previous.target == "releases/"+string(request.Target) {
+		return nil
+	}
+	version, err := releasetransition.ReleaseIDVersion(active.candidate.release)
+	if err != nil || !version.LT(semver.MustParse(UpdateAnchorVersion)) {
+		return nil
+	}
+	source, err := runtime.verifyPublishedCandidate(ctx, active.candidate, request.RuntimeRoot, &active.manifestDigest)
+	if err != nil {
+		return nil
+	}
+	defer source.Close()
+	if source.version != version.String() {
+		return nil
+	}
+	message, retry := sourceAnchorGuidance(source.version)
+	if version.LT(semver.MustParse(MinimumSourceVersion)) {
+		message, retry = "the installed source predates v"+MinimumSourceVersion, LegacyReinstallGuidance
+	}
+	outcome := publicReleaseOutcome(releaseLinksFromRuntimeSnapshot(selection.links), request.Target, nil,
+		releasetransition.CodePreconditionBlocked, message, retry)
+	return publicReleaseInspectionError{cause: transitionOutcomeError(outcome), outcome: outcome}
 }
 
 func (runtime *Runtime) verifySelectedActive(selection *releaseSelection, digest *releasetransition.Fingerprint) (*verifiedPublishedCandidate, error) {
@@ -149,24 +206,47 @@ func (runtime *Runtime) revalidateReleaseSelection(selection *releaseSelection, 
 		return stale()
 	}
 	defer active.Close()
-	_, activeIdentity, err := selectedRegistry(active)
-	if err != nil || activeIdentity != selection.activeRegistry {
-		return stale()
-	}
-	// The draft and its published destination share the same selected manifest.
-	targetRoot := filepath.Dir(filepath.Dir(target.candidate.root))
-	if !runtime.installedTransitionEngine(target, targetRoot) {
-		return stale()
-	}
-	_, targetIdentity, err := selectedRegistry(target)
-	if err != nil || targetIdentity != selection.targetRegistry {
-		return stale()
+	if selection.draft != nil {
+		if !runtime.matchesReleaseDraft(selection, target) {
+			return stale()
+		}
+	} else {
+		_, activeIdentity, err := selectedRegistry(active)
+		if err != nil || activeIdentity != selection.activeRegistry {
+			return stale()
+		}
+		if !runtime.installedTransitionEngine(target, request.RuntimeRoot) {
+			return stale()
+		}
+		_, targetIdentity, err := selectedRegistry(target)
+		if err != nil || targetIdentity != selection.targetRegistry {
+			return stale()
+		}
 	}
 	observed, err := runtime.readCurrentSnapshot(request.RuntimeRoot, request.ConfigHome)
 	if err != nil || !sameCurrentSnapshot(observed, selection.state) {
 		return stale()
 	}
 	return nil
+}
+
+// Only the draft we prepared, or that same directory after our publication
+// rename, may use the forward path. A competing installation requires reselection.
+func (runtime *Runtime) matchesReleaseDraft(selection *releaseSelection, target *verifiedPublishedCandidate) bool {
+	request := selection.request
+	canonical := filepath.Join(request.RuntimeRoot, "releases", string(request.Target))
+	current, err := target.root.Stat()
+	if err != nil || !os.SameFile(selection.draft, current) {
+		return false
+	}
+	if runtime.relocatedCandidates[selection.draftPath] == canonical {
+		return target.candidate.root == canonical && runtime.installedTransitionEngine(target, request.RuntimeRoot)
+	}
+	if target.candidate.root != selection.draftPath {
+		return false
+	}
+	_, err = os.Lstat(canonical)
+	return errors.Is(err, os.ErrNotExist) && runtime.installedTransitionEngine(target, filepath.Dir(filepath.Dir(selection.draftPath)))
 }
 
 func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releasetransition.RegistryV2, ledger, checkpoint releasetransition.ProtectedSnapshot) (string, error) {
@@ -195,8 +275,14 @@ func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releaset
 }
 
 // admitTransitionLaunch is the last admission check before a transition child
-// starts. Its caller holds the owner barrier through the child invocation.
+// starts. Selection and execution hold the owner barrier through invocation.
 func (runtime *Runtime) admitTransitionLaunch(ctx context.Context, engine *verifiedPublishedCandidate, request releasetransition.ProcessRequest) error {
+	if gate := journalGateLaunch(ctx, &request); gate != nil {
+		if runtime.exactJournalTransitionOwner(engine, request, gate.fingerprint) {
+			return nil
+		}
+		return staleRetainedSelection(request.RuntimeRoot, request.Target)
+	}
 	if selection, _ := ctx.Value(releaseSelectionKey{}).(*releaseSelection); selection != nil {
 		if request.RuntimeRoot != selection.request.RuntimeRoot || request.ConfigHome != selection.request.ConfigHome {
 			return staleRetainedSelection(request.RuntimeRoot, request.Target)
@@ -215,10 +301,19 @@ func (runtime *Runtime) admitTransitionLaunch(ctx context.Context, engine *verif
 		current.target == "releases/"+string(engine.candidate.release) && runtime.installedTransitionEngine(engine, request.RuntimeRoot) {
 		return nil
 	}
-	if runtime.exactJournalTransitionOwner(engine, request) {
+	if runtime.exactJournalTransitionOwner(engine, request, "") {
 		return nil
 	}
 	return staleRetainedSelection(request.RuntimeRoot, request.Target)
+}
+
+func journalGateLaunch(ctx context.Context, request *releasetransition.ProcessRequest) *journalGateInspection {
+	gate, _ := ctx.Value(journalGateInspectionKey{}).(*journalGateInspection)
+	if gate != nil && gate.fingerprint != "" && request != nil &&
+		request.Mode == releasetransition.ProcessInspect && request.Execution == nil {
+		return gate
+	}
+	return nil
 }
 
 func (runtime *Runtime) installedTransitionEngine(engine *verifiedPublishedCandidate, runtimeRoot string) bool {
@@ -232,7 +327,7 @@ func (runtime *Runtime) installedTransitionEngine(engine *verifiedPublishedCandi
 	return pinnedErr == nil && currentErr == nil && os.SameFile(pinned, current)
 }
 
-func (runtime *Runtime) exactJournalTransitionOwner(engine *verifiedPublishedCandidate, request releasetransition.ProcessRequest) bool {
+func (runtime *Runtime) exactJournalTransitionOwner(engine *verifiedPublishedCandidate, request releasetransition.ProcessRequest, expected releasetransition.Fingerprint) bool {
 	if request.Replacement != nil || request.MigrationOwnerReplacement != nil || request.ConfigHome == "" {
 		return false
 	}
@@ -241,7 +336,7 @@ func (runtime *Runtime) exactJournalTransitionOwner(engine *verifiedPublishedCan
 		return false
 	}
 	snapshot, err := store.ReadCurrentJournal()
-	if err != nil || !snapshot.Exists {
+	if err != nil || !snapshot.Exists || (expected != "" && snapshot.Fingerprint != expected) {
 		return false
 	}
 	journal, err := releasetransition.ParseJournal(snapshot.Payload)
