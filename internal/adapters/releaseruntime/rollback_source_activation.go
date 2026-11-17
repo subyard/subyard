@@ -39,7 +39,7 @@ func rollbackHasSourceWork(inspection releasetransition.Inspection) bool {
 func rollbackSourceDecisionsComplete(kind string) bool {
 	switch kind {
 	case "test-vms-settings-v1-to-v2", "test-yard-owner-v1-to-v2",
-		"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1":
+		"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1", "nm-device-guard-v1":
 		return true
 	default:
 		return false

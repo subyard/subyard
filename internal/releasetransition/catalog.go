@@ -83,6 +83,10 @@ func NewCapabilityCatalog(descriptors []CapabilityDescriptor) (CapabilityCatalog
 	}, nil
 }
 
+// nmDeviceGuardMigration marks the power-metadata reader boundary of the [device-subyard]
+// NetworkManager guard; the host-network-guard activation owner rewrites the file itself.
+const nmDeviceGuardMigration = "nm-device-guard-v1"
+
 func preRegisteredYardsCapabilityCatalog() CapabilityCatalog {
 	previous := PreviousBuiltinCapabilityCatalog()
 	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
@@ -97,11 +101,24 @@ func preRegisteredYardsCapabilityCatalog() CapabilityCatalog {
 	return catalog
 }
 
-func BuiltinCapabilityCatalog() CapabilityCatalog {
+func registeredYardsCapabilityCatalog() CapabilityCatalog {
 	previous := preRegisteredYardsCapabilityCatalog()
 	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
 		CapabilityDescriptor{Kind: registeredYardsMigration, Domain: "owner-registration", Version: 1},
 		CapabilityDescriptor{Kind: guestDiskTmpMigration, Domain: "power-metadata", Version: 1},
+	))
+	if err != nil {
+		panic(err)
+	}
+	return catalog
+}
+
+func BuiltinCapabilityCatalog() CapabilityCatalog {
+	previous := registeredYardsCapabilityCatalog()
+	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
+		// Released power readers reject the [device-subyard] NetworkManager guard and their init
+		// rewrites the released guard. No backward-compatible policy forbids rollback to them.
+		CapabilityDescriptor{Kind: nmDeviceGuardMigration, Domain: "power-metadata", Version: 1},
 	))
 	if err != nil {
 		panic(err)
@@ -131,7 +148,7 @@ func PreviousBuiltinCapabilityCatalog() CapabilityCatalog {
 
 func SupportedBuiltinCatalog(digest Fingerprint) (CapabilityCatalog, bool) {
 	current, previous := BuiltinCapabilityCatalog(), PreviousBuiltinCapabilityCatalog()
-	catalogs := []CapabilityCatalog{current, previous, preRegisteredYardsCapabilityCatalog()}
+	catalogs := []CapabilityCatalog{current, previous, preRegisteredYardsCapabilityCatalog(), registeredYardsCapabilityCatalog()}
 	// Both independently introduced implementations may own sealed journals.
 	// Recognize only their exact compiled catalogs, never arbitrary subsets.
 	for _, kind := range []string{"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1"} {

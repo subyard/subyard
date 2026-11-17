@@ -27,6 +27,8 @@ for arg in "$@"; do
     --check) mode=check ;;
     --verify) mode=verify ;;
     --operator-uid=*) APPROVED_OPERATOR_UID="${arg#--operator-uid=}" ;;
+    # yard update applies this stage for its disk-tmp policy; its next steps name the update.
+    --from-update) POWER_NM_GUARD_COMMAND="yard update" ;;
   esac
 done
 
@@ -48,6 +50,8 @@ if [ "$mode" != apply ]; then
   fi
   command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1 || exit 1
   power_host_safe "$BRIDGE" || exit 1
+  # A released guard, a missing bridge or a guard NetworkManager has not read is drift for the apply below.
+  nm_guard_file_current "$NM_GUARD_CONF" "$BRIDGE" || exit 1
   [ "$ufw_active" = 0 ] || ufw_yard_rules_present "$BRIDGE" || exit 1
   instance_exists=0
   incus info "$YARD_INSTANCE_NAME" --project "$INCUS_PROJECT" >/dev/null 2>&1 && instance_exists=1

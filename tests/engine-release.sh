@@ -395,7 +395,7 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
   && [ -L "$standalone_bin/sy" ] && [ ! -e "$TMP/standalone-go-invoked" ] \
   || fail 'standalone installer did not publish a usable runtime without a checkout'
 standalone_ledger="$standalone_home/.config/subyard/release-transition/v2/ledger.json"
-jq -e '.domains["power-metadata"] == {"epoch": 3, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]}' \
+jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}' \
   "$standalone_ledger" >/dev/null \
   || fail 'fresh bootstrap published entrypoints before the optional publication reader boundary'
 standalone_ledger_before="$(sha256sum "$standalone_ledger")"
@@ -645,7 +645,7 @@ cp "$TMP/full-inventory.before" "$full_inventory"
     || fail 'failed first transition published entrypoints or discarded its owner'
   : > "$SUBYARD_CONFIG_HOME/config.env"
   "$release/subyard-install.sh" --yes > "$TMP/bootstrap-retry.log" 2>&1
-  jq -e '.domains["power-metadata"] == {"epoch": 3, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]}' \
+  jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}' \
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
   [ -x "$YARD_BIN_DIR/yard" ] || fail 'supported bootstrap retry did not publish entrypoints'
 )
@@ -664,7 +664,7 @@ cp "$TMP/full-inventory.before" "$full_inventory"
   done
   export PATH="$native_tools"
   "$release/subyard-install.sh" --yes > "$TMP/bootstrap-cold.log" 2>&1
-  jq -e '.domains["power-metadata"] == {"epoch": 3, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]}' \
+  jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}' \
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
   [ -x "$YARD_BIN_DIR/yard" ] || fail 'cold bootstrap did not publish entrypoints'
 )

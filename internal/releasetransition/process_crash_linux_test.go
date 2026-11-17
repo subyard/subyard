@@ -316,7 +316,8 @@ esac
 		t.Fatal(err)
 	}
 	registry.Migrations = slices.DeleteFunc(registry.Migrations, func(m rt.MigrationDefinitionV2) bool {
-		return m.Kind == "registered-yards-v2-to-v3" || m.Kind == "registered-guest-disk-tmp-v2-to-v3"
+		return m.Kind == "registered-yards-v2-to-v3" || m.Kind == "registered-guest-disk-tmp-v2-to-v3" ||
+			m.Kind == "nm-device-guard-v1"
 	})
 	registry.CurrentEpochs["owner-registration"] = 2
 	registry.CurrentEpochs["power-metadata"] = 2

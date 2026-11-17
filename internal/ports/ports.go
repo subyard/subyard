@@ -213,6 +213,9 @@ const (
 	ReconcileStageSecurity        ReconcileStageID = "security"
 	ReconcileStageProfileRuntimes ReconcileStageID = "profile-runtimes"
 	ReconcileStageFinalize        ReconcileStageID = "finalize"
+	// ReconcileStageNetworkGuard migrates a released NetworkManager guard during update
+	// activation; init converges the guard through the network stage instead.
+	ReconcileStageNetworkGuard ReconcileStageID = "network-guard"
 )
 
 type ReconcileStageRunner interface {

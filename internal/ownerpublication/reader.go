@@ -27,11 +27,12 @@ func RequireReader(root, configHome string) error {
 	if err != nil {
 		return err
 	}
-	// Epoch 3 adds guest temporary-policy migration, preserving this reader.
+	// Epoch 3 adds guest temporary-policy migration and epoch 4 the NetworkManager device
+	// guard reader boundary, preserving this reader.
 	switch state.Ledger.Domains["power-metadata"].Epoch {
-	case 2, 3:
+	case 2, 3, 4:
 		return nil
 	default:
-		return fmt.Errorf("optional publication requires committed supported power-metadata epoch 2 or 3; complete the supported release transition")
+		return fmt.Errorf("optional publication requires committed supported power-metadata epoch 2, 3 or 4; complete the supported release transition")
 	}
 }

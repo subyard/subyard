@@ -1078,12 +1078,15 @@ func TestCandidateReleaseTransitionProtocolInspectsThenConverges(t *testing.T) {
 		context.Background(), repositoryRoot, request, verify, nil, owner, nil,
 	)
 	if err != nil || inspected.Inspection == nil || !inspected.Inspection.Assessment.Changed ||
-		len(inspected.Inspection.Decisions) != 3 {
+		len(inspected.Inspection.Decisions) != 4 {
 		t.Fatalf("inspection = %#v, err=%v", inspected, err)
 	}
 	if inspected.ActivationReconciliationOwned || inspected.Inspection.Decisions[2] != (releasetransition.RedactedDecision{
 		Resource: "power-metadata", Scope: "power-metadata", Decision: releasetransition.DecisionTransform,
 		Result: "optional-publication-reader-v1",
+	}) || inspected.Inspection.Decisions[3] != (releasetransition.RedactedDecision{
+		Resource: "power-metadata", Scope: "power-metadata", Decision: releasetransition.DecisionTransform,
+		Result: "nm-device-guard-reader-v1",
 	}) {
 		t.Fatalf("candidate protocol ownership or power decision changed: %#v", inspected)
 	}

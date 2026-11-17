@@ -17,7 +17,7 @@ yard update --version 0.28.1
 yard update
 ```
 
-The **anchor** (v0.28.0, `UpdateAnchorVersion`) is the oldest accepted source and the rollback floor;
+The **anchor** (v0.28.0, `UpdateAnchorVersion`) is the oldest accepted update source;
 installs that completed on v0.28.0 update directly. The **hop** (v0.28.1, `UpdateHopVersion`) is the
 release the refusal names. It is a fix release of the anchor series, because published v0.28.0 can
 stop an update from an older release at its first running VM yard with a pending disk-backed `/tmp`
@@ -27,8 +27,11 @@ before v0.26.0 never reach the later release's refusal; see
 [Release migrations](../control-plane.md#release-migrations).
 
 The same boundary applies to the installer over an existing runtime and offline update. Immutable
-staging remains available for cleanup tooling. Rollback below v0.28.0 refuses; compatible v0.28.x
-rollback remains supported. Incomplete or contradictory state cannot be repaired by comparing
+staging remains available for cleanup tooling. Rollback is limited by migration epochs: the
+NetworkManager device guard (`power-metadata` epoch 4, see
+[Release migrations](../control-plane.md#release-migrations)) refuses rollback to every published
+release through v0.29.0 as `rollback-incompatible`; rollback stays supported to retained releases
+at the same epochs. Incomplete or contradictory state cannot be repaired by comparing
 versions: exact unfinished transactions retain their sealed owner, artifacts and evidence.
 Any other unfinished transition while the installed release is below v0.28.0 refuses once with
 `next: yard update && yard update --version 0.28.1 && yard update`, or `yard update && yard update`
@@ -44,7 +47,8 @@ refusal never authorizes deletion. There is no automatic update chain or new bri
 
 Retirement removes fresh V1 upgrades and journal imports, including unfinished source V1
 recovery. Source-version admission must refuse before changing the active installation and explain the full
-data removal and clean-install path. New rollback targets below v0.28.0 also refuse, but keep
+data removal and clean-install path. New rollback targets below the current migration epochs
+(v0.29.0 and older since `power-metadata` epoch 4) also refuse, but keep
 the current release active and offer no uninstall path. Refusal never deletes evidence. An installation that already completed its transition to supported V2 state
 remains supported, including necessary historical evidence and recovery bindings with legacy
 provenance. The source version, authoritative state and retained bindings must be assessed
@@ -188,8 +192,9 @@ deletion) starts from these facts of the current candidate:
   have no V1 files and does not inspect them. Completed V2 evidence and recovery bindings with
   legacy provenance remain readable. An unfinished `legacy-v1-import` journal requires its
   original V1 files and is outside this assumption; current tooling refuses it without writes.
-- **Lowest rollback target:** v0.28.0. Rollback below it refuses before dispatch; compatible v0.28.x
-  rollback stays supported.
+- **Lowest rollback target:** the first release with `power-metadata` epoch 4 (the NetworkManager
+  device guard). Rollback to v0.29.0 or older refuses before activation as `rollback-incompatible`;
+  rollback between releases at the same epochs stays supported.
 
 ## Existing compatibility inventory
 

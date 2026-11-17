@@ -1,0 +1,3 @@
+[device-subyard]
+match-device=type:veth
+managed=0

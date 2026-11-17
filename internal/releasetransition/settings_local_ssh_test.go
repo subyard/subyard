@@ -480,7 +480,9 @@ func localSSHHistoricalRegistry(t *testing.T, payload []byte) []byte {
 		t.Fatal(err)
 	}
 	registry.CurrentEpochs["owner-registration"], registry.CurrentEpochs["power-metadata"] = 2, 2
-	registry.Migrations = slices.DeleteFunc(registry.Migrations, nativeMigration)
+	registry.Migrations = slices.DeleteFunc(registry.Migrations, func(m MigrationDefinitionV2) bool {
+		return nativeMigration(m) || m.Kind == nmDeviceGuardMigration
+	})
 	encoded, err := json.MarshalIndent(registry, "", "  ")
 	if err != nil {
 		t.Fatal(err)

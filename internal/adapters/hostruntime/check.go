@@ -39,6 +39,10 @@ type HostFacts struct {
 	IncusVersion  string
 	DockerPresent bool
 	PortListening bool
+	// NetworkManagerRebootPending: a migrated NetworkManager guard waits for a host reboot.
+	NetworkManagerRebootPending bool
+	// NetworkManagerGuardUnread: NetworkManager has not started since the guard was written.
+	NetworkManagerGuardUnread bool
 }
 
 type CheckOptions struct {
@@ -174,6 +178,13 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 		add("Existing tools", "ok", "no host Docker (expected; Docker lives inside the yard)")
 	}
 
+	if facts.NetworkManagerRebootPending {
+		add("Host networking", "warn", NetworkManagerRebootReminder)
+	}
+	if facts.NetworkManagerGuardUnread {
+		add("Host networking", "warn", NetworkManagerUnreadReminder)
+	}
+
 	var duplicates []string
 	for _, yard := range check.Yards {
 		if yard.AccessKind == domain.AccessRemote || yard.YardName == check.Yard.YardName {
@@ -302,6 +313,11 @@ func collectHostFacts(ctx context.Context, check HostCheck) (HostFacts, error) {
 	}
 	_, dockerErr := exec.LookPath("docker")
 	facts.DockerPresent = dockerErr == nil
+	if _, err := os.Lstat(NetworkManagerGuardPath); err == nil && networkManagerActiveLocally() {
+		state := LocalNetworkManagerGuardState()
+		facts.NetworkManagerRebootPending = state == "loaded-reboot" || state == "unread-migration"
+		facts.NetworkManagerGuardUnread = state == "unread-init"
+	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(check.Yard.SSHPort))
 	connection, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "tcp", address)
 	if err == nil {

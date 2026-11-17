@@ -179,8 +179,9 @@ else
 fi
 require_root "$root_reason"
 # Package installation can restart incusd too. Protect host networking before
-# any package/repository changes, then reconcile again after init (step 5).
-nm_unmanaged_guard "$INCUS_BRIDGE"
+# any package/repository changes with the static section, then list and pin the
+# Incus bridges after init (step 5).
+nm_unmanaged_guard_early
 
 # Elevated Incus commands use root's HOME. Older Subyard runs could preserve the
 # operator's HOME across sudo and leave the Incus client directory root-owned,

@@ -256,13 +256,14 @@ func TestPublishedReleaseTransitionRegistryMatchesBuiltinCatalog(t *testing.T) {
 	}
 	if registry.MinimumEpochs["settings"] != 1 || registry.CurrentEpochs["settings"] != 3 ||
 		registry.MinimumEpochs["owner-registration"] != 1 ||
-		registry.CurrentEpochs["owner-registration"] != 3 || len(registry.Migrations) != 6 ||
+		registry.CurrentEpochs["owner-registration"] != 3 || len(registry.Migrations) != 7 ||
 		registry.Migrations[0].ID != "canonicalize-test-vms-settings-v2" ||
 		registry.Migrations[2].ID != "canonicalize-test-yard-owner-v2" || registry.Migrations[3].Kind != localSSHPortMigration ||
-		registry.Migrations[4].Kind != registeredYardsMigration || registry.Migrations[5].Kind != guestDiskTmpMigration {
+		registry.Migrations[4].Kind != registeredYardsMigration || registry.Migrations[5].Kind != guestDiskTmpMigration ||
+		registry.Migrations[6].Kind != nmDeviceGuardMigration {
 		t.Fatalf("published registry = %#v", registry)
 	}
-	if registry.MinimumEpochs["power-metadata"] != 1 || registry.CurrentEpochs["power-metadata"] != 3 || registry.Migrations[1].Kind != "owner-publication-state-v1" {
+	if registry.MinimumEpochs["power-metadata"] != 1 || registry.CurrentEpochs["power-metadata"] != 4 || registry.Migrations[1].Kind != "owner-publication-state-v1" {
 		t.Fatalf("published power reader boundary = %#v", registry)
 	}
 	for _, domain := range []string{"project-state"} {
@@ -284,5 +285,17 @@ func TestRegistryV2ErrorsRemainClassifiableAsInvalid(t *testing.T) {
 		if !errors.Is(err, ErrRegistryInvalid) {
 			t.Fatalf("error = %v, want ErrRegistryInvalid", err)
 		}
+	}
+}
+
+// Released power readers reject the [device-subyard] NetworkManager guard and their init rewrites
+// the released guard, so a retained release older than this boundary is not a rollback target.
+func TestNetworkManagerDeviceGuardForbidsRollbackToReleasedReaders(t *testing.T) {
+	descriptor, ok := BuiltinCapabilityCatalog().descriptor(nmDeviceGuardMigration)
+	if !ok || descriptor.Domain != "power-metadata" || descriptor.RollbackCompatibility != "" {
+		t.Fatalf("NetworkManager device guard descriptor = %#v, %v", descriptor, ok)
+	}
+	if _, supported := SupportedBuiltinCatalog(registeredYardsCapabilityCatalog().Digest()); !supported {
+		t.Fatal("journals sealed by the previous catalog are no longer recognized")
 	}
 }

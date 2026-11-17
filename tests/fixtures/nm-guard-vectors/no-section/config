@@ -1,0 +1,4 @@
+[main]
+plugins=keyfile
+[keyfile]
+unmanaged-devices=type:veth;driver:veth;interface-name:incusbr0

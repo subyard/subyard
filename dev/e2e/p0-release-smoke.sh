@@ -66,8 +66,7 @@ verify_predecessor_rollback_refusal() {
   if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
     die 'release smoke allowed incompatible published predecessor rollback'
   fi
-  grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
-    || die 'release smoke predecessor rollback failed for an unexpected reason'
+  classify_epoch_rollback_refusal "$STATE_ROOT/predecessor-rollback.log" 'release smoke predecessor rollback'
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   for path in "$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"; do
     sudo -n cmp -s "$STATE_ROOT/rollback-refusal-${path##*/}" "$path" \
@@ -165,6 +164,8 @@ finish_smoke() {
   operator_yard export "$SMOKE_PROJECT" --yes
   exported="$(operator_env grep -Rl guest-change "$OPERATOR_HOME/.subyard/exports")"
   [ -n "$exported" ] || die 'release smoke export lost the guest change'
+  # The published predecessor is still the rollback target here: its refusal comes first.
+  verify_predecessor_rollback_refusal
   # Establish current=A/previous=B using only verified public update operations.
   # This leaves the exact candidate active for its compatible rollback cycle.
   operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
