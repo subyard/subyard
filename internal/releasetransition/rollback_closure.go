@@ -22,6 +22,7 @@ type rollbackClosureV1 struct {
 	Completion         RollbackTargetCompletion `json:"completion"`
 	ProjectionProducer Fingerprint              `json:"projectionProducer,omitempty"`
 	Artifacts          []rollbackArtifact       `json:"artifacts"`
+	Retirement         *rollbackRetirementV1    `json:"retirement,omitempty"`
 }
 
 var rollbackClosureParts = []string{"reconcile", "rollback", "v1", "closures"}
@@ -158,6 +159,9 @@ func (closure rollbackClosureV1) validate() error {
 		}
 		last = artifact.Path
 	}
+	if closure.Retirement != nil {
+		return closure.Retirement.validate(closure)
+	}
 	return nil
 }
 
@@ -176,14 +180,14 @@ func (store *POSIXV2Store) readRollbackClosure(transaction TransactionID) (*roll
 	if closure.Transaction != transaction {
 		return nil, invalid("rollback closure is filed under a different transaction")
 	}
-	if err := store.checkRollbackArtifactInventory(transaction, closure.Artifacts); err != nil {
+	if err := store.checkClosedRollbackArtifacts(closure); err != nil {
 		return nil, err
 	}
 	journal, err := ParseJournal(closure.RollbackJournal)
 	if err != nil {
 		return nil, err
 	}
-	if transaction == journal.Transaction {
+	if transaction == journal.Transaction && closure.Retirement == nil {
 		if err := store.sourceTransactionArtifacts(journal); err != nil {
 			return nil, err
 		}

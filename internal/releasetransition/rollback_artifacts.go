@@ -89,6 +89,9 @@ func (store *POSIXV2Store) rollbackArtifactInventory(transaction TransactionID) 
 	if err := visit(nativeIdentityParts(transaction), "native-identities", 0); err != nil {
 		return nil, err
 	}
+	if len(result) > maxRollbackArtifactEntries {
+		return nil, errors.New("rollback artifact inventory exceeds its entry bound")
+	}
 	slices.SortFunc(result, func(left, right rollbackArtifact) int { return strings.Compare(left.Path, right.Path) })
 	return result, nil
 }

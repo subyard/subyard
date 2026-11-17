@@ -31,7 +31,7 @@ func (store *POSIXV2Store) InspectCompletedRollback(registry RegistryV2, digest,
 	if err != nil || closure == nil {
 		return nil, err
 	}
-	if !bytes.Equal(closure.RollbackJournal, snapshot.Payload) || closure.Completion.TargetRegistry != digest || closure.Completion.TargetArtifact != artifact || closure.ActivationRequest.ConfigHome != store.configHome {
+	if closure.Retirement != nil || !bytes.Equal(closure.RollbackJournal, snapshot.Payload) || closure.Completion.TargetRegistry != digest || closure.Completion.TargetArtifact != artifact || closure.ActivationRequest.ConfigHome != store.configHome {
 		return nil, invalid("completed rollback does not bind this target and protected home")
 	}
 	state, err := store.ReadMigrationLedger(registry, digest)

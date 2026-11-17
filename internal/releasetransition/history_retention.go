@@ -34,13 +34,47 @@ func (store *POSIXV2Store) cleanupClosedMigrationTransactions(current Transactio
 		}
 		live[transaction] = receipt
 	}
-	return store.cleanupTransactions(current, func(graph *v2TransactionGraph) error {
+	selected, err := store.ReadCurrentJournal()
+	if err != nil {
+		return err
+	}
+	var successor *rollbackClosureV1
+	if selected.Exists {
+		journal, err := ParseJournal(selected.Payload)
+		if err != nil {
+			return err
+		}
+		completion, err := store.InspectCompletedRollback(registry, registryDigest, journal.ArtifactDigest)
+		if err != nil {
+			return err
+		}
+		if completion != nil {
+			successor, err = store.readRollbackClosure(current)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	retain := func(graph *v2TransactionGraph) error {
 		for transaction, receipt := range live {
 			graph.protected[string(transaction)] = struct{}{}
 			graph.protected[string(receipt.Replacement.Transaction)] = struct{}{}
 		}
 		for transaction := range graph.directories {
 			if _, protected := graph.protected[string(transaction)]; protected {
+				continue
+			}
+			closure, err := store.readRollbackClosure(transaction)
+			if err != nil {
+				return err
+			}
+			if closure != nil {
+				pinnedProjection := state.Checkpointed && state.Checkpoint.LegacyProjection.Exists && closure.ProjectionProducer == state.ProjectionSnapshot.Fingerprint
+				endpoint := closure.Releases.Target == endpoints.Active || endpoints.Previous != nil && closure.Releases.Target == *endpoints.Previous
+				superseded := successor != nil && sameRollbackPair(*closure, *successor) && closure.Completion.Transaction != successor.Completion.Transaction
+				if pinnedProjection || endpoint && !superseded && closure.Retirement == nil {
+					graph.protected[string(transaction)] = struct{}{}
+				}
 				continue
 			}
 			journal, err := store.closedTransactionEvidence(transaction, registry)
@@ -74,7 +108,20 @@ func (store *POSIXV2Store) cleanupClosedMigrationTransactions(current Transactio
 			}
 		}
 		return nil
+	}
+	err = store.cleanupTransactionsWithRemoval(current, retain, func(transaction TransactionID) (bool, error) {
+		if err := store.prepareRollbackRetirement(transaction, selected, state, endpoints, successor); err != nil {
+			return true, err
+		}
+		return store.removeRetiringRollbackArtifacts(transaction)
 	})
+	if err != nil {
+		return err
+	}
+	if !selected.Exists {
+		return nil
+	}
+	return store.finishRollbackRetirements(current, retain)
 }
 
 // closedTransactionEvidence proves a transaction directory holds complete terminal

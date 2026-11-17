@@ -198,6 +198,14 @@ func (store *POSIXV2Store) RetireReplacedTransactions(current TransactionID, reg
 		if validateTransactionID(TransactionID(transaction)) != nil || TransactionID(transaction) == current {
 			continue
 		}
+		closed, err := store.readRollbackClosure(TransactionID(transaction))
+		if err != nil {
+			return err
+		}
+		if closed != nil {
+			// Closed rollback components have their own exact retirement proof.
+			continue
+		}
 		if err := store.retireReplacedRecovery(TransactionID(transaction)); err != nil {
 			return err
 		}
@@ -489,6 +497,10 @@ func (store *POSIXV2Store) CleanupTransactions(current TransactionID) error {
 }
 
 func (store *POSIXV2Store) cleanupTransactions(current TransactionID, retain func(*v2TransactionGraph) error) error {
+	return store.cleanupTransactionsWithRemoval(current, retain, nil)
+}
+
+func (store *POSIXV2Store) cleanupTransactionsWithRemoval(current TransactionID, retain func(*v2TransactionGraph) error, remove func(TransactionID) (bool, error)) error {
 	if store == nil {
 		return errors.New("release transition store is required")
 	}
@@ -530,6 +542,22 @@ func (store *POSIXV2Store) cleanupTransactions(current TransactionID, retain fun
 	const cleanupLimit = 32
 	deletions := graph.cleanupOrder(cleanupLimit)
 	for _, transaction := range deletions {
+		if remove != nil {
+			handled, err := remove(transaction)
+			if err != nil {
+				return err
+			}
+			if handled {
+				continue
+			}
+		}
+		closed, err := store.readRollbackClosure(transaction)
+		if err != nil {
+			return err
+		}
+		if closed != nil {
+			return invalid("closed rollback artifacts require durable retirement")
+		}
 		if err := os.RemoveAll(filepath.Join(root, string(transaction))); err != nil {
 			return err
 		}
