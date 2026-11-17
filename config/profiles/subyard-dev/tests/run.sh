@@ -8,3 +8,5 @@ bash "$ROOT/config/profiles/subyard-dev/tests/subyard-dev-provision.sh"
 bash "$ROOT/config/profiles/subyard-dev/tests/e2e-controller.sh"
 bash "$ROOT/config/profiles/subyard-dev/tests/e2e/acceptance.sh" --help >/dev/null
 bash "$ROOT/config/profiles/subyard-dev/tests/cache-contract.sh"
+
+python3 "$ROOT/config/profiles/subyard-dev/tests/trim-gocache-test.py"
