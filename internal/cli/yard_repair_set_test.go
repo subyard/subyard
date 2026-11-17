@@ -1478,7 +1478,12 @@ func TestConfigSyncConsumerRefreshIsAConsumerRepair(t *testing.T) {
 		testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("d", 64)), 0o600)
 	})
 	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
-	program.ownerMutationLock = &uninstall.Tree{} // held by the publishing sync
+	owner, unlock, err := uninstall.OwnerLock(context.Background(), program.env["SUBYARD_HOME"], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unlock)
+	program.ownerMutationLock = &owner
 	program.sourceBinding = harness.bindSources
 	inProcess, finish, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default"})
 	if err != nil || !inProcess || finish == nil || finish() != nil {
