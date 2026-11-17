@@ -4,7 +4,6 @@
 import json
 import os
 from pathlib import Path
-import select
 import subprocess
 import signal
 import sys
@@ -19,6 +18,60 @@ CREDENTIAL_HEADERS = ('Authorization: Basic synthetic-basic-value\n'
                       'Proxy-Authorization: Bearer synthetic-proxy-value\n'
                       'Set-Cookie: id=synthetic-set-cookie; HttpOnly\n'
                       'Visible line after headers.')
+SCOPE_FIXTURE = r'''#!/usr/bin/env python3
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+scopes = Path(__file__).parent.parent / 'scopes'
+args = sys.argv[1:]
+if (scopes / 'offline').exists():
+    sys.exit(1)
+
+if Path(__file__).name == 'systemd-run':
+    unit = scopes / next(arg[7:] for arg in args if arg.startswith('--unit='))
+    gate = os.environ.get('BRIDGE_TEST_SCOPE_GATE')
+    if gate:
+        Path(gate + '.pid').write_text(str(os.getpid()))
+        deadline = time.monotonic() + 8
+        while not Path(gate).exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+    unit.write_text(str(os.getpid()))
+    argv = args[args.index('--') + 1:]
+    if os.environ.get('BRIDGE_TEST_RESULT_CRASH'):
+        argv[1:1] = ['-B', '-c', """
+import os, runpy, sys
+main = runpy.run_path(sys.argv.pop(1))['main']
+namespace = main.__globals__
+save = namespace['save_state']
+def crash(root, state):
+    if state['status'] == 'done':
+        if os.environ['BRIDGE_TEST_RESULT_CRASH'] == 'after':
+            save(root, state)
+        os._exit(92)
+    save(root, state)
+namespace['save_state'] = crash
+main()
+"""]
+    os.execv(argv[0], argv)
+
+unit = scopes / args[-1]
+try:
+    pid = int(unit.read_text())
+except FileNotFoundError:
+    pid = None
+if 'show' in args:
+    print('LoadState=loaded\nActiveState=active\nControlGroup=/fixture' if pid else
+          'LoadState=not-found\nActiveState=inactive\nControlGroup=')
+elif pid and not (scopes / 'busy').exists():
+    unit.unlink(missing_ok=True)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+'''
 FAKE = r'''#!/usr/bin/env python3
 import json
 import os
@@ -169,9 +222,16 @@ for line in sys.stdin:
 
 if scenario == 'pending' and os.environ.get('BRIDGE_TEST_DESCENDANT'):
     child = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={})
     Path(os.environ['BRIDGE_TEST_DESCENDANT']).write_text(str(child.pid))
 '''
+
+
+def process_alive(pid):
+    try:
+        return (Path('/proc') / str(pid) / 'stat').read_text().rsplit(') ', 1)[1].split()[0] != 'Z'
+    except FileNotFoundError:
+        return False
 
 
 class Bridge(unittest.TestCase):
@@ -184,6 +244,12 @@ class Bridge(unittest.TestCase):
             path = self.bin / vendor
             path.write_text(FAKE)
             path.chmod(0o755)
+        self.scopes = self.root / 'scopes'
+        self.scopes.mkdir()
+        for command in ('systemd-run', 'systemctl'):
+            path = self.bin / command
+            path.write_text(SCOPE_FIXTURE)
+            path.chmod(0o755)
         self.env = {**os.environ, 'PATH': str(self.bin) + os.pathsep + os.environ['PATH']}
         self.mask = -1
         self.workers = []
@@ -192,10 +258,7 @@ class Bridge(unittest.TestCase):
     def cleanup(self):
         for root in self.workers:
             try:
-                state = json.loads((root / 'state').read_text())
-                if state['status'] == 'running':
-                    self.cli('interrupt', root)
-                    self.until(lambda: self.state(root)['status'] != 'running')
+                self.cli('stop', root, '--timeout', '1')
             except (OSError, AssertionError):
                 pass
         self.temp.cleanup()
@@ -233,13 +296,20 @@ class Bridge(unittest.TestCase):
         return json.loads((root / 'state').read_text())
 
     def done(self, root, status='done'):
-        self.until(lambda: self.state(root)['status'] != 'running')
-        self.assertEqual(self.state(root)['status'], status, (root / 'events.jsonl').read_text())
-        return (root / 'final.md').read_text().strip() if status == 'done' else None
+        self.until(lambda: self.state(root)['status'] not in ('running', 'launching'))
+        state = self.state(root)
+        self.assertEqual(state['status'], status, (root / 'events.jsonl').read_text())
+        return Path(state['final_file']).read_text().strip() if status == 'done' else None
+
+    def turn(self, root):
+        return root / 'turns' / self.state(root)['generation']
+
+    def result(self, root):
+        return json.loads(Path(self.state(root)['result_file']).read_text())
 
     def approval(self, root):
         names = self.until(lambda: self.state(root)['pending_approvals'])
-        path = root / 'approvals' / (names[0] + '.json')
+        path = self.turn(root) / 'approvals' / (names[0] + '.json')
         request = json.loads(path.read_text())
         self.assertEqual(request['command'], 'fixture-command')
         self.assertEqual(request['reason'], 'fixture-reason')
@@ -258,15 +328,18 @@ class Bridge(unittest.TestCase):
                 first = self.approval(root)
                 self.reply(first, 'allow')
                 self.assertEqual(self.done(root), 'allow')
-                self.assertEqual(list((root / 'approvals').iterdir()), [])
+                self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
                 self.assertEqual(self.state(root)['pending_approvals'], [])
                 self.cli('resume', root)
                 second = self.approval(root)
                 self.assertNotEqual(first, second)
+                self.assertNotEqual(first.parent, second.parent)
+                self.reply(first, 'allow')
+                self.assertEqual(self.cli('wait', root, '--timeout', '1', success=False).returncode, 2)
                 self.assertEqual(self.state(root)['status'], 'running')
                 self.reply(second, 'deny')
                 self.assertEqual(self.done(root), 'deny')
-                self.assertEqual(list((root / 'approvals').iterdir()), [])
+                self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
 
     def test_pending_wait_and_interrupt(self):
         for vendor in ('codex', 'claude'):
@@ -278,10 +351,10 @@ class Bridge(unittest.TestCase):
                 state = json.loads(self.cli('status', root).stdout)
                 self.assertEqual(state['status'], 'running')
                 self.assertEqual(len(state['pending_approvals']), 1)
-                self.assertFalse((root / 'final.md').exists())
+                self.assertFalse('final_file' in self.state(root))
                 self.cli('interrupt', root)
                 self.done(root, 'interrupted')
-                self.assertEqual(list((root / 'approvals').iterdir()), [])
+                self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
                 (root / 'task.md').write_text('after-interrupt')
                 self.cli('resume', root)
                 self.assertEqual(self.done(root), 'resumed:after-interrupt')
@@ -354,8 +427,8 @@ class Bridge(unittest.TestCase):
                 with self.subTest(vendor=vendor, scenario=scenario):
                     root = self.start(vendor, scenario)
                     self.done(root, 'failed')
-                    self.assertFalse((root / 'final.md').exists())
-                    self.assertEqual(list((root / 'approvals').iterdir()), [])
+                    self.assertFalse('final_file' in self.state(root))
+                    self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
         self.done(self.start('codex', 'rpc-error'), 'failed')
 
     def test_invalid_and_unsolicited_replies_fail_closed(self):
@@ -367,7 +440,7 @@ class Bridge(unittest.TestCase):
                     target = path.with_suffix('.reply') if reply != 'unsolicited' else path.parent / '999999.reply'
                     self.reply(target.with_suffix('.json'), reply)
                     self.done(root, 'failed')
-                    self.assertFalse((root / 'final.md').exists())
+                    self.assertFalse('final_file' in self.state(root))
 
     def test_codex_file_approval_and_directory_permissions(self):
         root = self.start('codex', 'file-approval')
@@ -375,8 +448,9 @@ class Bridge(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text())['item']['changes'][0]['path'], 'fixture.txt')
         self.reply(path, 'allow')
         self.assertEqual(self.done(root), 'allow')
-        for name in ('state', 'config.json', 'events.jsonl', 'final.md', 'bridge.log'):
-            self.assertEqual((root / name).stat().st_mode & 0o777, 0o600)
+        for path in (root / 'state', root / 'config.json', root / 'events.jsonl', root / 'bridge.log',
+                     Path(self.state(root)['final_file']), Path(self.state(root)['result_file'])):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         unsafe = self.root / 'unsafe'
         unsafe.mkdir()
         unsafe.chmod(0o755)
@@ -395,10 +469,11 @@ class Bridge(unittest.TestCase):
         root = self.start('claude', 'approval')
         self.reply(self.approval(root), 'allow')
         self.assertEqual(self.done(root), 'allow')
-        for name in ('state', 'config.json', 'events.jsonl', 'final.md', 'bridge.log',
-                     'command.lock', 'worker.lock'):
-            self.assertEqual((root / name).stat().st_mode & 0o777, 0o600)
-        for path in (root, root / 'inbox', root / 'approvals'):
+        for path in (root / 'state', root / 'config.json', root / 'events.jsonl', root / 'bridge.log',
+                     root / 'command.lock', root / 'worker.lock',
+                     Path(self.state(root)['final_file']), Path(self.state(root)['result_file'])):
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        for path in (root, root / 'inbox', self.turn(root), self.turn(root) / 'approvals'):
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
 
     def test_passthrough_environment_cwd_and_native_executable(self):
@@ -470,7 +545,7 @@ class Bridge(unittest.TestCase):
                 self.assertEqual(timed.returncode, 124)
                 self.cli('send', root, '--message', 'finished')
                 self.cli('wait', root, '--timeout', '5')
-                result = json.loads((root / 'result.json').read_text())
+                result = self.result(root)
                 self.assertEqual(result['state'], 'done')
                 self.assertEqual(result['exit_code'], 0)
                 self.assertEqual(result['session_id'], 'fixture-session')
@@ -482,13 +557,13 @@ class Bridge(unittest.TestCase):
                 self.assertEqual(self.cli('tail', root, '-n', '0').stdout, '')
                 failed = self.start(vendor, 'result-error')
                 self.assertEqual(self.cli('wait', failed, '--timeout', '5', success=False).returncode, 1)
-                self.assertEqual(json.loads((failed / 'result.json').read_text())['exit_code'], 1)
+                self.assertEqual(self.result(failed)['exit_code'], 1)
                 pending = self.start(vendor, 'pending')
                 self.approval(pending)
                 self.assertEqual(self.cli('wait', pending, success=False).returncode, 2)
                 self.cli('stop', pending, '--timeout', '5')
                 self.assertEqual(self.cli('wait', pending, success=False).returncode, 130)
-                self.assertEqual(json.loads((pending / 'result.json').read_text())['exit_code'], 130)
+                self.assertEqual(self.result(pending)['exit_code'], 130)
                 self.cli('stop', pending)
 
     def test_approval_commands_and_independent_named_workers(self):
@@ -540,77 +615,118 @@ class Bridge(unittest.TestCase):
         self.assertEqual(self.cli('wait', root, success=False).returncode, 1)
         self.cli('stop', root)
         self.cli('stop', root)
-        self.assertEqual(json.loads((root / 'result.json').read_text())['state'], 'failed')
-        self.assertEqual(list((root / 'approvals').iterdir()), [])
+        self.assertEqual(self.result(root)['state'], 'failed')
+        self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
 
-    def test_launcher_crash_before_spawn_can_be_stopped_or_resumed(self):
+    def crash_launcher(self, root, task, point, **env):
+        script = """
+import os
+from pathlib import Path
+import runpy
+import sys
+import time
+
+bridge, point = sys.argv[1:3]
+del sys.argv[1:3]
+main = runpy.run_path(bridge)['main']
+module = main.__globals__['subprocess']
+popen = module.Popen
+def crash(argv, *args, **kwargs):
+    if argv[0] != 'systemd-run':
+        return popen(argv, *args, **kwargs)
+    if point != 'before':
+        child = popen(argv, *args, **kwargs)
+        stamp = (Path(os.environ['BRIDGE_TEST_SCOPE_GATE'] + '.pid') if point == 'delayed'
+                 else Path(os.environ['BRIDGE_TEST_SCOPES']) /
+                 next(arg[7:] for arg in argv if arg.startswith('--unit=')))
+        deadline = time.monotonic() + 5
+        while not stamp.exists():
+            assert time.monotonic() < deadline and child.poll() is None
+            time.sleep(0.02)
+    os._exit(91)
+module.Popen = crash
+main()
+"""
+        crash = subprocess.run([sys.executable, '-B', '-c', script, str(BRIDGE), point,
+                                'resume', '--dir', str(root), '--task', str(task)],
+                               env={**self.env, 'BRIDGE_TEST_SCOPES': str(self.scopes), **env},
+                               capture_output=True, text=True, timeout=8)
+        self.assertEqual(crash.returncode, 91, crash.stderr)
+        return self.state(root)
+
+    def test_launcher_crash_on_either_side_of_scope_creation(self):
         root = self.start('codex', 'complete')
         self.done(root)
         original_session = self.state(root)['session_id']
         task = self.root / 'retry.md'
         task.write_text('after-launch-crash')
-        script = """
-import os
-import runpy
-import sys
-bridge = sys.argv.pop(1)
-namespace = runpy.run_path(bridge)
-namespace['subprocess'].Popen = lambda *args, **kwargs: os._exit(91)
-namespace['main']()
-"""
-        for recovery in ('stop', 'resume'):
-            with self.subTest(recovery=recovery):
-                crash = subprocess.run([sys.executable, '-B', '-c', script, str(BRIDGE),
-                                        'resume', '--dir', str(root), '--task', str(task)],
-                                       capture_output=True, text=True, timeout=8)
-                self.assertEqual(crash.returncode, 91, crash.stderr)
-                self.assertEqual(self.state(root)['status'], 'launching')
-                self.assertGreater(self.state(root)['pid'], 0)
-                self.assertEqual(json.loads(self.cli('status', root).stdout)['status'], 'failed')
+        for point in ('before', 'after'):
+            with self.subTest(point=point):
+                previous = self.state(root)
+                state = self.crash_launcher(root, task, point)
+                self.assertEqual(state['status'], 'launching')
+                self.assertGreater(state['pid'], 0)
+                self.assertEqual((self.scopes / state['scope']).exists(), point == 'after')
+                status = json.loads(self.cli('status', root).stdout)
+                self.assertEqual(status['status'], 'failed')
+                self.assertFalse('final_file' in status or 'result_file' in status)
+                self.assertTrue(Path(previous['final_file']).exists())
                 self.assertEqual(self.cli('wait', root, '--timeout', '1', success=False).returncode, 1)
-                if recovery == 'stop':
+                if point == 'before':
                     self.cli('stop', root, '--timeout', '1')
-                    self.assertEqual(json.loads((root / 'result.json').read_text())['state'], 'failed')
+                    self.assertEqual(self.result(root)['state'], 'failed')
                 self.cli('resume', root, '--task', str(task))
                 self.assertEqual(self.done(root), 'resumed:after-launch-crash')
                 self.assertEqual(self.state(root)['session_id'], original_session)
+                self.assertFalse((self.scopes / state['scope']).exists())
 
-    def test_stop_does_not_signal_a_reused_process_group(self):
+    def test_delayed_old_launcher_is_fenced_after_resume(self):
         root = self.start('codex', 'complete')
         self.done(root)
-        # Reap an unrelated group leader while its descendant remains alive, then
-        # use that group ID in a stale crash receipt to simulate numeric reuse.
-        script = """
-import subprocess
-child = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-print(child.pid)
-"""
-        leader = subprocess.Popen([sys.executable, '-B', '-c', script], start_new_session=True,
-                                  stdout=subprocess.PIPE, text=True)
-        stdout, _ = leader.communicate(timeout=8)
-        self.assertEqual(leader.returncode, 0)
-        pid = int(stdout)
-        fd = os.pidfd_open(pid)
+        task = self.root / 'delayed.md'
+        task.write_text('approval')
+        gate = self.root / 'scope-gate'
+        old = self.crash_launcher(root, task, 'delayed', BRIDGE_TEST_SCOPE_GATE=str(gate))
+        pid = int(gate.with_suffix('.pid').read_text())
         try:
-            self.assertEqual(os.getpgid(pid), leader.pid)
-            self.assertFalse(Path(f'/proc/{leader.pid}').exists())
-            stale = self.state(root)
-            stale.update(status='running', pid=leader.pid, worker_pid=leader.pid, worker_start='1')
-            (root / 'state').write_text(json.dumps(stale))
-            self.cli('stop', root)
-            self.assertEqual(self.state(root)['status'], 'failed')
-            # A pidfd becomes readable once the process exits, including as a zombie.
-            self.assertFalse(select.select([fd], [], [], 0.2)[0])
+            self.assertFalse((self.scopes / old['scope']).exists())
+            self.cli('send', root, '--message', 'after-delay')
+            self.assertEqual(self.done(root), 'resumed:after-delay')
+            current = self.state(root)
+            self.assertNotEqual(current['generation'], old['generation'])
+            gate.touch()
+            self.until(lambda: not process_alive(pid))
+            self.assertEqual(self.state(root), current)
+            self.assertFalse(list((root / 'turns' / old['generation'] / 'approvals').iterdir()))
         finally:
             try:
-                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            finally:
-                os.close(fd)
 
-    def test_stop_kills_descendants_after_worker_group_leader_exits(self):
+    def test_result_publication_has_one_commit_point(self):
+        for point, status, code in (('before', 'failed', 1), ('after', 'done', 0)):
+            with self.subTest(point=point):
+                self.env['BRIDGE_TEST_RESULT_CRASH'] = point
+                try:
+                    root = self.start('codex', 'complete')
+                finally:
+                    self.env.pop('BRIDGE_TEST_RESULT_CRASH')
+                result = self.cli('wait', root, '--timeout', '4', success=(code == 0))
+                self.assertEqual(result.returncode, code)
+                state = json.loads(result.stdout)
+                self.assertEqual(state['status'], status)
+                self.assertTrue((self.turn(root) / 'final.md').exists())
+                if point == 'before':
+                    self.assertFalse('result_file' in state or 'final_file' in state)
+                else:
+                    self.assertEqual(Path(state['final_file']).read_text().strip(), 'started:complete')
+                    self.assertEqual(self.result(root)['state'], 'done')
+                self.cli('stop', root)
+                self.assertEqual(self.result(root)['state'], status)
+                self.assertEqual('final_file' in self.state(root), point == 'after')
+
+    def test_stop_kills_clean_environment_descendant_after_bridge_crash(self):
         marker = self.root / 'descendant-pid'
         root = self.start('codex', 'pending', '--env', 'BRIDGE_TEST_DESCENDANT=' + str(marker))
         self.approval(root)
@@ -619,22 +735,16 @@ print(child.pid)
         self.until(lambda: marker.read_text().strip() if marker.exists() else None)
         pid = int(marker.read_text())
 
-        def alive(process):
-            try:
-                return Path(f'/proc/{process}/stat').read_text().rsplit(') ', 1)[1].split()[0] != 'Z'
-            except FileNotFoundError:
-                return False
-
         def clean_up_descendant():
-            if alive(pid):
+            if process_alive(pid):
                 os.kill(pid, signal.SIGKILL)
 
         self.addCleanup(clean_up_descendant)
-        self.until(lambda: not alive(old['worker_pid']))
-        self.assertTrue(alive(pid))
-        self.assertEqual(os.getpgid(pid), old['worker_pid'])
+        self.assertTrue(process_alive(pid))
+        self.assertEqual((Path('/proc') / str(pid) / 'environ').read_bytes(), b'')
         self.cli('stop', root)
-        self.until(lambda: not alive(pid))
+        self.until(lambda: not process_alive(pid))
+        self.assertEqual(self.state(root)['cleanup'], 'verified')
 
     def test_resume_after_bridge_crash_retires_pending_worker(self):
         root = self.start('claude', 'pending')
@@ -646,13 +756,28 @@ print(child.pid)
         task.write_text('recovered')
         self.cli('resume', root, '--task', str(task))
         self.assertEqual(self.done(root), 'resumed:recovered')
-        self.assertEqual(list((root / 'approvals').iterdir()), [])
-        def retired():
-            try:
-                return Path(f'/proc/{old["worker_pid"]}/stat').read_text().rsplit(') ', 1)[1].split()[0] == 'Z'
-            except FileNotFoundError:
-                return True
-        self.until(retired)
+        self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
+        self.assertFalse((self.scopes / old['scope']).exists())
+
+    def test_stop_and_resume_refuse_unverified_cleanup(self):
+        root = self.start('codex', 'pending')
+        self.approval(root)
+        old = self.state(root)
+        os.kill(old['pid'], signal.SIGKILL)
+        for failure in ('offline', 'busy'):
+            with self.subTest(failure=failure):
+                fault = self.scopes / failure
+                fault.touch()
+                try:
+                    failed = self.cli('stop', root, success=False)
+                    self.assertIn('Cleanup unverified', failed.stderr)
+                    self.assertEqual(json.loads(failed.stdout)['cleanup'], 'unverified')
+                    self.cli('resume', root, success=False)
+                    self.assertEqual(self.state(root)['generation'], old['generation'])
+                finally:
+                    fault.unlink()
+        self.cli('stop', root)
+        self.assertEqual(self.state(root)['cleanup'], 'verified')
 
 
 if __name__ == '__main__':

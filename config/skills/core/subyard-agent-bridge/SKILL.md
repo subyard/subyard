@@ -8,6 +8,8 @@ description: Run a worker of the other vendor (Claude from Codex or Codex from C
 Run `python3 <this-skill-directory>/bridge.py`. Python 3 and the selected vendor's
 CLI must be installed; `/usr/local/bin/<vendor>` is preferred over PATH, and shell
 functions are not used. `--executable /absolute/path` selects another real CLI.
+The bridge needs a reachable systemd user manager and runs each turn in its own
+transient scope.
 The bridge inherits credentials,
 configuration and permissions. Claude uses the native stdio permission host without
 overriding its configured permission mode. No SDK package or Orca is required.
@@ -30,7 +32,9 @@ omitted. The detached bridge owns the worker's stdio; commands return promptly.
 `wait` blocks until terminal state, a pending approval or its timeout. Exit codes:
 done `0`, failed `1`, pending approval `2`, interrupted `130`, timeout `124`.
 Use one background/event wait call for long waits; no coordinator polling loop is
-needed. `stop` waits for interruption, is idempotent, and never reads stdin.
+needed. `stop` waits for interruption, verifies the turn's scope is empty or gone,
+and is idempotent. A crashed turn reports `failed`. If scope cleanup cannot be
+verified, `stop` and `resume` fail with a cleanup diagnostic.
 
 `start --role developer|reviewer|observer` supplies model/effort defaults: developer
 and reviewer use Codex `gpt-6.1-sol` or Claude `opus`, high effort; observer uses
@@ -50,14 +54,15 @@ arguments after `--`, e.g. Codex `-- -c key=value --profile NAME` or Claude
 They override role defaults and are retained on resume. Native flags must preserve
 the stdio protocol. The bridge always sets Claude's permission host to stdio.
 
-`state` is JSON: `status` (`launching`, `running`, `done`, `failed`, `interrupted`), launcher or bridge PID,
-session/turn IDs, generation and pending approval filenames without extensions.
+`state` is JSON with `status` (`launching`, `running`, `done`, `failed`, `interrupted`),
+launcher or bridge PID, session/turn IDs, scope, generation and pending approval IDs.
 `status` additionally lists queued message filenames. `events.jsonl` contains
 messages with recognized credentials redacted, tool summaries, approval IDs and terminal
-outcomes. Only `done` publishes `final.md` with the full turn's agent messages.
-Keep this report private. Every normal terminal outcome publishes `result.json` with state, exit
-code, session ID, effective model, duration in seconds and native token usage (or
-`null` if unavailable). Native stderr is private in `bridge.log`; do not dump logs or protocol
+outcomes. Terminal state publishes `result_file`, the path to the turn's
+`result.json` with state, exit code, session ID, model, duration and token usage.
+Only `done` publishes `final_file`, the path to `final.md` with the full report.
+Use the paths from the current state and keep the report private. Native stderr
+is private in `bridge.log`; do not dump logs or protocol
 bodies into chat without checking for secrets.
 
 Use `tail --dir /tmp/WORKER -n 20` for recent summarized messages/tool calls.
@@ -67,14 +72,14 @@ workers under that private root, independently of one another.
 To continue, run `resume --dir /tmp/WORKER --task FILE`, or replace `task.md` and
 omit `--task`. `send` steers a running turn; on a stopped worker it starts the next
 turn of that same session with the supplied message. Both restart the
-native process with the same session ID, model, effort and cwd. It clears the old
-final answer. If Codex rejects a steer, the message stays in the inbox and the current
+native process with the same session ID, model, effort and cwd. A new turn publishes
+its own result paths when it finishes. If Codex rejects a steer, the message stays in the inbox and the current
 turn continues. The next turn started with `send` or `resume` includes queued messages
 in its initial input. `status` shows the queue. A worker with no session ID cannot resume.
 
 ## Operator approvals
 
-The bridge writes `approvals/NNNNNN.json` containing `vendor`, `tool`, `command`,
+The bridge writes `turns/GENERATION/approvals/NNNNNN.json` containing `vendor`, `tool`, `command`,
 `reason`, the native `request` and the associated Codex `item` when available (for
 example, proposed file changes). It publishes the ID in `state.pending_approvals`.
 The request stays pending indefinitely until answered; `interrupt` remains available.
@@ -82,7 +87,7 @@ The request stays pending indefinitely until answered; `interrupt` remains avail
 1. Read the request and show the operator the action, reason and relevant details
    (including proposed file changes from the associated item when applicable).
 2. Wait for the operator's explicit decision. Never decide on the operator's behalf.
-3. Write exactly `allow` or `deny` to the matching `approvals/NNNNNN.reply`, preferably
+3. Write exactly `allow` or `deny` to the matching `.reply` file beside the request, preferably
    by writing a temporary file in that directory and atomically renaming it.
 
 Alternatively, `approvals --dir /tmp/WORKER` lists pending requests; after obtaining

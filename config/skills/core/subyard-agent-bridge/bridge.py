@@ -8,7 +8,6 @@ import math
 import os
 from pathlib import Path
 import re
-import select
 import selectors
 import shutil
 import signal
@@ -22,7 +21,6 @@ import uuid
 
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
 ACTIVE_STATES = ('launching', 'running')
-WORKER_MARKER = 'SUBYARD_BRIDGE_WORKER_GENERATION'
 MODELS = {'codex': {'developer': 'gpt-6.1-sol', 'reviewer': 'gpt-6.1-sol', 'observer': 'gpt-6-luna'},
           'claude': {'developer': 'opus', 'reviewer': 'opus', 'observer': 'haiku'}}
 STANDALONE = ('You are a standalone worker with no parent agent. Put your full report in your final '
@@ -132,13 +130,32 @@ def append(path):
     return stream
 
 
-def publish_result(root, state, model, tokens=None, duration=None):
+def turn_dir(root, state):
+    generation = state['generation']
+    if not re.fullmatch(r'[0-9a-f]{32}', generation):
+        raise ValueError('invalid turn generation')
+    return root / 'turns' / generation
+
+
+def save_state(root, state):
+    write(root / 'state', json.dumps(state) + '\n')
+
+
+def publish_result(root, state, model, tokens=None, duration=None, answers=()):
+    turn = turn_dir(root, state)
     result = {'state': state['status'], 'exit_code': EXIT_CODES[state['status']],
               'session_id': state.get('session_id'), 'vendor': state['vendor'],
               'model': model, 'duration_seconds': duration, 'tokens': tokens}
     if state.get('error'):
         result['error'] = state['error']
-    write(root / 'result.json', json.dumps(result) + '\n')
+    write(turn / 'result.json', json.dumps(result) + '\n')
+    if state['status'] == 'done':
+        write(turn / 'final.md', '\n\n'.join(answers) + '\n')
+        state['final_file'] = str(turn / 'final.md')
+    else:
+        (turn / 'final.md').unlink(missing_ok=True)
+    state['result_file'] = str(turn / 'result.json')
+    save_state(root, state)
 
 
 class Codex:
@@ -298,7 +315,9 @@ class Worker:
         self.root = root
         self.config = json.loads(read(root / 'config.json'))
         self.state = state
-        self.task = read(root / 'task.md')
+        self.turn = turn_dir(root, state)
+        self.approvals = self.turn / 'approvals'
+        self.task = read(self.turn / 'task.md')
         if self.config.get('role') == 'reviewer':
             self.task = 'Review read-only. Do not modify the repository. Write test/build outputs only in /tmp or TMPDIR.\n' + self.task
         elif self.config.get('role') == 'observer':
@@ -319,7 +338,7 @@ class Worker:
 
     def save(self):
         self.state['pending_approvals'] = sorted(self.pending)
-        write(self.root / 'state', json.dumps(self.state) + '\n')
+        save_state(self.root, self.state)
 
     def record(self, kind, **fields):
         fields = {key: self.redact(value) if isinstance(value, str) else value for key, value in fields.items()}
@@ -343,7 +362,7 @@ class Worker:
         # Persist the sequence before publication, so a crash cannot reuse a displayed ID.
         self.save()
         name = f'{self.state["approval_sequence"]:06d}'
-        path = self.root / 'approvals' / (name + '.json')
+        path = self.approvals / (name + '.json')
         # A reply must follow publication of this request, never preauthorize a future one.
         if path.with_suffix('.reply').exists():
             raise ValueError('unsolicited approval reply')
@@ -355,11 +374,11 @@ class Worker:
         self.save()
 
     def controls(self):
-        if (self.root / 'interrupt').exists():
+        if (self.turn / 'interrupt').exists():
             self.interrupted = True
         if self.interrupted:
             return
-        for path in sorted((self.root / 'approvals').glob('*.reply')):
+        for path in sorted(self.approvals.glob('*.reply')):
             name = path.stem
             if name not in self.pending:
                 raise ValueError('unsolicited approval reply')
@@ -379,7 +398,7 @@ class Worker:
                     self.adapter.message(path, read(path))
 
     def run(self):
-        env = {**self.env, WORKER_MARKER: self.state['generation']}
+        env = self.env
         executable = self.config.get('executable')
         if not executable:
             installed = '/usr/local/bin/' + self.config['vendor']
@@ -396,8 +415,7 @@ class Worker:
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'interrupted', True))
         signal.signal(signal.SIGINT, lambda *_: setattr(self, 'interrupted', True))
         self.child = subprocess.Popen(argv, cwd=self.config['cwd'], stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE, env=env, start_new_session=True, bufsize=0)
-        self.state['worker_pid'] = self.child.pid
+                                      stdout=subprocess.PIPE, env=env, bufsize=0)
         selector = selectors.DefaultSelector()
         selector.register(self.child.stdout, selectors.EVENT_READ)
         buffer = b''
@@ -426,43 +444,17 @@ class Worker:
                 raise ValueError('worker completed with unanswered approvals')
         finally:
             selector.close()
-            # Close the whole worker process group, including outstanding tool processes.
             self.child.stdin.close()
-            try:
-                os.killpg(self.child.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            # Wait without reaping the leader, which keeps the group's numeric ID reserved.
-            try:
-                fd = os.pidfd_open(self.child.pid)
-                try:
-                    poller = select.poll()
-                    poller.register(fd, select.POLLIN)
-                    poller.poll(2000)
-                finally:
-                    os.close(fd)
-            finally:
-                try:
-                    os.killpg(self.child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                self.child.wait()
-                self.child.stdout.close()
+            self.child.stdout.close()
 
     def finish(self):
         for name in self.pending:
             for suffix in ('.json', '.reply'):
-                (self.root / 'approvals' / (name + suffix)).unlink(missing_ok=True)
-        self.pending.clear()
-        (self.root / 'interrupt').unlink(missing_ok=True)
-        if self.outcome == 'done':
-            write(self.root / 'final.md', '\n\n'.join(self.answers) + '\n')
-        self.state['worker_pid'] = None
-        self.state['status'] = self.outcome or 'failed'
+                (self.approvals / (name + suffix)).unlink(missing_ok=True)
+        self.state.update(status=self.outcome or 'failed', pending_approvals=[])
         publish_result(self.root, self.state, self.model, self.tokens,
-                       round(time.time() - self.state['started_at'], 3))
+                       round(time.time() - self.state['started_at'], 3), self.answers)
         self.record(self.state['status'])
-        self.save()
 
 
 def process_identity(pid):
@@ -474,51 +466,112 @@ def process_identity(pid):
 
 
 def snapshot(root):
-    state = json.loads(read(root / 'state'))
-    if state['status'] in ACTIVE_STATES:
+    path = root / 'state'
+    while True:
+        raw = read(path)
+        state = json.loads(raw)
+        if state['status'] not in ACTIVE_STATES:
+            break
         pid, start = state.get('pid'), state.get('process_start')
-        if not pid or not start or process_identity(pid) != start:
-            state.update(status='failed', pending_approvals=[], error='Bridge process exited without a terminal state.')
+        if pid and start and process_identity(pid) == start:
+            break
+        if read(path) == raw:
+            state.update(status='failed', pending_approvals=[], cleanup='unverified',
+                         error='Bridge process exited without a terminal state.')
+            break
     state['queued_messages'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
     return state
+
+
+def scope_command(*args):
+    return subprocess.run(['systemctl', '--user', *args], stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=10)
+
+
+def scope_stopped(scope):
+    try:
+        scope_command('stop', scope)
+        result = scope_command('show', '--property=LoadState,ActiveState,ControlGroup', scope)
+        properties = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        if result.returncode != 0 or properties.get('ActiveState') not in ('inactive', 'failed'):
+            return False
+        group = properties.get('ControlGroup')
+        if group is None or properties.get('LoadState') not in ('loaded', 'not-found'):
+            return False
+        if not group:
+            return True
+        events = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events'
+        try:
+            return 'populated 0' in events.read_text().splitlines()
+        except FileNotFoundError:
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def recover(root, state):
+    if state.get('cleanup') == 'verified' or (not state.get('scope') and not state.get('error')):
+        return True
+    scope = state.get('scope')
+    if scope and scope == 'subyard-bridge-' + turn_dir(root, state).name + '.scope':
+        # Publish the fence and failure result before contacting the manager. A
+        # delayed _run can enter this scope but cannot start the vendor.
+        if not state.get('result_file'):
+            publish_result(root, state, state.get('model'))
+        if scope_stopped(scope):
+            for path in (turn_dir(root, state) / 'approvals').iterdir():
+                if path.suffix in ('.json', '.reply'):
+                    path.unlink(missing_ok=True)
+            state['cleanup'] = 'verified'
+            save_state(root, state)
+            return True
+    print('Cleanup unverified. Could not verify that the systemd user scope is empty or gone.',
+          file=sys.stderr)
+    return False
 
 
 def launch(root, state, config, task):
     config.setdefault('name', root.name)
     with locked(root / 'worker.lock'):
-        stop_orphan(state)
-        for path in (root / 'approvals').glob('*.json'):
-            path.unlink()
-            path.with_suffix('.reply').unlink(missing_ok=True)
+        if not recover(root, state):
+            return 1
+        generation = uuid.uuid4().hex
+        scope = 'subyard-bridge-' + generation + '.scope'
+        state = dict(session_id=state['session_id'], approval_sequence=state['approval_sequence'],
+                     status='launching', pid=os.getpid(), process_start=process_identity(os.getpid()),
+                     turn_id=None, pending_approvals=[], generation=generation, scope=scope,
+                     cleanup='unverified', vendor=config['vendor'], name=config['name'],
+                     model=config['model'], started_at=time.time())
+        directory(root / 'turns')
+        turn = turn_dir(root, state)
+        directory(turn)
+        directory(turn / 'approvals')
+        write(turn / 'task.md', task)
         write(root / 'task.md', task)
         write(root / 'config.json', json.dumps(config) + '\n')
-        state.pop('error', None)
-        state.pop('queued_messages', None)
         if config['vendor'] == 'codex':
             state['carryover'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
-        state.pop('worker_start', None)
-        state.update(status='launching', pid=os.getpid(), process_start=process_identity(os.getpid()),
-                     turn_id=None, pending_approvals=[],
-                     generation=uuid.uuid4().hex, vendor=config['vendor'], name=config['name'], model=config['model'],
-                     started_at=time.time(), worker_pid=None)
-        write(root / 'state', json.dumps(state) + '\n')
-        for name in ('final.md', 'result.json', 'interrupt'):
+        for name in ('final.md', 'result.json'):
             (root / name).unlink(missing_ok=True)
         for name in ('events.jsonl', 'bridge.log'):
             if not (root / name).exists():
                 write(root / name, '')
+        save_state(root, state)
         try:
             with append(root / 'bridge.log') as log:
-                child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '_run', '--dir', str(root)],
+                child = subprocess.Popen(['systemd-run', '--user', '--scope', '--quiet',
+                                          '--unit=' + scope, '--property=TimeoutStopSec=2s', '--',
+                                          sys.executable, str(Path(__file__).resolve()), '_run', '--dir', str(root),
+                                          '--generation', generation],
                                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         except OSError:
-            state.update(status='failed', error='Bridge process could not start.')
+            state.update(status='failed', error='Systemd user scope launcher could not start.')
             publish_result(root, state, config['model'])
-            write(root / 'state', json.dumps(state) + '\n')
             raise
-        state.update(status='running', pid=child.pid, process_start=process_identity(child.pid))
-        write(root / 'state', json.dumps(state) + '\n')
-    print(json.dumps({'status': 'running', 'pid': child.pid, 'dir': str(root)}))
+        state.update(pid=child.pid, process_start=process_identity(child.pid))
+        save_state(root, state)
+    print(json.dumps({'status': 'launching', 'pid': child.pid, 'dir': str(root)}))
+    return 0
 
 
 def wait(root, timeout, stopping=False):
@@ -526,42 +579,12 @@ def wait(root, timeout, stopping=False):
     while True:
         state = snapshot(root)
         if state['status'] not in ACTIVE_STATES:
-            break
+            return state, EXIT_CODES[state['status']]
         if state['pending_approvals'] and not stopping:
-            print(json.dumps(state))
-            return 2
+            return state, 2
         if time.monotonic() >= deadline:
-            print(json.dumps(state))
-            return 124
+            return state, 124
         time.sleep(0.1)
-    print(json.dumps(state))
-    return 0 if stopping else EXIT_CODES[state['status']]
-
-
-def stop_orphan(state):
-    if not state.get('error'):
-        return
-    group, generation = state.get('worker_pid'), state.get('generation')
-    if group and generation:
-        marker = f'{WORKER_MARKER}={generation}'.encode()
-        for process in Path('/proc').iterdir():
-            if not process.name.isdecimal():
-                continue
-            pid = int(process.name)
-            try:
-                if os.getpgid(pid) != group or process.stat().st_uid != os.getuid():
-                    continue
-                # Pin the process before inspecting its environment so PID reuse cannot
-                # redirect the signal to a replacement.
-                fd = os.pidfd_open(pid)
-                try:
-                    if marker in (process / 'environ').read_bytes().split(b'\0'):
-                        signal.pidfd_send_signal(fd, signal.SIGKILL)
-                finally:
-                    os.close(fd)
-            except (FileNotFoundError, ProcessLookupError, PermissionError):
-                continue
-    state['worker_pid'] = None
 
 
 def main():
@@ -570,6 +593,7 @@ def main():
                                           'tail', 'approvals', 'approve', 'deny', 'list', '_run'])
     parser.add_argument('approval_id', nargs='?')
     parser.add_argument('--dir', type=Path)
+    parser.add_argument('--generation', help=argparse.SUPPRESS)
     parser.add_argument('--root', type=Path, help='parent of worker directories for list')
     parser.add_argument('--vendor', choices=['codex', 'claude'])
     parser.add_argument('--model')
@@ -612,14 +636,16 @@ def main():
     if args.command == 'stop' and not (root / 'state').exists():
         return 0
     directory(root)
-    for name in ('inbox', 'approvals'):
-        directory(root / name)
+    directory(root / 'inbox')
     if args.command == '_run':
         with locked(root / 'worker.lock'):
-            state = json.loads(read(root / 'state'))
-            # A launcher that died before publishing this child never committed the launch.
-            if state['status'] != 'running' or state['pid'] != os.getpid():
+            state = snapshot(root)
+            if (state['status'] != 'launching' or state['generation'] != args.generation
+                    or state['pid'] != os.getpid()):
                 return 1
+            state.pop('queued_messages', None)
+            state['status'] = 'running'
+            save_state(root, state)
             worker = None
             try:
                 worker = Worker(root, state)
@@ -629,15 +655,20 @@ def main():
                 if worker is None:
                     state.update(status='failed', error='Worker initialization failed.')
                     publish_result(root, state, state.get('model'))
-                    write(root / 'state', json.dumps(state) + '\n')
-                    return 1
-                worker.outcome = 'interrupted' if worker.interrupted else 'failed'
-                worker.record('error', message='Worker executable, protocol or state operation failed.',
-                              error_type=type(error).__name__)
-            worker.finish()
+                else:
+                    worker.outcome = 'interrupted' if worker.interrupted else 'failed'
+                    worker.record('error', message='Worker executable, protocol or state operation failed.',
+                                  error_type=type(error).__name__)
+            if worker:
+                worker.finish()
+        # Stop the whole scope after publishing the result. Explicit stop and
+        # resume verify cleanup independently.
+        scope_command('--no-block', 'stop', state['scope'])
         return 0
     if args.command == 'wait':
-        return wait(root, args.timeout)
+        state, code = wait(root, args.timeout)
+        print(json.dumps(state))
+        return code
     if args.command == 'status':
         print(json.dumps(snapshot(root)))
         return 0
@@ -656,8 +687,9 @@ def main():
         return 0
     if args.command == 'approvals':
         requests = []
-        for name in snapshot(root)['pending_approvals']:
-            path = root / 'approvals' / (name + '.json')
+        state = snapshot(root)
+        for name in state['pending_approvals']:
+            path = turn_dir(root, state) / 'approvals' / (name + '.json')
             try:
                 request = json.loads(read(path))
             except FileNotFoundError:
@@ -668,10 +700,11 @@ def main():
         return 0
     with locked(root / 'command.lock'):
         if args.command in ('approve', 'deny'):
+            state = snapshot(root)
             name = args.approval_id
-            if not name or not name.isascii() or not name.isdigit() or len(name) < 6 or name not in snapshot(root)['pending_approvals']:
+            if not name or not name.isascii() or not name.isdigit() or len(name) < 6 or name not in state['pending_approvals']:
                 raise ValueError('approval is not pending')
-            reply = root / 'approvals' / (name + '.reply')
+            reply = turn_dir(root, state) / 'approvals' / (name + '.reply')
             if os.path.lexists(reply):
                 raise ValueError('approval already answered')
             read(reply.with_suffix('.json'))
@@ -716,24 +749,21 @@ def main():
                     raise ValueError('resume requires a stopped worker with a session id')
                 config = json.loads(read(root / 'config.json'))
             task = text if text is not None else read(args.task if args.task else root / 'task.md')
-            launch(root, state, config, task)
-        else:
+            return launch(root, state, config, task)
+        if args.command in ('interrupt', 'stop'):
             state = snapshot(root)
-            if state['status'] not in ACTIVE_STATES:
-                if args.command == 'stop':
-                    stop_orphan(state)
-                    if state.get('error'):
-                        (root / 'final.md').unlink(missing_ok=True)
-                        for path in (root / 'approvals').glob('*.json'):
-                            path.unlink()
-                            path.with_suffix('.reply').unlink(missing_ok=True)
-                        publish_result(root, state, state.get('model'))
-                        write(root / 'state', json.dumps(state) + '\n')
-                    return 0
+            if state['status'] in ACTIVE_STATES:
+                write(turn_dir(root, state) / 'interrupt', '')
+            elif args.command == 'interrupt':
                 raise ValueError('worker is not running')
-            write(root / 'interrupt', '')
-    if args.command == 'stop':
-        return wait(root, args.timeout, stopping=True)
+            if args.command == 'stop':
+                state, code = wait(root, args.timeout, stopping=True)
+                if code != 124:
+                    with locked(root / 'worker.lock'):
+                        state = snapshot(root)
+                        code = 0 if recover(root, state) else 1
+                print(json.dumps(state))
+                return code
     return 0
 
 
