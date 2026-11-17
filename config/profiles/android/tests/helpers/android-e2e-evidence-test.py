@@ -67,6 +67,54 @@ with tempfile.TemporaryDirectory(prefix='android-sdk-cleanup-', dir='/tmp') as d
     assert result.stderr.splitlines()[-1] == 'x' * 4096
 
 
+# The connected child captures all sections before run releases its lease. A
+# broken adb query must preserve the test failure and still collect the journal.
+gradle_source = (E2E / 'android-gradle.sh').read_text()
+connected = gradle_source[gradle_source.index('connected() {'):gradle_source.index('not_writable "$work/connected.log"')]
+for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
+    with tempfile.TemporaryDirectory(prefix='android-gradle-evidence-', dir='/tmp') as name:
+        directory = Path(name)
+        tools = directory / 'platform-tools'
+        tools.mkdir()
+        adb = tools / 'adb'
+        adb.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n'
+                       'printf "guest 12:34:56.789 192.0.2.1 2001:db8::1 2001:db8:0:1:2:3:4:5 aa:bb:cc:dd:ee:ff token=canary\\n"\n'
+                       'if [ "$ADB_EXIT" = 0 ]; then head -c 70000 /dev/zero | tr "\\0" x; fi\n'
+                       'if [ "$ADB_EXIT" = 124 ] && [ "${2:-}" = dumpsys ]; then sleep 30; fi\n'
+                       'exit "$ADB_EXIT"\n')
+        adb.chmod(0o755)
+        journal = directory / 'journalctl'
+        journal.write_text('#!/bin/bash\nprintf "journal %s\\n" "$*" >> "$CALLS"\necho emulator-log\n')
+        journal.chmod(0o755)
+        script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "exit $2"); '
+                  'export ANDROID_SDK_ROOT="$work" SUBYARD_EMU_SLOT=001 SUBYARD_EMU_GENERATION=2\n'
+                  'android-broker() { shift 10; local result=0; "$@" || result=$?; '
+                  'echo released >> "$CALLS"; return "$result"; }\n' + connected)
+        calls = directory / 'calls'
+        result = subprocess.run(['bash', '-c', script, '_', name, str(child_exit)],
+                                env=dict(os.environ, PATH=name + os.pathsep + os.environ['PATH'],
+                                         CALLS=str(calls), ADB_EXIT=str(adb_exit)),
+                                capture_output=True, text=True)
+        assert result.returncode == child_exit, result.stderr
+        evidence = (directory / 'emulator-evidence.log').read_text()
+        if child_exit == 0:
+            assert evidence == '' and calls.read_text() == 'released\n'
+        else:
+            assert all('android-gradle evidence: ' + section in evidence
+                       for section in ('logcat', 'meminfo', 'lowmemory', 'emulator'))
+            assert len(evidence) < 4 * 66000 and 'emulator-log' in evidence
+            assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
+                                                          'aa:bb:cc:dd:ee:ff', 'canary'))
+            assert '12:34:56.789' in evidence
+            if adb_exit:
+                assert evidence.count(f'capture_exit={adb_exit}') == 3
+            observed = calls.read_text()
+            assert 'logcat -b main -b system -b crash -d -t 512' in observed
+            assert 'shell dumpsys meminfo' in observed and 'dmesg; logcat' in observed
+            assert 'subyard-android-slot-001-2.service' in observed
+            assert observed.splitlines()[-1] == 'released'
+
+
 def load(name):
     spec = importlib.util.spec_from_file_location(name, E2E / (name + '.py'))
     value = importlib.util.module_from_spec(spec)

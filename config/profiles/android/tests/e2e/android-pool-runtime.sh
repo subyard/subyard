@@ -385,8 +385,10 @@ if [ "$lane" = gradle ]; then
     incus_binary=(sudo -n /usr/bin/incus)
   fi
   # Default-package build, broker SDK addition and connected tests through one lease.
+  # Fixture-only journal access lets the failing child capture its runtime before release.
+  incus --project "$project" exec "$instance" -- usermod -a -G systemd-journal dev
   timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
-    --user 1000 --group 1000 --env HOME=/home/dev -- bash -se \
+    --env HOME=/home/dev -- runuser -u dev -- bash -se \
     < "$root/config/profiles/android/tests/e2e/android-gradle.sh"
   android_phase_end 0
   android_phase_begin relay-owner
