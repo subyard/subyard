@@ -92,28 +92,56 @@ func TestRegisteredNestedBrokerRecognizesOwnedHostMemory(t *testing.T) {
 }
 
 func TestPlainInitFinishesCurrentMigrationsBeforeNormalPlan(t *testing.T) {
-	root, environment, marker := migrateCLIFixture(t, true)
-	platform := newInitPlatformFixture()
-	for stage := range platform.converged {
-		platform.converged[stage] = true
-	}
-	var output bytes.Buffer
-	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment, Stdout: &output, Stderr: &output, InitPlatform: platform})
-	if err != nil {
-		t.Fatal(err)
-	}
-	loaded, loadErr := program.resolveReleaseTransitionContext(context.Background(), "default", program.env["SUBYARD_CONFIG_HOME"])
-	if loadErr != nil {
-		t.Fatal(loadErr)
-	}
-	seedOwnerHostID(t, program.env["SUBYARD_CONFIG_HOME"])
-	program.options.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Config: map[string]string{"user.subyard.managed": "true"}}}}
-	code := program.Run(context.Background())
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("plain init did not execute existing migration: code=%d output=%s err=%v", code, output.String(), err)
-	}
-	if code != 0 {
-		t.Fatalf("normal init did not complete after migration: code=%d output=%s", code, output.String())
+	for _, entry := range []string{"ordinary init", "restore prior admission"} {
+		t.Run(entry, func(t *testing.T) {
+			root, environment, marker := migrateCLIFixture(t, true)
+			platform := newInitPlatformFixture()
+			for stage := range platform.converged {
+				platform.converged[stage] = true
+			}
+			var output bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"}, Environment: environment, Stdout: &output, Stderr: &output, InitPlatform: platform})
+			if err != nil {
+				t.Fatal(err)
+			}
+			loaded, loadErr := program.resolveReleaseTransitionContext(context.Background(), "default", program.env["SUBYARD_CONFIG_HOME"])
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			seedOwnerHostID(t, program.env["SUBYARD_CONFIG_HOME"])
+			program.options.Incus = &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Config: map[string]string{"user.subyard.managed": "true"}}}}
+			var code int
+			if entry == "restore prior admission" {
+				previous := &gateAdmission{kind: admissionRead}
+				program.gateAdmitted = previous
+				code, err = program.finishRegisteredInitMigrations(context.Background(), "default", []string{"--yes"}, true)
+				if err != nil || program.gateAdmitted != previous {
+					t.Fatalf("compatibility migration leaked admission: got=%+v want=%+v err=%v", program.gateAdmitted, previous, err)
+				}
+			} else {
+				migrated, initialized := false, false
+				gateBindObserver = func(prepared *preparedCommand) {
+					admission := prepared.gateAdmission()
+					switch prepared.Definition.Handler {
+					case "@current-migration":
+						migrated = admission != nil && admission.kind == admissionExempt
+					case "@init":
+						initialized = migrated && admission != nil && admission.kind == admissionReady && admission.request.handler == "@init"
+					}
+				}
+				t.Cleanup(func() { gateBindObserver = nil })
+				code = program.Run(context.Background())
+				if !migrated || !initialized {
+					t.Fatalf("migration/init did not bind their own admissions: migrated=%t initialized=%t output=%s", migrated, initialized, output.String())
+				}
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("plain init did not execute existing migration: code=%d output=%s err=%v", code, output.String(), err)
+			}
+			if code != 0 {
+				t.Fatalf("normal init did not complete after migration: code=%d output=%s", code, output.String())
+			}
+		})
 	}
 }
 
