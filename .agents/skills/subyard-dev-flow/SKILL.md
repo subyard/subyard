@@ -166,22 +166,41 @@ reviewer only for an explicit two-axis request or a concrete independent risk. P
 risk-based checks above; orchestration does not add acceptance runs.
 
 Role-specific obligations live in the client-neutral [developer](roles/developer.md),
-[reviewer](roles/reviewer.md), [observer](roles/observer.md) and [describer](roles/describer.md) contracts. They are not
-registered as native custom agents. Read the selected contract when assigning a role and include
-its instructions in a self-contained assignment to a fresh subagent without inherited conversation
-history. Spawn settings by client; record a comparable available alternative if needed:
+[reviewer](roles/reviewer.md), [observer](roles/observer.md) and [describer](roles/describer.md)
+contracts. Claude Code has [native project agents](../../../.claude/agents/) for
+`developer` and `reviewer` agents using Opus with `autoCompactWindow: 400000`; other
+clients use the same contracts through their native tools or the cross-vendor bridge.
+The window applies only to those Claude subagents, not the coordinator or a standalone
+Claude bridge worker. Read the selected contract when assigning a role and give a
+self-contained assignment to a fresh worker without inherited conversation history.
+Spawn settings by client; record a comparable available alternative if needed:
 
 | Client | Developer and fresh reviewer | Long-check observer | Resume the same worker |
 | --- | --- | --- | --- |
-| Any | Strongest available model, high reasoning effort | A faster model, medium effort | Same worker, not a new one |
-| Codex | `spawn_agent` with `model`, `reasoning_effort="high"`, `fork_turns="none"` | `fork_turns="none"`, faster `model`, `reasoning_effort="medium"` | `followup_task` |
-| Claude Code | Agent tool, `general-purpose`, strongest `model` | `general-purpose`, faster `model` | `SendMessage` to the agent |
-| Claude Code → Codex CLI | `codex exec -C <repo> -m <model> -o <final.md> - < <assignment.md>` | Same, faster `-m` | `codex exec resume <session-id> -o <final.md> - < <next.md>` (session id from the first run's log; not with `--ephemeral`) |
+| Any | Strongest available model, high reasoning effort | Haiku or Codex `gpt-6-luna`, medium effort; do not default to Sonnet | Same worker, not a new one |
+| Codex → Codex | `spawn_agent` with `model`, `reasoning_effort="high"`, `fork_turns="none"` | `model="gpt-6-luna"`, `reasoning_effort="medium"`, `fork_turns="none"` | `send_message` while running; `followup_task` when idle |
+| Claude Code → Claude Code | Agent tool, `subagent_type="developer"` or `"reviewer"`, `model="opus"` | `subagent_type="general-purpose"`, `model="haiku"`, `effort="medium"`; include the observer contract | `SendMessage` to the same agent |
+| Either client → other vendor | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md): `start --vendor codex\|claude --role developer\|reviewer --cwd REPO --dir STATE --task ASSIGNMENT` | `--role observer --model gpt-6-luna\|haiku --effort medium` | `send` during a turn or for the next turn; `resume --task NEXT` for the same stopped session |
+
+For cross-vendor work, use the installed skill's Python entrypoint, not the temporary
+`agent-bridge-local` command. Keep STATE outside the checkout. The bridge inherits
+native permissions; its reviewer preset keeps the repository read-only while allowing
+temporary outputs (set TMPDIR outside the repository). Explicit model/effort/native
+arguments override presets. A bridge worker is a standalone vendor session, so the
+Claude native subagent's compaction window does not apply to it.
+
+Wait with one background `wait --dir STATE --timeout SECONDS` call: done `0`, failed
+`1`, pending approval `2`, interrupted `130`, timeout `124`. On `2`, show the pending
+request to the operator and pass only their single-use decision through `approve` or
+`deny`; never auto-approve. Use `status`, `tail` and `result.json` for state, progress
+and the terminal result. `interrupt` works while approval is pending; `stop` is
+idempotent. Within one vendor, keep native delegation and approval behavior.
 
 `--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
 
-Neither client enforces the reviewer's read-only rule through these settings; the contract text
-carries it. A necessary long check may use one observer; run it directly if unavailable.
+Native same-vendor agents rely on the reviewer's contract for read-only behavior;
+the bridge reviewer preset also supplies native filesystem restrictions. A necessary
+long check may use one Haiku or Codex Luna observer; run it directly if unavailable.
 Short checks stay with the developer.
 
 The coordinator owns original requirements, editable scope, one shared task and final acceptance:
