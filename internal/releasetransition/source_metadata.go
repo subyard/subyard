@@ -47,6 +47,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 		return SourceMetadata{}, err
 	}
 	proof := SourceMetadata{}
+	closedRollback := false
 	if snapshot.Exists {
 		journal, err := ParseJournal(snapshot.Payload)
 		if err != nil {
@@ -56,13 +57,20 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 		if err != nil || !bytes.Equal(canonical, snapshot.Payload) {
 			return proof, errors.New("source repair requires a canonical protected journal")
 		}
-		originalCatalog, supportedCatalog := SupportedBuiltinCatalog(journal.CatalogDigest)
-		if journal.RegistryDigest != digest || !supportedCatalog || !BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) || journal.SourceIngress != nil {
-			return proof, errors.New("source repair requires the exact supported original registry and catalog without source ingress")
+		completion, err := store.InspectCompletedRollback(registry, digest, journal.ArtifactDigest)
+		if err != nil {
+			return proof, err
 		}
-		for _, migration := range registry.Migrations {
-			if !originalCatalog.Supports(migration.Kind, migration.Domain) {
-				return proof, errors.New("source repair registry exceeds the original compiled catalog")
+		closedRollback = completion != nil
+		if !closedRollback {
+			originalCatalog, supportedCatalog := SupportedBuiltinCatalog(journal.CatalogDigest)
+			if journal.RegistryDigest != digest || !supportedCatalog || !BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) || journal.SourceIngress != nil {
+				return proof, errors.New("source repair requires the exact supported original registry and catalog without source ingress")
+			}
+			for _, migration := range registry.Migrations {
+				if !originalCatalog.Supports(migration.Kind, migration.Domain) {
+					return proof, errors.New("source repair registry exceeds the original compiled catalog")
+				}
 			}
 		}
 		if journal.Checkpoint != JournalComplete && (journal.Checkpoint != JournalReconciling || journal.Goal.Direction != DirectionActivateTarget || len(journal.Steps) != 0 || IsRecoveryTransaction(journal.Transaction)) {
@@ -98,7 +106,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 		if completionErr != nil || !proof.Ledger.AuthoritySnapshot.Exists {
 			return proof, errors.New("source repair requires the complete original migration ledger")
 		}
-		if proof.Journal.Checkpoint == JournalComplete {
+		if proof.Journal.Checkpoint == JournalComplete && !closedRollback {
 			if err := store.sourceTerminalEvidence(*proof.Journal, registry, proof.Ledger); err != nil {
 				return proof, err
 			}
@@ -156,14 +164,28 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 				if ownerPredecessors[transaction] {
 					continue
 				}
-				closed, exists := journals[transaction]
-				if !exists || closed.Checkpoint != JournalComplete {
+				closed, err := store.readRollbackClosure(transaction)
+				if err != nil {
+					return proof, err
+				}
+				if closed != nil {
+					continue
+				}
+				bound, exists := journals[transaction]
+				if !exists || bound.Checkpoint != JournalComplete {
 					return proof, errors.New("source repair without a current journal requires terminal typed provenance for every retained transaction")
 				}
 			}
 		}
 		for transaction := range graph.directories {
 			if ownerPredecessors[transaction] {
+				continue
+			}
+			closed, err := store.readRollbackClosure(transaction)
+			if err != nil {
+				return proof, err
+			}
+			if closed != nil {
 				continue
 			}
 			bound, exists := journals[transaction]
@@ -694,6 +716,29 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 	if err := visit([]string{"release-transition"}); err != nil {
 		return "", err
 	}
+	closures, present, err := store.readDirectoryEntries(rollbackClosureParts, maxTransactionGraphEntries)
+	if err != nil {
+		return "", err
+	}
+	if len(closures) > maxTransactionGraphEntries {
+		return "", invalid("rollback closure namespace exceeds its entry bound")
+	}
+	// Preserve historical source bindings when this new auxiliary namespace
+	// is absent. Its appearance still changes the inventory on the next read.
+	if present {
+		if err := visit(rollbackClosureParts); err != nil {
+			return "", err
+		}
+	}
+	for _, entry := range closures {
+		transaction := TransactionID(strings.TrimSuffix(entry.Name(), ".json"))
+		if _, err := store.readRollbackClosure(transaction); err != nil {
+			return "", err
+		}
+		if err := visit(nativeIdentityParts(transaction)); err != nil {
+			return "", err
+		}
+	}
 	// The roots bind absence even when their parent already exists.
 	for _, parts := range [][]string{{"release-transition", "v2"}, recoveryReceiptParts, recoveryLifecycleParts, recoveryArchiveParts, recoveryFrontierParts} {
 		if _, seen := inputs[strings.Join(parts, "/")]; !seen {
@@ -724,6 +769,12 @@ func sourceMetadataDirectory(parts []string) bool {
 }
 
 func sourceMetadataFile(parts []string) bool {
+	if len(parts) == 5 && slices.Equal(parts[:4], rollbackClosureParts) {
+		return strings.HasSuffix(parts[4], ".json") && validateTransactionID(TransactionID(strings.TrimSuffix(parts[4], ".json"))) == nil
+	}
+	if len(parts) == 4 && slices.Equal(parts[:2], []string{"reconcile", "native-identities"}) {
+		return validateTransactionID(TransactionID(parts[2])) == nil && strings.HasSuffix(parts[3], ".json") && validateSafeID(strings.TrimSuffix(parts[3], ".json"), "closed native identity") == nil
+	}
 	if len(parts) == 5 && (slices.Equal(parts[:4], migrationOwnerReceiptParts) || slices.Equal(parts[:4], migrationOwnerCompletedParts)) {
 		return strings.HasSuffix(parts[4], ".json")
 	}
