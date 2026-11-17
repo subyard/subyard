@@ -17,6 +17,7 @@ FAKE = r'''#!/usr/bin/env python3
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 codex = Path(sys.argv[0]).name == 'codex'
@@ -42,8 +43,16 @@ def finish(text):
         emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
               'usage': {'input_tokens': 3, 'output_tokens': 2}})
 
+def say(text):
+    if codex:
+        emit({'method': 'item/completed', 'params': {'item': {'type': 'agentMessage', 'text': text}}})
+    else:
+        emit({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}})
+
 def begin(text):
     global scenario
+    assert 'standalone worker with no parent agent' in text
+    assert 'full report in your final message' in text
     scenario = text.split('\n')[-1]
     if codex:
         emit({'method': 'item/started', 'params': {'item': {
@@ -81,8 +90,18 @@ def begin(text):
             emit({'method': 'turn/completed', 'params': {'turn': {'status': 'failed'}}})
         else:
             emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True})
-    elif scenario != 'message':
-        finish(('resumed:' if resumed else 'started:') + text)
+    elif scenario == 'report':
+        say('The complete report.')
+        say('I sent the report to the parent.')
+        if codex:
+            emit({'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}})
+        else:
+            finish('I sent the report to the parent.')
+    elif scenario == 'credentials':
+        say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
+        finish('password="synthetic inline credential" and ghp_' + 'X' * 36)
+    elif scenario not in ('message', 'steer-race'):
+        finish(('resumed:' if resumed else 'started:') + scenario)
 
 for line in sys.stdin:
     message = json.loads(line)
@@ -97,15 +116,23 @@ for line in sys.stdin:
             emit({'id': message['id'], 'result': {'thread': {'id': session}}})
         elif method == 'turn/start':
             text = message['params']['input'][0]['text']
-            if text == 'rpc-error':
+            if text.split('\n')[-1] == 'rpc-error':
                 emit({'id': message['id'], 'error': {'message': 'fixture error'}})
             else:
                 emit({'id': message['id'], 'result': {'turn': {'id': 'fixture-turn'}}})
-                begin(text)
+                if text.split('\n')[-1] == 'carryover':
+                    assert resumed
+                    finish('received:' + message['params']['input'][1]['text'])
+                else:
+                    begin(text)
         elif method == 'turn/steer':
             assert message['params']['expectedTurnId'] == 'fixture-turn'
-            emit({'id': message['id'], 'result': {}})
-            finish('message:' + message['params']['input'][0]['text'])
+            if scenario == 'steer-race':
+                emit({'id': message['id'], 'error': {'code': -32602, 'message': 'turn id mismatch'}})
+                finish('Original turn finished.')
+            else:
+                emit({'id': message['id'], 'result': {}})
+                finish('message:' + message['params']['input'][0]['text'])
         elif method == 'turn/interrupt':
             emit({'id': message['id'], 'result': {}})
             emit({'method': 'turn/completed', 'params': {'turn': {'status': 'interrupted'}}})
@@ -132,6 +159,11 @@ for line in sys.stdin:
         elif message.get('type') == 'control_request':
             assert message['request']['subtype'] == 'interrupt'
             finish('interrupted')
+
+if scenario == 'pending' and os.environ.get('BRIDGE_TEST_DESCENDANT'):
+    child = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    Path(os.environ['BRIDGE_TEST_DESCENDANT']).write_text(str(child.pid))
 '''
 
 
@@ -264,6 +296,41 @@ class Bridge(unittest.TestCase):
                 self.assertEqual(self.done(root), 'resumed:next-task')
                 self.assertEqual(self.state(root)['session_id'], 'fixture-session')
 
+    def test_rejected_steer_preserves_worker_and_delivers_on_next_turn(self):
+        root = self.start('codex', 'steer-race')
+        self.until(lambda: self.state(root)['turn_id'])
+        self.cli('send', root, '--message', 'racing message')
+        self.assertEqual(self.done(root), 'Original turn finished.')
+        self.assertEqual(len(list((root / 'inbox').iterdir())), 1)
+        self.cli('send', root, '--message', 'carryover')
+        self.assertEqual(self.done(root), 'received:racing message')
+        self.assertEqual(self.state(root)['session_id'], 'fixture-session')
+        self.assertEqual(list((root / 'inbox').iterdir()), [])
+
+    def test_final_preserves_the_full_report_and_following_message(self):
+        for vendor in ('codex', 'claude'):
+            with self.subTest(vendor=vendor):
+                root = self.start(vendor, 'report')
+                self.assertEqual(self.done(root), 'The complete report.\n\nI sent the report to the parent.')
+
+    def test_event_messages_and_tail_redact_credentials(self):
+        for vendor in ('codex', 'claude'):
+            with self.subTest(vendor=vendor):
+                root = self.start(vendor, 'credentials', '--env', 'BRIDGE_TEST_TOKEN=synthetic-env-value')
+                self.done(root)
+                events = (root / 'events.jsonl').read_text()
+                secrets = ('synthetic-env-value', 'synthetic inline credential', 'ghp_' + 'X' * 36)
+                for secret in secrets:
+                    self.assertNotIn(secret, events)
+                # An existing state directory can have events written by older bridge versions.
+                with (root / 'events.jsonl').open('a') as stream:
+                    stream.write(json.dumps({'type': 'message', 'text': 'legacy synthetic-env-value'}) + '\n')
+                tail = self.cli('tail', root).stdout
+                for secret in secrets:
+                    self.assertNotIn(secret, tail)
+                self.assertIn('Report text. Echoed value: [redacted]', tail)
+                self.assertIn('legacy [redacted]', tail)
+
     def test_failures_never_publish_a_successful_final(self):
         for vendor in ('codex', 'claude'):
             for scenario in ('eof', 'malformed', 'result-error', 'unsupported', 'duplicate'):
@@ -356,7 +423,7 @@ class Bridge(unittest.TestCase):
                                       '--env', 'BRIDGE_TEST_CAPTURE=' + str(capture), preset=True)
                     self.done(root)
                     config = json.loads((root / 'config.json').read_text())
-                    self.assertEqual(config['effort'], 'low' if role == 'observer' else 'high')
+                    self.assertEqual(config['effort'], 'medium' if role == 'observer' else 'high')
                     if role == 'observer':
                         self.assertEqual(config['model'], 'gpt-6-luna' if vendor == 'codex' else 'haiku')
                     if role == 'reviewer':
@@ -458,6 +525,32 @@ class Bridge(unittest.TestCase):
         self.cli('stop', root)
         self.assertEqual(json.loads((root / 'result.json').read_text())['state'], 'failed')
         self.assertEqual(list((root / 'approvals').iterdir()), [])
+
+    def test_stop_kills_descendants_after_worker_group_leader_exits(self):
+        marker = self.root / 'descendant-pid'
+        root = self.start('codex', 'pending', '--env', 'BRIDGE_TEST_DESCENDANT=' + str(marker))
+        self.approval(root)
+        old = self.state(root)
+        os.kill(old['pid'], signal.SIGKILL)
+        self.until(lambda: marker.read_text().strip() if marker.exists() else None)
+        pid = int(marker.read_text())
+
+        def alive(process):
+            try:
+                return Path(f'/proc/{process}/stat').read_text().rsplit(') ', 1)[1].split()[0] != 'Z'
+            except FileNotFoundError:
+                return False
+
+        def clean_up_descendant():
+            if alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+        self.addCleanup(clean_up_descendant)
+        self.until(lambda: not alive(old['worker_pid']))
+        self.assertTrue(alive(pid))
+        self.assertEqual(os.getpgid(pid), old['worker_pid'])
+        self.cli('stop', root)
+        self.until(lambda: not alive(pid))
 
     def test_resume_after_bridge_crash_retires_pending_worker(self):
         root = self.start('claude', 'pending')

@@ -34,7 +34,7 @@ needed. `stop` waits for interruption, is idempotent, and never reads stdin.
 
 `start --role developer|reviewer|observer` supplies model/effort defaults: developer
 and reviewer use Codex `gpt-6.1-sol` or Claude `opus`, high effort; observer uses
-`gpt-6-luna` or `haiku`, low effort. Explicit `--model`/`--effort` override them.
+`gpt-6-luna` or `haiku`, medium effort. Explicit `--model`/`--effort` override them.
 Developer and observer inherit native permissions; observer receives a no-source-edit
 instruction. Reviewer uses a native Codex read-only profile with writable `/tmp`
 and `$TMPDIR`, or Claude's required Bash sandbox plus an Edit deny rule covering
@@ -53,8 +53,9 @@ the stdio protocol. The bridge always sets Claude's permission host to stdio.
 `state` is JSON: `status` (`running`, `done`, `failed`, `interrupted`), bridge PID,
 session/turn IDs, generation and pending approval filenames without extensions.
 `status` additionally lists queued message filenames. `events.jsonl` contains
-messages, tool summaries, approval IDs and terminal outcomes. Only `done` publishes
-`final.md`. Every normal terminal outcome publishes `result.json` with state, exit
+messages with recognized credentials redacted, tool summaries, approval IDs and terminal
+outcomes. Only `done` publishes `final.md` with the full turn's agent messages.
+Keep this report private. Every normal terminal outcome publishes `result.json` with state, exit
 code, session ID, effective model, duration in seconds and native token usage (or
 `null` if unavailable). Native stderr is private in `bridge.log`; do not dump logs or protocol
 bodies into chat without checking for secrets.
@@ -67,8 +68,9 @@ To continue, run `resume --dir /tmp/WORKER --task FILE`, or replace `task.md` an
 omit `--task`. `send` steers a running turn; on a stopped worker it starts the next
 turn of that same session with the supplied message. Both restart the
 native process with the same session ID, model, effort and cwd. It clears the old
-final answer. Messages racing turn completion can remain queued; `status` shows
-them and the next resume delivers them. A worker with no session ID cannot resume.
+final answer. If Codex rejects a steer, the message stays in the inbox and the current
+turn continues. The next turn started with `send` or `resume` includes queued messages
+in its initial input. `status` shows the queue. A worker with no session ID cannot resume.
 
 ## Operator approvals
 

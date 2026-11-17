@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import selectors
 import shutil
 import signal
@@ -21,6 +22,31 @@ import uuid
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
 MODELS = {'codex': {'developer': 'gpt-6.1-sol', 'reviewer': 'gpt-6.1-sol', 'observer': 'gpt-6-luna'},
           'claude': {'developer': 'opus', 'reviewer': 'opus', 'observer': 'haiku'}}
+STANDALONE = ('You are a standalone worker with no parent agent. Put your full report in your final '
+              'message. Do not send it to a parent.\n\n')
+SECRET_NAME = r'token|secret|password|passwd|passphrase|credentials?|cookie|api[_-]?key|private[_-]?key|access[_-]?key|signing[_-]?key'
+SECRET_ENV = re.compile(rf'(?:^|_)(?:{SECRET_NAME})(?:_|$)', re.IGNORECASE)
+SECRET_TEXT = re.compile(
+    rf'(?i)(\b(?:[a-z0-9]+[_-])*(?:{SECRET_NAME}|authorization)(?:[_-][a-z0-9]+)*["\x27]?\s*[:=]\s*)'
+    r'(?:bearer\s+)?(?:"[^"\r\n]*"|\x27[^\x27\r\n]*\x27|[^\s,;]+)'
+    r'|\bbearer [\w.+/=-]+|\b(?:gh[pousr]_|github_pat_|sk-)[\w-]{16,}'
+    r'|\beyJ[\w-]+\.eyJ[\w-]+\.[\w-]+')
+PRIVATE_KEY = re.compile(r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)',
+                         re.DOTALL)
+
+
+def event_redactor(env):
+    values = {value for name, value in env.items() if SECRET_ENV.search(name)
+              and not name.upper().endswith(('_FILE', '_PATH', '_DIR', '_SOCK')) and len(value) >= 8}
+    exact = re.compile('|'.join(re.escape(value) for value in sorted(values, key=len, reverse=True))) if values else None
+
+    def redact(text):
+        text = PRIVATE_KEY.sub('[redacted]', text)
+        if exact:
+            text = exact.sub('[redacted]', text)
+        return SECRET_TEXT.sub(lambda match: (match[1] or '') + '[redacted]', text)
+
+    return redact
 
 
 def role_arguments(config, env):
@@ -119,7 +145,7 @@ class Codex:
 
     def request(self, method, params, callback=lambda result: None):
         self.counter += 1
-        self.requests[self.counter] = callback
+        self.requests[self.counter] = (method, callback)
         self.w.send({'id': self.counter, 'method': method, 'params': params})
 
     def start(self):
@@ -141,12 +167,17 @@ class Codex:
         if self.w.state.get('session_id') not in (None, session):
             raise ValueError('Codex resumed a different session')
         self.w.state['session_id'] = session
+        queued = [self.w.root / 'inbox' / name for name in self.w.state.pop('carryover', [])]
+        self.w.sent.update(path.name for path in queued)
         self.w.save()
         self.request('turn/start', {'threadId': self.w.state['session_id'],
-                     'input': [{'type': 'text', 'text': self.w.task}],
-                     'effort': self.w.config['effort']}, self.turn)
+                     'input': [{'type': 'text', 'text': text} for text in
+                               [self.w.task, *(read(path) for path in queued)]],
+                     'effort': self.w.config['effort']}, lambda result: self.turn(result, queued))
 
-    def turn(self, result):
+    def turn(self, result, queued):
+        for path in queued:
+            path.unlink()
         self.w.state['turn_id'] = result['turn']['id']
         self.w.ready = True
         self.w.save()
@@ -164,8 +195,12 @@ class Codex:
     def event(self, event):
         method = event.get('method')
         if method is None and 'id' in event:
-            callback = self.requests.pop(event['id'])
+            request, callback = self.requests.pop(event['id'])
             if 'error' in event:
+                if request == 'turn/steer':
+                    # The inbox file has not been acknowledged. Deliver it on the next turn.
+                    self.w.record('message_deferred')
+                    return
                 raise ValueError('Codex request failed')
             callback(event['result'])
         elif method in ('item/commandExecution/requestApproval', 'item/fileChange/requestApproval'):
@@ -181,8 +216,7 @@ class Codex:
         elif method in ('item/started', 'item/completed'):
             item = event['params']['item']
             if item['type'] == 'agentMessage' and method == 'item/completed':
-                self.w.answer = item['text']
-                self.w.record('message', text=item['text'])
+                self.w.message(item['text'])
             elif item['type'] in ('commandExecution', 'fileChange', 'mcpToolCall'):
                 self.w.record('tool', tool=item['type'], status=item.get('status'), stage=method)
                 if method == 'item/started':
@@ -242,16 +276,15 @@ class Claude:
         elif kind == 'assistant':
             for block in event['message']['content']:
                 if block['type'] == 'text':
-                    self.w.answer = block['text']
-                    self.w.record('message', text=block['text'])
+                    self.w.message(block['text'])
                 elif block['type'] == 'tool_use':
                     self.w.record('tool', tool=block['name'])
         elif kind == 'result':
             self.w.tokens = event.get('usage')
-            answer = event.get('result', self.w.answer)
-            if answer and answer != self.w.answer:
-                self.w.record('message', text=answer)
-            self.w.answer = answer
+            answer = event.get('result')
+            if answer and (not self.w.answers or
+                           answer not in (self.w.answers[-1], '\n\n'.join(self.w.answers))):
+                self.w.message(answer)
             self.w.outcome = 'failed' if event.get('is_error') or event.get('subtype') != 'success' else 'done'
 
 
@@ -266,12 +299,15 @@ class Worker:
             self.task = 'Review read-only. Do not modify the repository. Write test/build outputs only in /tmp or TMPDIR.\n' + self.task
         elif self.config.get('role') == 'observer':
             self.task = 'Observe the assigned checks. Do not change repository sources.\n' + self.task
+        self.task = STANDALONE + self.task
+        self.env = {**os.environ, **self.config.get('env', {})}
+        self.redact = event_redactor(self.env)
         self.pending = {}
         self.approval_ids = set()
         self.sent = set()
         self.ready = False
         self.outcome = None
-        self.answer = ''
+        self.answers = []
         self.model = self.config['model']
         self.tokens = None
         self.interrupted = False
@@ -282,8 +318,13 @@ class Worker:
         write(self.root / 'state', json.dumps(self.state) + '\n')
 
     def record(self, kind, **fields):
+        fields = {key: self.redact(value) if isinstance(value, str) else value for key, value in fields.items()}
         with append(self.root / 'events.jsonl') as stream:
             stream.write(json.dumps({'type': kind, **fields}) + '\n')
+
+    def message(self, text):
+        self.answers.append(text)
+        self.record('message', text=text)
 
     def send(self, event):
         self.child.stdin.write((json.dumps(event) + '\n').encode())
@@ -334,7 +375,7 @@ class Worker:
                     self.adapter.message(path, read(path))
 
     def run(self):
-        env = {**os.environ, **self.config.get('env', {})}
+        env = self.env
         executable = self.config.get('executable')
         if not executable:
             installed = '/usr/local/bin/' + self.config['vendor']
@@ -406,7 +447,8 @@ class Worker:
         self.pending.clear()
         (self.root / 'interrupt').unlink(missing_ok=True)
         if self.outcome == 'done':
-            write(self.root / 'final.md', self.answer + '\n')
+            write(self.root / 'final.md', '\n\n'.join(self.answers) + '\n')
+        self.state.update(worker_pid=None, worker_start=None)
         self.state['status'] = self.outcome or 'failed'
         publish_result(self.root, self.state, self.model, self.tokens,
                        round(time.time() - self.state['started_at'], 3))
@@ -414,10 +456,10 @@ class Worker:
         self.save()
 
 
-def process_identity(pid):
+def process_identity(pid, include_zombie=False):
     try:
         fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
-        return None if fields[0] == 'Z' else fields[19]
+        return None if fields[0] == 'Z' and not include_zombie else fields[19]
     except (FileNotFoundError, ProcessLookupError):
         return None
 
@@ -442,6 +484,8 @@ def launch(root, state, config, task):
         write(root / 'config.json', json.dumps(config) + '\n')
         state.pop('error', None)
         state.pop('queued_messages', None)
+        if config['vendor'] == 'codex':
+            state['carryover'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
         state.update(status='running', pid=None, turn_id=None, pending_approvals=[],
                      generation=uuid.uuid4().hex, vendor=config['vendor'], name=config['name'], model=config['model'],
                      started_at=time.time(), worker_pid=None, worker_start=None)
@@ -483,12 +527,16 @@ def wait(root, timeout, stopping=False):
 
 
 def stop_orphan(state):
+    if not state.get('error'):
+        return
     pid = state.get('worker_pid')
-    if pid and state.get('worker_start') and process_identity(pid) == state['worker_start']:
+    if pid and state.get('worker_start') and process_identity(pid, include_zombie=True) in (None, state['worker_start']):
+        # The group can still contain tools after its session leader exits.
         try:
             os.killpg(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    state.update(worker_pid=None, worker_start=None)
 
 
 def main():
@@ -569,10 +617,13 @@ def main():
         if args.n < 0:
             raise ValueError('tail count must not be negative')
         lines = deque(maxlen=args.n)
+        config = json.loads(read(root / 'config.json'))
+        redact = event_redactor({**os.environ, **config.get('env', {})})
         for line in read(root / 'events.jsonl').splitlines():
             event = json.loads(line)
             if event['type'] in ('message', 'tool'):
-                lines.append(line)
+                lines.append(json.dumps({
+                    key: redact(value) if isinstance(value, str) else value for key, value in event.items()}))
         print('\n'.join(lines), end='\n' if lines else '')
         return 0
     if args.command == 'approvals':
@@ -615,7 +666,7 @@ def main():
                     raise ValueError('start requires --vendor and --cwd')
                 if args.role:
                     args.model = args.model or MODELS[args.vendor][args.role]
-                    args.effort = args.effort or ('low' if args.role == 'observer' else 'high')
+                    args.effort = args.effort or ('medium' if args.role == 'observer' else 'high')
                 if not args.model or not args.effort:
                     raise ValueError('start requires --role or explicit --model and --effort')
                 if not args.cwd.is_dir():
