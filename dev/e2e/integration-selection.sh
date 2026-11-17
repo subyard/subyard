@@ -186,6 +186,11 @@ if [ "$KIND" = default ]; then
   jq -e '.selection.requested == ["claude","codex","opencode","pi"] and .observed == "ready"' "$STATE/status.json" >/dev/null \
     || die 'fresh default did not receive the four approved integrations'
   guest sh -eu -c 'command -v codex; command -v opencode; test -f /home/dev/.claude/settings.json; test -f /home/dev/.pi/agent/settings.json'
+  [ "$(guest bash -lc 'echo "$CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT:$CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT"')" = 1:1 ] \
+    || die 'Claude login-shell environment is missing'
+  yard shell -- env > "$STATE/shell-environment"
+  grep -Fxq 'CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT=1' "$STATE/shell-environment"
+  grep -Fxq 'CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1' "$STATE/shell-environment"
   yard init --yes
   yard integration status --json | jq -e '.observed == "ready"' >/dev/null
   printf 'ok: fresh default converges four integrations without optional profiles\n'
