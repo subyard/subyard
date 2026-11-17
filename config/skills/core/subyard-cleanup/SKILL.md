@@ -3,20 +3,23 @@ name: subyard-cleanup
 description: Inspect disk usage and clean explicitly disposable caches, or recreate a selected yard while preserving registered projects. Also use before deleting files through a variable or command-substituted path.
 ---
 
-# Yard cleanup
+`yard status --space` measures storage; use `yard cleanup --help` for options.
+Soft cleanup removes only profile-declared `CLEANUP_CACHES`, preserving roots,
+permissions and nested mounts without following symlinks. Toolchains are not caches.
 
-Use `yard status --space` to inspect storage and `yard cleanup --help` to inspect the current command contract. Select the yard explicitly when several yards exist.
+For manual deletion, use a literal path or an empty-safe variable (`rm -rf -- "${dir:?}"/*`).
+For command-substituted paths, verify exactly one existing directory before deletion;
+never infer safety from name/age/size or delete `/tmp` wholesale.
 
-`yard cleanup` and `yard cleanup --soft` remove only directories declared by the selected environment profiles in `CLEANUP_CACHES`. They preserve each cache root and its permissions, do not follow symlinks, and preserve nested mounts. Missing directories are harmless. An active build may need a retry. Installed toolchains, SDKs and browser runtimes are not disposable caches.
+Review the hard-cleanup operation plan before confirming.
+Hard cleanup stops and recreates the selected yard. It backs up its native data volume
+independently and restores only complete registered project wrappers and registration data.
+External bind sources stay on the host; other guest data, including agent authorizations
+and histories, is discarded. The guest must be bootable enough to inspect its backup.
+Unregistered workspaces, nested project mounts and external Git dependencies can refuse cleanup.
+It can recover selected-yard migration failures but does not reset shared migration history.
 
-General temporary files, editor recovery data, credentials, agent histories, project build outputs and undeclared directories need manual inspection. Identify their owner and purpose before removing anything; do not infer a safe deletion target from its name, age or size. Never suggest blanket `/tmp` deletion.
+After interruption, keep the same configuration/runtime and rerun hard cleanup for the
+same yard. Do not delete its backup or recovery checkpoint; cleanup retires them after verification.
 
-Give `rm` a literal path or a variable that fails when empty: `rm -rf -- "${dir:?}"/*`, never `rm -rf $dir/*`. A path from command substitution such as `$(ls -d /tmp/run.*)` is empty, or several words, when the pattern matches nothing or more than one entry; check that it names exactly one existing directory before deleting.
-
-`yard cleanup --hard` stops the selected yard, independently copies its native data volume outside the resources that teardown deletes, verifies its registered project trees, and uses the ordinary lifecycle to create a fresh environment. Only complete registered project wrappers and exact registration/reservation data are restored. External bind sources stay on the host; their contents are neither copied nor replaced. Other guest data, including agent authorizations, history and user environment changes outside projects, is discarded.
-
-Before deletion, cleanup refuses unregistered workspaces, special project files, nested project mounts and Git metadata dependencies outside the backup (including external alternates). The existing guest must be bootable enough to inspect its read-only backup. Cleanup can recover broken selected-yard migrations; it does not reset shared migration history.
-
-A failed or interrupted hard cleanup retains an independent backup and a private recovery checkpoint. Keep the same configuration and runtime, then rerun `yard cleanup --hard` for that yard. Do not manually delete the backup volume or checkpoint. The command removes them only after restoration and verification succeed.
-
-Review the operation plan before confirming. Report measured space changes as observations: active builds, hardlinks, open files and shared storage can affect the result.
+[Hard-cleanup plans and recovery limits](https://github.com/Subyard/Subyard/blob/master/docs/control-plane.md#selected-yard-cleanup).

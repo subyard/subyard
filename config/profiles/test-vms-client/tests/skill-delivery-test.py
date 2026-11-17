@@ -105,7 +105,9 @@ class ClientProfile(unittest.TestCase):
                      'acquire --slot N', 'exec HANDLE --', 'release HANDLE', '`available`', '`held` or `busy`',
                      '`provisioning`, `draining`, `recovering`', '`capacity`', '--wait 20m',
                      '`quarantined`, `stopped`, `legacy*`, `unavailable`', 'every 5 minutes', '--idle',
-                     '20 minutes', 'Nothing in the VM survives', 'cannot reach this', 'root'):
+                     '20 minutes', 'Nothing in the VM survives', 'cannot reach this', 'root', 'test-vms-client', 'ALLOWS_HOST_ACCESS=false',
+                     'ENVIRONMENT_PROFILES', 'reconciling', 'without a checkout',
+                     'https://github.com/Subyard/Subyard/blob/master/docs/test-vms.md#pool-facts-for-agents'):
             self.assertIn(term, text)
         # Every documented command exists in the shipped client.
         usage = subprocess.run(['bash', str(SKILL / 'client.sh'), '--help'], capture_output=True, text=True, check=True).stdout
