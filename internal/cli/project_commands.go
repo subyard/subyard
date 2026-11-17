@@ -55,6 +55,7 @@ type projectExecution struct {
 	exportSourceTree      string
 	exportObservedTree    string
 	approvedRemoval       *projectRemovalObservation
+	approvedHookPaths     []string
 	ownerCopy             *ownerProjectCopy
 	ownerExport           *ownerProjectExport
 	controllerExport      *controllerProjectExport

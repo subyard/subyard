@@ -1385,6 +1385,29 @@ func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	}
 }
 
+func TestInitProjectHookFailureRendersApprovedLabel(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	platform := newInitPlatformFixture()
+	const hook = "/usr/local/libexec/subyard/projects-changed.d/fixture"
+	platform.projectHooksErr = &application.ProjectHookFailure{
+		Yard: "default", Reason: "exited unsuccessfully", Hooks: []string{hook},
+	}
+	var stderr bytes.Buffer
+	program, err := New(Options{
+		RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
+		Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr,
+		InitPlatform: platform,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "yard default: project hook "+hook+" failed") ||
+		!strings.Contains(stderr.String(), "retry init") {
+		t.Fatalf("init hook failure: code=%d stderr=%q", code, stderr.String())
+	}
+}
+
 func TestInitRepairsProfileRuntimeBeforeHooksInProvisionedYard(t *testing.T) {
 	// "converged": the fault was fixed and the runtime converged elsewhere (for
 	// example by the profile's own command), so init takes its hooks-only path.

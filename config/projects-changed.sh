@@ -78,6 +78,24 @@ if [ "${1:-}" = --observe ]; then
   observe_scope
   exit 0
 fi
+
+run_hook() {
+  local path="$1"
+  if [ "${SUBYARD_PROJECT_HOOK_REPORT:-}" = 1 ] || [ -n "${SUBYARD_PROJECT_HOOK_SCOPE:-}" ]; then
+    # Close the advisory reporting fd in the hook's inherited descriptors.
+    "$path" 3>&- >/dev/null 2>&1 && return 0
+  else
+    "$path" && return 0
+  fi
+  status=1
+  if [ "${SUBYARD_PROJECT_HOOK_REPORT:-}" = 1 ]; then
+    if [[ "$path" != /* ]]; then
+      path="$(type -P -- "$path")" || return 0
+    fi
+    printf 'subyard-project-hook-failed:%s\n' "$path" >&3
+  fi
+}
+
 if [ -n "${SUBYARD_PROJECT_HOOK_SCOPE:-}" ]; then
   observed="$(observe_scope)"
   # Validate before invoking any hook. Keep approved paths as data, never shell code.
@@ -107,23 +125,17 @@ SUBYARD_HOOK_APPROVAL
   status=0
   while IFS=$'\t' read -r hook binding; do
     [ -n "$hook" ] && [ -x "$hook" ] || continue
-    # Close the advisory reporting fd in the hook's inherited descriptors.
-    if ! SUBYARD_PROJECT_HOOK_BINDING="$binding" "$hook" 3>&- >/dev/null 2>&1; then
-      status=1
-      if [ "${SUBYARD_PROJECT_HOOK_REPORT:-}" = 1 ]; then
-        printf 'subyard-project-hook-failed:%s\n' "$hook" >&3
-      fi
-    fi
+    SUBYARD_PROJECT_HOOK_BINDING="$binding" run_hook "$hook"
   done <<< "$approved"
   exit "$status"
 fi
 status=0
 for hook in /usr/local/libexec/subyard/projects-changed.d/*; do
   [ -x "$hook" ] || continue
-  "$hook" || status=1
+  run_hook "$hook"
 done
 while IFS= read -r hook; do
   [ -n "$hook" ] || continue
-  "$hook" || status=1
+  run_hook "$hook"
 done < /etc/subyard/agent-project-hooks
 exit "$status"

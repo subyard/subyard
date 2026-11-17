@@ -32,6 +32,7 @@ type ProjectActionRunner struct {
 	VerifyExport       func(context.Context) error
 	VerifyPrepared     bool
 	RemovalApproval    *ProjectRemovalApproval
+	ApprovedHookPaths  []string
 	Exports            ports.ProjectExportStore
 	Instances          ports.Incus
 	VSCode             ports.VSCode
@@ -135,11 +136,18 @@ func (runner ProjectActionRunner) Run(
 func (runner ProjectActionRunner) notifyProjectsChanged(ctx context.Context) string {
 	err := RunProjectHooks(ctx, runner.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 		return runner.Data.Execute(ctx, runner.Yard, request)
-	})
+	}, runner.ApprovedHookPaths...)
 	if err == nil {
 		return ""
 	}
-	return "warning: " + err.Error() + "\n"
+	warning := err.Error()
+	var failure *ProjectHookFailure
+	if errors.As(err, &failure) {
+		if named := failure.namedFailures(); named != nil {
+			warning = named.Error() + "; " + warning
+		}
+	}
+	return "warning: " + warning + "\n"
 }
 
 func (runner ProjectActionRunner) code(ctx context.Context) (string, error) {
