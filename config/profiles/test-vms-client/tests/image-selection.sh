@@ -36,7 +36,7 @@ for scenario in unsupported legacy wrong-image; do
   (
     LOCAL_TEMP="$fixture/$scenario"
     IMAGE_REQUESTED='' VM_COUNT_REQUESTED=1 LEASE_RUN=1234abcd
-    LEASE_REQUESTED_SLOT=slot-001
+    LEASE_REQUESTED_SLOT='slot-001'
     [ "$scenario" = legacy ] || IMAGE_REQUESTED=ubuntu-24.04
     ensure_identity() { IDENTITY="$LOCAL_TEMP/lease_id_ed25519"; }
     resolve_bastion_route() { :; }
