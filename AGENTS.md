@@ -19,6 +19,7 @@ Expected drift is not a warning. Follow the
 
 Checks report every refusal they can determine independently, in stable order, not only the first.
 Only a finding that depends on a failed read may be skipped.
+Use `domain.CollectRefusals` for each check being changed; no separate audit is required.
 
 Before suggesting CLI commands, check the [generated CLI reference](docs/cli-reference.md)
 or the command's `--help`. Registry completion flags apply to whole command families,
