@@ -14,10 +14,13 @@ def output(*command):
 
 
 def identity(pid, proc=Path("/proc")):
+    process = proc / str(pid)
     try:
-        fields = (proc / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        # Read start ticks last so a reused PID cannot validate a replacement's cgroup.
+        cgroup = (process / "cgroup").read_text().strip()
+        fields = (process / "stat").read_text().rsplit(")", 1)[1].split()
         return {"pid": int(pid), "start": fields[19], "parent": int(fields[1]),
-                "cgroup": (proc / str(pid) / "cgroup").read_text().strip()}
+                "cgroup": cgroup}
     except FileNotFoundError:
         return None
 
@@ -65,11 +68,16 @@ def check_boot_placement(uid, proc=Path("/proc"), runtime=Path("/srv/agents/orca
             daemon = identity(pid, proc)
             if daemon is None or daemon["start"] != record.get("linuxStartTicks"):
                 continue
+            if time.monotonic() >= deadline:
+                break
             assert re.search(r"/user@" + str(uid) + r"\.service/(?:[^/]+/)*orca-daemon-[^/]+\.scope$",
                              daemon["cgroup"]), f"daemon placed outside its scope after boot: {daemon}"
             print(f"orca-resource: lifetime boot: daemon={pid} in its scope")
             return
-        time.sleep(0.5)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.5, remaining))
     raise AssertionError("Orca daemon did not publish a live PID record after boot")
 
 
@@ -85,15 +93,18 @@ def test_boot_placement():
         boot_id.write_text("current-boot\n")
         process = proc / "42"
         process.mkdir()
-        (process / "stat").write_text("42 (systemd-run) S " + "1 " * 18 + "123\n")
+        stat = process / "stat"
+        stat_prefix = "42 (systemd-run) S " + "1 " * 18
+        stat.write_text(stat_prefix + "123\n")
         (process / "cmdline").write_bytes(b"systemd-run\0--scope\0/srv/agents/orca/daemon-entry\0")
         cgroup = process / "cgroup"
         service = "0::/system.slice/subyard-orca.service"
+        scope = "0::/user.slice/user-1000.slice/user@1000.service/orca-daemon-test.scope"
         cgroup.write_text(service)
         pid_file = Path(tmp) / "daemon-v56.pid"
 
         def publish(_delay):
-            cgroup.write_text("0::/user.slice/user-1000.slice/user@1000.service/orca-daemon-test.scope")
+            cgroup.write_text(scope)
             pid_file.write_text(json.dumps({"pid": 42, "bootId": "current-boot", "linuxStartTicks": "123"}))
 
         with patch.object(time, "sleep", side_effect=publish) as sleep:
@@ -103,6 +114,39 @@ def test_boot_placement():
         with patch.object(time, "sleep", side_effect=AssertionError("ready daemon was retried")):
             with TestCase().assertRaisesRegex(AssertionError, "daemon placed outside its scope.*system.slice"):
                 check_boot_placement(1000, proc, Path(tmp))
+
+        read_text = Path.read_text
+        expect_error = TestCase().assertRaisesRegex
+        timeout = "Orca daemon did not publish a live PID record"
+
+        def reuse_pid(path):
+            if path == cgroup:
+                stat.write_text(stat_prefix + "124\n")
+                cgroup.write_text(scope)
+            return read_text(path)
+
+        with patch.object(Path, "read_text", reuse_pid), \
+                patch.object(time, "monotonic", side_effect=[0, 59.75, 59.75, 60]), \
+                patch.object(time, "sleep") as sleep:
+            with expect_error(AssertionError, timeout):
+                check_boot_placement(1000, proc, Path(tmp))
+            sleep.assert_called_once_with(0.25)
+
+        stat.write_text(stat_prefix + "123\n")
+        now = 0
+
+        def slow_stat(path):
+            nonlocal now
+            if path == stat:
+                now = 60.1
+            return read_text(path)
+
+        with patch.object(Path, "read_text", slow_stat), \
+                patch.object(time, "monotonic", side_effect=lambda: now), \
+                patch.object(time, "sleep") as sleep:
+            with expect_error(AssertionError, timeout):
+                check_boot_placement(1000, proc, Path(tmp))
+            sleep.assert_not_called()
 
 
 def main():
