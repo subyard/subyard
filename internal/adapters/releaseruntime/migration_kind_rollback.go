@@ -24,8 +24,17 @@ var publishedRollbackCatalogs = map[releasetransition.Fingerprint]string{
 func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, retained releasetransition.RegistryV2, ledger *releasetransition.LedgerV2) []string {
 	published := publishedRollbackCatalogs[target.manifestDigest] == target.version && target.version != ""
 	var publishedCatalog releasetransition.CapabilityCatalog
+	retiredThrough := make(map[string]int, len(retained.RetiredPrefixes))
 	if published {
 		publishedCatalog = releasetransition.PublishedSixKindCapabilityCatalog()
+	} else {
+		// As with a checkpoint, the exact prefix proof binds the retired
+		// definitions through the stated epoch.
+		for domain, retired := range retained.RetiredPrefixes {
+			if digest, err := source.MigrationPrefixDigest(domain, retired.ThroughEpoch); err == nil && digest == retired.Digest {
+				retiredThrough[domain] = retired.ThroughEpoch
+			}
+		}
 	}
 	migrations := slices.Clone(source.Migrations)
 	slices.SortFunc(migrations, func(a, b releasetransition.MigrationDefinitionV2) int {
@@ -58,9 +67,11 @@ func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, r
 			supported = publishedCatalog.Supports(migration.Kind, migration.Domain)
 		} else {
 			// A registered kind is a lower bound, never the complete compiled catalog.
-			for _, known := range retained.Migrations {
-				supported = supported || known.Kind == migration.Kind && known.Domain == migration.Domain
-			}
+			through, retired := retiredThrough[migration.Domain]
+			supported = (retired && migration.ToEpoch <= through) ||
+				slices.ContainsFunc(retained.Migrations, func(known releasetransition.MigrationDefinitionV2) bool {
+					return known.Kind == migration.Kind && known.Domain == migration.Domain
+				})
 		}
 		if supported {
 			continue

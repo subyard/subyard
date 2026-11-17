@@ -66,9 +66,20 @@ func TestPendingRollbackReinspectionReadsReportingVM(t *testing.T) {
 }
 
 func TestVMQEMURollbackBoundsAndRendersCompleteFindingsOnce(t *testing.T) {
-	for _, layout := range []bool{false, true} {
-		t.Run(fmt.Sprintf("layout refusal %t", layout), func(t *testing.T) {
+	for _, scenario := range []struct {
+		name      string
+		layout    bool
+		direction releasetransition.Direction
+		command   string
+	}{
+		{"rollback", false, releasetransition.DirectionActivatePrevious, "yard update --rollback"},
+		{"rollback with layout refusal", true, releasetransition.DirectionActivatePrevious, "yard update --rollback"},
+		{"explicit update with layout refusal", true, releasetransition.DirectionActivateTarget, "yard update --version 1.2.3"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
 			runtime, parsed, candidate, request, _ := vmQEMURollbackFixture(t, false)
+			request.Direction = scenario.direction
+			layout := scenario.layout
 			if layout {
 				writeConfigLayoutManifest(t, request.ConfigHome, 2, true)
 			}
@@ -89,7 +100,7 @@ func TestVMQEMURollbackBoundsAndRendersCompleteFindingsOnce(t *testing.T) {
 				count++
 			}
 			if !strings.Contains(failure.outcome.Message, fmt.Sprintf("%d findings omitted", count)) ||
-				!strings.Contains(failure.outcome.Message, "stderr of yard update --rollback") ||
+				!strings.Contains(failure.outcome.Message, "stderr of "+scenario.command) ||
 				!strings.Contains(failure.outcome.Message, "headless reporting VM") ||
 				layout && !strings.Contains(failure.outcome.Message, "Git configuration cache") {
 				t.Fatalf("bounded summary lacks real detail location: %q", failure.outcome.Message)

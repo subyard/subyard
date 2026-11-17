@@ -113,7 +113,7 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		if len(migrationMessages) != 0 {
 			reason = "rollback requires support for registered migration kinds and installed state"
 		}
-		command := "yard update --version"
+		command := "yard update --version " + target.version
 		if request.Direction == releasetransition.DirectionActivatePrevious {
 			command = "yard update --rollback"
 		}
