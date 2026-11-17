@@ -160,3 +160,16 @@ func (registry RegistryV2) Path(domain string, fromEpoch int) ([]MigrationDefini
 	}
 	return path, nil
 }
+
+// ParseRegistryV2Provenance validates sealed source metadata without granting
+// execution support for its kinds. Executable work still uses ParseRegistryV2.
+func ParseRegistryV2Provenance(payload []byte) (RegistryV2, Fingerprint, error) {
+	var registry RegistryV2
+	if err := decodeBoundedRecord(payload, MaxRegistryV2Bytes, &registry); err != nil {
+		return RegistryV2{}, "", fmt.Errorf("%w: %w", ErrRegistryInvalid, err)
+	}
+	if _, err := registry.historyRegistry(); err != nil {
+		return RegistryV2{}, "", fmt.Errorf("%w: %w", ErrRegistryInvalid, err)
+	}
+	return registry, fingerprintPayload(payload), nil
+}
