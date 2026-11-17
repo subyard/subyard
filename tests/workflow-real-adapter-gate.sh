@@ -46,6 +46,7 @@ grep -Fxq '  verify:' "$CI_WORKFLOW" && grep -Fxq '  compatibility:' "$CI_WORKFL
   && grep -Fxq '  deep-go:' "$DEEP_WORKFLOW" \
   || fail 'core and deep CI must use distinct stable job names'
 
+# A push to a release/** branch with an open PR to master triggers both push and pull_request CI.
 ci_triggers="$(awk '/^on:$/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$CI_WORKFLOW")"
 [[ "$ci_triggers" == "$(cat <<'YAML'
   push:
@@ -128,7 +129,7 @@ release_publish_line="$(line_of "$RELEASE_WORKFLOW" 'name: Freeze prepared sourc
 grep -Fq '2>&1 | tee .build/ci-logs/verify-release-upgrades.log' "$RELEASE_WORKFLOW" \
   || fail 'Release must preserve failed released-updater compatibility diagnostics'
 grep -Fq 'python3 dev/verify-release-upgrades.py --release-dir .build/release --version 99.0.0' "$CI_WORKFLOW" \
-  || fail 'CI must verify every push against released updaters, not only release preparation'
+  || fail 'CI must verify compatibility with released updaters on pull requests and pushes to master and release/**'
 ! grep -Fq 'runs-on: ubuntu-latest' "$RELEASE_WORKFLOW" \
   || fail 'Release must use the same explicit Ubuntu baseline as CI'
 grep -Fq 'unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true' "$RELEASE_WORKFLOW" \
