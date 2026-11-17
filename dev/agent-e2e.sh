@@ -53,10 +53,10 @@ Usage:
   dev/agent-e2e.sh [--owner ID] [--pool ID] --logs [--slot N] [-n 1..200] [--json]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --observe CURSOR|-
   dev/agent-e2e.sh [--owner ID] [--pool ID] --incident ID
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04] [--vm 1|2|both] -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04] --ssh 1|2 [-- COMMAND [ARG...]]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04] --ssh-stdin 1|2 -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04] --verify-boundary
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --ssh 1|2 [-- COMMAND [ARG...]]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --ssh-stdin 1|2 -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --verify-boundary
 
 The normal form copies the current tracked, dirty and non-ignored public worktree to each selected
 VM, runs COMMAND as dev, streams output and removes every run directory. A direct ./bin/yard command
@@ -76,7 +76,7 @@ Held leases expire twenty minutes after the last successful renewal or the initi
 The operator owns the outer test yard. Acquire creates disposable VMs from an immutable base;
 release fences access and deletes their disks. --type defaults to subyard-pair (two VMs);
 --vm-count 1 requests one standard VM instead. android-test supports only one larger VM.
---image selects debian-13 (default) or ubuntu-24.04. Each OS and type keeps its own base.
+--image selects debian-13 (default), ubuntu-24.04 or ubuntu-26.04. Each OS and type keeps its own base.
 --disk 50GiB requests a 50 GiB disk per VM; omission uses the configured default.
 --vm selects the payload destination without changing the allocation count. The default VM
 selection includes every requested VM. e2e-vm-1 and e2e-vm-2 are

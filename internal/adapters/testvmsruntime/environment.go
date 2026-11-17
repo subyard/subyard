@@ -55,13 +55,13 @@ func normalizedImage(image string) string {
 	return image
 }
 
-// ValidateImage accepts only the two supported guest OS releases.
+// ValidateImage accepts only the supported guest OS releases.
 func ValidateImage(image string) error {
 	switch normalizedImage(image) {
-	case DefaultImage, "ubuntu-24.04":
+	case DefaultImage, "ubuntu-24.04", "ubuntu-26.04":
 		return nil
 	default:
-		return fmt.Errorf("unsupported VM image %q (use debian-13 or ubuntu-24.04)", image)
+		return fmt.Errorf("unsupported VM image %q (use debian-13, ubuntu-24.04 or ubuntu-26.04)", image)
 	}
 }
 
@@ -74,6 +74,8 @@ func (cfg Config) withImage(image string) (Config, error) {
 		cfg.Image = "images:debian/13/cloud"
 	case "ubuntu-24.04":
 		cfg.Image = "images:ubuntu/24.04/cloud"
+	case "ubuntu-26.04":
+		cfg.Image = "images:ubuntu/26.04/cloud"
 	}
 	// An omitted selection preserves the broker's existing configured source.
 	return cfg, nil

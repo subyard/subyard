@@ -7,7 +7,7 @@ pool contains one or more shared slots and defaults to two. Each lease selects `
 each acquire creates fresh VM disks from a versioned immutable base. Release fences access and
 deletes the disposable disks. No guest state survives a lease as a supported continuation mechanism.
 
-Lease-taking commands accept `--image debian-13|ubuntu-24.04`; omission retains Debian 13.
+Lease-taking commands accept `--image debian-13|ubuntu-24.04|ubuntu-26.04`; omission retains Debian 13.
 The broker allowlists these choices rather than accepting arbitrary Incus images.
 Each OS and environment type has its own current immutable base; pruning retains all four
 current bases and every active lease pin. `yard test-vms refresh TYPE --image IMAGE` refreshes
@@ -565,10 +565,10 @@ SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
   bash dev/e2e/operator-extras-upgrade.sh
 ```
 
-Periodic E2E includes optional `periodic:nm-guard/ubuntu-24.04/fresh` and
-`periodic:nm-guard/ubuntu-24.04/upgrade` checks. They use `--image ubuntu-24.04`
-and remain outside release acceptance. For a local run, append the same image flag
-to the command below; omission keeps Debian 13.
+Periodic E2E includes optional `periodic:nm-guard/fresh` and `periodic:nm-guard/upgrade`
+checks outside release acceptance. They use the workflow's selected lease image.
+For a local run, append `--image ubuntu-24.04` or `--image ubuntu-26.04` to the command below.
+Omission keeps Debian 13.
 
 The NetworkManager guard lane owns its lease and reboots the VM itself. `--lane upgrade` runs a
 published 0.29.0 init that stops after writing its guard, which lets NetworkManager take the

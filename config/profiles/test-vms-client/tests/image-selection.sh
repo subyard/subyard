@@ -8,7 +8,7 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 LEASE_REQUESTED_SLOT=slot-001 LEASE_YARD=yard LEASE_PROJECT=project LEASE_RUN=run LEASE_PURPOSE=tests
 base='acquire-v3 subyard-pair client fingerprint yard project run tests ssh-ed25519 blob slot-001'
 [ "$(lease_acquire_request client fingerprint ssh-ed25519 blob)" = "$base" ] || fail 'legacy request changed'
-for image in debian-13 ubuntu-24.04; do
+for image in debian-13 ubuntu-24.04 ubuntu-26.04; do
   IMAGE_REQUESTED=''
   allocation_option --image "$image"
   [ "$(lease_acquire_request client fingerprint ssh-ed25519 blob)" = "$base 2 - $image" ] || fail 'image not forwarded with default disk'
@@ -19,7 +19,7 @@ for image in debian-13 ubuntu-24.04; do
   IMAGE_REQUESTED='' DISK_REQUESTED='' VM_COUNT_REQUESTED=''
   resolve_vm_count
 done
-for image in images:ubuntu/24.04/cloud ubuntu-26.04 ''; do
+for image in images:ubuntu/24.04/cloud ubuntu-25.04 ''; do
  if (allocation_option --image "$image") >/dev/null 2>&1; then fail 'unallowlisted image accepted'; fi
 done
 IMAGE_REQUESTED=debian-13
@@ -37,7 +37,8 @@ for scenario in unsupported legacy wrong-image; do
     LOCAL_TEMP="$fixture/$scenario"
     IMAGE_REQUESTED='' VM_COUNT_REQUESTED=1 LEASE_RUN=1234abcd
     LEASE_REQUESTED_SLOT='slot-001'
-    [ "$scenario" = legacy ] || IMAGE_REQUESTED=ubuntu-24.04
+    unset SUBYARD_E2E_LEASE_IMAGE
+    [ "$scenario" = legacy ] || export SUBYARD_E2E_LEASE_IMAGE=ubuntu-26.04
     ensure_identity() { IDENTITY="$LOCAL_TEMP/lease_id_ed25519"; }
     resolve_bastion_route() { :; }
     ensure_client_id() { printf client; }
@@ -77,7 +78,7 @@ for scenario in unsupported legacy wrong-image; do
       ;;
     wrong-image)
       [ "$rc" != 0 ] || fail 'wrong OS image accepted'
-      rg -q '^acquire-v3 ' "$fixture/$scenario/requests" || fail 'wrong-image test never acquired'
+      rg -q '^acquire-v3 .* 1 - ubuntu-26[.]04$' "$fixture/$scenario/requests" || fail 'wrong-image test never acquired'
       rg -q 'invalid disposable environment grant' "$fixture/$scenario/output" || fail 'missing wrong-image refusal'
       [ ! -f "$fixture/$scenario/config-written" ] || fail 'wrong image reached guest configuration'
       ;;
@@ -99,7 +100,7 @@ STUB
 export NM_IMAGE_CLIENT="$ROOT/config/profiles/test-vms-client/skills/subyard-test-vms/client.sh"
 export NM_IMAGE_CAPTURE="$fixture/image"
 controller="$(sed -n '/^controller_main() {/,/^}/p' "$ROOT/dev/e2e/nm-admin-uplink.sh")"
-for image in default debian-13 ubuntu-24.04; do
+for image in default debian-13 ubuntu-24.04 ubuntu-26.04; do
   (
     eval "$controller"
     ROOT="$fixture"

@@ -39,7 +39,7 @@ builders or VMs. The fixture reuses `dev/e2e/staging-reliability.sh --supported-
 marker-owned cleanup. Host-free checks do not establish real package, NetworkManager,
 Incus, systemd or boot behavior.
 
-Lease requests accept `debian-13` (the default) or `ubuntu-24.04` with `--image`.
+Lease requests accept `debian-13` (the default), `ubuntu-24.04`, or `ubuntu-26.04` with `--image`.
 The broker keeps a current base for each OS and type, and refresh/status identify both.
 The optional trailing `image` protocol field follows `vm_count` and `disk_size`;
 `-` retains the default disk. Old requests and persisted image-less records retain their

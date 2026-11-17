@@ -13,7 +13,7 @@ import (
 )
 
 func TestTestVMRefreshUsesNormalConfirmationWithoutLeaseMutation(t *testing.T) {
-	for _, image := range []string{"", "debian-13", "ubuntu-24.04"} {
+	for _, image := range []string{"", "debian-13", "ubuntu-24.04", "ubuntu-26.04"} {
 		for _, accept := range []bool{false, true} {
 			t.Run(image+"/"+map[bool]string{false: "decline", true: "accept"}[accept], func(t *testing.T) {
 				root, environment, _ := nativeFixture(t)

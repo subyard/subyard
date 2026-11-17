@@ -12,6 +12,14 @@ on:
     - cron: '23 */6 * * *'
   workflow_dispatch:
     inputs:
+      image:
+        description: OS image for leased VMs
+        type: choice
+        default: debian-13
+        options:
+          - debian-13
+          - ubuntu-24.04
+          - ubuntu-26.04
       checks:
         description: Space-separated check ids to run instead of all
         type: string
@@ -43,6 +51,7 @@ concurrency:
 
 env:
   CANDIDATE_VERSION: 1.0.0-ci.periodic-e2e
+  LEASE_IMAGE: ${{ inputs.image || 'debian-13' }}
   # The GUI accepts only a stable version, which must match its engine's. Any version above the
   # installed-source floor works; the Veranda checks install their own isolated runtime.
   VERANDA_VERSION: 0.99.1
@@ -167,7 +176,7 @@ jobs:
           ONLY: ${{ inputs.checks }}
           RETRY: ${{ inputs.origin }}
         run: |
-          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"
+          plan="$(python3 -B dev/ci/plan-periodic-checks.py --image "$LEASE_IMAGE")"
           if [ -n "$ONLY" ]; then
             plan="$(jq -c --arg only "$ONLY" '($only | split(" ") | map(select(. != ""))) as $ids
               | map_values(.include |= map(select(.id as $id | $ids | index($id))))' <<<"$plan")"
@@ -188,6 +197,7 @@ jobs:
           printf 'veranda=%s\n' "$(jq '[.[].include[] | select(.bundle == "veranda-bundle")] != []' <<<"$plan")" \
             >> "$GITHUB_OUTPUT"
           {
+            printf 'Lease image: %s\n' "$LEASE_IMAGE"
             echo '### Checks'
             jq -r '.checks.include[].id' <<<"$plan"
             echo '### Nested VM checks, only on Intel runners'
@@ -279,6 +289,7 @@ jobs:
         run: >-
           bash dev/ci/periodic-e2e.sh check pool-boundary
           "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz"
+          --image "$LEASE_IMAGE"
           bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1
       - name: Snapshot hosted check diagnostics
         continue-on-error: true
@@ -493,6 +504,6 @@ jobs:
             exit 1
           fi
           gh workflow run periodic-e2e.yml --ref "$REF" -f checks="$checks" -f origin="$ORIGIN" \
-            -f attempt="$attempt"
+            -f attempt="$attempt" -f image="$LEASE_IMAGE"
           printf 'Rescheduled on new runners at the latest %s commit, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
             "$REF" "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"

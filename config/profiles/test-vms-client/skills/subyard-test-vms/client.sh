@@ -834,6 +834,10 @@ acquire_lease() {
     || die "an exact --slot is required before acquiring an E2E lease"
   command -v jq >/dev/null 2>&1 || die "jq is required"
   [ -n "$LOCAL_TEMP" ] || die "lease temporary directory is not initialized"
+  # Periodic E2E sets a default for controllers that acquire through this client.
+  if [ -z "$IMAGE_REQUESTED" ] && [ -n "${SUBYARD_E2E_LEASE_IMAGE:-}" ]; then
+    allocation_option --image "$SUBYARD_E2E_LEASE_IMAGE"
+  fi
   ensure_identity
   CLIENT_CONFIG="$LOCAL_TEMP/ssh_config"
   GUEST_KNOWN_HOSTS="$LOCAL_TEMP/guest_known_hosts"
@@ -1322,7 +1326,7 @@ allocation_option() {
     --type) [ "$#" -ge 2 ] || die '--type needs subyard-pair or android-test'; ENVIRONMENT_TYPE="$2" ;;
     --image)
       [ "$#" -ge 2 ] && [ -z "$IMAGE_REQUESTED" ] || die '--image requires one image'
-      case "$2" in debian-13|ubuntu-24.04) IMAGE_REQUESTED="$2" ;; *) die '--image must be debian-13 or ubuntu-24.04' ;; esac ;;
+      case "$2" in debian-13|ubuntu-24.04|ubuntu-26.04) IMAGE_REQUESTED="$2" ;; *) die '--image must be debian-13, ubuntu-24.04 or ubuntu-26.04' ;; esac ;;
     --disk)
       [ "$#" -ge 2 ] || die '--disk needs 50GiB'
       [ -z "$DISK_REQUESTED" ] || die '--disk may be specified only once'
@@ -1787,7 +1791,7 @@ Usage: subyard-test-vms COMMAND [OPTIONS]
 
   status [--json]                       show slots, their state and holders
   acquire --slot N [--wait 20m] [--purpose LABEL] [--project NAME] [--idle 20m]
-          [--vm-count 1|2] [--type subyard-pair|android-test] [--image debian-13|ubuntu-24.04] [--disk 50GiB]
+          [--vm-count 1|2] [--type subyard-pair|android-test] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--disk 50GiB]
                                         take a lease; prints its HANDLE on stdout
   exec HANDLE [--vm 1|2] [--stdin] -- COMMAND [ARG...]
                                         run a command as root in the leased VM

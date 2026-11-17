@@ -192,7 +192,7 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 		}
 		if len(fields) == 14 {
 			if fields[13] == "" || ValidateImage(fields[13]) != nil {
-				return facade.writeAcquireError("invalid_request", "unsupported_image", "image must be debian-13 or ubuntu-24.04")
+				return facade.writeAcquireError("invalid_request", "unsupported_image", "image must be debian-13, ubuntu-24.04 or ubuntu-26.04")
 			}
 			spec.Image = fields[13]
 		}

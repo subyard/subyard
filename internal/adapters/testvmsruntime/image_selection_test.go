@@ -23,7 +23,7 @@ func TestImageSelectionProtocol(t *testing.T) {
 		{" 1 - ubuntu-24.04", "ubuntu-24.04", "20GiB", ""},
 		{" 1 50GiB ubuntu-24.04", "ubuntu-24.04", "50GiB", ""},
 		{" 1 - images:ubuntu/24.04/cloud", "", "", "unsupported_image"},
-		{" 1 - ubuntu-26.04", "", "", "unsupported_image"},
+		{" 1 - ubuntu-26.04", "ubuntu-26.04", "20GiB", ""},
 		{" 1 -", "", "", "invalid_disk_size"},
 		{" 1 60GiB ubuntu-24.04", "", "", "invalid_disk_size"},
 	} {
@@ -74,6 +74,7 @@ func TestImageSelectionKeepsCurrentBasePerOSAndType(t *testing.T) {
 	for i, spec := range []struct{ name, image string }{
 		{EnvironmentPair, ""}, {EnvironmentPair, "ubuntu-24.04"},
 		{EnvironmentAndroid, DefaultImage}, {EnvironmentAndroid, "ubuntu-24.04"},
+		{EnvironmentPair, "ubuntu-26.04"}, {EnvironmentAndroid, "ubuntu-26.04"},
 	} {
 		registry.Bases = append(registry.Bases, BaseImage{Environment: spec.name, Image: spec.image, Key: fmt.Sprintf("%064x", i+1), Fingerprint: fmt.Sprintf("%064x", i+10), CreatedAt: now.Add(time.Duration(i) * time.Minute)})
 	}
@@ -84,7 +85,7 @@ func TestImageSelectionKeepsCurrentBasePerOSAndType(t *testing.T) {
 	if err := rt.pruneImages(context.Background(), store, &registry, true); err != nil {
 		t.Fatal(err)
 	}
-	if len(registry.Bases) != 4 {
+	if len(registry.Bases) != 6 {
 		t.Fatalf("lost OS base: %+v", registry.Bases)
 	}
 }
@@ -98,7 +99,7 @@ func TestImageSelectionRecipeIdentity(t *testing.T) {
 	// Pinned from master 8c18dbf7, before image selection, with manifest bytes "recipe".
 	const legacy = "c755d79f5eaacebe9feac8231a59e5a87da00336b72665693b20b04a0f6e2e1d"
 	seen := map[string]bool{}
-	for _, image := range []string{DefaultImage, "ubuntu-24.04"} {
+	for _, image := range []string{DefaultImage, "ubuntu-24.04", "ubuntu-26.04"} {
 		selected, err := cfg.withImage(image)
 		if err != nil {
 			t.Fatal(err)

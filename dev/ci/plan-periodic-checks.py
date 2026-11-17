@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Print the periodic E2E matrices from release owners and periodic-only checks."""
+import argparse
 import importlib.util
 import json
 import pathlib
@@ -8,6 +9,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SLOT = ["--slot", "1"]
+IMAGES = ("debian-13", "ubuntu-24.04", "ubuntu-26.04")
 
 
 def optional_vm(name, duration, *guest_env):
@@ -40,10 +42,10 @@ PERIODIC_ONLY = [{"id": "periodic:config-sync",
                  optional_vm("sudo-terminal-ownership", "45m"),
                  optional_vm("zabbly-download-smoke", "15m")]
 # Both NM guard lanes keep their ordinary candidate bundle and own their lease/reboots.
-PERIODIC_ONLY += [{"id": f"periodic:nm-guard/ubuntu-24.04/{lane}", "optional": True,
+PERIODIC_ONLY += [{"id": f"periodic:nm-guard/{lane}", "optional": True,
                    "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
                                "bash", "dev/e2e/nm-admin-uplink.sh", *SLOT,
-                               "--lane", lane, "--image", "ubuntu-24.04"]}
+                               "--lane", lane]}
                   for lane in ("fresh", "upgrade")]
 # Veranda GUI SHORT scenarios (veranda/desktop/README.md). They gate no CLI or engine release, so
 # they are periodic only and use their own bundle, which adds the GUI and engine ELFs. A manual
@@ -70,7 +72,7 @@ def veranda_short(name, options):
                         "--purpose", name.replace(":", "-"), "--", "bash", "dev/e2e/veranda-short.sh", *options]}
 
 
-def plan(root=ROOT):
+def plan(root=ROOT, image=IMAGES[0]):
     module = collector()
     declared = module.commands(root, "0.0.0", module.profile_inventory(root), periodic=True)
     # The same release checks the collector runs: every shipped profile lane, the core VM catalog
@@ -130,10 +132,15 @@ def plan(root=ROOT):
     unknown = sorted(NESTED - {check["id"] for check in include})
     if unknown:
         raise SystemExit("plan-periodic-checks: unknown nested checks: " + " ".join(unknown))
+    # Every planned command leases through the hosted controller. Its image flag
+    # applies to every acquisition without changing the release lane entrypoints.
+    include = [check | {"command": ["--image", image, *check["command"]]} for check in include]
     return {"checks": {"include": [c for c in include if c["id"] not in NESTED]},
             "nested": {"include": [c for c in include if c["id"] in NESTED]}}
 
 
 if __name__ == "__main__":
-    json.dump(plan(), sys.stdout, separators=(",", ":"))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--image", choices=IMAGES, default=IMAGES[0])
+    json.dump(plan(image=parser.parse_args().image), sys.stdout, separators=(",", ":"))
     print()

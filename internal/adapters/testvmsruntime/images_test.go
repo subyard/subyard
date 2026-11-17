@@ -501,7 +501,7 @@ func TestCachedBaseMissingOrChangedIsExcludedWithoutDeletion(t *testing.T) {
 }
 
 func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
-	for _, image := range []string{"", "ubuntu-24.04"} {
+	for _, image := range []string{"", "ubuntu-24.04", "ubuntu-26.04"} {
 		t.Run(normalizedImage(image), func(t *testing.T) { testWarmAcquireImage(t, image) })
 	}
 }
@@ -547,8 +547,11 @@ func testWarmAcquireImage(t *testing.T, image string) {
 				t.Fatal(err)
 			}
 			alias := "debian/13/cloud"
-			if image == "ubuntu-24.04" {
+			switch image {
+			case "ubuntu-24.04":
 				alias = "ubuntu/24.04/cloud"
+			case "ubuntu-26.04":
+				alias = "ubuntu/26.04/cloud"
 			}
 			upstreamCalls := 0
 			buildRequired := errors.New("new base build reached")

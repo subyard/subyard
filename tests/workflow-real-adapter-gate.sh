@@ -144,6 +144,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 root = Path(sys.argv[1])
 
 # Source-level contract for the repository's block-style workflow/job/step layout;
@@ -322,8 +323,46 @@ assert a.CI_HOSTED_POLICIES == {"911e6588dded3367817a8c21c5a849dd5b945b2e",
                                 "836bbd8229d65149c75731a2f9ea46f2aa45e241",
                                 a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes())}
 p = module("periodic", "dev/ci/plan-periodic-checks.py")
-plan = p.plan(root)
-entries = {entry["id"]: entry["command"] for group in plan.values() for entry in group["include"]}
+workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
+planner = ["python3", "-B", "dev/ci/plan-periodic-checks.py"]
+default_plan = json.loads(subprocess.check_output(planner, cwd=root, text=True))
+assert default_plan == p.plan(root)
+images = ("debian-13", "ubuntu-24.04", "ubuntu-26.04")
+assert f"        type: choice\n        default: {images[0]}\n        options:\n" + "".join(
+    f"          - {image}\n" for image in images
+) in workflow
+assert "LEASE_IMAGE: ${{ inputs.image || 'debian-13' }}" in workflow
+assert '--image "$LEASE_IMAGE"\n          bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1' in workflow
+assert '-f attempt="$attempt" -f image="$LEASE_IMAGE"' in workflow
+assert workflow.count('CHECK_COMMAND: ${{ toJSON(matrix.command) }}') == 2
+assert workflow.count('tar.gz" "${command[@]}"') == 2
+for image in images:
+    selected = json.loads(subprocess.check_output(planner + ["--image", image], cwd=root, text=True))
+    assert selected == {
+        kind: {"include": [entry | {"command": ["--image", image, *entry["command"][2:]]}
+                           for entry in group["include"]]}
+        for kind, group in default_plan.items()
+    }
+for group in default_plan.values():
+    assert all(entry["command"][:2] == ["--image", "debian-13"] for entry in group["include"])
+# Run the hosted dispatch and controller environment with VM provisioning stubbed.
+with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+    bundle = Path(directory) / "bundle"
+    bundle.touch()
+    wrapper = (root / "dev/ci/periodic-e2e.sh").read_text()
+    wrapper = wrapper.replace("WORKSPACE=/srv/workspaces/Subyard/src", f"WORKSPACE={directory}")
+    wrapper, count = re.subn(r"(?ms)^check_probes\(\) \{.*?^\}",
+                            'check_probes() { BUNDLE="$2"; shift 2; run_check "$@"; }', wrapper)
+    assert count == 1
+    for image in images:
+        assert subprocess.check_output(
+            ["bash", "-c", wrapper, "periodic-e2e.sh", "check", "fixture", str(bundle),
+             "--image", image, "printenv", "SUBYARD_E2E_LEASE_IMAGE"],
+            env=dict(os.environ, RUNNER_TEMP=directory, GITHUB_ACTIONS="true", RUNNER_ENVIRONMENT="github-hosted"),
+            text=True).strip() == image
+entries = {entry["id"]: entry["command"][2:] for group in default_plan.values() for entry in group["include"]}
+plan = {kind: {"include": [entry | {"command": entries[entry["id"]]} for entry in group["include"]]}
+        for kind, group in default_plan.items()}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
 config_sync = {"id": "periodic:config-sync",
                "command": ["timeout", "--signal=TERM", "--kill-after=600s", "45m",
@@ -359,19 +398,20 @@ for name, duration, guest_env in (
             if entry["id"] == check_id] == [optional_vm[check_id]]
     assert optional_vm[check_id] in plan["checks"]["include"]
 nm_checks = [entry for entry in plan["checks"]["include"] if entry["id"].startswith("periodic:nm-guard/")]
-assert nm_checks == [{"id": f"periodic:nm-guard/ubuntu-24.04/{lane}", "optional": True,
+assert nm_checks == [{"id": f"periodic:nm-guard/{lane}", "optional": True,
                       "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
                                   "bash", "dev/e2e/nm-admin-uplink.sh", "--slot", "1",
-                                  "--lane", lane, "--image", "ubuntu-24.04"]}
+                                  "--lane", lane]}
                      for lane in ("fresh", "upgrade")]
 assert not {entry["id"] for entry in nm_checks} & set(commands)
 # Adding periodic-only checks must preserve every existing matrix entry, including Veranda.
 p.PERIODIC_ONLY = []
-assert {kind: {"include": [entry for entry in group["include"] if entry not in (config_sync, apparmor[0], *nm_checks, *optional_vm.values())]}
-        for kind, group in plan.items()} == p.plan(root)
+added_ids = {config_sync["id"], apparmor_id, *optional_vm, *(entry["id"] for entry in nm_checks)}
+assert {kind: {"include": [entry for entry in group["include"] if entry["id"] not in added_ids]}
+        for kind, group in default_plan.items()} == p.plan(root)
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
-workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
-selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"\n', 1)[1]
+plan = default_plan
+selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py --image "$LEASE_IMAGE")"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
 for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
              *optional_vm, *(entry["id"] for entry in nm_checks)):
