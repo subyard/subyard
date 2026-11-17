@@ -624,6 +624,15 @@ def snapshot(root):
     return state
 
 
+def unanswered_approvals(root, state):
+    if state['pending_approvals']:
+        approvals = turn_dir(root, state) / 'approvals'
+        for name in state['pending_approvals']:
+            request = approvals / (name + '.json')
+            if not os.path.lexists(request.with_suffix('.reply')) and request.exists():
+                yield request
+
+
 def scope_command(*args):
     return subprocess.run(['systemctl', '--user', *args], stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, timeout=10)
@@ -719,11 +728,14 @@ def launch(root, state, config, task, deadline):
                                           sys.executable, str(Path(__file__).resolve()), '_run', '--dir', str(root),
                                           '--generation', generation],
                                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-        except OSError:
-            state.update(status='failed', error='Systemd user scope launcher could not start.')
+        except (OSError, BridgeError) as error:
+            reason = str(error) if isinstance(error, BridgeError) else 'Systemd user scope launcher could not start.'
+            state.update(status='failed', error=reason)
             if not publish_failure(root, state, deadline):
                 print('Launch failed and the bridge inbox lock timed out; use stop to recover.', file=sys.stderr)
                 return 124
+            if isinstance(error, BridgeError):
+                record_event(root, 'error', message=reason)
             raise
         state.update(pid=child.pid, process_start=process_identity(child.pid))
         save_state(root, state)
@@ -736,8 +748,10 @@ def wait(root, deadline, stopping=False):
         state = snapshot(root)
         if state['status'] not in ACTIVE_STATES:
             return state, EXIT_CODES[state['status']]
-        if state['pending_approvals'] and not stopping:
-            return state, 2
+        if not stopping:
+            state['pending_approvals'] = [path.stem for path in unanswered_approvals(root, state)]
+            if state['pending_approvals']:
+                return state, 2
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return state, 124
@@ -851,7 +865,10 @@ def main():
     if args.command == 'stop' and not (root / 'state').exists():
         return 0
     inspect = args.command in ('status', 'tail', 'wait', 'approvals')
-    directory(root, create=not inspect)
+    starting = args.command == 'start'
+    directory(root, create=starting)
+    if not inspect and not starting and not (root / 'state').exists():
+        raise BridgeError('worker state is missing')
     if not inspect or os.path.lexists(root / 'inbox'):
         directory(root / 'inbox', create=not inspect)
     if args.command == '_run':
@@ -900,23 +917,24 @@ def main():
     if args.command == 'tail':
         if args.n < 0:
             raise BridgeError('tail count must not be negative')
+        if args.n == 0:
+            return 0
         lines = deque(maxlen=args.n)
-        for line in read(root / 'events.jsonl').splitlines():
-            event = json.loads(line)
-            if event['type'] in ('message', 'tool', 'error'):
-                lines.append(line)
+        with private_open(root / 'events.jsonl', os.O_RDONLY, 'r', require_private=False) as stream:
+            for line in stream:
+                if json.loads(line)['type'] in ('message', 'tool', 'error'):
+                    lines.append(line.rstrip('\n'))
         print('\n'.join(lines), end='\n' if lines else '')
         return 0
     if args.command == 'approvals':
         requests = []
         state = snapshot(root)
-        for name in state['pending_approvals']:
-            path = turn_dir(root, state) / 'approvals' / (name + '.json')
+        for path in unanswered_approvals(root, state):
             try:
                 request = json.loads(read(path))
             except FileNotFoundError:
                 continue
-            requests.append({'id': name, **{key: request[key] for key in ('vendor', 'tool', 'command', 'reason')},
+            requests.append({'id': path.stem, **{key: request[key] for key in ('vendor', 'tool', 'command', 'reason')},
                              'file': str(path)})
         print(json.dumps(requests))
         return 0

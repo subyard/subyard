@@ -790,8 +790,17 @@ runpy.run_path(bridge, run_name='__main__')
         self.env['BRIDGE_TEST_REPLY_GATE'] = str(gate)
         root = self.start('codex', 'approval')
         request = self.approval(root)
-        self.cli('approve', root, request.stem)
+        pid = self.state(root)['pid']
         try:
+            os.kill(pid, signal.SIGSTOP)
+            try:
+                self.cli('approve', root, request.stem)
+                self.assertEqual(json.loads(self.cli('approvals', root).stdout), [])
+                waiting = self.cli('wait', root, '--timeout', '0', success=False)
+                self.assertEqual(waiting.returncode, 124)
+                self.assertEqual(json.loads(waiting.stdout)['pending_approvals'], [])
+            finally:
+                os.kill(pid, signal.SIGCONT)
             self.until(gate.with_suffix('.held').exists)
             self.assertTrue(request.exists())
             self.assertIn(request.stem, self.state(root)['pending_approvals'])
@@ -803,8 +812,16 @@ runpy.run_path(bridge, run_name='__main__')
         self.assertEqual(self.done(root), 'allow')
         self.assertFalse(request.with_suffix('.reply').exists())
 
-    def test_inspection_does_not_create_directories(self):
+    def test_missing_worker_commands_do_not_create_directories(self):
         missing = self.root / 'missing'
+        for command, args in (('send', ('--message', 'hello')), ('resume', ()),
+                              ('approve', ('000001',)), ('deny', ('000001',))):
+            self.cli(command, missing, *args, success=False)
+            self.assertFalse(missing.exists())
+        missing.mkdir(mode=0o700)
+        self.cli('resume', missing, success=False)
+        self.assertFalse(list(missing.iterdir()))
+        missing.rmdir()
         for command in ('status', 'tail'):
             self.cli(command, missing, success=False)
             self.assertFalse(missing.exists())
@@ -816,6 +833,9 @@ runpy.run_path(bridge, run_name='__main__')
         for command, directory in (('status', root), ('tail', root), ('list', self.root)):
             self.cli(command, directory)
             self.assertFalse((root / 'inbox').exists())
+        (root / 'events.jsonl').unlink()
+        self.assertEqual(self.cli('tail', root, '-n', '0').stdout, '')
+        self.cli('tail', root, '-n', '1', success=False)
 
     def test_resume_task_file_and_no_stdin_hang(self):
         root = self.root / 'no-stdin'
@@ -927,6 +947,16 @@ runpy.run_path(bridge, run_name='__main__')
                     stopped = json.loads(self.cli('stop', root).stdout)
                     self.assertEqual(stopped['cleanup'], 'verified')
                     self.assertEqual(self.result(root)['state'], 'failed')
+                    log = root / 'bridge.log'
+                    log.unlink()
+                    log.touch()
+                    log.chmod(0o644)
+                    refused = self.cli('resume', root, success=False)
+                    self.assertIn('unsafe state file', refused.stderr)
+                    self.done(root, 'failed')
+                    self.assertEqual(self.result(root)['error'], 'unsafe state file')
+                    event = json.loads(self.cli('tail', root, '-n', '1').stdout)
+                    self.assertEqual(event, {'type': 'error', 'message': 'unsafe state file'})
 
     def test_bridge_crash_is_failed_and_stop_cleans_worker(self):
         root = self.start('codex', 'pending')
