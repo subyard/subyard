@@ -53,6 +53,9 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		cli.errorf("release transition request is invalid")
 		return 2
 	}
+	if envelope.SchemaVersion == releasetransition.RollbackTargetProcessSchemaV1 {
+		return cli.runRollbackTargetProcess(ctx, payload, protocolOutput)
+	}
 	var request releasetransition.ProcessRequest
 	var recovery *releasetransition.ActivationOnlyRecoveryRequest
 	if envelope.SchemaVersion == releasetransition.ProcessRecoverySchemaV2 {

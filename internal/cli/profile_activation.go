@@ -139,6 +139,9 @@ func (reconciler *profileRuntimeActivationReconciler) splitUninitialized(
 }
 
 func (reconciler *profileRuntimeActivationReconciler) sourceMigrationsComplete() (bool, error) {
+	if reconciler.cli.activation != nil && reconciler.cli.activation.rollbackPreview {
+		return true, nil
+	}
 	store, err := releasetransition.NewPOSIXV2Store(reconciler.request.ConfigHome)
 	if err != nil {
 		return false, err

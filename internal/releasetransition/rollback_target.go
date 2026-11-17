@@ -19,21 +19,22 @@ const (
 // The single operational mode assesses or performs R activation under S's V2
 // journal. NativeHistory is a proposed R-native ledger, never opaque history.
 type RollbackTargetRequest struct {
-	SchemaVersion  int                     `json:"schemaVersion"`
-	Mode           string                  `json:"mode"`
-	RuntimeRoot    string                  `json:"runtimeRoot,omitempty"`
-	ConfigHome     string                  `json:"configHome,omitempty"`
-	Yard           string                  `json:"yard,omitempty"`
-	Releases       ReleasePair             `json:"releases"`
-	SourceArtifact Fingerprint             `json:"sourceArtifact,omitempty"`
-	SourceRegistry Fingerprint             `json:"sourceRegistry,omitempty"`
-	TargetArtifact Fingerprint             `json:"targetArtifact,omitempty"`
-	TargetRegistry Fingerprint             `json:"targetRegistry,omitempty"`
-	Projection     Fingerprint             `json:"projection,omitempty"`
-	NativeHistory  *LedgerV2               `json:"nativeHistory,omitempty"`
-	Journal        Fingerprint             `json:"journal,omitempty"`
-	Plan           *RollbackActivationPlan `json:"plan,omitempty"`
-	Execution      *Execution              `json:"execution,omitempty"`
+	SchemaVersion       int                     `json:"schemaVersion"`
+	Mode                string                  `json:"mode"`
+	RuntimeRoot         string                  `json:"runtimeRoot,omitempty"`
+	ConfigHome          string                  `json:"configHome,omitempty"`
+	Yard                string                  `json:"yard,omitempty"`
+	Releases            ReleasePair             `json:"releases"`
+	SourceArtifact      Fingerprint             `json:"sourceArtifact,omitempty"`
+	SourceRegistry      Fingerprint             `json:"sourceRegistry,omitempty"`
+	TargetArtifact      Fingerprint             `json:"targetArtifact,omitempty"`
+	TargetRegistry      Fingerprint             `json:"targetRegistry,omitempty"`
+	Projection          Fingerprint             `json:"projection,omitempty"`
+	InheritedSettingIDs []string                `json:"inheritedSettingIDs,omitempty"`
+	NativeHistory       *LedgerV2               `json:"nativeHistory,omitempty"`
+	Journal             Fingerprint             `json:"journal,omitempty"`
+	Plan                *RollbackActivationPlan `json:"plan,omitempty"`
+	Execution           *Execution              `json:"execution,omitempty"`
 }
 
 type RollbackActivationScope struct {
@@ -119,6 +120,19 @@ func (request RollbackTargetRequest) Validate() error {
 			return err
 		}
 	}
+	if len(request.InheritedSettingIDs) > MaxPlanItems {
+		return invalid("too many inherited rollback settings")
+	}
+	seenIDs := map[string]bool{}
+	for _, id := range request.InheritedSettingIDs {
+		if err := validateSafeID(id, "inherited rollback setting"); err != nil {
+			return err
+		}
+		if seenIDs[id] {
+			return invalid("duplicate inherited rollback setting")
+		}
+		seenIDs[id] = true
+	}
 	if request.NativeHistory == nil {
 		return invalid("rollback target native history is required")
 	}
@@ -182,9 +196,10 @@ func (transition *V2Transition) rollbackActivationPlan(request RollbackTargetReq
 		RuntimeRoot, ConfigHome, Yard                                                       string
 		Releases                                                                            ReleasePair
 		SourceArtifact, SourceRegistry, TargetArtifact, TargetRegistry, Projection, History Fingerprint
+		InheritedSettingIDs                                                                 []string
 		Assessment                                                                          domain.ActionAssessment
 		Scopes                                                                              []RollbackActivationScope
-	}{RollbackTargetContractV1, request.RuntimeRoot, request.ConfigHome, request.Yard, request.Releases, request.SourceArtifact, request.SourceRegistry, request.TargetArtifact, request.TargetRegistry, request.Projection, history, assessment, scopes})
+	}{RollbackTargetContractV1, request.RuntimeRoot, request.ConfigHome, request.Yard, request.Releases, request.SourceArtifact, request.SourceRegistry, request.TargetArtifact, request.TargetRegistry, request.Projection, history, request.InheritedSettingIDs, assessment, scopes})
 	if err != nil {
 		return "", err
 	}
@@ -277,7 +292,7 @@ func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Con
 	if err != nil {
 		return RollbackTargetResponse{}, err
 	}
-	if journal.RegistryDigest != request.SourceRegistry || journal.ArtifactDigest != request.TargetArtifact || journal.Goal.Direction != DirectionActivatePrevious || !releasePairsEqual(journal.Releases, request.Releases) || journal.Checkpoint != JournalReconciling {
+	if journal.SourceIngress != nil || IsRecoveryTransaction(journal.Transaction) || journal.RegistryDigest != request.SourceRegistry || journal.ArtifactDigest != request.TargetArtifact || journal.Goal.Direction != DirectionActivatePrevious || !releasePairsEqual(journal.Releases, request.Releases) || journal.Checkpoint != JournalReconciling {
 		return RollbackTargetResponse{}, invalid("rollback activation is not owned by S's reconciling journal")
 	}
 	bound := false

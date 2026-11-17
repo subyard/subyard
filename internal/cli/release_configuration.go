@@ -52,11 +52,12 @@ func activeReleaseRepairCheckpoint(request releasetransition.ProcessRequest) rel
 }
 
 type releaseConfiguration struct {
-	request  releasetransition.ProcessRequest
-	repair   bool
-	complete bool
-	mutex    sync.Mutex
-	yards    map[string]releaseYardConfiguration
+	rollbackPreview bool
+	request         releasetransition.ProcessRequest
+	repair          bool
+	complete        bool
+	mutex           sync.Mutex
+	yards           map[string]releaseYardConfiguration
 	// pending is the activation's one deferral record for pending configuration.
 	pending pendingYardDeferral
 	// uninitialized names the yards this process leaves to their own init.
@@ -77,6 +78,9 @@ type releaseYardConfiguration struct {
 func (source *releaseConfiguration) materializedScope(cli *CLI, releases releasetransition.ReleasePair,
 	home string, goal releasetransition.Goal, artifact, registry releasetransition.Fingerprint, sourceIngress bool,
 ) (bool, error) {
+	if source != nil && source.rollbackPreview {
+		return true, nil
+	}
 	if source != nil && source.repair {
 		return true, nil
 	}
