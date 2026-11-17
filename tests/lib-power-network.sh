@@ -968,6 +968,8 @@ write_released
 MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_reconcile "$guard_conf" >"$tmp/migrate.out" 2>&1 \
   || fail "no-auto-default refused teardown: $(cat "$tmp/migrate.out")"
 [ ! -e "$guard_conf" ] && [ ! -e "$legacy_conf" ] || fail "no-auto-default kept a retired guard"
+grep -Fq "the administrator's no-auto-default list selects enp6s0; if enp6s0 relies on an automatic connection, create an explicit profile before the reboot" "$tmp/migrate.out" \
+  || fail "teardown dropped the no-auto-default notice: $(cat "$tmp/migrate.out")"
 # Lists Subyard cannot decide migrate with a notice naming the list and the managed devices.
 for key in unmanaged-devices no-auto-default; do
   section=keyfile

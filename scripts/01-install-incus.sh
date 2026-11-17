@@ -166,7 +166,6 @@ else
     vm_qemu_note=("Install qemu-system-x86 and conntrack for VM yards if missing (apt).")
   fi
   announce "Subyard Phase 1 — install & initialize Incus" \
-    "With NetworkManager active, first init or migration without evidence needs one host reboot, then rerun yard init; a soft reboot does not count because the boot ID must change." \
     "Install the 'incus' package if missing (apt)." \
     "${restart_notes[@]}" \
     "${vm_qemu_note[@]}" \

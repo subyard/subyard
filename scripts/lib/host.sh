@@ -483,6 +483,13 @@ nm_guard_hijack_check() {
   done
 }
 
+nm_guard_render_notices() {
+  local notice
+  while IFS= read -r notice; do
+    [ -z "$notice" ] || warn "$notice"
+  done <<< "$NM_GUARD_NOTICES"
+}
+
 # Decision 1: a released guard counts as held when every up Incus-managed bridge it names is
 # unmanaged in NetworkManager (at least one, and only from known inventories and device reads).
 nm_guard_released_names() { # <conf>: exact interface names a released or legacy guard lists
@@ -660,7 +667,7 @@ nm_guard_apply_current() { # <conf> <desired or empty> <bridges> <stop: 1|0> <pi
 # publish without touching NetworkManager. Until NetworkManager reads it, starts wait for the
 # host reboot; init (stop 1) stops there before anything creates devices.
 nm_guard_migrate_with() { # <conf> <bridges> <stop: 1|0>
-  local conf="$1" desired rc=0 notice
+  local conf="$1" desired rc=0
   desired="$(nm_guard_render "$2")" || { power_fail "unsafe Incus bridge name in NetworkManager guard"; return 1; }
   nm_guard_preflight "$conf" "$desired" "$2" "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY"
   [ "$NM_GUARD_ACTIVE" = 0 ] || nm_guard_hijack_check
@@ -671,9 +678,7 @@ nm_guard_migrate_with() { # <conf> <bridges> <stop: 1|0>
   local evidence=0
   [ "$NM_GUARD_ACTIVE" = 0 ] || ! nm_guard_released "$conf" || ! nm_guard_released_evidence "$conf" || evidence=1
   nm_guard_publish "$conf" "$desired" migration "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY" "$evidence" || return 1
-  while IFS= read -r notice; do
-    [ -z "$notice" ] || warn "$notice"
-  done <<< "$NM_GUARD_NOTICES"
+  nm_guard_render_notices
   [ -n "$NM_GUARD_BINARY" ] || return 0
   nm_guard_post_publish "$conf" "$3" || rc=$?
   case "$rc" in
@@ -765,7 +770,8 @@ nm_unmanaged_guard_reconcile() { # [conf]
         warn "kept the NetworkManager guard: $(power_join <<< "$NM_GUARD_REFUSALS")"
         return 1
       fi
-      nm_guard_publish "$conf" '' migration "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY"
+      nm_guard_publish "$conf" '' migration "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY" || return 1
+      nm_guard_render_notices
       return
     fi
     nm_guard_migrate_with "$conf" "$NM_INVENTORY" 0 || { warn "kept the NetworkManager guard: $POWER_ERROR"; return 1; }
