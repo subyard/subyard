@@ -61,6 +61,7 @@ type initExecution struct {
 	profileSetup         *initProfileSet
 	operationID          string
 	integrationSelection *initIntegrationSelection
+	powerPaths           *config.PowerPathsWrite
 	integrationBaseline  *initIntegrationBaseline
 	integrationAdoption  reconcileruntime.IntegrationPlan
 	integrationWarnings  []string
@@ -583,6 +584,12 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 		requestedProfile: request.profile, loaded: loaded, mode: mode, bootstrap: bootstrap, platform: platform, powerYards: powerYards,
 		integrationSelection: selection, integrationBaseline: baseline,
 	}
+	if mode != initConfigs {
+		execution.powerPaths, err = cli.catalog.PlanCommandPowerPathsWrite(loaded, cli.baseEnv)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if runtime, ok := execution.platform.(reconcileruntime.Runtime); ok {
 		runtime.InitProfile = request.profile
 		if mode == initReset {
@@ -708,6 +715,9 @@ func (execution *initExecution) consequences() []string {
 	if execution.integrationSelection != nil {
 		hostIDConsequences = append(hostIDConsequences, "record the selected yard's requested integration set")
 	}
+	if execution.powerPaths != nil {
+		hostIDConsequences = append(hostIDConsequences, "persist effective command power paths as desired host settings; retain them if later initialization fails")
+	}
 	if execution.bootstrap != nil {
 		hostIDConsequences = append(hostIDConsequences, execution.bootstrap.description())
 	}
@@ -758,7 +768,7 @@ func (execution *initExecution) actionPlan() (domain.ActionID, domain.ActionDelt
 		return "", domain.ActionDelta{}, errors.New("init execution is required")
 	}
 	action := domain.ActionID("yard.init.reconcile")
-	changed := execution.adopting() || execution.legacyContinuation != nil && !execution.legacyContinuation.before.Exists || execution.profileSetup != nil || execution.profileProvisionChanged() || execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
+	changed := execution.powerPaths != nil || execution.adopting() || execution.legacyContinuation != nil && !execution.legacyContinuation.before.Exists || execution.profileSetup != nil || execution.profileProvisionChanged() || execution.plan.Pending() != 0 || execution.bootstrap != nil || execution.hostIDPending || execution.integrationSelection != nil || execution.orphanIngress != nil || execution.orphanIngressDeferred
 	switch execution.mode {
 	case initReconcile:
 		if execution.hooksOnly() {
@@ -848,7 +858,7 @@ func (execution *initExecution) retireResolvedPendingRecords(ctx context.Context
 }
 
 func (execution *initExecution) hooksOnly() bool {
-	return !execution.adopting() && (execution.legacyContinuation == nil || execution.legacyContinuation.before.Exists) && execution.profileSetup == nil && !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
+	return execution.powerPaths == nil && !execution.adopting() && (execution.legacyContinuation == nil || execution.legacyContinuation.before.Exists) && execution.profileSetup == nil && !execution.profileProvisionChanged() && execution.mode == initReconcile && execution.plan.Pending() == 0 &&
 		execution.bootstrap == nil && !execution.hostIDPending && execution.integrationSelection == nil && execution.orphanIngress == nil && !execution.orphanIngressDeferred
 }
 
@@ -1090,6 +1100,9 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		}
 	}
 	if err := execution.integrationSelection.apply(execution); err != nil {
+		return err
+	}
+	if err := execution.powerPaths.Apply(); err != nil {
 		return err
 	}
 	if execution.bootstrap != nil {
