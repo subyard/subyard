@@ -95,10 +95,8 @@ func TestImageSelectionRecipeIdentity(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfg.RecipeRoot, "manifest.sha256"), []byte("recipe"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := (&Runtime{Config: cfg}).recipeDigest(EnvironmentPair)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Pinned from master 8c18dbf7, before image selection, with manifest bytes "recipe".
+	const legacy = "c755d79f5eaacebe9feac8231a59e5a87da00336b72665693b20b04a0f6e2e1d"
 	seen := map[string]bool{}
 	for _, image := range []string{DefaultImage, "ubuntu-24.04"} {
 		selected, err := cfg.withImage(image)
