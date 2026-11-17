@@ -81,6 +81,21 @@ cleanup() {
       < "$root/config/profiles/android/tests/e2e/android-sdk-diagnostic.py" \
       || printf 'android-sdk-diagnostic retry=unavailable original_failure_preserved=true\n' >&2
   fi
+  # The emulator journal survives lease release; collect it as root before teardown.
+  if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \
+    && [ -n "$project" ] && [ -n "$instance" ]; then
+    printf 'android-gradle evidence: emulator\n' >&2
+    { timeout --kill-after=2 5 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+        journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' 2>&1
+      printf '\ncapture_exit=%s\n' "$?"; } |
+      head -c 65536 | sed -E \
+      -e 's/(token|credential|secret|password|authorization|api[_-]?key)[=: ][^[:space:]]+/[redacted]/Ig' \
+      -e 's/\b[0-9a-fA-F]{64}\b/[redacted]/g' \
+      -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[address]/g' \
+      -e 's/([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}/[address]/g' \
+      -e 's/([0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{0,4}::[0-9a-fA-F:.]*/[address]/g' \
+      -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/[address]/g' >&2 || true
+  fi
   if [ -n "$monitor_pid" ] && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
       touch "$monitor_stop" >/dev/null 2>&1 || true

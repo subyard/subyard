@@ -1,0 +1,3 @@
+[device-subyard]
+match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0,except:interface-name:incusbr0
+managed=0

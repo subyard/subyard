@@ -1282,7 +1282,9 @@ Current code carries migrations only for direct updates from the anchor release
 older sources must first take the hop below. Direct updates, the installer over an existing installation and offline update require installed
 **v0.28.0 or newer**. Sources from v0.11.0 to below v0.28.0 refuse before any change and print
 `yard update --version 0.28.1 && yard update`: the hop is the v0.28.1 fix release, because the
-anchor itself can stop with a running VM yard (see below). Rollback targets below v0.28.0 refuse. The
+anchor itself can stop with a running VM yard (see below). Rollback targets must be at the current
+migration epochs: since the NetworkManager device guard (`power-metadata` epoch 4) that excludes
+v0.29.0 and every older release. The
 [approved support boundary](reference/legacy-migration-support.md#approved-support-boundary)
 owns the complete rules, including unfinished transitions below the anchor.
 
@@ -1910,6 +1912,37 @@ the saved device against its current owning receipt and atomically restores it w
 restarting the yard. Explicit start schedules this retry after committing running intent.
 Publication restore failures do not enter the security-critical running-runtime failure
 path. Host network and policy guards continue to fail closed.
+
+The compiled `nm-device-guard-v1` capability advances `power-metadata` from epoch 3 to 4. It
+is the reader boundary of the `[device-subyard]` NetworkManager guard; the
+`host-network-guard` activation owner rewrites a released guard file without reloading
+NetworkManager and records one pending host reboot. Subyard never reloads or restarts
+NetworkManager. Whether NetworkManager read the guard is proven only by a boot: the root-owned
+record `/var/lib/subyard/nm-guard-state` (`boot_id inode:ctime sha256 held|unread init|migration`)
+binds one regular guard file, by its identity (compared only for equality), to the SHA-256 of its
+static content (without comments, blank lines or the exact Incus bridge names, which are pinned
+unmanaged one by one instead). The guard counts as read when the record binds the file on disk
+and is `held` or names another boot. Subyard removes the record durably before any change to the
+static content, then renames the guard in and records it `unread` for this boot; `held` needs
+NetworkManager explicitly inactive at both samples, or a migration with evidence that it holds the
+released guard. A bridge-only rewrite keeps boot and state and refreshes the identity. A guard
+without a binding record is `unbound`: the record is missing, unreadable or foreign, the identity
+or hash differs (a hand edit or restore), or the guard is a symbolic link. Its next step is
+`yard init` (which records it `unread`, replacing a link with a file), then one reboot. A
+NetworkManager restart never counts. No yard starts while the guard is unread or unbound: init,
+early installation included, stops before anything creates devices; update and teardown leave the
+reboot to the operator.
+
+The record's guarantee has a boundary. It binds the guard file, not the rest of NetworkManager's
+configuration: an administrator who restarts NetworkManager on a different configuration and then
+restores the files on disk, for example by swapping or restoring the `conf.d` directory or by
+adding a temporary higher-priority file such as `zzz.conf`, restarting and removing it again, is
+outside what the record can detect. Reboot after such changes. `held` also trusts systemd's view
+of NetworkManager: "explicitly inactive at both samples" means `systemctl is-active` reported it
+inactive, so a NetworkManager process running outside its unit is not seen. Released power readers reject the new
+guard, and their init would rewrite the released guard and reload NetworkManager, so
+rollback to a release below this epoch is refused before activation as `rollback-incompatible`.
+`yard update --rollback` does not cross this boundary.
 
 The compiled `owner-publication-state-v1` capability advances `power-metadata` from epoch 1
 to 2 before runtime activation. Existing canonical power and ownership values retain their

@@ -47,3 +47,25 @@ func TestInitPlanRendersConvergedStageDiagnostics(t *testing.T) {
 		t.Fatalf("diagnostic became a consequence: %v", consequences)
 	}
 }
+
+// Incus can already be converged while the network stage still needs the first guard write.
+func TestInitPlanDisclosesNetworkManagerRebootBeforeApproval(t *testing.T) {
+	const disclosure = "with NetworkManager active, the first init or a migration without evidence needs one host reboot; a soft reboot does not count (the host boot ID must change)"
+	for _, conditional := range []bool{false, true} {
+		execution := &initExecution{mode: initReconcile, loaded: config.Loaded{Context: domain.Context{
+			IncusProject: "subyard", YardInstanceName: "yard", IncusBridge: "incusbr0",
+		}}, plan: application.ReconcilePlan{Steps: []application.ReconcileStep{
+			{Stage: application.ReconcileStage{ID: ports.ReconcileStageIncus}, Converged: true},
+			{Stage: application.ReconcileStage{ID: ports.ReconcileStageNetwork}, Conditional: conditional},
+		}}}
+		steps := execution.operationSteps()
+		var output bytes.Buffer
+		(&CLI{options: Options{Stdout: &output}}).printOperationSteps(domain.OperationPlan{Steps: steps})
+		if !strings.Contains(output.String(), disclosure) {
+			t.Fatalf("native plan omitted reboot disclosure (conditional=%v): %s", conditional, output.String())
+		}
+		if !strings.Contains(strings.Join(domain.OperationStepConsequences(steps), "\n"), disclosure) {
+			t.Fatalf("approval consequences omitted reboot disclosure (conditional=%v)", conditional)
+		}
+	}
+}

@@ -42,7 +42,7 @@ func TestAuthoredMigrationsExactlyCoverRegistryAndRollbackPolicy(t *testing.T) {
 		CapabilityDescriptor{Kind: registeredYardsMigration, Domain: "owner-registration", Version: 1},
 		CapabilityDescriptor{Kind: guestDiskTmpMigration, Domain: "power-metadata", Version: 1})
 	frozen, err := NewCapabilityCatalog(descriptors)
-	if err != nil || frozen.Digest() != BuiltinCapabilityCatalog().Digest() {
+	if err != nil || frozen.Digest() != registeredYardsCapabilityCatalog().Digest() {
 		t.Fatalf("historical catalog identity changed: %v", err)
 	}
 }

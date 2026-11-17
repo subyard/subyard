@@ -33,6 +33,7 @@ type teardownExecution struct {
 	activeYard                                              *uninstall.RecoveryYard
 	RecoveryBinding                                         *uninstall.Tree
 	Assessed, resumed                                       bool
+	assumeYes                                               bool
 	ManagedRoots, PreservedRoots, MutableRoots              []string
 }
 
@@ -115,6 +116,7 @@ func prepareTeardownExecution(arguments []string) (*teardownExecution, error) {
 	for _, argument := range arguments {
 		switch argument {
 		case "-y", "--yes":
+			execution.assumeYes = true
 		case "--keep-data":
 			execution.keepData = true
 		case "--reset-config":

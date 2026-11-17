@@ -1,0 +1,20 @@
+b1 7:1.5 h1 held init|b1|7:1.5|h1|loaded
+b1 7:1.5 h1 held migration|b1|7:1.5|h1|loaded-reboot
+b1 7:1.5 h1 unread init|b1|7:1.5|h1|unread-init
+b1 7:1.5 h1 unread migration|b1|7:1.5|h1|unread-migration
+b1 7:1.5 h1 unread init|b2|7:1.5|h1|loaded
+b1 7:1.5 h1 unread migration|b2|7:1.5|h1|loaded
+b1 7:1.5 h1 held migration|b2|7:1.5|h1|loaded
+b1 7:1.5 h1 unread init|b2|7:2.5|h1|unbound
+b1 7:1.5 h1 held init|b1|8:1.5|h1|unbound
+b1 7:1.5 h1 held init|b2||h1|unbound
+b1 7:1.5 h1 held init|b1|7:1.5|h2|unbound
+b1 7:1.5 h1 held init|b2|7:1.5|h2|unbound
+b1 7:1.5 h1 held init|b1|7:1.5||unbound
+b1 7:1.5 h1 held init||7:1.5|h1|unread-init
+b1 h1 held init|b1|7:1.5|h1|unbound
+b1 7:1.5 h1 held|b1|7:1.5|h1|unbound
+b1 7:1.5 h1 held init extra|b1|7:1.5|h1|unbound
+b1 7:1.5 h1 maybe init|b2|7:1.5|h1|unbound
+b1 7:1.5 h1 held other|b2|7:1.5|h1|unbound
+|b1|7:1.5|h1|unbound

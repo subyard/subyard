@@ -125,3 +125,14 @@ func verifyCanonicalSettingsMigration(transition *V2Transition, ctx context.Cont
 	}
 	return nil
 }
+
+func planNMDeviceGuardMigration(_ *V2Transition, _ context.Context, observation *v2Observation, migration MigrationDefinitionV2, view V2SettingsSnapshotView) (V2SettingsSnapshotView, error) {
+	// Activation owns rewriting and checking the host guard. This ledger-only
+	// boundary prevents an older owner from replacing that guard during init.
+	if migration.Domain != "power-metadata" || migration.FromEpoch != 3 || migration.ToEpoch != 4 {
+		return view, invalid("NetworkManager device guard migration requires power-metadata 3 to 4")
+	}
+	observation.decisions = append(observation.decisions, RedactedDecision{Resource: "power-metadata", Scope: "power-metadata", Decision: DecisionTransform, Result: "nm-device-guard-reader-v1"})
+	observation.activationConsequences = append(observation.activationConsequences, "accept only the [device-subyard] NetworkManager guard; rollback to a release that requires the released guard becomes unavailable")
+	return view, nil
+}

@@ -305,7 +305,8 @@ capability boundary. Keep generalized alias authoring safety and actual released
 for both completed history and retained unfinished history; rebuilding an old binary is insufficient.
 
 The [legacy migration support policy](reference/legacy-migration-support.md) requires installed
-v0.28.0 or newer for direct update and retained rollback. Sources from v0.11.0 to below v0.28.0
+v0.28.0 or newer for direct update; retained rollback additionally needs a target at the current
+migration epochs, which excludes v0.29.0 and older. Sources from v0.11.0 to below v0.28.0
 first run `yard update --version 0.28.1`, then plain `yard update`. Earlier sources retain the
 full-uninstall route. Exact unfinished transitions retain their original owner and bindings.
 

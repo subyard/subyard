@@ -164,6 +164,59 @@ timeout() {
                 if scenario in ('queued-deadline', 'stalled-clock'):
                     self.assertIn(b'deadline', observed.stderr)
 
+    def test_owner_boot_evidence_is_bounded_masked_and_only_captures_missing_owner(self):
+        source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
+        functions = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
+                              for name in ('reboot_owner', 'owner_boot_evidence'))
+        script = r'''set -euo pipefail
+scenario=$1
+CLIENT_CONFIG=fixture-config bundle=fixture-bundle bundle_hash=fixture-hash
+die() { printf '%s\n' "$*" >&2; exit 2; }
+cleanup_guest() { :; }
+prepare_guest() { [ "$scenario" != staging-failed ] || return 19; }
+verify_boot_result() { [ "$scenario" != verification-failed ] || return 23; }
+sleep() { :; }
+quote_ssh_command() { printf '%q ' "$@"; }
+guest() { printf 'old-boot\n'; }
+ssh() {
+  case "$*" in
+    *'systemctl reboot'*) return 0 ;;
+    *'-- true') [ "$scenario" = stayed-up ] ;;
+    *boot_id*) [ "$scenario" != missing ] || return 255; printf 'new-boot\n' ;;
+    *)
+      printf 'diagnostic-call\n' >&2
+      printf 'peer 192.0.2.1\n'
+      printf 'transport 198.51.100.2\n' >&2
+      head -c 100000 /dev/zero | tr '\\0' x
+      return 19 ;;
+  esac
+}
+timeout() {
+  while [[ "$1" = --* ]]; do shift; done
+  bound=$1; shift
+  if [[ "$*" = *journalctl* ]]; then [ "$bound" = 30 ] || return 95; fi
+  "$@"
+}
+'''
+        for scenario, expected in (('returned', 0), ('missing', 2), ('stayed-up', 2),
+                                   ('staging-failed', 19), ('verification-failed', 23)):
+            with self.subTest(scenario=scenario):
+                observed = subprocess.run(['bash', '-c', script+functions+'\nreboot_owner\n', '_', scenario],
+                                          capture_output=True, timeout=5)
+                self.assertEqual(observed.returncode, expected, observed.stderr.decode())
+                evidence = observed.stderr
+                if scenario == 'missing':
+                    self.assertEqual(evidence.count(b'diagnostic-call'), 3)
+                    self.assertEqual(evidence.count(b'amnezia_owner_boot_evidence_attempt='), 3)
+                    self.assertIn(b'peer IPV4', evidence)
+                    self.assertIn(b'transport IPV4', evidence)
+                    self.assertNotRegex(evidence.decode(), r'[0-9]{1,3}(\.[0-9]{1,3}){3}')
+                    self.assertGreater(len(evidence), 65536)
+                    self.assertLess(len(evidence), 3 * 65536 + 1024)
+                else:
+                    self.assertNotIn(b'owner-boot-evidence', evidence)
+                    self.assertNotIn(b'diagnostic-call', evidence)
+
     def test_private_failure_bytes_survive_cleanup_with_original_exit(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
         functions = source.split('diagnose_failure() {', 1)[1].split('trap cleanup_acceptance EXIT', 1)[0]
@@ -191,10 +244,11 @@ esac
                 ssh = binary / 'ssh'
                 ssh.write_text('''#!/bin/sh
 case "$*" in
-  *failure-capture.py*)
+  *"python3 - collect"*)
     [ "$FAULT" != transport ] || exit 19
     [ "$FAULT" != stalled ] || exec sleep 100
     [ "$FAULT" != signal-during-capture ] || sleep 0.3
+    cmp -s - "$CAPTURE" || exit 18
     exec python3 "$CAPTURE" collect ;;
   *) [ "$ORIGINAL" = 0 ] || test -s "$OUTPUT/failure.tar"; touch "$CLEANED" ;;
 esac

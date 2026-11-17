@@ -31,7 +31,7 @@ Read by task; links are relative to this skill.
 | Code, build, or packaging work | [Development](../../../docs/development.md): toolchain and build/release workflow; use `go.mod` for versions. |
 | Commands, RPC, reconciliation, or adapters | [Control plane](../../../docs/control-plane.md): implementation map, ownership boundaries, and extension contracts. |
 | Design rationale or difficult recovery bugs | [Decisions and glossary](../../../docs/reference/decisions-and-glossary.md), [Architecture](../../../docs/reference/control-plane-architecture.md), and [Release transitions](../../../docs/reference/resumable-release-transition-design.md): current decisions, architectural rationale, and recovery invariants; use the control-plane guide for the component implementation map. |
-| Before building, running, or changing tests | [Testing](../../../docs/testing.md) and [Test VMs](../../../docs/test-vms.md): commands, evidence tiers, and VM access. |
+| Testing guidance by task type | [Testing reading map](../../../docs/testing.md#reading-map-by-task-type): choose the relevant sections for the task. |
 | Live host or release behavior | [Real-host acceptance](../../../docs/real-host-acceptance.md): physical-boundary and release checks. |
 | Configuration or credentials | [Configuration](../../../docs/configuration.md) and [Keys](../../../docs/keys.md), respectively. |
 

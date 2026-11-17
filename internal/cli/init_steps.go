@@ -137,7 +137,7 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		desired := native.Stage.Label
 		if native.Stage.ID == ports.ReconcileStageNetwork {
 			scope = "owner host networking for " + target + " bridge " + yard.IncusBridge
-			desired = fmt.Sprintf("host NetworkManager and route safety; bridge DHCP/DNS and forwarding rules if UFW is active; native policy lock access for operator UID %d", os.Getuid())
+			desired = fmt.Sprintf("host NetworkManager and route safety; bridge DHCP/DNS and forwarding rules if UFW is active; native policy lock access for operator UID %d; with NetworkManager active, the first init or a migration without evidence needs one host reboot; a soft reboot does not count (the host boot ID must change)", os.Getuid())
 		}
 		consequence := desired
 		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && detach.Unverified {

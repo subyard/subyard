@@ -27,10 +27,24 @@ for arg in "$@"; do
   case "$arg" in
     --remove-if-unused) action=remove-if-unused ;;
     --native-fence) action=native-fence ;;
+    --guard-only) action="guard-only" ;;
     -y|--yes) ;;
     -*) die "unknown option '$arg'" ;;
   esac
 done
+
+if [ "$action" = guard-only ]; then
+  # Update activation: rewrite a released NetworkManager guard, with or without this unit.
+  POWER_NM_GUARD_COMMAND="yard update"
+  announce "Subyard — migrate the released NetworkManager guard" \
+    "Replace the released guard, which replaced the administrator's NetworkManager device lists, with a [device-subyard] section for veths, Incus tap devices and Incus bridges." \
+    "Refuse without changes if NetworkManager manages a device the administrator's lists mark unmanaged." \
+    "Do not reload NetworkManager: reboot the host once afterwards to apply the guard safely."
+  proceed_or_die
+  require_root "rewriting the host NetworkManager guard needs root"
+  nm_unmanaged_guard_migrate
+  exit 0
+fi
 
 if [ "$action" = install ]; then
   announce "Subyard — install guarded yard boot reconciliation" \

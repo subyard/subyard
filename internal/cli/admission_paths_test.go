@@ -13,6 +13,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/rpc"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 // blockedGateRefusal is the public refusal of the completed-history gate fixture
@@ -285,14 +286,16 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 	blocker := filepath.Join(root, "not-a-directory")
 	testkit.WriteFile(t, blocker, []byte("file\n"), 0o600)
 	resume := "yard: full uninstall recovery at " + pending + ": "
+	var prompt *testkit.Prompt
 	run := func(t *testing.T, arguments []string, extra ...string) (int, string, string) {
 		t.Helper()
+		prompt = &testkit.Prompt{Answers: []bool{false}}
 		var stdout, stderr bytes.Buffer
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: append(append([]string(nil), environment...), extra...), WorkingDir: root,
 			Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr,
-			Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}, Prompt: &testkit.Prompt{},
+			Incus: lifecycleIncus(), AdapterRunner: &testkit.ScriptedAdapter{}, Prompt: prompt,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -346,6 +349,51 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 			code, stdout, stderr := run(t, test.arguments, test.extra...)
 			if code != test.code || stderr != test.stderr || stdout != "" {
 				t.Fatalf("exit=%d want %d\nstderr=%q\n  want %q\nstdout=%q", code, test.code, stderr, test.stderr, stdout)
+			}
+		})
+	}
+	// A valid store must reach confirmation. An overlapping removal root stops
+	// confirmed execution before removal, so lost consent cannot hide behind an
+	// unreadable store and this test never needs physical teardown.
+	original := uninstall.RecoveryPlan{
+		Schema: 1, Stage: uninstall.RecoveryPrepared,
+		Installation: uninstall.Installation{Schema: 1, OperatorUID: uint32(os.Getuid()),
+			DataHome: home, ConfigHome: filepath.Join(root, "state"),
+			RuntimeRoot: filepath.Join(root, "runtime"), CacheRoot: filepath.Join(root, "cache")},
+		Trees: []uninstall.Tree{{Path: pending}},
+	}
+	body, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(pending, "plan.json")
+	testkit.WriteFile(t, path, body, 0600)
+	if _, _, err := (uninstall.RecoveryStore{Directory: pending, UID: uint32(os.Getuid())}).Read(); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name      string
+		arguments []string
+		extra     []string
+		consent   bool
+	}{
+		{"no-consent", []string{"teardown", "--full"}, nil, false},
+		{"local-short", []string{"teardown", "--full", "-y"}, nil, true},
+		{"local-long", []string{"teardown", "--full", "--yes"}, nil, true},
+		{"global-short", []string{"-y", "teardown", "--full"}, nil, true},
+		{"environment", []string{"teardown", "--full"}, []string{"ASSUME_YES=1"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			code, _, stderr := run(t, test.arguments, append(test.extra, "SUBYARD_HOME="+home)...)
+			want, prompts := "yard: operation declined\n", 1
+			if test.consent {
+				want, prompts = "recovery root overlaps an approved removal root", 0
+			}
+			if code != 1 || len(prompt.Requests) != prompts || !strings.Contains(stderr, want) {
+				t.Fatalf("exit=%d prompts=%d want %d stderr=%q", code, len(prompt.Requests), prompts, stderr)
+			}
+			if after := mustReadConfigFixture(t, path); !bytes.Equal(after, body) {
+				t.Fatal("resume changed the protected plan")
 			}
 		})
 	}

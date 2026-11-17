@@ -399,7 +399,7 @@ func (cli *CLI) admitTeardownInvocation(ctx context.Context, definition command.
 		directory := home + ".uninstall"
 		if _, statErr := os.Lstat(directory); statErr == nil {
 			retry := []string{directory}
-			if slices.Contains(arguments, "--yes") || cli.env["ASSUME_YES"] == "1" {
+			if execution.assumeYes || cli.env["ASSUME_YES"] == "1" {
 				retry = append(retry, "--yes")
 			}
 			cli.gateAdmitted = &gateAdmission{kind: admissionExempt} // the recovery owns its admission

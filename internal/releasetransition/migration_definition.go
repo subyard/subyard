@@ -27,6 +27,7 @@ const (
 	publicationBoundaryRecipe migrationRecipe = "publication-boundary"
 	registeredYardsRecipe     migrationRecipe = "registered-yards"
 	guestDiskTmpRecipe        migrationRecipe = "guest-disk-tmp"
+	nmDeviceGuardRecipe       migrationRecipe = "nm-device-guard"
 )
 
 type rollbackClass string
@@ -83,6 +84,12 @@ func builtinMigrationDefinitions() []migrationDefinition {
 			capability: CapabilityDescriptor{Kind: guestDiskTmpMigration, Domain: "power-metadata", Version: 1},
 			recipe:     guestDiskTmpRecipe, forward: planNativeMigration,
 			rollback: rollbackPolicy{class: rollbackIrreversible, reason: "guest storage migration has no supported inverse"},
+		},
+		{
+			migration:  MigrationDefinitionV2{ID: "introduce-nm-device-guard-v4", Domain: "power-metadata", FromEpoch: 3, ToEpoch: 4, Kind: nmDeviceGuardMigration, DependsOn: []string{"complete-registered-guest-disk-tmp-v3"}},
+			capability: CapabilityDescriptor{Kind: nmDeviceGuardMigration, Domain: "power-metadata", Version: 1},
+			recipe:     nmDeviceGuardRecipe, forward: planNMDeviceGuardMigration,
+			rollback: rollbackPolicy{class: rollbackIrreversible, reason: "older power readers cannot honor the NetworkManager device guard"},
 		},
 	}
 }

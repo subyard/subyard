@@ -29,6 +29,9 @@ cleanup() {
   trap - EXIT
   if [ "$result" -ne 0 ]; then
     printf 'android-gradle: stage=%s exit=%s\n' "$stage" "$result" >&2
+    if [ -f "$work/emulator-evidence.log" ]; then
+      cat "$work/emulator-evidence.log" >&2 || true
+    fi
     for log in assemble-37.2.log assemble-35.log assemble-missing.log sdk-install.log assemble-36.1.log connected.log; do
       if [ -f "$work/$log" ]; then
         printf 'android-gradle: %s (last 80 lines)\n' "$log" >&2
@@ -191,7 +194,39 @@ printf 'android gradle: sdk install outside defaults, repeat and list=PASS\n'
 assemble 36.1 -PsubyardCompileSdk=36 -PsubyardCompileSdkMinor=1
 stage='connected'
 # No --no-daemon: run's GRADLE_OPTS guard keeps Gradle inside the lease.
+# The child's EXIT trap runs while run still owns the emulator and ADB relay.
+connected() {
+  local result=$? section
+  local -a command
+  trap - EXIT
+  if [ "$result" -ne 0 ]; then
+    for section in logcat meminfo lowmemory; do
+      printf 'android-gradle evidence: %s\n' "$section" >&2
+      case "$section" in
+        logcat) command=("$ANDROID_SDK_ROOT/platform-tools/adb" logcat -b main -b system -b crash -d -t 512 -v threadtime) ;;
+        meminfo) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell dumpsys meminfo) ;;
+        # dmesg may be forbidden on Google APIs images; retain lmkd records too.
+        lowmemory) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell 'dmesg; logcat -b all -d -t 512 -v threadtime -s lmkd lowmemorykiller') ;;
+      esac
+      # Bound both runtime and bytes, including stderr and unavailable queries.
+      { timeout --kill-after=2 5 "${command[@]}" 2>&1; printf '\ncapture_exit=%s\n' "$?"; } |
+        head -c 65536 | sed -E \
+        -e 's/(token|credential|secret|password|authorization|api[_-]?key)[=: ][^[:space:]]+/[redacted]/Ig' \
+        -e 's/\b[0-9a-fA-F]{64}\b/[redacted]/g' \
+        -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[address]/g' \
+        -e 's/([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}/[address]/g' \
+        -e 's/([0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{0,4}::[0-9a-fA-F:.]*/[address]/g' \
+        -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/[address]/g' >&2 || true
+    done
+  fi
+  exit "$result"
+}
+export -f connected
+export ANDROID_GRADLE_EVIDENCE="$work/emulator-evidence.log"
+# The child shell expands the exported evidence path and command arguments.
+# shellcheck disable=SC2016
 android-broker run --device phone --api 36 --wait 900 --purpose android-gradle -- \
+  bash -c 'trap "connected 2> \"$ANDROID_GRADLE_EVIDENCE\"" EXIT; "$@"' _ \
   "${gradle[@]}" -PsubyardCompileSdk=36 -PsubyardCompileSdkMinor=1 :app:connectedDebugAndroidTest \
   > "$work/connected.log" 2>&1 < /dev/null
 not_writable "$work/connected.log"

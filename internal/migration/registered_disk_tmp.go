@@ -145,6 +145,8 @@ func CompleteRegisteredDiskTmp(ctx context.Context, runtime reconcileruntime.Run
 		return err
 	}
 	if !ready {
+		// Its next steps (a reboot for an unread NetworkManager guard) name yard update.
+		runtime.FromUpdate = true
 		if err := runtime.ApplyStage(ctx, ports.ReconcileStageNetwork); err != nil {
 			return err
 		}
