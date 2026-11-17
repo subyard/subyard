@@ -12,7 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -239,9 +241,9 @@ func TestRetainedMigrationRegistryIdentity(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				findings, err := runtime.inspectRetainedRegistry(ctx, target, request, links)
-				if err != nil || len(findings) != 0 {
-					t.Fatalf("verified registryless pair did not match: %q, %v", findings, err)
+				selection, err := runtime.captureReleaseSelection(ctx, target, request, links)
+				if err != nil || selection.refusal != "" {
+					t.Fatalf("verified registryless pair did not match: %+v, %v", selection, err)
 				}
 				return
 			}
@@ -395,11 +397,140 @@ func TestMigrationKindRollbackRechecksBeforeExecution(t *testing.T) {
 	before := mustReadFile(t, called)
 	writeMigrationRollbackSource(t, candidate, request, []byte(migrationRollbackSettingsRegistry))
 	err = prepared.Execute(context.Background())
-	var failure publicReleaseInspectionError
-	if !errors.As(err, &failure) || failure.outcome.Code != releasetransition.CodeRollbackIncompatible || !strings.Contains(failure.outcome.Message, "migration registry differs") {
-		t.Fatalf("refusal = %v", err)
-	}
+	assertReleaseSelectionStale(t, err)
 	if string(mustReadFile(t, called)) != string(before) {
 		t.Fatal("refused execution invoked the target")
+	}
+}
+
+func assertReleaseSelectionStale(t *testing.T, err error) {
+	t.Helper()
+	outcome, ok := TransitionOutcome(err)
+	if !errors.Is(err, domain.ErrPlanStale) || !ok || outcome.Code != releasetransition.CodePlanStale ||
+		outcome.Message != "release state changed; retry" {
+		t.Fatalf("selection change did not produce a stale refusal: %v", err)
+	}
+}
+
+func TestReleaseSelectionRevalidatesAfterVMInspection(t *testing.T) {
+	for _, entry := range []string{"rollback", "explicit update"} {
+		for _, scenario := range []string{"current switch during preparation", "checkpoint advance during preparation", "current switch during execution", "checkpoint advance during execution", "previous appears"} {
+			if entry == "rollback" && scenario == "previous appears" {
+				continue
+			}
+			t.Run(entry+"/"+scenario, func(t *testing.T) {
+				runtime, candidate, request, called, args := retainedVersionFixture(t)
+				if entry == "rollback" {
+					args = []string{"--rollback", "--runtime-root", request.RuntimeRoot}
+				}
+				bindRollbackFixtureRegistry(t, candidate, []byte(migrationRollbackSettingsRegistry))
+				rewriteReleaseOwnerManifest(t, candidate)
+				_, profileRoot, _, _, _ := retainedRuntimeFixture(t)
+				runtime.config.RepositoryRoot = profileRoot
+				writeVMRollbackSettings(t, request.ConfigHome, "default", "1")
+				current := filepath.Join(request.RuntimeRoot, "current")
+				previous := filepath.Join(request.RuntimeRoot, "previous")
+				registry, digest, err := releasetransition.ParseRegistryV2([]byte(migrationRollbackSettingsRegistry), releasetransition.BuiltinCapabilityCatalog())
+				if err != nil {
+					t.Fatal(err)
+				}
+				store, err := releasetransition.NewPOSIXV2Store(request.ConfigHome)
+				if err != nil {
+					t.Fatal(err)
+				}
+				state, err := store.ReadMigrationLedger(registry, digest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.ConvertMigrationLedger(state, registry, digest, registry, digest); err != nil {
+					t.Fatal(err)
+				}
+				state, err = store.ReadMigrationLedger(registry, digest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next, err := state.Ledger.Advance(registry, registry.Migrations[0])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "previous appears" {
+					if err := os.Remove(previous); err != nil {
+						t.Fatal(err)
+					}
+				}
+				execution := strings.HasSuffix(scenario, "during execution")
+				changed := false
+				runtime.config.YardInstance = func(context.Context, config.Loaded) (ports.InstanceInfo, error) {
+					return ports.InstanceInfo{}, ports.ErrInstanceNotFound
+				}
+				var prepared Prepared
+				if execution {
+					prepared, err = runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if prepared.Close != nil {
+						t.Cleanup(func() { _ = prepared.Close() })
+					}
+				}
+				runtime.config.YardInstance = func(context.Context, config.Loaded) (ports.InstanceInfo, error) {
+					if changed {
+						t.Fatal("VM probe repeated after the selection changed")
+					}
+					changed = true
+					switch {
+					case strings.HasPrefix(scenario, "current switch"):
+						other := filepath.Join(request.RuntimeRoot, "releases", "release-c")
+						if err := os.Mkdir(other, 0o700); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Remove(current); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Symlink("releases/release-c", current); err != nil {
+							t.Fatal(err)
+						}
+					case strings.HasPrefix(scenario, "checkpoint advance"):
+						if err := store.CompareAndSwapMigrationLedger(state, next, registry, digest); err != nil {
+							t.Fatal(err)
+						}
+					default:
+						if err := os.Symlink("releases/"+string(request.Target), previous); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return ports.InstanceInfo{}, ports.ErrInstanceNotFound
+				}
+				if execution {
+					before := mustReadFile(t, called)
+					assertReleaseSelectionStale(t, prepared.Execute(context.Background()))
+					if !bytes.Equal(before, mustReadFile(t, called)) {
+						t.Fatal("execution delegated after the selection changed")
+					}
+				} else {
+					_, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+					assertReleaseSelectionStale(t, err)
+					if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("inspection delegated after the selection changed: %v", err)
+					}
+				}
+				if !changed {
+					t.Fatal("test did not reach the VM check")
+				}
+			})
+		}
+	}
+}
+
+func TestExplicitVersionRequiresRegistryIdentityWithoutPrevious(t *testing.T) {
+	runtime, _, request, called, args := retainedVersionFixture(t)
+	if err := os.Remove(filepath.Join(request.RuntimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	request.Direction = releasetransition.DirectionActivateTarget
+	_, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+	assertMigrationRollbackRefused(t, request, err, "migration registry differs")
+	if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("incompatible explicit target received transition inspection: %v", err)
 	}
 }

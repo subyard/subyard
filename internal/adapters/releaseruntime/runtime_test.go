@@ -697,9 +697,13 @@ func TestFrozenRollbackRequiresMatchingCheckpointProjection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = verifyCheckpointProjectionRollback(verified, store, checkpoint)
-			if (err == nil) != (scenario == "equal") {
-				t.Fatalf("frozen rollback %s: %v", scenario, err)
+			raw, err = store.ReadLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason, err := verifyRetainedHistory(verified, registry, raw, checkpoint)
+			if (reason == "" && err == nil) != (scenario == "equal") {
+				t.Fatalf("frozen rollback %s: %s, %v", scenario, reason, err)
 			}
 			after, err := store.ReadMigrationCheckpoint()
 			if err != nil || !sameProtectedSnapshot(checkpoint, after) {
@@ -2840,8 +2844,12 @@ func prepareCandidateTransitionForTest(
 	if request.ArtifactDigest == "" {
 		request.ArtifactDigest = verified.manifestDigest
 	}
-	if previous, err := inspectRuntimeLink(request.RuntimeRoot, "previous"); err == nil && previous.target == "releases/"+string(candidate.release) {
-		parsed.retainedArtifact = verified.manifestDigest
+	if links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot); err == nil && links.previous.target == "releases/"+string(candidate.release) {
+		selection, err := runtime.captureReleaseSelection(ctx, verified, request, links)
+		if err != nil {
+			return Prepared{}, err
+		}
+		parsed.selection = selection
 	}
 	return runtime.prepareVerifiedCandidateTransition(ctx, parsed, verified, request)
 }

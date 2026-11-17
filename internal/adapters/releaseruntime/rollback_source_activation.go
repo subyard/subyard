@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -111,7 +112,7 @@ func (runtime *Runtime) inspectRollbackSourceActivation(ctx context.Context, own
 	if err == nil {
 		return nil, nil
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, domain.ErrPlanStale) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return nil, err
 	}
 	outcome := publicReleaseOutcome(releasetransition.ReleaseLinks{Active: inspection.Outcome.Active, Previous: inspection.Outcome.Previous},

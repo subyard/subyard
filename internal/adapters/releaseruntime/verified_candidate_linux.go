@@ -72,6 +72,20 @@ func (runtime *Runtime) verifyPublishedCandidate(
 	runtimeRoot string,
 	expectedDigest *releasetransition.Fingerprint,
 ) (*verifiedPublishedCandidate, error) {
+	verified, err := runtime.verifyPublishedCandidateFiles(candidate, runtimeRoot, expectedDigest, true)
+	if err != nil {
+		return nil, err
+	}
+	version, err := runtime.runVerifiedCandidateVersion(ctx, verified, runtimeRoot)
+	if err != nil {
+		verified.Close()
+		return nil, err
+	}
+	verified.version = version
+	return verified, nil
+}
+
+func (runtime *Runtime) verifyPublishedCandidateFiles(candidate publishedCandidate, runtimeRoot string, expectedDigest *releasetransition.Fingerprint, sealEngine bool) (*verifiedPublishedCandidate, error) {
 	if relocated, ok := runtime.relocatedCandidates[candidate.root]; ok {
 		candidate.root = relocated
 	}
@@ -126,7 +140,11 @@ func (runtime *Runtime) verifyPublishedCandidate(
 				return fail(errors.New("published runtime engine is unavailable"))
 			}
 			verified.producerEvidence.EngineSHA256 = hex.EncodeToString(entry.digest[:])
-			verified.engine, err = sealVerifiedEngine(file, entry.digest)
+			if sealEngine {
+				verified.engine, err = sealVerifiedEngine(file, entry.digest)
+			} else {
+				err = verifyCandidateFile(file, entry.digest)
+			}
 		} else {
 			err = verifyCandidateFile(file, entry.digest)
 			if err == nil && entry.path == "scripts/02-create-project.sh" {
@@ -166,7 +184,7 @@ func (runtime *Runtime) verifyPublishedCandidate(
 			return fail(err)
 		}
 	}
-	if verified.engine == nil {
+	if verified.producerEvidence.EngineSHA256 == "" {
 		return fail(errors.New("published runtime manifest does not bind yard-engine"))
 	}
 	if verified.registryDigest == "" {
@@ -178,11 +196,6 @@ func (runtime *Runtime) verifyPublishedCandidate(
 			return fail(errors.New("published runtime registry is not bound by its manifest"))
 		}
 	}
-	version, err := runtime.runVerifiedCandidateVersion(ctx, verified, runtimeRoot)
-	if err != nil {
-		return fail(err)
-	}
-	verified.version = version
 	return verified, nil
 }
 
@@ -477,6 +490,16 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
 		return errors.New("verified published runtime is unavailable")
 	}
+	selection, _ := ctx.Value(releaseSelectionKey{}).(*releaseSelection)
+	if selection != nil && len(arguments) != 0 && arguments[0] == "_release-transition" {
+		unlock, err := runtime.lockReleaseSelection(ctx)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+	} else {
+		selection = nil
+	}
 	extra := make([]*os.File, 0, 3)
 	var grantReader *os.File
 	if grant != "" {
@@ -528,11 +551,7 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	if grant != "" {
 		command.Env = append(command.Env, "SUBYARD_RELEASE_TRANSITION_GRANT_FD=3")
 	}
-	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
-	if home == "" {
-		home = filepath.Join(runtime.config.Inputs.value("HOME", runtime.config.Context), ".subyard")
-	}
-	owner, borrowErr := uninstall.BorrowOwnerLock(home)
+	owner, borrowErr := uninstall.BorrowOwnerLock(runtime.ownerDataHome())
 	if borrowErr != nil {
 		return borrowErr
 	}
@@ -547,6 +566,11 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		command.ExtraFiles = append(command.ExtraFiles, runtime.config.OperatorInput)
 	}
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, runtime.config.Stderr
+	if selection != nil {
+		if err := runtime.revalidateReleaseSelection(selection, assets); err != nil {
+			return err
+		}
+	}
 	err := command.Run()
 	if err != nil && ctx.Err() != nil {
 		return errors.Join(err, ctx.Err())

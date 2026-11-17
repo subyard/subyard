@@ -133,6 +133,13 @@ func TestUpdateProtectedOwnerReceivesOnlyExplicitSettingOverrides(t *testing.T) 
 				environment = append(environment, test.override)
 			}
 			journalPath := installCompletedUpdateOwnerFixture(t, environment, runtimeRoot)
+			if test.blocked {
+				// This fixture exercises the journal owner's exact-target guard
+				// without the complete ledger needed for metadata fallback.
+				if err := os.Remove(filepath.Join(filepath.Dir(journalPath), "ledger.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			before, err := os.ReadFile(journalPath)
 			if err != nil {
 				t.Fatal(err)

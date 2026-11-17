@@ -530,7 +530,7 @@ func TestUpdateUsesThePreparedReleaseAcrossRPCPlanAndExecute(t *testing.T) {
 		writeCLIFile(t, filepath.Join(assets, name+suffix), "fixture", 0o600)
 	}
 	writeCLIUpdateInstaller(t, root)
-	prepareCLIOldRelease(t, runtimeRoot)
+	prepareCLIOldRelease(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"))
 	environment = append(environment,
 		"YARD_RELEASE_BASE_URL=file://"+assets,
 		"YARD_RELEASE_CACHE="+cache,
@@ -1115,7 +1115,7 @@ func TestUpdateRefreshesConfigsWithActivatedRuntimeLauncher(t *testing.T) {
 			root, environment, runtimeRoot := updateReleaseFixture(t)
 			if test.defaultRoot {
 				runtimeRoot = filepath.Join(root, "data", "runtime")
-				prepareCLIOldRelease(t, runtimeRoot)
+				prepareCLIOldRelease(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"))
 			}
 			if test.sameVersion {
 				prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), false)
@@ -1239,7 +1239,7 @@ case "${1:-}" in
 esac
 `, 0o700)
 		writeCLIFile(t, filepath.Join(bin, "yard"), "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ACTIVE_CAPTURE\"\n", 0o700)
-		registry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`)
+		registry := []byte(cliUpdateFixtureRegistry)
 		if err := os.MkdirAll(filepath.Join(releaseRoot, "config"), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -1265,11 +1265,7 @@ esac
 		if err := os.Symlink("releases/previous-b", filepath.Join(root, "previous")); err != nil {
 			t.Fatal(err)
 		}
-		history := filepath.Join(configHome, "release-transition", "v2")
-		if err := os.MkdirAll(history, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		writeCLIFile(t, filepath.Join(history, "ledger.json"), `{"schemaVersion":2,"domains":{"settings":{"epoch":1,"applied":[]}}}`, 0o600)
+		writeCLIUpdateFixtureHistory(t, configHome)
 	}
 }
 
@@ -1457,7 +1453,7 @@ func updateReleaseFixture(t *testing.T) (string, []string, string) {
 		writeCLIFile(t, filepath.Join(assets, name+suffix), "fixture", 0o600)
 	}
 	writeCLIUpdateInstaller(t, root)
-	prepareCLIOldRelease(t, runtimeRoot)
+	prepareCLIOldRelease(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"))
 	return root, append(environment,
 		"YARD_RELEASE_BASE_URL=file://"+assets,
 		"YARD_RELEASE_CACHE="+cache,
@@ -1465,11 +1461,31 @@ func updateReleaseFixture(t *testing.T) (string, []string, string) {
 	), runtimeRoot
 }
 
-func prepareCLIOldRelease(t *testing.T, runtimeRoot string) {
+const cliUpdateFixtureRegistry = `{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":1},"migrations":[]}`
+
+func writeCLIUpdateFixtureHistory(t *testing.T, configHome string) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", "release-old"), 0o700); err != nil {
+	history := filepath.Join(configHome, "release-transition", "v2")
+	if err := os.MkdirAll(history, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	writeCLIFile(t, filepath.Join(history, "ledger.json"), `{"schemaVersion":2,"domains":{"settings":{"epoch":1,"applied":[]}}}`, 0o600)
+}
+
+func prepareCLIOldRelease(t *testing.T, runtimeRoot, configHome string) {
+	t.Helper()
+	old := filepath.Join(runtimeRoot, "releases", "release-old")
+	for _, directory := range []string{"bin", "config"} {
+		if err := os.MkdirAll(filepath.Join(old, directory), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	engine := "#!/bin/sh\n[ \"${1:-}\" = --version ] || exit 64\nprintf 'yard-engine 1.2.2\\n'\n"
+	writeCLIFile(t, filepath.Join(old, "bin", "yard-engine"), engine, 0o700)
+	writeCLIFile(t, filepath.Join(old, "config", "release-transition.json"), cliUpdateFixtureRegistry, 0o600)
+	manifest := fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", sha256.Sum256([]byte(engine)), sha256.Sum256([]byte(cliUpdateFixtureRegistry)))
+	writeCLIFile(t, filepath.Join(old, "runtime-files.sha256"), manifest, 0o600)
+	writeCLIUpdateFixtureHistory(t, configHome)
 	if err := os.Symlink("releases/release-old", filepath.Join(runtimeRoot, "current")); err != nil {
 		t.Fatal(err)
 	}
@@ -1477,7 +1493,7 @@ func prepareCLIOldRelease(t *testing.T, runtimeRoot string) {
 
 func writeCLIUpdateInstaller(t *testing.T, repositoryRoot string) {
 	t.Helper()
-	script := strings.ReplaceAll(`#!/bin/sh
+	script := strings.NewReplacer("__RELEASE_TARGET__", "releases/1.2.3-f16d05ec6b29", "__RELEASE_REGISTRY__", cliUpdateFixtureRegistry).Replace(`#!/bin/sh
 set -eu
 if [ -n "${RELEASE_CAPTURE:-}" ]; then
 	printf '%s\n' "$@" > "$RELEASE_CAPTURE"
@@ -1565,11 +1581,11 @@ esac
 ENGINE
 printf '%s\n' '#!/bin/sh' 'if [ -n "${YARD_ENGINE_PATH:-}" ]; then exec "$YARD_ENGINE_PATH" "$@"; fi' 'printf "%s\\n" "$*" >> "$ACTIVE_CAPTURE"' > "$destination/bin/yard"
 chmod 700 "$destination/bin/yard-engine" "$destination/bin/yard"
-printf '{}\n' > "$destination/config/release-transition.json"
+printf '%s\n' '__RELEASE_REGISTRY__' > "$destination/config/release-transition.json"
 (cd "$destination" && sha256sum ./bin/yard ./bin/yard-engine ./config/release-transition.json > runtime-files.sha256)
 [ "$publish_only" = true ] || exit 64
 printf '%s\n' "$target"
-`, "__RELEASE_TARGET__", "releases/1.2.3-f16d05ec6b29")
+`)
 	writeCLIFile(t, filepath.Join(repositoryRoot, "scripts", "install-runtime-release.sh"), script, 0o700)
 }
 

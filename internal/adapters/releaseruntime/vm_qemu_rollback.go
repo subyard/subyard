@@ -65,22 +65,22 @@ func (runtime *Runtime) inspectVMQEMURollback(ctx context.Context, target *verif
 // inspectRollbackCompatibility returns every independent finding in the existing
 // public error cause. Only its protocol outcome is bounded; the operation boundary
 // renders the complete cause once, including for a new rollback's planning refusal.
-func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, selected releasetransition.Fingerprint) error {
+func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, selection *releaseSelection) error {
 	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
-	if selected != "" && (err != nil || links.previous.target != "releases/"+string(request.Target)) {
+	if selection != nil && (err != nil || links != selection.links) {
 		return staleRetainedSelection(request.RuntimeRoot, request.Target)
 	}
 	if err != nil {
 		return err
 	}
 	observed := releaseLinksFromRuntimeSnapshot(links)
-	if selected == "" && request.Direction != releasetransition.DirectionActivatePrevious {
+	if selection == nil && request.Direction != releasetransition.DirectionActivatePrevious {
 		return nil
 	}
 	var migrationMessages []string
 	var migrationErr error
-	if selected != "" {
-		migrationMessages, migrationErr = runtime.inspectRetainedRegistry(ctx, target, request, links)
+	if selection != nil && selection.refusal != "" {
+		migrationMessages, migrationErr = []string{selection.refusal}, selection.cause
 	}
 	layout, layoutErr := runtime.inspectConfigLayoutRollback(ctx, target, request)
 	messages, vmErr := runtime.inspectVMQEMURollback(ctx, target, request)
@@ -89,8 +89,15 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		messages = append([]string{layout.Message}, messages...)
 	}
 	messages = append(migrationMessages, messages...)
-	if err := verifyRetainedSelection(request.RuntimeRoot, target, selected); err != nil {
-		return err
+	if selection != nil && selection.refusal == "" {
+		unlock, err := runtime.lockReleaseSelection(ctx)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if err := runtime.revalidateReleaseSelection(selection, target); err != nil {
+			return err
+		}
 	}
 	if len(messages) == 0 {
 		return domain.CollectRefusals(migrationErr, layoutErr, vmErr)
