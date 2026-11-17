@@ -22,7 +22,7 @@ class OwnerTest(unittest.TestCase):
             root = Path(name)
             profile = root/'config/profiles/telemetry'
             profile.mkdir(parents=True)
-            for path in source.glob('*.py'):
+            for path in [*source.glob('*.py'), source/'usage-fields.json']:
                 shutil.copyfile(path,profile/path.name)
             shutil.copyfile(source/'profile.sh',profile/'profile.sh')
             (root/'scripts/lib').mkdir(parents=True)
@@ -150,7 +150,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         repository = source.parents[2]
         profile = root/'config/profiles/telemetry'
         profile.mkdir(parents=True)
-        for path in source.glob('*.py'):
+        for path in [*source.glob('*.py'), source/'usage-fields.json']:
             shutil.copyfile(path, profile/path.name)
         for name in ('profile.sh', 'runtime.sh'):
             shutil.copyfile(source/name, profile/name)

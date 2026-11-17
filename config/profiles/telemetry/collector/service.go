@@ -77,7 +77,7 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "origin_id": s.origin, "outbox_failures": failures.Load()})
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "origin_id": s.origin, "outbox_failures": failures.Load(), "outbox_discarded": s.outboxDiscarded.Load()})
 	})
 	mux.HandleFunc("POST /v1/records", func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -173,12 +173,12 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		return err
 	}
 	count := 0
+	var unsafeFile bool
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		count++
-		if count > 256 {
+		if count == 256 {
 			break
 		}
 		target := filepath.Join(path, entry.Name())
@@ -186,9 +186,11 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > s.limits.RequestBytes {
-			return errors.New("invalid outbox file")
+		if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+			unsafeFile = true
+			continue
 		}
+		count++
 		f, err := os.OpenFile(target, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 		if err != nil {
 			return err
@@ -201,11 +203,13 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		var r Record
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
-		if err = dec.Decode(&r); err != nil {
-			return errors.New("invalid outbox record")
-		}
-		if err = s.Ingest(ctx, []Record{r}); err != nil {
-			return err
+		discard := int64(len(data)) > s.limits.RequestBytes || dec.Decode(&r) != nil || dec.Decode(new(json.RawMessage)) != io.EOF
+		if !discard {
+			err = s.Ingest(ctx, []Record{r})
+			discard = errors.Is(err, errInvalidRecord)
+			if err != nil && !discard {
+				return err
+			}
 		}
 		current, err := os.Lstat(target)
 		if err != nil {
@@ -217,6 +221,9 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		if err = os.Remove(target); err != nil {
 			return err
 		}
+		if discard {
+			s.outboxDiscarded.Add(1)
+		}
 		dir, err := os.Open(path)
 		if err != nil {
 			return err
@@ -226,6 +233,9 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		if err != nil {
 			return err
 		}
+	}
+	if unsafeFile {
+		return errors.New("invalid outbox file")
 	}
 	return nil
 }

@@ -141,13 +141,29 @@ func sanitizeJSON(data []byte, p Policy) ([]byte, int64, error) {
 							n++
 							continue
 						}
-						if raw, ok := value["stringValue"].(string); ok && isTokenCounter(strings.ToLower(name)) {
-							count, err := strconv.ParseInt(raw, 10, 64)
-							if err != nil || count < 0 {
+						field, typed := usageSchema.Attributes[name]
+						if !typed && isTokenCounter(strings.ToLower(name)) {
+							field, typed = usageField{Type: "int"}, true
+						}
+						if typed {
+							raw, stringValue := value["stringValue"]
+							if intValue && field.Type == "int" {
+								raw = value["intValue"]
+							}
+							validated, ok := field.validate(raw)
+							if !ok || len(value) != 1 {
 								n++
 								continue
 							}
-							value["stringValue"] = strconv.FormatInt(count, 10)
+							if field.Type == "int" {
+								raw = strconv.FormatInt(validated.(int64), 10)
+							}
+							key := "intValue"
+							if stringValue {
+								key = "stringValue"
+							}
+							kept = append(kept, map[string]any{"key": name, "value": map[string]any{key: raw}})
+							continue
 						}
 						kept = append(kept, walk(m, k, true, class))
 					}

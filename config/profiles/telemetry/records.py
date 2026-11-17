@@ -2,6 +2,7 @@
 """Private, bounded producer outbox. Collection failures never fail workloads."""
 import datetime
 import fcntl
+import functools
 import http.client
 import json
 import math
@@ -31,10 +32,7 @@ value unit observed_time resource_id allocation_generation requested_cpu request
 selector phase final_complete acquired_at ready_at expires_at stopped_at last_seen source_time
 requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_memory_bytes
 vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes
-read_bytes write_bytes read_ops write_ops populated attribution_id
-client request_identity request_id turn_id native_agent_id parent_native_agent_id model trigger
-input_tokens cache_read_tokens cache_write_tokens output_tokens reasoning_tokens tool_output_bytes
-tool_use_id tool_result_bytes'''.split())
+read_bytes write_bytes read_ops write_ops populated attribution_id'''.split())
 IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}\Z')
 MAX_RECORDS = 4096
 MAX_BYTES = 64*1024*1024
@@ -56,6 +54,33 @@ def clean(value):
     if isinstance(value, dict) and len(value) <= 128:
         return {key: clean(item) for key, item in value.items() if key in FIELDS}
     raise ValueError('unsupported metadata')
+
+
+@functools.cache
+def usage_schema():
+    return json.loads(Path(__file__).with_name('usage-fields.json').read_text())
+
+
+def usage_body(kind, body):
+    schema = usage_schema()
+    result = {}
+    for key, field in schema['fields'].items():
+        if key not in body and not (field.get('required') or (kind == 'tool_result' and field.get('tool_required'))):
+            continue
+        value = body[key]
+        field_type = field['type']
+        if field_type == 'int':
+            if isinstance(value, str) and re.fullmatch(schema['int_pattern'], value):
+                value = int(value)
+            valid = type(value) is int and 0 <= value < 2**63
+        elif field_type == 'enum':
+            valid = isinstance(value, str) and value in field['values']
+        else:
+            valid = isinstance(value, str) and re.fullmatch(schema['name_pattern'], value)
+        if not valid:
+            raise ValueError('invalid usage field')
+        result[key] = value
+    return result
 
 
 def private_directory(path):
@@ -151,6 +176,8 @@ def emit(data_dir, kind, body, source_id=None, source_time=None, event_id=None):
     try:
         if kind not in KINDS:
             return False
+        usage = kind in ('model_usage', 'tool_result')
+        body = usage_body(kind, body) if usage else clean(body)
         directory = private_directory(data_dir)
         outbox = private_directory(directory/'outbox')
         fd = os.open(outbox/'.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -170,7 +197,12 @@ def emit(data_dir, kind, body, source_id=None, source_time=None, event_id=None):
             existing = read_private(path) if path.exists() else None
             record = {'schema': SCHEMA, 'source_id': source_id, 'event_id': event_id,
                       'source_version': '1', 'source_time': source_time or (existing or {}).get('source_time') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      'kind': kind, 'body': clean(body)}
+                      'kind': kind, 'body': body}
+            if usage:
+                timestamp = record['source_time']
+                if not re.fullmatch(usage_schema()['time_pattern'], timestamp):
+                    return False
+                datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
             if existing:
                 if existing != record:
                     return False

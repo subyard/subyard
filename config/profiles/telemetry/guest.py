@@ -47,7 +47,7 @@ class Runtime:
         # stay known so that leftovers are detected and kept unchanged.
         self.retained = {}
         for name in ('native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
-                     'resources.py', 'sources.py', 'broker-correlation.py', 'tomli_w.py', 'subyard-telemetry'):
+                     'resources.py', 'sources.py', 'broker-correlation.py', 'usage-fields.json', 'tomli_w.py', 'subyard-telemetry'):
             mode = 0o755 if name in ('subyard-telemetry', 'broker-correlation.py') else 0o644
             if name == 'subyard-telemetry' and not selected:
                 self.retained[library/name] = mode
@@ -354,9 +354,9 @@ class Runtime:
         binary = self.library/'subyard-telemetry'
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
-            # An interrupted upgrade may have published the new executable before its inventory.
-            desired_binary = self.selected and path == binary and before == self.assets[binary][0]
-            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest() and not desired_binary:
+            # An interrupted upgrade may have published new assets before the inventory.
+            desired = path in self.assets and before == self.assets[path][0]
+            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest() and not desired:
                 raise ValueError('managed asset changed')
             if path in (self.units/COLLECTOR, self.units/MANAGER) and before != self.assets[path][0] and before is not None:
                 unit = path.name

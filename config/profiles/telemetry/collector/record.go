@@ -84,8 +84,17 @@ func sanitizeRecord(r Record) (Record, int64, error) {
 	if !validID(r.SourceID) || !validID(r.EventID) || !kinds[r.Kind] || r.Body == nil {
 		return r, 0, errors.New("invalid record identity or kind")
 	}
-	parsedTime, err := time.Parse(time.RFC3339Nano, r.SourceTime)
-	if err != nil {
+	usage := r.Kind == "model_usage" || r.Kind == "tool_result"
+	var parsedTime time.Time
+	var validTime bool
+	if usage {
+		parsedTime, validTime = usageTimestamp(r.SourceTime)
+	} else {
+		var err error
+		parsedTime, err = time.Parse(time.RFC3339Nano, r.SourceTime)
+		validTime = err == nil
+	}
+	if !validTime {
 		return r, 0, errors.New("invalid source time")
 	}
 	r.SourceTime = parsedTime.UTC().Format(timestampLayout)
@@ -94,7 +103,7 @@ func sanitizeRecord(r Record) (Record, int64, error) {
 	}
 	r.Schema = RecordSchema
 	r.SchemaVersion = 0
-	if r.Kind == "model_usage" || r.Kind == "tool_result" {
+	if usage {
 		return sanitizeUsage(r)
 	}
 	body := make(map[string]any, len(r.Body))

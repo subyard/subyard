@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -64,8 +67,9 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	const validTimestamp = "2026-10-01T02:03:04.123+02:00"
 	add("claude", 100, map[string]any{"event.name": "api_request", "request_id": "req-main", "session.id": "claude-thread",
-		"prompt.id": "prompt-1", "model": "claude-fixture", "input_tokens": 10, "cache_read_tokens": 4, "cache_creation_tokens": 0, "output_tokens": 6})
+		"event.timestamp": validTimestamp, "prompt.id": "prompt-1", "model": "claude-fixture", "input_tokens": 10, "cache_read_tokens": 4, "cache_creation_tokens": 0, "output_tokens": 6})
 	add("claude", 110, map[string]any{"event.name": "api_request", "request_id": "req-worker", "session.id": "claude-thread",
 		"prompt.id": "prompt-1", "agent_id": "worker", "parent_agent_id": "parent-worker", "input_tokens": 5})
 	add("claude", 120, map[string]any{"event.name": "tool_result", "request_id": "req-main", "tool_use_id": "tool-1",
@@ -74,7 +78,7 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 		add(run, uint64(200+i), map[string]any{"event.name": "codex.sse_event", "event.kind": "response.completed",
 			"conversation.id": "codex-thread", "turn.id": "turn-1", "input_token_count": "20", "cached_token_count": 12,
 			"output_token_count": "3", "reasoning_token_count": 2, "tool_token_count": "23",
-			"cache_write_token_count": "fixture-private-counter"})
+			"cache_write_token_count": "fixture-private-counter", "event.timestamp": "fixture-private-timestamp"})
 	}
 	consumers, err := makeConsumers(s, DefaultPolicy())
 	if err != nil {
@@ -89,7 +93,7 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 	if _, err := Export(ctx, s.db, &rawExport, 0, 1000); err != nil {
 		t.Fatal(err)
 	}
-	sawCounter := false
+	sawCounter, sawTimestamp := false, false
 	for line := range bytes.SplitSeq(bytes.TrimSpace(rawExport.Bytes()), []byte("\n")) {
 		var entry Envelope
 		if err := json.Unmarshal(line, &entry); err != nil {
@@ -108,6 +112,12 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 		for _, resource := range request.Logs().ResourceLogs().All() {
 			for _, scope := range resource.ScopeLogs().All() {
 				for _, event := range scope.LogRecords().All() {
+					if stamp, ok := event.Attributes().Get("event.timestamp"); ok {
+						if stamp.Str() != validTimestamp {
+							t.Fatal("invalid event.timestamp survived in exported OTLP")
+						}
+						sawTimestamp = true
+					}
 					value, ok := event.Attributes().Get("input_token_count")
 					sawCounter = sawCounter || (ok && value.Str() == "20")
 				}
@@ -116,6 +126,9 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 	}
 	if !sawCounter {
 		t.Fatal("numeric string token counter missing from exported OTLP")
+	}
+	if !sawTimestamp {
+		t.Fatal("valid RFC3339 timestamp missing from exported OTLP")
 	}
 	trace := ptrace.NewTraces()
 	spanEvent := trace.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty().Events().AppendEmpty()
@@ -200,4 +213,49 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 		}
 	}
 	check(replayed)
+}
+
+func TestUsageProducerAndOutboxRejectInvalidRecords(t *testing.T) {
+	s := fixtureStore(t)
+	root := testkit.TempDir(t)
+	cmd := exec.Command("python3", "-B", "-c", `
+from pathlib import Path
+import sys
+from records import emit
+
+root = Path(sys.argv[1])
+body = dict(client='codex', request_identity='provider', request_id='request', input_tokens=7)
+for invalid in (dict(input_tokens='private message here'), dict(trigger='private conversation')):
+    assert not emit(root, 'model_usage', dict(body, **invalid), event_id='rejected')
+assert not (root/'outbox/rejected.json').exists()
+assert emit(root, 'model_usage', body, event_id='valid')
+`, root)
+	cmd.Dir = ".."
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("emit fixture: %v\n%s", err, out)
+	}
+	outbox := filepath.Join(root, "outbox")
+	// Older producers could leave malformed JSON or invalid usage bodies behind.
+	testkit.WriteFile(t, filepath.Join(outbox, "bad-json.json"), []byte("{"), 0600)
+	r := record("model_usage", map[string]any{
+		"client": "codex", "request_identity": "provider", "request_id": "rejected", "input_tokens": "private message here",
+	})
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(outbox, "bad-usage.json"), data, 0600)
+	if err := s.IngestOutbox(context.Background(), outbox); err != nil {
+		t.Fatal(err)
+	}
+	if discarded := s.outboxDiscarded.Load(); discarded != 2 {
+		t.Fatalf("discarded %d records, want 2", discarded)
+	}
+	var count, tokens int
+	if err := s.db.QueryRow("SELECT count(*), coalesce(sum(input_tokens), 0) FROM model_usage").Scan(&count, &tokens); err != nil || count != 1 || tokens != 7 {
+		t.Fatalf("outbox delivery: %d rows, %d tokens, error %v", count, tokens, err)
+	}
+	if entries, err := os.ReadDir(outbox); err != nil || len(entries) != 1 || entries[0].Name() != ".lock" {
+		t.Fatalf("outbox retained processed records: %v, %v", entries, err)
+	}
 }

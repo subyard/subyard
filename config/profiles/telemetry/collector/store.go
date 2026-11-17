@@ -14,12 +14,15 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
+
+var errInvalidRecord = errors.New("invalid record")
 
 var ErrCapacity = errors.New("telemetry capacity exceeded")
 var ErrStorage = errors.New("telemetry storage unavailable")
@@ -43,6 +46,7 @@ type writeRequest struct {
 	result  chan error
 }
 type Store struct {
+	outboxDiscarded atomic.Int64
 	db              *sql.DB
 	dir             string
 	origin          string
@@ -237,7 +241,7 @@ func (s *Store) Ingest(ctx context.Context, records []Record) error {
 	for _, r := range records {
 		clean, n, err := sanitizeRecord(r)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", errInvalidRecord, err)
 		}
 		body, err := json.Marshal(clean.Body)
 		if err != nil {

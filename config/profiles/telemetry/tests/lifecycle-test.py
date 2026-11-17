@@ -223,7 +223,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             root = Path(name)
             source = root/'source'
             source.mkdir()
-            for path in Path(guest.__file__).parent.glob('*.py'):
+            for path in [*Path(guest.__file__).parent.glob('*.py'), Path(guest.__file__).parent/'usage-fields.json']:
                 shutil.copyfile(path, source/path.name)
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
             # Match the compiled collector's observed 25 MiB size, not a tiny stub.
@@ -323,11 +323,12 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 runtime.apply()
                 self.assertEqual(calls[-1],('restart',guest.COLLECTOR))
                 self.assertEqual(runtime.observe()['state'],'current')
-                binary = root/'library/subyard-telemetry'
-                previous = binary.read_bytes() + b'previous'
-                binary.write_bytes(previous)
+                upgraded = [root/'library'/name for name in ('launcher.py', 'records.py', 'subyard-telemetry')]
                 saved = json.loads((root/'control/assets.json').read_text())
-                saved[str(binary)] = hashlib.sha256(previous).hexdigest()
+                for asset in upgraded:
+                    previous = asset.read_bytes() + b'\n# previous version\n'
+                    asset.write_bytes(previous)
+                    saved[str(asset)] = hashlib.sha256(previous).hexdigest()
                 (root/'control/assets.json').write_text(json.dumps(saved))
                 calls.clear()
                 publish = guest.native.publish
@@ -338,15 +339,22 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 with patch.object(guest.native, 'publish', side_effect=interrupt_inventory):
                     with self.assertRaises(InterruptedError):
                         runtime.apply()
-                self.assertEqual(binary.read_bytes(), runtime.assets[binary][0])
+                for asset in upgraded:
+                    self.assertEqual(asset.read_bytes(), runtime.assets[asset][0], asset.name)
                 self.assertEqual(json.loads((root/'control/assets.json').read_text()), saved)
                 self.assertEqual(states[guest.COLLECTOR]['ActiveState'], 'inactive')
+                script = upgraded[0]
+                script.write_bytes(b'changed outside Subyard')
+                with self.assertRaisesRegex(ValueError, 'managed asset changed'):
+                    runtime.apply()
+                self.assertEqual(script.read_bytes(), b'changed outside Subyard')
+                script.write_bytes(runtime.assets[script][0])
                 runtime.apply()
                 self.assertLess(calls.index(('stop', guest.COLLECTOR)),
                                 calls.index(('enable', '--now', guest.COLLECTOR, guest.MANAGER)))
-                self.assertEqual(binary.read_bytes(), runtime.assets[binary][0])
-                self.assertEqual(json.loads((root/'control/assets.json').read_text())[str(binary)],
-                                 hashlib.sha256(binary.read_bytes()).hexdigest())
+                inventory = json.loads((root/'control/assets.json').read_text())
+                for asset in upgraded:
+                    self.assertEqual(inventory[str(asset)], hashlib.sha256(runtime.assets[asset][0]).hexdigest())
                 self.assertNotIn(('stop', guest.MANAGER), calls)
                 self.assertEqual(runtime.observe()['state'], 'current')
                 for changed in ({'User':'root'},{'DropInPaths':'/etc/systemd/system/subyard-.service.d/foreign.conf'},
@@ -429,7 +437,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             root = Path(name)
             source = root/'source'
             source.mkdir()
-            for path in Path(guest.__file__).parent.glob('*.py'):
+            for path in [*Path(guest.__file__).parent.glob('*.py'), Path(guest.__file__).parent/'usage-fields.json']:
                 shutil.copyfile(path, source/path.name)
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))

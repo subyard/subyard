@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
-	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
@@ -19,44 +17,17 @@ var usageCounters = strings.Fields("input_tokens cache_read_tokens cache_write_t
 
 func sanitizeUsage(r Record) (Record, int64, error) {
 	clean := make(map[string]any, len(r.Body))
-	for _, key := range slices.Concat(usageIDs, []string{"tool_use_id"}) {
-		if value, ok := r.Body[key]; ok {
-			if !safeName.MatchString(stringValue(r.Body, key)) {
-				return r, 0, fmt.Errorf("invalid usage %s", key)
-			}
-			clean[key] = value
+	for _, key := range usageFieldNames {
+		field := usageSchema.Fields[key]
+		value, exists := r.Body[key]
+		if !exists && !field.Required && !(r.Kind == "tool_result" && field.ToolRequired) {
+			continue
 		}
-	}
-	for _, key := range slices.Concat(usageCounters, []string{"tool_result_bytes"}) {
-		if value, ok := r.Body[key]; ok {
-			n, err := strconv.ParseInt(fmt.Sprint(value), 10, 64)
-			if err != nil || n < 0 {
-				return r, 0, fmt.Errorf("invalid usage %s", key)
-			}
-			clean[key] = n
+		validated, ok := field.validate(value)
+		if !ok {
+			return r, 0, fmt.Errorf("invalid usage %s", key)
 		}
-	}
-	switch stringValue(r.Body, "client") {
-	case "claude", "codex":
-		clean["client"] = r.Body["client"]
-	default:
-		return r, 0, fmt.Errorf("invalid usage client")
-	}
-	switch stringValue(r.Body, "request_identity") {
-	case "provider", "native_log":
-		clean["request_identity"] = r.Body["request_identity"]
-	default:
-		return r, 0, fmt.Errorf("invalid usage request identity")
-	}
-	if clean["request_id"] == nil || (r.Kind == "tool_result" && (clean["tool_use_id"] == nil || clean["tool_result_bytes"] == nil)) {
-		return r, 0, fmt.Errorf("missing usage identity or size")
-	}
-	switch stringValue(r.Body, "trigger") {
-	case "":
-	case "new_prompt", "tool_result", "worker_result", "poll_unchanged":
-		clean["trigger"] = r.Body["trigger"]
-	default:
-		return r, 0, fmt.Errorf("invalid model request trigger")
+		clean[key] = validated
 	}
 	removed := int64(len(r.Body) - len(clean))
 	r.Body = clean
@@ -79,16 +50,21 @@ func nativeUsage(ctx context.Context, log plog.LogRecord, resource pcommon.Map, 
 		if !ok || forbidden(key) {
 			return 0, false
 		}
+		field := usageSchema.Attributes[key]
+		var value any
 		switch v.Type() {
 		case pcommon.ValueTypeInt:
-			return v.Int(), v.Int() >= 0
+			value = v.Int()
 		case pcommon.ValueTypeStr:
 			if allow[key] {
-				n, err := strconv.ParseInt(v.Str(), 10, 64)
-				return n, err == nil && n >= 0
+				value = v.Str()
 			}
 		}
-		return 0, false
+		n, valid := field.validate(value)
+		if !valid {
+			return 0, false
+		}
+		return n.(int64), true
 	}
 
 	kind, client, sessionKey, turnKey := "model_usage", "claude", "session.id", "prompt.id"
@@ -137,8 +113,10 @@ func nativeUsage(ctx context.Context, log plog.LogRecord, resource pcommon.Map, 
 		stamp = log.ObservedTimestamp()
 	}
 	if stamp == 0 {
-		if parsed, err := time.Parse(time.RFC3339Nano, attr("event.timestamp")); err == nil && parsed.UnixNano() > 0 {
-			stamp = pcommon.NewTimestampFromTime(parsed)
+		if value, exists := attrs.Get("event.timestamp"); exists && allow["event.timestamp"] {
+			if parsed, ok := usageTimestamp(value.Str()); ok && parsed.UnixNano() > 0 {
+				stamp = pcommon.NewTimestampFromTime(parsed)
+			}
 		}
 	}
 	body["request_identity"] = "provider"
@@ -175,7 +153,11 @@ func nativeUsage(ctx context.Context, log plog.LogRecord, resource pcommon.Map, 
 		}
 	}
 	sourceTime := stamp.AsTime().UTC().Format(timestampLayout)
-	raw, _ := json.Marshal(body)
+	clean, _, err := sanitizeUsage(Record{Kind: kind, Body: body})
+	if err != nil {
+		return Envelope{}, false
+	}
+	raw, _ := json.Marshal(clean.Body)
 	return Envelope{
 		EventID:  fmt.Sprintf("usage:%x", sha256.Sum256(append(raw, sourceTime...))),
 		SourceID: "collector:native-usage", SourceVersion: "1", SourceTime: sourceTime,
