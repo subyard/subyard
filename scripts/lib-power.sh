@@ -307,7 +307,7 @@ power_join_comma() { # stdin lines -> one ", "-separated line
 }
 
 power_nm_guard_effective() { # <bridge...>: every independent finding, next steps in order
-  local config violations='' managed rc remedy='' reboot=0
+  local config violations='' managed rc remedy='' reboot=0 next_step="$POWER_NM_GUARD_COMMAND"
   if power_nm_active; then :; else
     rc=$?; [ "$rc" -eq 1 ] && return 0
     return "$rc"
@@ -346,12 +346,13 @@ power_nm_guard_effective() { # <bridge...>: every independent finding, next step
   if ! managed="$(power_nm_managed_bridges "$@")"; then
     violations+="${violations:+$'\n'}cannot read NetworkManager's devices with nmcli"
   elif [ -n "$managed" ]; then
+    [ -n "$violations" ] || next_step="yard init"
     while IFS= read -r rc; do
       violations+="${violations:+$'\n'}NetworkManager manages yard bridge $rc"
     done <<< "$managed"
   fi
   [ -z "$violations" ] && return 0
-  power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — ${remedy}rerun $POWER_NM_GUARD_COMMAND"
+  power_fail "NetworkManager guard is not effective: $(power_join <<< "$violations") — ${remedy}rerun $next_step"
 }
 
 # Subyard's own devices only: yard bridges, veths and Incus tap devices.

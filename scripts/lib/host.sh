@@ -283,11 +283,11 @@ nm_read_devices() {
   NM_DEVICES="$devices"
 }
 
-# The [keyfile] unmanaged-devices value of a printed configuration.
-nm_keyfile_unmanaged() {
-  awk '
+# An administrator device list from a printed configuration.
+nm_config_list() { # <section> <key>
+  awk -v wanted_section="[$1]" -v wanted_key="$2" '
     /^[[:space:]]*\[/ { section = $0; gsub(/[[:space:]]/, "", section); next }
-    section == "[keyfile]" && /^[[:space:]]*unmanaged-devices[[:space:]]*=/ { value = $0; sub(/^[^=]*=/, "", value) }
+    section == wanted_section && $0 ~ "^[[:space:]]*" wanted_key "[[:space:]]*=" { value = $0; sub(/^[^=]*=/, "", value) }
     END { print value }
   '
 }
@@ -412,18 +412,24 @@ nm_guard_preflight() { # <conf> <desired or empty for removal> <bridges> <active
   while IFS= read -r device; do [ -z "$device" ] || bridge_args+=("$device"); done <<< "$bridges"
   proposed="$(mktemp -d)" || { NM_GUARD_REFUSALS="cannot create a private NetworkManager work directory"$'\n'; return 0; }
   chmod 0700 "$proposed"
-  [ ! -d "${conf%/*}" ] || cp -a "${conf%/*}/." "$proposed/"
-  rm -f "$proposed/99-subyard-unmanaged.conf" "$proposed/${conf##*/}"
-  [ -z "$desired" ] || printf '%s\n' "$desired" > "$proposed/${conf##*/}"
-  if ! NM_GUARD_PROPOSED="$("$binary" --config-dir "$proposed" --print-config 2>/dev/null)"; then
-    NM_GUARD_REFUSALS+="NetworkManager rejects the proposed configuration"$'\n'
-    NM_GUARD_PROPOSED=''
-  elif [ -n "$desired" ]; then
-    while IFS= read -r device; do
-      [ -z "$device" ] || NM_GUARD_REFUSALS+="proposed guard: $device"$'\n'
-    done < <(printf '%s\n' "$NM_GUARD_PROPOSED" | power_nm_config_violations "${bridge_args[@]}")
+  if [ -d "${conf%/*}" ] && ! cp -a "${conf%/*}/." "$proposed/"; then
+    NM_GUARD_REFUSALS+="cannot copy NetworkManager configuration for preflight"$'\n'
+    rm -rf "$proposed"
+    proposed=''
   fi
-  rm -rf "$proposed"
+  if [ -n "$proposed" ]; then
+    rm -f "$proposed/99-subyard-unmanaged.conf" "$proposed/${conf##*/}"
+    [ -z "$desired" ] || printf '%s\n' "$desired" > "$proposed/${conf##*/}"
+    if ! NM_GUARD_PROPOSED="$("$binary" --config-dir "$proposed" --print-config 2>/dev/null)"; then
+      NM_GUARD_REFUSALS+="NetworkManager rejects the proposed configuration"$'\n'
+      NM_GUARD_PROPOSED=''
+    elif [ -n "$desired" ]; then
+      while IFS= read -r device; do
+        [ -z "$device" ] || NM_GUARD_REFUSALS+="proposed guard: $device"$'\n'
+      done < <(printf '%s\n' "$NM_GUARD_PROPOSED" | power_nm_config_violations "${bridge_args[@]}")
+    fi
+    rm -rf "$proposed"
+  fi
   [ "$active" = 1 ] || return 0
   # Each read is independent: one failure never hides another finding.
   power_nm_print_config >/dev/null 2>&1 \
@@ -448,22 +454,40 @@ nm_guard_preflight() { # <conf> <desired or empty for removal> <bridges> <active
   done <<< "$NM_DEVICES"
 }
 
-# Released guards replaced the administrator's unmanaged-devices list, so NetworkManager may run a
-# device that list marks unmanaged; restoring the list would deconfigure it at the next start.
-# Adds provable cases to NM_GUARD_REFUSALS; NM_GUARD_UNDECIDED names devices it cannot decide.
-NM_GUARD_UNDECIDED='' NM_GUARD_LIST=''
+# Released guards replaced the administrator's device lists. Restoring either list can
+# remove a device's connectivity at the next start. Only unmanaged-devices proves a
+# takeover; no-auto-default does not affect explicit profiles, so it only gets notices.
+NM_GUARD_NOTICES=''
 nm_guard_hijack_check() {
-  local device type state rc
-  NM_GUARD_UNDECIDED='' NM_GUARD_LIST="$(printf '%s\n' "$NM_GUARD_PROPOSED" | nm_keyfile_unmanaged)"
+  local device type state rc key section list undecided
+  NM_GUARD_NOTICES=''
   [ -n "$NM_GUARD_PROPOSED" ] && [ -n "$NM_DEVICES" ] || return 0
-  while IFS=: read -r device type state; do
-    [ -n "$device" ] && [ "$type" != loopback ] && [ "$state" != unmanaged ] || continue
-    if nm_list_selects "$NM_GUARD_LIST" "$device" "$type"; then rc=0; else rc=$?; fi
-    case "$rc" in
-      0) NM_GUARD_REFUSALS+="NetworkManager manages $device, which the administrator's unmanaged-devices list marks unmanaged; the released Subyard guard replaced that list, and restoring it would make NetworkManager deconfigure $device. Hand $device back first with 'sudo nmcli device set $device managed no' (or the administrator's own way)"$'\n' ;;
-      2) NM_GUARD_UNDECIDED+="$device"$'\n' ;;
-    esac
-  done <<< "$NM_DEVICES"
+  for key in unmanaged-devices no-auto-default; do
+    section=keyfile
+    [ "$key" != no-auto-default ] || section=main
+    list="$(printf '%s\n' "$NM_GUARD_PROPOSED" | nm_config_list "$section" "$key")"
+    undecided=''
+    while IFS=: read -r device type state; do
+      [ -n "$device" ] && [ "$type" != loopback ] && [ "$state" != unmanaged ] || continue
+      if nm_list_selects "$list" "$device" "$type"; then rc=0; else rc=$?; fi
+      if [ "$key" = no-auto-default ] && [ "$rc" = 0 ]; then
+        NM_GUARD_NOTICES+="the administrator's no-auto-default list selects $device; if $device relies on an automatic connection, create an explicit profile before the reboot"$'\n'
+        continue
+      fi
+      case "$rc" in
+        0) NM_GUARD_REFUSALS+="NetworkManager manages $device, which the administrator's $key list marks unmanaged; the released Subyard guard replaced that list, and restoring it could leave $device without connectivity after reboot. Hand $device back first with 'sudo nmcli device set $device managed no' (or the administrator's own way), or change the administrator's own $key list if NetworkManager should keep the device"$'\n' ;;
+        2) undecided+="$device"$'\n' ;;
+      esac
+    done <<< "$NM_DEVICES"
+    [ -z "$undecided" ] || NM_GUARD_NOTICES+="Subyard cannot decide whether the administrator's $key list ($list) marks these devices NetworkManager manages: $(power_join_comma <<< "$undecided"). Do not reload or restart NetworkManager before the reboot."$'\n'
+  done
+}
+
+nm_guard_render_notices() {
+  local notice
+  while IFS= read -r notice; do
+    [ -z "$notice" ] || warn "$notice"
+  done <<< "$NM_GUARD_NOTICES"
 }
 
 # Decision 1: a released guard counts as held when every up Incus-managed bridge it names is
@@ -584,6 +608,10 @@ nm_guard_nm_state() { # sets NM_GUARD_ACTIVE and NM_GUARD_BINARY, or fails
   if power_nm_active; then NM_GUARD_ACTIVE=1; else
     rc=$?; [ "$rc" -eq 1 ] || { power_fail "$POWER_ERROR"; return 1; }
   fi
+  if [ "$NM_GUARD_ACTIVE" = 1 ] && [ -z "$NM_GUARD_BINARY" ]; then
+    power_fail "NetworkManager is active but its binary is unavailable at a known path; restore the binary before rerunning $POWER_NM_GUARD_COMMAND"
+    return 1
+  fi
 }
 
 nm_guard_unread_message() {
@@ -650,9 +678,7 @@ nm_guard_migrate_with() { # <conf> <bridges> <stop: 1|0>
   local evidence=0
   [ "$NM_GUARD_ACTIVE" = 0 ] || ! nm_guard_released "$conf" || ! nm_guard_released_evidence "$conf" || evidence=1
   nm_guard_publish "$conf" "$desired" migration "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY" "$evidence" || return 1
-  if [ -n "$NM_GUARD_UNDECIDED" ]; then
-    warn "Subyard cannot decide whether the administrator's unmanaged-devices list ($NM_GUARD_LIST) marks these devices NetworkManager manages: $(power_join_comma <<< "$NM_GUARD_UNDECIDED"). Do not reload or restart NetworkManager before the reboot."
-  fi
+  nm_guard_render_notices
   [ -n "$NM_GUARD_BINARY" ] || return 0
   nm_guard_post_publish "$conf" "$3" || rc=$?
   case "$rc" in
@@ -744,7 +770,8 @@ nm_unmanaged_guard_reconcile() { # [conf]
         warn "kept the NetworkManager guard: $(power_join <<< "$NM_GUARD_REFUSALS")"
         return 1
       fi
-      nm_guard_publish "$conf" '' migration "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY"
+      nm_guard_publish "$conf" '' migration "$NM_GUARD_ACTIVE" "$NM_GUARD_BINARY" || return 1
+      nm_guard_render_notices
       return
     fi
     nm_guard_migrate_with "$conf" "$NM_INVENTORY" 0 || { warn "kept the NetworkManager guard: $POWER_ERROR"; return 1; }
