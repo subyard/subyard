@@ -6013,6 +6013,8 @@ operator_yard() {
   case "$*" in
     --version) printf 'yard %s\n' "$(cat "$F/active-version")"; return ;;
     "update --version $HOP_VERSION --yes") printf '%s\n' "$HOP_VERSION" > "$F/active-version" ;;
+    'config set CODING_TOOL_INTEGRATIONS  --scope host --yes') : ;;
+    'config set CODING_TOOL_INTEGRATIONS '*) exit 93 ;;
     *--local*) exit 91 ;;
     '-Y e2e-yard init --yes')
       grep -Fxq YARD_TEMPLATE=test-vms "$OPERATOR_HOME/.config/subyard/yards/e2e-yard/config.env" ;;
@@ -6031,6 +6033,7 @@ for name in E2E_VM_SLOT_COUNT E2E_VM_CPU E2E_VM_MEMORY E2E_VM_DISK; do
 done
 grep -Fxq 'yard -Y e2e-yard init --yes' "$trace"
 grep -Fxq 'yard init --yes' "$trace"
+grep -Fxq 'yard config set CODING_TOOL_INTEGRATIONS  --scope host --yes' "$trace"
 grep -Fxq 'incus stop yard-e2e-yard --project subyard-e2e-yard' "$trace"
 grep -Fxq "yard update --version $HOP_VERSION --yes" "$trace"
 jq -e '.schemaVersion == 1 and (.files | length) > 0' "$OPERATOR_HOME/.config/subyard/.sync/manifest.json" >/dev/null

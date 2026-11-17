@@ -364,7 +364,8 @@ BASELINE_CONFIG
   operator_yard config set DEV_UID "$FIXTURE_DEV_UID" --scope host --yes
   operator_yard config set YARD_IMAGE "$BASE_IMAGE" --scope host --yes
   operator_yard config set YARD_IMAGE_FALLBACK "$BASE_IMAGE" --scope host --yes
-  operator_yard config set CODING_TOOL_INTEGRATIONS codex --scope host --yes
+  # Avoid v0.28.1's Codex provisioning, which uses the anonymous GitHub API.
+  operator_yard config set CODING_TOOL_INTEGRATIONS '' --scope host --yes
   operator_yard -Y e2e-yard config set E2E_VM_SLOT_COUNT 1 --scope yard --yes
   operator_yard -Y e2e-yard config set E2E_VM_CPU 1 --scope yard --yes
   operator_yard -Y e2e-yard config set E2E_VM_MEMORY 1GiB --scope yard --yes
@@ -956,6 +957,9 @@ prepare() {
   [ "$(operator_yard version)" = "yard $VERSION_A" ] \
     || die 'first candidate runtime is not active'
   verify_v2_release_transition "$VERSION_A"
+  # Exercise Codex rules delivery and repair only with the candidate's provisioner.
+  operator_yard config set CODING_TOOL_INTEGRATIONS codex --scope host --yes
+  operator_yard init --yes
   prepare_address_service
   verify_shared_target_refusals
   operator_yard config unset INCUS_PROJECT --scope host --yes
