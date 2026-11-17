@@ -209,12 +209,18 @@ assert_v2_transition() {
     .domains["owner-registration"] == {
       "epoch": 3, "applied": ["canonicalize-test-yard-owner-v2", "register-existing-local-yards-v3"]
     } and
-    .domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]} and
+    .domains["power-metadata"] == {"epoch": 3, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3"]} and
     .domains["project-state"] == {"epoch": 1, "applied": []} and
     .domains.settings == {
       "epoch": 3, "applied": ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]
     }
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
+    && operator_env jq -e '
+      # ledger.json stays the legacy projection for released readers (power-metadata epoch 3);
+      # the compacted checkpoint carries the device-guard epoch.
+      .legacyProjection.epochs["power-metadata"] == 3 and
+      .domains["power-metadata"].epoch == 4
+    ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/history-checkpoint.json" >/dev/null \
     || {
       # Capture allowlisted migration facts before marker-owned cleanup removes them.
       for record in ledger.json history-checkpoint.json; do
