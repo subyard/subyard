@@ -26,6 +26,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
 const (
@@ -489,7 +490,9 @@ func (runtime Runtime) runProfileRuntimeHandler(
 }
 
 func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile.Definition, handler string, environment []string, timeout time.Duration, action string, arguments ...string) ([]byte, []byte, error) {
-	environment = slices.DeleteFunc(slices.Clone(environment), func(value string) bool { return strings.HasPrefix(value, "SUBYARD_PROFILE_DIAGNOSTICS=") })
+	environment = slices.DeleteFunc(slices.Clone(environment), func(value string) bool {
+		return strings.HasPrefix(value, "SUBYARD_PROFILE_DIAGNOSTICS=") || strings.HasPrefix(value, "SUBYARD_ACTIVATION_EFFECT_LOCK_FD=")
+	})
 	if action == "observe" && runtime.profileDiagnostics {
 		environment = append(environment, "SUBYARD_PROFILE_DIAGNOSTICS=1")
 	}
@@ -503,6 +506,9 @@ func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile
 	command := exec.CommandContext(callContext, cleanPath, append([]string{action}, arguments...)...)
 	command.Dir = root
 	command.Env = environment
+	if action == "apply" {
+		attachActivationEffectLock(ctx, command)
+	}
 	if strings.HasPrefix(runtime.RepositoryRoot, "/proc/self/fd/") {
 		// The hook does not inherit the engine's repository descriptor.
 		parentRoot := strings.Replace(runtime.RepositoryRoot, "/proc/self/", fmt.Sprintf("/proc/%d/", os.Getpid()), 1)
@@ -535,6 +541,13 @@ func (runtime Runtime) runShippedHandler(ctx context.Context, definition profile
 		return nil, stderr.Bytes(), fmt.Errorf("profile runtime handler %s failed: %w", action, err)
 	}
 	return bytes.Clone(stdout.Bytes()), bytes.Clone(stderr.Bytes()), nil
+}
+
+func attachActivationEffectLock(ctx context.Context, command *exec.Cmd) {
+	if lock := releasetransition.ActivationEffectLock(ctx); lock != nil {
+		command.ExtraFiles = []*os.File{lock}
+		command.Env = append(command.Env, "SUBYARD_ACTIVATION_EFFECT_LOCK_FD=3")
+	}
 }
 
 func (runtime Runtime) readProfileHook(definition profile.Definition, handler string) ([]byte, error) {

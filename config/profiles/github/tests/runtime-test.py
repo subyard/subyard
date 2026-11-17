@@ -3,6 +3,7 @@
 import importlib.util
 import contextlib
 import ctypes
+import fcntl
 import io
 import json
 import os
@@ -501,6 +502,43 @@ class OwnerProcessTest(unittest.TestCase):
         self.assertTrue(self.pids.exists())
         self.assertFalse(self.published.exists())
         self.reap_child()
+
+    def test_effect_lock_survives_engine_and_owner_death(self):
+        lock = self.root/'update.lock'
+        deadline = time.monotonic()+3
+        self.owner.write_text(self.owner.read_text().replace('wait\ntouch',
+            'echo $$ > '+shlex.quote(str(self.root/'owner-pid'))+'\nwait\ntouch'))
+        with lock.open('wb') as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            command = ('import os,runpy; '
+                       f'os.dup2({handle.fileno()}, 3); '
+                       'os.environ["SUBYARD_ACTIVATION_EFFECT_LOCK_FD"]="3"; '
+                       f'rt=runpy.run_path({str(Path(runtime.__file__))!r}); '
+                       f'rt["apply_owner"].__globals__["SOURCE"]=__import__("pathlib").Path({str(self.root)!r}); '
+                       'rt["apply_owner"](os.environ.copy())')
+            engine = subprocess.Popen([sys.executable, '-c', command], pass_fds=(handle.fileno(),))
+        try:
+            owner_pid_file = self.root/'owner-pid'
+            while not (owner_pid_file.exists() and self.pids.exists()) and time.monotonic() < deadline:
+                self.assertIsNone(engine.poll())
+                time.sleep(0.01)
+            owner = int(owner_pid_file.read_text())
+            worker = int(self.pids.read_text())
+            engine.kill()
+            engine.wait(timeout=3)
+            os.kill(owner, 9)
+            os.waitpid(owner, 0)
+            with lock.open('rb') as contender:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.kill(worker, 9)
+                os.waitpid(worker, 0)
+                self.pids.unlink()
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            if engine.poll() is None:
+                engine.kill()
+                engine.wait(timeout=3)
 
     def test_exited_owner_cannot_hide_a_surviving_child(self):
         self.owner.write_text(self.owner.read_text().replace('wait\ntouch',

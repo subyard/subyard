@@ -335,7 +335,7 @@ func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Con
 	for index, scope := range request.Plan.Scopes {
 		scopes[index] = v2ActivationScope(scope)
 	}
-	outcome, pending, err := transition.reconcileActivation(ctx, journal, scopes)
+	outcome, pending, err := transition.reconcileActivation(WithActivationEffectLock(ctx, lock), journal, scopes)
 	if err != nil {
 		return RollbackTargetResponse{}, err
 	}
@@ -376,6 +376,19 @@ func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Con
 	}
 	completion := RollbackTargetCompletion{RollbackTargetContractV1, journal.Transaction, journal.IntentDigest, token, transition.registryDigest, request.TargetArtifact, final.AuthoritySnapshot.Fingerprint, request.Projection, history}
 	return RollbackTargetResponse{SchemaVersion: RollbackTargetProcessSchemaV1, Completion: &completion}, nil
+}
+
+type activationEffectLockKey struct{}
+
+// WithActivationEffectLock carries the held transition OFD to effect runners.
+func WithActivationEffectLock(ctx context.Context, lock *os.File) context.Context {
+	return context.WithValue(ctx, activationEffectLockKey{}, lock)
+}
+
+// ActivationEffectLock is passed only to children that can make activation effects.
+func ActivationEffectLock(ctx context.Context) *os.File {
+	lock, _ := ctx.Value(activationEffectLockKey{}).(*os.File)
+	return lock
 }
 
 func (store *POSIXV2Store) checkInheritedTransitionLock(file *os.File) error {

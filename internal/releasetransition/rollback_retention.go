@@ -159,7 +159,7 @@ func (store *POSIXV2Store) prepareRollbackRetirement(transaction TransactionID, 
 
 // Called only for a whole component selected by the existing protected graph.
 // Exact conditional removals preserve any byte changed after the inventory read.
-func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction TransactionID) (bool, error) {
+func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction TransactionID, endpoints ReleaseLinks) (bool, error) {
 	closure, err := store.readRollbackClosure(transaction)
 	if err != nil {
 		return true, err
@@ -173,6 +173,9 @@ func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction Transacti
 			return true, invalid("rollback artifacts have no durable retirement evidence")
 		}
 		return false, nil
+	}
+	if err := store.checkRollbackRetirementSuccessor(retirement, closure, endpoints); err != nil {
+		return true, err
 	}
 	var actual []rollbackArtifact
 	if closure != nil {
@@ -212,6 +215,9 @@ func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction Transacti
 			if present {
 				err = unix.Unlinkat(parent, name, unix.AT_REMOVEDIR)
 				if err == nil {
+					err = store.inject("after-rollback-directory-unlink")
+				}
+				if err == nil {
 					err = unix.Fsync(parent)
 				}
 				_ = unix.Close(parent)
@@ -235,6 +241,24 @@ func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction Transacti
 			return true, err
 		}
 	}
+	// A prior process may have removed either root and died before syncing
+	// its parent. The intent must survive until those unlinks are durable.
+	for _, parts := range [][]string{{"release-transition", "v2", "transactions"}, {"reconcile", "native-identities"}} {
+		parent, present, err := store.openParent(parts, false)
+		if err != nil {
+			return true, err
+		}
+		if present {
+			err = store.inject("before-rollback-artifact-root-parent-fsync")
+			if err == nil {
+				err = unix.Fsync(parent)
+			}
+			_ = unix.Close(parent)
+			if err != nil {
+				return true, err
+			}
+		}
+	}
 	if closure != nil {
 		name := string(transaction) + ".json"
 		original, err := store.readRecord(rollbackClosureParts, name)
@@ -252,6 +276,44 @@ func (store *POSIXV2Store) removeRetiringRollbackArtifacts(transaction Transacti
 		}
 	}
 	return true, store.removeProtectedRecord(rollbackClosureParts, rollbackRetirementPrefix+string(transaction)+".json", receipt.Payload)
+}
+
+func (store *POSIXV2Store) checkRollbackRetirementSuccessor(retirement rollbackRetirement, original *rollbackClosureV1, endpoints ReleaseLinks) error {
+	selected, err := store.ReadCurrentJournal()
+	if err != nil {
+		return err
+	}
+	if !selected.Exists || selected.Fingerprint != retirement.SelectedJournal {
+		return invalid("rollback retirement selected journal changed")
+	}
+	journal, err := ParseJournal(selected.Payload)
+	if err != nil {
+		return err
+	}
+	if journal.Checkpoint != JournalComplete || journal.Transaction != retirement.SelectedTransaction || !activatedReleaseLinks(endpoints, journal.Releases) && !initialReleaseLinks(endpoints, journal.Releases) {
+		return invalid("rollback retirement does not select its completed successor")
+	}
+	if retirement.Superseding == "" {
+		if original != nil && (original.Releases.Target == endpoints.Active || endpoints.Previous != nil && original.Releases.Target == *endpoints.Previous) {
+			return invalid("rollback retirement has no supersession proof for a retained endpoint")
+		}
+		return nil
+	}
+	snapshot, err := store.readRecord(rollbackClosureParts, string(journal.Transaction)+".json")
+	if err != nil {
+		return err
+	}
+	if !snapshot.Exists || snapshot.Fingerprint != retirement.Superseding {
+		return invalid("rollback retirement successor closure changed")
+	}
+	successor, err := parseRollbackClosure(snapshot.Payload)
+	if err != nil {
+		return err
+	}
+	if successor.Transaction != journal.Transaction || !bytes.Equal(successor.RollbackJournal, selected.Payload) || original != nil && (!sameRollbackPair(*original, successor) || original.Completion.Transaction == successor.Completion.Transaction) {
+		return invalid("rollback retirement successor does not prove supersession")
+	}
+	return nil
 }
 
 func rollbackArtifactLocation(transaction TransactionID, path string) ([]string, string, bool, error) {
@@ -277,7 +339,7 @@ func rollbackArtifactLocation(transaction TransactionID, path string) ([]string,
 
 // The transaction directory may disappear before its native sibling or receipt.
 // Finish those bounded orphan retirements without inventing a transaction root.
-func (store *POSIXV2Store) finishRollbackRetirements(current TransactionID, retain func(*v2TransactionGraph) error) error {
+func (store *POSIXV2Store) finishRollbackRetirements(current TransactionID, endpoints ReleaseLinks, retain func(*v2TransactionGraph) error) error {
 	snapshot, err := store.ReadCurrentJournal()
 	if err != nil {
 		return err
@@ -340,7 +402,7 @@ func (store *POSIXV2Store) finishRollbackRetirements(current TransactionID, reta
 		if _, protected := graph.protected[string(transaction)]; protected {
 			continue
 		}
-		if _, err := store.removeRetiringRollbackArtifacts(transaction); err != nil {
+		if _, err := store.removeRetiringRollbackArtifacts(transaction, endpoints); err != nil {
 			return err
 		}
 		removed++

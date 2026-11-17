@@ -22,9 +22,16 @@ CHECK_REASONS = {'boot-link-missing', 'boot-link-target-mismatch', 'unit-fragmen
 
 def apply_owner(environment):
     """Keep the ordinary owner and its foreground children inside one lifetime."""
+    descriptors = runpy.run_path(str(OWNER_BARRIER))['inherited_owner_descriptors']()
+    effect_lock = environment.get('SUBYARD_ACTIVATION_EFFECT_LOCK_FD')
+    if effect_lock is not None:
+        if effect_lock != '3':
+            raise ValueError('invalid activation effect lock descriptor')
+        os.fstat(3)
+        descriptors = tuple(sorted(set(descriptors + (3,))))
     child = subprocess.Popen([str(SOURCE/'owner.sh'), '--yes'], env=environment,
                              stdout=sys.stderr, start_new_session=True,
-                             pass_fds=runpy.run_path(str(OWNER_BARRIER))['inherited_owner_descriptors']())
+                             pass_fds=descriptors)
     previous = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM)}
     def cancel(signum, frame):
         raise SystemExit(128+signum)

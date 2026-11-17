@@ -2497,6 +2497,9 @@ func (runtime Runtime) runPathEnvironment(
 	command.Stdin = runtime.Stdin
 	command.Stdout = output
 	command.Stderr = output
+	if ctx.Value(readOnlyProbeKey{}) == nil {
+		attachActivationEffectLock(ctx, command)
+	}
 	if ctx.Value(readOnlyProbeKey{}) != nil {
 		// The child's own group is a background group of the operator's terminal.
 		// Reading it or changing its modes, as `incus exec` does, stops the child.

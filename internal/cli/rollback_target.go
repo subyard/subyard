@@ -21,16 +21,6 @@ func (cli *CLI) runRollbackTargetProcess(ctx context.Context, payload []byte, ou
 		cli.errorf("rollback target request is invalid")
 		return 2
 	}
-	registry, version, err := releaseruntime.VerifyRollbackTargetAssets(ctx, cli.options.RepositoryRoot, request)
-	if err != nil {
-		cli.errorf("rollback target assets: %v", err)
-		return 1
-	}
-	if !domain.SafeID(cli.ensureOperationID()) {
-		cli.errorf("rollback target operation context is invalid")
-		return 2
-	}
-	actorRequest := releasetransition.ProcessRequest{SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect, RuntimeRoot: request.RuntimeRoot, ConfigHome: request.ConfigHome, Yard: request.Yard, Target: request.Releases.Target, Direction: releasetransition.DirectionActivatePrevious, ArtifactDigest: request.TargetArtifact, RegistryDigest: request.TargetRegistry, InheritedSettingIDs: request.InheritedSettingIDs}
 	var lock *os.File
 	if request.Execution != nil {
 		fd, err := strconv.Atoi(os.Getenv("SUBYARD_RELEASE_TRANSITION_LOCK_FD"))
@@ -41,6 +31,18 @@ func (cli *CLI) runRollbackTargetProcess(ctx context.Context, payload []byte, ou
 		unix.CloseOnExec(fd)
 		lock = os.NewFile(uintptr(fd), "inherited release transition lock")
 		defer lock.Close()
+	}
+	registry, version, err := releaseruntime.VerifyRollbackTargetAssets(ctx, cli.options.RepositoryRoot, request)
+	if err != nil {
+		cli.errorf("rollback target assets: %v", err)
+		return 1
+	}
+	if !domain.SafeID(cli.ensureOperationID()) {
+		cli.errorf("rollback target operation context is invalid")
+		return 2
+	}
+	actorRequest := releasetransition.ProcessRequest{SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect, RuntimeRoot: request.RuntimeRoot, ConfigHome: request.ConfigHome, Yard: request.Yard, Target: request.Releases.Target, Direction: releasetransition.DirectionActivatePrevious, ArtifactDigest: request.TargetArtifact, RegistryDigest: request.TargetRegistry, InheritedSettingIDs: request.InheritedSettingIDs}
+	if lock != nil {
 		actorRequest.Mode = releasetransition.ProcessConverge
 		if err := releaseruntime.CheckSourcePolicy(ctx, actorRequest); err != nil {
 			cli.errorf("rollback target source policy: %v", err)

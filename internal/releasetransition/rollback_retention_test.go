@@ -2,14 +2,119 @@ package releasetransition
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestRollbackRetentionRejectsChangedSuccessorBeforeUnlink(t *testing.T) {
+	for _, field := range []string{"selected journal", "successor closure"} {
+		t.Run(field, func(t *testing.T) {
+			store, registry, previous := rollbackRetentionFixture(t)
+			current := nextRollbackRetentionCycle(t, store, previous, "tx-later")
+			selected, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := store.ReadMigrationLedger(registry, current.Completion.TargetRegistry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			endpoints := ReleaseLinks{Active: "target", Previous: releaseIDPointer("source")}
+			if err := store.prepareRollbackRetirement(previous.Transaction, selected, state, endpoints, &current); err != nil {
+				t.Fatal(err)
+			}
+			intent, _, err := store.readRollbackRetirement(previous.Transaction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if field == "selected journal" {
+				intent.SelectedJournal = digestA
+			} else {
+				intent.Superseding = digestA
+			}
+			payload, err := json.Marshal(intent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(store.configHome, "reconcile", "rollback", "v1", "closures", rollbackRetirementPrefix+string(previous.Transaction)+".json")
+			testkit.WriteFile(t, path, append(payload, '\n'), 0o600)
+			if _, err := store.removeRetiringRollbackArtifacts(previous.Transaction, endpoints); err == nil || !strings.Contains(err.Error(), field+" changed") {
+				t.Fatalf("changed proof: %v", err)
+			}
+			if err := store.checkRollbackArtifactInventory(previous.Transaction, previous.Artifacts); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestRollbackRetentionSyncsParentsOfAlreadyRemovedRoots(t *testing.T) {
+	store, registry, original := rollbackRetentionFixture(t)
+	previous := nextRollbackRetentionCycle(t, store, original, "tx-with-native-root")
+	current := nextRollbackRetentionCycle(t, store, previous, "tx-new-root")
+	selected, err := store.ReadCurrentJournal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.ReadMigrationLedger(registry, current.Completion.TargetRegistry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoints := ReleaseLinks{Active: "target", Previous: releaseIDPointer("source")}
+	if err := store.prepareRollbackRetirement(previous.Transaction, selected, state, endpoints, &current); err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("crash after unlink")
+	for _, root := range []string{"transaction", "native-identities"} {
+		store.fault = func(point string) error {
+			if point != "after-rollback-directory-unlink" {
+				return nil
+			}
+			parts, name, _, err := rollbackArtifactLocation(previous.Transaction, root+"/")
+			if err != nil {
+				return err
+			}
+			path := filepath.Join(append([]string{store.configHome}, append(parts, name)...)...)
+			if _, err := os.Stat(path); os.IsNotExist(err) {
+				return stop
+			}
+			return nil
+		}
+		// Removal visits transaction before native-identities in reverse lexical order.
+		if _, err := store.removeRetiringRollbackArtifacts(previous.Transaction, endpoints); !errors.Is(err, stop) {
+			t.Fatalf("remove %s: %v", root, err)
+		}
+	}
+	for _, at := range []int{1, 2} {
+		syncs := 0
+		store.fault = func(point string) error {
+			if point == "before-rollback-artifact-root-parent-fsync" {
+				syncs++
+				if syncs == at {
+					return stop
+				}
+			}
+			return nil
+		}
+		if _, err := store.removeRetiringRollbackArtifacts(previous.Transaction, endpoints); !errors.Is(err, stop) {
+			t.Fatalf("sync %d: %v", at, err)
+		}
+		if _, receipt, err := store.readRollbackRetirement(previous.Transaction); err != nil || !receipt.Exists {
+			t.Fatalf("proof discarded before sync %d: %v", at, err)
+		}
+	}
+	store.fault = nil
+	if _, err := store.removeRetiringRollbackArtifacts(previous.Transaction, endpoints); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func rollbackRetentionFixture(t *testing.T) (*POSIXV2Store, RegistryV2, rollbackClosureV1) {
 	t.Helper()

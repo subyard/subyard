@@ -3748,6 +3748,10 @@ func (transition *V2Transition) reconcileActivationOwners(
 	expected []v2ActivationScope,
 	findings *bool,
 ) (Outcome, error) {
+	effectContext := ctx
+	if ActivationEffectLock(ctx) != nil {
+		ctx = WithActivationEffectLock(ctx, nil)
+	}
 	pending := map[int]bool{}
 	for pass := 0; pass < 2; pass++ {
 		for index, reconciler := range transition.options.Reconcilers {
@@ -3799,7 +3803,7 @@ func (transition *V2Transition) reconcileActivationOwners(
 				pending[index] = true
 				continue
 			}
-			if err := reconciler.Reconcile(ctx, links); err != nil {
+			if err := reconciler.Reconcile(effectContext, links); err != nil {
 				phase := "reconcile"
 				var phased interface{ ActivationPhase() string }
 				if errors.As(err, &phased) && phased.ActivationPhase() != "" {

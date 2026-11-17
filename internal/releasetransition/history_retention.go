@@ -113,7 +113,7 @@ func (store *POSIXV2Store) cleanupClosedMigrationTransactions(current Transactio
 		if err := store.prepareRollbackRetirement(transaction, selected, state, endpoints, successor); err != nil {
 			return true, err
 		}
-		return store.removeRetiringRollbackArtifacts(transaction)
+		return store.removeRetiringRollbackArtifacts(transaction, endpoints)
 	})
 	if err != nil {
 		return err
@@ -121,7 +121,7 @@ func (store *POSIXV2Store) cleanupClosedMigrationTransactions(current Transactio
 	if !selected.Exists {
 		return nil
 	}
-	return store.finishRollbackRetirements(current, retain)
+	return store.finishRollbackRetirements(current, endpoints, retain)
 }
 
 // closedTransactionEvidence proves a transaction directory holds complete terminal
