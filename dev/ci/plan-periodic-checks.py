@@ -39,6 +39,12 @@ PERIODIC_ONLY = [{"id": "periodic:config-sync",
                              "SUBYARD_E2E_CLEANUP_CACHE_HELPER=config/profiles/subyard-dev/tests/e2e/cleanup-cache.sh"),
                  optional_vm("sudo-terminal-ownership", "45m"),
                  optional_vm("zabbly-download-smoke", "15m")]
+# Both NM guard lanes keep their ordinary candidate bundle and own their lease/reboots.
+PERIODIC_ONLY += [{"id": f"periodic:nm-guard/ubuntu-24.04/{lane}", "optional": True,
+                   "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
+                               "bash", "dev/e2e/nm-admin-uplink.sh", *SLOT,
+                               "--lane", lane, "--image", "ubuntu-24.04"]}
+                  for lane in ("fresh", "upgrade")]
 # Veranda GUI SHORT scenarios (veranda/desktop/README.md). They gate no CLI or engine release, so
 # they are periodic only and use their own bundle, which adds the GUI and engine ELFs. A manual
 # check runs only when a dispatch names it.

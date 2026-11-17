@@ -39,6 +39,7 @@ type PoolStorageStatus struct {
 
 type BuilderResourceStatus struct {
 	Environment     string `json:"type"`
+	Image           string `json:"image"`
 	Memory          uint64 `json:"reserved_memory_bytes"`
 	DiskPeak        uint64 `json:"reserved_disk_peak_bytes"`
 	PeakMeasurement string `json:"observed_peak"`
@@ -67,6 +68,7 @@ func usageEvidence(known bool, amount uint64, confirmed string) string {
 
 type BaseResourceStatus struct {
 	Environment     string    `json:"type"`
+	Image           string    `json:"image"`
 	Fingerprint     string    `json:"fingerprint"`
 	CreatedAt       time.Time `json:"created_at"`
 	AgeSeconds      int64     `json:"age_seconds"`
@@ -198,7 +200,7 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 		result.LastBuildError = "base_build_failed"
 	}
 	if registry.Build != nil {
-		result.Builder = &BuilderResourceStatus{Environment: registry.Build.Environment, Memory: registry.Build.Memory, DiskPeak: registry.Build.Disk, PeakMeasurement: "unavailable"}
+		result.Builder = &BuilderResourceStatus{Environment: registry.Build.Environment, Image: normalizedImage(registry.Build.Image), Memory: registry.Build.Memory, DiskPeak: registry.Build.Disk, PeakMeasurement: "unavailable"}
 		if result.MemoryAdmission != nil {
 			// New admission waits for the image lock and confirmed builder cleanup.
 			// Until then report its separate promise and a conservative lower bound;
@@ -212,16 +214,16 @@ func (rt *Runtime) ResourceStatus(ctx context.Context, pool LeasePool) ResourceS
 		if base.Unusable {
 			continue
 		}
-		previous, found := current[base.Environment]
+		previous, found := current[base.identity()]
 		if !found || base.CreatedAt.After(previous.CreatedAt) {
-			current[base.Environment] = base
+			current[base.identity()] = base
 		}
 	}
 	for _, base := range registry.Bases {
 		age := now.Sub(base.CreatedAt)
-		result.Bases = append(result.Bases, BaseResourceStatus{Environment: base.Environment, Fingerprint: base.Fingerprint,
+		result.Bases = append(result.Bases, BaseResourceStatus{Environment: base.Environment, Image: normalizedImage(base.Image), Fingerprint: base.Fingerprint,
 			CreatedAt: base.CreatedAt, AgeSeconds: max(0, int64(age/time.Second)), CompressedBytes: base.Size,
-			Current: !base.Unusable && current[base.Environment].Fingerprint == base.Fingerprint,
+			Current: !base.Unusable && current[base.identity()].Fingerprint == base.Fingerprint,
 			Expired: age < 0 || age >= baseMaxAge, Unusable: base.Unusable})
 	}
 	return result

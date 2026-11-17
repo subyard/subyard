@@ -358,17 +358,23 @@ for name, duration, guest_env in (
     assert [entry for group in plan.values() for entry in group["include"]
             if entry["id"] == check_id] == [optional_vm[check_id]]
     assert optional_vm[check_id] in plan["checks"]["include"]
+nm_checks = [entry for entry in plan["checks"]["include"] if entry["id"].startswith("periodic:nm-guard/")]
+assert nm_checks == [{"id": f"periodic:nm-guard/ubuntu-24.04/{lane}", "optional": True,
+                      "command": ["timeout", "--signal=TERM", "--kill-after=600s", "90m",
+                                  "bash", "dev/e2e/nm-admin-uplink.sh", "--slot", "1",
+                                  "--lane", lane, "--image", "ubuntu-24.04"]}
+                     for lane in ("fresh", "upgrade")]
+assert not {entry["id"] for entry in nm_checks} & set(commands)
 # Adding periodic-only checks must preserve every existing matrix entry, including Veranda.
 p.PERIODIC_ONLY = []
-assert {kind: {"include": [entry for entry in group["include"]
-                          if entry not in (config_sync, apparmor[0], *optional_vm.values())]}
+assert {kind: {"include": [entry for entry in group["include"] if entry not in (config_sync, apparmor[0], *nm_checks, *optional_vm.values())]}
         for kind, group in plan.items()} == p.plan(root)
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
 workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
 for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
-             *optional_vm):
+             *optional_vm, *(entry["id"] for entry in nm_checks)):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
         env=dict(os.environ, ONLY=only, plan=json.dumps(plan))))
@@ -394,7 +400,7 @@ assert {name for name in entries if name.startswith("published:")} == {
     if "vm:published-upgrade/" + (role if role in ("anchor", "hop") else version) not in commands}
 # Unsupported-source VM checks run by default and remain nonblocking on release and PR paths.
 optional = {entry["id"] for group in plan.values() for entry in group["include"] if entry.get("optional")}
-assert optional == {"p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0", *optional_vm}
+assert optional == {"p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0", *optional_vm, *(entry["id"] for entry in nm_checks)}
 assert not {"vm:p0-source-upgrade", *("vm:published-upgrade/" + v for v in ("0.11.0", "0.17.3", "0.27.0"))} & set(commands)
 assert entries["p0:source-upgrade"] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "source-upgrade", "--slot", "1"]
 assert "    continue-on-error: ${{ matrix.optional || false }}\n" in workflow.split("  check:\n", 1)[1].split("    steps:", 1)[0]

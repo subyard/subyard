@@ -15,6 +15,7 @@ bash /usr/local/share/subyard/skills/subyard-test-vms/client.sh status
 `exec HANDLE -- COMMAND [ARG...]` (root), then `release HANDLE` when done.
 Handles under `~/.subyard/e2e/handles/` contain private route, host-key and lease credentials.
 Acquisition defaults to one standard VM; attribution uses guest facts and the yard name as project.
+Use `--image debian-13|ubuntu-24.04` to choose the lease OS (default Debian 13).
 
 Slot states: `available`: acquire; `held` or `busy`: refusals show
 yard, project, run, purpose and expiry;

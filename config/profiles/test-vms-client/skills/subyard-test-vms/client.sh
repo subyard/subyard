@@ -66,6 +66,7 @@ ENVIRONMENT_TYPE=subyard-pair
 VM_COUNT=2
 VM_COUNT_REQUESTED=''
 DISK_REQUESTED=''
+IMAGE_REQUESTED=''
 BASE_FINGERPRINT=""
 GRANT_CPU_PER_VM=""
 GRANT_MEMORY_PER_VM=""
@@ -396,7 +397,9 @@ lease_acquire_request() {
     "$LEASE_ACQUIRE_PROTOCOL" \
     "$ENVIRONMENT_TYPE" "$client" "$fingerprint" "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" \
     "$LEASE_PURPOSE" "$key_type" "$key_blob" "$LEASE_REQUESTED_SLOT"
-  if [ -n "$DISK_REQUESTED" ]; then
+  if [ -n "$IMAGE_REQUESTED" ]; then
+    printf ' %s %s %s' "$VM_COUNT" "${DISK_REQUESTED:--}" "$IMAGE_REQUESTED"
+  elif [ -n "$DISK_REQUESTED" ]; then
     printf ' %s %s' "$VM_COUNT" "$DISK_REQUESTED"
   elif [ -n "$VM_COUNT_REQUESTED" ]; then
     printf ' %s' "$VM_COUNT_REQUESTED"
@@ -628,7 +631,7 @@ render_pool_status() {
        else (.expires_at // "-") end),
       (.environment.type // "-"),
       (if .environment then
-         "\(.environment.vm_count)x cpu=\(.environment.cpu_per_vm) ram=\(.environment.memory_per_vm) disk=\(.environment.disk_per_vm)"
+         "\(.environment.vm_count)x cpu=\(.environment.cpu_per_vm) ram=\(.environment.memory_per_vm) disk=\(.environment.disk_per_vm) image=\(.environment.image // "debian-13")"
        else "-" end)
     ] | @tsv
   ' <<<"$response")
@@ -637,8 +640,8 @@ render_pool_status() {
     "Memory: available=\(.memory.available_bytes // "unknown") reserved=\(.reserved_vm_memory_bytes) bytes; L0=\(.outer_host_evidence)",
     "Storage: driver=\(.storage.driver // "unknown") physical_used=\(.storage.physical_used_bytes // "unknown") physical_free=\(.storage.physical_free_bytes // "unknown") virtual_reserved=\(.reserved_vm_virtual_disk_bytes) bytes",
     "Budgets: disk=\(if .budgets.disk_bytes == 0 then "unlimited" else (.budgets.disk_bytes | tostring) end) cache=\(.budgets.cache_bytes) bytes",
-    (.bases[] | "Base: type=\(.type) fingerprint=\(.fingerprint) age=\(.age_seconds)s current=\(.current) expired=\(.expired)"),
-    (if .builder then "Builder: type=\(.builder.type) reserved_memory=\(.builder.reserved_memory_bytes) reserved_disk_peak=\(.builder.reserved_disk_peak_bytes) bytes; observed_peak=\(.builder.observed_peak)" else empty end),
+    (.bases[] | "Base: type=\(.type) image=\(.image // "debian-13") fingerprint=\(.fingerprint) age=\(.age_seconds)s current=\(.current) expired=\(.expired)"),
+    (if .builder then "Builder: type=\(.builder.type) image=\(.builder.image // "debian-13") reserved_memory=\(.builder.reserved_memory_bytes) reserved_disk_peak=\(.builder.reserved_disk_peak_bytes) bytes; observed_peak=\(.builder.observed_peak)" else empty end),
     (if .last_build_error then "Base failure: \(.last_build_error)" else empty end),
     (.errors[]? | "Telemetry gap: " + .)
   ' <<<"$response"
@@ -731,9 +734,10 @@ parse_lease_grant() {
     && [ "$response_run" = "$LEASE_RUN" ] \
     && [ "$response_purpose" = "$LEASE_PURPOSE" ] \
     || die "facade changed the requested lease attribution"
-  jq -e --arg environment "$ENVIRONMENT_TYPE" --argjson count "$VM_COUNT" '
-    (.grant.environment | keys | sort) ==
+  jq -e --arg environment "$ENVIRONMENT_TYPE" --arg image "${IMAGE_REQUESTED:-debian-13}" --argjson count "$VM_COUNT" '
+    (.grant.environment | del(.image) | keys | sort) ==
       ["cpu_per_vm", "disk_per_vm", "lifecycle", "memory_per_vm", "type", "vm_count"] and
+    (.grant.environment.image // "debian-13") == $image and
     .grant.environment.type == $environment and .grant.environment.vm_count == $count and
     .grant.environment.lifecycle == "disposable-v1" and
     (.grant.environment.cpu_per_vm | type == "number" and . >= 1 and . == floor) and
@@ -860,6 +864,10 @@ acquire_lease() {
   if [ -n "$DISK_REQUESTED" ]; then
     jq -e '(.capabilities // []) | index("disk-size-v1") != null' <<<"$status_response" >/dev/null \
       || die 'broker does not support explicit disk size (disk-size-v1)'
+  fi
+  if [ -n "$IMAGE_REQUESTED" ]; then
+    jq -e '(.capabilities // []) | index("image-v1") != null' <<<"$status_response" >/dev/null \
+      || die 'broker does not support explicit images (image-v1)'
   fi
   LEASE_ACQUIRE_PROTOCOL=acquire-v3
   if jq -e '(.capabilities // []) | index("process-acquire-v4") != null' <<<"$status_response" >/dev/null; then
@@ -1312,6 +1320,9 @@ allocation_option() {
       [ -z "$LEASE_REQUESTED_SLOT" ] || die '--slot may be specified only once'
       set_requested_slot "$2" --slot ;;
     --type) [ "$#" -ge 2 ] || die '--type needs subyard-pair or android-test'; ENVIRONMENT_TYPE="$2" ;;
+    --image)
+      [ "$#" -ge 2 ] && [ -z "$IMAGE_REQUESTED" ] || die '--image requires one image'
+      case "$2" in debian-13|ubuntu-24.04) IMAGE_REQUESTED="$2" ;; *) die '--image must be debian-13 or ubuntu-24.04' ;; esac ;;
     --disk)
       [ "$#" -ge 2 ] || die '--disk needs 50GiB'
       [ -z "$DISK_REQUESTED" ] || die '--disk may be specified only once'
@@ -1652,7 +1663,7 @@ client_acquire() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --owner | --pool | --yard) route_option "$@"; shift 2 ;;
-      --slot | --type | --vm-count | --disk) allocation_option "$@"; shift 2 ;;
+      --slot | --type | --vm-count | --disk | --image) allocation_option "$@"; shift 2 ;;
       --wait) [ "$#" -ge 2 ] || die '--wait needs a duration'; WAIT_SECONDS="$(parse_client_duration "$2" --wait)"; shift 2 ;;
       --purpose) [ "$#" -ge 2 ] || die '--purpose needs a label'; purpose="$2"; shift 2 ;;
       --project) [ "$#" -ge 2 ] || die '--project needs a label'; CLIENT_PROJECT="$2"; shift 2 ;;
@@ -1776,7 +1787,7 @@ Usage: subyard-test-vms COMMAND [OPTIONS]
 
   status [--json]                       show slots, their state and holders
   acquire --slot N [--wait 20m] [--purpose LABEL] [--project NAME] [--idle 20m]
-          [--vm-count 1|2] [--type subyard-pair|android-test] [--disk 50GiB]
+          [--vm-count 1|2] [--type subyard-pair|android-test] [--image debian-13|ubuntu-24.04] [--disk 50GiB]
                                         take a lease; prints its HANDLE on stdout
   exec HANDLE [--vm 1|2] [--stdin] -- COMMAND [ARG...]
                                         run a command as root in the leased VM
