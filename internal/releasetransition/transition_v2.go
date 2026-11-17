@@ -201,11 +201,13 @@ type V2Transition struct {
 type v2WorkKind string
 
 const (
-	v2NativeWork   v2WorkKind = "registered-native"
-	v2SettingsWork v2WorkKind = "settings"
-	v2OwnerWork    v2WorkKind = "owner-registration"
-	v2LedgerWork   v2WorkKind = "ledger"
-	v2IngressWork  v2WorkKind = "ingress"
+	v2NativeWork         v2WorkKind = "registered-native"
+	v2SettingsWork       v2WorkKind = "settings"
+	v2OwnerWork          v2WorkKind = "owner-registration"
+	v2LedgerWork         v2WorkKind = "ledger"
+	v2IngressWork        v2WorkKind = "ingress"
+	v2RollbackVerifyWork v2WorkKind = "rollback-verify"
+	v2RollbackRewindWork v2WorkKind = "rollback-rewind"
 )
 
 type v2Observation struct {
@@ -2781,6 +2783,13 @@ func (transition *V2Transition) convergeStep(
 				if err := transition.inject("after-source-" + string(stepRequest.Kind) + "-apply"); err != nil {
 					return Outcome{}, err
 				}
+			case v2RollbackRewindWork:
+				if err := transition.publishRollbackEdge(*journalSnapshot, work, work.recipe.(*rollbackRewindRecipe)); err != nil {
+					return Outcome{}, err
+				}
+				if err := transition.inject("after-rollback-ledger-cas"); err != nil {
+					return Outcome{}, err
+				}
 			case v2LedgerWork:
 				if err := work.ledgerRecipe().edge.Validate(); err != nil {
 					return Outcome{}, invalid("%v", err)
@@ -3292,6 +3301,8 @@ func (transition *V2Transition) workFingerprint(
 		return ownerRegistrationProgressFingerprint(
 			progress, work.ownerPlan().ExpectedFingerprint, work.ownerPlan().DesiredFingerprint,
 		)
+	case v2RollbackVerifyWork, v2RollbackRewindWork:
+		return transition.observeRollbackWork(ctx, work)
 	case v2LedgerWork:
 		snapshot, _, err := transition.readLedgerSemanticSnapshot()
 		if err != nil {

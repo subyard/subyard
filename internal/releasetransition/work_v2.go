@@ -65,6 +65,14 @@ func (work v2Work) kind() v2WorkKind {
 		if recipe != nil {
 			return v2IngressWork
 		}
+	case *rollbackVerifyRecipe:
+		if recipe != nil {
+			return v2RollbackVerifyWork
+		}
+	case *rollbackRewindRecipe:
+		if recipe != nil {
+			return v2RollbackRewindWork
+		}
 	case *ledgerWorkRecipe:
 		if recipe != nil {
 			return v2LedgerWork
@@ -133,6 +141,8 @@ func (transition *V2Transition) validateWorkRecipe(work v2Work, journal JournalR
 		return invalid("migration work recipe is absent, typed nil or differs from its journal intent")
 	}
 	switch recipe := work.recipe.(type) {
+	case *rollbackVerifyRecipe, *rollbackRewindRecipe:
+		return transition.validateRollbackWork(journal, work)
 	case *ledgerWorkRecipe:
 		return transition.validateLedgerWork(work, step)
 	case *nativeWorkRecipe:
