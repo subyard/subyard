@@ -178,7 +178,7 @@ jq -e '.env == {DISABLE_UPDATES: "1"}' "$policy" >/dev/null || fail 'legacy poli
 
 # The installed hook and its managed registration converge together.
 python3 "$ROOT/dev/sync-git-approval-hook.py" --check
-python3 "$ROOT/config/agents/shared/git-approval-hook-test.py" "$git_hook"
+python3 "$ROOT/config/agents/shared/tests/git-approval-hook-test.py" "$git_hook"
 jq -e --arg hook "$git_hook" '
   .hooks.PreToolUse == [{matcher:"Bash", hooks:[{
     type:"command", command:($hook | @sh), timeout:3, onFailure:"block"

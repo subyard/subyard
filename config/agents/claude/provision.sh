@@ -35,7 +35,8 @@ import sys
 
 # Keep shell separators distinct from quoted words. Comments are recognized only
 # at token boundaries. A full shell evaluator is outside this hook's scope.
-TOKEN = re.compile(r"""[^\S\n]+|\#[^\n]*|[;&|()\n]+|<{1,3}|>+|(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s'";&|()<>\\])+""", re.S)
+TOKEN = re.compile(r"""[^\S\n]+|\#[^\n]*|[;&|\n]+|[()]|<{1,3}|>+|(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s'";&|()<>\\])+""", re.S)
+ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*\+?=")
 GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree",
                      "--namespace", "--config-env", "--super-prefix"}
 GIT_FLAGS = {"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
@@ -61,12 +62,20 @@ def git_action(words):
 def simple_commands(command):
     words = []
     offset = 0
+    array_depth = 0
     while offset < len(command):
         token = TOKEN.match(command, offset)
         if token is None:
             return
         offset = token.end()
         raw = token[0]
+        if array_depth:
+            array_depth += (raw == "(") - (raw == ")")
+            continue
+        if (raw == "(" and words and words[-1][2] == token.start()
+                and ASSIGNMENT.fullmatch(words[-1][0])):
+            array_depth = 1
+            continue
         if raw == "<<":
             # A heredoc body contains data, not a list of shell commands.
             if words:
@@ -84,6 +93,29 @@ def simple_commands(command):
         yield words
 
 
+def shell_command(args):
+    options = iter(args)
+    command_mode = noexec = False
+    for arg in options:
+        if arg == "--":
+            arg = next(options, None)
+            break
+        if re.fullmatch(r"[-+][a-zA-Z]+", arg):
+            enabled = arg[0] == "-"
+            flags = arg[1:]
+            if "c" in flags and enabled:
+                command_mode = True
+            if "n" in flags:
+                noexec = enabled
+            if flags.endswith("o") and next(options, None) == "noexec":
+                noexec = enabled
+        elif not arg.startswith("--"):
+            break
+    else:
+        return None
+    return arg if command_mode and not noexec else None
+
+
 def denied_action(command, nested=False, depth=0):
     if depth == 8:
         return None
@@ -94,7 +126,7 @@ def denied_action(command, nested=False, depth=0):
         except (IndexError, ValueError):
             continue
         start = 0
-        while start < len(words) and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", tokens[start][0]):
+        while start < len(words) and ASSIGNMENT.match(tokens[start][0]):
             start += 1
         if start == len(words):
             continue
@@ -106,14 +138,11 @@ def denied_action(command, nested=False, depth=0):
                            command[tokens[0][1]:tokens[1][2]] != f"git {action}"):
                 return action
         elif executable in {"sh", "bash", "dash", "zsh", "ksh"}:
-            for index, arg in enumerate(args[:-1]):
-                if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", arg):
-                    action = denied_action(args[index + 1], nested=True, depth=depth + 1)
-                    if action:
-                        return action
-                    break
-                if arg == "--" or not arg.startswith("-"):
-                    break
+            script = shell_command(args)
+            if script is not None:
+                action = denied_action(script, nested=True, depth=depth + 1)
+                if action:
+                    return action
     return None
 
 

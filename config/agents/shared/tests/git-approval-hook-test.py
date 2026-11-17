@@ -16,6 +16,9 @@ for action in ("commit", "push"):
         f"/usr/bin/git {action}",
         f"sh -c 'git {action}'",
         f'bash -lc "cd x && git {action}"',
+        f"bash -c -- '/usr/bin/git {action}'",
+        f"bash -n +n -c '/usr/bin/git {action}'",
+        f"examples=(/usr/bin/git {action}); (/usr/bin/git {action})",
         f"true; /usr/bin/git {action}",
         f"GIT_DIR=.git git {action}",
     ):
@@ -37,6 +40,11 @@ for command in (
     "# /usr/bin/git push",
     "cat <<'EOF'\n/usr/bin/git push\nEOF",
     "sh -c 'git log --grep commit; git stash push'",
+    "bash -n -c '/usr/bin/git commit'",
+    "bash -cn '/usr/bin/git commit'",
+    "bash -c -o noexec -- '/usr/bin/git commit'",
+    "examples=(/usr/bin/git push)",
+    "examples+=(\n/usr/bin/git push\n); git status",
 ):
     result = subprocess.run([hook], input=json.dumps({"tool_input": {"command": command}}),
                             text=True, capture_output=True)
