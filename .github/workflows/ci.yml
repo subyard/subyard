@@ -75,11 +75,48 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  verify:
-    # Ubuntu 24.04 carries systemd 255, whose real parser guards the oldest
-    # supported RestartForceExitStatus=/Type= compatibility boundary.
+  verify-go:
     runs-on: ubuntu-24.04
-    # Include setup and ShellCheck alongside all core and profile checks.
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install system test tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
+      - name: Lint
+        run: make lint
+      - name: Go verification
+        run: |
+          set -o pipefail
+          mkdir -p .build/ci-logs
+          ./tests/run.sh --go 2>&1 | tee .build/ci-logs/verify-go.log
+      - name: CLI reference freshness
+        run: make cli-docs-check
+      - name: Preserve failed host-free diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ci-host-free-go-${{ github.run_attempt }}
+          path: |
+            .build/test-runs/
+            .build/ci-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  verify-shell:
+    # Use the Ubuntu host systemd 255 parser for compatibility checks.
+    runs-on: ubuntu-24.04
     timeout-minutes: 70
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -99,24 +136,79 @@ jobs:
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
       - name: ShellCheck
         run: bash dev/shellcheck.sh
-      - name: Complete shipped profile acceptance inventory
-        run: bash dev/test-profiles.sh --e2e --list
-      - name: Yard-safe verification gate
+      - name: Core shell verification
         run: |
           set -o pipefail
           mkdir -p .build/ci-logs
-          make verify 2>&1 | tee .build/ci-logs/verify.log
-      - name: CLI reference freshness
-        run: make cli-docs-check
+          ./tests/run.sh --shell 2>&1 | tee .build/ci-logs/verify-shell.log
       - name: Real local crypto and OpenSSH adapter contracts
         run: bash tests/real-host/adapter-contracts.sh
       - name: Preserve failed host-free diagnostics
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: ci-host-free-${{ github.run_attempt }}
+          name: ci-host-free-shell-${{ github.run_attempt }}
           path: |
             .build/test-runs/
             .build/ci-logs/
           retention-days: 7
           if-no-files-found: ignore
+
+  verify-profiles:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Install system test tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
+      - name: Complete shipped profile acceptance inventory
+        run: bash dev/test-profiles.sh --e2e --list
+      - name: Shipped profile verification
+        run: |
+          set -o pipefail
+          mkdir -p .build/ci-logs
+          {
+            bash dev/test-profiles.sh --permissions-only &&
+              make build VERSION=0.29.0-test &&
+              bash dev/test-profiles.sh --after-permissions
+          } 2>&1 | tee .build/ci-logs/verify-profiles.log
+      - name: Preserve failed host-free diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ci-host-free-profiles-${{ github.run_attempt }}
+          path: .build/ci-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Keep the required check name and fail if any verification job did not succeed.
+  verify:
+    needs: [verify-go, verify-shell, verify-profiles]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every verification job to succeed
+        if: always()
+        env:
+          GO_RESULT: ${{ needs.verify-go.result }}
+          SHELL_RESULT: ${{ needs.verify-shell.result }}
+          PROFILES_RESULT: ${{ needs.verify-profiles.result }}
+        run: |
+          printf 'Go: %s\nShell: %s\nProfiles: %s\n' "$GO_RESULT" "$SHELL_RESULT" "$PROFILES_RESULT"
+          test "$GO_RESULT/$SHELL_RESULT/$PROFILES_RESULT" = success/success/success
+      - name: Reject workflow cancellation
+        if: cancelled()
+        run: exit 1

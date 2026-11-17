@@ -24,7 +24,7 @@ automatically. CI uses `actions/setup-go` with `go-version-file: go.mod`; it doe
 version constant.
 
 `make lint` checks closed release-transition states and their consumers with golangci-lint
-v2.15.0 and its `exhaustive` linter. `make verify` and the existing CI verification job
+v2.15.0 and its `exhaustive` linter. `make verify` and CI's `verify-go` job
 include this gate. The runner downloads checksum-pinned official Linux amd64/arm64
 binaries into `.build/tools/`; Go build and module caches remain shared. A fail-closed
 `default` branch does not satisfy exhaustiveness when a checkpoint state is added.

@@ -3,6 +3,14 @@
 set -euo pipefail
 umask 0022
 
+selection=all
+case "$#:${1:-}" in
+  0:) ;;
+  1:--go) selection=go ;;
+  1:--shell) selection=shell ;;
+  *) printf 'Usage: %s [--go|--shell]\n' "$0" >&2; exit 2 ;;
+esac
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Disposable fixtures must not become workspace repositories in Orca.
 export TMPDIR=/tmp
@@ -41,8 +49,8 @@ finish() {
   set +e
   [ -z "$CHECK_NAME" ] || record_check "$rc"
   [ "$rc" -eq 0 ] || status=failed
-  printf 'run\tall\tall\t%s\t%s\t%s\t-\n' \
-    "$status" "$rc" "$((SECONDS - RUN_STARTED))" >> "$SUMMARY"
+  printf 'run\t%s\tall\t%s\t%s\t%s\t-\n' \
+    "$selection" "$status" "$rc" "$((SECONDS - RUN_STARTED))" >> "$SUMMARY"
   printf 'SUMMARY status=%s checks=%s duration_seconds=%s exit_code=%s results=%s\n' \
     "$status" "$CHECK_COUNT" "$((SECONDS - RUN_STARTED))" "$rc" "$SUMMARY"
   exit "$rc"
@@ -127,21 +135,28 @@ check_go_race() {
     './internal/audit:TestUpdateHistoryPersistsStructuredAttemptWithPrivateModes'
 }
 
-run_check syntax check_syntax
-while IFS= read -r test_name; do
-  case "$test_name" in '' | '# '*) continue ;; esac
-  run_check "tests/$test_name" bash "$ROOT/tests/$test_name"
-done < "$ROOT/tests/suites/preflight.list"
+if [ "$selection" != go ]; then
+  run_check syntax check_syntax
+  while IFS= read -r test_name; do
+    case "$test_name" in '' | '# '*) continue ;; esac
+    run_check "tests/$test_name" bash "$ROOT/tests/$test_name"
+  done < "$ROOT/tests/suites/preflight.list"
+fi
 run_check go-toolchain command -v go
-CURRENT_SUITE=go
-printf 'SUITE go\n'
-run_check gofmt check_format
-run_check go-vet go -C "$ROOT" vet ./cmd/... ./internal/...
+if [ "$selection" != shell ]; then
+  CURRENT_SUITE=go
+  printf 'SUITE go\n'
+  run_check gofmt check_format
+  run_check go-vet go -C "$ROOT" vet ./cmd/... ./internal/...
+fi
 run_check build make -C "$ROOT" build VERSION="${SUBYARD_TEST_BUILD_VERSION:-0.29.0-test}"
 run_check build-layout check_build_layout
-run_check go-race check_go_race
-run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
-run_check observation-fuzz go -C "$ROOT" test ./internal/observation -run '^$' -fuzz '^FuzzValidateJSON$' -fuzztime=1000x
+if [ "$selection" != shell ]; then
+  run_check go-race check_go_race
+  run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
+  run_check observation-fuzz go -C "$ROOT" test ./internal/observation -run '^$' -fuzz '^FuzzValidateJSON$' -fuzztime=1000x
+fi
+[ "$selection" != go ] || exit 0
 run_check manifests check_manifests
 
 for suite in unit contract integration; do

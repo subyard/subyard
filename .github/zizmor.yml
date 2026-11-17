@@ -7,7 +7,9 @@ rules:
       - ci.yml:22:9
       - ci.yml:45:9
       - ci.yml:57:9
-      - ci.yml:89:9
+      - ci.yml:86:9
+      - ci.yml:126:9
+      - ci.yml:165:9
       # setup-go caches only the native Go prerequisite for client contract tests.
       # Veranda's tag/manual triggers run tests and builds; this workflow never
       # uploads artifacts or publishes releases. Retain its test prerequisite cache.
