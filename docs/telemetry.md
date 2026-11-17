@@ -246,11 +246,69 @@ ORDER BY s.source_time
 LIMIT 1000;
 ```
 
-The profile's collector source defines SQLite schema version 2. Opening a version
-1 store for writing migrates it transactionally; read-only export never migrates it.
-Do not write derived calculations back into canonical records. A future usage
-projection can be rebuilt from these records without combining incompatible token
-counters, per-request events or cache/reasoning subsets.
+The collector installs the usage views when it opens the SQLite database for
+writing. The views use the existing schema 2 records layout. Read-only export
+leaves the schema unchanged. Replay of usage records requires a collector that
+supports them.
+
+## Model request usage
+
+The read-only `model_usage` view has one row per identified request. Join its
+`agent_run_id` to `runs` to group spend by task and parent run. Each row can also
+carry a native session, turn, worker ID and parent worker ID when the client sends
+them. A resumed session can appear under multiple run IDs. Group by the run ID
+on the request row to charge that request to its original launch.
+
+```sql
+SELECT json_extract(r.body, '$.task_id') AS task_id,
+       json_extract(r.body, '$.parent_run_id') AS parent_run_id,
+       u.agent_run_id, u.client, u.session_id, u.native_agent_id,
+       count(*) AS requests, count(u.input_tokens) AS known_input_requests,
+       sum(u.input_tokens) AS input_tokens, sum(u.cache_read_tokens) AS cache_read_tokens,
+       sum(u.cache_write_tokens) AS cache_write_tokens, sum(u.output_tokens) AS output_tokens,
+       sum(u.reasoning_tokens) AS reasoning_tokens
+FROM model_usage u LEFT JOIN runs r USING (agent_run_id)
+GROUP BY task_id, parent_run_id, u.agent_run_id, u.client, u.session_id, u.native_agent_id;
+```
+
+| Client | Request accounting and attribution |
+| --- | --- |
+| Claude Code | Uses API request logs. Input excludes cache reads and writes. Cache counts are separate. Native prompt and agent identifiers, including parent agent IDs, are recorded when present. Older exporters can leave built-in worker identity unknown. |
+| Codex CLI | Uses OTLP `response.completed` logs. Cached input and reasoning output are subsets of input and output. The collector excludes the legacy `tool_token_count` field because it carries total tokens. Conversation IDs distinguish reported conversations. Built-in worker parent edges require an explicit native link. |
+| Codex app-server | Uses the same OTLP completion logs as the CLI. App-server protocol notifications and cumulative turn usage are outside the collector's OTLP input. A shared app-server can report multiple sessions under one run. |
+
+Usage is a projection of new deliveries. It keeps numeric zero separate from
+SQL NULL. Sums cover known values in each client row. Claude uses its provider
+request ID where available. Otherwise the identity comes from the native log's
+session and exporter timestamp, plus Claude's event sequence where available. A
+client without these identifiers can still contribute raw OTLP. The projection
+selects one log stream per client and combines repeated observations of the same
+identity. Conflicting values for the same field are reported as NULL. The native
+log identity assumes exporter timestamps distinguish completions within a
+Codex conversation. Request totals exclude aggregate metrics and overlapping
+trace events.
+
+Explicit request observations through the local records contract can carry
+`trigger` (`new_prompt`, `tool_result`, `worker_result`, `poll_unchanged`) and
+`tool_output_bytes` for the bytes newly forwarded to the model. The native
+exporters covered here leave these fields unknown. Claude tool-result logs with
+a request ID, tool-use ID and size contribute to `model_tool_results`. They
+report the completed tool's result size and reference the request that issued the
+tool call. The next model request may receive a different payload. Join on
+`client` and `request_id`, aggregating tool rows before joining to request
+totals.
+
+A bridge that accepts a Codex executable path and invokes it with
+`app-server` can use `/usr/local/bin/subyard-telemetry-run`. The local bridge
+sets that path through `AGENT_BRIDGE_CODEX`. Start the bridge from the managed
+parent so the child inherits its task and parent run. For CLI workers, use the
+regular managed launch with either `codex exec` or `codex exec resume`.
+A new managed process that resumes an existing session creates a new run link
+when that session exports telemetry.
+
+The underlying JSON usage and tool-result records are included in normal
+export/replay. They use the lifecycle and relation retention policy and stay
+queryable after raw OTLP rotates, within the collector's hard disk bound.
 
 ## Resource attribution and measurement semantics
 

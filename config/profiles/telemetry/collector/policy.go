@@ -32,7 +32,7 @@ type Policy struct {
 }
 
 func DefaultPolicy() Policy {
-	return Policy{Schema: PolicyVersion, Attributes: strings.Fields(`service.name service.version telemetry.sdk.name telemetry.sdk.version telemetry.sdk.language deployment.environment.name session.id session_id conversation.id conversation_id thread.id agent.name agent.version agent.id subyard.agent_run.id subyard.agent_run.evidence gen_ai.system gen_ai.provider.name gen_ai.request.model gen_ai.response.model gen_ai.operation.name gen_ai.usage.input_tokens gen_ai.usage.output_tokens gen_ai.usage.cache_read.input_tokens gen_ai.usage.reasoning.output_tokens model model.name event.name tool.name terminal.type prompt_tokens completion_tokens input_tokens output_tokens cached_input_tokens reasoning_output_tokens`), SpanNames: []string{}, EventNames: []string{}}
+	return Policy{Schema: PolicyVersion, Attributes: strings.Fields(`service.name service.version telemetry.sdk.name telemetry.sdk.version telemetry.sdk.language deployment.environment.name session.id session_id conversation.id conversation_id thread.id agent.name agent.version agent.id subyard.agent_run.id subyard.agent_run.evidence gen_ai.system gen_ai.provider.name gen_ai.request.model gen_ai.response.model gen_ai.operation.name gen_ai.usage.input_tokens gen_ai.usage.output_tokens gen_ai.usage.cache_read.input_tokens gen_ai.usage.reasoning.output_tokens model model.name event.name event.kind event.timestamp request_id prompt.id agent_id parent_agent_id turn.id tool_use_id input_token_count output_token_count cached_token_count cache_write_token_count reasoning_token_count cache_read_tokens cache_creation_tokens tool.name terminal.type prompt_tokens completion_tokens input_tokens output_tokens cached_input_tokens reasoning_output_tokens`), SpanNames: []string{}, EventNames: []string{}}
 }
 func LoadPolicy(path string) (Policy, error) {
 	if path == "" {
@@ -60,7 +60,7 @@ func forbidden(key string) bool {
 	k := strings.ToLower(key)
 	// This standardized deployment label is safe metadata, not an environment
 	// variable dump. It is also part of our default configurable allowlist.
-	if k == "deployment.environment.name" {
+	if k == "deployment.environment.name" || k == "prompt.id" {
 		return false
 	}
 	usageCounter := strings.HasSuffix(k, "tokens") || strings.HasSuffix(k, "token_count") || strings.HasSuffix(k, "tokens_count")

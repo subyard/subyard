@@ -17,6 +17,31 @@ import launcher
 
 
 class LauncherTest(unittest.TestCase):
+    def test_nested_codex_replaces_claude_otlp_run_context_on_resume(self):
+        parent = launcher.environment('/fixture', {'agent': 'claude', 'agent_run_id': 'parent', 'task_id': 'task'}, {
+            'OTEL_RESOURCE_ATTRIBUTES': 'service.name=fixture',
+            'OTEL_EXPORTER_OTLP_LOGS_HEADERS': 'Authorization=fixture',
+        })
+        args = types.SimpleNamespace(agent='codex', agent_version='fixture', **{
+            key: None for key in ('task_id', 'project_id', 'worktree_id', 'yard_id', 'host_id')
+        })
+        run = launcher.context(args, parent)
+        self.assertEqual(run['parent_run_id'], 'parent')
+        self.assertEqual(run['task_id'], 'task')
+        child = launcher.environment('/fixture', run, parent)
+        self.assertEqual(child['OTEL_RESOURCE_ATTRIBUTES'], 'service.name=fixture')
+        self.assertEqual(child['OTEL_EXPORTER_OTLP_LOGS_HEADERS'], 'Authorization=fixture')
+        self.assertEqual(child['SUBYARD_AGENT_RUN_ID'], run['agent_run_id'])
+        command = launcher.native_arguments('codex', ['codex', 'exec', 'resume', 'session'], run['agent_run_id'])
+        self.assertEqual(command[-3:], ['exec', 'resume', 'session'])
+        self.assertIn('otel.exporter.otlp-http.headers.x-subyard-agent-run-id='+json.dumps(run['agent_run_id']), command)
+        with patch.object(sys, 'argv', ['launcher.py', 'run', 'app-server', '--listen', 'stdio://']), \
+             patch.object(launcher, 'launch') as launch:
+            launcher.main()
+        parsed = launch.call_args.args[0]
+        self.assertEqual(parsed.agent, 'codex')
+        self.assertEqual(parsed.command, ['--', 'codex', 'app-server', '--listen', 'stdio://'])
+
     def test_final_wait_preserves_original_failure_when_diagnostic_fails(self):
         owner = (Path(__file__).parent/'e2e/owner.sh').read_text()
         function = 'wait_for_finals() {\n'+owner.split('wait_for_finals() {\n',1)[1].split('\n}\n',1)[0]+'\n}\n'

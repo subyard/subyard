@@ -323,6 +323,19 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 runtime.apply()
                 self.assertEqual(calls[-1],('restart',guest.COLLECTOR))
                 self.assertEqual(runtime.observe()['state'],'current')
+                binary = root/'library/subyard-telemetry'
+                previous = binary.read_bytes() + b'previous'
+                binary.write_bytes(previous)
+                saved = json.loads((root/'control/assets.json').read_text())
+                saved[str(binary)] = hashlib.sha256(previous).hexdigest()
+                (root/'control/assets.json').write_text(json.dumps(saved))
+                calls.clear()
+                runtime.apply()
+                self.assertLess(calls.index(('stop', guest.COLLECTOR)),
+                                calls.index(('enable', '--now', guest.COLLECTOR, guest.MANAGER)))
+                self.assertEqual(binary.read_bytes(), runtime.assets[binary][0])
+                self.assertNotIn(('stop', guest.MANAGER), calls)
+                self.assertEqual(runtime.observe()['state'], 'current')
                 for changed in ({'User':'root'},{'DropInPaths':'/etc/systemd/system/subyard-.service.d/foreign.conf'},
                                 {'DropInPaths':'/etc/systemd/system/'+guest.COLLECTOR+'.d/foreign.conf'},
                                 {'KillMode':'process'},{'MemoryMax':'infinity'},{'Environment':'PRIVATE=unsafe'},

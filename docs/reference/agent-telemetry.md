@@ -75,7 +75,7 @@ Run records distinguish `agent_run_id`, agent type/version, native session ID,
 parent run, task, project/worktree, yard and owner host. Samples belong to measured
 objects once; temporal attribution edges carry source, quality and interval.
 Unknown is not zero, and a shared backend is not independently charged to every
-session. Raw OTLP and resource records remain the reconstruction source.
+session. Raw OTLP and resource records remain reconstruction sources. Request usage records preserve identified token counters after raw OTLP rotation.
 Read-only run inspection offers both the run's own links and an explicit
 `parent_run_id` descendant view. The latter selects objects once across the tree,
 including broker allocations; parent-inclusive counters suppress overlapping child

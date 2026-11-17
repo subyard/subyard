@@ -360,6 +360,11 @@ class Runtime:
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
+        binary = self.library/'subyard-telemetry'
+        if self.selected and before_states[COLLECTOR].get('ActiveState') == 'active' and self.asset_snapshot(binary) != self.assets[binary][0]:
+            # Stop before replacing the executable so an interrupted apply can
+            # start the new version through the normal enable path on retry.
+            systemctl('stop', COLLECTOR)
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)
             if before != content:

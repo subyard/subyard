@@ -156,22 +156,25 @@ func Open(dir string, limits Limits) (*Store, error) {
 	if err = db.QueryRow("PRAGMA synchronous").Scan(&syncMode); err != nil || syncMode != 2 {
 		return bad(errors.New("cannot enable FULL synchronization"))
 	}
-	if version < 2 {
-		tx, e := db.Begin()
-		if e != nil {
-			return bad(e)
-		}
-		migration := `ALTER TABLE records ADD COLUMN import_policy_version TEXT NOT NULL DEFAULT ''; PRAGMA user_version=2;`
-		if version == 0 {
-			migration = schema
-		}
-		if _, e = tx.Exec(migration); e != nil {
-			tx.Rollback()
-			return bad(fmt.Errorf("telemetry migration: %w", e))
-		}
-		if e = tx.Commit(); e != nil {
-			return bad(e)
-		}
+	// These views add read-only projections over the v2 records layout.
+	// Keep the on-disk version readable by the previous collector.
+	migration := usageViewSQL()
+	switch version {
+	case 0:
+		migration = schema + migration
+	case 1:
+		migration = `ALTER TABLE records ADD COLUMN import_policy_version TEXT NOT NULL DEFAULT ''; PRAGMA user_version=2;` + migration
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return bad(err)
+	}
+	if _, err = tx.Exec(migration); err != nil {
+		tx.Rollback()
+		return bad(fmt.Errorf("telemetry migration: %w", err))
+	}
+	if err = tx.Commit(); err != nil {
+		return bad(err)
 	}
 	var pageSize int64
 	if err = db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {

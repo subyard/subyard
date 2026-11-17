@@ -211,6 +211,10 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (co
 	return ctx, nil
 }
 func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
+	usageAttributes := make(map[string]bool, len(p.Attributes))
+	for _, key := range p.Attributes {
+		usageAttributes[key] = !forbidden(key)
+	}
 	submit := func(ctx context.Context, kind string, data []byte, relations []Envelope) error {
 		e := Envelope{Kind: "otlp/" + kind, Encoding: "otlp/" + kind, SourceID: "native-otlp", SourceVersion: "collector-pdata/1.69.0", Protobuf: data}
 		if err := SanitizeEnvelope(&e, p); err != nil {
@@ -240,7 +244,11 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 				scope := resource.ScopeLogs().At(j)
 				sessionAttributes(scope.Scope().Attributes(), sessions, p)
 				for k := 0; k < scope.LogRecords().Len(); k++ {
-					sessionAttributes(scope.LogRecords().At(k).Attributes(), sessions, p)
+					log := scope.LogRecords().At(k)
+					sessionAttributes(log.Attributes(), sessions, p)
+					if usage, ok := nativeUsage(resourceCtx, log, resource.Resource().Attributes(), usageAttributes); ok {
+						relations = append(relations, usage)
+					}
 				}
 			}
 			relations = append(relations, sessionEnvelopes(resourceCtx, sessions)...)

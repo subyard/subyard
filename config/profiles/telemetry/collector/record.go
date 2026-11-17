@@ -75,7 +75,7 @@ var allowedBodies = func() map[string]bool {
 	}
 	return m
 }()
-var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true}
+var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true, "model_usage": true, "tool_result": true}
 
 func sanitizeRecord(r Record) (Record, int64, error) {
 	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
@@ -94,6 +94,9 @@ func sanitizeRecord(r Record) (Record, int64, error) {
 	}
 	r.Schema = RecordSchema
 	r.SchemaVersion = 0
+	if r.Kind == "model_usage" || r.Kind == "tool_result" {
+		return sanitizeUsage(r)
+	}
 	body := make(map[string]any, len(r.Body))
 	var removed int64
 	for key, value := range r.Body {

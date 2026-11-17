@@ -179,16 +179,22 @@ def environment(data_dir, run, environ):
         if run.get(field) is not None:
             result[name] = run[field]
     result['SUBYARD_TELEMETRY_DATA_DIR'] = str(data_dir)
-    if run['agent'] == 'claude':
+    if run['agent'] in ('claude', 'codex'):
+        claude = run['agent'] == 'claude'
         fields = [entry for entry in result.get('OTEL_RESOURCE_ATTRIBUTES', '').split(',')
-                  if entry and not entry.startswith('subyard.agent_run.id=')]
-        result['OTEL_RESOURCE_ATTRIBUTES'] = ','.join([*fields, 'subyard.agent_run.id='+run['agent_run_id']])
+                  if entry and entry.partition('=')[0].strip() != 'subyard.agent_run.id']
+        if claude:
+            fields.append('subyard.agent_run.id='+run['agent_run_id'])
+        if claude or 'OTEL_RESOURCE_ATTRIBUTES' in result:
+            result['OTEL_RESOURCE_ATTRIBUTES'] = ','.join(fields)
         for name in ('OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_EXPORTER_OTLP_LOGS_HEADERS',
                      'OTEL_EXPORTER_OTLP_METRICS_HEADERS', 'OTEL_EXPORTER_OTLP_TRACES_HEADERS'):
-            if name == 'OTEL_EXPORTER_OTLP_HEADERS' or name in result:
+            if name in result or (claude and name == 'OTEL_EXPORTER_OTLP_HEADERS'):
                 headers = [entry for entry in result.get(name, '').split(',')
                            if entry and entry.partition('=')[0].strip().lower() != 'x-subyard-agent-run-id']
-                result[name] = ','.join([*headers, 'x-subyard-agent-run-id='+run['agent_run_id']])
+                if claude:
+                    headers.append('x-subyard-agent-run-id='+run['agent_run_id'])
+                result[name] = ','.join(headers)
     return result
 
 
@@ -646,7 +652,11 @@ def main():
     manager.add_argument('--data-dir', default='/var/lib/subyard/telemetry')
     manager.add_argument('--delegate', action='store_true')
     manager.add_argument('--sample-interval', type=float, default=5)
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    if argv[:2] == ['run', 'app-server']:
+        # Bridge clients can supply an executable path and append app-server.
+        argv = ['run', '--agent', 'codex', '--', 'codex', *argv[1:]]
+    args = parser.parse_args(argv)
     if args.verb == 'run':
         return launch(args)
     records.private_directory(args.data_dir)
