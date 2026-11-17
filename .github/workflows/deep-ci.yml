@@ -10,9 +10,9 @@ permissions:
 
 jobs:
   # CI already runs every Go test once with the race detector in a fixed order and
-  # each fuzz target for 1000 inputs on every push. This job only adds what that
-  # cannot find: tests that depend on their order or fail intermittently, and longer
-  # fuzzing. Two shuffled race passes over all packages took 23 minutes on an
+  # each fuzz target for 1000 inputs on pull requests and pushes to master and release/**.
+  # This job adds coverage for order-dependent and intermittent failures, plus
+  # longer fuzzing. Two shuffled race passes over all packages took 23 minutes on an
   # 8-core workstation; internal/releasetransition alone took 21 of them.
   deep-go:
     runs-on: ubuntu-24.04

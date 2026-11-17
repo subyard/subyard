@@ -4,7 +4,7 @@ on:
   pull_request:
     paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'cmd/**', 'internal/**', 'go.mod', 'go.sum', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   push:
-    branches: ['**']
+    branches: [master, 'release/**']
     tags: ['v*']
     paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'cmd/**', 'internal/**', 'go.mod', 'go.sum', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
   workflow_dispatch:

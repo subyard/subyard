@@ -26,10 +26,23 @@ tools are downloaded with SHA-256 verification and cached in `.build/tools`.
 Run `bash dev/lint-workflows.sh` or `bash dev/lint-python.sh` for a focused check;
 workflow linting requires ShellCheck on PATH.
 
+## Required CI checks
+
+Core CI runs `verify`, `compatibility` and `native-engine-arm64` on pull request opens, reopens
+and head updates. GitHub evaluates the checks for the current PR revision, using the test merge
+commit when available. Core CI also runs on pushes to `master` and `release/**` for post-merge
+and standalone release validation. A PR sourced from a release branch can receive both events.
+Periodic E2E probes on `ci-probe/**` use their own push trigger.
+
+## Veranda and dependency audits
+
 `make verify-veranda` runs client formatting, Clippy with
 `--locked --all-targets -- -D warnings`, and native tests, locally and in Veranda CI.
 Install `stable` with Clippy and rustfmt for formatting, Clippy and tests.
-Veranda CI runs the native client on Linux (x86-64 and arm64) and Windows for every relevant push and pull request. The macOS run (`veranda-macos.yml`) is scheduled daily, runs on release tags and on manual dispatch, and is not a merge gate, because hosted macOS arm64 capacity is scarce.
+Veranda CI runs the native client on Linux (x86-64 and arm64) and Windows on path-filtered pull
+requests and pushes to `master` and `release/**`. It also runs on `v*` tag pushes and manual
+dispatch. The macOS run (`veranda-macos.yml`) is scheduled daily, runs on release tags and on
+manual dispatch, and is not a merge gate, because hosted macOS arm64 capacity is scarce.
 The GTK desktop job runs the same format/Clippy checks for `veranda/desktop/Cargo.toml`;
 local desktop compilation also requires `libgtk-4-dev`.
 

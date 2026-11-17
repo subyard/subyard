@@ -1,6 +1,13 @@
 rules:
   cache-poisoning:
     ignore:
+      # zizmor treats explicit release branch pushes as a publishing trigger.
+      # Core CI uploads failure diagnostics only. Release preparation disables
+      # setup-go caching, and compatibility checks hash-pin the baseline binaries.
+      - ci.yml:22:9
+      - ci.yml:45:9
+      - ci.yml:57:9
+      - ci.yml:89:9
       # setup-go caches only the native Go prerequisite for client contract tests.
       # Veranda's tag/manual triggers run tests and builds; this workflow never
       # uploads artifacts or publishes releases. Retain its test prerequisite cache.
