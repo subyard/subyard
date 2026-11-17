@@ -158,6 +158,10 @@ func (cli *CLI) finishRegisteredInitMigrations(ctx context.Context, yard string,
 	// Init keeps its own plan and names its own provision continuation.
 	cli.profileOfferSuppressed = true
 	defer func() { cli.profileOfferSuppressed = false }()
+	// Like direct migrate, compatibility work owns its admission before the ordinary gate.
+	previousAdmission := cli.gateAdmitted
+	cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
+	defer func() { cli.gateAdmitted = previousAdmission }()
 	return cli.runCurrentMigration(ctx, definition, nil, false, yes || slices.Contains(arguments, "--yes") || slices.Contains(arguments, "-y")), nil
 }
 

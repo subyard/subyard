@@ -182,7 +182,7 @@ func prepareIntegrationTest(t *testing.T, cli *CLI, arguments ...string) (*prepa
 		return nil, err
 	}
 	definition, _ := cli.manifest.Lookup("integration")
-	return cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments, ExplicitYard: true})
+	return admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments, ExplicitYard: true})
 }
 func TestIntegrationStoppedAndMissingRejectBeforePlanOrWrite(t *testing.T) {
 	for _, state := range []string{"Stopped", "missing"} {

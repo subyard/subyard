@@ -171,7 +171,7 @@ func TestPrepareCommandOwnsCanonicalStopPlan(t *testing.T) {
 		t.Fatal("stop is missing from the manifest")
 	}
 	arguments := []string{"--force"}
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{
 		Loaded:     loaded,
 		Definition: definition,
 		Arguments:  arguments,
@@ -218,7 +218,7 @@ func TestPreparedCommandExecutesItsCapturedStopPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	definition, _ := program.manifest.Lookup("stop")
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{
 		Loaded: loaded, Definition: definition, Arguments: []string{"--force"},
 	})
 	if err != nil {
@@ -265,7 +265,7 @@ func TestPreparedCommandClassifiesProjectCommitFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	definition, _ := program.manifest.Lookup("stop")
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{
 		Loaded: loaded, Definition: definition, Arguments: []string{"--force"},
 	})
 	if err != nil {
@@ -311,7 +311,7 @@ func TestPreparedCommandCloseReleasesProjectReservationOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepared := &preparedCommand{
-		CLI: &CLI{},
+		CLI: admitPreparedFixture(&CLI{}),
 		Project: &projectExecution{
 			Store:       store,
 			Reservation: reservation.Reservation,
@@ -347,7 +347,7 @@ func TestRPCHandlerCloseReleasesEveryPreparedCommand(t *testing.T) {
 	handler := &rpcHandler{plans: map[string]*preparedCommand{
 		"operation-rpc-one": {
 			lifecycle:     &preparedLifecycle{},
-			CLI:           &CLI{},
+			CLI:           admitPreparedFixture(&CLI{}),
 			closeResource: release.Close,
 			Project: &projectExecution{
 				Store:       store,
@@ -418,7 +418,7 @@ func TestPreparedPlanUsesOneStepsSnapshot(t *testing.T) {
 				t.Fatal(err)
 			}
 			calls := 0
-			prepared := preparedCommand{CLI: program, Loaded: loaded, Definition: command.Definition{Name: "stop", Confirmation: command.ConfirmationNever}, policy: domain.CommandPolicy{Name: "stop", Effect: domain.CommandRead, RemotePolicy: domain.RemoteOnOwner}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+			prepared := preparedCommand{CLI: admitPreparedFixture(program), Loaded: loaded, Definition: command.Definition{Name: "stop", Confirmation: command.ConfirmationNever}, policy: domain.CommandPolicy{Name: "stop", Effect: domain.CommandRead, RemotePolicy: domain.RemoteOnOwner}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 				return domain.AdapterResult{}, nil
 			}, steps: func() []domain.OperationStep {
 				calls++

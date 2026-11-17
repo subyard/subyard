@@ -47,7 +47,7 @@ func TestAppliedIdentityHintPublishesVerifiedIdentityAfterRecreation(t *testing.
 	if err := config.PublishAppliedIdentityHint(loaded.Context.Paths.ConfigHome, old, config.PersistentFileSnapshot{}); err != nil {
 		t.Fatal(err)
 	}
-	prepared := &preparedCommand{CLI: cli, Loaded: loaded}
+	prepared := &preparedCommand{CLI: admitPreparedFixture(cli), Loaded: loaded}
 	if handled, err := prepared.prepareStoppedIdentityInspection(context.Background(), nil); err != nil || handled {
 		t.Fatal("missing native instance incorrectly blocked guarded recreation", handled, err)
 	}
@@ -90,7 +90,7 @@ func TestIdentityInspectionLeavesUnreachableIncusToOrdinaryInit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared := &preparedCommand{CLI: cli, Loaded: loaded}
+	prepared := &preparedCommand{CLI: admitPreparedFixture(cli), Loaded: loaded}
 	check := func(name string, prepare func(context.Context, *initBootstrap) (bool, error), refuses bool) {
 		t.Helper()
 		handled, err := prepare(context.Background(), nil)
@@ -161,7 +161,7 @@ func TestStoppedIdentityInspectionCapturesPrivateApprovalScope(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			prepared := &preparedCommand{CLI: cli, Loaded: loaded}
+			prepared := &preparedCommand{CLI: admitPreparedFixture(cli), Loaded: loaded}
 			handled, err := prepared.prepareStoppedIdentityInspection(context.Background(), nil)
 			if scenario == "foreign" {
 				if !errors.Is(err, domain.ErrPlanStale) {
@@ -298,7 +298,7 @@ func TestStoppedIdentityInspectionStartReceivesSudoPreauthorization(t *testing.T
 	}
 	key := loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName
 	native.Instances[key] = ports.InstanceInfo{Name: loaded.Context.YardInstanceName, Status: "Stopped", Config: map[string]string{"volatile.uuid": "11111111-1111-1111-1111-111111111111"}}
-	prepared := &preparedCommand{CLI: cli, Loaded: loaded}
+	prepared := &preparedCommand{CLI: admitPreparedFixture(cli), Loaded: loaded}
 	handled, err := prepared.prepareStoppedIdentityInspection(context.Background(), nil)
 	if err != nil || !handled {
 		t.Fatal("stopped account inspection omitted", handled, err)

@@ -80,7 +80,7 @@ func TestNativeTargetChecksRetainIndependentCollisionAndForeignOwner(t *testing.
 	}
 	var diagnostics bytes.Buffer
 	cli.options.Stderr = &diagnostics
-	if code := cli.runConfig(context.Background(), loaded, []string{"status", "--all-local"}); code == 0 {
+	if code := admitPreparedFixture(cli).runConfig(context.Background(), loaded, []string{"status", "--all-local"}); code == 0 {
 		t.Fatal("status accepted")
 	}
 	for _, want := range []string{"yards alpha and beta share native target", "belongs to yard foreign", "broken"} {

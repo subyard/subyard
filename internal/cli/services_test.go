@@ -126,7 +126,7 @@ func TestInfrastructureServiceRegistrationHasNoLifecycleEffects(t *testing.T) {
 		t.Fatal(err)
 	}
 	definition := command.Definition{Name: "service", Handler: "@service", Remote: command.RemoteForward, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"register", "fixture-service", "--yard", "default"}, ExplicitYard: true})
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"register", "fixture-service", "--yard", "default"}, ExplicitYard: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestInfrastructureServiceOwnerRenameRequiresExplicitVerifiedRepair(t *testi
 		t.Fatalf("old owner plan remained valid: %v", err)
 	}
 	definition := command.Definition{Name: "service", Handler: "@service", Remote: command.RemoteForward, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"register", "fixture-service", "--yard", "default"}})
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"register", "fixture-service", "--yard", "default"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestInfrastructureServiceLifecycleExecutesOnlyParentApproval(t *testing.T) 
 					t.Fatal(err)
 				}
 				definition := command.Definition{Name: "service", Handler: "@service", Remote: command.RemoteForward, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
-				prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{action, "fixture-service"}})
+				prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{action, "fixture-service"}})
 				if err != nil {
 					t.Fatal(err)
 				}

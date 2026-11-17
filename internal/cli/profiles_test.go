@@ -144,7 +144,7 @@ func prepareScopedProfile(t *testing.T, cli *CLI, arguments ...string) (*prepare
 		return nil, err
 	}
 	definition, _ := cli.manifest.Lookup("profile")
-	return cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments, ExplicitYard: true, InteractiveSetup: true})
+	return admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments, ExplicitYard: true, InteractiveSetup: true})
 }
 
 func TestScopedProfileEnableDisablePreservesNeighborsAndSkipsInit(t *testing.T) {

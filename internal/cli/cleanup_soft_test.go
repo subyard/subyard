@@ -44,7 +44,7 @@ func cleanupAssessmentCommand(t *testing.T, payload string) (*preparedCommand, *
 	testkit.WriteFile(t, filepath.Join(directory, "profile.conf"), []byte("CLEANUP_CACHES=/srv/cache/test\n"), 0644)
 	data := &cleanupAssessmentFixture{payload: []byte(payload)}
 	program := &CLI{options: Options{RepositoryRoot: root, ProjectData: data}}
-	return &preparedCommand{CLI: program, Loaded: config.Loaded{Context: domain.Context{DevUser: "dev", Paths: domain.RuntimePaths{DataHome: root}}, Environment: map[string]string{"ENVIRONMENT_PROFILES": "selected"}}}, data
+	return &preparedCommand{CLI: admitPreparedFixture(program), Loaded: config.Loaded{Context: domain.Context{DevUser: "dev", Paths: domain.RuntimePaths{DataHome: root}}, Environment: map[string]string{"ENVIRONMENT_PROFILES": "selected"}}}, data
 }
 
 func TestCleanupAssessmentPreservesFullWidthIdentityThroughApply(t *testing.T) {

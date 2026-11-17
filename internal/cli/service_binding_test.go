@@ -38,7 +38,7 @@ func TestInfrastructureServiceOperationBinding(t *testing.T) {
 			testkit.WriteFile(t, handler, []byte(fmt.Sprintf("#!/bin/sh\ncat %q\n", payload)), 0o755)
 			selection.definition.InfrastructureService.BindingHandler = "binding.sh"
 			applied := 0
-			prepared := &preparedCommand{CLI: program, steps: func() []domain.OperationStep { return nil }, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+			prepared := &preparedCommand{CLI: admitPreparedFixture(program), steps: func() []domain.OperationStep { return nil }, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 				applied++
 				return domain.AdapterResult{Status: "ok"}, nil
 			}}

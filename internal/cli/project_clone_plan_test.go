@@ -79,7 +79,7 @@ func TestProjectEmptyCloneNativeExecutionCommitsOnlyVerifiedCopy(t *testing.T) {
 			program, execution, source, data := emptyClonePlanFixture(t)
 			data.workspaceRoot = testkit.TempDir(t)
 			definition, _ := program.manifest.Lookup("clone")
-			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.Loaded, Project: execution}
 			prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 			if err := prepared.prepareProject(context.Background(), nil); err != nil {
 				t.Fatal(err)
@@ -141,7 +141,7 @@ func TestProjectCloneUsesNativeGitGlobalConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	definition, _ := program.manifest.Lookup("clone")
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.Loaded, Project: execution}
 	prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 	if err := prepared.prepareProject(context.Background(), nil); err != nil {
 		t.Fatal(err)
@@ -221,7 +221,7 @@ func TestProjectEmptyCloneRetainsStateAndRefusesNewRefsBeforeAdmission(t *testin
 	if !ok {
 		t.Fatal("clone definition missing")
 	}
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.Loaded, Project: execution}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.Loaded, Project: execution}
 	prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
 	if err := prepared.prepareProject(context.Background(), nil); err != nil {
 		t.Fatal(err)

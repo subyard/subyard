@@ -103,7 +103,7 @@ func TestNetworkRestartRequiresTypedConsentBeforeMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition := command.Definition{Name: "network", Handler: "@network", Remote: command.RemoteLocal, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: args})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: args})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -180,7 +180,7 @@ func TestNetworkCPUAuthorizationPrecedesMutation(t *testing.T) {
 			}
 			definition := command.Definition{Name: "network", Handler: "@network", Remote: command.RemoteLocal,
 				Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
-			prepared, err := program.prepareCommand(context.Background(),
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(),
 				prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: args})
 			if err != nil {
 				t.Fatal(err)
@@ -247,7 +247,7 @@ func TestNetworkPreparationIsReadOnlyAndRejectsForeignHost(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition := command.Definition{Name: "network", Handler: "@network", Remote: command.RemoteLocal, Effect: command.EffectMutate, Confirmation: command.ConfirmationDynamic, Visibility: command.VisibilityPublic}
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: args})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: args})
 			invalid := args[0] == "isolation" || strings.Contains(args[1], "/")
 			if invalid {
 				if err == nil {

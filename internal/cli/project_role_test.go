@@ -237,7 +237,7 @@ func TestCanonicalCompatibilityProjectRouteRevalidatedBeforeWork(t *testing.T) {
 			}
 			beforeExecution := nativeTreeSnapshot(t, root)
 			called := false
-			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Project: execution, Plan: domain.OperationPlan{Confirmed: true},
 				execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 					called = true
 					return domain.AdapterResult{Status: "ok"}, nil
@@ -457,7 +457,7 @@ func TestCanonicalRemoteProjectRoleRecheckedOnOwner(t *testing.T) {
 			before := nativeTreeSnapshot(t, store.Root)
 			writeCLIFile(t, denied, "denied\n", 0o600)
 			physicalWork := false
-			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Project: execution, Plan: domain.OperationPlan{Confirmed: true},
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Project: execution, Plan: domain.OperationPlan{Confirmed: true},
 				execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 					physicalWork = true
 					return domain.AdapterResult{Status: "ok"}, nil

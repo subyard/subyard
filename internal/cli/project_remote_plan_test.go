@@ -92,7 +92,7 @@ func ownerProjectCopyFixture(t *testing.T) (*CLI, *preparedCommand, *bool) {
 		t.Fatal(err)
 	}
 	source := ProjectCopySourceDescriptor{Schema: 1, Source: "/controller/source", ArchiveDigest: fmt.Sprintf("%x", sha256.Sum256([]byte("retained archive"))), ArchiveSize: 2048, TreeDigest: tree, RequestedName: "Demo", TargetProfile: "yard"}
-	prepared, err = program.prepareOwnerProjectCopy(context.Background(), loaded, source)
+	prepared, err = admitPreparedFixture(program).prepareOwnerProjectCopy(context.Background(), loaded, source)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestProjectOwnerCopyRechecksTargetAfterConsentBeforeAdmission(t *testing.T)
 	}
 	source := initial.Project.ownerCopy.source
 	source.TargetProfile = "sample"
-	prepared, err := fresh.prepareOwnerProjectCopy(context.Background(), loaded, source)
+	prepared, err := admitPreparedFixture(fresh).prepareOwnerProjectCopy(context.Background(), loaded, source)
 	if err != nil {
 		t.Fatal(err)
 	}

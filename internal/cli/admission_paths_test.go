@@ -308,7 +308,7 @@ func TestRunAdmissionTeardownFull(t *testing.T) {
 		t.Fatalf("resume diagnostic=%q", direct)
 	}
 	// The direct resume entrypoint is exempt like teardown --full: its prepared
-	// command must not reach execution without an admission (tests do not refuse that).
+	// command must not reach execution without an admission.
 	var discard bytes.Buffer
 	resumed, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"_uninstall-resume", pending},

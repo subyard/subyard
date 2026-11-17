@@ -152,7 +152,7 @@ func TestRemoteIntegrationUsesOneOwnerRPCSession(t *testing.T) {
 				}
 				definition, _ := cli.manifest.Lookup("provision")
 				ownerArgs = []string{"sample"}
-				owner, err = cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: ownerArgs})
+				owner, err = admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: ownerArgs})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -263,7 +263,7 @@ while True:
 				}
 				return []string{"-o", "HostKeyAlias=reviewed-owner"}, nil
 			})
-			prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: owner.Definition, Arguments: args, ReadOnly: kind == "status"})
+			prepared, err := admitPreparedFixture(cli).prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: owner.Definition, Arguments: args, ReadOnly: kind == "status"})
 			if trustCalls != 1 {
 				t.Fatalf("SSH trust checks: %d", trustCalls)
 			}

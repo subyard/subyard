@@ -241,7 +241,7 @@ func TestStartRefusesNeverInitializedYardBeforePower(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition, _ := program.manifest.Lookup("start")
-			prepared := &preparedCommand{CLI: program, Definition: definition, Loaded: loaded, Arguments: []string{"--yes"}}
+			prepared := &preparedCommand{CLI: admitPreparedFixture(program), Definition: definition, Loaded: loaded, Arguments: []string{"--yes"}}
 			err = prepared.prepareLifecycle(context.Background(), nil)
 			if !test.refused {
 				if err != nil {

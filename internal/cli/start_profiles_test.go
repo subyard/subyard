@@ -76,7 +76,7 @@ printf '%%s\n' '%s'
 				writeCLIFile(t, config.DeveloperIdentityMarkerPath(loaded.Context.Paths.ConfigHome, "default"), `{}`, 0600)
 			}
 			definition, _ := program.manifest.Lookup("start")
-			prepared := &preparedCommand{CLI: program, Definition: definition, Loaded: loaded, Arguments: []string{"--yes"}}
+			prepared := &preparedCommand{CLI: admitPreparedFixture(program), Definition: definition, Loaded: loaded, Arguments: []string{"--yes"}}
 			if err := prepared.prepareLifecycle(context.Background(), nil); err != nil {
 				t.Fatal(err)
 			}

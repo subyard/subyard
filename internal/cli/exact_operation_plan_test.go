@@ -11,7 +11,7 @@ import (
 
 func TestExactOperationPlanExpiry(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
-	prepared := &preparedCommand{Plan: domain.OperationPlan{OperationID: "fixture", Command: "fixture"}}
+	prepared := &preparedCommand{CLI: admitPreparedFixture(&CLI{}), Plan: domain.OperationPlan{OperationID: "fixture", Command: "fixture"}}
 	plan := bindExactOperationPlan(prepared, now)
 	if plan.Schema != 1 || plan.StepSchema != 0 || len(plan.Digest) != 64 || !plan.ExpiresAt.Equal(now.Add(5*time.Minute)) {
 		t.Fatalf("invalid exact plan: %#v", plan)
@@ -43,6 +43,7 @@ func TestExactOperationPlanRejectsChangedBinding(t *testing.T) {
 	for _, kind := range []string{"missing digest", "tampered digest", "state", "context", "arguments", "stored plan", "incomplete steps"} {
 		t.Run(kind, func(t *testing.T) {
 			prepared := &preparedCommand{
+				CLI: admitPreparedFixture(&CLI{}),
 				Plan: domain.OperationPlan{
 					OperationID: "fixture", Command: "fixture",
 					Steps: []domain.OperationStep{{

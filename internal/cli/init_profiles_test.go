@@ -224,7 +224,7 @@ func TestPreparedInitOnlyOffersProfileAtInteractiveBoundary(t *testing.T) {
 	}
 	definition, _ := cli.manifest.Lookup("init")
 	for _, readOnly := range []bool{false, true} {
-		prepared, err := cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: readOnly})
+		prepared, err := admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: readOnly})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -234,7 +234,7 @@ func TestPreparedInitOnlyOffersProfileAtInteractiveBoundary(t *testing.T) {
 		t.Fatal("RPC preparation tried to read setup input")
 	}
 	// An exact/read-only direct plan must also stay noninteractive.
-	prepared, err := cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: true, InteractiveSetup: true})
+	prepared, err := admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: true, InteractiveSetup: true})
 	if err != nil {
 		t.Fatal(err)
 	}

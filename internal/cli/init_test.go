@@ -1740,7 +1740,7 @@ func TestPreparedInitAllowsShrinkToHooksAndRejectsExpansion(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition, _ := program.manifest.Lookup("init")
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1786,7 +1786,7 @@ func TestPreparedEmptyInitSkipsDispatchAfterLockedRefresh(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition, _ := program.manifest.Lookup("init")
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition})
 			if err != nil {
 				t.Fatal(err)
 			}

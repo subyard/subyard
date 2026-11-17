@@ -71,7 +71,7 @@ func TestInfrastructureServiceInstallBootstrapsOnlyAfterParentConsent(t *testing
 			if foreign {
 				incus.Reconcile = ports.ReconcileState{ProjectFound: true, InstanceFound: true, Instance: ports.InstanceInfo{Name: loaded.Context.YardInstanceName, Config: map[string]string{"volatile.uuid": "foreign"}}}
 			}
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Bootstrap: bootstrap, Definition: definition, Arguments: arguments, ExplicitYard: true})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Bootstrap: bootstrap, Definition: definition, Arguments: arguments, ExplicitYard: true})
 			target := filepath.Join(root, "state/yards/fixture-runtime/config.env")
 			registryRoot := filepath.Join(root, "data/services")
 			assertAbsent := func() {

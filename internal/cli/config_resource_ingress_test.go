@@ -69,7 +69,7 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 				if err != nil {
 					t.Fatal(err)
 				}
-				code := program.runConfigAuthoring(context.Background(), loaded, "set",
+				code := admitPreparedFixture(program).runConfigAuthoring(context.Background(), loaded, "set",
 					[]string{test.setting, test.value, "--scope", "yard"}, true)
 				if code != test.wantCode {
 					t.Fatalf("config code=%d, want=%d; stderr=%s", code, test.wantCode, stderr.String())

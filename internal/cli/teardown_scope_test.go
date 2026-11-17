@@ -334,7 +334,7 @@ func TestQueuedLocalMutationRefusesCompletedEpochInRetainedRoot(t *testing.T) {
 	}
 	release()
 	called := false
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: &CLI{}, Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal, Paths: domain.RuntimePaths{DataHome: home, ConfigHome: filepath.Join(home, "config")}}}, Plan: domain.OperationPlan{Confirmed: true}, ownerAdmission: ownerWriteAdmission{home: home, generation: []uninstall.Tree{generation}}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(&CLI{}), Loaded: config.Loaded{Context: domain.Context{AccessKind: domain.AccessLocal, Paths: domain.RuntimePaths{DataHome: home, ConfigHome: filepath.Join(home, "config")}}}, Plan: domain.OperationPlan{Confirmed: true}, ownerAdmission: ownerWriteAdmission{home: home, generation: []uninstall.Tree{generation}}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 		called = true
 		return domain.AdapterResult{}, nil
 	}}

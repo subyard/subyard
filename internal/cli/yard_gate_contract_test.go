@@ -322,7 +322,7 @@ func TestAdmissionIsReadOnlyByTheGate(t *testing.T) {
 		"gateRecord":   {"yard_gate_verdict.go:gateAdmission", "yard_gate_verdict.go:gateSkipped", "cli.go:Handle"},
 		"gateDeclared": {"yard_gate_verdict.go:setGateSubject", "yard_gate_verdict.go:gateSubject"},
 		"gatePlanned":  {"yard_gate_verdict.go:bindGate", "cli.go:Handle"},
-		"gateAdmitted": {"admission.go:admitReleaseGate", "admission.go:admitTeardownGate", "admission.go:admitTeardownInvocation", "admission.go:admitRPCOperation", "cli.go:Run", "cli.go:Handle", "cli.go:runReleaseTransitionYardCommandIO", "yard_gate_verdict.go:gateAdmission", "yard_scoped_gate.go:guardEffects", "resource_commands.go:runResourceCommand"},
+		"gateAdmitted": {"admission.go:admitReleaseGate", "admission.go:admitTeardownGate", "admission.go:admitTeardownInvocation", "admission.go:admitRPCOperation", "cli.go:Run", "cli.go:Handle", "cli.go:runReleaseTransitionYardCommandIO", "registered_yard_migration.go:finishRegisteredInitMigrations", "yard_gate_verdict.go:gateAdmission", "yard_scoped_gate.go:guardEffects", "resource_commands.go:runResourceCommand"},
 	}
 	files, err := filepath.Glob(filepath.Join(repositoryRoot(t), "internal/cli/*.go"))
 	if err != nil {
@@ -423,7 +423,12 @@ func TestDifferentialAdmissionOracle(t *testing.T) {
 		testkit.WriteFile(t, registry, append(mustReadConfigFixture(t, registry), line+"\n"...), 0o600)
 	}
 	var bound []*preparedCommand
-	gateBindObserver = func(prepared *preparedCommand) { bound = append(bound, prepared) }
+	gateBindObserver = func(prepared *preparedCommand) {
+		if prepared.gateAdmission() == nil {
+			t.Errorf("Run reached binding for %s without an admission", prepared.Definition.Handler)
+		}
+		bound = append(bound, prepared)
+	}
 	t.Cleanup(func() { gateBindObserver = nil })
 	program := &CLI{}
 	networkPolicy, _ := yardnetwork.Decode(nil)

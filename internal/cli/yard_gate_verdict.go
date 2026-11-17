@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -463,11 +462,6 @@ func (prepared *preparedCommand) bindGate(ctx context.Context) error {
 	}
 	admission := prepared.gateAdmission()
 	if admission == nil {
-		// Every invocation and RPC operation carries an explicit kind; only a
-		// test builds a prepared command outside them.
-		if testing.Testing() {
-			return nil
-		}
 		return errors.New("internal error: a prepared command reached execution without a release gate admission")
 	}
 	subject := prepared.gateSubject()

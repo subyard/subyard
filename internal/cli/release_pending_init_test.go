@@ -646,7 +646,7 @@ func TestPreparedRepairPostInitBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition, _ := program.manifest.Lookup("migrate")
-			prepared := &preparedCommand{CLI: program, Loaded: loaded, Definition: definition, lifecycle: &preparedLifecycle{}, exactState: "release-state", stepsComplete: true, executeNoOp: true}
+			prepared := &preparedCommand{CLI: admitPreparedFixture(program), Loaded: loaded, Definition: definition, lifecycle: &preparedLifecycle{}, exactState: "release-state", stepsComplete: true, executeNoOp: true}
 			prepared.steps = func() []domain.OperationStep {
 				return []domain.OperationStep{{ID: "release.activate", Target: "release", Observed: "drift", Desired: "ready", Decision: domain.StepApply, Verify: "readiness", Consequence: "repair active release"}}
 			}

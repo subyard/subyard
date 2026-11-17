@@ -157,7 +157,7 @@ func ownerProjectExportFixture(t *testing.T) (*CLI, *preparedCommand, *exportOwn
 	}
 	descriptor := ProjectExportDescriptor{Schema: 1, ProjectID: "Demo", SourceKey: record.SourceKey, ArchiveDigest: fmt.Sprintf("%x", sha256.Sum256([]byte("retained controller archive"))), ArchiveSize: 2048, SourceTree: tree, Destination: "/controller-only/output/Demo.patch", DestinationBinding: fmt.Sprintf("%x", sha256.Sum256([]byte("controller-only private destination facts")))}
 	beforeState := nativeTreeSnapshot(t, loaded.Context.Paths.StateDir)
-	prepared, err := program.prepareOwnerProjectExport(context.Background(), loaded, descriptor)
+	prepared, err := admitPreparedFixture(program).prepareOwnerProjectExport(context.Background(), loaded, descriptor)
 	if err != nil {
 		t.Fatal(err)
 	}

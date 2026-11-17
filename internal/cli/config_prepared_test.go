@@ -39,7 +39,7 @@ func configExactPlan(t *testing.T, program *CLI, loaded config.Loaded, arguments
 	if !ok {
 		t.Fatal("config metadata missing")
 	}
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments})
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestConfigExactScalarRejectsInvalidProspectiveScopeBeforeConsent(t *testing
 			arguments = append(arguments, "--scope", "host")
 			program := configExactProgram(t, root, environment, nil, nil)
 			definition, _ := program.manifest.Lookup("config")
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments})
 			if prepared != nil {
 				_ = prepared.Close()
 			}
@@ -340,7 +340,7 @@ func TestConfigExactSharedScalarValidatesRegisteredNeighbor(t *testing.T) {
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	program := configExactProgram(t, root, environment, nil, nil)
 	definition, _ := program.manifest.Lookup("config")
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "E2E_VM_SLOT_COUNT", "3", "--scope", "shared"}})
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "E2E_VM_SLOT_COUNT", "3", "--scope", "shared"}})
 	if prepared != nil {
 		_ = prepared.Close()
 	}
@@ -405,14 +405,14 @@ func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T)
 	writeConfigCommandFile(t, target, "YARD_TEMPLATE=isolated\n")
 	loaded := loadConfigCommandContext(t, root, environment, "named")
 	program := configExactProgram(t, root, environment, nil, nil)
-	valid := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded}
+	valid := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Loaded: loaded}
 	err := valid.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"})
 	_ = valid.Close()
 	if err != nil {
 		t.Fatalf("valid profile-compatible draft rejected: %v", err)
 	}
 	for _, arguments := range [][]string{{"ENVIRONMENT_PROFILES", "another"}, {"YARD_KIND", "container"}} {
-		prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded}
+		prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Loaded: loaded}
 		err := prepared.prepareConfigScalar(context.Background(), "set", append(arguments, "--scope", "yard"))
 		_ = prepared.Close()
 		if err == nil {
@@ -624,7 +624,7 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 				writeConfigCommandFile(t, dependency, content, mode)
 				writeConfigCommandFile(t, target, initial)
 				loaded := loadConfigCommandContext(t, root, environment, "named")
-				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: configExactProgram(t, root, environment, nil, nil), Loaded: loaded}
+				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(configExactProgram(t, root, environment, nil, nil)), Loaded: loaded}
 				t.Cleanup(func() { _ = prepared.Close() })
 				if err := prepared.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"}); err != nil {
 					t.Fatal(errors.Unwrap(err))
@@ -668,7 +668,7 @@ func TestConfigProspectiveSelectedProfileThroughConfigAlias(t *testing.T) {
 	if loaded.Environment["ENVIRONMENT_PROFILES"] != "sample" {
 		t.Fatal("selected profile lost through alias")
 	}
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: configExactProgram(t, root, environment, nil, nil), Loaded: loaded}
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(configExactProgram(t, root, environment, nil, nil)), Loaded: loaded}
 	t.Cleanup(func() { _ = prepared.Close() })
 	if err := prepared.prepareConfigScalar(context.Background(), "set", []string{"SSH_PORT", "2390", "--scope", "yard"}); err != nil {
 		t.Fatal(err)
@@ -707,7 +707,7 @@ func TestConfigProspectiveOverridesCannotMaskPersistentProfileConstraints(t *tes
 	if err != nil {
 		t.Fatalf("ordinary supplied context should load: %v", err)
 	}
-	if code := program.runConfigAuthoring(context.Background(), loaded, "set", []string{"SSH_PORT", "2444", "--scope", "host", "--local"}, true); code == 0 {
+	if code := admitPreparedFixture(program).runConfigAuthoring(context.Background(), loaded, "set", []string{"SSH_PORT", "2444", "--scope", "host", "--local"}, true); code == 0 {
 		t.Fatal("command override masked invalid persistent profile selection")
 	}
 	content, err := os.ReadFile(path)
@@ -737,7 +737,7 @@ func TestConfigProspectiveContextDefaultsCannotMaskPersistentPaths(t *testing.T)
 	if err != nil {
 		t.Fatalf("ordinary overridden context: %v", err)
 	}
-	if code := program.runConfigAuthoring(context.Background(), loaded, "set", []string{"SSH_PORT", "2444", "--scope", "host", "--local"}, true); code == 0 {
+	if code := admitPreparedFixture(program).runConfigAuthoring(context.Background(), loaded, "set", []string{"SSH_PORT", "2444", "--scope", "host", "--local"}, true); code == 0 {
 		t.Fatal("execution context defaults masked unsafe persistent host paths")
 	}
 	content, err := os.ReadFile(path)

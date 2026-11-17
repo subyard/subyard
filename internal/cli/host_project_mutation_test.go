@@ -94,7 +94,7 @@ func TestPreparedProjectRejectsRemovedOwnerBeforeRefreshOrPhysicalWork(t *testin
 		t.Fatal(err)
 	}
 	called := false
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Project: project,
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(cli), Project: project,
 		Plan: domain.OperationPlan{Confirmed: true, Assessment: &domain.ActionAssessment{Action: "project.sync", Changed: true, Effect: domain.ActionMutation}},
 		refresh: func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 			called = true
@@ -191,7 +191,7 @@ func TestPreparedProjectRejectsChangedOwnerBeforeRoleCheckOrPhysicalWork(t *test
 			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			cli.env = map[string]string{"PATH": fakeBin, "SSH_INVOCATION_LOG": sshLog}
 			called := false
-			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Project: project,
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(cli), Project: project,
 				Plan: domain.OperationPlan{Confirmed: true, Assessment: &domain.ActionAssessment{
 					Action: "project.sync", Changed: true, Effect: domain.ActionMutation}},
 				refresh: func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
