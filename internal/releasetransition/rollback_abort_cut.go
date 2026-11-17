@@ -146,7 +146,7 @@ func (store *POSIXV2Store) prepareRollbackAbortCut(selected ProtectedSnapshot) (
 	if err != nil {
 		return rollbackAbortCut{}, err
 	}
-	if !sameProtectedSnapshot(current.ProjectionSnapshot, initial.ProjectionSnapshot) || !sameLedgerV2(current.Ledger, progress.ledger) {
+	if !current.Checkpointed || !sameProtectedSnapshot(current.ProjectionSnapshot, initial.ProjectionSnapshot) || !sameLedgerV2(current.Ledger, progress.ledger) {
 		return rollbackAbortCut{}, invalid("rollback abort checkpoint differs from its verified ledger cut")
 	}
 	after, err := store.ReadCurrentJournal()
