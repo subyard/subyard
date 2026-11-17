@@ -618,7 +618,7 @@ def snapshot(root):
             break
         if read(path) == raw:
             state.update(status='failed', pending_approvals=[], cleanup='unverified',
-                         error='Bridge process exited without a terminal state.')
+                         error=state.get('error', 'Bridge process exited without a terminal state.'))
             break
     state['queued_messages'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
     return state
@@ -730,12 +730,16 @@ def launch(root, state, config, task, deadline):
                                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         except (OSError, BridgeError) as error:
             reason = str(error) if isinstance(error, BridgeError) else 'Systemd user scope launcher could not start.'
-            state.update(status='failed', error=reason)
-            if not publish_failure(root, state, deadline):
-                print('Launch failed and the bridge inbox lock timed out; use stop to recover.', file=sys.stderr)
-                return 124
+            # Keep the refusal in the launching state until the inbox lock allows terminal publication.
+            state['error'] = reason
+            save_state(root, state)
+            state['status'] = 'failed'
+            published = publish_failure(root, state, deadline)
             if isinstance(error, BridgeError):
                 record_event(root, 'error', message=reason)
+            if not published:
+                print('Launch failed and the bridge inbox lock timed out; use stop to recover.', file=sys.stderr)
+                return 124
             raise
         state.update(pid=child.pid, process_start=process_identity(child.pid))
         save_state(root, state)
@@ -866,7 +870,12 @@ def main():
         return 0
     inspect = args.command in ('status', 'tail', 'wait', 'approvals')
     starting = args.command == 'start'
-    directory(root, create=starting)
+    try:
+        directory(root, create=starting)
+    except FileNotFoundError as error:
+        if starting:
+            raise
+        raise BridgeError('worker state is missing') from error
     if not inspect and not starting and not (root / 'state').exists():
         raise BridgeError('worker state is missing')
     if not inspect or os.path.lexists(root / 'inbox'):
