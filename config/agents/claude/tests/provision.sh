@@ -69,8 +69,15 @@ export CLAUDE_TEST_ROOT="$tmp"
 export SUBYARD_TEST_ARTIFACT_CURL="$ROOT/tests/helpers/artifact-curl.sh" SUBYARD_TEST_TRANSFER_LOG="$tmp/transfer.log"
 run_hook() { # installation root [architecture]
   local root="$1" arch="${2:-amd64}"
+  # Model the distro's runuser stack without changing the host's PAM configuration.
+  if [ ! -f "$root/etc/pam.d/runuser" ]; then
+    install -d -m 0755 "$root/etc/pam.d"
+    install -m 0644 /dev/null "$root/etc/pam.d/runuser"
+    printf 'session required pam_unix.so\n' > "$root/etc/pam.d/runuser"
+  fi
   env PATH="$tmp/bin:$PATH" HOME="$tmp/home" TMPDIR=/tmp \
     CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ARCH="$arch" \
+    CLAUDE_ETC_DIR="$root/etc" \
     CLAUDE_INSTALL_ROOT="$root/opt/subyard/claude" \
     CLAUDE_BIN_LINK="$root/usr/local/bin/claude" \
     CLAUDE_POLICY_DIR="$root/etc/claude-code/managed-settings.d" \
@@ -188,6 +195,7 @@ dev_home="$tmp/dev-home"
 shadow="$dev_home/.local/bin/claude"
 run_shadow_hook() {
   env PATH="$tmp/bin:$PATH" HOME="$tmp/home" TMPDIR=/tmp DEV_USER="$(id -un)" CLAUDE_DEV_HOME="$dev_home" \
+    CLAUDE_ETC_DIR="$root/etc" \
     CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ARCH=amd64 \
     CLAUDE_INSTALL_ROOT="$root/opt/subyard/claude" CLAUDE_BIN_LINK="$link" \
     CLAUDE_POLICY_DIR="$policy_dir" CLAUDE_POLICY_CHECK_PATH="$check" bash "$hook"
@@ -307,6 +315,39 @@ for scenario in corrupt ignore-range range-refused exhausted resume; do
   case "$scenario" in range-refused|exhausted) expected=$'0\n64\n64\n64' ;; esac
   [ "$(cat "$SUBYARD_TEST_TRANSFER_LOG")" = "$expected" ] || fail "wrong resume offsets or retry count: $scenario"
 done
+# Process environment is delivered through both login-shell and PAM paths, never settings env.
+profile_env="$root/etc/profile.d/subyard-claude.sh"
+environment="$root/etc/environment"
+[ "$(stat -c '%a' "$profile_env")" = 644 ] || fail 'incorrect profile environment mode'
+[ "$(stat -c '%a' "$environment")" = 644 ] || fail 'incorrect PAM environment mode'
+env -u CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT -u CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT \
+  bash -euc '. "$1"; bash -euc '\''[ "$CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT:$CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT" = 1:1 ]'\''' \
+  environment-test "$profile_env" || fail 'login environment was not exported to child processes'
+grep -q '^CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT=1$' "$environment" || fail 'PAM inline switch missing'
+grep -q '^CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1$' "$environment" || fail 'PAM substitution switch missing'
+cp "$environment" "$tmp/environment.expected"
+pam_runuser="$root/etc/pam.d/runuser"
+printf 'session required pam_unix.so\n\nsession required pam_env.so readenv=1\n' > "$tmp/runuser.expected"
+cmp "$pam_runuser" "$tmp/runuser.expected" || fail 'runuser PAM environment read missing or existing stack changed'
+run_hook "$root" >/dev/null
+cmp "$environment" "$tmp/environment.expected" || fail 'environment rerun was not idempotent'
+cmp "$pam_runuser" "$tmp/runuser.expected" || fail 'runuser PAM configuration was not idempotent'
+# Replace the whole owned block, retaining unrelated entries before and after it.
+printf 'FOREIGN_BEFORE=keep\n' > "$environment"
+cat "$tmp/environment.expected" >> "$environment"
+sed -i '/^# <<< subyard-claude <<</i RETIRED_CLAUDE_SETTING=1' "$environment"
+printf 'FOREIGN_AFTER=keep\n' >> "$environment"
+run_hook "$root" >/dev/null
+! grep -q RETIRED_CLAUDE_SETTING "$environment" || fail 'old block entries survived'
+[ "$(grep -c '^# >>> subyard-claude >>>$' "$environment")" = 1 ] || fail 'duplicate environment blocks'
+printf 'FOREIGN_BEFORE=keep\nFOREIGN_AFTER=keep\n' > "$tmp/environment.foreign"
+env CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ETC_DIR="$root/etc" bash "$hook" --remove
+[ ! -e "$profile_env" ] || fail 'removal kept the login environment'
+cmp "$environment" "$tmp/environment.foreign" || fail 'removal changed unrelated environment'
+env CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ETC_DIR="$root/etc" bash "$hook" --remove
+cmp "$environment" "$tmp/environment.foreign" || fail 'removal was not idempotent'
+run_hook "$root" >/dev/null
+
 # The home template carries no Git ask rules; the managed drop-in owns them.
 jq -e '.permissions.ask == []' "$ROOT/config/agents/claude/settings.json" >/dev/null \
   || fail 'Claude home template carries Git ask rules'
