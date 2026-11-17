@@ -19,6 +19,8 @@ CREDENTIAL_HEADERS = ('Authorization: Basic synthetic-basic-value\n'
                       'Cookie: session=synthetic-cookie-one; theme=synthetic-cookie-two\n'
                       'Proxy-Authorization: Bearer synthetic-proxy-value\n'
                       'Set-Cookie: id=synthetic-set-cookie; HttpOnly\n'
+                      'Authorization = Basic Zml4dHVyZTphdXRo\n'
+                      'Proxy-Authorization = Basic Zml4dHVyZTpwcm94eQ==\n'
                       'Visible line after headers.')
 ESCAPED_PASSWORD = json.dumps({'password': 'prefix" with synthetic escaped suffix'})
 SCOPE_FIXTURE = r'''#!/usr/bin/env python3
@@ -114,7 +116,8 @@ def finish(text):
         emit({'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}})
     else:
         emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
-              'usage': {'input_tokens': 3, 'output_tokens': 2}})
+              'usage': {'input_tokens': 3, 'output_tokens': 2,
+                        'cache_creation': {'ephemeral_5m_input_tokens': 1}}})
 
 def say(text):
     if codex:
@@ -127,7 +130,8 @@ def await_gate(suffix=''):
     deadline = time.monotonic() + 8
     while not gate.exists():
         assert time.monotonic() < deadline
-        time.sleep(0.02)
+        assert not select.select([sys.stdin], [], [], 0.02)[0], 'a follow-up arrived before the result'
+    assert not select.select([sys.stdin], [], [], 0)[0], 'a follow-up arrived before the result'
 
 def begin(text):
     global scenario
@@ -412,8 +416,6 @@ class Bridge(unittest.TestCase):
                 gate.touch()
                 self.assertEqual(self.done(root), 'first result\n\nmessage:hello' if vendor == 'claude' else 'message:hello')
                 self.assertEqual(list((root / 'inbox').iterdir()), [])
-                self.cli('send', root, '--message', 'late')
-                self.assertEqual(self.done(root), 'resumed:late')
                 (root / 'task.md').write_text('next-task')
                 self.cli('resume', root)
                 self.assertEqual(self.done(root), 'resumed:next-task')
@@ -433,6 +435,62 @@ class Bridge(unittest.TestCase):
         gate.with_suffix('.second').touch()
         self.assertEqual(self.done(root), 'first result\n\nmessage:held follow-up\n\nmessage:another follow-up')
         self.assertEqual(list((root / 'inbox').iterdir()), [])
+        self.assertEqual(self.result(root)['tokens'], {'input_tokens': 9, 'output_tokens': 6,
+                                                        'cache_creation': {'ephemeral_5m_input_tokens': 3}})
+
+    def test_claude_completion_waits_for_an_accepted_send_to_finish_enqueueing(self):
+        gate = self.root / 'first-result'
+        held = self.root / 'enqueue-held'
+        release = self.root / 'enqueue-release'
+        root = self.start('claude', 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
+        self.until(lambda: self.state(root).get('session_id'))
+        script = """
+import os
+from pathlib import Path
+import runpy
+import sys
+import time
+
+bridge, held, release = sys.argv[1:4]
+del sys.argv[1:4]
+rename = os.replace
+def pause(source, target):
+    if target.parent.name == 'inbox':
+        Path(held).touch()
+        deadline = time.monotonic() + 6
+        while not Path(release).exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+    rename(source, target)
+os.replace = pause
+runpy.run_path(bridge, run_name='__main__')
+"""
+        with subprocess.Popen([sys.executable, '-B', '-c', script, str(BRIDGE), str(held), str(release),
+                               'send', '--dir', str(root), '--message', 'racing message'], env=self.env) as sender:
+            try:
+                self.until(held.exists)
+                gate.touch()
+                self.assertEqual(self.cli('wait', root, '--timeout', '0.3', success=False).returncode, 124)
+            finally:
+                release.touch()
+            self.assertEqual(sender.wait(timeout=4), 0)
+        self.assertEqual(self.done(root), 'first result\n\nmessage:racing message')
+        self.assertEqual(list((root / 'inbox').iterdir()), [])
+
+    def test_send_refuses_finished_workers(self):
+        for vendor in ('codex', 'claude'):
+            for status, task in (('done', 'complete'), ('failed', 'result-error'), ('interrupted', 'pending')):
+                with self.subTest(vendor=vendor, status=status):
+                    root = self.start(vendor, task)
+                    if status == 'interrupted':
+                        self.approval(root)
+                        self.cli('stop', root, '--timeout', '1')
+                    self.done(root, status)
+                    generation = self.state(root)['generation']
+                    result = self.cli('send', root, '--message', 'late', success=False)
+                    self.assertIn('use resume', result.stderr)
+                    self.assertEqual(self.state(root)['generation'], generation)
+                    self.assertEqual(list((root / 'inbox').iterdir()), [])
 
     def test_rejected_steer_preserves_worker_and_delivers_on_next_turn(self):
         root = self.start('codex', 'steer-race')
@@ -440,7 +498,8 @@ class Bridge(unittest.TestCase):
         self.cli('send', root, '--message', 'racing message')
         self.assertEqual(self.done(root), 'Original turn finished.')
         self.assertEqual(len(list((root / 'inbox').iterdir())), 1)
-        self.cli('send', root, '--message', 'carryover')
+        (root / 'task.md').write_text('carryover')
+        self.cli('resume', root)
         self.assertEqual(self.done(root), 'received:racing message')
         self.assertEqual(self.state(root)['session_id'], 'fixture-session')
         self.assertEqual(list((root / 'inbox').iterdir()), [])
@@ -461,7 +520,8 @@ class Bridge(unittest.TestCase):
                 events = (root / 'events.jsonl').read_text()
                 secrets = ('synthetic-env-value', 'synthetic inline credential', 'ghp_' + 'X' * 36,
                            'synthetic-basic-value', 'synthetic-cookie-one', 'synthetic-cookie-two',
-                           'synthetic-proxy-value', 'synthetic-set-cookie', 'synthetic escaped suffix')
+                           'synthetic-proxy-value', 'synthetic-set-cookie', 'synthetic escaped suffix',
+                           'Zml4dHVyZTphdXRo', 'Zml4dHVyZTpwcm94eQ==')
                 for secret in secrets:
                     self.assertNotIn(secret, events)
                 # An existing state directory can have events written by older bridge versions.
@@ -475,6 +535,7 @@ class Bridge(unittest.TestCase):
                 self.assertIn('legacy [redacted]', tail)
                 expected = ('Authorization: [redacted]\nCookie: [redacted]\n'
                             'Proxy-Authorization: [redacted]\nSet-Cookie: [redacted]\n'
+                            'Authorization = [redacted]\nProxy-Authorization = [redacted]\n'
                             'Visible line after headers.')
                 self.assertIn(expected, [json.loads(line)['text'] for line in events.splitlines()
                                          if json.loads(line)['type'] == 'message'])
@@ -560,7 +621,8 @@ class Bridge(unittest.TestCase):
                 self.assertEqual(info['cwd'], str(self.root))
                 self.assertEqual(info['env'], {'BRIDGE_TEST_VALUE': 'fixture-value',
                                               'TMPDIR': str(scratch), 'PATH': fixture_path})
-                self.cli('send', root, '--message', 'next')
+                (root / 'task.md').write_text('next')
+                self.cli('resume', root)
                 self.assertEqual(self.done(root), 'resumed:next')
                 self.assertEqual(json.loads(capture.read_text())['env'], info['env'])
 
@@ -575,6 +637,15 @@ class Bridge(unittest.TestCase):
                 self.assertEqual(self.result(root)['error'], 'Codex did not apply the requested sandbox.')
                 self.assertFalse(stamp.exists())
                 self.assertEqual(json.loads(self.cli('stop', root).stdout)['cleanup'], 'verified')
+
+    def test_codex_reviewer_refuses_explicit_sandbox_at_start(self):
+        root = self.root / 'reviewer'
+        for flags in (('--sandbox', 'read-only'), ('-s=workspace-write',), ('-c', 'sandbox_mode="read-only"')):
+            with self.subTest(flags=flags):
+                result = self.cli('start', root, '--vendor', 'codex', '--role', 'reviewer', '--cwd', str(self.root),
+                                  '--', *flags, success=False)
+                self.assertIn('--role reviewer, which fixes the sandbox', result.stderr)
+                self.assertFalse((root / 'state').exists())
 
     def test_role_defaults_overrides_and_reviewer_temporary_writes(self):
         scratch = self.root.parent / (self.root.name + '-scratch')
@@ -807,7 +878,8 @@ main()
         pid = int(gate.with_suffix('.pid').read_text())
         try:
             self.assertFalse((self.scopes / old['scope']).exists())
-            self.cli('send', root, '--message', 'pending')
+            task.write_text('pending')
+            self.cli('resume', root, '--task', str(task))
             pending = self.approval(root)
             current = self.state(root)
             self.assertNotEqual(current['generation'], old['generation'])
@@ -887,6 +959,10 @@ main()
             stat_file = Path('/proc') / str(pid) / 'stat'
             self.until(lambda: stat_file.read_text().rsplit(') ', 1)[1].startswith('T '))
             result = self.result(root)
+            resumed = self.cli('resume', root, '--timeout', '0.1', success=False)
+            self.assertEqual(resumed.returncode, 124)
+            self.assertIn('worker lock', resumed.stderr)
+            self.assertEqual(self.state(root), published)
             stopped = json.loads(self.cli('stop', root, '--timeout', '0.1').stdout)
             self.assertEqual(stopped['status'], 'done')
             self.assertEqual(stopped['cleanup'], 'verified')

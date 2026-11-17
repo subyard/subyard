@@ -29,10 +29,10 @@ STANDALONE = ('You are a standalone worker with no parent agent. Put your full r
               'message. Do not send it to a parent.\n\n')
 SECRET_NAME = r'token|secret|password|passwd|passphrase|credentials?|cookie|api[_-]?key|private[_-]?key|access[_-]?key|signing[_-]?key'
 SECRET_ENV = re.compile(rf'(?:^|_)(?:{SECRET_NAME})(?:_|$)', re.IGNORECASE)
-SECRET_HEADER = re.compile(r'(?i)(\b(?:authorization|proxy-authorization|cookie|set-cookie)[ \t]*:)[^\r\n]*')
+SECRET_HEADER = re.compile(r'(?i)(\b(?:(?:proxy-)?authorization[ \t]*[:=]|(?:set-)?cookie[ \t]*:))[^\r\n]*')
 SECRET_TEXT = re.compile(
     rf'(?i)(\b(?:[a-z0-9]+[_-])*(?:{SECRET_NAME}|authorization)(?:[_-][a-z0-9]+)*["\x27]?\s*[:=]\s*)'
-    r'(?:bearer\s+)?(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|\x27(?:\\[^\r\n]|[^\x27\\\r\n])*\x27|[^\s,;]+)'
+    r'(?:(?:basic|bearer)\s+)?(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|\x27(?:\\[^\r\n]|[^\x27\\\r\n])*\x27|[^\s,;]+)'
     r'|\bbearer [\w.+/=-]+|\b(?:gh[pousr]_|github_pat_|sk-)[\w-]{16,}'
     r'|\beyJ[\w-]+\.eyJ[\w-]+\.[\w-]+')
 PRIVATE_KEY = re.compile(r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)',
@@ -97,6 +97,17 @@ def role_arguments(config, env):
                            'filesystem': {'denyWrite': [cwd], 'allowWrite': ['/tmp', scratch]}},
                 'permissions': {'deny': ['Edit(/' + cwd + '/**)']}}
     return ['--settings', json.dumps(settings)]
+
+
+def add_usage(totals, usage):
+    for key, value in usage.items():
+        previous = totals.get(key)
+        if isinstance(value, dict):
+            value = add_usage(previous if isinstance(previous, dict) else {}, value)
+        elif type(value) is int and type(previous) is int:
+            value += previous
+        totals[key] = value
+    return totals
 
 
 def read(path):
@@ -326,6 +337,15 @@ class Claude:
         self.w.send({'type': 'user', 'message': {'role': 'user', 'content': [
             {'type': 'text', 'text': text}]}})
 
+    def next_turn(self):
+        if self.inflight:
+            self.inflight.unlink()
+        self.inflight = next(iter(sorted((self.w.root / 'inbox').glob('*.md'))), None)
+        if self.inflight:
+            self.user(read(self.inflight))
+            return True
+        return False
+
     def interrupt(self):
         self.w.send({'type': 'control_request', 'request_id': 'interrupt-' + uuid.uuid4().hex,
                      'request': {'subtype': 'interrupt'}})
@@ -357,23 +377,13 @@ class Claude:
                 elif block['type'] == 'tool_use':
                     self.w.record('tool', tool=block['name'])
         elif kind == 'result':
-            self.w.tokens = event.get('usage')
+            if usage := event.get('usage'):
+                self.w.tokens = add_usage(self.w.tokens or {}, usage)
             answer = event.get('result')
             answers = self.w.answers[self.answer_start:]
             if answer and (not answers or answer not in (answers[-1], '\n\n'.join(answers))):
                 self.w.message(answer)
-            if event.get('is_error') or event.get('subtype') != 'success':
-                self.w.outcome = 'failed'
-                return
-            if self.inflight:
-                self.inflight.unlink()
-            # Claude may return one result per user message. Keep the next inbox
-            # file until its own result arrives.
-            self.inflight = next(iter(sorted((self.w.root / 'inbox').glob('*.md'))), None)
-            if self.inflight and not self.w.pending:
-                self.user(read(self.inflight))
-            else:
-                self.w.outcome = 'done'
+            self.w.outcome = 'failed' if event.get('is_error') or event.get('subtype') != 'success' else 'done'
 
 
 class Worker:
@@ -546,8 +556,15 @@ class Worker:
                         self.adapter.event(json.loads(frame))
                     if len(buffer) > 16 * 1024 * 1024:
                         raise ValueError('worker frame too large')
-            if self.outcome == 'done' and self.pending:
-                raise ValueError('worker completed with unanswered approvals')
+                if self.outcome == 'done':
+                    if self.pending:
+                        raise ValueError('worker completed with unanswered approvals')
+                    # Serialize the last inbox scan and terminal publication with send.
+                    with locked(self.root / 'inbox.lock'):
+                        if self.config['vendor'] == 'claude' and self.adapter.next_turn():
+                            self.outcome = None
+                        else:
+                            self.finish()
         finally:
             self.selector.close()
             self.child.stdin.close()
@@ -624,14 +641,19 @@ def cleanup_unverified():
     return False
 
 
-def recover(root, state, stopped=False):
+def recover(root, state, deadline, stopped=False):
     if state.get('cleanup') == 'verified' or (not state.get('scope') and not state.get('error')):
         return True
     if state.get('scope'):
         # Publish the fence and failure result before contacting the manager. A
         # delayed _run can enter this scope but cannot start the vendor.
         if not state.get('result_file'):
-            publish_result(root, state, state.get('model'))
+            lock = lock_until(root / 'inbox.lock', deadline)
+            if lock is None:
+                print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
+                return False
+            with lock:
+                publish_result(root, state, state.get('model'))
         if stopped or scope_stopped(root, state):
             for path in (turn_dir(root, state) / 'approvals').iterdir():
                 if path.suffix in ('.json', '.reply'):
@@ -642,10 +664,14 @@ def recover(root, state, stopped=False):
     return cleanup_unverified()
 
 
-def launch(root, state, config, task):
+def launch(root, state, config, task, deadline):
     config.setdefault('name', root.name)
-    with locked(root / 'worker.lock'):
-        if not recover(root, state):
+    lock = lock_until(root / 'worker.lock', deadline)
+    if lock is None:
+        print('Timed out waiting for the bridge worker lock; use stop to recover.', file=sys.stderr)
+        return 124
+    with lock:
+        if not recover(root, state, deadline):
             return 1
         generation = uuid.uuid4().hex
         scope = 'subyard-bridge-' + generation + '.scope'
@@ -678,7 +704,8 @@ def launch(root, state, config, task):
                                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         except OSError:
             state.update(status='failed', error='Systemd user scope launcher could not start.')
-            publish_result(root, state, config['model'])
+            with locked(root / 'inbox.lock'):
+                publish_result(root, state, config['model'])
             raise
         state.update(pid=child.pid, process_start=process_identity(child.pid))
         save_state(root, state)
@@ -769,13 +796,15 @@ def main():
                 # Native errors and protocol bodies can contain credentials. Keep diagnostics generic.
                 if worker is None:
                     state.update(status='failed', error='Worker initialization failed.')
-                    publish_result(root, state, state.get('model'))
+                    with locked(root / 'inbox.lock'):
+                        publish_result(root, state, state.get('model'))
                 else:
                     worker.outcome = 'interrupted' if worker.interrupted else 'failed'
                     worker.record('error', message='Worker executable, protocol or state operation failed.',
                                   error_type=type(error).__name__)
-            if worker:
-                worker.finish()
+            if worker and not state.get('result_file'):
+                with locked(root / 'inbox.lock'):
+                    worker.finish()
         # Stop the whole scope after publishing the result. Explicit stop and
         # resume verify cleanup independently.
         scope_command('--no-block', 'stop', state['scope'])
@@ -813,14 +842,19 @@ def main():
                              'file': str(path)})
         print(json.dumps(requests))
         return 0
-    message = None
     if args.command == 'send':
         if args.message is None and sys.stdin.isatty():
             raise ValueError('send requires --message or piped stdin')
         message = args.message if args.message is not None else sys.stdin.read()
+        with locked(root / 'inbox.lock'):
+            if not (root / 'state').exists() or snapshot(root)['status'] not in ACTIVE_STATES:
+                print('send requires an active turn; use resume to continue a stopped worker.', file=sys.stderr)
+                return 1
+            write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
+        return 0
     deadline = time.monotonic() + args.timeout
     command_lock = root / 'command.lock'
-    lock = lock_until(command_lock, deadline) if args.command == 'stop' else locked(command_lock)
+    lock = lock_until(command_lock, deadline) if args.command in ('stop', 'resume') else locked(command_lock)
     if lock is None:
         print('Timed out waiting for the bridge command lock.', file=sys.stderr)
         print(json.dumps(snapshot(root)))
@@ -837,12 +871,7 @@ def main():
             read(reply.with_suffix('.json'))
             write(reply, 'allow\n' if args.command == 'approve' else 'deny\n')
             return 0
-        if args.command in ('start', 'resume', 'send'):
-            if args.command == 'send':
-                state = snapshot(root)
-                if state['status'] in ACTIVE_STATES:
-                    write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
-                    return 0
+        if args.command in ('start', 'resume'):
             if args.command == 'start':
                 if (root / 'state').exists():
                     raise ValueError('worker already exists; use resume')
@@ -851,6 +880,10 @@ def main():
                 if args.role:
                     args.model = args.model or MODELS[args.vendor][args.role]
                     args.effort = args.effort or ('medium' if args.role == 'observer' else 'high')
+                if args.role == 'reviewer' and args.vendor == 'codex' and codex_arguments(vendor_args)[1]:
+                    print('An explicit --sandbox or sandbox_mode conflicts with --role reviewer, which fixes the sandbox.',
+                          file=sys.stderr)
+                    return 1
                 if not args.model or not args.effort:
                     raise ValueError('start requires --role or explicit --model and --effort')
                 if not args.cwd.is_dir():
@@ -871,8 +904,8 @@ def main():
                 if state['status'] in ACTIVE_STATES or not state['session_id']:
                     raise ValueError('resume requires a stopped worker with a session id')
                 config = json.loads(read(root / 'config.json'))
-            task = message if message is not None else read(args.task if args.task else root / 'task.md')
-            return launch(root, state, config, task)
+            task = read(args.task if args.task else root / 'task.md')
+            return launch(root, state, config, task, deadline)
         if args.command in ('interrupt', 'stop'):
             state = snapshot(root)
             if state['status'] in ACTIVE_STATES:
@@ -900,7 +933,7 @@ def main():
                         # A launcher can still be outside the scope while admission is pending.
                         # Its interrupt file prevents vendor startup until we publish this fence.
                         state.update(status='interrupted', pending_approvals=[])
-                    code = 0 if recover(root, state, stopped=forced) else 1
+                    code = 0 if recover(root, state, deadline, stopped=forced) else 1
                 print(json.dumps(state))
                 return code
     return 0

@@ -8,8 +8,8 @@ description: Run a worker of the other vendor (Claude from Codex or Codex from C
 Run `python3 <this-skill-directory>/bridge.py`. Python 3 and the selected vendor's
 CLI must be installed; `/usr/local/bin/<vendor>` is preferred over PATH, and shell
 functions are not used. `--executable /absolute/path` selects another real CLI.
-The bridge needs a reachable systemd user manager and runs each turn in its own
-transient scope.
+The bridge needs a reachable systemd user manager. Each `start` or `resume`
+runs in a new transient scope.
 The bridge inherits credentials,
 configuration and permissions. Claude uses the native stdio permission host without
 overriding its configured permission mode. No SDK package or Orca is required.
@@ -35,8 +35,9 @@ Use one background/event wait call for long waits; no coordinator polling loop i
 needed. `stop` waits for interruption, verifies the turn's scope is empty or gone,
 and is idempotent. The `--timeout` budget covers waiting for the turn and its lock.
 When it expires, `stop` stops the scope directly and verifies cleanup.
-A crashed turn reports `failed`. If scope cleanup cannot be verified, `stop` and
-`resume` fail with a cleanup diagnostic.
+A crashed run reports `failed`. If scope cleanup cannot be verified, `stop` and
+`resume` fail with a cleanup diagnostic. If `resume` times out waiting for a
+lock, run `stop` to recover the scope before retrying.
 
 `start --role developer|reviewer|observer` supplies model/effort defaults: developer
 and reviewer use Codex `gpt-6.1-sol` or Claude `opus`, high effort; observer uses
@@ -57,31 +58,36 @@ They override role defaults and are retained on resume. Native flags must preser
 the stdio protocol. The bridge always sets Claude's permission host to stdio.
 For Codex, the bridge translates `--sandbox` or `-s` to `sandbox_mode` and checks
 the effective sandbox before starting the turn. A mismatch fails the turn.
+The reviewer role fixes the sandbox, so `start` rejects an explicit sandbox mode
+with that role.
 
 `state` is JSON with `status` (`launching`, `running`, `done`, `failed`, `interrupted`),
 launcher or bridge PID, session/turn IDs, scope, generation and pending approval IDs.
 `status` additionally lists queued message filenames. `events.jsonl` contains
-messages with recognized credentials redacted, tool summaries, approval IDs and terminal
-outcomes. Terminal state publishes `result_file`, the path to the turn's
+messages, tool summaries, approval IDs and terminal outcomes. Terminal state
+publishes `result_file`, the path to the run's
 `result.json` with state, exit code, session ID, model, duration and token usage.
+Claude token usage includes every user turn that returned a result in the run.
 Immediately after a crash, `status` and `wait` can report `failed` before recovery
 publishes `result_file`.
 Only `done` publishes `final_file`, the path to `final.md` with the full report.
-Use the paths from the current state and keep the report private. Native stderr
-is private in `bridge.log`; do not dump logs or protocol
-bodies into chat without checking for secrets.
+Use the paths from the current state. `events.jsonl`, `tail` output, and
+`final.md` are private and may contain secrets. Redaction is best effort.
+Keep native stderr in `bridge.log` and protocol bodies private as well.
 
 Use `tail --dir /tmp/WORKER -n 20` for recent summarized messages/tool calls.
 `start --name NAME` names a worker; `list --root /tmp/PRIVATE-WORKER-ROOT` reports
 workers under that private root, independently of one another.
 
-To continue, run `resume --dir /tmp/WORKER --task FILE`, or replace `task.md` and
-omit `--task`. On a stopped worker, `send` and `resume` restart the native process
-with the same session ID, model, effort and cwd. An active Codex worker steers
-with `send` and carries rejected messages into the next turn. An active Claude
-worker queues each `send` for the next user turn in the same session and retains
-the inbox file until its result arrives. `status` shows the queue. A worker with
-no session ID cannot resume.
+`send` requires an active worker. It steers the current Codex turn and carries
+rejected messages into the next turn. For Claude, `send` queues the message
+for the next user turn of the same session. The bridge starts that turn
+automatically after the current turn succeeds and keeps the message queued until
+its result arrives. `status` shows the queue.
+
+To continue a finished or stopped worker, run `resume --dir /tmp/WORKER --task FILE`,
+or replace `task.md` and omit `--task`. A worker needs a session ID to resume
+with its existing model, effort and cwd.
 
 ## Operator approvals
 

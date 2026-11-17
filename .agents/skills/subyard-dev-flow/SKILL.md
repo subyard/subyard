@@ -180,13 +180,14 @@ Spawn settings by client; record a comparable available alternative if needed:
 | Any | Strongest available model, high reasoning effort | Haiku or Codex `gpt-6-luna`, medium effort; do not default to Sonnet | Same worker, not a new one |
 | Codex → Codex | `spawn_agent` with `model`, `reasoning_effort="high"`, `fork_turns="none"` | `model="gpt-6-luna"`, `reasoning_effort="medium"`, `fork_turns="none"` | `send_message` while running; `followup_task` when idle |
 | Claude Code → Claude Code | Agent tool, `subagent_type="developer"` or `"reviewer"`, `model="opus"` | `subagent_type="general-purpose"`, `model="haiku"`, `effort="medium"`; include the observer contract | `SendMessage` to the same agent |
-| Either client → other vendor | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md): `start --vendor codex\|claude --role developer\|reviewer --cwd REPO --dir STATE --task ASSIGNMENT` | `--role observer --model gpt-6-luna\|haiku --effort medium` | `send` during a turn or for the next turn; `resume --task NEXT` for the same stopped session |
+| Either client → other vendor | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md): `start --vendor codex\|claude --role developer\|reviewer --cwd REPO --dir STATE --task ASSIGNMENT` | `--role observer --model gpt-6-luna\|haiku --effort medium` | `send` steers active Codex or queues Claude's next turn; `resume --task NEXT` continues a stopped session |
 
 For cross-vendor work, use the installed skill's Python entrypoint, not the temporary
 `agent-bridge-local` command. Keep STATE outside the checkout. The bridge inherits
 native permissions; its reviewer preset keeps the repository read-only while allowing
-temporary outputs (set TMPDIR outside the repository). Explicit model/effort/native
-arguments override presets. A bridge worker is a standalone vendor session, so the
+temporary outputs (set TMPDIR outside the repository). Model and effort override their
+role defaults. The reviewer role rejects an explicit Codex sandbox mode. A bridge
+worker is a standalone vendor session, so the
 Claude native subagent's compaction window does not apply to it.
 
 Wait with one background `wait --dir STATE --timeout SECONDS` call: done `0`, failed
