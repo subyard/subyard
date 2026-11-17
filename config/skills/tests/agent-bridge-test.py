@@ -44,15 +44,15 @@ if Path(__file__).name == 'systemd-run':
             time.sleep(0.02)
     unit.write_text(str(os.getpid()))
     argv = args[args.index('--') + 1:]
-    if os.environ.get('BRIDGE_TEST_RESULT_CRASH'):
+    if os.environ.get('BRIDGE_TEST_RESULT_CRASH') or os.environ.get('BRIDGE_TEST_REPLY_GATE'):
         argv[1:1] = ['-B', '-c', """
-import os, runpy, signal, sys
+import os, runpy, signal, sys, time
+from pathlib import Path
 main = runpy.run_path(sys.argv.pop(1))['main']
 namespace = main.__globals__
 save = namespace['save_state']
 def crash(root, state):
-    if state['status'] == 'done':
-        point = os.environ['BRIDGE_TEST_RESULT_CRASH']
+    if state['status'] == 'done' and (point := os.environ.get('BRIDGE_TEST_RESULT_CRASH')):
         if point in ('after', 'suspend'):
             save(root, state)
         if point == 'suspend':
@@ -61,6 +61,17 @@ def crash(root, state):
         os._exit(92)
     save(root, state)
 namespace['save_state'] = crash
+if gate := os.environ.get('BRIDGE_TEST_REPLY_GATE'):
+    unlink = Path.unlink
+    def pause_request_removal(path, *args, **kwargs):
+        if path.suffix == '.json' and path.parent.name == 'approvals' and not args and not kwargs:
+            Path(gate + '.held').touch()
+            deadline = time.monotonic() + 6
+            while not Path(gate).exists():
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+        return unlink(path, *args, **kwargs)
+    Path.unlink = pause_request_removal
 main()
 """]
     os.execv(argv[0], argv)
@@ -132,7 +143,7 @@ def await_gate(suffix=''):
         assert not select.select([sys.stdin], [], [], 0.02)[0], 'a follow-up arrived before the result'
     assert not select.select([sys.stdin], [], [], 0)[0], 'a follow-up arrived before the result'
 
-def approval(_):
+def approval():
     if codex:
         if scenario == 'file-approval':
             emit({'method': 'item/started', 'params': {'item': {
@@ -155,49 +166,11 @@ def approval(_):
         emit(request)
 
 
-def error(_):
+def fail_turn():
     if codex:
         emit({'method': 'turn/completed', 'params': {'turn': {'status': 'failed'}}})
     else:
         emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True})
-
-
-def report(_):
-    say('The complete report.')
-    if not codex:
-        say('I sent the report to the parent.')
-    finish('I sent the report to the parent.')
-
-
-def credentials(_):
-    say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
-    say(os.environ['BRIDGE_TEST_HEADERS'])
-    say(os.environ['BRIDGE_TEST_JSON'])
-    finish('ghp_' + 'X' * 36)
-
-
-def message_turn(_):
-    if not codex:
-        await_gate()
-        finish('first result')
-
-
-def large(text):
-    assert text.split('\n')[-2] == 'x' * (1024 * 1024)
-    finish('complete large frame')
-
-
-SCENARIOS = {
-    **dict.fromkeys(('approval', 'pending', 'file-approval', 'unsupported', 'duplicate'), approval),
-    'eof': lambda _: sys.exit(7),
-    'malformed': lambda _: print('not json', flush=True),
-    'result-error': error,
-    'report': report,
-    'credentials': credentials,
-    'message': message_turn,
-    'steer-race': lambda _: None,
-    'large': large,
-}
 
 
 def begin(text):
@@ -210,10 +183,34 @@ def begin(text):
             'id': 'tool-call', 'type': 'commandExecution', 'status': 'inProgress'}}})
     else:
         emit({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash'}]}})
-    handler = SCENARIOS.get(scenario)
-    if handler:
-        handler(text)
-    else:
+    if scenario in ('approval', 'pending', 'file-approval', 'unsupported', 'duplicate'):
+        approval()
+    elif scenario == 'eof':
+        sys.exit(7)
+    elif scenario == 'malformed':
+        print('not json', flush=True)
+    elif scenario == 'unknown-response':
+        emit({'id': 'fixture-private-native-body', 'result': {}})
+    elif scenario == 'result-error':
+        fail_turn()
+    elif scenario == 'report':
+        say('The complete report.')
+        if not codex:
+            say('I sent the report to the parent.')
+        finish('I sent the report to the parent.')
+    elif scenario == 'credentials':
+        say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
+        say(os.environ['BRIDGE_TEST_HEADERS'])
+        say(os.environ['BRIDGE_TEST_JSON'])
+        finish('ghp_' + 'X' * 36)
+    elif scenario == 'large':
+        assert text.split('\n')[-2] == 'x' * (1024 * 1024)
+        finish('complete large frame')
+    elif scenario == 'message':
+        if not codex:
+            await_gate()
+            finish('first result')
+    elif scenario != 'steer-race':
         finish(('resumed:' if resumed else 'started:') + scenario)
 
 
@@ -234,7 +231,10 @@ for line in sys.stdin:
                 if arg.startswith('sandbox_mode='):
                     sandbox = modes[json.loads(arg.split('=', 1)[1])]
             sandbox = os.environ.get('BRIDGE_TEST_EFFECTIVE_SANDBOX', sandbox)
-            emit({'id': message['id'], 'result': {'thread': {'id': session}, 'sandbox': {'type': sandbox}}})
+            permissions = {'sandbox': {'type': sandbox}}
+            if report := os.environ.get('BRIDGE_TEST_REVIEWER_REPORT'):
+                permissions = json.loads(Path(report).read_text())
+            emit({'id': message['id'], 'result': {'thread': {'id': session}, **permissions}})
         elif method == 'turn/start':
             if stamp := os.environ.get('BRIDGE_TEST_TURN_START'):
                 Path(stamp).touch()
@@ -270,7 +270,10 @@ for line in sys.stdin:
                 if text == 'held follow-up':
                     Path(os.environ['BRIDGE_TEST_HOLD_RESULT'] + '.received').touch()
                     await_gate('.second')
-                finish('message:' + text)
+                if text == 'failing follow-up':
+                    fail_turn()
+                else:
+                    finish('message:' + text)
             else:
                 assert '--permission-prompt-tool' in sys.argv
                 assert sys.argv[sys.argv.index('--permission-prompt-tool') + 1] == 'stdio'
@@ -441,7 +444,8 @@ class Bridge(unittest.TestCase):
                 root, gate = self.start_message(vendor)
                 refused = self.cli('resume', root, success=False)
                 self.assertIn('resume requires a stopped worker with a session id', refused.stderr)
-                self.cli('start', root, success=False)
+                duplicate = self.cli('start', root, '--vendor', vendor, '--cwd', str(self.root), success=False)
+                self.assertIn('worker already exists', duplicate.stderr)
                 self.cli('send', root, '--message', 'hello')
                 gate.touch()
                 self.assertEqual(self.done(root), 'first result\n\nmessage:hello' if vendor == 'claude' else 'message:hello')
@@ -451,15 +455,6 @@ class Bridge(unittest.TestCase):
                 self.cli('resume', root)
                 self.assertEqual(self.done(root), 'resumed:next-task')
                 self.assertEqual(self.state(root)['session_id'], 'fixture-session')
-
-            for status, task in (('failed', 'result-error'), ('interrupted', 'pending')):
-                with self.subTest(vendor=vendor, status=status):
-                    root = self.start(vendor, task)
-                    if status == 'interrupted':
-                        self.approval(root)
-                        self.cli('stop', root, '--timeout', '1')
-                    self.done(root, status)
-                    self.assert_send_refused(root)
 
     def assert_send_refused(self, root):
         generation = self.state(root)['generation']
@@ -481,6 +476,19 @@ class Bridge(unittest.TestCase):
         self.assertEqual(self.done(root), 'first result\n\nmessage:held follow-up\n\nmessage:another follow-up')
         self.assertEqual(list((root / 'inbox').iterdir()), [])
         self.assertEqual(self.result(root)['tokens'], {'input_tokens': 9, 'output_tokens': 6})
+
+    def test_claude_retires_only_the_followup_that_returned_an_error(self):
+        root, gate = self.start_message('claude')
+        self.cli('send', root, '--message', 'failing follow-up')
+        self.cli('send', root, '--message', 'next follow-up')
+        gate.touch()
+        self.done(root, 'failed')
+        queued = list((root / 'inbox').glob('*.md'))
+        self.assertEqual([path.read_text() for path in queued], ['next follow-up'])
+        (root / 'task.md').write_text('recover')
+        self.cli('resume', root)
+        self.assertEqual(self.done(root), 'resumed:recover\n\nmessage:next follow-up')
+        self.assertFalse(list((root / 'inbox').iterdir()))
 
     def test_claude_completion_waits_for_an_accepted_send_to_finish_enqueueing(self):
         held = self.root / 'enqueue-held'
@@ -591,6 +599,10 @@ runpy.run_path(bridge, run_name='__main__')
     def test_missing_executable_fails_without_a_session(self):
         root = self.start('codex', 'unused', '--executable', str(self.root / 'missing'))
         self.done(root, 'failed')
+        self.assertNotIn('error', self.result(root))
+        error = json.loads(self.cli('tail', root, '-n', '1').stdout)
+        self.assertEqual(error['error_type'], 'FileNotFoundError')
+        self.assertNotIn(str(self.root), error['message'])
         self.cli('resume', root, success=False)
 
     def test_exact_modes_under_restrictive_umask(self):
@@ -655,6 +667,34 @@ runpy.run_path(bridge, run_name='__main__')
                 self.assertIn('--role reviewer, which fixes the sandbox', result.stderr)
                 self.assertFalse((root / 'state').exists())
 
+    def test_codex_reviewer_rechecks_permissions_on_resume(self):
+        report = self.root / 'reviewer-report.json'
+        stamp = self.root / 'reviewer-turn-start'
+        restricted = {'sandbox': {'type': 'workspaceWrite', 'writableRoots': ['/tmp']},
+                      'activePermissionProfile': {'id': 'bridge-reviewer', 'extends': ':read-only'}}
+        report.write_text(json.dumps(restricted))
+        root = self.start('codex', 'complete', '--role', 'reviewer', '--env', 'TMPDIR=/tmp',
+                          '--env', f'BRIDGE_TEST_REVIEWER_REPORT={report}',
+                          '--env', f'BRIDGE_TEST_TURN_START={stamp}')
+        self.assertEqual(self.done(root), 'started:complete')
+        stamp.unlink()
+        for incorrect in (
+            {**restricted, 'sandbox': {'type': 'dangerFullAccess'}},
+            {**restricted, 'sandbox': {'type': 'workspaceWrite', 'writableRoots': ['/tmp', str(self.root)]}},
+            {'sandbox': restricted['sandbox']},
+        ):
+            with self.subTest(permissions=incorrect):
+                report.write_text(json.dumps(incorrect))
+                self.cli('resume', root)
+                self.done(root, 'failed')
+                self.assertEqual(self.result(root)['error'], 'Codex did not apply the reviewer permissions.')
+                self.assertFalse(stamp.exists())
+                self.assertEqual(self.state(root)['session_id'], 'fixture-session')
+        report.write_text(json.dumps(restricted))
+        self.cli('resume', root)
+        self.assertEqual(self.done(root), 'resumed:complete')
+        self.assertTrue(stamp.exists())
+
     def test_role_defaults_overrides_and_reviewer_temporary_writes(self):
         scratch = self.root.parent / (self.root.name + '-scratch')
         scratch.mkdir()
@@ -663,10 +703,16 @@ runpy.run_path(bridge, run_name='__main__')
             for role in ('developer', 'reviewer', 'observer'):
                 with self.subTest(vendor=vendor, role=role):
                     capture = self.root / 'role-capture.json'
-                    # Reviewer TMPDIR must be outside its read-only repository root.
+                    stamp = self.root / f'{vendor}-{role}-turn'
+                    # The fake Codex server reports dangerFullAccess without a fixture report.
+                    refused = vendor == 'codex' and role == 'reviewer'
                     root = self.start(vendor, 'complete', '--role', role, '--env', 'TMPDIR=' + str(scratch),
-                                      '--env', 'BRIDGE_TEST_CAPTURE=' + str(capture), preset=True)
-                    self.done(root)
+                                      '--env', f'BRIDGE_TEST_CAPTURE={capture}',
+                                      '--env', f'BRIDGE_TEST_TURN_START={stamp}', preset=True)
+                    self.done(root, 'failed' if refused else 'done')
+                    if refused:
+                        self.assertEqual(self.result(root)['error'], 'Codex did not apply the reviewer permissions.')
+                        self.assertFalse(stamp.exists())
                     config = json.loads((root / 'config.json').read_text())
                     self.assertEqual(config['effort'], 'medium' if role == 'observer' else 'high')
                     if role == 'observer':
@@ -674,9 +720,9 @@ runpy.run_path(bridge, run_name='__main__')
                     if role == 'reviewer':
                         argv = json.loads(capture.read_text())['argv']
                         if vendor == 'codex':
-                            filesystem = next(arg for arg in argv if arg.startswith('permissions.bridge-reviewer.filesystem='))
+                            profile = next(arg for arg in argv if arg.startswith('permissions.bridge-reviewer='))
                             import tomllib
-                            permissions = tomllib.loads(filesystem)['permissions']['bridge-reviewer']['filesystem']
+                            permissions = tomllib.loads(profile)['permissions']['bridge-reviewer']['filesystem']
                             self.assertEqual(permissions[str(self.root)], 'read')
                             self.assertEqual(permissions['/tmp'], 'write')
                             self.assertEqual(permissions[str(scratch)], 'write')
@@ -687,7 +733,7 @@ runpy.run_path(bridge, run_name='__main__')
                             self.assertFalse(settings['sandbox']['allowUnsandboxedCommands'])
                             self.assertTrue(settings['sandbox']['failIfUnavailable'])
                     override = self.start(vendor, 'complete', '--role', role)
-                    self.done(override)
+                    self.done(override, 'failed' if refused else 'done')
                     self.assertEqual(json.loads((override / 'config.json').read_text())['model'], 'fixture')
 
     def test_wait_exit_codes_result_and_tail(self):
@@ -712,12 +758,14 @@ runpy.run_path(bridge, run_name='__main__')
                 failed = self.start(vendor, 'result-error')
                 self.assertEqual(self.cli('wait', failed, '--timeout', '5', success=False).returncode, 1)
                 self.assertEqual(self.result(failed)['exit_code'], 1)
+                self.assert_send_refused(failed)
                 pending = self.start(vendor, 'pending')
                 self.approval(pending)
                 self.assertEqual(self.cli('wait', pending, success=False).returncode, 2)
                 self.cli('stop', pending, '--timeout', '5')
                 self.assertEqual(self.cli('wait', pending, success=False).returncode, 130)
                 self.assertEqual(self.result(pending)['exit_code'], 130)
+                self.assert_send_refused(pending)
                 self.cli('stop', pending)
 
     def test_approval_commands_and_independent_named_workers(self):
@@ -725,10 +773,7 @@ runpy.run_path(bridge, run_name='__main__')
                  self.start('claude', 'approval', '--name', 'claude-worker')]
         for root in roots:
             self.approval(root)
-        result = subprocess.run([sys.executable, str(BRIDGE), 'list', '--root', str(self.root)],
-                                capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        listed = json.loads(result.stdout)
+        listed = json.loads(self.cli('list', self.root).stdout)
         self.assertEqual({item['dir'] for item in listed}, {str(root) for root in roots})
         self.assertEqual({item['name'] for item in listed}, {'codex-worker', 'claude-worker'})
         for root, command in zip(roots, ('approve', 'deny')):
@@ -739,6 +784,38 @@ runpy.run_path(bridge, run_name='__main__')
             self.assertEqual(self.done(root), 'allow' if command == 'approve' else 'deny')
             self.cli(command, root, name, success=False)
             self.assertEqual(json.loads(self.cli('approvals', root).stdout), [])
+
+    def test_approval_stays_answered_during_request_retirement(self):
+        gate = self.root / 'reply-gate'
+        self.env['BRIDGE_TEST_REPLY_GATE'] = str(gate)
+        root = self.start('codex', 'approval')
+        request = self.approval(root)
+        self.cli('approve', root, request.stem)
+        try:
+            self.until(gate.with_suffix('.held').exists)
+            self.assertTrue(request.exists())
+            self.assertIn(request.stem, self.state(root)['pending_approvals'])
+            refused = self.cli('deny', root, request.stem, success=False)
+            self.assertIn('approval already answered', refused.stderr)
+            self.assertEqual(request.with_suffix('.reply').read_text().strip(), 'allow')
+        finally:
+            gate.touch()
+        self.assertEqual(self.done(root), 'allow')
+        self.assertFalse(request.with_suffix('.reply').exists())
+
+    def test_inspection_does_not_create_directories(self):
+        missing = self.root / 'missing'
+        for command in ('status', 'tail'):
+            self.cli(command, missing, success=False)
+            self.assertFalse(missing.exists())
+        self.assertEqual(json.loads(self.cli('list', missing).stdout), [])
+        self.assertFalse(missing.exists())
+        root = self.start('codex', 'complete')
+        self.done(root)
+        (root / 'inbox').rmdir()
+        for command, directory in (('status', root), ('tail', root), ('list', self.root)):
+            self.cli(command, directory)
+            self.assertFalse((root / 'inbox').exists())
 
     def test_resume_task_file_and_no_stdin_hang(self):
         root = self.root / 'no-stdin'
@@ -763,7 +840,7 @@ runpy.run_path(bridge, run_name='__main__')
         self.cli('stop', root)
         self.cli('stop', self.root / 'missing-worker')
 
-    def test_stop_does_not_wait_for_piped_send_to_reach_eof(self):
+    def test_stop_and_resume_fence_a_send_waiting_for_eof(self):
         root = self.start('codex', 'pending')
         self.approval(root)
         marker = self.root / 'reading'
@@ -782,16 +859,25 @@ sys.stdin.read = wait_for_eof
 runpy.run_path(bridge, run_name='__main__')
 """
         sender = subprocess.Popen([sys.executable, '-B', '-c', script, str(BRIDGE), str(marker),
-                                   'send', '--dir', str(root)], env=self.env, stdin=subprocess.PIPE)
+                                   'send', '--dir', str(root)], env=self.env, stdin=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
         try:
             self.until(marker.exists)
             stopped = json.loads(self.cli('stop', root, '--timeout', '0.1').stdout)
             self.assertEqual(stopped['cleanup'], 'verified')
             self.assertIsNone(sender.poll())
+            previous = self.state(root)['generation']
+            self.cli('resume', root)
+            self.approval(root)
+            self.assertNotEqual(previous, self.state(root)['generation'])
+            _, diagnostic = sender.communicate('stale message', timeout=3)
+            self.assertEqual(sender.returncode, 1)
+            self.assertIn('active turn changed', diagnostic)
+            self.assertFalse(list((root / 'inbox').iterdir()))
         finally:
-            sender.terminate()
-            sender.wait(timeout=2)
-            sender.stdin.close()
+            if sender.poll() is None:
+                sender.kill()
+                sender.communicate(timeout=2)
 
     def test_lock_timeouts(self):
         timeout = ('--timeout', '0.1')
@@ -803,7 +889,8 @@ runpy.run_path(bridge, run_name='__main__')
                 for command in ('start', 'resume', 'interrupt', 'stop', 'approve', 'deny'):
                     with self.subTest(command=command):
                         approval = [request.stem] if command in ('approve', 'deny') else []
-                        waiting = self.cli(command, root, *approval, *timeout, success=False)
+                        start = ['--vendor', 'codex', '--cwd', str(self.root)] if command == 'start' else []
+                        waiting = self.cli(command, root, *approval, *start, *timeout, success=False)
                         self.assertEqual(waiting.returncode, 124)
                         self.assertIn('command lock', waiting.stderr)
                 self.assertFalse((self.turn(root) / 'interrupt').exists())
@@ -977,7 +1064,7 @@ main()
     def test_result_publication_has_one_commit_point(self):
         failures = ('eof', 'malformed', 'result-error', 'unsupported', 'duplicate')
         for vendor in ('codex', 'claude'):
-            scenarios = failures + ('rpc-error',) if vendor == 'codex' else failures
+            scenarios = failures + ('rpc-error', 'unknown-response') if vendor == 'codex' else failures
             for scenario in scenarios:
                 with self.subTest(vendor=vendor, scenario=scenario):
                     root = self.start(vendor, scenario)
@@ -985,6 +1072,16 @@ main()
                     self.assertNotIn('final_file', self.state(root))
                     self.assertFalse((self.turn(root) / 'final.md').exists())
                     self.assertFalse(list((self.turn(root) / 'approvals').iterdir()))
+                    if scenario == 'unsupported':
+                        reason = ('unsupported Codex server request' if vendor == 'codex'
+                                  else 'unsupported Claude control request')
+                        self.assertEqual(self.result(root)['error'], reason)
+                        self.assertEqual(json.loads(self.cli('tail', root, '-n', '1').stdout)['message'], reason)
+                    if scenario == 'unknown-response':
+                        error = json.loads(self.cli('tail', root, '-n', '1').stdout)
+                        self.assertEqual(error['error_type'], 'KeyError')
+                        self.assertNotIn('fixture-private-native-body', json.dumps(error))
+                        self.assertNotIn('fixture-private-native-body', json.dumps(self.result(root)))
         for point, status, code in (('before', 'failed', 1), ('after', 'done', 0)):
             with self.subTest(point=point):
                 self.env['BRIDGE_TEST_RESULT_CRASH'] = point

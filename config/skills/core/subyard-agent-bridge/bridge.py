@@ -2,6 +2,7 @@
 
 import argparse
 from collections import deque
+from contextlib import nullcontext
 import fcntl
 import json
 import math
@@ -82,19 +83,22 @@ def codex_arguments(args):
     return arguments, sandbox
 
 
+def reviewer_scratch(env):
+    return str(Path(env.get('TMPDIR', '/tmp')).resolve())
+
+
 def role_arguments(config, env):
     if config.get('role') != 'reviewer':
         return []
     cwd = config['cwd']
-    scratch = str(Path(env.get('TMPDIR', '/tmp')).resolve())
+    scratch = reviewer_scratch(env)
     if cwd in ('/tmp', scratch) or Path(cwd) in Path('/tmp').parents or Path(cwd) in Path(scratch).parents:
         raise BridgeError('reviewer cwd must be distinct from temporary roots')
     if config['vendor'] == 'codex':
         filesystem = {'/tmp': 'write', scratch: 'write', cwd: 'read'}
         return ['-c', 'default_permissions="bridge-reviewer"',
-                '-c', 'permissions.bridge-reviewer.extends=":read-only"',
-                '-c', 'permissions.bridge-reviewer.filesystem={' + ','.join(
-                    json.dumps(path) + '=' + json.dumps(mode) for path, mode in filesystem.items()) + '}']
+                '-c', 'permissions.bridge-reviewer={extends=":read-only",filesystem={' + ','.join(
+                    json.dumps(path) + '=' + json.dumps(mode) for path, mode in filesystem.items()) + '}}']
     # Bash is sandboxed; file tools use explicit deny rules for repository writes.
     settings = {'sandbox': {'enabled': True, 'failIfUnavailable': True,
                            'allowUnsandboxedCommands': False, 'excludedCommands': [],
@@ -144,12 +148,13 @@ def write(path, text):
             os.unlink(temporary)
 
 
-def directory(path):
-    try:
-        path.mkdir(mode=0o700)
-        path.chmod(0o700)
-    except FileExistsError:
-        pass
+def directory(path, *, create=True):
+    if create:
+        try:
+            path.mkdir(mode=0o700)
+            path.chmod(0o700)
+        except FileExistsError:
+            pass
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise BridgeError('state directories must be owned by you with mode 0700')
@@ -192,6 +197,11 @@ def append(path):
     return private_open(path, os.O_WRONLY | os.O_APPEND, 'a')
 
 
+def record_event(root, kind, **fields):
+    with append(root / 'events.jsonl') as stream:
+        stream.write(json.dumps({'type': kind, **fields}) + '\n')
+
+
 def turn_dir(root, state):
     generation = state['generation']
     if not re.fullmatch(r'[0-9a-f]{32}', generation):
@@ -227,9 +237,9 @@ class Codex:
         self.items = {}
         self.counter = 0
         self.sent = set()
-        self.ready = False
-        self.arguments, self.sandbox = codex_arguments(
-            role_arguments(worker.config, worker.env) + worker.config.get('vendor_args', []))
+        self.arguments, self.sandbox = codex_arguments(worker.config.get('vendor_args', []))
+        # Pin the complete reviewer profile after native overrides.
+        self.arguments.extend(role_arguments(worker.config, worker.env))
 
     def request(self, method, params, callback=lambda result: None):
         self.counter += 1
@@ -250,17 +260,21 @@ class Codex:
         self.request(method, params, self.thread)
 
     def thread(self, result):
-        if self.sandbox and (result.get('sandbox') or {}).get('type') != self.sandbox:
-            self.w.state['error'] = 'Codex did not apply the requested sandbox.'
-            self.w.outcome = 'failed'
-            return
+        sandbox = result.get('sandbox') or {}
+        if self.w.config.get('role') == 'reviewer':
+            profile = result.get('activePermissionProfile') or {}
+            if (sandbox.get('type') != 'workspaceWrite'
+                    or set(sandbox.get('writableRoots') or ()) != {'/tmp', reviewer_scratch(self.w.env)}
+                    or profile.get('id') != 'bridge-reviewer' or profile.get('extends') != ':read-only'):
+                raise BridgeError('Codex did not apply the reviewer permissions.')
+        if self.sandbox and sandbox.get('type') != self.sandbox:
+            raise BridgeError('Codex did not apply the requested sandbox.')
         self.w.model = result.get('model', self.w.model)
         session = result['thread']['id']
         if self.w.state.get('session_id') not in (None, session):
             raise BridgeError('Codex resumed a different session')
         self.w.state['session_id'] = session
         queued = [self.w.root / 'inbox' / name for name in self.w.state.pop('carryover', [])]
-        self.sent.update(path.name for path in queued)
         self.w.save()
         self.request('turn/start', {'threadId': self.w.state['session_id'],
                      'input': [{'type': 'text', 'text': text} for text in
@@ -271,11 +285,10 @@ class Codex:
         for path in queued:
             path.unlink()
         self.w.state['turn_id'] = result['turn']['id']
-        self.ready = True
         self.w.save()
 
     def steer(self):
-        if not self.ready:
+        if not self.w.state.get('turn_id'):
             return
         for path in sorted((self.w.root / 'inbox').glob('*.md')):
             if path.name not in self.sent:
@@ -286,7 +299,7 @@ class Codex:
                              lambda result, path=path: path.unlink())
 
     def interrupt(self):
-        if self.ready:
+        if self.w.state.get('turn_id'):
             self.request('turn/interrupt', {'threadId': self.w.state['session_id'],
                          'turnId': self.w.state['turn_id']})
 
@@ -346,8 +359,6 @@ class Claude:
             {'type': 'text', 'text': text}]}})
 
     def next_turn(self):
-        if self.inflight:
-            self.inflight.unlink()
         self.inflight = next(iter(sorted((self.w.root / 'inbox').glob('*.md'))), None)
         if self.inflight:
             self.user(read(self.inflight))
@@ -385,6 +396,9 @@ class Claude:
                 elif block['type'] == 'tool_use':
                     self.w.record('tool', tool=block['name'])
         elif kind == 'result':
+            if self.inflight:
+                self.inflight.unlink()
+                self.inflight = None
             if usage := event.get('usage'):
                 self.w.tokens = add_usage(self.w.tokens or {}, usage)
             answer = event.get('result')
@@ -426,8 +440,7 @@ class Worker:
 
     def record(self, kind, **fields):
         fields = {key: self.redact(value) if isinstance(value, str) else value for key, value in fields.items()}
-        with append(self.root / 'events.jsonl') as stream:
-            stream.write(json.dumps({'type': kind, **fields}) + '\n')
+        record_event(self.root, kind, **fields)
 
     def message(self, text):
         self.answers.append(text)
@@ -465,7 +478,7 @@ class Worker:
         path = self.approvals / (name + '.json')
         # A reply must follow publication of this request, never preauthorize a future one.
         if os.path.lexists(path.with_suffix('.reply')):
-            self.reply_handler(name)
+            raise BridgeError('unsolicited approval reply')
         write(path, json.dumps({'vendor': self.config['vendor'], 'tool': tool,
                                'command': command, 'reason': reason, 'request': request,
                                'item': item}) + '\n')
@@ -473,19 +486,15 @@ class Worker:
         self.record('approval', id=name)
         self.save()
 
-    def reply_handler(self, name):
-        if name not in self.pending:
-            raise BridgeError('unsolicited approval reply')
-        return self.pending[name]
-
     def reply_sent(self, path, decision):
         name = path.stem
-        path.unlink()
         path.with_suffix('.json').unlink()
         self.pending.pop(name)
         self.replying.remove(name)
-        self.record('approval_decision', id=name, decision=decision)
         self.save()
+        # Keep the reply visible until both the request file and pending ID are gone.
+        path.unlink()
+        self.record('approval_decision', id=name, decision=decision)
 
     def controls(self):
         if (self.turn / 'interrupt').exists():
@@ -496,7 +505,9 @@ class Worker:
             name = path.stem
             if name in self.replying:
                 continue
-            reply = self.reply_handler(name)
+            if name not in self.pending:
+                raise BridgeError('unsolicited approval reply')
+            reply = self.pending[name]
             decision = read(path).strip()
             if decision not in ('allow', 'deny'):
                 raise BridgeError('approval reply must be allow or deny')
@@ -770,7 +781,7 @@ def parse_args():
         'stop': 'Interrupt the worker and verify scope cleanup.',
         'status': 'Show the current worker state.',
         'wait': 'Wait for completion or a pending approval.',
-        'tail': 'Show recent summarized messages and tool events.',
+        'tail': 'Show recent messages, tool events, and errors.',
         'approvals': 'List pending approval requests.',
         'approve': 'Allow a pending request once.',
         'deny': 'Deny a pending request.',
@@ -779,9 +790,7 @@ def parse_args():
     for name, description in descriptions.items():
         command = commands.add_parser(name, help=description, description=description)
         if name == 'list':
-            location = command.add_mutually_exclusive_group(required=True)
-            location.add_argument('--root', type=Path, help='parent of worker directories')
-            location.add_argument('--dir', type=Path, help='alias for --root')
+            command.add_argument('--root', '--dir', type=Path, required=True, help='parent of worker directories')
         else:
             command.add_argument('--dir', type=Path, required=True, help='worker state directory')
         if name in ('approve', 'deny'):
@@ -792,8 +801,8 @@ def parse_args():
             command.add_argument('--timeout', type=float, default=60,
                                  help='maximum wait seconds (default: 60)')
         if name == 'start':
-            command.add_argument('--vendor', choices=['codex', 'claude'])
-            command.add_argument('--cwd', type=Path)
+            command.add_argument('--vendor', choices=['codex', 'claude'], required=True)
+            command.add_argument('--cwd', type=Path, required=True)
             command.add_argument('--model')
             command.add_argument('--effort')
             command.add_argument('--role', choices=['developer', 'reviewer', 'observer'])
@@ -823,14 +832,15 @@ def parse_args():
 def main():
     args, vendor_args = parse_args()
     if args.command == 'list':
-        root = args.root or args.dir
-        directory(root)
+        root = args.root
+        if os.path.lexists(root):
+            directory(root, create=False)
         workers = []
         for path in sorted(root.rglob('state')):
             try:
                 if not stat.S_ISREG(path.lstat().st_mode):
                     continue
-                directory(path.parent)
+                directory(path.parent, create=False)
                 state = snapshot(path.parent)
                 workers.append({'dir': str(path.parent), **state})
             except (OSError, ValueError, KeyError):
@@ -840,8 +850,10 @@ def main():
     root = args.dir.absolute()
     if args.command == 'stop' and not (root / 'state').exists():
         return 0
-    directory(root)
-    directory(root / 'inbox')
+    inspect = args.command in ('status', 'tail', 'wait', 'approvals')
+    directory(root, create=not inspect)
+    if not inspect or os.path.lexists(root / 'inbox'):
+        directory(root / 'inbox', create=not inspect)
     if args.command == '_run':
         lock = claim_turn(root, args.generation)
         if lock is None:
@@ -859,13 +871,17 @@ def main():
                 worker = Worker(root, state)
                 worker.run()
             except Exception as error:
-                # Native errors and protocol bodies can contain credentials. Keep diagnostics generic.
+                # Native errors and protocol bodies can contain credentials.
+                if isinstance(error, BridgeError):
+                    state['error'] = str(error)
                 if worker is None:
-                    state.update(status='failed', error='Worker initialization failed.')
+                    state['status'] = 'failed'
+                    state.setdefault('error', 'Worker initialization failed.')
                     publish_failure(root, state)
+                    record_event(root, 'error', message=state['error'])
                 else:
                     worker.outcome = 'interrupted' if worker.interrupted else 'failed'
-                    worker.record('error', message='Worker executable, protocol or state operation failed.',
+                    worker.record('error', message=state.get('error', 'Worker executable, protocol or state operation failed.'),
                                   error_type=type(error).__name__)
             if worker and not state.get('result_file'):
                 with locked(root / 'inbox.lock'):
@@ -887,7 +903,7 @@ def main():
         lines = deque(maxlen=args.n)
         for line in read(root / 'events.jsonl').splitlines():
             event = json.loads(line)
-            if event['type'] in ('message', 'tool'):
+            if event['type'] in ('message', 'tool', 'error'):
                 lines.append(line)
         print('\n'.join(lines), end='\n' if lines else '')
         return 0
@@ -906,23 +922,24 @@ def main():
         return 0
     if args.command == 'send':
         hint = 'send requires an active turn; use resume to continue a stopped worker.'
-        if not (root / 'state').exists() or snapshot(root)['status'] not in ACTIVE_STATES:
-            print(hint, file=sys.stderr)
-            return 1
+        original = snapshot(root) if (root / 'state').exists() else None
+        if original is None or original['status'] not in ACTIVE_STATES:
+            raise BridgeError(hint)
         if args.message is None and sys.stdin.isatty():
             raise BridgeError('send requires --message or piped stdin')
         message = args.message if args.message is not None else sys.stdin.read()
         lock = lock_until(root / 'inbox.lock', time.monotonic() + args.timeout)
-        if lock is not None:
-            with lock:
-                if snapshot(root)['status'] in ACTIVE_STATES:
-                    write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
-                    return 0
-        elif snapshot(root)['status'] in ACTIVE_STATES:
-            print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
-            return 124
-        print(hint, file=sys.stderr)
-        return 1
+        with lock if lock is not None else nullcontext():
+            current = snapshot(root)
+            if current['status'] not in ACTIVE_STATES:
+                raise BridgeError(hint)
+            if current['generation'] != original['generation']:
+                raise BridgeError('send refused because the active turn changed before enqueueing the message.')
+            if lock is None:
+                print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
+                return 124
+            write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
+        return 0
     deadline = time.monotonic() + args.timeout
     lock = lock_until(root / 'command.lock', deadline)
     if lock is None:
@@ -946,8 +963,6 @@ def main():
             if args.command == 'start':
                 if (root / 'state').exists():
                     raise BridgeError('worker already exists; use resume')
-                if not args.vendor or not args.cwd:
-                    raise BridgeError('start requires --vendor and --cwd')
                 if args.role:
                     args.model = args.model or MODELS[args.vendor][args.role]
                     args.effort = args.effort or ('medium' if args.role == 'observer' else 'high')

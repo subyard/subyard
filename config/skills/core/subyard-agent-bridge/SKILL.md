@@ -45,21 +45,19 @@ and reviewer use Codex `gpt-6.1-sol` or Claude `opus`, high effort; observer use
 Developer and observer inherit native permissions; observer receives a no-source-edit
 instruction. Reviewer uses a native Codex read-only profile with writable `/tmp`
 and `$TMPDIR`, or Claude's required Bash sandbox plus an Edit deny rule covering
-all repository file tools. Reviewer TMPDIR must be outside the repository; use
-`--env TMPDIR=/tmp/SCRATCH` if necessary. Native sandbox dependencies are required;
-failure does not fall back to unrestricted execution. These presets are defaults,
-not a boundary against an operator explicitly overriding native settings.
+all repository file tools. Reviewer TMPDIR must be outside the repository. Use
+`--env TMPDIR=/tmp/SCRATCH` if necessary. Reviewer presets require native sandbox support.
 
 Repeat `--env K=V` to override child environment values; other values, including
 PATH/TMPDIR, are inherited. `--cwd` selects the worktree. Add arbitrary vendor
 arguments after `--`, e.g. Codex `-- -c key=value --profile NAME` or Claude
 `-- --permission-mode manual --max-turns 4 --append-system-prompt 'Extra context'`.
-They override role defaults and are retained on resume. Native flags must preserve
-the stdio protocol. The bridge always sets Claude's permission host to stdio.
-For Codex, the bridge translates `--sandbox` or `-s` to `sandbox_mode` and checks
-the effective sandbox before starting the turn. A mismatch fails the turn.
-The reviewer role fixes the sandbox, so `start` rejects an explicit sandbox mode
-with that role.
+Native flags are retained on resume and must preserve the stdio protocol.
+The bridge always sets Claude's permission host to stdio. For Codex, it
+translates `--sandbox` or `-s` to `sandbox_mode` and checks the reported sandbox
+before each turn. The Codex reviewer preset pins its permission profile and
+requires the server to confirm the profile and writable roots on both start and
+resume. An explicit sandbox mode conflicts with the Codex reviewer preset.
 
 `state` is JSON with `status` (`launching`, `running`, `done`, `failed`, `interrupted`),
 launcher or bridge PID, session/turn IDs, scope, generation and pending approval IDs.
@@ -76,7 +74,7 @@ Use the paths from the current state. `events.jsonl`, `tail` output, and
 redaction when writing events. `tail` displays the stored summaries.
 Keep native stderr in `bridge.log` and protocol bodies private as well.
 
-Use `tail --dir /tmp/WORKER -n 20` for recent summarized messages/tool calls.
+Use `tail --dir /tmp/WORKER -n 20` for recent messages, tool summaries, and errors.
 `start --name NAME` names a worker; `list --root /tmp/PRIVATE-WORKER-ROOT` reports
 workers under that private root, independently of one another.
 
@@ -92,20 +90,18 @@ with its existing model, effort and cwd.
 
 ## Operator approvals
 
-The bridge writes `turns/GENERATION/approvals/NNNNNN.json` containing `vendor`, `tool`, `command`,
-`reason`, the native `request` and the associated Codex `item` when available (for
-example, proposed file changes). It publishes the ID in `state.pending_approvals`.
-The request stays pending indefinitely until answered; `interrupt` remains available.
-
-1. Read the request and show the operator the action, reason and relevant details
-   (including proposed file changes from the associated item when applicable).
+1. Run `approvals --dir /tmp/WORKER` and show the operator the action, reason
+   and relevant details. For proposed file changes, read the associated item in
+   the request file.
 2. Wait for the operator's explicit decision. Never decide on the operator's behalf.
-3. Write exactly `allow` or `deny` to the matching `.reply` file beside the request, preferably
-   by writing a temporary file in that directory and atomically renaming it.
+3. Run `approve NNNNNN --dir /tmp/WORKER` or `deny NNNNNN --dir /tmp/WORKER`.
+   Each ID can be answered only once. `interrupt` remains available while the
+   request is pending.
 
-Alternatively, `approvals --dir /tmp/WORKER` lists pending requests; after obtaining
-the operator decision, run `approve NNNNNN --dir /tmp/WORKER` or
-`deny NNNNNN --dir /tmp/WORKER`. Each ID can be answered only once.
+Integrations can read `turns/GENERATION/approvals/NNNNNN.json` using the ID in
+`state.pending_approvals`. It contains the vendor, tool, command, reason, native
+request, and available Codex item. Publish a sibling `.reply` containing exactly
+`allow` or `deny` by atomic rename.
 
 The bridge sends a single-use response and removes both files. It sends no session
 allow, rule amendment or permission-mode change. Interruption/failure cancels pending
@@ -117,6 +113,3 @@ Supported approvals are Codex command execution and file changes, and Claude
 grants (which grant turn/session access rather than single-operation approval).
 This is an explicit coordinator-to-operator flow; it does not inject prompts into
 the coordinator's native subagent approval UI.
-
-This product skill does not use the temporary `agent-bridge-local` installation or
-its automatic approval behavior. Retiring that installation belongs to rollout.
