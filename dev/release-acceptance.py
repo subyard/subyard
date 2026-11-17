@@ -273,6 +273,8 @@ CI_COUNTED_POLICIES = frozenset({
     "c91e74a532fb6624fd04107c3fe167f47ec36f55",
     # host-free-verify job limit raised to 70 minutes; commands unchanged.
     "9eb85775fcd01585c6f4a745d7b3b32c3d67700e",
+    # host-free-verify runs the shared parallel ShellCheck runner.
+    "c8c262c85a127ba8034478cbacc1720f15597b56",
 })
 
 
@@ -520,7 +522,9 @@ def commands(root, version, inventory, periodic=False):
     release = root / ".subyard-acceptance/release"
     result = {
         "verify": ["make", "verify"],
-        "shellcheck": ["bash", "-c", 'mapfile -t files < <(find scripts dev config/profiles config/agents tests -type f -name "*.sh" -print | sort); shellcheck -x -S warning bin/yard completions/yard.bash "${files[@]}"'],
+        # Historical candidates retain the command recorded in their local receipts.
+        "shellcheck": ["bash", "dev/shellcheck.sh"] if (root / "dev/shellcheck.sh").is_file() else
+            ["bash", "-c", 'mapfile -t files < <(find scripts dev config/profiles config/agents tests -type f -name "*.sh" -print | sort); shellcheck -x -S warning bin/yard completions/yard.bash "${files[@]}"'],
         "process-coverage": ["bash", "dev/process-coverage.sh"],
         "local-adapters": ["bash", "tests/real-host/adapter-contracts.sh"],
         "compatibility": ["python3", "dev/verify-release-upgrades.py", "--release-dir", str(release), "--version", version],

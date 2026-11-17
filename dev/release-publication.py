@@ -48,6 +48,8 @@ PREPARATION_WORKFLOW_POLICIES = {
     "c91e74a532fb6624fd04107c3fe167f47ec36f55": PREPARATION_JOBS,
     # host-free-verify job limit raised to 70 minutes; jobs and commands unchanged.
     "9eb85775fcd01585c6f4a745d7b3b32c3d67700e": PREPARATION_JOBS,
+    # host-free-verify runs the shared parallel ShellCheck runner.
+    "c8c262c85a127ba8034478cbacc1720f15597b56": PREPARATION_JOBS,
 }
 
 
