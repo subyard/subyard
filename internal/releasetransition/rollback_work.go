@@ -40,11 +40,15 @@ func (transition *V2Transition) rewindOnlyWork(edge migrationhistory.ReverseEdge
 	if err != nil {
 		return nil, err
 	}
-	predicate := fingerprintPayload([]byte("rewind-only:" + migration.ID))
 	return []v2Work{
-		{intent: PlannerStepIntent{ID: migration.ID + ".verify-rollback", Migration: migration.ID, Resource: "rollback.compatibility", Decision: DecisionPreserve, Expected: predicate, Desired: predicate}, migration: migration, recipe: &rollbackVerifyRecipe{}},
+		{intent: rewindOnlyVerifierIntent(migration.ID), migration: migration, recipe: &rollbackVerifyRecipe{}},
 		{intent: PlannerStepIntent{ID: migration.ID + ".rewind-ledger", Migration: migration.ID, Resource: "ledger." + migration.Domain, Decision: DecisionTransform, Expected: before, Desired: after}, migration: migration, recipe: &rollbackRewindRecipe{edge: edge, projection: projection}},
 	}, nil
+}
+
+func rewindOnlyVerifierIntent(migrationID string) PlannerStepIntent {
+	predicate := fingerprintPayload([]byte("rewind-only:" + migrationID))
+	return PlannerStepIntent{ID: migrationID + ".verify-rollback", Migration: migrationID, Resource: "rollback.compatibility", Decision: DecisionPreserve, Expected: predicate, Desired: predicate}
 }
 
 func (transition *V2Transition) publishRollbackEdge(snapshot ProtectedSnapshot, work v2Work, recipe *rollbackRewindRecipe) error {

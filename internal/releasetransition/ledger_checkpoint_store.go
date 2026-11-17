@@ -99,7 +99,12 @@ func (store *POSIXV2Store) CompareAndSwapMigrationLedger(
 		!sameProtectedSnapshot(current.ProjectionSnapshot, expected.ProjectionSnapshot) {
 		return ErrProtectedStoreStale
 	}
-	if !expected.Checkpointed {
+	if !current.Checkpointed {
+		for domain, prior := range current.Ledger.Domains {
+			if next.Domains[domain].Epoch < prior.Epoch {
+				return invalid("migration ledger domain %q moved behind its current epoch", domain)
+			}
+		}
 		payload, _, err := MarshalLedgerV2(next, registry)
 		if err != nil {
 			return err
@@ -107,8 +112,8 @@ func (store *POSIXV2Store) CompareAndSwapMigrationLedger(
 		return store.CompareAndSwapLedger(expected.AuthoritySnapshot, payload)
 	}
 	checkpoint, err := advanceLedgerCheckpointV1(
-		expected.Checkpoint, next, registry, registryDigest,
-		expected.ProjectionSnapshot,
+		current.Checkpoint, next, registry, registryDigest,
+		current.ProjectionSnapshot,
 	)
 	if err != nil {
 		return err
@@ -304,10 +309,10 @@ func advanceLedgerCheckpointV1(
 			if err != nil {
 				return LedgerCheckpointV1{}, err
 			}
-			prior = DomainCheckpointV1{CompactedThrough: minimum, PrefixDigest: prefixDigest}
+			prior = DomainCheckpointV1{Epoch: minimum, CompactedThrough: minimum, PrefixDigest: prefixDigest}
 		}
-		if state.Epoch < prior.CompactedThrough {
-			return LedgerCheckpointV1{}, invalid("migration checkpoint domain %q moved behind its compacted prefix", domain)
+		if state.Epoch < prior.Epoch {
+			return LedgerCheckpointV1{}, invalid("migration checkpoint domain %q moved behind its current epoch", domain)
 		}
 		advanced.Domains[domain] = DomainCheckpointV1{
 			Epoch: state.Epoch, CompactedThrough: prior.CompactedThrough,

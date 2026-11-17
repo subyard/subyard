@@ -110,6 +110,11 @@ func (store *POSIXV2Store) prepareCheckpointRewind(expected MigrationLedgerSnaps
 		return checkpointRewindProof{}, invalid("rewind is not owned by the migrating rollback journal")
 	}
 	migration := edge.Migration()
+	definition, compiled := compiledMigration(migration)
+	if !compiled || !sameMigrationDefinition(migration, definition.migration) || definition.rollback.class != rollbackRewindOnly || definition.rollback.verify == nil {
+		return checkpointRewindProof{}, invalid("migration %q has no supported checkpoint rewind recipe", migration.ID)
+	}
+	verifier := rewindOnlyVerifierIntent(migration.ID)
 	_, beforePin, err := MarshalLedgerV2(ledgerFromAuthority(edge.Before()), source)
 	if err != nil {
 		return checkpointRewindProof{}, err
@@ -137,7 +142,7 @@ func (store *POSIXV2Store) prepareCheckpointRewind(expected MigrationLedgerSnaps
 		if err := store.checkRewindStepEvidence(journal, step); err != nil {
 			return checkpointRewindProof{}, err
 		}
-		if step.Migration == migration.ID && step.Resource != "ledger."+migration.Domain {
+		if step.ID == verifier.ID && step.Migration == verifier.Migration && step.Resource == verifier.Resource && step.Decision == verifier.Decision && step.Expected == verifier.Expected && step.Desired == verifier.Desired && step.Evidence.Recovery == "" {
 			verifiedResource = true
 		}
 	}

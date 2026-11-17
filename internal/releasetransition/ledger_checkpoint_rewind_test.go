@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/migrationhistory"
@@ -124,6 +125,50 @@ func TestRewindCheckpointRejectsProjectionFloorAndForeignPrefix(t *testing.T) {
 	}
 }
 
+func TestCheckpointWriterRefusesDecreaseWithinAppliedSuffix(t *testing.T) {
+	source, target := rewindRegistries()
+	source.CurrentEpochs["settings"] = 4
+	source.Migrations = append(source.Migrations, MigrationDefinitionV2{ID: "settings-v4", Domain: "settings", FromEpoch: 3, ToEpoch: 4, Kind: "future-settings-v4"})
+	store, err := NewPOSIXV2Store(testkit.TempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, _, err := MarshalLedgerV2(completeRewindLedger(target), target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapLedger(absentProtectedSnapshot(), projection); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.ReadMigrationLedger(source, digestA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ConvertMigrationLedger(state, source, digestA, source, digestA); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.ReadMigrationLedger(source, digestA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CompareAndSwapMigrationLedger(state, completeRewindLedger(source), source, digestA); err != nil {
+		t.Fatal(err)
+	}
+	state, err = store.ReadMigrationLedger(source, digestA)
+	if err != nil || state.Checkpoint.Domains["settings"].CompactedThrough != 2 {
+		t.Fatalf("advanced checkpoint = %+v, %v", state.Checkpoint, err)
+	}
+	lower := completeRewindLedger(source)
+	lower.Domains["settings"] = DomainLedgerV2{Epoch: 3, Applied: source.appliedPrefix("settings", 3)}
+	if err := store.CompareAndSwapMigrationLedger(state, lower, source, digestA); err == nil {
+		t.Fatal("ordinary writer lowered the current epoch within the applied suffix")
+	}
+	current, err := store.ReadMigrationCheckpoint()
+	if err != nil || !sameProtectedSnapshot(current, state.AuthoritySnapshot) {
+		t.Fatalf("refused decrease changed authority: %v", err)
+	}
+}
+
 type checkpointRewindFixture struct {
 	store          *POSIXV2Store
 	home           string
@@ -135,7 +180,29 @@ type checkpointRewindFixture struct {
 
 func newCheckpointRewindFixture(t *testing.T) checkpointRewindFixture {
 	t.Helper()
-	source, target := rewindRegistries()
+	return checkpointRewindWithEvidence(t, false, false)
+}
+
+func checkpointRewindWithEvidence(t *testing.T, irreversible, unrelatedEvidence bool) checkpointRewindFixture {
+	t.Helper()
+	migration := builtinMigrationDefinitions()[0].migration
+	target := RegistryV2{SchemaVersion: 2, MinimumEpochs: map[string]int{"settings": 1}, CurrentEpochs: map[string]int{"settings": 1}, Migrations: []MigrationDefinitionV2{}}
+	source := target
+	source.CurrentEpochs, source.Migrations = map[string]int{"settings": 2}, []MigrationDefinitionV2{migration}
+	if irreversible {
+		payload, err := BuiltinRegistryPayload()
+		if err != nil {
+			t.Fatal(err)
+		}
+		source, _, err = ParseRegistryV2(payload, BuiltinCapabilityCatalog())
+		if err != nil {
+			t.Fatal(err)
+		}
+		migration = source.Migrations[len(source.Migrations)-1]
+		target = source
+		target.Migrations = source.Migrations[:len(source.Migrations)-1]
+		target.CurrentEpochs = map[string]int{"settings": 3, "project-state": 1, "owner-registration": 3, "power-metadata": 3}
+	}
 	state := rewindSnapshot(t, source, target)
 	store, err := NewPOSIXV2Store(testkit.TempDir(t))
 	if err != nil {
@@ -151,7 +218,7 @@ func newCheckpointRewindFixture(t *testing.T) checkpointRewindFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	edge, err := owner.Rewind(authority, "settings-v3")
+	edge, err := owner.Rewind(authority, migration.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,9 +234,13 @@ func newCheckpointRewindFixture(t *testing.T) checkpointRewindFixture {
 	journal.Goal.Direction = DirectionActivatePrevious
 	journal.RegistryDigest = digestA
 	journal.Checkpoint = JournalMigrating
+	verifier := rewindOnlyVerifierIntent(migration.ID)
+	if unrelatedEvidence {
+		verifier.Resource = "state.settings"
+	}
 	journal.Steps = []JournalStep{
-		{ID: "settings-v3.reverse", Migration: "settings-v3", Resource: "state.settings", Decision: DecisionTransform, Expected: digestC, Desired: digestD, Checkpoint: StepVerified},
-		{ID: "settings-v3.rewind-ledger", Migration: "settings-v3", Resource: "ledger.settings", Decision: DecisionTransform, Expected: beforePin, Desired: afterPin, Checkpoint: StepEvidence},
+		{ID: verifier.ID, Migration: verifier.Migration, Resource: verifier.Resource, Decision: verifier.Decision, Expected: verifier.Expected, Desired: verifier.Desired, Checkpoint: StepVerified},
+		{ID: migration.ID + ".rewind-ledger", Migration: migration.ID, Resource: "ledger." + migration.Domain, Decision: DecisionTransform, Expected: beforePin, Desired: afterPin, Checkpoint: StepEvidence},
 	}
 	for index := range journal.Steps {
 		step := &journal.Steps[index]
@@ -208,7 +279,29 @@ func newCheckpointRewindFixture(t *testing.T) checkpointRewindFixture {
 	return checkpointRewindFixture{store: store, home: store.configHome, source: source, target: target, state: state, edge: edge, journal: snapshot}
 }
 func (f checkpointRewindFixture) proof() (checkpointRewindProof, error) {
-	return f.store.prepareCheckpointRewind(f.state, f.source, digestA, f.target, digestB, f.edge, f.journal, "settings-v3.rewind-ledger")
+	return f.store.prepareCheckpointRewind(f.state, f.source, digestA, f.target, digestB, f.edge, f.journal, f.edge.Migration().ID+".rewind-ledger")
+}
+
+func TestCheckpointRewindRefusesIrreversibleAndUnrelatedEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		irreversible, unrelated bool
+		want                    string
+	}{
+		{"irreversible migration with verifier-shaped evidence", true, false, "no supported checkpoint rewind recipe"},
+		{"unrelated verified preserve row", false, true, "does not bind verified reverse work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := checkpointRewindWithEvidence(t, tc.irreversible, tc.unrelated)
+			if _, err := f.proof(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("rewind proof error = %v, want %q", err, tc.want)
+			}
+			current, err := f.store.ReadMigrationCheckpoint()
+			if err != nil || !sameProtectedSnapshot(current, f.state.AuthoritySnapshot) {
+				t.Fatalf("refused rewind changed authority: %v", err)
+			}
+		})
+	}
 }
 
 func TestCheckpointRewindPublicationRetriesAndRejectsStaleJournal(t *testing.T) {
@@ -277,7 +370,7 @@ func TestCheckpointRewindRequiresProtectedVerifiedEvidence(t *testing.T) {
 	for _, change := range []string{"missing", "changed", "unsafe mode"} {
 		t.Run(change, func(t *testing.T) {
 			f := newCheckpointRewindFixture(t)
-			path := filepath.Join(f.home, "release-transition", "v2", "transactions", "tx-001", "evidence", "settings-v3.reverse.verified.json")
+			path := filepath.Join(f.home, "release-transition", "v2", "transactions", "tx-001", "evidence", f.edge.Migration().ID+".verify-rollback.verified.json")
 			switch change {
 			case "missing":
 				if err := os.Remove(path); err != nil {
