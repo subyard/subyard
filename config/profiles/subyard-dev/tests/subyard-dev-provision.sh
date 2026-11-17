@@ -27,15 +27,20 @@ mkdir -p "$tmp/fake-bin" "$tmp/home" "$adapter_cwd"
 
 # Developer provisioning must not require or change a user manager.
 export SUBYARD_DEV_MANAGER_LOG="$tmp/manager-invocations"
-for tool in loginctl systemctl; do
-  cat > "$tmp/fake-bin/$tool" <<'SH'
+cat > "$tmp/fake-bin/loginctl" <<'SH'
 #!/bin/sh
 : > "${SUBYARD_DEV_MANAGER_LOG:?}"
 exit 99
 SH
-  chmod +x "$tmp/fake-bin/$tool"
-done
+chmod +x "$tmp/fake-bin/loginctl"
 
+cat > "$tmp/fake-bin/systemctl" <<'SH'
+#!/bin/sh
+case "$*" in
+  daemon-reload|'enable --now subyard-dev-gocache-trim.timer'|'is-enabled --quiet subyard-dev-gocache-trim.timer'|'is-active --quiet subyard-dev-gocache-trim.timer') exit 0 ;;
+  *) exit 99 ;;
+esac
+SH
 cat > "$tmp/fake-bin/apt-get" <<'APT'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SUBYARD_DEV_APT_LOG"
@@ -188,6 +193,26 @@ grep -Fxq "GOCACHE=$test_cache GOMODCACHE=$test_mod_cache GOTOOLCHAIN=auto" \
 run_hook
 [ "$(wc -l < "$SUBYARD_DEV_GO_LOG")" -eq 2 ] \
   || fail "Go environment was not re-applied exactly once per provision"
+
+# Missing or changed units/helper must be reported as drift.
+for artifact in etc/systemd/system/subyard-dev-gocache-trim.service etc/systemd/system/subyard-dev-gocache-trim.timer usr/local/lib/subyard-dev/trim-gocache.py; do
+  cp "$tmp/system/$artifact" "$tmp/saved-artifact"
+  printf 'drift\n' >> "$tmp/system/$artifact"
+  status=0
+  env "${common_env[@]}" bash "$HOOK" --check || status=$?
+  [ "$status" -eq 10 ] || fail "changed $artifact did not report drift"
+  rm "$tmp/system/$artifact"
+  status=0
+  env "${common_env[@]}" bash "$HOOK" --check || status=$?
+  [ "$status" -eq 10 ] || fail "missing $artifact did not report drift"
+  cp "$tmp/saved-artifact" "$tmp/system/$artifact"
+done
+grep -Fxq 'Persistent=true' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
+grep -Fxq 'OnCalendar=*-*-* 00,12:00:00' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
+status=0
+env "${common_env[@]}" SUBYARD_GOCACHE_LIMIT=invalid bash "$HOOK" --check >"$tmp/invalid.out" 2>&1 || status=$?
+[ "$status" -eq 2 ] || fail "invalid limit accepted"
+grep -Fq 'limit must be a positive integer' "$tmp/invalid.out"
 
 # Ordinary Go preparation/checks neither create Rust homes nor install Rust.
 mv "$tmp/home/.cargo" "$tmp/saved-cargo"

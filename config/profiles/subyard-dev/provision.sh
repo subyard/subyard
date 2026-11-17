@@ -29,6 +29,53 @@ GOMODCACHE="${GOMODCACHE:-/srv/cache/go-mod}"
 SUBYARD_CARGO_BUILD_ROOT="${SUBYARD_CARGO_BUILD_ROOT:-/srv/cache/cargo-build/subyard}"
 SUBYARD_NPM_PUBLIC_CACHE="${SUBYARD_NPM_PUBLIC_CACHE:-/srv/cache/npm-public}"
 SYSTEM_ROOT="${SUBYARD_DEV_SYSTEM_ROOT:-}"
+PROFILE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUBYARD_GOCACHE_LIMIT="${SUBYARD_GOCACHE_LIMIT:-30G}"
+python3 "$PROFILE_DIR/trim-gocache.py" --validate "$GOCACHE" "$SUBYARD_GOCACHE_LIMIT"
+
+# Paths are passed as systemd quoted arguments; specifiers must remain literal.
+unit_argument() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  value="${value//\$/\$\$}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  printf '"%s"' "$value"
+}
+cache_service() {
+  cat <<EOF
+[Unit]
+Description=Trim Subyard development Go build cache
+[Service]
+Type=oneshot
+User=$DEV_USER
+Group=$DEV_GROUP
+Nice=19
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 /usr/local/lib/subyard-dev/trim-gocache.py $(unit_argument "$GOCACHE") $SUBYARD_GOCACHE_LIMIT
+EOF
+}
+cache_timer() {
+  cat <<'EOF'
+[Unit]
+Description=Trim Subyard development Go build cache twice daily
+[Timer]
+OnCalendar=*-*-* 00,12:00:00
+Persistent=true
+RandomizedDelaySec=30m
+[Install]
+WantedBy=timers.target
+EOF
+}
+check_cache_timer() {
+  cmp -s "$PROFILE_DIR/trim-gocache.py" "$SYSTEM_ROOT/usr/local/lib/subyard-dev/trim-gocache.py" &&
+    cmp -s <(cache_service) "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim.service" &&
+    cmp -s <(cache_timer) "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim.timer" &&
+    systemctl is-enabled --quiet subyard-dev-gocache-trim.timer &&
+    systemctl is-active --quiet subyard-dev-gocache-trim.timer
+}
 
 # PAM launches, login shells (including IDE/agent command shells), and future
 # user-manager processes get the same absolute paths despite isolated app XDG.
@@ -123,6 +170,7 @@ if [ "$check_only" -eq 1 ]; then
     fi
   done
   check_environment || changed=1
+  check_cache_timer || changed=1
   if [ "$changed" -eq 0 ]; then
     mapfile -t go_env < <(run_go_as_dev env GOCACHE GOMODCACHE GOTOOLCHAIN)
     [ "${go_env[0]-}" = "$GOCACHE" ] || changed=1
@@ -167,6 +215,14 @@ sed -i '/^# >>> subyard-dev >>>$/,/^# <<< subyard-dev <<<$/d' "$SYSTEM_ROOT/etc/
 cache_environment > "$SYSTEM_ROOT/etc/environment.d/60-subyard-dev.conf"
 cache_environment | sed 's/^/export /' > "$SYSTEM_ROOT/etc/profile.d/subyard-dev.sh"
 chmod 0644 "$SYSTEM_ROOT/etc/environment" "$SYSTEM_ROOT/etc/environment.d/60-subyard-dev.conf" "$SYSTEM_ROOT/etc/profile.d/subyard-dev.sh"
+
+install -d -m 0755 "$SYSTEM_ROOT/usr/local/lib/subyard-dev" "$SYSTEM_ROOT/etc/systemd/system"
+install -m 0644 "$PROFILE_DIR/trim-gocache.py" "$SYSTEM_ROOT/usr/local/lib/subyard-dev/trim-gocache.py"
+cache_service > "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim.service"
+cache_timer > "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim.timer"
+chmod 0644 "$SYSTEM_ROOT/etc/systemd/system/subyard-dev-gocache-trim."{service,timer}
+systemctl daemon-reload
+systemctl enable --now subyard-dev-gocache-trim.timer
 
 if [ "$with_rust" = 1 ]; then
 for directory in "$DEV_HOME/.cargo" "$DEV_HOME/.rustup"; do
