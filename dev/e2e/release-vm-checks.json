@@ -16,6 +16,8 @@
      "command": ["bash", "dev/e2e/disabled-components-release.sh"]},
     {"id": "published-upgrade/anchor", "lease": {}, "timeout_seconds": 3600,
      "command": ["bash", "dev/e2e/published-upgrade.sh", "anchor", "all"]},
+    {"id": "published-upgrade/0.29.0", "lease": {}, "timeout_seconds": 3600,
+     "command": ["bash", "dev/e2e/published-upgrade.sh", "0.29.0", "all"]},
     {"id": "integration-selection/container", "lease": {}, "timeout_seconds": 3000,
      "command": ["bash", "dev/e2e/integration-selection.sh", "container"]},
     {"id": "integration-selection/default", "lease": {}, "timeout_seconds": 1200,

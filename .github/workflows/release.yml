@@ -145,13 +145,18 @@ jobs:
           for arch in amd64 arm64; do
             dev/package-engine.sh --output-dir .build/release --version "$VERSION" --arch "$arch"
           done
+      - name: Cache pinned released callers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: .build/published-baselines
+          key: published-baselines-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('dev/verify-release-upgrades.py', 'dev/e2e/published-upgrade-baselines.tsv') }}
       - name: Verify released updater compatibility
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -o pipefail
           mkdir -p .build/ci-logs
-          python3 dev/verify-release-upgrades.py --release-dir .build/release --version "$VERSION" 2>&1 | tee .build/ci-logs/verify-release-upgrades.log
+          SUBYARD_TEST_BASELINE_CACHE="$PWD/.build/published-baselines" python3 dev/verify-release-upgrades.py --release-dir .build/release --version "$VERSION" 2>&1 | tee .build/ci-logs/verify-release-upgrades.log
       - name: Freeze prepared source and exact assets
         env:
           VERSION: ${{ inputs.version }}

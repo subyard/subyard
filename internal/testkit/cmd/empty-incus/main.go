@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -22,7 +23,24 @@ func main() {
 		fmt.Fprintln(os.Stderr, "empty-incus: expected a private fixture root and optional observation file")
 		os.Exit(2)
 	}
-	server, err := testkit.NewIncusServer(os.Args[1])
+	server, err := testkit.NewIncusServer(os.Args[1], func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := os.Stat(os.Args[1] + "/refusal-read-only"); err == nil {
+				file, err := os.OpenFile(os.Args[1]+"/incus-requests", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if err != nil {
+					http.Error(w, "cannot record request", 500)
+					return
+				}
+				fmt.Fprintln(file, r.Method+" "+r.URL.Path)
+				file.Close()
+				if r.Method != http.MethodGet {
+					http.Error(w, "mutation forbidden", 403)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "empty-incus: cannot start fixture server")
 		os.Exit(1)

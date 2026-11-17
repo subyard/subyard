@@ -441,6 +441,12 @@ Agents preparing a release apply the
   its CI checks pass; the release is complete only after it merges. Publication, attestation and
   their confirmations stay with the operator.
 
+- After publication, open a PR to the default branch pinning the new release's verified installer
+  and archive SHA-256 values as a `direct` row in
+  `dev/e2e/published-upgrade-baselines.tsv`. Add its all-agent published-upgrade check to
+  `dev/e2e/release-vm-checks.json` and `CI_HOSTED_CHECKS` in `dev/release-acceptance.py`, so
+  the next release accepts a direct upgrade from the previous published release.
+
 ### One release candidate
 
 The same profile inventory is used by local acceptance and the branch CI inventory step

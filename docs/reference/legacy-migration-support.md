@@ -136,9 +136,10 @@ checks. Release preparation refuses if the previous published release is not a d
 row or local release tags are unavailable. Candidate versions must sort above their direct baselines.
 
 Required host-free released-caller refusal coverage includes v0.11.0, v0.17.3 and v0.27.0,
-each asserting the hop command. Their VM refusal checks and the v0.11.0 → hop → candidate
-source-upgrade lane are optional Periodic E2E coverage, outside release acceptance and full P0;
-their failure never blocks a release or PR. See [Periodic E2E](../testing.md#periodic-e2e-on-hosted-runners).
+each asserting the hop command and unchanged protected state using temporary homes and a local
+`file://` candidate. The focused `--only-source-anchor` verifier records Incus API reads and
+rejects API mutations; an Incus CLI stub rejects every invocation. Pinned downloads are cached
+in CI and rechecked against immutable archive hashes. These refusals need no VM lanes.
 Pre-v0.11.0 removal retains its own pinned harness and full-uninstall lane. The one-time hop chains belong
 to the first boundary release, v0.29.0, whose acceptance runs from its release branch; master no
 longer includes them. Fixtures that step an older install through the boundary use the hop;

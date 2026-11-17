@@ -24,7 +24,7 @@ from unittest.mock import patch
 
 root = Path(sys.argv[1])
 
-def published_baseline_refusals(source, catalog):
+def published_baseline_refusals(source, catalog, previous=None):
     errors, pins, unique = [], {}, {"anchor": [], "hop": []}
     path = source / "dev/e2e/published-upgrade-baselines.tsv"
     for index, line in enumerate(path.read_text().splitlines(), 1):
@@ -78,6 +78,12 @@ def published_baseline_refusals(source, catalog):
         allowed = ("refusal",) if mode == "refusal" else ("anchor", "hop", "direct")
         if role not in allowed:
             errors.append(f"{entry['id']}: {mode} source {version} has role {role}")
+    if previous is not None and pins.get(previous) not in ("anchor", "hop"):
+        if pins.get(previous) != "direct":
+            errors.append(f"previous release {previous}: expected direct baseline")
+        if not any(entry["command"] == ["bash", "dev/e2e/published-upgrade.sh", previous, "all"]
+                   for entry in catalog["checks"]):
+            errors.append(f"previous release {previous}: missing catalog check with all agents")
     return errors
 
 sys.argv = [sys.argv[0]]
@@ -3143,10 +3149,14 @@ while True: time.sleep(1)
         self.assertEqual(default["lease"], {})
         for entry in catalog["checks"]:
             self.assertTrue((root / entry["command"][1]).is_file(), entry["id"])
-        self.assertEqual(published_baseline_refusals(root, catalog), [])
+        tags = subprocess.check_output(["git", "tag", "--list", "v[0-9]*"], cwd=root, text=True).split()
+        previous = max((tag[1:] for tag in tags if re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag)),
+                       key=lambda version: tuple(map(int, version.split("."))))
+        self.assertEqual(published_baseline_refusals(root, catalog, previous), [])
         self.assertEqual({entry["id"]: entry["command"][2:] for entry in catalog["checks"]
                           if entry["command"][1] == "dev/e2e/published-upgrade.sh"}, {
             "published-upgrade/anchor": ["anchor", "all"],
+            "published-upgrade/0.29.0": ["0.29.0", "all"],
         })
         verifier = importlib.util.spec_from_file_location("upgrade_verifier", root / "dev/verify-release-upgrades.py")
         module = importlib.util.module_from_spec(verifier)
@@ -3190,6 +3200,17 @@ while True: time.sleep(1)
                 "anchor-refusal: refusal source 1.0.0 has role None",
                 "hop-refusal: refusal source 1.1.0 has role None",
                 "hop-direct: hop baseline is unavailable"])
+
+    def test_previous_release_requires_direct_row_and_all_agent_check(self):
+        catalog = json.loads((root / m.CORE_VM_CATALOG).read_text())
+        self.assertEqual(published_baseline_refusals(root, catalog, "0.30.0"), [
+            "previous release 0.30.0: expected direct baseline",
+            "previous release 0.30.0: missing catalog check with all agents"])
+        for previous in ("0.28.0", "0.28.1"):
+            self.assertEqual(published_baseline_refusals(root, catalog, previous), [])
+        catalog["checks"] = [entry for entry in catalog["checks"] if entry["id"] != "published-upgrade/0.29.0"]
+        self.assertEqual(published_baseline_refusals(root, catalog, "0.29.0"), [
+            "previous release 0.29.0: missing catalog check with all agents"])
 
     def test_core_vm_check_wrapper_runs_the_declared_command_on_its_slot(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -3481,7 +3502,7 @@ class FullSplitRequirement(unittest.TestCase):
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 21)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 22)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):

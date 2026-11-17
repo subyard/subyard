@@ -97,7 +97,7 @@ type incusOperation struct {
 	terminal  map[string]any
 }
 
-func NewIncusServer(root string) (*IncusServer, error) {
+func NewIncusServer(root string, middleware ...func(http.Handler) http.Handler) (*IncusServer, error) {
 	if !filepath.IsAbs(root) {
 		return nil, errors.New("fake Incus root must be absolute")
 	}
@@ -120,7 +120,11 @@ func NewIncusServer(root string) (*IncusServer, error) {
 		execStarted: make(chan struct{}, 1),
 		operations:  make(map[string]*incusOperation),
 	}
-	fake.server = &http.Server{Handler: fake}
+	var handler http.Handler = fake
+	for _, wrap := range middleware {
+		handler = wrap(handler)
+	}
+	fake.server = &http.Server{Handler: handler}
 	go func() { _ = fake.server.Serve(listener) }()
 	return fake, nil
 }
