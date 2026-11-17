@@ -69,14 +69,16 @@ func (runtime *Runtime) inspectVMQEMURollback(ctx context.Context, target *verif
 // public error cause. Only its protocol outcome is bounded; the operation boundary
 // renders the complete cause once, including for a new rollback's planning refusal.
 func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest) error {
+	migrationMessages, migrationErr := runtime.inspectMigrationKindRollback(ctx, target, request)
 	layout, layoutErr := runtime.inspectConfigLayoutRollback(ctx, target, request)
 	messages, vmErr := runtime.inspectVMQEMURollback(ctx, target, request)
 	vmRefused := len(messages) != 0
 	if layout != nil {
 		messages = append([]string{layout.Message}, messages...)
 	}
-	if layoutErr != nil || vmErr != nil {
-		causes := []error{layoutErr, vmErr}
+	messages = append(migrationMessages, messages...)
+	if migrationErr != nil || layoutErr != nil || vmErr != nil {
+		causes := []error{migrationErr, layoutErr, vmErr}
 		for _, message := range messages {
 			causes = append(causes, errors.New(message))
 		}
@@ -96,7 +98,10 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		outcome = publicReleaseOutcome(releaseLinksFromRuntimeSnapshot(links), request.Target, nil, releasetransition.CodeRollbackIncompatible,
 			"", "retain a release supporting headless VMs with free page reporting, then run yard update --rollback")
 	}
-	if layout != nil && vmRefused {
+	if len(migrationMessages) != 0 {
+		outcome.Retry = "keep the current release active; select a verified retained release supporting all registered migrations, or update forward to a compatible release"
+	}
+	if layout != nil && vmRefused && len(migrationMessages) == 0 {
 		outcome.Retry = "retain a release supporting the installed configuration and reporting VM values, then run yard update --rollback"
 	}
 	outcome.Message = strings.Join(messages, "; ")
@@ -105,6 +110,9 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		reason := "rollback requires headless reporting VM reader support"
 		if layout != nil {
 			reason = "rollback requires Git configuration cache and headless reporting VM reader support"
+		}
+		if len(migrationMessages) != 0 {
+			reason = "rollback requires support for registered migration kinds and installed state"
 		}
 		outcome.Message = fmt.Sprintf("%s; %d findings omitted; full details: stderr of yard update --rollback", reason, len(messages))
 	}
