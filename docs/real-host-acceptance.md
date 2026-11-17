@@ -84,7 +84,7 @@ power/systemd and full peer scenarios, and includes the same release-smoke phase
 loopback SSH/crypto and engine-release contracts have already passed, so it does not repeat them on
 the VMs. Only these disposable VMs observe real KVM and kernel behavior. Physical candidate-broker
 cross-slot isolation and quarantine/rebuild are an explicit separate diagnostic, not recursively
-run inside every full P0. See [test VM capacity and scope](test-vms-operator.md#operator-setup).
+run inside every full P0. See [test VM capacity and scope](test-vms.md#capacity-and-test-scope).
 
 Android acceptance needs only one `--type android-test` VM (8 GiB / 40 GiB). A pair is used for
 scenarios with two independent hosts; `--vm 1` alone still allocates the default pair.

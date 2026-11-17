@@ -13,6 +13,72 @@ An unrelated registration using either name refuses update and init with a diagn
 The outer yard remains operator-owned. Agents can acquire inner slots, but cannot start a stopped
 outer yard, enter its shell, reach its Incus socket or invoke arbitrary lifecycle commands.
 
+## Pool facts for agents
+
+Use the [generated CLI reference](cli-reference.md) and command `--help` for command
+syntax. When diagnosis needs an owner-side command, give the operator the exact command;
+agents own only their allocated inner VMs.
+
+The `test-vms` service creation preset uses yard name `test-yard`, SSH port `2223` and
+guest UID `1001` (avoiding the cloud image's UID `1000`). Existing runtimes retain their
+configured settings. Workspace selection does not select the service.
+
+Registration adopts a proven owned broker without initialization, container restart or lease
+interruption. New-release reconciliation can register a uniquely proven owned broker while
+retaining leases. Interrupted publication and owner HostID changes can require explicit
+registration; use the [service activation contract](control-plane.md#owner-infrastructure-services)
+for ownership checks and recovery. Service update reconciles the broker against the installed
+runtime; ordinary runtime update installs releases. Acquisition never starts a stopped outer yard
+or changes its desired power state.
+
+For use from any yard without a checkout, see the
+[`subyard-test-vms` skill](../config/profiles/test-vms-client/skills/subyard-test-vms/SKILL.md).
+`dev/agent-e2e.sh` sources that same client and adds worktree copying, lanes and phase evidence;
+its lease is bound to the wrapper and launching process.
+
+### Capacity and test scope
+
+Slots are shared across types. The default pool has two slots; shrinking refuses while retiring
+slots are held, provisioning, draining or quarantined. Grants report the actual resource contract.
+
+| Type | Guests | RAM per guest | Virtual disk per guest |
+| --- | ---: | ---: | ---: |
+| `subyard-pair` | 1 or 2 | 4 GiB | 20 GiB |
+| `android-test` | 1 | 8 GiB | 40 GiB |
+
+Admission reserves provisioning RAM and builder promises against the lower of visible
+memory/cgroup headroom and verified physical-owner available RAM. Swap adds no RAM headroom;
+missing physical counters refuse admission. With the default 512 MiB per-VM overhead and
+4 GiB host reserve, a singleton needs 8.5 GiB available and a pair needs 13 GiB before other
+pending requests or builders. Held VMs consume available RAM rather than retaining a growth
+promise. The broker worker's separate process budget is not the VM budget.
+
+Virtual disk capacity differs from physical usage and cache costs. The default disk quota is
+unlimited, but the 5 GiB physical reserve and outstanding growth commitments still apply.
+For `dir` storage, the disk budget charges image cache and allocated VM/snapshot blocks;
+`btrfs` and `zfs` use conservative whole-pool usage. Deleting files inside a guest need not
+reclaim host blocks until release deletes its volume. Use broker physical usage and growth
+fields when diagnosing capacity; guest free space alone is insufficient.
+
+Both types have the generic host baseline (Go bootstrap, build utilities, ShellCheck, Git,
+network/archive tools and the product Incus installer). `android-test` selects larger resources;
+Android SDK and emulator setup belong to the separate Android workflow. Images contain no
+project data, credentials or project caches. On x86_64, broker VMs support ACPI S3 (`deep`)
+with RTC wakeup; other architectures do not receive the broker's ICH9 S3 override.
+
+Bases refresh on recipe changes, explicit request or after seven days. Validation must pass
+before publication; active leases pin their bases and keep their disks through refresh.
+Legacy retained allocations need explicit safe retirement before reuse; releasing an active
+legacy lease retains its old disks. Preserve needed data before proposing retirement.
+
+Ordinary P0 uses the standard resources above: smoke, full and peer scenarios use two guests;
+independent single-host lanes use one. `SUBYARD_P0_NESTED_VM=2` retains a pair for that selector.
+Android acceptance uses one Android VM. Physical candidate-broker cross-slot isolation and
+quarantine/rebuild use the separate `SUBYARD_P0_BROKER_RECOVERY_ONLY=1` diagnostic, which creates
+nested pairs and checks capacity first. Select it for affected broker behavior; it is not an
+automatic full P0 requirement or a reason to enlarge the ordinary pool. A successful outer-broker
+lease does not prove the candidate broker code.
+
 ## Running tests
 
 Choose checks using [Subyard dev-flow](../.agents/skills/subyard-dev-flow/SKILL.md#choose-checks-by-risk).
@@ -1315,7 +1381,7 @@ Every wrapper invocation is a new lease for only the requested slot. For a two-V
 `e2e-vm-1` and `e2e-vm-2` select its two guests; any singleton has only `e2e-vm-1`. These are
 guests within the allocation, never global slot names. Stateful multi-step work must stay in one
 script invocation or one interactive SSH session, or use a
-[client handle](test-vms-operator.md#client-for-any-yard) across separate commands. Once leased, the agent has unrestricted root
+[client handle](../config/profiles/test-vms-client/skills/subyard-test-vms/SKILL.md) across separate commands. Once leased, the agent has unrestricted root
 in its allocated guests and may create arbitrary nested yards,
 brokers and leases. Nested slots are a separate namespace: inspect the nested broker's local status
 and choose its slot locally instead of copying the outer `SUBYARD_E2E_SLOT`. `--slot N` requests only

@@ -15,7 +15,7 @@ Test selection still follows the skill's risk-based policy.
 | Long checks or observer work | [Execution and reporting principles](#execution-and-reporting-principles), including only your client's [Codex mechanics](#codex-mechanics) or [Claude Code mechanics](#claude-code-mechanics). |
 | VM checks | [Running tests](test-vms.md#running-tests), [Test lanes and gates](test-vms.md#test-lanes-and-gates), and [Fixture preflight](test-vms.md#fixture-preflight). |
 | Release preparation, acceptance, or publication | [Release publication](reference/release-publication.md), including the [agent release workflow](reference/release-publication.md#agent-release-workflow). |
-| Operator service or client setup | [Test VM operator setup and client](test-vms-operator.md). |
+| Test-VM pool setup, capacity, or client availability | [Pool facts for agents](test-vms.md#pool-facts-for-agents) and the [subyard-test-vms skill](../config/profiles/test-vms-client/skills/subyard-test-vms/SKILL.md). |
 
 ## Static checks and dependency audits
 
