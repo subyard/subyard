@@ -8,6 +8,15 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SLOT = ["--slot", "1"]
+
+
+def optional_vm(name, duration, *guest_env):
+    return {"id": "periodic:" + name, "optional": True,
+            "command": ["timeout", "--signal=TERM", "--kill-after=600s", duration,
+                        "dev/agent-e2e.sh", *SLOT, "--vm-count", "1", "--vm", "1",
+                        "--purpose", name, "--", *guest_env, "bash", f"dev/e2e/{name}.sh"]}
+
+
 # Checks that boot a VM inside the leased VM. On AMD hosted runners such a VM boots far too slowly
 # under the runner's hypervisor for these checks to finish, so they run only on Intel runners.
 NESTED = {"p0-release-smoke", "p0:release", "p0:nested-teardown", "profile:amnezia",
@@ -25,7 +34,11 @@ PERIODIC_ONLY = [{"id": "periodic:config-sync",
                  # Physical regression outside the release acceptance catalog; uses the normal candidate bundle.
                  {"id": "vm:incus-apparmor-probe",
                   "command": ["dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
-                              "--purpose", "apparmor-probe", "--", "bash", "dev/e2e/incus-apparmor-probe.sh"]}]
+                              "--purpose", "apparmor-probe", "--", "bash", "dev/e2e/incus-apparmor-probe.sh"]},
+                 optional_vm("cleanup-acceptance", "60m", "env",
+                             "SUBYARD_E2E_CLEANUP_CACHE_HELPER=config/profiles/subyard-dev/tests/e2e/cleanup-cache.sh"),
+                 optional_vm("sudo-terminal-ownership", "45m"),
+                 optional_vm("zabbly-download-smoke", "15m")]
 # Veranda GUI SHORT scenarios (veranda/desktop/README.md). They gate no CLI or engine release, so
 # they are periodic only and use their own bundle, which adds the GUI and engine ELFs. A manual
 # check runs only when a dispatch names it.

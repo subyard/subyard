@@ -3318,6 +3318,15 @@ class FullSplitRequirement(unittest.TestCase):
         self.assertEqual({name: set(required) for name, required in m.core_vm_requirements(root).items()},
                          {"vm:" + owner[0]: {"vm:" + lane_checks[lane] for lane in split}})
 
+    def test_periodic_physical_diagnostics_are_outside_release_acceptance(self):
+        names = {"cleanup-acceptance", "sudo-terminal-ownership", "zabbly-download-smoke"}
+        scripts = {f"dev/e2e/{name}.sh" for name in names}
+        commands = m.commands(root, "0.0.0", m.profile_inventory(root))
+        catalog = m.core_vm_catalog(root)
+        self.assertFalse(names & {name.rsplit(":", 1)[-1] for name in commands})
+        for command in [*commands.values(), *(entry["command"] for entry in catalog)]:
+            self.assertFalse(scripts.intersection(command or []))
+
     def test_catalog_requirements_fail_loudly(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             checkout = split_catalog_checkout(Path(temporary))

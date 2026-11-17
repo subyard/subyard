@@ -20,6 +20,7 @@ RUN_ID="${SUBYARD_E2E_RUN_ID:?run through dev/agent-e2e.sh}"
 STATE="$(mktemp -d /var/tmp/subyard-cleanup.XXXXXX)"
 printf '%s\n' "$RUN_ID" > "$STATE/.fixture-run"
 NAMES=()
+PROJECT_ROOTS=()
 launcher=''
 die() { printf 'cleanup-acceptance: %s\n' "$*" >&2; exit 1; }
 incus() { sudo -n /usr/bin/incus "$@"; }
@@ -58,8 +59,8 @@ CODING_TOOL_INTEGRATIONS=
 ENVIRONMENT_PROFILES=
 DEV_USER=$fixture_dev_user
 DEV_UID=$fixture_dev_uid
-HOST_BASE=$STATE/host-$kind
-RESTRICTED_DISK_PATHS=$STATE/host-$kind
+HOST_BASE=$PROJECT_ROOT
+RESTRICTED_DISK_PATHS=$PROJECT_ROOT
 FORWARD_SSH_AGENT=0
 LIMITS_CPU=1
 LIMITS_MEMORY=1GiB
@@ -70,7 +71,7 @@ EOF
   chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
 }
 cleanup() {
-  local original=$? cleanup_exit=0 name rc project instance
+  local original=$? cleanup_exit=0 name rc project instance root
   trap - EXIT
   set +e
   if [ -n "$launcher" ]; then
@@ -90,6 +91,12 @@ cleanup() {
         printf 'cleanup-acceptance: cleanup_yard=%s project_still_present\n' "$name"
         cleanup_exit=3
       fi
+    done
+  fi
+  if [ "$cleanup_exit" = 0 ]; then
+    for root in "${PROJECT_ROOTS[@]}"; do
+      [ ! -L "$root" ] && [ "$(cat "$root/.fixture-run" 2>/dev/null)" = "$RUN_ID" ] \
+        && sudo -n find "$root" -depth -delete || cleanup_exit=3
     done
   fi
   if [ "$cleanup_exit" = 0 ] && [ ! -L "$STATE" ] \
@@ -113,8 +120,11 @@ sudo -n true || die 'disposable VM requires passwordless root helpers'
 if [ "$cleanup_mode" = vm ]; then
   test -c /dev/kvm || die 'nested VM recovery acceptance requires /dev/kvm'
 fi
+required_gib=5
+[ "$cleanup_mode" != vm ] || required_gib=10
 free_bytes=$(df -B1 --output=avail /var/tmp | tail -n 1)
-[ "$free_bytes" -ge $((10 * 1024 * 1024 * 1024)) ] || die 'need 10 GiB free for independent data backups'
+[ "$free_bytes" -ge $((required_gib * 1024 * 1024 * 1024)) ] \
+  || die "need $required_gib GiB free for independent data backups"
 
 # Reuse the owning platform reconciler and image preflight; no second installer recipe.
 bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
@@ -176,10 +186,10 @@ for scenario in "${scenarios[@]}"; do
   kind="$cleanup_mode"; port=$((33000 + $$ % 10000))
   if [ "$scenario" = default ]; then port=$((port + 1)); neighbor_before="$(neighbor_oracle)"; fi
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
-  write_yard_config
   PROJECT_ROOT="$(mktemp -d /tmp/subyard-cleanup-projects.XXXXXX)"
   printf '%s\n' "$RUN_ID" > "$PROJECT_ROOT/.fixture-run"
-  printf 'HOST_BASE=%s\nRESTRICTED_DISK_PATHS=%s\n' "$PROJECT_ROOT" "$PROJECT_ROOT" >> "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
+  PROJECT_ROOTS+=("$PROJECT_ROOT")
+  write_yard_config
   NAMES+=("$name")
   yard init --yes
   yard start --yes
@@ -199,7 +209,7 @@ for scenario in "${scenarios[@]}"; do
   sudo -n chown -R "$fixture_dev_uid:$fixture_dev_uid" "$bindsource"
   yard sync "$source" --name alpha --yes
   yard bind "$bindsource" --name beta --yes
-  guest sh -eu -c 'printf retained >/tmp/cleanup-sentinel; printf undeclared >/srv/cache/cleanup-sentinel; printf rootfs >/home/dev/cleanup-sentinel'
+  guest sh -eu -c 'mkdir -p /srv/cache; printf retained >/tmp/cleanup-sentinel; printf undeclared >/srv/cache/cleanup-sentinel; printf rootfs >/home/dev/cleanup-sentinel'
   original_uuid="$(incus config get "$instance" volatile.uuid --project "$project")"
   project_before="$(project_oracle)"; registry_before="$(registry_oracle)"
   config_before=$(sha256sum "$SUBYARD_CONFIG_HOME/yards/$name/config.env")

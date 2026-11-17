@@ -342,15 +342,33 @@ assert apparmor == [{"id": apparmor_id, "command": [
     "--purpose", "apparmor-probe", "--", "bash", "dev/e2e/incus-apparmor-probe.sh"]}]
 assert apparmor[0] in plan["checks"]["include"]  # Containers need no Intel-only nested VM job.
 assert apparmor_id not in commands  # Periodic-only; no new release acceptance gate.
+optional_vm = {}
+for name, duration, guest_env in (
+    ("cleanup-acceptance", "60m", ["env",
+        "SUBYARD_E2E_CLEANUP_CACHE_HELPER=config/profiles/subyard-dev/tests/e2e/cleanup-cache.sh"]),
+    ("sudo-terminal-ownership", "45m", []),
+    ("zabbly-download-smoke", "15m", []),
+):
+    check_id = "periodic:" + name
+    optional_vm[check_id] = {"id": check_id, "optional": True, "command": [
+        "timeout", "--signal=TERM", "--kill-after=600s", duration,
+        "dev/agent-e2e.sh", "--slot", "1", "--vm-count", "1", "--vm", "1",
+        "--purpose", name, "--", *guest_env, "bash", f"dev/e2e/{name}.sh",
+    ]}
+    assert [entry for group in plan.values() for entry in group["include"]
+            if entry["id"] == check_id] == [optional_vm[check_id]]
+    assert optional_vm[check_id] in plan["checks"]["include"]
 # Adding periodic-only checks must preserve every existing matrix entry, including Veranda.
 p.PERIODIC_ONLY = []
-assert {kind: {"include": [entry for entry in group["include"] if entry not in (config_sync, apparmor[0])]}
+assert {kind: {"include": [entry for entry in group["include"]
+                          if entry not in (config_sync, apparmor[0], *optional_vm.values())]}
         for kind, group in plan.items()} == p.plan(root)
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
 workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
-for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0"):
+for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
+             *optional_vm):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
         env=dict(os.environ, ONLY=only, plan=json.dumps(plan))))
@@ -376,7 +394,7 @@ assert {name for name in entries if name.startswith("published:")} == {
     if "vm:published-upgrade/" + (role if role in ("anchor", "hop") else version) not in commands}
 # Unsupported-source VM checks run by default and remain nonblocking on release and PR paths.
 optional = {entry["id"] for group in plan.values() for entry in group["include"] if entry.get("optional")}
-assert optional == {"p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0"}
+assert optional == {"p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0", *optional_vm}
 assert not {"vm:p0-source-upgrade", *("vm:published-upgrade/" + v for v in ("0.11.0", "0.17.3", "0.27.0"))} & set(commands)
 assert entries["p0:source-upgrade"] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "source-upgrade", "--slot", "1"]
 assert "    continue-on-error: ${{ matrix.optional || false }}\n" in workflow.split("  check:\n", 1)[1].split("    steps:", 1)[0]
