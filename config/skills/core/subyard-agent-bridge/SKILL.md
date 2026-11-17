@@ -55,6 +55,8 @@ arguments after `--`, e.g. Codex `-- -c key=value --profile NAME` or Claude
 `-- --permission-mode manual --max-turns 4 --append-system-prompt 'Extra context'`.
 They override role defaults and are retained on resume. Native flags must preserve
 the stdio protocol. The bridge always sets Claude's permission host to stdio.
+For Codex, the bridge translates `--sandbox` or `-s` to `sandbox_mode` and checks
+the effective sandbox before starting the turn. A mismatch fails the turn.
 
 `state` is JSON with `status` (`launching`, `running`, `done`, `failed`, `interrupted`),
 launcher or bridge PID, session/turn IDs, scope, generation and pending approval IDs.
@@ -74,12 +76,12 @@ Use `tail --dir /tmp/WORKER -n 20` for recent summarized messages/tool calls.
 workers under that private root, independently of one another.
 
 To continue, run `resume --dir /tmp/WORKER --task FILE`, or replace `task.md` and
-omit `--task`. `send` steers a running turn; on a stopped worker it starts the next
-turn of that same session with the supplied message. Both restart the
-native process with the same session ID, model, effort and cwd. A new turn publishes
-its own result paths when it finishes. If Codex rejects a steer, the message stays in the inbox and the current
-turn continues. The next turn started with `send` or `resume` includes queued messages
-in its initial input. `status` shows the queue. A worker with no session ID cannot resume.
+omit `--task`. On a stopped worker, `send` and `resume` restart the native process
+with the same session ID, model, effort and cwd. An active Codex worker steers
+with `send` and carries rejected messages into the next turn. An active Claude
+worker queues each `send` for the next user turn in the same session and retains
+the inbox file until its result arrives. `status` shows the queue. A worker with
+no session ID cannot resume.
 
 ## Operator approvals
 

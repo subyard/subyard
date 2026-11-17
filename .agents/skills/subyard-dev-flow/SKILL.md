@@ -193,8 +193,9 @@ Wait with one background `wait --dir STATE --timeout SECONDS` call: done `0`, fa
 `1`, pending approval `2`, interrupted `130`, timeout `124`. On `2`, show the pending
 request to the operator and pass only their single-use decision through `approve` or
 `deny`; never auto-approve. Use `status` and `tail` for progress and read the
-`result_file` published in terminal state. `interrupt` works while approval is pending; `stop` is
-idempotent. Within one vendor, keep native delegation and approval behavior.
+`result_file` published in terminal state. If `wait` returns `1` without `result_file`,
+run `stop` to recover the turn and publish its result. `interrupt` works while approval
+is pending and `stop` is idempotent. Within one vendor, keep native delegation and approval behavior.
 
 `--approve-for-me` forces a sandbox in which protected-runtime tests and the GitHub broker fail.
 

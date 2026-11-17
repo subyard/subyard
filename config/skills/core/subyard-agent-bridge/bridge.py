@@ -21,6 +21,8 @@ import uuid
 
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
 ACTIVE_STATES = ('launching', 'running')
+CODEX_SANDBOXES = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
+                   'danger-full-access': 'dangerFullAccess'}
 MODELS = {'codex': {'developer': 'gpt-6.1-sol', 'reviewer': 'gpt-6.1-sol', 'observer': 'gpt-6-luna'},
           'claude': {'developer': 'opus', 'reviewer': 'opus', 'observer': 'haiku'}}
 STANDALONE = ('You are a standalone worker with no parent agent. Put your full report in your final '
@@ -30,7 +32,7 @@ SECRET_ENV = re.compile(rf'(?:^|_)(?:{SECRET_NAME})(?:_|$)', re.IGNORECASE)
 SECRET_HEADER = re.compile(r'(?i)(\b(?:authorization|proxy-authorization|cookie|set-cookie)[ \t]*:)[^\r\n]*')
 SECRET_TEXT = re.compile(
     rf'(?i)(\b(?:[a-z0-9]+[_-])*(?:{SECRET_NAME}|authorization)(?:[_-][a-z0-9]+)*["\x27]?\s*[:=]\s*)'
-    r'(?:bearer\s+)?(?:"[^"\r\n]*"|\x27[^\x27\r\n]*\x27|[^\s,;]+)'
+    r'(?:bearer\s+)?(?:"(?:\\[^\r\n]|[^"\\\r\n])*"|\x27(?:\\[^\r\n]|[^\x27\\\r\n])*\x27|[^\s,;]+)'
     r'|\bbearer [\w.+/=-]+|\b(?:gh[pousr]_|github_pat_|sk-)[\w-]{16,}'
     r'|\beyJ[\w-]+\.eyJ[\w-]+\.[\w-]+')
 PRIVATE_KEY = re.compile(r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\Z)',
@@ -50,6 +52,29 @@ def event_redactor(env):
         return SECRET_TEXT.sub(lambda match: (match[1] or '') + '[redacted]', text)
 
     return redact
+
+
+def codex_arguments(args):
+    arguments = []
+    sandbox = None
+    args = iter(args)
+    for arg in args:
+        option, equals, value = arg.partition('=')
+        if arg.startswith(('-s', '-c')) and not arg.startswith('--') and len(option) > 2:
+            option, equals, value = arg[:2], '=', arg[2:]
+        if option in ('-s', '--sandbox'):
+            mode = value if equals else next(args, '')
+            sandbox = CODEX_SANDBOXES[mode]
+            arguments.extend(['-c', 'sandbox_mode=' + json.dumps(mode)])
+        elif option in ('-c', '--config'):
+            config = value if equals else next(args, '')
+            arguments.extend(['-c', config])
+            key, _, setting = config.partition('=')
+            if key.strip().strip('"\'') == 'sandbox_mode':
+                sandbox = CODEX_SANDBOXES[setting.strip().strip('"\'')]
+        else:
+            arguments.append(arg)
+    return arguments, sandbox
 
 
 def role_arguments(config, env):
@@ -190,6 +215,8 @@ class Codex:
         self.requests = {}
         self.items = {}
         self.counter = 0
+        self.arguments, self.sandbox = codex_arguments(
+            role_arguments(worker.config, worker.env) + worker.config.get('vendor_args', []))
 
     def request(self, method, params, callback=lambda result: None):
         self.counter += 1
@@ -210,6 +237,10 @@ class Codex:
         self.request(method, params, self.thread)
 
     def thread(self, result):
+        if self.sandbox and (result.get('sandbox') or {}).get('type') != self.sandbox:
+            self.w.state['error'] = 'Codex did not apply the requested sandbox.'
+            self.w.outcome = 'failed'
+            return
         self.w.model = result.get('model', self.w.model)
         session = result['thread']['id']
         if self.w.state.get('session_id') not in (None, session):
@@ -284,17 +315,16 @@ class Codex:
 class Claude:
     def __init__(self, worker):
         self.w = worker
+        self.inflight = None
+        self.answer_start = 0
 
     def start(self):
-        self.w.ready = True
         self.user(self.w.task)
 
-    def user(self, text, sent=None):
+    def user(self, text):
+        self.answer_start = len(self.w.answers)
         self.w.send({'type': 'user', 'message': {'role': 'user', 'content': [
-            {'type': 'text', 'text': text}]}}, sent)
-
-    def message(self, path, text):
-        self.user(text, path.unlink)
+            {'type': 'text', 'text': text}]}})
 
     def interrupt(self):
         self.w.send({'type': 'control_request', 'request_id': 'interrupt-' + uuid.uuid4().hex,
@@ -329,10 +359,21 @@ class Claude:
         elif kind == 'result':
             self.w.tokens = event.get('usage')
             answer = event.get('result')
-            if answer and (not self.w.answers or
-                           answer not in (self.w.answers[-1], '\n\n'.join(self.w.answers))):
+            answers = self.w.answers[self.answer_start:]
+            if answer and (not answers or answer not in (answers[-1], '\n\n'.join(answers))):
                 self.w.message(answer)
-            self.w.outcome = 'failed' if event.get('is_error') or event.get('subtype') != 'success' else 'done'
+            if event.get('is_error') or event.get('subtype') != 'success':
+                self.w.outcome = 'failed'
+                return
+            if self.inflight:
+                self.inflight.unlink()
+            # Claude may return one result per user message. Keep the next inbox
+            # file until its own result arrives.
+            self.inflight = next(iter(sorted((self.w.root / 'inbox').glob('*.md'))), None)
+            if self.inflight and not self.w.pending:
+                self.user(read(self.inflight))
+            else:
+                self.w.outcome = 'done'
 
 
 class Worker:
@@ -458,13 +499,15 @@ class Worker:
             executable = installed if Path(installed).is_file() else shutil.which(self.config['vendor'], path=env.get('PATH'))
         if not executable:
             raise ValueError('worker executable missing')
-        extra = role_arguments(self.config, env) + self.config.get('vendor_args', [])
-        argv = [executable, *extra, 'app-server'] if self.config['vendor'] == 'codex' else [
-            executable, '-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
-            '--verbose', '--model', self.config['model'], '--effort', self.config['effort'],
-            *extra, '--permission-prompt-tool', 'stdio']
-        if self.config['vendor'] == 'claude' and self.state.get('session_id'):
-            argv.append('--resume=' + self.state['session_id'])
+        if self.config['vendor'] == 'codex':
+            argv = [executable, *self.adapter.arguments, 'app-server']
+        else:
+            extra = role_arguments(self.config, env) + self.config.get('vendor_args', [])
+            argv = [executable, '-p', '--input-format', 'stream-json', '--output-format', 'stream-json',
+                    '--verbose', '--model', self.config['model'], '--effort', self.config['effort'],
+                    *extra, '--permission-prompt-tool', 'stdio']
+            if self.state.get('session_id'):
+                argv.append('--resume=' + self.state['session_id'])
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, 'interrupted', True))
         signal.signal(signal.SIGINT, lambda *_: setattr(self, 'interrupted', True))
         self.child = subprocess.Popen(argv, cwd=self.config['cwd'], stdin=subprocess.PIPE,
@@ -770,7 +813,19 @@ def main():
                              'file': str(path)})
         print(json.dumps(requests))
         return 0
-    with locked(root / 'command.lock'):
+    message = None
+    if args.command == 'send':
+        if args.message is None and sys.stdin.isatty():
+            raise ValueError('send requires --message or piped stdin')
+        message = args.message if args.message is not None else sys.stdin.read()
+    deadline = time.monotonic() + args.timeout
+    command_lock = root / 'command.lock'
+    lock = lock_until(command_lock, deadline) if args.command == 'stop' else locked(command_lock)
+    if lock is None:
+        print('Timed out waiting for the bridge command lock.', file=sys.stderr)
+        print(json.dumps(snapshot(root)))
+        return 124
+    with lock:
         if args.command in ('approve', 'deny'):
             state = snapshot(root)
             name = args.approval_id
@@ -783,14 +838,10 @@ def main():
             write(reply, 'allow\n' if args.command == 'approve' else 'deny\n')
             return 0
         if args.command in ('start', 'resume', 'send'):
-            text = None
             if args.command == 'send':
-                if args.message is None and sys.stdin.isatty():
-                    raise ValueError('send requires --message or piped stdin')
-                text = args.message if args.message is not None else sys.stdin.read()
                 state = snapshot(root)
                 if state['status'] in ACTIVE_STATES:
-                    write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), text)
+                    write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
                     return 0
             if args.command == 'start':
                 if (root / 'state').exists():
@@ -820,10 +871,9 @@ def main():
                 if state['status'] in ACTIVE_STATES or not state['session_id']:
                     raise ValueError('resume requires a stopped worker with a session id')
                 config = json.loads(read(root / 'config.json'))
-            task = text if text is not None else read(args.task if args.task else root / 'task.md')
+            task = message if message is not None else read(args.task if args.task else root / 'task.md')
             return launch(root, state, config, task)
         if args.command in ('interrupt', 'stop'):
-            deadline = time.monotonic() + args.timeout
             state = snapshot(root)
             if state['status'] in ACTIVE_STATES:
                 write(turn_dir(root, state) / 'interrupt', '')

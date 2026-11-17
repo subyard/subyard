@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Host-free bridge checks with native-shaped fake stdio agents."""
 
+import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import signal
 import sys
@@ -18,6 +20,7 @@ CREDENTIAL_HEADERS = ('Authorization: Basic synthetic-basic-value\n'
                       'Proxy-Authorization: Bearer synthetic-proxy-value\n'
                       'Set-Cookie: id=synthetic-set-cookie; HttpOnly\n'
                       'Visible line after headers.')
+ESCAPED_PASSWORD = json.dumps({'password': 'prefix" with synthetic escaped suffix'})
 SCOPE_FIXTURE = r'''#!/usr/bin/env python3
 import os
 from pathlib import Path
@@ -119,6 +122,13 @@ def say(text):
     else:
         emit({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}})
 
+def await_gate(suffix=''):
+    gate = Path(os.environ['BRIDGE_TEST_HOLD_RESULT'] + suffix)
+    deadline = time.monotonic() + 8
+    while not gate.exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+
 def begin(text):
     global scenario
     assert 'standalone worker with no parent agent' in text
@@ -170,7 +180,11 @@ def begin(text):
     elif scenario == 'credentials':
         say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
         say(os.environ['BRIDGE_TEST_HEADERS'])
+        say(os.environ['BRIDGE_TEST_JSON'])
         finish('password="synthetic inline credential" and ghp_' + 'X' * 36)
+    elif scenario == 'message' and not codex:
+        await_gate()
+        finish('first result')
     elif scenario == 'large':
         assert text.split('\n')[-2] == 'x' * (1024 * 1024)
         finish('complete large frame')
@@ -187,8 +201,17 @@ for line in sys.stdin:
             resumed = method == 'thread/resume'
             if resumed:
                 assert message['params']['threadId'] == session
-            emit({'id': message['id'], 'result': {'thread': {'id': session}}})
+            sandbox = 'dangerFullAccess'
+            modes = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
+                     'danger-full-access': 'dangerFullAccess'}
+            for arg in sys.argv:
+                if arg.startswith('sandbox_mode='):
+                    sandbox = modes[json.loads(arg.split('=', 1)[1])]
+            sandbox = os.environ.get('BRIDGE_TEST_EFFECTIVE_SANDBOX', sandbox)
+            emit({'id': message['id'], 'result': {'thread': {'id': session}, 'sandbox': {'type': sandbox}}})
         elif method == 'turn/start':
+            if stamp := os.environ.get('BRIDGE_TEST_TURN_START'):
+                Path(stamp).touch()
             text = message['params']['input'][0]['text']
             if text.split('\n')[-1] == 'rpc-error':
                 emit({'id': message['id'], 'error': {'message': 'fixture error'}})
@@ -218,6 +241,9 @@ for line in sys.stdin:
         if message.get('type') == 'user':
             text = message['message']['content'][0]['text']
             if scenario:
+                if text == 'held follow-up':
+                    Path(os.environ['BRIDGE_TEST_HOLD_RESULT'] + '.received').touch()
+                    await_gate('.second')
                 finish('message:' + text)
             else:
                 assert '--permission-prompt-tool' in sys.argv
@@ -236,7 +262,8 @@ for line in sys.stdin:
 
 if scenario == 'pending' and os.environ.get('BRIDGE_TEST_DESCENDANT'):
     child = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={})
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={},
+                             start_new_session=bool(os.environ.get('BRIDGE_TEST_NEW_SESSION')))
     Path(os.environ['BRIDGE_TEST_DESCENDANT']).write_text(str(child.pid))
 '''
 
@@ -376,12 +403,14 @@ class Bridge(unittest.TestCase):
     def test_message_resume_and_invalid_commands(self):
         for vendor in ('codex', 'claude'):
             with self.subTest(vendor=vendor):
-                root = self.start(vendor, 'message')
+                gate = self.root / ('message-gate-' + vendor)
+                root = self.start(vendor, 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
                 self.until(lambda: self.state(root).get('session_id'))
                 self.cli('resume', root, success=False)
                 self.cli('start', root, success=False)
                 self.cli('send', root, '--message', 'hello')
-                self.assertEqual(self.done(root), 'message:hello')
+                gate.touch()
+                self.assertEqual(self.done(root), 'first result\n\nmessage:hello' if vendor == 'claude' else 'message:hello')
                 self.assertEqual(list((root / 'inbox').iterdir()), [])
                 self.cli('send', root, '--message', 'late')
                 self.assertEqual(self.done(root), 'resumed:late')
@@ -389,6 +418,21 @@ class Bridge(unittest.TestCase):
                 self.cli('resume', root)
                 self.assertEqual(self.done(root), 'resumed:next-task')
                 self.assertEqual(self.state(root)['session_id'], 'fixture-session')
+
+    def test_claude_followups_stay_queued_until_their_own_results(self):
+        gate = self.root / 'claude-first'
+        root = self.start('claude', 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
+        self.until(lambda: self.state(root).get('session_id'))
+        self.cli('send', root, '--message', 'held follow-up')
+        self.cli('send', root, '--message', 'another follow-up')
+        self.assertEqual(len(list((root / 'inbox').iterdir())), 2)
+        gate.touch()
+        self.until(gate.with_suffix('.received').exists)
+        self.assertEqual(self.cli('wait', root, '--timeout', '0.1', success=False).returncode, 124)
+        self.assertEqual(len(list((root / 'inbox').iterdir())), 2)
+        gate.with_suffix('.second').touch()
+        self.assertEqual(self.done(root), 'first result\n\nmessage:held follow-up\n\nmessage:another follow-up')
+        self.assertEqual(list((root / 'inbox').iterdir()), [])
 
     def test_rejected_steer_preserves_worker_and_delivers_on_next_turn(self):
         root = self.start('codex', 'steer-race')
@@ -411,18 +455,19 @@ class Bridge(unittest.TestCase):
         for vendor in ('codex', 'claude'):
             with self.subTest(vendor=vendor):
                 root = self.start(vendor, 'credentials', '--env', 'BRIDGE_TEST_TOKEN=synthetic-env-value',
-                                  '--env', 'BRIDGE_TEST_HEADERS=' + CREDENTIAL_HEADERS)
+                                  '--env', 'BRIDGE_TEST_HEADERS=' + CREDENTIAL_HEADERS,
+                                  '--env', 'BRIDGE_TEST_JSON=' + ESCAPED_PASSWORD)
                 self.done(root)
                 events = (root / 'events.jsonl').read_text()
                 secrets = ('synthetic-env-value', 'synthetic inline credential', 'ghp_' + 'X' * 36,
                            'synthetic-basic-value', 'synthetic-cookie-one', 'synthetic-cookie-two',
-                           'synthetic-proxy-value', 'synthetic-set-cookie')
+                           'synthetic-proxy-value', 'synthetic-set-cookie', 'synthetic escaped suffix')
                 for secret in secrets:
                     self.assertNotIn(secret, events)
                 # An existing state directory can have events written by older bridge versions.
                 with (root / 'events.jsonl').open('a') as stream:
-                    stream.write(json.dumps({'type': 'message',
-                                             'text': 'legacy synthetic-env-value\n' + CREDENTIAL_HEADERS}) + '\n')
+                    stream.write(json.dumps({'type': 'message', 'text': 'legacy synthetic-env-value\n' +
+                                             CREDENTIAL_HEADERS + '\n' + ESCAPED_PASSWORD}) + '\n')
                 tail = self.cli('tail', root).stdout
                 for secret in secrets:
                     self.assertNotIn(secret, tail)
@@ -433,7 +478,8 @@ class Bridge(unittest.TestCase):
                             'Visible line after headers.')
                 self.assertIn(expected, [json.loads(line)['text'] for line in events.splitlines()
                                          if json.loads(line)['type'] == 'message'])
-                self.assertEqual(json.loads(tail.splitlines()[-1])['text'], 'legacy [redacted]\n' + expected)
+                self.assertEqual(json.loads(tail.splitlines()[-1])['text'],
+                                 'legacy [redacted]\n' + expected + '\n{"password": [redacted]}')
 
     def test_failures_never_publish_a_successful_final(self):
         for vendor in ('codex', 'claude'):
@@ -508,13 +554,27 @@ class Bridge(unittest.TestCase):
                 info = json.loads(capture.read_text())
                 argv = info['argv']
                 offset = argv.index(vendor_args[0])
-                self.assertEqual(argv[offset:offset + len(vendor_args)], vendor_args)
+                expected = (vendor_args[:-2] + ['-c', 'sandbox_mode="workspace-write"']
+                            if vendor == 'codex' else vendor_args)
+                self.assertEqual(argv[offset:offset + len(expected)], expected)
                 self.assertEqual(info['cwd'], str(self.root))
                 self.assertEqual(info['env'], {'BRIDGE_TEST_VALUE': 'fixture-value',
                                               'TMPDIR': str(scratch), 'PATH': fixture_path})
                 self.cli('send', root, '--message', 'next')
                 self.assertEqual(self.done(root), 'resumed:next')
                 self.assertEqual(json.loads(capture.read_text())['env'], info['env'])
+
+    def test_codex_refuses_mismatched_sandbox_before_starting_turn(self):
+        flags = (('--sandbox', 'read-only'), ('-s=read-only',), ('-c', 'sandbox_mode="read-only"'))
+        for args in flags:
+            with self.subTest(flags=args):
+                stamp = self.root / 'codex-turn-start'
+                root = self.start('codex', 'complete', '--env', 'BRIDGE_TEST_TURN_START=' + str(stamp),
+                                  '--env', 'BRIDGE_TEST_EFFECTIVE_SANDBOX=dangerFullAccess', '--', *args)
+                self.done(root, 'failed')
+                self.assertEqual(self.result(root)['error'], 'Codex did not apply the requested sandbox.')
+                self.assertFalse(stamp.exists())
+                self.assertEqual(json.loads(self.cli('stop', root).stdout)['cleanup'], 'verified')
 
     def test_role_defaults_overrides_and_reviewer_temporary_writes(self):
         scratch = self.root.parent / (self.root.name + '-scratch')
@@ -554,10 +614,12 @@ class Bridge(unittest.TestCase):
     def test_wait_exit_codes_result_and_tail(self):
         for vendor in ('codex', 'claude'):
             with self.subTest(vendor=vendor):
-                root = self.start(vendor, 'message')
+                gate = self.root / ('wait-gate-' + vendor)
+                root = self.start(vendor, 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
                 timed = self.cli('wait', root, '--timeout', '0.1', success=False)
                 self.assertEqual(timed.returncode, 124)
                 self.cli('send', root, '--message', 'finished')
+                gate.touch()
                 self.cli('wait', root, '--timeout', '5')
                 result = self.result(root)
                 self.assertEqual(result['state'], 'done')
@@ -619,6 +681,47 @@ class Bridge(unittest.TestCase):
         self.assertEqual(self.done(root), 'resumed:task-from-file')
         self.cli('stop', root)
         self.cli('stop', self.root / 'missing-worker')
+
+    def test_stop_does_not_wait_for_piped_send_to_reach_eof(self):
+        root = self.start('codex', 'pending')
+        self.approval(root)
+        marker = self.root / 'reading'
+        script = """
+from pathlib import Path
+import runpy
+import sys
+
+bridge, marker = sys.argv[1:3]
+del sys.argv[1:3]
+read = sys.stdin.read
+def wait_for_eof():
+    Path(marker).touch()
+    return read()
+sys.stdin.read = wait_for_eof
+runpy.run_path(bridge, run_name='__main__')
+"""
+        sender = subprocess.Popen([sys.executable, '-B', '-c', script, str(BRIDGE), str(marker),
+                                   'send', '--dir', str(root)], env=self.env, stdin=subprocess.PIPE)
+        try:
+            self.until(marker.exists)
+            stopped = json.loads(self.cli('stop', root, '--timeout', '0.1').stdout)
+            self.assertEqual(stopped['cleanup'], 'verified')
+            self.assertIsNone(sender.poll())
+        finally:
+            sender.terminate()
+            sender.wait(timeout=2)
+            sender.stdin.close()
+
+    def test_stop_times_out_if_command_lock_is_held(self):
+        root = self.start('codex', 'pending')
+        self.approval(root)
+        with (root / 'command.lock').open('r') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            waiting = self.cli('stop', root, '--timeout', '0.1', success=False)
+            self.assertEqual(waiting.returncode, 124)
+            self.assertIn('command lock', waiting.stderr)
+            self.assertFalse((self.turn(root) / 'interrupt').exists())
+        self.cli('stop', root, '--timeout', '0.1')
 
     def test_bridge_crash_is_failed_and_stop_cleans_worker(self):
         root = self.start('codex', 'pending')
@@ -796,8 +899,26 @@ main()
                 os.kill(pid, signal.SIGCONT)
 
     def test_stop_kills_clean_environment_descendant_after_bridge_crash(self):
+        self.check_scope_cleanup()
+
+    def test_real_manager_stops_clean_environment_new_session_descendant(self):
+        if not (shutil.which('systemd-run') and shutil.which('systemctl')):
+            self.skipTest('systemd user manager tools are unavailable')
+        try:
+            manager = subprocess.run(['systemctl', '--user', 'show', '--property=Version', '--value'],
+                                     capture_output=True, timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            self.skipTest('systemd user manager is unavailable')
+        if manager.returncode != 0 or not manager.stdout.strip():
+            self.skipTest('systemd user manager is unavailable')
+        for command in ('systemd-run', 'systemctl'):
+            (self.bin / command).unlink()
+        self.check_scope_cleanup(new_session=True)
+
+    def check_scope_cleanup(self, new_session=False):
         marker = self.root / 'descendant-pid'
-        root = self.start('codex', 'pending', '--env', 'BRIDGE_TEST_DESCENDANT=' + str(marker))
+        options = ['--env', 'BRIDGE_TEST_NEW_SESSION=1'] if new_session else []
+        root = self.start('codex', 'pending', '--env', 'BRIDGE_TEST_DESCENDANT=' + str(marker), *options)
         self.approval(root)
         old = self.state(root)
         os.kill(old['pid'], signal.SIGKILL)
@@ -811,6 +932,9 @@ main()
         self.addCleanup(clean_up_descendant)
         self.assertTrue(process_alive(pid))
         self.assertEqual((Path('/proc') / str(pid) / 'environ').read_bytes(), b'')
+        if new_session:
+            self.assertEqual(os.getsid(pid), pid)
+            self.assertIn(old['scope'], (Path('/proc') / str(pid) / 'cgroup').read_text())
         self.cli('stop', root)
         self.until(lambda: not process_alive(pid))
         self.assertEqual(self.state(root)['cleanup'], 'verified')
