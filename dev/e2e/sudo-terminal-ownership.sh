@@ -259,11 +259,9 @@ if incus storage show "$E2E_POOL" --project default >/dev/null 2>&1; then
       sudo-terminal-e2e-v1 ] \
     || die "refusing unexpected existing storage pool $E2E_POOL"
 else
-  incus storage create "$E2E_POOL" dir --project default >/dev/null \
-    || die "could not create marker-owned E2E storage pool"
-  incus storage set "$E2E_POOL" user.subyard.owner=sudo-terminal-e2e-v1 \
+  incus storage create "$E2E_POOL" dir user.subyard.owner=sudo-terminal-e2e-v1 \
     --project default >/dev/null \
-    || die "could not mark the E2E storage pool"
+    || die "could not create marker-owned E2E storage pool"
 fi
 POOL_OWNED=1
 real_token="$(printf '%s' "$token" | tr '[:upper:]' '[:lower:]')"
