@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import signal
 import sys
@@ -13,6 +14,11 @@ import unittest
 
 
 BRIDGE = Path(__file__).resolve().parents[1] / 'core/subyard-agent-bridge/bridge.py'
+CREDENTIAL_HEADERS = ('Authorization: Basic synthetic-basic-value\n'
+                      'Cookie: session=synthetic-cookie-one; theme=synthetic-cookie-two\n'
+                      'Proxy-Authorization: Bearer synthetic-proxy-value\n'
+                      'Set-Cookie: id=synthetic-set-cookie; HttpOnly\n'
+                      'Visible line after headers.')
 FAKE = r'''#!/usr/bin/env python3
 import json
 import os
@@ -99,6 +105,7 @@ def begin(text):
             finish('I sent the report to the parent.')
     elif scenario == 'credentials':
         say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
+        say(os.environ['BRIDGE_TEST_HEADERS'])
         finish('password="synthetic inline credential" and ghp_' + 'X' * 36)
     elif scenario not in ('message', 'steer-race'):
         finish(('resumed:' if resumed else 'started:') + scenario)
@@ -316,20 +323,30 @@ class Bridge(unittest.TestCase):
     def test_event_messages_and_tail_redact_credentials(self):
         for vendor in ('codex', 'claude'):
             with self.subTest(vendor=vendor):
-                root = self.start(vendor, 'credentials', '--env', 'BRIDGE_TEST_TOKEN=synthetic-env-value')
+                root = self.start(vendor, 'credentials', '--env', 'BRIDGE_TEST_TOKEN=synthetic-env-value',
+                                  '--env', 'BRIDGE_TEST_HEADERS=' + CREDENTIAL_HEADERS)
                 self.done(root)
                 events = (root / 'events.jsonl').read_text()
-                secrets = ('synthetic-env-value', 'synthetic inline credential', 'ghp_' + 'X' * 36)
+                secrets = ('synthetic-env-value', 'synthetic inline credential', 'ghp_' + 'X' * 36,
+                           'synthetic-basic-value', 'synthetic-cookie-one', 'synthetic-cookie-two',
+                           'synthetic-proxy-value', 'synthetic-set-cookie')
                 for secret in secrets:
                     self.assertNotIn(secret, events)
                 # An existing state directory can have events written by older bridge versions.
                 with (root / 'events.jsonl').open('a') as stream:
-                    stream.write(json.dumps({'type': 'message', 'text': 'legacy synthetic-env-value'}) + '\n')
+                    stream.write(json.dumps({'type': 'message',
+                                             'text': 'legacy synthetic-env-value\n' + CREDENTIAL_HEADERS}) + '\n')
                 tail = self.cli('tail', root).stdout
                 for secret in secrets:
                     self.assertNotIn(secret, tail)
                 self.assertIn('Report text. Echoed value: [redacted]', tail)
                 self.assertIn('legacy [redacted]', tail)
+                expected = ('Authorization: [redacted]\nCookie: [redacted]\n'
+                            'Proxy-Authorization: [redacted]\nSet-Cookie: [redacted]\n'
+                            'Visible line after headers.')
+                self.assertIn(expected, [json.loads(line)['text'] for line in events.splitlines()
+                                         if json.loads(line)['type'] == 'message'])
+                self.assertEqual(json.loads(tail.splitlines()[-1])['text'], 'legacy [redacted]\n' + expected)
 
     def test_failures_never_publish_a_successful_final(self):
         for vendor in ('codex', 'claude'):
@@ -525,6 +542,73 @@ class Bridge(unittest.TestCase):
         self.cli('stop', root)
         self.assertEqual(json.loads((root / 'result.json').read_text())['state'], 'failed')
         self.assertEqual(list((root / 'approvals').iterdir()), [])
+
+    def test_launcher_crash_before_spawn_can_be_stopped_or_resumed(self):
+        root = self.start('codex', 'complete')
+        self.done(root)
+        original_session = self.state(root)['session_id']
+        task = self.root / 'retry.md'
+        task.write_text('after-launch-crash')
+        script = """
+import os
+import runpy
+import sys
+bridge = sys.argv.pop(1)
+namespace = runpy.run_path(bridge)
+namespace['subprocess'].Popen = lambda *args, **kwargs: os._exit(91)
+namespace['main']()
+"""
+        for recovery in ('stop', 'resume'):
+            with self.subTest(recovery=recovery):
+                crash = subprocess.run([sys.executable, '-B', '-c', script, str(BRIDGE),
+                                        'resume', '--dir', str(root), '--task', str(task)],
+                                       capture_output=True, text=True, timeout=8)
+                self.assertEqual(crash.returncode, 91, crash.stderr)
+                self.assertEqual(self.state(root)['status'], 'launching')
+                self.assertGreater(self.state(root)['pid'], 0)
+                self.assertEqual(json.loads(self.cli('status', root).stdout)['status'], 'failed')
+                self.assertEqual(self.cli('wait', root, '--timeout', '1', success=False).returncode, 1)
+                if recovery == 'stop':
+                    self.cli('stop', root, '--timeout', '1')
+                    self.assertEqual(json.loads((root / 'result.json').read_text())['state'], 'failed')
+                self.cli('resume', root, '--task', str(task))
+                self.assertEqual(self.done(root), 'resumed:after-launch-crash')
+                self.assertEqual(self.state(root)['session_id'], original_session)
+
+    def test_stop_does_not_signal_a_reused_process_group(self):
+        root = self.start('codex', 'complete')
+        self.done(root)
+        # Reap an unrelated group leader while its descendant remains alive, then
+        # use that group ID in a stale crash receipt to simulate numeric reuse.
+        script = """
+import subprocess
+child = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+print(child.pid)
+"""
+        leader = subprocess.Popen([sys.executable, '-B', '-c', script], start_new_session=True,
+                                  stdout=subprocess.PIPE, text=True)
+        stdout, _ = leader.communicate(timeout=8)
+        self.assertEqual(leader.returncode, 0)
+        pid = int(stdout)
+        fd = os.pidfd_open(pid)
+        try:
+            self.assertEqual(os.getpgid(pid), leader.pid)
+            self.assertFalse(Path(f'/proc/{leader.pid}').exists())
+            stale = self.state(root)
+            stale.update(status='running', pid=leader.pid, worker_pid=leader.pid, worker_start='1')
+            (root / 'state').write_text(json.dumps(stale))
+            self.cli('stop', root)
+            self.assertEqual(self.state(root)['status'], 'failed')
+            # A pidfd becomes readable once the process exits, including as a zombie.
+            self.assertFalse(select.select([fd], [], [], 0.2)[0])
+        finally:
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                os.close(fd)
 
     def test_stop_kills_descendants_after_worker_group_leader_exits(self):
         marker = self.root / 'descendant-pid'

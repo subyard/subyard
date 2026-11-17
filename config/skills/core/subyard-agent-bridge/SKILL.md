@@ -50,7 +50,7 @@ arguments after `--`, e.g. Codex `-- -c key=value --profile NAME` or Claude
 They override role defaults and are retained on resume. Native flags must preserve
 the stdio protocol. The bridge always sets Claude's permission host to stdio.
 
-`state` is JSON: `status` (`running`, `done`, `failed`, `interrupted`), bridge PID,
+`state` is JSON: `status` (`launching`, `running`, `done`, `failed`, `interrupted`), launcher or bridge PID,
 session/turn IDs, generation and pending approval filenames without extensions.
 `status` additionally lists queued message filenames. `events.jsonl` contains
 messages with recognized credentials redacted, tool summaries, approval IDs and terminal

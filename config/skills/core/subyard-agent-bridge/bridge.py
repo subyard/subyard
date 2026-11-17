@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import selectors
 import shutil
 import signal
@@ -20,12 +21,15 @@ import uuid
 
 
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
+ACTIVE_STATES = ('launching', 'running')
+WORKER_MARKER = 'SUBYARD_BRIDGE_WORKER_GENERATION'
 MODELS = {'codex': {'developer': 'gpt-6.1-sol', 'reviewer': 'gpt-6.1-sol', 'observer': 'gpt-6-luna'},
           'claude': {'developer': 'opus', 'reviewer': 'opus', 'observer': 'haiku'}}
 STANDALONE = ('You are a standalone worker with no parent agent. Put your full report in your final '
               'message. Do not send it to a parent.\n\n')
 SECRET_NAME = r'token|secret|password|passwd|passphrase|credentials?|cookie|api[_-]?key|private[_-]?key|access[_-]?key|signing[_-]?key'
 SECRET_ENV = re.compile(rf'(?:^|_)(?:{SECRET_NAME})(?:_|$)', re.IGNORECASE)
+SECRET_HEADER = re.compile(r'(?i)(\b(?:authorization|proxy-authorization|cookie|set-cookie)[ \t]*:)[^\r\n]*')
 SECRET_TEXT = re.compile(
     rf'(?i)(\b(?:[a-z0-9]+[_-])*(?:{SECRET_NAME}|authorization)(?:[_-][a-z0-9]+)*["\x27]?\s*[:=]\s*)'
     r'(?:bearer\s+)?(?:"[^"\r\n]*"|\x27[^\x27\r\n]*\x27|[^\s,;]+)'
@@ -42,6 +46,7 @@ def event_redactor(env):
 
     def redact(text):
         text = PRIVATE_KEY.sub('[redacted]', text)
+        text = SECRET_HEADER.sub(r'\1 [redacted]', text)
         if exact:
             text = exact.sub('[redacted]', text)
         return SECRET_TEXT.sub(lambda match: (match[1] or '') + '[redacted]', text)
@@ -289,11 +294,10 @@ class Claude:
 
 
 class Worker:
-    def __init__(self, root):
+    def __init__(self, root, state):
         self.root = root
         self.config = json.loads(read(root / 'config.json'))
-        self.state = json.loads(read(root / 'state'))
-        self.state['pid'] = os.getpid()
+        self.state = state
         self.task = read(root / 'task.md')
         if self.config.get('role') == 'reviewer':
             self.task = 'Review read-only. Do not modify the repository. Write test/build outputs only in /tmp or TMPDIR.\n' + self.task
@@ -375,7 +379,7 @@ class Worker:
                     self.adapter.message(path, read(path))
 
     def run(self):
-        env = self.env
+        env = {**self.env, WORKER_MARKER: self.state['generation']}
         executable = self.config.get('executable')
         if not executable:
             installed = '/usr/local/bin/' + self.config['vendor']
@@ -394,7 +398,6 @@ class Worker:
         self.child = subprocess.Popen(argv, cwd=self.config['cwd'], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, env=env, start_new_session=True, bufsize=0)
         self.state['worker_pid'] = self.child.pid
-        self.state['worker_start'] = process_identity(self.child.pid)
         selector = selectors.DefaultSelector()
         selector.register(self.child.stdout, selectors.EVENT_READ)
         buffer = b''
@@ -429,16 +432,22 @@ class Worker:
                 os.killpg(self.child.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+            # Wait without reaping the leader, which keeps the group's numeric ID reserved.
             try:
-                self.child.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.child.pid, signal.SIGKILL)
+                fd = os.pidfd_open(self.child.pid)
+                try:
+                    poller = select.poll()
+                    poller.register(fd, select.POLLIN)
+                    poller.poll(2000)
+                finally:
+                    os.close(fd)
+            finally:
+                try:
+                    os.killpg(self.child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 self.child.wait()
-            try:
-                os.killpg(self.child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            self.child.stdout.close()
+                self.child.stdout.close()
 
     def finish(self):
         for name in self.pending:
@@ -448,7 +457,7 @@ class Worker:
         (self.root / 'interrupt').unlink(missing_ok=True)
         if self.outcome == 'done':
             write(self.root / 'final.md', '\n\n'.join(self.answers) + '\n')
-        self.state.update(worker_pid=None, worker_start=None)
+        self.state['worker_pid'] = None
         self.state['status'] = self.outcome or 'failed'
         publish_result(self.root, self.state, self.model, self.tokens,
                        round(time.time() - self.state['started_at'], 3))
@@ -456,18 +465,19 @@ class Worker:
         self.save()
 
 
-def process_identity(pid, include_zombie=False):
+def process_identity(pid):
     try:
         fields = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1].split()
-        return None if fields[0] == 'Z' and not include_zombie else fields[19]
+        return None if fields[0] == 'Z' else fields[19]
     except (FileNotFoundError, ProcessLookupError):
         return None
 
 
 def snapshot(root):
     state = json.loads(read(root / 'state'))
-    if state['status'] == 'running' and state.get('pid'):
-        if process_identity(state['pid']) != state.get('process_start'):
+    if state['status'] in ACTIVE_STATES:
+        pid, start = state.get('pid'), state.get('process_start')
+        if not pid or not start or process_identity(pid) != start:
             state.update(status='failed', pending_approvals=[], error='Bridge process exited without a terminal state.')
     state['queued_messages'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
     return state
@@ -486,9 +496,11 @@ def launch(root, state, config, task):
         state.pop('queued_messages', None)
         if config['vendor'] == 'codex':
             state['carryover'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
-        state.update(status='running', pid=None, turn_id=None, pending_approvals=[],
+        state.pop('worker_start', None)
+        state.update(status='launching', pid=os.getpid(), process_start=process_identity(os.getpid()),
+                     turn_id=None, pending_approvals=[],
                      generation=uuid.uuid4().hex, vendor=config['vendor'], name=config['name'], model=config['model'],
-                     started_at=time.time(), worker_pid=None, worker_start=None)
+                     started_at=time.time(), worker_pid=None)
         write(root / 'state', json.dumps(state) + '\n')
         for name in ('final.md', 'result.json', 'interrupt'):
             (root / name).unlink(missing_ok=True)
@@ -504,7 +516,7 @@ def launch(root, state, config, task):
             publish_result(root, state, config['model'])
             write(root / 'state', json.dumps(state) + '\n')
             raise
-        state.update(pid=child.pid, process_start=process_identity(child.pid))
+        state.update(status='running', pid=child.pid, process_start=process_identity(child.pid))
         write(root / 'state', json.dumps(state) + '\n')
     print(json.dumps({'status': 'running', 'pid': child.pid, 'dir': str(root)}))
 
@@ -513,7 +525,7 @@ def wait(root, timeout, stopping=False):
     deadline = time.monotonic() + timeout
     while True:
         state = snapshot(root)
-        if state['status'] != 'running':
+        if state['status'] not in ACTIVE_STATES:
             break
         if state['pending_approvals'] and not stopping:
             print(json.dumps(state))
@@ -529,14 +541,27 @@ def wait(root, timeout, stopping=False):
 def stop_orphan(state):
     if not state.get('error'):
         return
-    pid = state.get('worker_pid')
-    if pid and state.get('worker_start') and process_identity(pid, include_zombie=True) in (None, state['worker_start']):
-        # The group can still contain tools after its session leader exits.
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    state.update(worker_pid=None, worker_start=None)
+    group, generation = state.get('worker_pid'), state.get('generation')
+    if group and generation:
+        marker = f'{WORKER_MARKER}={generation}'.encode()
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal():
+                continue
+            pid = int(process.name)
+            try:
+                if os.getpgid(pid) != group or process.stat().st_uid != os.getuid():
+                    continue
+                # Pin the process before inspecting its environment so PID reuse cannot
+                # redirect the signal to a replacement.
+                fd = os.pidfd_open(pid)
+                try:
+                    if marker in (process / 'environ').read_bytes().split(b'\0'):
+                        signal.pidfd_send_signal(fd, signal.SIGKILL)
+                finally:
+                    os.close(fd)
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+    state['worker_pid'] = None
 
 
 def main():
@@ -591,14 +616,17 @@ def main():
         directory(root / name)
     if args.command == '_run':
         with locked(root / 'worker.lock'):
+            state = json.loads(read(root / 'state'))
+            # A launcher that died before publishing this child never committed the launch.
+            if state['status'] != 'running' or state['pid'] != os.getpid():
+                return 1
             worker = None
             try:
-                worker = Worker(root)
+                worker = Worker(root, state)
                 worker.run()
             except Exception as error:
                 # Native errors and protocol bodies can contain credentials. Keep diagnostics generic.
                 if worker is None:
-                    state = json.loads(read(root / 'state'))
                     state.update(status='failed', error='Worker initialization failed.')
                     publish_result(root, state, state.get('model'))
                     write(root / 'state', json.dumps(state) + '\n')
@@ -656,7 +684,7 @@ def main():
                     raise ValueError('send requires --message or piped stdin')
                 text = args.message if args.message is not None else sys.stdin.read()
                 state = snapshot(root)
-                if state['status'] == 'running':
+                if state['status'] in ACTIVE_STATES:
                     write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), text)
                     return 0
             if args.command == 'start':
@@ -684,17 +712,18 @@ def main():
                 state = dict(session_id=None, approval_sequence=0)
             else:
                 state = snapshot(root)
-                if state['status'] == 'running' or not state['session_id']:
+                if state['status'] in ACTIVE_STATES or not state['session_id']:
                     raise ValueError('resume requires a stopped worker with a session id')
                 config = json.loads(read(root / 'config.json'))
             task = text if text is not None else read(args.task if args.task else root / 'task.md')
             launch(root, state, config, task)
         else:
             state = snapshot(root)
-            if state['status'] != 'running':
+            if state['status'] not in ACTIVE_STATES:
                 if args.command == 'stop':
                     stop_orphan(state)
                     if state.get('error'):
+                        (root / 'final.md').unlink(missing_ok=True)
                         for path in (root / 'approvals').glob('*.json'):
                             path.unlink()
                             path.with_suffix('.reply').unlink(missing_ok=True)
