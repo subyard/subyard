@@ -76,3 +76,23 @@ func TestProjectHookFailureHasPublicActivationDiagnostic(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectHookFailureNamesOnlyApprovedDispatcherRecords(t *testing.T) {
+	const a = "/hooks/a"
+	const b = "/hooks/b"
+	err := RunProjectHooks(context.Background(), domain.Context{YardName: "sample"}, func(_ context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if !strings.Contains(request.Command[2], "3>&1 >/dev/null 2>&1") {
+			t.Fatal("hook streams are not isolated from dispatcher records")
+		}
+		return ports.InstanceExecResult{ExitCode: 1, Stdout: []byte("subyard-project-hook-failed:/hooks/b\nsubyard-project-hook-failed:/unapproved\nsubyard-project-hook-failed:/hooks/a\nsubyard-project-hook-failed:/hooks/a\n"), Stderr: []byte("private hook output")}, nil
+	}, b, a)
+	var failure *ProjectHookFailure
+	if !errors.As(err, &failure) {
+		t.Fatal(err)
+	}
+	message, retry := failure.ActivationDiagnostic()
+	want := "yard sample: project hook /hooks/a failed (exited unsuccessfully); yard sample: project hook /hooks/b failed (exited unsuccessfully)"
+	if message != want || retry != "run yard migrate" {
+		t.Fatalf("diagnostic = %q / %q", message, retry)
+	}
+}

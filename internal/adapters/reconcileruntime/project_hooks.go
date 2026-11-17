@@ -82,12 +82,20 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 			return err
 		}
 	}
+	var approved []string
+	if runtime.HookPlan != nil {
+		for _, hook := range runtime.HookPlan.allowedHooks {
+			if path := runtime.HookPlan.current.Resolved[hook]; path != "" {
+				approved = append(approved, path)
+			}
+		}
+	}
 	if err := application.RunProjectHooks(ctx, runtime.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 		for name, value := range runtime.HookPlan.Environment() {
 			request.Environment[name] = value
 		}
 		return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-	}); err != nil {
+	}, approved...); err != nil {
 		return err
 	}
 	if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {

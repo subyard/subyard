@@ -107,7 +107,13 @@ SUBYARD_HOOK_APPROVAL
   status=0
   while IFS=$'\t' read -r hook binding; do
     [ -n "$hook" ] && [ -x "$hook" ] || continue
-    SUBYARD_PROJECT_HOOK_BINDING="$binding" "$hook" || status=1
+    # fd 3 belongs to the dispatcher, never to a hook or its children.
+    if ! SUBYARD_PROJECT_HOOK_BINDING="$binding" "$hook" 3>&- >/dev/null 2>&1; then
+      status=1
+      if [ "${SUBYARD_PROJECT_HOOK_REPORT:-}" = 1 ]; then
+        printf 'subyard-project-hook-failed:%s\n' "$hook" >&3
+      fi
+    fi
   done <<< "$approved"
   exit "$status"
 fi

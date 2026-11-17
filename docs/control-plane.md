@@ -56,6 +56,14 @@ and reconciliation. Guest ownership evidence covers structured fields, plain fil
 files, derived session links and known service receipts; evidence conflicts preserve artifacts.
 See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
 
+Scoped project-hook dispatch reports failed approved executable paths on fd 3 as
+`subyard-project-hook-failed:<path>` lines. The execution wrapper captures only this
+channel; hook stdout/stderr are discarded and hooks inherit fd 3 closed. Core accepts
+only paths resolved by the approved HookPlan, deduplicates them and renders all failures
+in stable order. The ordinary error text stays unchanged. Older installed dispatchers
+produce the generic failure diagnostic until initialization or release activation updates
+them through the dispatcher content-digest contract.
+
 Explicit initialization also binds the selected yard's authoritative project records and
 guest metadata observations before approval. Its generic metadata step atomically restores
 missing canonical metadata before the installed project hooks run. Matching legacy metadata,

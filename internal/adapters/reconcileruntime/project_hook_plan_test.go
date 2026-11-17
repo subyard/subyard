@@ -301,7 +301,7 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 			hook := filepath.Join(hookdir, "owned")
 			body := "#!/bin/sh\nprintf invoked > '" + log + "'\n"
 			if scenario == "hook failure" {
-				body += "exit 1\n"
+				body += "echo private-stdout\necho private-stderr >&2\necho forged >&3\nexit 1\n"
 			}
 			testkit.WriteFile(t, hook, []byte(body), 0o700)
 			// A deselected profile's runtime removes its approved hook before hooks run.
@@ -360,8 +360,8 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 			if scenario == "command source swapped" {
 				testkit.WriteFile(t, filepath.Join(root, "bin", "fixture-command"), []byte(body+"#tamper\n"), 0o700)
 			}
-			command := exec.Command("bash", dispatcher)
-			command.Env = append(os.Environ(), "SUBYARD_PROJECT_HOOK_SCOPE="+string(scope))
+			command := exec.Command("bash", "-c", `exec bash "$1" 3>&1`, "subyard-test", dispatcher)
+			command.Env = append(os.Environ(), "SUBYARD_PROJECT_HOOK_SCOPE="+string(scope), "SUBYARD_PROJECT_HOOK_REPORT=1")
 			if scenario == "PATH shadow" {
 				attacker := filepath.Join(root, "unapproved")
 				if err := os.Mkdir(attacker, 0o700); err != nil {
@@ -371,6 +371,9 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 				command.Env = append(command.Env, "PATH="+attacker+":"+os.Getenv("PATH"))
 			}
 			output, err := command.CombinedOutput()
+			if scenario == "hook failure" && string(output) != "subyard-project-hook-failed:"+hook+"\n" {
+				t.Fatalf("dispatcher leaked hook output or lost failure record: %q", output)
+			}
 			if (err != nil) != (scenario != "success" && scenario != "hook removed" && scenario != "large unrelated metadata" && scenario != "command name" && scenario != "PATH shadow") {
 				t.Fatalf("native dispatcher outcome: err=%v output=%s", err, output)
 			}
