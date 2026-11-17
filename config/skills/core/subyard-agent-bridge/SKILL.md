@@ -33,7 +33,8 @@ omitted. The detached bridge owns the worker's stdio; commands return promptly.
 done `0`, failed `1`, pending approval `2`, interrupted `130`, timeout `124`.
 Use one background/event wait call for long waits; no coordinator polling loop is
 needed. `stop` waits for interruption, verifies the turn's scope is empty or gone,
-and is idempotent. If the graceful wait times out, `stop` stops the scope directly.
+and is idempotent. The `--timeout` budget covers waiting for the turn and its lock.
+When it expires, `stop` stops the scope directly and verifies cleanup.
 A crashed turn reports `failed`. If scope cleanup cannot be verified, `stop` and
 `resume` fail with a cleanup diagnostic.
 

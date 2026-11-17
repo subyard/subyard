@@ -124,6 +124,17 @@ def locked(path, blocking=True):
     return stream
 
 
+def lock_until(path, deadline):
+    while True:
+        try:
+            return locked(path, blocking=False)
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(0.02, remaining))
+
+
 def claim_turn(root, generation):
     while True:
         state = json.loads(read(root / 'state'))
@@ -632,17 +643,17 @@ def launch(root, state, config, task):
     return 0
 
 
-def wait(root, timeout, stopping=False):
-    deadline = time.monotonic() + timeout
+def wait(root, deadline, stopping=False):
     while True:
         state = snapshot(root)
         if state['status'] not in ACTIVE_STATES:
             return state, EXIT_CODES[state['status']]
         if state['pending_approvals'] and not stopping:
             return state, 2
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             return state, 124
-        time.sleep(0.1)
+        time.sleep(min(0.1, remaining))
 
 
 def main():
@@ -727,7 +738,7 @@ def main():
         scope_command('--no-block', 'stop', state['scope'])
         return 0
     if args.command == 'wait':
-        state, code = wait(root, args.timeout)
+        state, code = wait(root, time.monotonic() + args.timeout)
         print(json.dumps(state))
         return code
     if args.command == 'status':
@@ -812,19 +823,28 @@ def main():
             task = text if text is not None else read(args.task if args.task else root / 'task.md')
             return launch(root, state, config, task)
         if args.command in ('interrupt', 'stop'):
+            deadline = time.monotonic() + args.timeout
             state = snapshot(root)
             if state['status'] in ACTIVE_STATES:
                 write(turn_dir(root, state) / 'interrupt', '')
             elif args.command == 'interrupt':
                 raise ValueError('worker is not running')
             if args.command == 'stop':
-                state, code = wait(root, args.timeout, stopping=True)
-                forced = code == 124
-                if forced and not scope_stopped(root, state):
-                    cleanup_unverified()
-                    print(json.dumps(state))
-                    return 1
-                with locked(root / 'worker.lock'):
+                state, code = wait(root, deadline, stopping=True)
+                lock_path = root / 'worker.lock'
+                lock = None if code == 124 else lock_until(lock_path, deadline)
+                forced = lock is None
+                if forced:
+                    if not scope_stopped(root, state):
+                        cleanup_unverified()
+                        print(json.dumps(snapshot(root)))
+                        return 1
+                    lock = lock_until(lock_path, deadline)
+                    if lock is None:
+                        print('Scope stopped, but worker state is still locked.', file=sys.stderr)
+                        print(json.dumps(snapshot(root)))
+                        return 1
+                with lock:
                     state = snapshot(root)
                     if forced and state['status'] in ACTIVE_STATES:
                         # A launcher can still be outside the scope while admission is pending.

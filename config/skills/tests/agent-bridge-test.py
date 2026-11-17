@@ -42,14 +42,18 @@ if Path(__file__).name == 'systemd-run':
     argv = args[args.index('--') + 1:]
     if os.environ.get('BRIDGE_TEST_RESULT_CRASH'):
         argv[1:1] = ['-B', '-c', """
-import os, runpy, sys
+import os, runpy, signal, sys
 main = runpy.run_path(sys.argv.pop(1))['main']
 namespace = main.__globals__
 save = namespace['save_state']
 def crash(root, state):
     if state['status'] == 'done':
-        if os.environ['BRIDGE_TEST_RESULT_CRASH'] == 'after':
+        point = os.environ['BRIDGE_TEST_RESULT_CRASH']
+        if point in ('after', 'suspend'):
             save(root, state)
+        if point == 'suspend':
+            os.kill(os.getpid(), signal.SIGSTOP)
+            return
         os._exit(92)
     save(root, state)
 namespace['save_state'] = crash
@@ -766,6 +770,30 @@ main()
                 self.cli('stop', root)
                 self.assertEqual(self.result(root)['state'], status)
                 self.assertEqual('final_file' in self.state(root), point == 'after')
+
+    def test_stop_retires_bridge_suspended_after_publishing_done(self):
+        self.env['BRIDGE_TEST_RESULT_CRASH'] = 'suspend'
+        try:
+            root = self.start('codex', 'complete')
+        finally:
+            self.env.pop('BRIDGE_TEST_RESULT_CRASH')
+        self.assertEqual(self.done(root), 'started:complete')
+        published = self.state(root)
+        pid = published['pid']
+        try:
+            stat_file = Path('/proc') / str(pid) / 'stat'
+            self.until(lambda: stat_file.read_text().rsplit(') ', 1)[1].startswith('T '))
+            result = self.result(root)
+            stopped = json.loads(self.cli('stop', root, '--timeout', '0.1').stdout)
+            self.assertEqual(stopped['status'], 'done')
+            self.assertEqual(stopped['cleanup'], 'verified')
+            self.assertEqual(stopped['final_file'], published['final_file'])
+            self.assertEqual(stopped['result_file'], published['result_file'])
+            self.assertEqual(self.result(root), result)
+            self.until(lambda: not process_alive(pid))
+        finally:
+            if process_alive(pid):
+                os.kill(pid, signal.SIGCONT)
 
     def test_stop_kills_clean_environment_descendant_after_bridge_crash(self):
         marker = self.root / 'descendant-pid'
