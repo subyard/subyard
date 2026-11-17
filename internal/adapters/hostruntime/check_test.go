@@ -156,3 +156,21 @@ func readyFacts() HostFacts {
 		StorageFS: "test", StorageKnown: true, IncusPresent: true, IncusVersion: "6.0.6",
 	}
 }
+
+func TestHostCheckRemindsOfThePendingNetworkManagerReboot(t *testing.T) {
+	var output bytes.Buffer
+	check := HostCheck{
+		Yard: testYard("alpha", 2323), Output: &output,
+		Probe: func(context.Context, HostCheck) (HostFacts, error) {
+			facts := readyFacts()
+			facts.NetworkManagerRebootPending = true
+			return facts, nil
+		},
+	}
+	if err := check.Run(context.Background(), CheckOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), NetworkManagerRebootReminder) {
+		t.Fatalf("check omitted the reboot reminder:\n%s", output.String())
+	}
+}

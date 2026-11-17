@@ -61,7 +61,10 @@ case "${1:-}" in
     printf 'Client version: %s\nServer version: %s\n' "${TEST_INCUS_VERSION:-6.0.6}" "$server"
     exit "${TEST_SERVER_QUERY_RC:-0}"
     ;;
-  storage|network) exit 0 ;;
+  network)
+    [ "${2:-}" != list ] || printf '[{"name":"incusbr0","type":"bridge","managed":true}]\n'
+    exit 0 ;;
+  storage) exit 0 ;;
   *) exit 0 ;;
 esac
 SH
@@ -141,9 +144,22 @@ cat > "$TMP/bin/dispatcher" <<'SH'
 SH
 chmod 0755 "$TMP/bin"/*
 
+# NetworkManager read this guard when it started in an earlier boot, so active-NetworkManager cases
+# continue instead of stopping for the first reboot, which tests/lib-power-network.sh covers.
+seed_read_guard() {
+  mkdir -p "$TMP/etc/NetworkManager/conf.d" "$TMP/var/lib/subyard"
+  printf '%s\n' '# Subyard: keep yard veths, Incus tap devices and Incus bridges unmanaged.' '[device-subyard]' \
+    'match-device=type:veth,driver:veth,interface-name:tap????????,interface-name:incusbr0' 'managed=0' \
+    > "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
+  bash -c '. "$1"; printf "earlier-boot %s %s held init\n" "$(power_nm_file_id "$2")" "$(power_nm_guard_static_hash "$2")"' \
+    _ "$ROOT/scripts/lib-power.sh" "$TMP/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf" \
+    > "$TMP/var/lib/subyard/nm-guard-state"
+}
+
 run_installer() (
   local data_home="$1" command_path installer_path operator_user operator_group
   shift
+  [ "${TEST_NM_STATE:-inactive}" != active ] || seed_read_guard
   command_path="${TEST_COMMAND_PATH:-$TMP/bin:$PATH}"
   installer_path="${TEST_INSTALLER_PATH:-$ROOT/scripts/01-install-incus.sh}"
   operator_user="$(id -un)"
@@ -376,7 +392,7 @@ printf 'VERSION_CODENAME=test\n' > "$TMP/etc/os-release"
 printf 'fixture-key\n' > "$TMP/etc/apt/keyrings/zabbly.asc"
 version_bin="$TMP/version-bin"
 mkdir "$version_bin"
-for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir; do
+for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir mv sha256sum join sync; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
 for command_name in getent id systemctl sudo; do
@@ -415,13 +431,26 @@ cat > "$version_bin/install" <<'SH'
 case "${*: -1}" in "$TEST_FIXTURE_ROOT"/*) ;; *) exit 99 ;; esac
 exec /usr/bin/install "$@"
 SH
+cat > "$version_bin/nmcli" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-t -f DEVICE,STATE device") printf 'incusbr0:unmanaged\n' ;;
+  "-t -f DEVICE,TYPE,STATE device") printf 'incusbr0:bridge:unmanaged\n' ;;
+  "-g GENERAL.STATE device show "*) printf '10 (unmanaged)\n' ;;
+  "device set "*) [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'nmcli %s\n' "$*" >> "$TEST_EFFECT_LOG" ;;
+  general\ reload*) [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'nmcli %s\n' "$*" >> "$TEST_EFFECT_LOG" ;;
+  *) exit 99 ;;
+esac
+SH
 cat > "$version_bin/NetworkManager" <<'SH'
 #!/usr/bin/env bash
+dir="$TEST_FIXTURE_ROOT/etc/NetworkManager/conf.d"
+if [ "${1:-}" = --config-dir ]; then dir="$2"; shift 2; fi
 [ "$*" = --print-config ] || exit 99
-cat "$TEST_FIXTURE_ROOT/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf"
+cat "$dir/zz-subyard-unmanaged.conf"
 SH
 # Retain the real reader/guard logic, redirecting only its absolute binary peer.
-sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g" \
+sed -i "s|/usr/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/usr/bin/NetworkManager|$version_bin/NetworkManager|g; s|/sbin/NetworkManager|$version_bin/NetworkManager|g; s|/var/lib/subyard/|$TMP/var/lib/subyard/|g; s|/etc/NetworkManager/|$TMP/etc/NetworkManager/|g" \
   "$TMP/version-scripts/lib-power.sh"
 # The package replaces the initial executable, keeping installed and final
 # versions separate without making package effects implicit in --version.
@@ -429,9 +458,10 @@ cat > "$TMP/incus-initial" <<'SH'
 #!/usr/bin/env bash
 [ -z "${TEST_EFFECT_LOG:-}" ] || printf 'incus %s\n' "$*" >> "$TEST_EFFECT_LOG"
 if [ "${1:-}" = --version ]; then printf '%s\n' "${TEST_INITIAL_INCUS_VERSION:-6.0.5}"; fi
+if [ "${1:-} ${2:-}" = "network list" ]; then printf '[{"name":"incusbr0","type":"bridge","managed":true}]\n'; fi
 SH
 chmod 0755 "$version_bin/apt-cache" "$version_bin/apt-get" "$version_bin/curl" \
-  "$version_bin/dpkg" "$version_bin/install" "$version_bin/NetworkManager" "$TMP/incus-initial"
+  "$version_bin/dpkg" "$version_bin/install" "$version_bin/NetworkManager" "$version_bin/nmcli" "$TMP/incus-initial"
 export TEST_FIXTURE_ROOT="$TMP"
 
 for package_path in upgrade install; do
@@ -570,10 +600,13 @@ for installed in 6.0.6 7.0.0 6.0.5 none; do
           ! grep -Fq 'could not list existing Incus bridges' "$source_output" \
             || fail "$label emitted a spurious Incus inventory warning"
           guard_count="$(grep -c '^systemctl is-active NetworkManager$' "$effect_log")"
+          # Each guard run checks NetworkManager's state, before and again after a file write.
           expected_guards=1
           [ "$mode" != normal ] || expected_guards=2
-          [ "$nm_state" != active ] || expected_guards=$((expected_guards * 2))
-          [ "$guard_count" -eq "$expected_guards" ] || fail "$label omitted or repeated a guard reconcile"
+          [ "$guard_count" -ge "$expected_guards" ] && [ "$guard_count" -le $((expected_guards * 2)) ] \
+            || fail "$label omitted or repeated a guard reconcile"
+          ! grep -Eq '^(systemctl (reload|restart|try-restart|reload-or-restart) NetworkManager|nmcli general reload)' "$effect_log" \
+            || fail "$label reloaded or restarted NetworkManager"
         done
       done
     done

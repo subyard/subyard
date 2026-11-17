@@ -117,9 +117,9 @@ reconcile_e2e_route_mount() {
 owner_phase=whole
 created=0 created_uuid=''
 case "${1:-}" in
-  --owner-before-instance) owner_phase=before-instance ;;
-  --owner-before-srv) owner_phase=before-srv ;;
-  --owner-after-srv) owner_phase=after-srv ;;
+  --owner-before-instance) owner_phase='before-instance' ;;
+  --owner-before-srv) owner_phase='before-srv' ;;
+  --owner-after-srv) owner_phase='after-srv' ;;
 esac
 if [ "$owner_phase" != whole ]; then
   [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" = 1 ] || die 'owner portion requires its original prepared context'

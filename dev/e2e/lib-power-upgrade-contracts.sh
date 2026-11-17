@@ -215,6 +215,12 @@ assert_v2_transition() {
       "epoch": 3, "applied": ["canonicalize-test-vms-settings-v2", "localize-ssh-port-settings-v3"]
     }
   ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/ledger.json" >/dev/null \
+    && operator_env jq -e '
+      # ledger.json stays the legacy projection for released readers (power-metadata epoch 3);
+      # the compacted checkpoint carries the device-guard epoch.
+      .legacyProjection.epochs["power-metadata"] == 3 and
+      .domains["power-metadata"].epoch == 4
+    ' "$OPERATOR_HOME/.config/subyard/release-transition/v2/history-checkpoint.json" >/dev/null \
     || {
       # Capture allowlisted migration facts before marker-owned cleanup removes them.
       for record in ledger.json history-checkpoint.json; do
@@ -350,6 +356,22 @@ assert_legacy_native_policy() {
   assert_upgrade_ownership
 }
 
+# A rollback refused across the device-guard epoch: `code=rollback-incompatible` and either the
+# rollback-compatibility blocker's own message or, for every published target before this epoch,
+# the source provenance check that runs first (the retained engine cannot read the newer
+# registry). The CLI exposes no check past provenance, so that expected case prints LIMIT and the
+# blocker itself is proven host-free (go:releasetransition). Anything else fails.
+classify_epoch_rollback_refusal() { # <log> <label>
+  grep -Fq 'code=rollback-incompatible' "$1" || die "$2 failed for an unexpected reason"
+  if grep -Fq 'the retained release cannot safely accept the current migration ledger' "$1"; then
+    printf 'evidence: %s refused by the rollback-compatibility blocker\n' "$2"
+  elif grep -Fq 'source release has invalid or foreign V2 registry provenance' "$1"; then
+    printf 'LIMIT: %s refused by the source provenance check, which runs before the rollback-compatibility blocker for every published target before this epoch\n' "$2"
+  else
+    die "$2 was refused by another rollback-incompatible blocker"
+  fi
+}
+
 verify_legacy_rollback_refusal() {
   local path index=0
   local -a paths=("$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"
@@ -368,8 +390,7 @@ verify_legacy_rollback_refusal() {
   if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
     die "incompatible published v$OLD_VERSION rollback unexpectedly succeeded"
   fi
-  grep -Fq 'code=rollback-incompatible' "$STATE_ROOT/predecessor-rollback.log" \
-    || die 'published predecessor rollback failed for an unexpected reason'
+  classify_epoch_rollback_refusal "$STATE_ROOT/predecessor-rollback.log" 'published predecessor rollback'
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   index=0
   for path in "${paths[@]}"; do
@@ -386,45 +407,34 @@ verify_legacy_rollback_refusal() {
   ok "incompatible published v$OLD_VERSION rollback refused without mutation"
 }
 
-check_compatible_transition() {
-  local version="$1" release_root="$2" target="${3#releases/}" active="${4#releases/}"
-  operator_env env YARD_RELEASE_BASE_URL="file://$release_root" \
-    "$OPERATOR_HOME/.local/bin/yard" update --version "$version" --check --json \
-    > "$STATE_ROOT/compatible-check.json"
-  jq -e --arg target "$target" --arg active "$active" '
-    .outcome.target == $target and .outcome.active == $active and
-    .outcome.status == "migration-required" and .outcome.code == "transition-required" and
-    .outcome.reachedGoal == false and .assessment.changed == true and
-    (.plan | type == "string" and startswith("plan-v1-")) and
-    ((.blockers // []) | type == "array" and length == 0)
-  ' "$STATE_ROOT/compatible-check.json" >/dev/null \
-    || die 'public update inspection did not authorize the exact compatible target'
-}
-
+# Rollback to the published anchor crosses the candidate's power-metadata epoch and is refused
+# without mutation; the rollback cycle then runs against a candidate-built compatible release.
 finish_candidate_flow() {
-  local rollback_catalog rollback_ledger runtime="$OPERATOR_HOME/.subyard/runtime"
+  local rollback_catalog rollback_ledger checked_target runtime="$OPERATOR_HOME/.subyard/runtime"
   load_release_targets
-  capture_legacy_native_policy "$STATE_ROOT/native-policy.before"
-  local legacy="$OPERATOR_HOME/.config/subyard/migrations/state.json"
-  if operator_env test ! -e "$legacy" && operator_env test ! -L "$legacy"; then
-    printf 'absent\n' > "$STATE_ROOT/refusal-3.mode"
-  else
-    operator_env stat -c '%a:%u:%g:%d:%i' "$legacy" > "$STATE_ROOT/refusal-3.mode"
-    operator_env cat "$legacy" > "$STATE_ROOT/refusal-3.bytes"
-  fi
-  info "retaining the authentic published $COMPATIBLE_VERSION runtime through verified public updates"
-  check_compatible_transition "$COMPATIBLE_VERSION" "$COMPATIBLE_RELEASE_ROOT" \
-    "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
+  assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
+  verify_legacy_rollback_refusal
+  info "updating to the candidate-built compatible $COMPATIBLE_VERSION through verified public updates"
+  # A same-epoch target: the public inspection names it exactly, with a plan and no blockers.
+  operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --check --json \
+    > "$STATE_ROOT/compatible-check.json"
+  checked_target="$(jq -er --arg version "$COMPATIBLE_VERSION" --arg active "${CANDIDATE_RELEASE_TARGET#releases/}" '
+    select(.outcome.active == $active and (.outcome.target | type == "string" and startswith($version + "-")) and
+      (.plan | type == "string" and startswith("plan-v1-")) and ((.blockers // []) | length == 0)) | .outcome.target
+  ' "$STATE_ROOT/compatible-check.json")" \
+    || die 'public update inspection did not name the exact unblocked compatible target'
   operator_env env YARD_RELEASE_BASE_URL="file://$COMPATIBLE_RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$COMPATIBLE_VERSION" --yes
+  COMPATIBLE_RELEASE_TARGET="$(operator_env readlink "$runtime/current")"
+  [ "$COMPATIBLE_RELEASE_TARGET" = "releases/$checked_target" ] \
+    || die "the compatible update activated $COMPATIBLE_RELEASE_TARGET, not the inspected releases/$checked_target"
   assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_state "$COMPATIBLE_VERSION" \
     "$runtime/$COMPATIBLE_RELEASE_TARGET/config/systemd/subyard-power-reconcile.service.in" loaded candidate \
     "$COMPATIBLE_RELEASE_TARGET"
   assert_legacy_native_policy
   assert_published_v1_history_unchanged
-  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
-    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
@@ -432,7 +442,7 @@ finish_candidate_flow() {
   assert_legacy_native_policy
   rollback_catalog="$(operator_env jq -er '.catalogDigest | select(type == "string" and test("^[a-f0-9]{64}$"))' "$V2_JOURNAL")"
   rollback_ledger="$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')"
-  info "rolling back to the exact compatible published $COMPATIBLE_VERSION runtime"
+  info "rolling back to the compatible $COMPATIBLE_VERSION runtime"
   operator_yard update --rollback --yes
   assert_runtime_links "$COMPATIBLE_RELEASE_TARGET" "$CANDIDATE_RELEASE_TARGET"
   assert_runtime_state "$COMPATIBLE_VERSION" \
@@ -443,8 +453,6 @@ finish_candidate_flow() {
   [ "$(operator_env sha256sum "$V2_LEDGER" | awk '{print $1}')" = "$rollback_ledger" ] \
     || die 'rollback changed the exact v2 migration ledger bytes'
   assert_legacy_native_policy
-  check_compatible_transition "$CANDIDATE_VERSION" "$RELEASE_ROOT" \
-    "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
   operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
     "$OPERATOR_HOME/.local/bin/yard" update --version "$CANDIDATE_VERSION" --yes
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$COMPATIBLE_RELEASE_TARGET"
@@ -453,17 +461,6 @@ finish_candidate_flow() {
   operator_yard init --yes
   assert_legacy_native_policy
   assert_published_v1_history_unchanged
-  ok 'authentic compatible rollback and candidate roll-forward retained upgrade ownership'
+  ok 'refused anchor rollback, compatible rollback and candidate roll-forward retained upgrade ownership'
 }
 
-verify_compatible_capabilities() {
-  local response="$1"
-  [ "$(wc -c < "$response")" -le 65536 ] \
-    && jq -e 'keys == ["activationOwners", "activationReconciliationOwned", "schemaVersion"] and
-      .activationReconciliationOwned == false and .schemaVersion == 2 and
-      (.activationOwners | sort) == ["core-guest-runtime", "git-fetch-runtime", "github-runtime",
-        "host-power", "installation-runtime-v1", "key-tools-runtime", "openlit-runtime", "orca-runtime",
-        "telemetry-runtime", "test-vm-broker", "test-yard-route-consumers"]' \
-      "$response" >/dev/null \
-    || die 'published compatible runtime lacks exact activation capabilities'
-}

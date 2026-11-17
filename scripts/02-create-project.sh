@@ -25,8 +25,8 @@ INCUS_NETWORK="${INCUS_NETWORK:-${INCUS_BRIDGE:-incusbr0}}"
 
 owner_phase=whole
 case "${1:-}" in
-  --owner-before-project) owner_phase=before-project ;;
-  --owner-after-project) owner_phase=after-project ;;
+  --owner-before-project) owner_phase='before-project' ;;
+  --owner-after-project) owner_phase='after-project' ;;
 esac
 if [ "$owner_phase" != whole ]; then
   [ "${SUBYARD_PREPARED_OWNER_PHASE:-}" = 1 ] || die 'owner portion requires its original prepared context'

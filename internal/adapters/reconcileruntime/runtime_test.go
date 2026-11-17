@@ -674,6 +674,29 @@ exec bash "$1/scripts/install-power-reconciler.sh" --yes
 	}
 	runtime.Environment[4] = "POWER_LOAD_STATE=loaded"
 	runtime.Environment[5] = "POWER_NEED_RELOAD=no"
+	// A released guard keeps only the separate network-guard stage pending: update
+	// activation migrates it there, while host-power stays converged.
+	guardDirectory := testkit.TempDir(t)
+	defer func(previous string) { networkManagerGuardPath = previous }(networkManagerGuardPath)
+	networkManagerGuardPath = filepath.Join(guardDirectory, "zz-subyard-unmanaged.conf")
+	for _, test := range []struct {
+		name, guard string
+		want        bool
+	}{
+		{name: "released guard", guard: "[keyfile]\nunmanaged-devices=type:veth\n\n[device-subyard]\nmatch-device=type:veth\nmanaged=0\n"},
+		{name: "current guard", guard: "[device-subyard]\nmatch-device=type:veth,driver:veth\nmanaged=0\n", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			write(networkManagerGuardPath, test.guard, 0o644)
+			verified, err := runtime.VerifyStage(context.Background(), ports.ReconcileStageNetworkGuard)
+			if err != nil || verified != test.want {
+				t.Fatalf("guard verified=%v error=%v, want %v", verified, err, test.want)
+			}
+			if power, err := runtime.VerifyStage(context.Background(), "power"); err != nil || !power {
+				t.Fatalf("the guard changed host-power convergence: %v %v", power, err)
+			}
+		})
+	}
 	incus.Reconcile.Instance.Config["user.subyard.initialized"] = "false"
 	assertStage(t, runtime, "power", false, "unfinished desired-power transaction")
 	verified, err := runtime.VerifyStage(context.Background(), "power")
@@ -2320,6 +2343,14 @@ func TestNetworkStageCapturesKernelActorBeforeElevatedScript(t *testing.T) {
 		if err != nil || string(data) != actor.Username+"\n--yes\n--operator-uid="+strconv.Itoa(os.Getuid())+"\n" {
 			t.Fatalf("kernel actor not retained in script identity and argv: %v", err)
 		}
+	}
+	// yard update names itself in the stage's next steps.
+	runtime.Environment, runtime.FromUpdate = nil, true
+	if err := runtime.ApplyStage(context.Background(), ports.ReconcileStageNetwork); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || !strings.HasSuffix(string(data), "\n--from-update\n") {
+		t.Fatalf("update context not passed to the network stage: %q %v", data, err)
 	}
 }
 

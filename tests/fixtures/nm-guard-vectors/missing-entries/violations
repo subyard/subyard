@@ -1,0 +1,4 @@
+[device-subyard] match-device lacks type:veth
+[device-subyard] match-device lacks driver:veth
+[device-subyard] match-device lacks interface-name:tap????????
+[device-subyard] match-device lacks interface-name:nestedbr0

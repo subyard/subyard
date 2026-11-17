@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"unicode/utf8"
 
+	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/config"
@@ -182,6 +183,7 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 		cli.profileActivationReconciler(request, "key-tools-runtime"),
 		cli.brokerActivationReconciler(request),
 		cli.routeConsumerActivationReconciler(request),
+		cli.networkGuardActivationReconciler(request),
 		cli.powerActivationReconciler(request),
 	}...)
 }
@@ -876,6 +878,36 @@ func (cli *CLI) powerActivationReconciler(
 			), nil
 		},
 		authorize: cli.releaseTransitionPrivilegeAuthorization,
+	}
+}
+
+// networkGuardActivationReconciler migrates a guard written by a released version. It applies
+// whenever such a guard exists, even where the boot reconciler was never installed, and runs
+// only the host-power helper's guard-only action, which installs nothing else.
+func (cli *CLI) networkGuardActivationReconciler(
+	request releasetransition.ProcessRequest,
+) releasetransition.V2ActivationReconciler {
+	power := cli.powerActivationReconciler(request).(*activationStageReconciler)
+	return &activationStageReconciler{
+		configuration: cli,
+		id:            "host-network-guard", stage: ports.ReconcileStageNetworkGuard,
+		inspectApplicability: func(context.Context) (activationApplicability, error) {
+			current, err := hostruntime.NetworkManagerGuardCurrent(hostruntime.NetworkManagerGuardPath)
+			if err != nil {
+				return activationApplicability{}, fmt.Errorf("inspect the NetworkManager guard: %w", err)
+			}
+			// The state stays the same across the rewrite, so the authorized Desired
+			// fingerprint is stable through reconciliation and resume.
+			return activationApplicability{state: "network-guard", applies: !current}, nil
+		},
+		platform:  power.platform,
+		authorize: cli.releaseTransitionPrivilegeAuthorization,
+		planned: func() []string {
+			if current, err := hostruntime.NetworkManagerGuardCurrent(hostruntime.NetworkManagerGuardPath); err == nil && current {
+				return nil
+			}
+			return []string{"rewrite the released Subyard NetworkManager guard without reloading NetworkManager; reboot the host once afterwards to apply it safely"}
+		},
 	}
 }
 
