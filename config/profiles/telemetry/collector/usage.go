@@ -200,12 +200,14 @@ min(nullif(source_time,'1970-01-01T00:00:00.000000000Z')) AS source_time`
 	return sql + `
 FROM records WHERE kind='model_usage'
 GROUP BY client,request_identity,request_id;
-CREATE VIEW IF NOT EXISTS model_tool_results AS
+DROP VIEW IF EXISTS model_tool_results;
+CREATE VIEW model_tool_results AS
 SELECT json_extract(body,'$.client') AS client,
+json_extract(body,'$.request_identity') AS request_identity,
 json_extract(body,'$.request_id') AS request_id,
 json_extract(body,'$.tool_use_id') AS tool_use_id,
 CASE WHEN min(json_extract(body,'$.tool_result_bytes'))=max(json_extract(body,'$.tool_result_bytes'))
 	THEN min(json_extract(body,'$.tool_result_bytes')) END AS tool_result_bytes
 FROM records WHERE kind='tool_result'
-GROUP BY client,request_id,tool_use_id;`
+GROUP BY client,request_identity,request_id,tool_use_id;`
 }

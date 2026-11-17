@@ -351,16 +351,18 @@ class Runtime:
         saved = json.loads((self.control/'assets.json').read_text())
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
                    and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
+        binary = self.library/'subyard-telemetry'
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
-            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
+            # An interrupted upgrade may have published the new executable before its inventory.
+            desired_binary = self.selected and path == binary and before == self.assets[binary][0]
+            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest() and not desired_binary:
                 raise ValueError('managed asset changed')
             if path in (self.units/COLLECTOR, self.units/MANAGER) and before != self.assets[path][0] and before is not None:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
-        binary = self.library/'subyard-telemetry'
         if self.selected and before_states[COLLECTOR].get('ActiveState') == 'active' and self.asset_snapshot(binary) != self.assets[binary][0]:
             # Stop before replacing the executable so an interrupted apply can
             # start the new version through the normal enable path on retry.

@@ -295,7 +295,7 @@ exporters covered here leave these fields unknown. Claude tool-result logs with
 a request ID, tool-use ID and size contribute to `model_tool_results`. They
 report the completed tool's result size and reference the request that issued the
 tool call. The next model request may receive a different payload. Join on
-`client` and `request_id`, aggregating tool rows before joining to request
+`client`, `request_identity`, and `request_id`, aggregating tool rows before joining to request
 totals.
 
 A bridge that accepts a Codex executable path and invokes it with

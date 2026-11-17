@@ -3,6 +3,7 @@ package collector
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 )
 
@@ -20,7 +22,17 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacy.db.Exec("DROP VIEW model_usage; DROP VIEW model_tool_results"); err != nil {
+	if _, err := legacy.db.Exec(`DROP VIEW model_usage; DROP VIEW model_tool_results;
+		CREATE VIEW model_tool_results AS SELECT json_extract(body,'$.request_id') AS request_id
+		FROM records WHERE kind='tool_result';`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Ingest(ctx, []Record{
+		record("run", map[string]any{"agent_run_id": "claude", "task_id": "task"}),
+		record("run", map[string]any{"agent_run_id": "codex-start", "task_id": "task", "parent_run_id": "claude"}),
+		record("run", map[string]any{"agent_run_id": "codex-resume", "task_id": "task", "parent_run_id": "claude"}),
+		record("gap", map[string]any{"reason": "historical"}),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := legacy.Close(); err != nil {
@@ -31,12 +43,9 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.Ingest(ctx, []Record{
-		record("run", map[string]any{"agent_run_id": "claude", "task_id": "task"}),
-		record("run", map[string]any{"agent_run_id": "codex-start", "task_id": "task", "parent_run_id": "claude"}),
-		record("run", map[string]any{"agent_run_id": "codex-resume", "task_id": "task", "parent_run_id": "claude"}),
-	}); err != nil {
-		t.Fatal(err)
+	var historical int
+	if err := s.db.QueryRow("SELECT count(*) FROM records WHERE kind='gap' AND json_extract(body,'$.reason')='historical'").Scan(&historical); err != nil || historical != 1 {
+		t.Fatalf("historical record count: %d, %v", historical, err)
 	}
 	logs := plog.NewLogs()
 	add := func(run string, stamp uint64, attributes map[string]any) {
@@ -64,7 +73,8 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 	for i, run := range []string{"codex-start", "codex-resume", ""} {
 		add(run, uint64(200+i), map[string]any{"event.name": "codex.sse_event", "event.kind": "response.completed",
 			"conversation.id": "codex-thread", "turn.id": "turn-1", "input_token_count": "20", "cached_token_count": 12,
-			"output_token_count": "3", "reasoning_token_count": 2, "tool_token_count": "23"})
+			"output_token_count": "3", "reasoning_token_count": 2, "tool_token_count": "23",
+			"cache_write_token_count": "fixture-private-counter"})
 	}
 	consumers, err := makeConsumers(s, DefaultPolicy())
 	if err != nil {
@@ -74,6 +84,38 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 		if err := consumers.logs.ConsumeLogs(ctx, logs); err != nil {
 			t.Fatal(err)
 		}
+	}
+	var rawExport bytes.Buffer
+	if _, err := Export(ctx, s.db, &rawExport, 0, 1000); err != nil {
+		t.Fatal(err)
+	}
+	sawCounter := false
+	for line := range bytes.SplitSeq(bytes.TrimSpace(rawExport.Bytes()), []byte("\n")) {
+		var entry Envelope
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Kind != "otlp/logs" {
+			continue
+		}
+		if bytes.Contains(entry.Protobuf, []byte("fixture-private-counter")) {
+			t.Fatal("nonnumeric token counter survived in exported OTLP")
+		}
+		request := plogotlp.NewExportRequest()
+		if err := request.UnmarshalProto(entry.Protobuf); err != nil {
+			t.Fatal(err)
+		}
+		for _, resource := range request.Logs().ResourceLogs().All() {
+			for _, scope := range resource.ScopeLogs().All() {
+				for _, event := range scope.LogRecords().All() {
+					value, ok := event.Attributes().Get("input_token_count")
+					sawCounter = sawCounter || (ok && value.Str() == "20")
+				}
+			}
+		}
+	}
+	if !sawCounter {
+		t.Fatal("numeric string token counter missing from exported OTLP")
 	}
 	trace := ptrace.NewTraces()
 	spanEvent := trace.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty().Events().AppendEmpty()
@@ -92,9 +134,14 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 		}
 	}
 	// A second observation of the same provider request can supply a missing field.
-	if err := s.Ingest(ctx, []Record{record("model_usage", map[string]any{
-		"client": "claude", "request_identity": "provider", "request_id": "req-main", "trigger": "new_prompt", "input_tokens": 10,
-	})}); err != nil {
+	if err := s.Ingest(ctx, []Record{
+		record("model_usage", map[string]any{
+			"client": "claude", "request_identity": "provider", "request_id": "req-main", "trigger": "new_prompt", "input_tokens": 10,
+		}),
+		record("tool_result", map[string]any{
+			"client": "claude", "request_identity": "native_log", "request_id": "req-main", "tool_use_id": "tool-1", "tool_result_bytes": 42,
+		}),
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -105,11 +152,15 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer db.Close()
+		var nativeSize int
+		if err := db.QueryRow("SELECT tool_result_bytes FROM model_tool_results WHERE request_identity='native_log' AND request_id='req-main' AND tool_use_id='tool-1'").Scan(&nativeSize); err != nil || nativeSize != 42 {
+			t.Fatalf("native-log tool size: %d, %v", nativeSize, err)
+		}
 		rows, err := Query(ctx, db, `SELECT u.agent_run_id, u.session_id, u.turn_id, u.native_agent_id, u.parent_native_agent_id,
 			json_extract(r.body,'$.task_id') task_id,json_extract(r.body,'$.parent_run_id') parent_run_id,
 			u.input_tokens,u.cache_read_tokens,u.cache_write_tokens,u.reasoning_tokens,u.tool_output_bytes,u.trigger,t.tool_result_bytes
 			FROM model_usage u LEFT JOIN runs r USING(agent_run_id)
-			LEFT JOIN model_tool_results t ON t.client=u.client AND t.request_id=u.request_id
+			LEFT JOIN model_tool_results t USING(client,request_identity,request_id)
 			ORDER BY u.source_time`)
 		if err != nil || len(rows) != 7 {
 			t.Fatalf("request rows: %v, %v", rows, err)

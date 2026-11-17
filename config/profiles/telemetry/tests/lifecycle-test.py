@@ -330,10 +330,23 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 saved[str(binary)] = hashlib.sha256(previous).hexdigest()
                 (root/'control/assets.json').write_text(json.dumps(saved))
                 calls.clear()
+                publish = guest.native.publish
+                def interrupt_inventory(path, *args, **kwargs):
+                    if path == root/'control/assets.json':
+                        raise InterruptedError('before publishing the new inventory')
+                    return publish(path, *args, **kwargs)
+                with patch.object(guest.native, 'publish', side_effect=interrupt_inventory):
+                    with self.assertRaises(InterruptedError):
+                        runtime.apply()
+                self.assertEqual(binary.read_bytes(), runtime.assets[binary][0])
+                self.assertEqual(json.loads((root/'control/assets.json').read_text()), saved)
+                self.assertEqual(states[guest.COLLECTOR]['ActiveState'], 'inactive')
                 runtime.apply()
                 self.assertLess(calls.index(('stop', guest.COLLECTOR)),
                                 calls.index(('enable', '--now', guest.COLLECTOR, guest.MANAGER)))
                 self.assertEqual(binary.read_bytes(), runtime.assets[binary][0])
+                self.assertEqual(json.loads((root/'control/assets.json').read_text())[str(binary)],
+                                 hashlib.sha256(binary.read_bytes()).hexdigest())
                 self.assertNotIn(('stop', guest.MANAGER), calls)
                 self.assertEqual(runtime.observe()['state'], 'current')
                 for changed in ({'User':'root'},{'DropInPaths':'/etc/systemd/system/subyard-.service.d/foreign.conf'},

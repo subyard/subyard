@@ -11,6 +11,21 @@ import records
 
 
 class OutboxTest(unittest.TestCase):
+    def test_usage_records_keep_metadata_in_the_durable_outbox(self):
+        identity = {'client': 'codex', 'request_identity': 'native_log', 'request_id': 'request'}
+        for kind, body in (
+            ('model_usage', dict(identity, agent_run_id='run', session_id='session', turn_id='turn',
+                                 native_agent_id='worker', parent_native_agent_id='parent', model='model',
+                                 trigger='poll_unchanged', input_tokens=12, cache_read_tokens=4,
+                                 cache_write_tokens=0, output_tokens=3, reasoning_tokens=1, tool_output_bytes=0)),
+            ('tool_result', dict(identity, tool_use_id='tool', tool_result_bytes=42)),
+        ):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                self.assertTrue(records.emit(name, kind, dict(body, transcript='private'), event_id='usage'))
+                queued = records.read_private(Path(name)/'outbox/usage.json')
+                self.assertEqual(queued['kind'], kind)
+                self.assertEqual(queued['body'], body)
+
     def test_capacity_scan_with_concurrent_consumer_preserves_admission_and_limits(self):
         for scenario in ('admit', 'count-cap', 'byte-cap', 'permission'):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as name:

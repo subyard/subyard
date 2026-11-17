@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
@@ -56,6 +57,10 @@ func LoadPolicy(path string) (Policy, error) {
 	}
 	return p, nil
 }
+func isTokenCounter(key string) bool {
+	return strings.HasSuffix(key, "tokens") || strings.HasSuffix(key, "token_count") || strings.HasSuffix(key, "tokens_count")
+}
+
 func forbidden(key string) bool {
 	k := strings.ToLower(key)
 	// This standardized deployment label is safe metadata, not an environment
@@ -63,7 +68,7 @@ func forbidden(key string) bool {
 	if k == "deployment.environment.name" || k == "prompt.id" {
 		return false
 	}
-	usageCounter := strings.HasSuffix(k, "tokens") || strings.HasSuffix(k, "token_count") || strings.HasSuffix(k, "tokens_count")
+	usageCounter := isTokenCounter(k)
 	if strings.Contains(k, "token") && !usageCounter {
 		return true
 	}
@@ -135,6 +140,14 @@ func sanitizeJSON(data []byte, p Policy) ([]byte, int64, error) {
 						if (!allow[name] && !numeric) || forbidden(name) {
 							n++
 							continue
+						}
+						if raw, ok := value["stringValue"].(string); ok && isTokenCounter(strings.ToLower(name)) {
+							count, err := strconv.ParseInt(raw, 10, 64)
+							if err != nil || count < 0 {
+								n++
+								continue
+							}
+							value["stringValue"] = strconv.FormatInt(count, 10)
 						}
 						kept = append(kept, walk(m, k, true, class))
 					}

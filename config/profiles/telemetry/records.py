@@ -14,7 +14,7 @@ import tempfile
 import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
-KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
+KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap', 'model_usage', 'tool_result'}
 FIELDS = set('''association_id purpose allocated_cpu allocated_memory_bytes allocated_disk_bytes reservation_semantics agent_run_id state agent agent_version session_id parent_run_id task_id project_id
 worktree_id yard_id host_id object_id object_kind parent_object_id accounting boot_id generation
 monotonic_ns cpu_ns cpu_user_ns cpu_system_ns memory_bytes memory_peak_bytes swap_bytes
@@ -31,7 +31,10 @@ value unit observed_time resource_id allocation_generation requested_cpu request
 selector phase final_complete acquired_at ready_at expires_at stopped_at last_seen source_time
 requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_memory_bytes
 vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes
-read_bytes write_bytes read_ops write_ops populated attribution_id'''.split())
+read_bytes write_bytes read_ops write_ops populated attribution_id
+client request_identity request_id turn_id native_agent_id parent_native_agent_id model trigger
+input_tokens cache_read_tokens cache_write_tokens output_tokens reasoning_tokens tool_output_bytes
+tool_use_id tool_result_bytes'''.split())
 IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}\Z')
 MAX_RECORDS = 4096
 MAX_BYTES = 64*1024*1024
