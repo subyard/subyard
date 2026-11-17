@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/Subyard/Subyard/internal/ports"
 	"os"
 	"path/filepath"
@@ -121,6 +122,14 @@ func TestInitCommandPowerPathsDesiredState(t *testing.T) {
 					t.Fatal("init changed host settings")
 				}
 				return
+			}
+			wantAssignment := fmt.Sprintf("%s=%q", name, value)
+			otherName := "SUBYARD_POWER_UNIT_PATH"
+			if name == otherName {
+				otherName = "SUBYARD_POWER_RECONCILER_PATH"
+			}
+			if !strings.Contains(output.String(), wantAssignment) || strings.Contains(output.String(), otherName+"=") {
+				t.Fatalf("plan must describe only the single persisted override %s: %s", wantAssignment, &output)
 			}
 			if !bytes.HasPrefix(after, before) {
 				t.Fatal("init changed unrelated settings")

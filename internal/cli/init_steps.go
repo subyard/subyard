@@ -78,7 +78,7 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 			"read exact canonical integration settings", "record the selected yard's requested integration set", false, false)
 	}
 	if execution.powerPaths != nil {
-		appendStep("init.power-paths", execution.powerPaths.Path, fmt.Sprintf("persist effective command power paths as desired host settings: reconciler %s; unit %s; retain them if later initialization fails", execution.loaded.Environment["SUBYARD_POWER_RECONCILER_PATH"], execution.loaded.Environment["SUBYARD_POWER_UNIT_PATH"]), "protected compare-and-swap preserves unrelated assignments", "persist effective command power paths; retain them if later initialization fails", false, false)
+		appendStep("init.power-paths", execution.powerPaths.Path, fmt.Sprintf("persist effective command power paths as desired host settings: %s; retain them if later initialization fails", strings.Join(execution.powerPaths.Assignments, "; ")), "protected compare-and-swap preserves unrelated assignments", "persist effective command power paths; retain them if later initialization fails", false, false)
 	}
 	if execution.bootstrap != nil {
 		appendStep("init.registration", execution.bootstrap.targetPath, execution.bootstrap.description()+fmt.Sprintf("; owner-local SSH port %d", yard.SSHPort),
