@@ -13,6 +13,7 @@ import (
 )
 
 const projectHooksDispatcher = "/usr/local/libexec/subyard/projects-changed"
+const projectHooksUnsuccessful = "exited unsuccessfully"
 
 // RunProjectHooks bounds both the data-plane request and the guest process. Callers keep the
 // primary operation's result and display the returned warning; hook output may contain secrets.
@@ -23,19 +24,29 @@ func RunProjectHooks(ctx context.Context, yard domain.Context,
 	hookContext, cancel := context.WithTimeout(ctx, 130*time.Second)
 	defer cancel()
 	dev := uint32(yard.DevUID)
-	result, err := execute(hookContext, ports.InstanceExecRequest{
-		Command:     []string{"sh", "-c", `[ -x "$1" ] && exec timeout --kill-after=5s 120s "$1" 3>&1 >/dev/null 2>&1`, "subyard", projectHooksDispatcher},
-		Environment: map[string]string{"HOME": "/home/" + yard.DevUser, "SUBYARD_PROJECT_HOOK_REPORT": "1"},
+	request := ports.InstanceExecRequest{
+		Command:     []string{"sh", "-c", `[ -x "$1" ] && exec timeout --kill-after=5s 120s "$1"`, "subyard", projectHooksDispatcher},
+		Environment: map[string]string{"HOME": "/home/" + yard.DevUser},
 		User:        dev, Group: dev,
-	})
+	}
+	if len(approved) != 0 {
+		request.Command[2] += " 3>&1 >/dev/null 2>&1"
+		request.Environment["SUBYARD_PROJECT_HOOK_REPORT"] = "1"
+	}
+	result, err := execute(hookContext, request)
 	if err == nil && result.ExitCode == 0 {
 		return nil
 	}
-	failure := &ProjectHookFailure{Yard: yard.YardName, Reason: "exited unsuccessfully"}
+	failure := &ProjectHookFailure{Yard: yard.YardName, Reason: projectHooksUnsuccessful}
 	for _, line := range strings.Split(string(result.Stdout), "\n") {
 		if path, ok := strings.CutPrefix(line, "subyard-project-hook-failed:"); ok && slices.Contains(approved, path) {
 			failure.Hooks = append(failure.Hooks, path)
 		}
+	}
+	var guestExit *ports.GuestExitError
+	if errors.As(err, &guestExit) {
+		result.ExitCode = guestExit.Code
+		err = nil
 	}
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -70,10 +81,14 @@ func (failure *ProjectHookFailure) ActivationDiagnostic() (string, string) {
 	}
 	var causes []error
 	for _, hook := range failure.Hooks {
-		causes = append(causes, fmt.Errorf("yard %s: project hook %s failed (%s)", yard, hook, failure.Reason))
+		causes = append(causes, fmt.Errorf("yard %s: project hook %s failed", yard, hook))
 	}
 	if combined := domain.CollectRefusals(causes...); combined != nil {
-		return combined.Error(), "run yard migrate"
+		message := combined.Error()
+		if failure.Reason != projectHooksUnsuccessful {
+			message += fmt.Sprintf("; yard %s: optional agent project hooks %s", yard, failure.Reason)
+		}
+		return message, "run yard migrate"
 	}
 	return fmt.Sprintf("yard %s: optional agent project hooks %s; the hook pass failed or its state is undetermined, see the integration's status", yard, failure.Reason), "run yard migrate"
 }

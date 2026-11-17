@@ -1340,7 +1340,7 @@ func TestIntegrationInventoryAdoptsOnlyExactProtectedCoreArtifacts(t *testing.T)
 }
 
 func TestIntegrationInventoryAdoptsReleasedDispatcherPredecessor(t *testing.T) {
-	for _, version := range []string{"v0.3", "shared-hooks", "shared-hooks-comment"} {
+	for _, version := range []string{"v0.3", "shared-hooks", "shared-hooks-comment", "scope-without-reporting"} {
 		t.Run(version, func(t *testing.T) {
 			root := t.TempDir()
 			home, state := root+"/home", root+"/state"
@@ -1380,6 +1380,13 @@ func TestIntegrationInventoryAdoptsReleasedDispatcherPredecessor(t *testing.T) {
 					t.Fatal(err)
 				}
 				wantDigest = "b632dd04a13ba11abff0b7502785ae09d8a6119c0c1261f338861796de82df35"
+			}
+			if version == "scope-without-reporting" {
+				predecessor, err = os.ReadFile("testdata/projects-changed-before-reporting.sh")
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantDigest = "1a99d38f52be1c6aead189ccdbd2f16bd24be92e3110c9915ee6624e7e0b1ddf"
 			}
 			if got := fmt.Sprintf("%x", sha256.Sum256(predecessor)); got != wantDigest {
 				t.Fatalf("unexpected predecessor fixture digest %s", got)
