@@ -200,14 +200,13 @@ connected() {
   local -a command
   trap - EXIT
   if [ "$result" -ne 0 ]; then
-    for section in logcat meminfo lowmemory emulator; do
+    for section in logcat meminfo lowmemory; do
       printf 'android-gradle evidence: %s\n' "$section" >&2
       case "$section" in
         logcat) command=("$ANDROID_SDK_ROOT/platform-tools/adb" logcat -b main -b system -b crash -d -t 512 -v threadtime) ;;
         meminfo) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell dumpsys meminfo) ;;
         # dmesg may be forbidden on Google APIs images; retain lmkd records too.
         lowmemory) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell 'dmesg; logcat -b all -d -t 512 -v threadtime -s lmkd lowmemorykiller') ;;
-        emulator) command=(journalctl --no-pager -q -n 512 -o cat -u "subyard-android-slot-$SUBYARD_EMU_SLOT-$SUBYARD_EMU_GENERATION.service") ;;
       esac
       # Bound both runtime and bytes, including stderr and unavailable queries.
       { timeout --kill-after=2 5 "${command[@]}" 2>&1; printf '\ncapture_exit=%s\n' "$?"; } |

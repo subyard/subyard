@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix='android-sdk-cleanup-', dir='/tmp') as d
 
 
 # The connected child captures all sections before run releases its lease. A
-# broken adb query must preserve the test failure and still collect the journal.
+# broken adb query must preserve the test failure and collect the other sections.
 gradle_source = (E2E / 'android-gradle.sh').read_text()
 connected = gradle_source[gradle_source.index('connected() {'):gradle_source.index('not_writable "$work/connected.log"')]
 for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
@@ -83,9 +83,6 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
                        'if [ "$ADB_EXIT" = 124 ] && [ "${2:-}" = dumpsys ]; then sleep 30; fi\n'
                        'exit "$ADB_EXIT"\n')
         adb.chmod(0o755)
-        journal = directory / 'journalctl'
-        journal.write_text('#!/bin/bash\nprintf "journal %s\\n" "$*" >> "$CALLS"\necho emulator-log\n')
-        journal.chmod(0o755)
         script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "exit $2"); '
                   'export ANDROID_SDK_ROOT="$work" SUBYARD_EMU_SLOT=001 SUBYARD_EMU_GENERATION=2\n'
                   'android-broker() { shift 10; local result=0; "$@" || result=$?; '
@@ -101,8 +98,8 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
             assert evidence == '' and calls.read_text() == 'released\n'
         else:
             assert all('android-gradle evidence: ' + section in evidence
-                       for section in ('logcat', 'meminfo', 'lowmemory', 'emulator'))
-            assert len(evidence) < 4 * 66000 and 'emulator-log' in evidence
+                       for section in ('logcat', 'meminfo', 'lowmemory'))
+            assert len(evidence) < 3 * 66000 and 'emulator' not in evidence
             assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
                                                           'aa:bb:cc:dd:ee:ff', 'canary'))
             assert '12:34:56.789' in evidence
@@ -111,8 +108,31 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
             observed = calls.read_text()
             assert 'logcat -b main -b system -b crash -d -t 512' in observed
             assert 'shell dumpsys meminfo' in observed and 'dmesg; logcat' in observed
-            assert 'subyard-android-slot-001-2.service' in observed
             assert observed.splitlines()[-1] == 'released'
+
+
+# After the Gradle exec fails, root cleanup captures the retained journal without
+# changing the original failure. Unrelated phases and successful runs skip it.
+runtime_source = (E2E / 'android-pool-runtime.sh').read_text()
+journal_branch = runtime_source[runtime_source.index('  # The emulator journal survives'):
+                                runtime_source.index('  if [ -n "$monitor_pid" ] &&')]
+for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'images', 0, False),
+                                           (23, 'gradle', 0, True), (23, 'gradle', 7, True)):
+    script = ('set -euo pipefail\nstatus="$1"; failed_phase="$2"; capture_exit="$3"\n'
+              'lane=gradle; project=fixture; instance=fixture; incus_binary=(incus)\n'
+              'timeout() { printf "%s\\n" "$*"; '
+              'printf "journal 12:34:56.789 192.0.2.1 2001:db8::1 token=canary\\n"; '
+              'return "$capture_exit"; }\n' + journal_branch + '\nexit "$status"\n')
+    result = subprocess.run(['bash', '-c', script, '_', str(status), phase, str(capture_exit)],
+                            capture_output=True, text=True)
+    assert result.returncode == status, result.stderr
+    assert ('android-gradle evidence: emulator' in result.stderr) == called
+    if called:
+        assert 'exec fixture -- journalctl' in result.stderr and '--user' not in result.stderr
+        assert '-n 512 -o cat -u subyard-android-slot-*' in result.stderr
+        assert f'capture_exit={capture_exit}' in result.stderr
+        assert '12:34:56.789' in result.stderr
+        assert not any(value in result.stderr for value in ('192.0.2.1', '2001:db8::1', 'canary'))
 
 
 def load(name):
