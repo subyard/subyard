@@ -569,3 +569,43 @@ func TestEnvironmentPinnedInstalledReleaseRefusesNewPreviousBeforeInspection(t *
 		t.Fatalf("stale selection invoked transition inspection: %v", err)
 	}
 }
+
+func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithoutSelection(t *testing.T) {
+	runtime, candidate, request, called, _ := retainedVersionFixture(t)
+	runtime.config.Inputs.values["YARD_RELEASE_VERSION"] = "0.29.0"
+	if err := os.Remove(filepath.Join(request.RuntimeRoot, "previous")); err != nil {
+		t.Fatal(err)
+	}
+	template := filepath.Join(filepath.Dir(request.RuntimeRoot), "publication-template")
+	if err := os.Rename(candidate.root, template); err != nil {
+		t.Fatal(err)
+	}
+	installer := mustReadFile(t, runtime.config.Installer)
+	testkit.WriteFile(t, runtime.config.Installer, bytes.ReplaceAll(installer, []byte(candidate.root), []byte(template)), 0o700)
+	ctx := context.Background()
+	args := []string{"--offline", "--runtime-root", request.RuntimeRoot}
+	prepared, err := runtime.PrepareTransition(ctx, args, request.ConfigHome, request.Yard)
+	if err != nil || !prepared.Changed {
+		t.Fatalf("prepare fresh update: changed=%t, %v", prepared.Changed, err)
+	}
+	t.Cleanup(func() { _ = prepared.Close() })
+
+	if err := os.Rename(template, candidate.root); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, runtime.config.Installer, installer, 0o700)
+	assertReleaseSelectionStale(t, prepared.Execute(ctx))
+	if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
+		t.Fatalf("expected draft inspection and reinspection only, got %q", got)
+	}
+	if current, err := os.Readlink(filepath.Join(request.RuntimeRoot, "current")); err != nil || current != "releases/release-a" {
+		t.Fatalf("collision changed the active release: %q, %v", current, err)
+	}
+
+	request.Direction = releasetransition.DirectionActivateTarget
+	_, err = runtime.PrepareTransition(ctx, args, request.ConfigHome, request.Yard)
+	assertMigrationRollbackRefused(t, request, err, "migration registry differs")
+	if got := string(mustReadFile(t, called)); got != "called\ncalled\n" {
+		t.Fatalf("fresh selection delegated to the incompatible installed release: %q", got)
+	}
+}

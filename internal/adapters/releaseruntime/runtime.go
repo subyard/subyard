@@ -927,6 +927,9 @@ func (runtime *Runtime) PrepareTransition(
 					if !errors.Is(err, unix.EEXIST) {
 						return fmt.Errorf("publish approved release: %w", err)
 					}
+					if parsed.selection == nil {
+						return staleRetainedSelection(request.RuntimeRoot, request.Target)
+					}
 					existing, verifyErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: candidate.release, root: canonical}, parsed.root, &fresh.manifestDigest)
 					if verifyErr != nil {
 						return fmt.Errorf("%w: existing release differs from approved draft", domain.ErrPlanStale)
