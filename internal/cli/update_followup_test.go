@@ -357,7 +357,7 @@ func TestUpdateDiskTmpRetryPrecedesFreshFinalCheck(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition, _ := program.manifest.Lookup("update")
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"--version", "1.2.3", "--runtime-root", runtimeRoot}})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"--version", "1.2.3", "--runtime-root", runtimeRoot}})
 			if err != nil {
 				t.Fatal(err)
 			}

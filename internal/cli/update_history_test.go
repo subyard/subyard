@@ -75,7 +75,7 @@ func TestReadinessAndMigrateProtectedOwnerReceiveOnlyExplicitSettingOverrides(t 
 							t.Fatalf("gate outcome=%#v err=%v", outcome, err)
 						}
 					} else {
-						prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Loaded: loaded, Arguments: []string{"--check", "--json"}, Plan: domain.OperationPlan{Confirmed: true}}
+						prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Loaded: loaded, Arguments: []string{"--check", "--json"}, Plan: domain.OperationPlan{Confirmed: true}}
 						if err := prepared.prepareCurrentMigration(context.Background(), nil); err != nil {
 							t.Fatal(err)
 						}

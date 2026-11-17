@@ -352,7 +352,7 @@ func TestYardAdoptionPreparedCommandRequiresConsent(t *testing.T) {
 					// the native fixture owns their actual installed adapters.
 					fake.Reconcile.HostPoolFound = false
 				}
-				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: execution.loaded, Arguments: []string{"--adopt"}}
+				prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.loaded, Arguments: []string{"--adopt"}}
 				prepared.policy = commandPolicy(definition, execution.loaded.Context, nil, nil)
 				if err := prepared.prepareInit(context.Background(), nil); err != nil {
 					t.Fatal(err)

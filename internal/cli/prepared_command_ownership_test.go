@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,7 +22,7 @@ func TestPreparedCommandRequiresConfirmationExecutesOnceAndClosesOnce(t *testing
 	executions := 0
 	closes := 0
 	prepared := &preparedCommand{lifecycle: &preparedLifecycle{},
-		CLI:  &CLI{},
+		CLI:  admitPreparedFixture(&CLI{}),
 		Plan: domain.OperationPlan{OperationID: "lifecycle", Command: "fixture", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationPromptDefaultYes, Target: domain.TargetLocalController},
 		execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 			executions++
@@ -64,7 +65,7 @@ func TestPreparedCommandRequiresConfirmationExecutesOnceAndClosesOnce(t *testing
 func TestPreparedCommandClosePreservesResourceError(t *testing.T) {
 	closeErr := errors.New("release cleanup failed")
 	calls := 0
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, closeResource: func() error {
+	prepared := &preparedCommand{CLI: admitPreparedFixture(&CLI{}), lifecycle: &preparedLifecycle{}, closeResource: func() error {
 		calls++
 		return closeErr
 	}}
@@ -111,7 +112,7 @@ func TestPreparedProjectExecutionOwnsReservationAndCommitLifecycle(t *testing.T)
 			if !ok {
 				t.Fatal("sync command missing from manifest")
 			}
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{
 				Loaded: loaded, Definition: definition, Arguments: []string{projectPath}, ExplicitYard: true,
 			})
 			if err != nil {
@@ -218,7 +219,7 @@ func TestPreparedAuthorityRejectsForgedAndTamperedPreview(t *testing.T) {
 }
 
 func authorityFixture(runs *int) *preparedCommand {
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: &CLI{}, Plan: domain.OperationPlan{
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(&CLI{}), Plan: domain.OperationPlan{
 		OperationID: "authority", Command: "fixture", Effect: domain.CommandMutate,
 		Confirmation: domain.ConfirmationPromptDefaultYes, Target: domain.TargetLocalController,
 		Consequences: []string{"bounded effect"},
@@ -323,4 +324,20 @@ func confirmedAdapterFixture(t *testing.T, orchestrator *application.Orchestrato
 		t.Fatal(err)
 	}
 	return confirmed
+}
+
+func TestPreparedCommandWithoutGateAdmissionFailsBeforeEffect(t *testing.T) {
+	runs := 0
+	prepared := authorityFixture(&runs)
+	// Deliberately omit the admission installed by the ordinary fixture.
+	prepared.CLI.gateAdmitted = nil
+	defer prepared.Close()
+	orchestrator := &application.Orchestrator{}
+	if _, err := prepared.Confirm(context.Background(), orchestrator, true); err != nil {
+		t.Fatal(err)
+	}
+	_, err := prepared.Execute(context.Background(), orchestrator, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "a prepared command reached execution without a release gate admission") || runs != 0 {
+		t.Fatalf("missing admission: runs=%d err=%v", runs, err)
+	}
 }

@@ -1466,8 +1466,9 @@ Admission before dispatch decides by handler identity and the handler's own pars
 yard only, so an invocation that cannot be admitted is refused before its prepare; it records an
 explicit kind (ready, read, exempt, open, repair or bounded stop) that travels with the prepared
 command. Paths before the gate, the completed-history fallback repairs and desktop client
-integration, which writes only host-local client files, are exempt and own their admission; only a
-test builds a prepared command without a kind. The early verdict runs on that admission's snapshot
+integration, which writes only host-local client files, are exempt and own their admission.
+Tests that prepare commands directly install an explicit fixture admission; execution without a
+kind fails in tests and production alike. The early verdict runs on that admission's snapshot
 before consent. The binding decision runs in `preparedCommand.Execute` after the owner barrier: an
 open admission decides its subject on its snapshot without a new inspection; a repair is rechecked
 against fresh release state and its subject decided on that state; a read admission runs no plan

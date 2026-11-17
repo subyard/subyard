@@ -638,7 +638,7 @@ func TestOwnerExactConfigPlansKeepPrivateInputsOutOfPublicOutput(t *testing.T) {
 		}
 	}
 	definition, _ := program.manifest.Lookup("config")
-	_, err = program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "SSH_PORT", "password=synthetic-protected-value", "--scope", "host"}, ReadOnly: true})
+	_, err = admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "SSH_PORT", "password=synthetic-protected-value", "--scope", "host"}, ReadOnly: true})
 	if err == nil || strings.Contains(err.Error(), "synthetic-protected-value") {
 		t.Fatal("invalid protected value leaked through planning diagnostics")
 	}

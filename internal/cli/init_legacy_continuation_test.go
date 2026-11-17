@@ -392,7 +392,7 @@ func TestLegacyContinuationInstalledSourceAndTypedConsent(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition, _ := program.manifest.Lookup("init")
-			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: program, Definition: definition, Loaded: loaded, Arguments: []string{"--continue-legacy"}, steps: execution.operationSteps, stepsComplete: true, exactState: execution.stateBinding(), assess: func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }}
+			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: loaded, Arguments: []string{"--continue-legacy"}, steps: execution.operationSteps, stepsComplete: true, exactState: execution.stateBinding(), assess: func(context.Context) (domain.ActionID, domain.ActionDelta, error) { return execution.actionPlan() }}
 			prepared.policy = commandPolicy(definition, loaded.Context, nil, nil)
 			prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
 				if err := execution.inputBaseline.check(ctx, program); err != nil {
@@ -1386,7 +1386,7 @@ func TestFullInstallationExplicitRootDiagnostics(t *testing.T) {
 			path := filepath.Join(program.env["YARD_RUNTIME_ROOT"], uninstall.ManifestName)
 			before, err := os.ReadFile(path)
 			requireDiagnosticNoError(t, err)
-			err = (&preparedCommand{CLI: program, Loaded: execution.loaded}).bindFullInstallation()
+			err = (&preparedCommand{CLI: admitPreparedFixture(program), Loaded: execution.loaded}).bindFullInstallation()
 			diagnostic := requireOwnerDiagnostic(t, err, field+": stored="+config.QuoteMetadataPath(stored)+", current="+config.QuoteMetadataPath(current), "installation.json")
 			if strings.Contains(err.Error(), current) {
 				t.Fatal(diagnostic, err)

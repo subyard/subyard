@@ -74,7 +74,7 @@ func TestRestartDisclosureDeclineLeavesProtectedStateUntouched(t *testing.T) {
 			}
 			text := migration.DiskTmpDisclosure("synthetic", true)
 			mutated := false
-			prepared := &preparedCommand{CLI: program, Definition: command.Definition{Name: "update"}, Plan: domain.OperationPlan{
+			prepared := &preparedCommand{CLI: admitPreparedFixture(program), Definition: command.Definition{Name: "update"}, Plan: domain.OperationPlan{
 				OperationID: "restart-disclosure", Command: "update", Effect: domain.CommandMutate, Confirmation: domain.ConfirmationPromptDefaultYes, Target: domain.TargetLocalController,
 				Steps: []domain.OperationStep{{ID: "release.resource.0", Target: "yard synthetic", Observed: "marker absent", Desired: text, Decision: domain.StepApply, Verify: "native marker"}},
 			}, execute: func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
@@ -260,7 +260,7 @@ func TestDiskTmpRetryNeverExtendsUnfinishedJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, path, data, 0o600)
-	prepared := &preparedCommand{CLI: fixture.cli, release: &releaseExecution{configHome: home, prepared: releaseruntime.Prepared{Action: "update.activate", SourceRelease: string(journal.Goal.Target), TargetRelease: string(journal.Goal.Target)}}}
+	prepared := &preparedCommand{CLI: admitPreparedFixture(fixture.cli), release: &releaseExecution{configHome: home, prepared: releaseruntime.Prepared{Action: "update.activate", SourceRelease: string(journal.Goal.Target), TargetRelease: string(journal.Goal.Target)}}}
 	if err := fixture.cli.prepareDiskTmpRetry(context.Background(), prepared); err != nil || prepared.release.retryDiskTmp != nil {
 		t.Fatalf("unfinished journal acquired new restart work: %v", err)
 	}

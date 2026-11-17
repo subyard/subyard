@@ -83,7 +83,7 @@ func TestLegacyIntegrationSettingsCapturedBeforeDesiredWrite(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition := nativeConfigCommandDefinition()
-			prepared, err := cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "AGENT_codex_COMMAND", "new-command", "--scope", "yard"}})
+			prepared, err := admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "AGENT_codex_COMMAND", "new-command", "--scope", "yard"}})
 			if scenario == "stopped" || scenario == "conflict" {
 				if err == nil {
 					prepared.Close()
@@ -196,7 +196,7 @@ func TestIdentityAuthoringRefusesUnverifiableAppliedOwner(t *testing.T) {
 	fixture.cli.options.InitPlatform = unavailableIdentityPlatform{platform}
 	path := filepath.Join(loaded.Context.Paths.ConfigHome, "yards/default/config.env")
 	before, beforeErr := os.ReadFile(path)
-	prepared, err := fixture.cli.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: nativeConfigCommandDefinition(), Arguments: []string{"set", "DEV_USER", "other", "--scope", "yard"}})
+	prepared, err := admitPreparedFixture(fixture.cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: nativeConfigCommandDefinition(), Arguments: []string{"set", "DEV_USER", "other", "--scope", "yard"}})
 	if err == nil {
 		prepared.Close()
 		t.Fatal("unverifiable identity change accepted")

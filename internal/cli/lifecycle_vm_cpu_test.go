@@ -86,7 +86,7 @@ func TestLifecycleVMCPUPlanReadOnly(t *testing.T) {
 				program.options.Incus = fixture.Incus
 			}
 			definition, _ := program.manifest.Lookup("start")
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: true})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: true})
 			if scenario.failure != nil {
 				if !errors.Is(err, scenario.failure) {
 					t.Fatalf("lost readiness cause: %v", err)
@@ -126,7 +126,7 @@ func TestLifecycleVMCPUPlanRejectsNewWorkBeforeExecution(t *testing.T) {
 		t.Run(drift, func(t *testing.T) {
 			program, loaded, fixture, runner, log := lifecycleVMCPUCommandFixture(t, "Running", true)
 			definition, _ := program.manifest.Lookup("start")
-			prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: true})
+			prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, ReadOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}

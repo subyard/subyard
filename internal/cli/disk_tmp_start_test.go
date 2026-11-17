@@ -104,7 +104,7 @@ esac
 				}
 
 				start, _ := program.manifest.Lookup("start")
-				p := &preparedCommand{CLI: program, Definition: start, Loaded: loaded, Arguments: []string{"--yes"}}
+				p := &preparedCommand{CLI: admitPreparedFixture(program), Definition: start, Loaded: loaded, Arguments: []string{"--yes"}}
 				ctx := context.Background()
 				if err := p.prepareLifecycle(ctx, nil); err != nil {
 					t.Fatal(err)

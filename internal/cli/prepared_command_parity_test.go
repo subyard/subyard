@@ -112,6 +112,9 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 				t.Fatal(err)
 			}
 			code := direct.Run(context.Background())
+			if direct.gateAdmitted == nil {
+				t.Fatal("Run dispatched without a gate admission")
+			}
 			if test.noPrompt {
 				if code != 0 || len(prompt.Requests) != 0 || len(runner.Requests) != 0 {
 					t.Fatalf("direct no-op: code=%d prompts=%#v adapters=%#v stderr=%q",
@@ -145,6 +148,11 @@ func TestDirectAndRPCPreparationParity(t *testing.T) {
 			}, nil)
 			if err != nil {
 				t.Fatalf("RPC plan failed: %v", err)
+			}
+			for _, prepared := range handler.plans {
+				if prepared.gateAdmission() == nil {
+					t.Fatal("RPC planned without a gate admission")
+				}
 			}
 			plan := result.(domain.OperationPlan)
 			if plan.Assessment == nil || plan.Assessment.Action != test.action ||

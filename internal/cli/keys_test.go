@@ -38,7 +38,7 @@ func TestKeysTypedConfirmationProtectsPayloadAndUsesResolvedDefaults(t *testing.
 		prompt := &testkit.Prompt{Answers: []bool{false}}
 		program, loaded, definition, keysRoot := credentialCLIFixture(t, input, prompt, true)
 
-		if code := program.runKeys(context.Background(), loaded, definition, []string{"add", "fixture"}); code != 1 {
+		if code := admitPreparedFixture(program).runKeys(context.Background(), loaded, definition, []string{"add", "fixture"}); code != 1 {
 			t.Fatalf("declined add code=%d", code)
 		}
 		if input.reads != 0 {
@@ -55,7 +55,7 @@ func TestKeysTypedConfirmationProtectsPayloadAndUsesResolvedDefaults(t *testing.
 		input := &credentialInputProbe{reader: strings.NewReader("y\nprotected-value")}
 		program, loaded, definition, keysRoot := credentialCLIFixture(t, input, nil, true)
 
-		if code := program.runKeys(context.Background(), loaded, definition, []string{"add", "fixture"}); code != 1 {
+		if code := admitPreparedFixture(program).runKeys(context.Background(), loaded, definition, []string{"add", "fixture"}); code != 1 {
 			t.Fatalf("non-terminal add code=%d", code)
 		}
 		if input.reads != 0 {
@@ -71,7 +71,7 @@ func TestKeysTypedConfirmationProtectsPayloadAndUsesResolvedDefaults(t *testing.
 			t, strings.NewReader("unused"), prompt, true,
 		)
 
-		if code := program.runKeys(context.Background(), loaded, definition, []string{
+		if code := admitPreparedFixture(program).runKeys(context.Background(), loaded, definition, []string{
 			"rotate", credentialID, "--file", source, "--yes",
 		}); code != 1 {
 			t.Fatalf("invalid rotate code=%d", code)
@@ -123,7 +123,7 @@ func TestKeysTypedConfirmationProtectsPayloadAndUsesResolvedDefaults(t *testing.
 				t.Fatal(err)
 			}
 
-			code := program.runKeys(context.Background(), loaded, definition, []string{test.command, credentialID})
+			code := admitPreparedFixture(program).runKeys(context.Background(), loaded, definition, []string{test.command, credentialID})
 			if code != test.wantReturnCode {
 				t.Fatalf("%s code=%d", test.command, code)
 			}
@@ -152,7 +152,7 @@ func TestKeysReadOperationSkipsConfirmation(t *testing.T) {
 	program, loaded, definition, _ := credentialCLIFixture(t, strings.NewReader(""), prompt, false)
 	program.options.Stdout = &output
 
-	if code := program.runKeys(context.Background(), loaded, definition, []string{"status"}); code != 0 {
+	if code := admitPreparedFixture(program).runKeys(context.Background(), loaded, definition, []string{"status"}); code != 0 {
 		t.Fatalf("status code=%d output=%q", code, output.String())
 	}
 	if len(prompt.Requests) != 0 || !strings.Contains(output.String(), "not initialized") {

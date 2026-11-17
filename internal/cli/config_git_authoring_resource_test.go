@@ -89,7 +89,7 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 		t.Fatalf("retry fixture must need cache application without another commit: created=%t apply=%t", prepared.createdCommit, prepared.preview.NeedsApply())
 	}
 	prepared.cleanup(program, context.Background())
-	code := program.runConfigAuthoring(context.Background(), loaded, "set",
+	code := admitPreparedFixture(program).runConfigAuthoring(context.Background(), loaded, "set",
 		[]string{"ENVIRONMENT_PROFILES", "", "--scope", "yard", "--git"}, false)
 	if code != 1 || !strings.Contains(stderr.String(), "run relay down before changing ENVIRONMENT_PROFILES") {
 		t.Fatalf("unsafe committed-profile retry: code=%d stderr=%s", code, stderr.String())

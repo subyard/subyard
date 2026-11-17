@@ -1407,7 +1407,7 @@ func TestReadAdmissionRunsNoEffect(t *testing.T) {
 	}
 	definition, _ := program.manifest.Lookup("config")
 	program.gateAdmitted = &gateAdmission{kind: admissionRead}
-	prepared, err := program.prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition,
+	prepared, err := admitPreparedFixture(program).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition,
 		Arguments: []string{"set", "SSH_PORT", "2232", "--scope", "yard", "--local"}})
 	if err != nil {
 		t.Fatal(err)
