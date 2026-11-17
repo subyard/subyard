@@ -9,7 +9,7 @@ PROFILE="$ROOT/config/profiles/test-vms-client"
 slot=''
 usage() { printf 'usage: acceptance.sh --slot N | --preflight\n' >&2; exit 2; }
 preflight() {
-  env -u SUBYARD_E2E_LEASE_IMAGE bash "$PROFILE/tests/run.sh"
+  env -u SUBYARD_E2E_LEASE_IMAGE bash "$PROFILE/tests/fixtures.sh"
 }
 if [ "$#" = 1 ] && [ "$1" = --preflight ]; then
   preflight
