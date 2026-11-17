@@ -65,20 +65,22 @@ func (runtime *Runtime) inspectVMQEMURollback(ctx context.Context, target *verif
 // inspectRollbackCompatibility returns every independent finding in the existing
 // public error cause. Only its protocol outcome is bounded; the operation boundary
 // renders the complete cause once, including for a new rollback's planning refusal.
-func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest) error {
+func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, selected releasetransition.Fingerprint) error {
 	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
+	if selected != "" && (err != nil || links.previous.target != "releases/"+string(request.Target)) {
+		return staleRetainedSelection(request.RuntimeRoot, request.Target)
+	}
 	if err != nil {
 		return err
 	}
 	observed := releaseLinksFromRuntimeSnapshot(links)
-	retained := observed.Previous != nil && *observed.Previous == request.Target
-	if !retained && request.Direction != releasetransition.DirectionActivatePrevious {
+	if selected == "" && request.Direction != releasetransition.DirectionActivatePrevious {
 		return nil
 	}
 	var migrationMessages []string
 	var migrationErr error
-	if retained {
-		migrationMessages, migrationErr = runtime.inspectMigrationKindRollback(ctx, target, request, links)
+	if selected != "" {
+		migrationMessages, migrationErr = runtime.inspectRetainedRegistry(ctx, target, request, links)
 	}
 	layout, layoutErr := runtime.inspectConfigLayoutRollback(ctx, target, request)
 	messages, vmErr := runtime.inspectVMQEMURollback(ctx, target, request)
@@ -87,6 +89,9 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 		messages = append([]string{layout.Message}, messages...)
 	}
 	messages = append(migrationMessages, messages...)
+	if err := verifyRetainedSelection(request.RuntimeRoot, target, selected); err != nil {
+		return err
+	}
 	if len(messages) == 0 {
 		return domain.CollectRefusals(migrationErr, layoutErr, vmErr)
 	}
@@ -111,7 +116,7 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 			reason = "rollback requires Git configuration cache and headless reporting VM reader support"
 		}
 		if len(migrationMessages) != 0 {
-			reason = "rollback requires support for registered migration kinds and installed state"
+			reason = "rollback requires matching migration registries and compatible installed state"
 		}
 		command := "yard update --version " + target.version
 		if request.Direction == releasetransition.DirectionActivatePrevious {

@@ -30,6 +30,19 @@ type RetiredMigrationPrefixV2 struct {
 
 type MigrationDefinitionV2 = migrationhistory.Migration
 
+// CanonicalDigest identifies a parsed registry independently of its JSON
+// formatting. Definition order is significant to migration planning.
+func (registry RegistryV2) CanonicalDigest() (Fingerprint, error) {
+	if len(registry.Migrations) == 0 {
+		registry.Migrations = []MigrationDefinitionV2{}
+	}
+	payload, err := json.Marshal(registry)
+	if err != nil {
+		return "", err
+	}
+	return fingerprintPayload(payload), nil
+}
+
 func ParseRegistryV2(payload []byte, catalog CapabilityCatalog) (RegistryV2, Fingerprint, error) {
 	var registry RegistryV2
 	if err := decodeBoundedRecord(payload, MaxRegistryV2Bytes, &registry); err != nil {

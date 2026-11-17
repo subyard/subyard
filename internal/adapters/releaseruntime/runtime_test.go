@@ -2840,6 +2840,9 @@ func prepareCandidateTransitionForTest(
 	if request.ArtifactDigest == "" {
 		request.ArtifactDigest = verified.manifestDigest
 	}
+	if previous, err := inspectRuntimeLink(request.RuntimeRoot, "previous"); err == nil && previous.target == "releases/"+string(candidate.release) {
+		parsed.retainedArtifact = verified.manifestDigest
+	}
 	return runtime.prepareVerifiedCandidateTransition(ctx, parsed, verified, request)
 }
 

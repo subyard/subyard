@@ -124,7 +124,7 @@ func TestFreshRollbackOpaqueWorkRequiresSourceCapability(t *testing.T) {
 			runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": filepath.Dir(home)}), Stdout: &output, Stderr: &output})
 			defer runtime.Close()
 			prepared, err := prepareCandidateTransitionForTest(runtime, context.Background(), options{root: root}, candidate, request)
-			allowed := kind == "complete" || kind == "newer-checkpoint" || kind == "known-old-pending"
+			allowed := kind == "complete" || kind == "known-old-pending"
 			if allowed {
 				if err != nil || prepared.run == nil {
 					t.Fatalf("compatible history refused: prepared=%+v err=%v", prepared, err)
