@@ -56,6 +56,8 @@ def check_boot_placement(uid, proc=Path("/proc"), runtime=Path("/srv/agents/orca
     boot_id = (proc / "sys/kernel/random/boot_id").read_text().strip()
     while time.monotonic() < deadline:
         for path in sorted(runtime.glob("daemon-v[0-9]*.pid")):
+            if time.monotonic() >= deadline:
+                break
             try:
                 record = json.loads(path.read_text())
             except (FileNotFoundError, json.JSONDecodeError):
@@ -126,7 +128,7 @@ def test_boot_placement():
             return read_text(path)
 
         with patch.object(Path, "read_text", reuse_pid), \
-                patch.object(time, "monotonic", side_effect=[0, 59.75, 59.75, 60]), \
+                patch.object(time, "monotonic", side_effect=[0, 59.75, 59.75, 59.75, 60]), \
                 patch.object(time, "sleep") as sleep:
             with expect_error(AssertionError, timeout):
                 check_boot_placement(1000, proc, Path(tmp))
@@ -147,6 +149,24 @@ def test_boot_placement():
             with expect_error(AssertionError, timeout):
                 check_boot_placement(1000, proc, Path(tmp))
             sleep.assert_not_called()
+
+        stale_pid_file = Path(tmp) / "daemon-v55.pid"
+        stale_pid_file.write_text(json.dumps({"pid": 42, "bootId": "previous-boot", "linuxStartTicks": "123"}))
+        now = 0
+        reads = []
+
+        def slow_stale_record(path):
+            nonlocal now
+            reads.append(path)
+            if path == stale_pid_file:
+                now = 60.1
+            return read_text(path)
+
+        with patch.object(Path, "read_text", slow_stale_record), \
+                patch.object(time, "monotonic", side_effect=lambda: now):
+            with expect_error(AssertionError, timeout):
+                check_boot_placement(1000, proc, Path(tmp))
+        assert reads == [boot_id, stale_pid_file], f"read after the deadline: {reads}"
 
 
 def main():
