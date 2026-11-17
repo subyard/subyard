@@ -59,8 +59,10 @@ The profile installs a dev-owned Go cache trim service and system timer, schedul
 daily with up to 30 minutes of randomized delay and persistent catch-up. Set
 `SUBYARD_GOCACHE_LIMIT` in the profile configuration (default `30G`, positive integer
 with optional binary K/M/G/T suffix), then provision again to apply it. Above the
-limit, the helper removes oldest entries toward 80%, retaining files used within
-the last hour. Fresh entries can keep usage above the target until a later run;
+limit, the helper removes oldest entries, including cached executable directories,
+toward 80%, retaining entries used within the last two hours (Go coalesces usage
+timestamps for up to an hour). Fresh entries can keep usage above the target until
+a later run;
 this is a periodic limit, not a hard quota. Root permissions and other filesystems
 are preserved. Manual soft cleanup retains its existing behavior.
 

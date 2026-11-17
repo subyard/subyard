@@ -14,18 +14,54 @@ def limit_bytes(value):
     return int(match[1]) * 1024 ** ("", "K", "M", "G", "T").index(match[2])
 
 
-def trim(root, limit):
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    with_fd = os.open(root, flags)
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def identity(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_size, info.st_blocks)
+
+
+def entry(parent, name, device):
+    """Snapshot a file or flat Go executable entry; refuse unsafe contents."""
+    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if info.st_dev != device:
+        return None
+    if stat.S_ISREG(info.st_mode):
+        return info.st_mtime, info.st_blocks * 512, identity(info), []
+    if not stat.S_ISDIR(info.st_mode) or not name.endswith("-d"):
+        return None
+    directory = os.open(name, DIRECTORY_FLAGS, dir_fd=parent)
     try:
-        device = os.fstat(with_fd).st_dev
+        if identity(os.fstat(directory)) != identity(info):
+            return None
+        children = []
+        for child in sorted(os.listdir(directory)):
+            child_info = os.stat(child, dir_fd=directory, follow_symlinks=False)
+            if not stat.S_ISREG(child_info.st_mode) or child_info.st_dev != device:
+                return None
+            children.append((child, identity(child_info)))
+        return (max([info.st_mtime] + [item[1][3] / 1e9 for item in children]),
+                (info.st_blocks + sum(item[1][-1] for item in children)) * 512,
+                identity(info), children)
+    finally:
+        os.close(directory)
+
+
+def trim(root, limit):
+    # Go coalesces mtime updates for an hour. Keep another hour of margin,
+    # measured before scanning, and skip entries changed during this trim.
+    cutoff = time.time() - 2 * 3600
+    root_fd = os.open(root, DIRECTORY_FLAGS)
+    try:
+        device = os.fstat(root_fd).st_dev
         total = 0
         entries = []
-        for shard in os.listdir(with_fd):
+        for shard in os.listdir(root_fd):
             if not re.fullmatch(r"[0-9a-f]{2}", shard):
                 continue
             try:
-                directory = os.open(shard, flags, dir_fd=with_fd)
+                directory = os.open(shard, DIRECTORY_FLAGS, dir_fd=root_fd)
             except (FileNotFoundError, NotADirectoryError):
                 continue
             try:
@@ -33,40 +69,45 @@ def trim(root, limit):
                     continue
                 for name in os.listdir(directory):
                     try:
-                        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                        before = entry(directory, name, device)
                     except FileNotFoundError:
                         continue
-                    if stat.S_ISREG(info.st_mode) and info.st_dev == device:
-                        total += info.st_blocks * 512
-                        entries.append((info.st_mtime, shard, name, info))
+                    if before is not None:
+                        total += before[1]
+                        entries.append((before[0], shard, name, before))
             finally:
                 os.close(directory)
         if total <= limit:
             return
-        cutoff = time.time() - 3600
         for mtime, shard, name, before in sorted(entries):
             if total <= limit * 4 // 5 or mtime > cutoff:
                 break
             try:
-                directory = os.open(shard, flags, dir_fd=with_fd)
+                directory = os.open(shard, DIRECTORY_FLAGS, dir_fd=root_fd)
                 try:
                     if os.fstat(directory).st_dev != device:
                         continue
-                    now = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                    # Recheck use/identity immediately before unlinking. Concurrent
-                    # Go writers may lose a cache hit, never a build output.
-                    if (now.st_dev, now.st_ino, now.st_mtime_ns, now.st_size) != (
-                        before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size
-                    ):
+                    if entry(directory, name, device) != before:
                         continue
-                    os.unlink(name, dir_fd=directory)
-                    total -= before.st_blocks * 512
+                    if stat.S_ISDIR(before[2][2]):
+                        executable_dir = os.open(name, DIRECTORY_FLAGS, dir_fd=directory)
+                        try:
+                            if identity(os.fstat(executable_dir)) != before[2]:
+                                continue
+                            for child, _ in before[3]:
+                                os.unlink(child, dir_fd=executable_dir)
+                        finally:
+                            os.close(executable_dir)
+                        os.rmdir(name, dir_fd=directory)
+                    else:
+                        os.unlink(name, dir_fd=directory)
+                    total -= before[1]
                 finally:
                     os.close(directory)
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
                 continue
     finally:
-        os.close(with_fd)
+        os.close(root_fd)
 
 
 if __name__ == "__main__":

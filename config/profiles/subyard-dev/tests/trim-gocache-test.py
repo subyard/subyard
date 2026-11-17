@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
     "trim", Path(__file__).resolve().parents[1] / "trim-gocache.py"
@@ -47,6 +48,63 @@ class TrimTest(unittest.TestCase):
             self.assertTrue(files[4].exists())  # Fresh even when above limit.
             with self.assertRaises(OSError):
                 trim.trim(str(root / "cd"), 1)
+
+    def test_overlap_with_build_cache_use(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp)
+            shard = root / "ab"
+            shard.mkdir()
+            selected = shard / "selected-d"
+            touched = shard / "touched-d"
+            old = shard / "old-d"
+            for path in (selected, touched, old):
+                path.write_bytes(b"x" * 8192)
+                os.utime(path, (1, 1))
+            # A build selected this entry without refreshing its mtime, which Go
+            # coalesces hourly. It can cross the old one-hour cutoff before open.
+            age = time.time() - 90 * 60
+            os.utime(selected, (age, age))
+            snapshot = trim.entry
+
+            def overlapping_use(parent, name, device):
+                result = snapshot(parent, name, device)
+                if name == touched.name and result[0] == 1:
+                    os.utime(touched, None)  # Build uses it after trim scans it.
+                return result
+
+            with patch.object(trim, "entry", side_effect=overlapping_use):
+                trim.trim(str(root), 1)
+            self.assertFalse(old.exists())
+            # Model the delayed linker's open after trim completes.
+            self.assertEqual(selected.read_bytes(), b"x" * 8192)
+            self.assertEqual(touched.read_bytes(), b"x" * 8192)
+
+    def test_executable_directory_entries(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
+            root = Path(tmp) / "cache"
+            shard = root / "ab"
+            shard.mkdir(parents=True)
+            outside = Path(tmp) / "outside"
+            outside.write_bytes(b"keep")
+            old = shard / "old-d"
+            fresh = shard / "fresh-d"
+            unsafe = shard / "unsafe-d"
+            for directory in (old, fresh, unsafe):
+                directory.mkdir()
+                executable = directory / "program"
+                executable.write_bytes(b"x" * 16384)
+                os.utime(executable, (1, 1))
+                os.utime(directory, (1, 1))
+            (unsafe / "link").symlink_to(outside)
+            os.utime(unsafe, (1, 1))
+            os.utime(fresh / "program", None)
+            # Only executable directories contribute bytes: they must trigger trim.
+            trim.trim(str(root), 1)
+            self.assertFalse(old.exists())
+            self.assertTrue((fresh / "program").exists())
+            self.assertTrue((unsafe / "link").is_symlink())
+            self.assertEqual(outside.read_bytes(), b"keep")
+            self.assertTrue((unsafe / "program").exists())
 
     def test_limits(self):
         self.assertEqual(trim.limit_bytes("30G"), 30 * 1024**3)
