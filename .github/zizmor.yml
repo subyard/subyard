@@ -1,9 +1,9 @@
 rules:
   cache-poisoning:
     ignore:
-      # Core CI caches Go dependencies and pinned compatibility inputs for tests.
-      # It uploads failure diagnostics only. Release assets and acceptance evidence
-      # come from separate workflows.
+      # zizmor treats explicit release branch pushes as a publishing trigger.
+      # Core CI uploads failure diagnostics only. Release preparation disables
+      # setup-go caching, and compatibility checks hash-pin the baseline binaries.
       - ci.yml:22:9
       - ci.yml:45:9
       - ci.yml:57:9

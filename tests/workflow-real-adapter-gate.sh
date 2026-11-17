@@ -56,6 +56,14 @@ ci_triggers="$(awk '/^on:$/ {inside=1; next} inside && /^[^[:space:]]/ {exit} in
 YAML
 )" ]] || fail 'core CI must run on master and release branch pushes and unfiltered pull requests'
 
+veranda_workflow="$ROOT/.github/workflows/veranda.yml"
+veranda_pr="$(awk '/^  pull_request:$/ {getline; print}' "$veranda_workflow")"
+veranda_push="$(awk '/^  push:$/ {getline; print; getline; print; getline; print}' "$veranda_workflow")"
+[[ "$veranda_pr" == '    paths: ['* ]] \
+  && [[ "$veranda_push" == "$(printf '%s\n' "    branches: [master, 'release/**']" "    tags: ['v*']" "$veranda_pr")" ]] \
+  && grep -Fxq '  workflow_dispatch:' "$veranda_workflow" \
+  || fail 'Veranda CI must share path filters for PRs and allowed branch pushes and retain tag and manual runs'
+
 grep -Fxq '  workflow_dispatch:' "$DEEP_WORKFLOW" \
   && grep -Fxq '  schedule:' "$DEEP_WORKFLOW" \
   || fail 'deep CI must support manual and nightly runs'

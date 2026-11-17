@@ -39,7 +39,10 @@ Periodic E2E probes on `ci-probe/**` use their own push trigger.
 `make verify-veranda` runs client formatting, Clippy with
 `--locked --all-targets -- -D warnings`, and native tests, locally and in Veranda CI.
 Install `stable` with Clippy and rustfmt for formatting, Clippy and tests.
-Veranda CI runs the native client on Linux (x86-64 and arm64) and Windows for every relevant push and pull request. The macOS run (`veranda-macos.yml`) is scheduled daily, runs on release tags and on manual dispatch, and is not a merge gate, because hosted macOS arm64 capacity is scarce.
+Veranda CI runs the native client on Linux (x86-64 and arm64) and Windows on path-filtered pull
+requests and pushes to `master` and `release/**`. It also runs on `v*` tag pushes and manual
+dispatch. The macOS run (`veranda-macos.yml`) is scheduled daily, runs on release tags and on
+manual dispatch, and is not a merge gate, because hosted macOS arm64 capacity is scarce.
 The GTK desktop job runs the same format/Clippy checks for `veranda/desktop/Cargo.toml`;
 local desktop compilation also requires `libgtk-4-dev`.
 
