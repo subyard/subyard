@@ -46,24 +46,28 @@ func completedRollbackFixture(t *testing.T) (*POSIXV2Store, RegistryV2, rollback
 	if err != nil {
 		t.Fatal(err)
 	}
-	step := &journal.Steps[0]
-	step.Expected = fingerprintPayload([]byte(closure.ActivationPlan.Token))
-	step.Desired = step.Expected
-	for _, phase := range []EvidenceCheckpoint{EvidenceCaptured, EvidenceApplied, EvidenceVerified} {
-		evidence := evidenceFor(journal, *step, phase, step.Desired, "")
-		payload, err := MarshalEvidence(evidence)
-		if err != nil {
-			t.Fatal(err)
+	for index := range journal.Steps {
+		step := &journal.Steps[index]
+		if step.ID == RollbackTargetActivationStep {
+			step.Expected = fingerprintPayload([]byte(closure.ActivationPlan.Token))
+			step.Desired = step.Expected
 		}
-		name, err := checkpointEvidenceName(journal.Transaction, step.ID, phase)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.createImmutable([]string{"release-transition", "v2", "transactions", string(journal.Transaction), "evidence"}, name, payload); err != nil {
-			t.Fatal(err)
-		}
-		if phase == EvidenceVerified {
-			step.Evidence = &evidence
+		for _, phase := range []EvidenceCheckpoint{EvidenceCaptured, EvidenceApplied, EvidenceVerified} {
+			evidence := evidenceFor(journal, *step, phase, step.Desired, "")
+			payload, err := MarshalEvidence(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			name, err := checkpointEvidenceName(journal.Transaction, step.ID, phase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.createImmutable([]string{"release-transition", "v2", "transactions", string(journal.Transaction), "evidence"}, name, payload); err != nil {
+				t.Fatal(err)
+			}
+			if phase == EvidenceVerified {
+				step.Evidence = &evidence
+			}
 		}
 	}
 	journal.IntentDigest = bindJournalIntent(journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps)

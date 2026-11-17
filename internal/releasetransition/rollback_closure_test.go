@@ -47,7 +47,10 @@ func rollbackClosureFixture(t *testing.T) (*POSIXV2Store, rollbackClosureV1) {
 	step := JournalStep{ID: RollbackTargetActivationStep, Migration: RollbackTargetActivationStep, Resource: "activation.rollback-target-plan", Decision: DecisionPreserve, Expected: pin, Desired: pin, Checkpoint: StepVerified}
 	evidence := evidenceFor(journal, step, EvidenceVerified, pin, "")
 	step.Evidence = &evidence
-	journal.Steps = []JournalStep{step}
+	ownerStep := rollbackOwnerFixtureStep(t, request)
+	ownerEvidence := evidenceFor(journal, ownerStep, EvidenceVerified, ownerStep.Desired, "")
+	ownerStep.Evidence = &ownerEvidence
+	journal.Steps = []JournalStep{ownerStep, step}
 	journal.IntentDigest = bindJournalIntent(journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps)
 	journalPayload, err := MarshalJournal(journal)
 	if err != nil {

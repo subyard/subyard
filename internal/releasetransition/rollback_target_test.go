@@ -67,9 +67,12 @@ func newRollbackTargetFixture(t *testing.T) rollbackTargetFixture {
 	journal.AuthorizationDigest = fingerprintPayload([]byte("S-grant"))
 	journal.Checkpoint = JournalReconciling
 	pin := fingerprintPayload([]byte(inspected.Plan.Token))
-	journal.Steps = []JournalStep{{ID: RollbackTargetActivationStep, Migration: RollbackTargetActivationStep, Resource: "activation.rollback-target-plan", Decision: DecisionPreserve, Expected: pin, Desired: pin, Checkpoint: StepVerified}}
-	evidence := evidenceFor(journal, journal.Steps[0], EvidenceVerified, pin, "")
-	journal.Steps[0].Evidence = &evidence
+	journal.Steps = []JournalStep{rollbackOwnerFixtureStep(t, request), {ID: RollbackTargetActivationStep, Migration: RollbackTargetActivationStep, Resource: "activation.rollback-target-plan", Decision: DecisionPreserve, Expected: pin, Desired: pin, Checkpoint: StepVerified}}
+	for index := range journal.Steps {
+		step := &journal.Steps[index]
+		evidence := evidenceFor(journal, *step, EvidenceVerified, step.Desired, "")
+		step.Evidence = &evidence
+	}
 	journal.IntentDigest = bindJournalIntent(journal.AuthorizationPlan, journal.ResumePlan, journal.ObservationScope, journal.Steps)
 	payload, err = MarshalJournal(journal)
 	if err != nil {

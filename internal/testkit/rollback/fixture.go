@@ -95,30 +95,43 @@ func Seed(t testing.TB, inputs Inputs) rt.JournalRecord {
 		AuthorizationPlan: rt.PlanToken("plan-v1-" + string(fingerprint([]byte("source-plan")))), ResumePlan: rt.PlanToken("resume-v1-" + string(fingerprint([]byte("source-resume")))),
 		ArtifactDigest: inputs.TargetArtifact, RegistryDigest: request.SourceRegistry, CatalogDigest: fingerprint([]byte("future-source-catalog")), ObservationScope: fingerprint([]byte("source-scope")), AuthorizationDigest: fingerprint([]byte("fixture-grant")), Checkpoint: rt.JournalReconciling}
 	artifacts := []artifact{{"transaction/", fingerprint(nil)}, {"transaction/evidence/", fingerprint(nil)}}
-	for _, phase := range []rt.EvidenceCheckpoint{rt.EvidenceCaptured, rt.EvidenceApplied, rt.EvidenceVerified} {
-		evidence := rt.EvidenceRecord{SchemaVersion: 2, Transaction: journal.Transaction, Releases: journal.Releases, Step: step.ID, Expected: pin, Desired: pin, Observed: pin, Checkpoint: phase}
-		value, err := rt.MarshalEvidence(evidence)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := store.CreateCheckpointEvidence(journal.Transaction, step.ID, phase, value); err != nil {
-			t.Fatal(err)
-		}
-		artifacts = append(artifacts, artifact{"transaction/evidence/" + step.ID + "." + string(phase) + ".json", fingerprint(value)})
-		if phase == rt.EvidenceVerified {
-			step.Evidence = &evidence
-		}
+	ownerPin, err := (rt.RollbackSourceOwnerBinding{RuntimeRoot: request.RuntimeRoot, ConfigHome: request.ConfigHome, Releases: request.Releases, SourceArtifact: request.SourceArtifact, SourceRegistry: request.SourceRegistry, TargetArtifact: request.TargetArtifact, TargetRegistry: request.TargetRegistry}).Fingerprint()
+	if err != nil {
+		t.Fatal(err)
 	}
-	journal.Steps = []rt.JournalStep{step}
+	journal.Steps = []rt.JournalStep{{ID: rt.RollbackSourceOwnerStep, Migration: rt.RollbackSourceOwnerStep, Resource: "rollback.source-owner", Decision: rt.DecisionPreserve, Expected: ownerPin, Desired: ownerPin, Checkpoint: rt.StepVerified}, step}
+	for index := range journal.Steps {
+		current := &journal.Steps[index]
+		for _, phase := range []rt.EvidenceCheckpoint{rt.EvidenceCaptured, rt.EvidenceApplied, rt.EvidenceVerified} {
+			evidence := rt.EvidenceRecord{SchemaVersion: 2, Transaction: journal.Transaction, Releases: journal.Releases, Step: current.ID, Expected: current.Expected, Desired: current.Desired, Observed: current.Desired, Checkpoint: phase}
+			value, err := rt.MarshalEvidence(evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.CreateCheckpointEvidence(journal.Transaction, current.ID, phase, value); err != nil {
+				t.Fatal(err)
+			}
+			artifacts = append(artifacts, artifact{"transaction/evidence/" + current.ID + "." + string(phase) + ".json", fingerprint(value)})
+			if phase == rt.EvidenceVerified {
+				current.Evidence = &evidence
+			}
+		}
+
+	}
 	// Frozen V2 intent excludes the mutable checkpoint and embedded evidence.
-	steps, err := json.Marshal([]struct {
+	type intentStep struct {
 		ID        string         `json:"id"`
 		Migration string         `json:"migration"`
 		Resource  string         `json:"resource"`
 		Decision  rt.Decision    `json:"decision"`
 		Expected  rt.Fingerprint `json:"expected"`
 		Desired   rt.Fingerprint `json:"desired"`
-	}{{step.ID, step.Migration, step.Resource, step.Decision, step.Expected, step.Desired}})
+	}
+	intents := make([]intentStep, len(journal.Steps))
+	for index, current := range journal.Steps {
+		intents[index] = intentStep{current.ID, current.Migration, current.Resource, current.Decision, current.Expected, current.Desired}
+	}
+	steps, err := json.Marshal(intents)
 	if err != nil {
 		t.Fatal(err)
 	}

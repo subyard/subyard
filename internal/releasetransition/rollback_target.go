@@ -295,6 +295,9 @@ func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Con
 	if journal.SourceIngress != nil || IsRecoveryTransaction(journal.Transaction) || journal.RegistryDigest != request.SourceRegistry || journal.ArtifactDigest != request.TargetArtifact || journal.Goal.Direction != DirectionActivatePrevious || !releasePairsEqual(journal.Releases, request.Releases) || journal.Checkpoint != JournalReconciling {
 		return RollbackTargetResponse{}, invalid("rollback activation is not owned by S's reconciling journal")
 	}
+	if err := rollbackRequestSourceOwner(request).CheckJournal(journal); err != nil {
+		return RollbackTargetResponse{}, err
+	}
 	bound := false
 	for _, step := range journal.Steps {
 		if step.ID == RollbackTargetActivationStep && step.Migration == RollbackTargetActivationStep && step.Resource == "activation.rollback-target-plan" && step.Checkpoint == StepVerified && step.Decision == DecisionPreserve && step.Expected == step.Desired && step.Desired == fingerprintPayload([]byte(token)) {

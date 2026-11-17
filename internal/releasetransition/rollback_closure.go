@@ -110,6 +110,9 @@ func (closure rollbackClosureV1) validate() error {
 	if request.Mode != "activate-under-v2" || request.Execution != nil || request.Plan != nil || request.Journal != "" || !releasePairsEqual(request.Releases, journal.Releases) || request.SourceArtifact != closure.SourceArtifact || request.SourceRegistry != sourceDigest || request.TargetRegistry != targetDigest || request.TargetArtifact != completion.TargetArtifact || request.Projection != completion.Projection {
 		return invalid("rollback closure activation inputs differ from their sealed bindings")
 	}
+	if err := rollbackRequestSourceOwner(request).CheckJournal(journal); err != nil {
+		return err
+	}
 	if err := closure.ActivationPlan.validate(); err != nil {
 		return err
 	}

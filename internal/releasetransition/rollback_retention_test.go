@@ -53,6 +53,14 @@ func nextRollbackRetentionCycle(t *testing.T, store *POSIXV2Store, previous roll
 	closure.Completion.Plan = closure.ActivationPlan.Token
 	for index := range journal.Steps {
 		step := &journal.Steps[index]
+		if step.ID == RollbackSourceOwnerStep {
+			binding := rollbackRequestSourceOwner(closure.ActivationRequest)
+			step.Expected, err = binding.Fingerprint()
+			if err != nil {
+				t.Fatal(err)
+			}
+			step.Desired = step.Expected
+		}
 		if step.ID == RollbackTargetActivationStep {
 			step.Expected = fingerprintPayload([]byte(closure.ActivationPlan.Token))
 			step.Desired = step.Expected

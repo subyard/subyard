@@ -373,7 +373,7 @@ func (runtime *Runtime) inspectProtectedTransition(
 		}
 		nativeRollback = completion != nil
 	}
-	if verifiedTarget.registryDigest != journal.RegistryDigest && !nativeRollback {
+	if (verifiedTarget.registryDigest != journal.RegistryDigest || releasetransition.HasRollbackSourceOwner(journal)) && !nativeRollback {
 		if journal.Goal.Direction != releasetransition.DirectionActivatePrevious {
 			return nil, publicCandidateFailure(
 				errors.New("journal target does not own the protected transition registry"),
@@ -395,6 +395,14 @@ func (runtime *Runtime) inspectProtectedTransition(
 			return nil, publicCandidateFailure(
 				errors.New("journal transition owner does not match the protected registry"),
 			)
+		}
+		if releasetransition.HasRollbackSourceOwner(journal) {
+			binding := releasetransition.RollbackSourceOwnerBinding{RuntimeRoot: root, ConfigHome: configHome, Releases: journal.Releases,
+				SourceArtifact: verifiedOwner.manifestDigest, SourceRegistry: verifiedOwner.registryDigest, TargetArtifact: verifiedTarget.manifestDigest, TargetRegistry: verifiedTarget.registryDigest}
+			if err := binding.CheckJournal(journal); err != nil {
+				return nil, newPublicReleaseInspectionError(err, runtimeRoot, journal.Goal.Target, &journal.Transaction, releasetransition.CodeDependencyUnavailable,
+					"the sealed rollback source differs from the authorized owner", "restore the exact rollback source release before retrying yard update")
+			}
 		}
 	}
 	request := releasetransition.ProcessRequest{
