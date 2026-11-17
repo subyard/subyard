@@ -93,6 +93,7 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 	if reboot {
 		remedies = append(remedies, "reboot the host once")
 	}
+	nextStep := "yard start"
 	nmcli, ok := guard.lookup("nmcli")
 	if !ok {
 		violations = append(violations, "cannot read NetworkManager's devices with nmcli")
@@ -102,6 +103,9 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 		for _, line := range strings.Split(string(devices), "\n") {
 			device, state, _ := strings.Cut(line, ":")
 			if slices.Contains(bridges, device) && state != "unmanaged" {
+				if len(violations) == 0 {
+					nextStep = "yard init"
+				}
 				violations = append(violations, "NetworkManager manages yard bridge "+device)
 			}
 		}
@@ -110,7 +114,7 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 		return nil
 	}
 	return fmt.Errorf("NetworkManager guard is not effective: %s — %s", strings.Join(violations, "; "),
-		strings.Join(append(remedies, "rerun yard start"), ", then "))
+		strings.Join(append(remedies, "rerun "+nextStep), ", then "))
 }
 
 func (guard NetworkGuard) networkManagerActive(ctx context.Context) (bool, error) {

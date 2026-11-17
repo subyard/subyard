@@ -27,6 +27,10 @@ no source checkout, toolchain, or private data.
 yard, and its core configuration. Both `yard init` and later reconciliation runs are designed to be
 repeatable.
 
+If NetworkManager is active, the first init or a guard migration without evidence that the
+released guard is held needs one host reboot before init can continue. Reboot, then rerun
+`yard init`. A soft reboot does not count: the host boot ID must change.
+
 Run `yard --help` or `yard <command> --help` for complete command usage.
 
 ## Add a first project

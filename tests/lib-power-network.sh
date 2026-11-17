@@ -86,7 +86,7 @@ import os, sys
 directory = sys.argv[1]
 # Like NetworkManager, only regular .conf files are read.
 files = sorted(name for name in os.listdir(directory) if name.endswith(".conf") and os.path.isfile(os.path.join(directory, name))) if os.path.isdir(directory) else []
-listed, sections = None, []
+listed, no_auto, sections = None, None, []
 for name in files:
     section = None
     for line in open(os.path.join(directory, name)):
@@ -99,8 +99,13 @@ for name in files:
         if section[0] == "[keyfile]" and key.rstrip("+") == "unmanaged-devices":
             listed = (listed + "," + value) if key.endswith("+") and listed else value
             continue
+        if section[0] == "[main]" and key.rstrip("+") == "no-auto-default":
+            no_auto = (no_auto + "," + value) if key.endswith("+") and no_auto else value
+            continue
         section[1].append(line)
 print("[main]\nplugins=keyfile")
+if no_auto is not None:
+    print("no-auto-default=" + no_auto.replace(";", ","))
 if listed is not None:
     print("[keyfile]\nunmanaged-devices=" + listed.replace(";", ","))
 for header, lines in reversed(sections):
@@ -246,6 +251,13 @@ MOCK_UID=0
 power_nm_guard_effective incusbr0 || fail "root effective-config read failed"
 [ ! -s "$MOCK_SUDO_LOG" ] || fail "root effective-config read invoked sudo"
 grep -Fq '1:direct' "$MOCK_NM_LOG" || fail "root did not read NetworkManager directly"
+
+# A bridge-only refusal must lead to init, which pins it.
+reset_case
+MOCK_UID=0 MOCK_NM_DEVICES='incusbr0:bridge:connected (externally)'
+if power_nm_guard_effective incusbr0; then fail "a managed bridge passed the guard"; fi
+[ "$POWER_ERROR" = 'NetworkManager guard is not effective: NetworkManager manages yard bridge incusbr0 — rerun yard init' ] \
+  || fail "bridge-only remedy: $POWER_ERROR"
 
 reset_case
 power_nm_prepare_reader || fail "sudo credential preparation failed"
@@ -548,6 +560,32 @@ while IFS= read -r entry; do
   [ -n "$(printf '[device-subyard]\nmatch-device=%s\nmanaged=0\n' "$kept" | power_nm_config_violations incusbr0)" ] \
     || fail "a guard without $entry passed the rule"
 done <<< "$rendered_entries"
+
+# An active unit without a known binary is not an absent installation.
+guard_case
+rm -f "$guard_conf" "$legacy_conf"
+if (power_nm_binary() { return 1; }; nm_unmanaged_guard_early "$guard_conf" >"$tmp/guard.out" 2>&1); then
+  fail "init accepted an active NetworkManager without its binary"
+fi
+grep -Fq 'NetworkManager is active but its binary is unavailable at a known path' "$tmp/guard.out" \
+  || fail "unknown binary refusal: $(cat "$tmp/guard.out")"
+[ ! -e "$guard_conf" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] || fail "unknown binary changed the guard"
+
+# A failed conf.d copy must never validate or publish a partial proposal. Independent reads remain.
+(nm_guard_nm_state
+ nm_guard_write_file "$guard_conf" "$expected_guard"
+ before_hash="$(hash_of "$guard_conf")"
+ cp() { return 1; }
+ MOCK_NMCLI_READ_RC=1
+ if nm_guard_apply_current "$guard_conf" "$(render incusbr0)" incusbr0 1 1; then
+   fail "a failed preflight copy was accepted"
+ fi
+ [ -z "$NM_GUARD_PROPOSED" ] || fail "a partial proposal was validated"
+ for finding in 'cannot copy NetworkManager configuration for preflight' "cannot read NetworkManager's devices with nmcli"; do
+   [[ "$POWER_ERROR" == *"$finding"* ]] || fail "missing preflight finding: $POWER_ERROR"
+ done
+ [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] \
+   || fail "a failed preflight copy changed the guard")
 
 # First install with NetworkManager running: the early call writes the static section, records
 # `unread init` for this boot and stops; planning, starts and init refuse until the host reboots,
@@ -889,17 +927,20 @@ guard_case
 MOCK_INCUS_NETWORKS='[{"name":"incusbr0","type":"bridge","managed":true}]'
 write_released
 if power_nm_guard_effective incusbr0; then fail "a released guard without a record passed the rule"; fi
-migration_refuses() { # <admin list> <description> [teardown]
+migration_refuses() { # <admin list> <description> [teardown] [key]
+  local key="${4:-unmanaged-devices}" section=keyfile effect="marks unmanaged"
+  [ "$key" != no-auto-default ] || { section=main; effect="denies an auto-default connection"; }
   write_released
-  printf '[keyfile]\nunmanaged-devices=%s\n' "$1" > "$conf_dir/00-admin.conf"
+  printf '[%s]\n%s=%s\n' "$section" "$key" "$1" > "$conf_dir/00-admin.conf"
   before_hash="$(hash_of "$guard_conf")"
   if [ -n "${3:-}" ]; then
     if MOCK_INCUS_NETWORKS='[]' nm_unmanaged_guard_reconcile "$guard_conf" >"$tmp/migrate.out" 2>&1; then fail "teardown removed a guard over a hijack ($2)"; fi
   elif (POWER_NM_GUARD_COMMAND='yard update' nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1); then
     fail "migration applied with a hijacked device ($2)"
   fi
-  grep -Fq "NetworkManager manages enp6s0, which the administrator's unmanaged-devices list marks unmanaged" "$tmp/migrate.out" \
+  grep -Fq "NetworkManager manages enp6s0, which the administrator's $key list $effect" "$tmp/migrate.out" \
     && grep -Fq "'sudo nmcli device set enp6s0 managed no' (or the administrator's own way)" "$tmp/migrate.out" \
+    && grep -Fq "change the administrator's own $key list if NetworkManager should keep the device" "$tmp/migrate.out" \
     || fail "hijack refusal ($2): $(cat "$tmp/migrate.out")"
   [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ -e "$legacy_conf" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] \
     || fail "a refused migration changed the host ($2)"
@@ -912,14 +953,22 @@ migration_refuses 'except:interface-name:wlan0' 'except-only'
 migration_refuses 'type:ethernet' 'type'
 migration_refuses '*,except:type:wifi,except:type:gsm,except:type:cdma' 'Ubuntu stock list'
 migration_refuses 'interface-name:enp6s0' 'teardown' teardown
+for listed in 'interface-name:enp6s0' '*' 'except:interface-name:wlan0' 'type:ethernet'; do
+  migration_refuses "$listed" 'no-auto-default' '' no-auto-default
+done
+migration_refuses 'interface-name:enp6s0' 'no-auto-default teardown' teardown no-auto-default
 # Lists Subyard cannot decide migrate with a notice naming the list and the managed devices.
-for undecided in 'interface-name:docker*;interface-name:virbr*' 'mac:00:11:22:33:44:55'; do
-  write_released
-  printf '[keyfile]\nunmanaged-devices=%s\n' "$undecided" > "$conf_dir/00-admin.conf"
-  nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1 || fail "an undecidable list refused the migration: $(cat "$tmp/migrate.out")"
-  grep -Fq "cannot decide whether the administrator's unmanaged-devices list (${undecided//;/,}) marks these devices NetworkManager manages: enp6s0" "$tmp/migrate.out" \
-    && grep -Fq 'Do not reload or restart NetworkManager before the reboot' "$tmp/migrate.out" \
-    || fail "undecidable-list notice: $(cat "$tmp/migrate.out")"
+for key in unmanaged-devices no-auto-default; do
+  section=keyfile
+  [ "$key" != no-auto-default ] || section=main
+  for undecided in 'interface-name:docker*;interface-name:virbr*' 'mac:00:11:22:33:44:55'; do
+    write_released
+    printf '[%s]\n%s=%s\n' "$section" "$key" "$undecided" > "$conf_dir/00-admin.conf"
+    nm_unmanaged_guard_migrate "$guard_conf" >"$tmp/migrate.out" 2>&1 || fail "an undecidable list refused the migration: $(cat "$tmp/migrate.out")"
+    grep -Fq "cannot decide whether the administrator's $key list (${undecided//;/,}) marks these devices NetworkManager manages: enp6s0" "$tmp/migrate.out" \
+      && grep -Fq 'Do not reload or restart NetworkManager before the reboot' "$tmp/migrate.out" \
+      || fail "undecidable-list notice: $(cat "$tmp/migrate.out")"
+  done
 done
 # After the hand-back: with evidence (every up Incus bridge the released guard names is unmanaged)
 # the record says `held migration` and starts work until the reboot; without it, `unread`.

@@ -468,3 +468,12 @@ func TestNetworkGuardSendsAnUnboundGuardToInit(t *testing.T) {
 		t.Fatalf("an unbound guard did not name init and the reboot: %v", err)
 	}
 }
+
+func TestNetworkGuardSendsAManagedBridgeToInit(t *testing.T) {
+	guard := activeGuard(currentGuardConfig, "incusbr0:connected (externally)\n", `[]`)
+	err := guard.Check(context.Background(), []string{"incusbr0"})
+	want := "NetworkManager guard is not effective: NetworkManager manages yard bridge incusbr0 — rerun yard init"
+	if err == nil || err.Error() != want {
+		t.Fatalf("bridge-only refusal = %v, want %q", err, want)
+	}
+}
