@@ -166,9 +166,10 @@ def approval():
         emit(request)
 
 
-def fail_turn():
+def fail_turn(error=None):
     if codex:
-        emit({'method': 'turn/completed', 'params': {'turn': {'status': 'failed'}}})
+        emit({'method': 'turn/completed', 'params': {'turn': {
+            'id': 'fixture-turn', 'status': 'failed', 'error': error}}})
     else:
         emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True})
 
@@ -192,7 +193,16 @@ def begin(text):
     elif scenario == 'unknown-response':
         emit({'id': 'fixture-private-native-body', 'result': {}})
     elif scenario == 'result-error':
+        fail_turn({'codexErrorInfo': 'modelNotFound', 'message': 'The model "fixture-unknown-model" does not exist.',
+                   'additionalDetails': 'fixture-private-native-body'})
+    elif scenario == 'notification-error':
+        emit({'method': 'error', 'params': {'turnId': 'fixture-turn', 'willRetry': False, 'error': {
+            'codexErrorInfo': 'badRequest', 'message': 'Invalid request for this model.',
+            'additionalDetails': 'fixture-private-native-body'}}})
         fail_turn()
+    elif scenario == 'raw-request-error':
+        fail_turn({'codexErrorInfo': 'badRequest',
+                   'message': 'Unexpected status 400: {"message":"fixture-private-native-body"}'})
     elif scenario == 'report':
         say('The complete report.')
         if not codex:
@@ -240,7 +250,9 @@ for line in sys.stdin:
                 Path(stamp).touch()
             text = message['params']['input'][0]['text']
             if text.split('\n')[-1] == 'rpc-error':
-                emit({'id': message['id'], 'error': {'message': 'fixture error'}})
+                emit({'id': message['id'], 'error': {
+                    'code': -32602, 'message': 'Unsupported effort. Authorization: Bearer fixture-native-credential',
+                    'data': 'fixture-private-native-body'}})
             else:
                 emit({'id': message['id'], 'result': {'turn': {'id': 'fixture-turn'}}})
                 if text.split('\n')[-1] == 'carryover':
@@ -660,10 +672,12 @@ runpy.run_path(bridge, run_name='__main__')
 
     def test_codex_reviewer_refuses_explicit_sandbox_at_start(self):
         root = self.root / 'reviewer'
+        task = self.root / 'review-task.md'
+        task.write_text('complete')
         for flags in (('--sandbox', 'read-only'), ('-s=workspace-write',), ('-c', 'sandbox_mode="read-only"')):
             with self.subTest(flags=flags):
                 result = self.cli('start', root, '--vendor', 'codex', '--role', 'reviewer', '--cwd', str(self.root),
-                                  '--', *flags, success=False)
+                                  '--task', str(task), '--', *flags, success=False)
                 self.assertIn('--role reviewer, which fixes the sandbox', result.stderr)
                 self.assertFalse((root / 'state').exists())
 
@@ -843,6 +857,16 @@ runpy.run_path(bridge, run_name='__main__')
     def test_resume_task_file_and_no_stdin_hang(self):
         root = self.root / 'no-stdin'
         task = self.root / 'assignment.md'
+        for task_option in ((), ('--task', str(task))):
+            result = self.cli('start', root, '--vendor', 'codex', '--cwd', str(self.root), *task_option,
+                              success=False)
+            self.assertIn('Supply --task FILE or put task.md in the worker directory', result.stderr)
+            self.assertFalse(root.exists())
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+        result = self.cli('start', root, '--vendor', 'codex', '--cwd', str(self.root), success=False)
+        self.assertIn('start requires an assignment file', result.stderr)
+        self.assertFalse(list(root.iterdir()))
         task.write_text('complete')
         process = subprocess.Popen([sys.executable, str(BRIDGE), 'start', '--dir', str(root),
                                     '--vendor', 'codex', '--model', 'fixture', '--effort', 'low',
@@ -1124,9 +1148,16 @@ main()
                         os.kill(bridge_pid, signal.SIGCONT)
 
     def test_result_publication_has_one_commit_point(self):
-        failures = ('eof', 'malformed', 'result-error', 'unsupported', 'duplicate')
+        codex_reasons = {
+            'result-error': 'The model "fixture-unknown-model" does not exist.',
+            'rpc-error': 'Unsupported effort. Authorization: [redacted]',
+            'notification-error': 'Invalid request for this model.',
+            'raw-request-error': 'Codex rejected the request as invalid.',
+        }
+        failures = ('eof', 'malformed', 'unsupported', 'duplicate')
         for vendor in ('codex', 'claude'):
-            scenarios = failures + ('rpc-error', 'unknown-response') if vendor == 'codex' else failures
+            extra = ('unknown-response', *codex_reasons) if vendor == 'codex' else ('result-error',)
+            scenarios = failures + extra
             for scenario in scenarios:
                 with self.subTest(vendor=vendor, scenario=scenario):
                     root = self.start(vendor, scenario)
@@ -1134,6 +1165,15 @@ main()
                     self.assertNotIn('final_file', self.state(root))
                     self.assertFalse((self.turn(root) / 'final.md').exists())
                     self.assertFalse(list((self.turn(root) / 'approvals').iterdir()))
+                    if vendor == 'codex' and scenario in codex_reasons:
+                        result = self.result(root)
+                        tail = self.cli('tail', root).stdout
+                        self.assertEqual(result['error'], codex_reasons[scenario])
+                        messages = [json.loads(line).get('message') for line in tail.splitlines()]
+                        self.assertIn(result['error'], messages)
+                        for private in ('fixture-private-native-body', 'fixture-native-credential'):
+                            self.assertNotIn(private, json.dumps(result))
+                            self.assertNotIn(private, tail)
                     if scenario == 'unsupported':
                         reason = ('unsupported Codex server request' if vendor == 'codex'
                                   else 'unsupported Claude control request')
@@ -1178,6 +1218,8 @@ main()
             stat_file = Path('/proc') / str(pid) / 'stat'
             self.until(lambda: stat_file.read_text().rsplit(') ', 1)[1].startswith('T '))
             result = self.result(root)
+            status = json.loads(self.cli('status', root).stdout)
+            self.assertEqual(status['cleanup'], 'pending_stop')
             late = self.cli('send', root, '--message', 'late', '--timeout', '0', success=False)
             self.assertEqual(late.returncode, 1)
             self.assertIn('use resume', late.stderr)
@@ -1188,6 +1230,7 @@ main()
             stopped = json.loads(self.cli('stop', root, '--timeout', '0.1').stdout)
             self.assertEqual(stopped['status'], 'done')
             self.assertEqual(stopped['cleanup'], 'verified')
+            self.assertEqual(json.loads(self.cli('status', root).stdout)['cleanup'], 'verified')
             self.assertEqual(stopped['final_file'], published['final_file'])
             self.assertEqual(stopped['result_file'], published['result_file'])
             self.assertEqual(self.result(root), result)

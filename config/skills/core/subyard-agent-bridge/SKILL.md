@@ -61,8 +61,9 @@ resume. An explicit sandbox mode conflicts with the Codex reviewer preset.
 
 `state` is JSON with `status` (`launching`, `running`, `done`, `failed`, `interrupted`),
 launcher or bridge PID, session/turn IDs, scope, generation and pending approval IDs.
-`status` additionally lists queued message filenames. `events.jsonl` contains
-messages, tool summaries, approval IDs and terminal outcomes. Terminal state
+`status` lists queued message filenames. For a completed worker, cleanup shows
+`pending_stop` until verified. `events.jsonl` contains messages, tool summaries,
+approval IDs and terminal outcomes. Terminal state
 publishes `result_file`, the path to the run's
 `result.json` with state, exit code, session ID, model, duration and token usage.
 Claude token usage sums top-level integer counters across all results in the run.

@@ -237,6 +237,7 @@ class Codex:
         self.items = {}
         self.counter = 0
         self.sent = set()
+        self.turn_error = None
         self.arguments, self.sandbox = codex_arguments(worker.config.get('vendor_args', []))
         # Pin the complete reviewer profile after native overrides.
         self.arguments.extend(role_arguments(worker.config, worker.env))
@@ -303,6 +304,25 @@ class Codex:
             self.request('turn/interrupt', {'threadId': self.w.state['session_id'],
                          'turnId': self.w.state['turn_id']})
 
+    def error_message(self, error):
+        if not isinstance(error, dict):
+            return None
+        info = error.get('codexErrorInfo')
+        if info == 'modelNotFound':
+            fallback = 'Codex model was not found.'
+        elif info == 'badRequest' or error.get('code') in (-32600, -32602):
+            fallback = 'Codex rejected the request as invalid.'
+        else:
+            return None
+        message = error.get('message')
+        if isinstance(message, str):
+            message = message.strip()
+            # Provider responses can include raw bodies, endpoints, and headers.
+            if (0 < len(message) <= 512 and message.isprintable()
+                    and not re.search(r'[{}<>]|https?://', message, re.IGNORECASE)):
+                return self.w.redact(message)
+        return fallback
+
     def event(self, event):
         method = event.get('method')
         if method is None and 'id' in event:
@@ -312,7 +332,7 @@ class Codex:
                     # The inbox file has not been acknowledged. Deliver it on the next turn.
                     self.w.record('message_deferred')
                     return
-                raise BridgeError('Codex request failed')
+                raise BridgeError(self.error_message(event['error']) or 'Codex request failed')
             callback(event['result'])
         elif method in ('item/commandExecution/requestApproval', 'item/fileChange/requestApproval'):
             params = event['params']
@@ -334,8 +354,19 @@ class Codex:
                     self.items[item['id']] = item
                 else:
                     self.items.pop(item.get('id'), None)
+        elif method == 'error':
+            params = event['params']
+            if not params.get('willRetry') and (reason := self.error_message(params.get('error'))):
+                self.turn_error = (params['turnId'], reason)
         elif method == 'turn/completed':
-            status = event['params']['turn']['status']
+            turn = event['params']['turn']
+            status = turn['status']
+            if status == 'failed':
+                reason = self.error_message(turn.get('error'))
+                if not reason and self.turn_error and self.turn_error[0] == turn.get('id'):
+                    reason = self.turn_error[1]
+                self.w.state['error'] = reason or 'Codex turn failed.'
+                self.w.record('error', message=self.w.state['error'])
             self.w.outcome = {'completed': 'done', 'interrupted': 'interrupted', 'failed': 'failed'}[status]
         elif method == 'thread/tokenUsage/updated':
             self.w.tokens = event['params']['tokenUsage']
@@ -871,6 +902,15 @@ def main():
         return 0
     inspect = args.command in ('status', 'tail', 'wait', 'approvals')
     starting = args.command == 'start'
+    if starting:
+        if os.path.lexists(root):
+            directory(root, create=False)
+        try:
+            task = read(args.task or root / 'task.md')
+        except FileNotFoundError as error:
+            raise BridgeError(
+                'start requires an assignment file. Supply --task FILE or put task.md in the worker directory.'
+            ) from error
     try:
         directory(root, create=starting)
     except FileNotFoundError as error:
@@ -922,7 +962,10 @@ def main():
         print(json.dumps(state))
         return code
     if args.command == 'status':
-        print(json.dumps(snapshot(root)))
+        state = snapshot(root)
+        if state['status'] == 'done' and state.get('cleanup') == 'unverified':
+            state['cleanup'] = 'pending_stop'
+        print(json.dumps(state))
         return 0
     if args.command == 'tail':
         if args.n < 0:
@@ -1018,7 +1061,7 @@ def main():
                 if state['status'] in ACTIVE_STATES or not state['session_id']:
                     raise BridgeError('resume requires a stopped worker with a session id')
                 config = json.loads(read(root / 'config.json'))
-            task = read(args.task if args.task else root / 'task.md')
+                task = read(args.task or root / 'task.md')
             return launch(root, state, config, task, deadline)
         if args.command == 'stop':
             state, code = stop(root, deadline)
