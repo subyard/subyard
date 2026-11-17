@@ -120,7 +120,7 @@ func sealSourceAdmissionCandidate(t *testing.T, candidate publishedCandidate) re
 }
 
 func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *testing.T) {
-	for _, drift := range []string{"none", "journal replacement", "catalog", "registry", "sealed asset", "unfinished", "unfinished same target", "current repair", "current repair old-wire", "current repair replacement", "private draft", "private draft parent replacement", "private draft parent mode", "private draft immutable hardlink", "older latest"} {
+	for _, drift := range []string{"none", "stale metadata reinspection", "journal replacement", "catalog", "registry", "sealed asset", "unfinished", "unfinished same target", "current repair", "current repair old-wire", "current repair replacement", "private draft", "private draft parent replacement", "private draft parent mode", "private draft immutable hardlink", "older latest"} {
 		t.Run(drift, func(t *testing.T) {
 			ctx := context.Background()
 			root := testkit.TempDir(t)
@@ -193,7 +193,12 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 				candidateRoot = filepath.Join(root, "candidate-template")
 			}
 			phaseLog := filepath.Join(root, "candidate-phases")
-			candidate := writeVersionedRuntimeCandidate(t, candidateRoot, candidateID, "1.2.4", fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.4\\n';; _release-transition) %s=1 SUBYARD_TEST_SOURCE_ADMISSION_PHASE_LOG=%q exec %q -test.run '^TestSourceAdmissionCandidateProcessHelper$';; *) exit 64;; esac\n", sourceAdmissionProcessEnvironment, phaseLog, executable))
+			engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.4\\n';; _release-transition) %s=1 SUBYARD_TEST_SOURCE_ADMISSION_PHASE_LOG=%q exec %q -test.run '^TestSourceAdmissionCandidateProcessHelper$';; *) exit 64;; esac\n", sourceAdmissionProcessEnvironment, phaseLog, executable)
+			if drift == "stale metadata reinspection" {
+				engine = strings.Replace(engine, " exec ", " ", 1)
+				engine = strings.Replace(engine, "';; *)", fmt.Sprintf("' && ln -sfn %q %q;; *)", "releases/"+candidateID, filepath.Join(runtimeRoot, "previous")), 1)
+			}
+			candidate := writeVersionedRuntimeCandidate(t, candidateRoot, candidateID, "1.2.4", engine)
 			sealSourceAdmissionCandidate(t, candidate)
 			cache := filepath.Join(root, "cache", "1.2.4")
 			if err := os.MkdirAll(cache, 0o700); err != nil {
@@ -257,6 +262,13 @@ func TestCompletedHistoryAdmissionPreparesNewGoalWhenOldObserveUnavailable(t *te
 				version = "1.2.3"
 			}
 			prepared, err := adapter.PrepareTransition(ctx, []string{"--offline", "--version", version}, home, "default")
+			if drift == "stale metadata reinspection" {
+				assertReleaseSelectionStale(t, err)
+				if got := string(mustReadFile(t, phaseLog)); got != "inspect:true\n" {
+					t.Fatalf("unexpected delegation after the selection changed: %q", got)
+				}
+				return
+			}
 			if drift == "catalog" || drift == "registry" || drift == "sealed asset" || strings.HasPrefix(drift, "unfinished") {
 				if err == nil {
 					t.Fatal("unsupported original history admitted a new candidate")

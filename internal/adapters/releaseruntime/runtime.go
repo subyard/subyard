@@ -779,9 +779,7 @@ func (runtime *Runtime) PrepareTransition(
 		return Prepared{}, errors.New("published release name does not match the verified engine version")
 	}
 	canonicalCandidate := publishedCandidate{release: candidate.release, root: filepath.Join(parsed.root, "releases", string(candidate.release))}
-	if linksBefore.previous.target == "releases/"+string(candidate.release) {
-		parsed.retainedArtifact = verified.manifestDigest
-	}
+	retainedTarget := linksBefore.previous.target == "releases/"+string(candidate.release)
 	canonicalPresent := false
 	inspectionCandidate := verified
 	inspectionRoot := draftRoot
@@ -789,7 +787,7 @@ func (runtime *Runtime) PrepareTransition(
 		canonicalPresent = true
 		existing, err := runtime.verifyPublishedCandidate(ctx, canonicalCandidate, parsed.root, &verified.manifestDigest)
 		if err != nil {
-			if parsed.retainedArtifact != "" && ctx.Err() == nil {
+			if retainedTarget && ctx.Err() == nil {
 				return runtime.inspectionFailure(parsed, staleRetainedSelection(parsed.root, candidate.release))
 			}
 			return Prepared{}, fmt.Errorf("existing release differs from candidate: %w", err)
@@ -805,7 +803,7 @@ func (runtime *Runtime) PrepareTransition(
 		inspectionRoot = parsed.root
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Prepared{}, err
-	} else if parsed.retainedArtifact != "" {
+	} else if retainedTarget {
 		return runtime.inspectionFailure(parsed, staleRetainedSelection(parsed.root, candidate.release))
 	}
 	request := releasetransition.ProcessRequest{
@@ -817,7 +815,7 @@ func (runtime *Runtime) PrepareTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       sourceIngress, Replacement: newerRelease,
 	}
-	if newerRelease == nil && (parsed.versionExplicit || parsed.retainedArtifact != "") {
+	if newerRelease == nil && (canonicalPresent || parsed.versionExplicit) {
 		parsed.selection, err = runtime.captureReleaseSelection(ctx, inspectionCandidate, request, linksBefore)
 		if err != nil {
 			return runtime.inspectionFailure(parsed, err)
@@ -846,6 +844,9 @@ func (runtime *Runtime) PrepareTransition(
 		// existing release lock. An older candidate without that observation
 		// remains unsupported for this NEW admission path.
 		response, inspectErr := runtime.invokeVerifiedCandidateTransition(ctx, inspectionCandidate, request, "")
+		if errors.Is(inspectErr, domain.ErrPlanStale) {
+			return runtime.inspectionFailure(parsed, inspectErr)
+		}
 		if inspectErr != nil || response.Inspection == nil || response.Inspection.Resume != nil || !slices.ContainsFunc(response.Inspection.Decisions, func(decision releasetransition.RedactedDecision) bool {
 			return decision.Resource == "transition.source-metadata" && decision.Decision == releasetransition.DecisionPreserve && decision.Result == completedAdmission.Binding
 		}) {
@@ -1285,7 +1286,6 @@ func (runtime *Runtime) prepareRetainedTransition(
 			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
 		}}
 	}
-	parsed.retainedArtifact = verified.manifestDigest
 	parsed.expectedLinks = &links
 	if err := sourceVersionError(verified.version); err != nil {
 		return Prepared{}, err
@@ -1926,7 +1926,6 @@ func (failure transitionOutcomeFailure) Error() string {
 
 type options struct {
 	selection                                               *releaseSelection
-	retainedArtifact                                        releasetransition.Fingerprint
 	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit, json  bool

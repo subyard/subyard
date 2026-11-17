@@ -87,7 +87,8 @@ Subyard retains the previous verified runtime. Swap back to it with:
 yard update --rollback
 ```
 
-Rollback and explicit-version updates require matching migration registries and readable active migration history.
+Rollback, explicit-version updates, and updates to an already installed release require matching
+migration registries and readable active migration history.
 If the selected release or active history changes during the operation, retry from a fresh inspection.
 
 An installed release can also report migrations or runtime repairs that still need to finish.

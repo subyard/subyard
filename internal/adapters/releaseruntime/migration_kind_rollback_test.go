@@ -534,3 +534,38 @@ func TestExplicitVersionRequiresRegistryIdentityWithoutPrevious(t *testing.T) {
 		t.Fatalf("incompatible explicit target received transition inspection: %v", err)
 	}
 }
+
+type releaseProgressFunc func(string)
+
+func (write releaseProgressFunc) Write(payload []byte) (int, error) {
+	write(string(payload))
+	return len(payload), nil
+}
+
+func TestEnvironmentPinnedInstalledReleaseRefusesNewPreviousBeforeInspection(t *testing.T) {
+	runtime, candidate, request, called, _ := retainedVersionFixture(t)
+	runtime.config.Inputs.values["YARD_RELEASE_VERSION"] = "0.29.0"
+	bindRollbackFixtureRegistry(t, candidate, []byte(migrationRollbackSettingsRegistry))
+	rewriteReleaseOwnerManifest(t, candidate)
+	previous := filepath.Join(request.RuntimeRoot, "previous")
+	if err := os.Remove(previous); err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	runtime.config.Progress = releaseProgressFunc(func(message string) {
+		if message == "Checking update requirements...\n" {
+			if err := os.Symlink("releases/"+string(request.Target), previous); err != nil {
+				t.Fatal(err)
+			}
+			changed = true
+		}
+	})
+	_, err := runtime.PrepareTransition(context.Background(), []string{"--offline", "--runtime-root", request.RuntimeRoot}, request.ConfigHome, request.Yard)
+	assertReleaseSelectionStale(t, err)
+	if !changed {
+		t.Fatal("test did not install the previous link after selection")
+	}
+	if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale selection invoked transition inspection: %v", err)
+	}
+}
