@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host-free bridge checks with native-shaped fake stdio agents."""
 
+from datetime import UTC, datetime
 import fcntl
 import json
 import os
@@ -451,6 +452,9 @@ class Bridge(unittest.TestCase):
                 self.assertEqual(self.done(root), 'resumed:after-interrupt')
 
     def test_message_resume_and_invalid_commands(self):
+        help_text = self.cli('resume', self.root, '--help').stdout
+        self.assertIn('finished or stopped', help_text)
+        self.assertIn('resume --dir DIR --task FILE', help_text)
         for vendor in ('codex', 'claude'):
             with self.subTest(vendor=vendor):
                 root, gate = self.start_message(vendor)
@@ -458,7 +462,10 @@ class Bridge(unittest.TestCase):
                 self.assertIn('resume requires a stopped worker with a session id', refused.stderr)
                 duplicate = self.cli('start', root, '--vendor', vendor, '--cwd', str(self.root), success=False)
                 self.assertIn('worker already exists', duplicate.stderr)
-                self.cli('send', root, '--message', 'hello')
+                receipt = self.cli('send', root, '--message', 'hello').stdout
+                expected = ('Queued for the next available Claude turn.' if vendor == 'claude'
+                            else 'Queued for steering the Codex turn.')
+                self.assertEqual(receipt.splitlines(), [expected])
                 gate.touch()
                 self.assertEqual(self.done(root), 'first result\n\nmessage:hello' if vendor == 'claude' else 'message:hello')
                 self.assertEqual(list((root / 'inbox').iterdir()), [])
@@ -471,7 +478,8 @@ class Bridge(unittest.TestCase):
     def assert_send_refused(self, root):
         generation = self.state(root)['generation']
         result = self.cli('send', root, '--message', 'late', success=False)
-        self.assertIn('use resume', result.stderr)
+        self.assertIn('finished or stopped', result.stderr)
+        self.assertIn('resume --dir DIR --task FILE', result.stderr)
         self.assertEqual(self.state(root)['generation'], generation)
         self.assertFalse(list((root / 'inbox').iterdir()))
 
@@ -767,7 +775,16 @@ runpy.run_path(bridge, run_name='__main__')
                 self.assertGreaterEqual(result['duration_seconds'], 0)
                 tail = self.cli('tail', root, '-n', '1').stdout.splitlines()
                 self.assertEqual(len(tail), 1)
-                self.assertEqual(json.loads(tail[0])['text'], 'message:finished')
+                message = json.loads(tail[0])
+                self.assertEqual(message['text'], 'message:finished')
+                events = [json.loads(line) for line in self.cli('tail', root).stdout.splitlines()]
+                for event in events:
+                    self.assertEqual(datetime.fromisoformat(event['timestamp']).tzinfo, UTC)
+                if vendor == 'codex':
+                    self.assertEqual(events[0]['stage'], 'item/started')
+                    self.assertEqual(message['stage'], 'item/completed')
+                else:
+                    self.assertTrue(all('stage' not in event for event in events))
                 self.assertEqual(self.cli('tail', root, '-n', '0').stdout, '')
                 failed = self.start(vendor, 'result-error')
                 self.assertEqual(self.cli('wait', failed, '--timeout', '5', success=False).returncode, 1)
@@ -787,7 +804,7 @@ runpy.run_path(bridge, run_name='__main__')
                  self.start('claude', 'approval', '--name', 'claude-worker')]
         for root in roots:
             self.approval(root)
-        listed = json.loads(self.cli('list', self.root).stdout)
+        listed = json.loads(self.cli('list', self.root, '--json').stdout)
         self.assertEqual({item['dir'] for item in listed}, {str(root) for root in roots})
         self.assertEqual({item['name'] for item in listed}, {'codex-worker', 'claude-worker'})
         for root, command in zip(roots, ('approve', 'deny')):
@@ -798,6 +815,10 @@ runpy.run_path(bridge, run_name='__main__')
             self.assertEqual(self.done(root), 'allow' if command == 'approve' else 'deny')
             self.cli(command, root, name, success=False)
             self.assertEqual(json.loads(self.cli('approvals', root).stdout), [])
+        header, *rows = self.cli('list', self.root).stdout.splitlines()
+        self.assertEqual(header.split(), ['NAME', 'VENDOR', 'STATUS', 'CLEANUP', 'DIR'])
+        self.assertCountEqual([row.split(maxsplit=4) for row in rows],
+                              [[item['name'], item['vendor'], 'done', 'pending_stop', item['dir']] for item in listed])
 
     def test_approval_stays_answered_during_request_retirement(self):
         gate = self.root / 'reply-gate'
@@ -842,7 +863,7 @@ runpy.run_path(bridge, run_name='__main__')
             refused = self.cli(command, missing, success=False)
             self.assertEqual(refused.stderr.strip(), 'worker state is missing')
             self.assertFalse(missing.exists())
-        self.assertEqual(json.loads(self.cli('list', missing).stdout), [])
+        self.assertEqual(json.loads(self.cli('list', missing, '--json').stdout), [])
         self.assertFalse(missing.exists())
         root = self.start('codex', 'complete')
         self.done(root)
@@ -982,10 +1003,10 @@ runpy.run_path(bridge, run_name='__main__')
                     event_log = root / 'events.jsonl'
 
                     def error_events():
-                        return [event for line in event_log.read_text().splitlines()
+                        return [event['message'] for line in event_log.read_text().splitlines()
                                 if (event := json.loads(line))['type'] == 'error']
 
-                    error_event = {'type': 'error', 'message': 'unsafe state file'}
+                    error_event = 'unsafe state file'
                     previous = error_events()
                     refused = self.cli('resume', root, success=False)
                     self.assertIn('unsafe state file', refused.stderr)
@@ -1222,7 +1243,7 @@ main()
             self.assertEqual(status['cleanup'], 'pending_stop')
             late = self.cli('send', root, '--message', 'late', '--timeout', '0', success=False)
             self.assertEqual(late.returncode, 1)
-            self.assertIn('use resume', late.stderr)
+            self.assertIn('resume --dir DIR --task FILE', late.stderr)
             resumed = self.cli('resume', root, '--timeout', '0.1', success=False)
             self.assertEqual(resumed.returncode, 124)
             self.assertIn('worker lock', resumed.stderr)

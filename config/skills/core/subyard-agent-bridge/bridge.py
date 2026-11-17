@@ -3,6 +3,7 @@
 import argparse
 from collections import deque
 from contextlib import nullcontext, suppress
+from datetime import UTC, datetime
 import fcntl
 import json
 import math
@@ -22,6 +23,7 @@ import uuid
 
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
 ACTIVE_STATES = ('launching', 'running')
+RESUME_COMMAND = 'resume --dir DIR --task FILE'
 CLEANUP_UNVERIFIED = 'Cleanup unverified. Could not verify that the systemd user scope is empty or gone.'
 CODEX_SANDBOXES = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
                    'danger-full-access': 'dangerFullAccess'}
@@ -198,8 +200,9 @@ def append(path):
 
 
 def record_event(root, kind, **fields):
+    timestamp = datetime.now(UTC).isoformat(timespec='milliseconds')
     with append(root / 'events.jsonl') as stream:
-        stream.write(json.dumps({'type': kind, **fields}) + '\n')
+        stream.write(json.dumps({'type': kind, 'timestamp': timestamp, **fields}) + '\n')
 
 
 def turn_dir(root, state):
@@ -347,7 +350,7 @@ class Codex:
         elif method in ('item/started', 'item/completed'):
             item = event['params']['item']
             if item['type'] == 'agentMessage' and method == 'item/completed':
-                self.w.message(item['text'])
+                self.w.message(item['text'], stage=method)
             elif item['type'] in ('commandExecution', 'fileChange', 'mcpToolCall'):
                 self.w.record('tool', tool=item['type'], status=item.get('status'), stage=method)
                 if method == 'item/started':
@@ -366,7 +369,7 @@ class Codex:
                 if not reason and self.turn_error and self.turn_error[0] == turn.get('id'):
                     reason = self.turn_error[1]
                 self.w.state['error'] = reason or 'Codex turn failed.'
-                self.w.record('error', message=self.w.state['error'])
+                self.w.record('error', message=self.w.state['error'], stage=method)
             self.w.outcome = {'completed': 'done', 'interrupted': 'interrupted', 'failed': 'failed'}[status]
         elif method == 'thread/tokenUsage/updated':
             self.w.tokens = event['params']['tokenUsage']
@@ -473,9 +476,9 @@ class Worker:
         fields = {key: self.redact(value) if isinstance(value, str) else value for key, value in fields.items()}
         record_event(self.root, kind, **fields)
 
-    def message(self, text):
+    def message(self, text, **fields):
         self.answers.append(text)
-        self.record('message', text=text)
+        self.record('message', text=text, **fields)
 
     def send(self, event, sent=None):
         if not self.outgoing:
@@ -820,12 +823,29 @@ def stop(root, deadline):
     return state, 0 if recovered else 1
 
 
+def worker_view(state):
+    if state['status'] == 'done' and state.get('cleanup') == 'unverified':
+        return {**state, 'cleanup': 'pending_stop'}
+    return state
+
+
+def print_worker_table(workers):
+    columns = ('name', 'vendor', 'status', 'cleanup', 'dir')
+    rows = [tuple(column.upper() for column in columns)]
+    for state in map(worker_view, workers):
+        rows.append(tuple(str(state.get(column, '-')).replace('\n', r'\n').replace('\r', r'\r')
+                          for column in columns))
+    widths = [max(map(len, column)) for column in zip(*rows)]
+    for row in rows:
+        print('  '.join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True, metavar='COMMAND')
     descriptions = {
         'start': 'Start a worker in a new state directory.',
-        'resume': 'Continue a stopped worker in the same session.',
+        'resume': 'Continue a finished or stopped worker in the same session.',
         'send': 'Send a message to an active turn.',
         'interrupt': 'Request interruption of the active turn.',
         'stop': 'Interrupt the worker and verify scope cleanup.',
@@ -841,6 +861,7 @@ def parse_args():
         command = commands.add_parser(name, help=description, description=description)
         if name == 'list':
             command.add_argument('--root', '--dir', type=Path, required=True, help='parent of worker directories')
+            command.add_argument('--json', action='store_true', help='show full worker records as JSON')
         else:
             command.add_argument('--dir', type=Path, required=True, help='worker state directory')
         if name in ('approve', 'deny'):
@@ -861,6 +882,8 @@ def parse_args():
             command.add_argument('--executable', type=Path,
                                  help='explicit native CLI path (otherwise /usr/local/bin, then PATH)')
             command.epilog = 'Pass native vendor arguments after --.'
+        if name == 'resume':
+            command.epilog = f'Run {RESUME_COMMAND}.'
         if name == 'send':
             command.add_argument('--message', help='send text; defaults to stdin')
         if name == 'tail':
@@ -895,7 +918,10 @@ def main():
                 workers.append({'dir': str(path.parent), **state})
             except (OSError, ValueError, KeyError):
                 workers.append({'dir': str(path.parent), 'status': 'failed'})
-        print(json.dumps(workers))
+        if args.json:
+            print(json.dumps(workers))
+        else:
+            print_worker_table(workers)
         return 0
     root = args.dir.absolute()
     if args.command == 'stop' and not (root / 'state').exists():
@@ -962,10 +988,7 @@ def main():
         print(json.dumps(state))
         return code
     if args.command == 'status':
-        state = snapshot(root)
-        if state['status'] == 'done' and state.get('cleanup') == 'unverified':
-            state['cleanup'] = 'pending_stop'
-        print(json.dumps(state))
+        print(json.dumps(worker_view(snapshot(root))))
         return 0
     if args.command == 'tail':
         if args.n < 0:
@@ -992,7 +1015,7 @@ def main():
         print(json.dumps(requests))
         return 0
     if args.command == 'send':
-        hint = 'send requires an active turn; use resume to continue a stopped worker.'
+        hint = f'send requires an active turn. To continue a finished or stopped worker, use {RESUME_COMMAND}.'
         original = snapshot(root) if (root / 'state').exists() else None
         if original is None or original['status'] not in ACTIVE_STATES:
             raise BridgeError(hint)
@@ -1010,6 +1033,8 @@ def main():
                 print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
                 return 124
             write(root / 'inbox' / (f'{time.time_ns():020d}-' + uuid.uuid4().hex + '.md'), message)
+        print('Queued for the next available Claude turn.' if current['vendor'] == 'claude'
+              else 'Queued for steering the Codex turn.')
         return 0
     deadline = time.monotonic() + args.timeout
     lock = lock_until(root / 'command.lock', deadline)

@@ -76,14 +76,15 @@ redaction when writing events. `tail` displays the stored summaries.
 Keep native stderr in `bridge.log` and protocol bodies private as well.
 
 Use `tail --dir /tmp/WORKER -n 20` for recent messages, tool summaries, and errors.
-`start --name NAME` names a worker; `list --root /tmp/PRIVATE-WORKER-ROOT` reports
-workers under that private root, independently of one another.
+New events have a UTC timestamp and include the vendor's stage when available.
+`start --name NAME` names a worker. `list --root /tmp/PRIVATE-WORKER-ROOT` prints a
+table of workers under that root. Add `--json` for the full records.
 
 `send` requires an active worker. It steers the current Codex turn and carries
 rejected messages into the next turn. For Claude, `send` queues the message
 for the next user turn of the same session. The bridge starts that turn
 automatically after the current turn succeeds and keeps the message queued until
-its result arrives. `status` shows the queue.
+its result arrives. A `send` receipt confirms the inbox write. `status` shows the queue.
 
 To continue a finished or stopped worker, run `resume --dir /tmp/WORKER --task FILE`,
 or replace `task.md` and omit `--task`. A worker needs a session ID to resume
