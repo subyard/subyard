@@ -68,6 +68,10 @@ esac
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(home, "yards/default/config.env"), []byte("# unchanged owner context\n"), 0600)
+	// "attributed" scenarios report the activation failure as yard private's
+	// own, so the yard-scoped gate admits the shutdown as that yard's repair.
+	attributed := strings.HasPrefix(scenario, "attributed")
+	scenario = strings.TrimPrefix(strings.TrimPrefix(scenario, "attributed"), "-")
 	// Bring-up and shutdown of public ingress require exact v2 plans; "v1"
 	// keeps the legacy-shaped handler only to prove its refusal.
 	if scenario != "v1" {
@@ -143,6 +147,13 @@ esac
 		program.options.InitPlatform = platform
 		for index := range response.Inspection.Blockers {
 			response.Inspection.Blockers[index].Message, response.Inspection.Blockers[index].Retry = outcome.Message, outcome.Retry
+		}
+	}
+	if attributed {
+		response.Inspection.Decisions = append(response.Inspection.Decisions, releasetransition.RedactedDecision{
+			Resource: "activation.sample-runtime", Scope: "yard-attribution", Decision: releasetransition.DecisionPreserve, Result: "failed private"})
+		program.sourceBinding = func(context.Context, releasetransition.JournalRecord) (string, string, error) {
+			return "fixture-source", "fixture-tooling", nil
 		}
 	}
 	if scenario == "foreign-blocker" {
