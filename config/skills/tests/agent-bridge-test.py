@@ -76,13 +76,20 @@ FAKE = r'''#!/usr/bin/env python3
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import sys
+import time
 
 codex = Path(sys.argv[0]).name == 'codex'
 session = 'fixture-session'
 resumed = any(arg == '--resume=' + session for arg in sys.argv)
 scenario = ''
+if marker := os.environ.get('BRIDGE_TEST_NOT_READING'):
+    assert select.select([sys.stdin], [], [], 5)[0], 'assignment never reached stdin'
+    Path(marker).write_text(str(os.getpid()))
+    time.sleep(60)
+    sys.exit(0)
 if os.environ.get('BRIDGE_TEST_CAPTURE'):
     Path(os.environ['BRIDGE_TEST_CAPTURE']).write_text(json.dumps({
         'argv': sys.argv[1:], 'cwd': os.getcwd(),
@@ -160,6 +167,9 @@ def begin(text):
         say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
         say(os.environ['BRIDGE_TEST_HEADERS'])
         finish('password="synthetic inline credential" and ghp_' + 'X' * 36)
+    elif scenario == 'large':
+        assert text.split('\n')[-2] == 'x' * (1024 * 1024)
+        finish('complete large frame')
     elif scenario not in ('message', 'steer-race'):
         finish(('resumed:' if resumed else 'started:') + scenario)
 
@@ -690,19 +700,50 @@ main()
         pid = int(gate.with_suffix('.pid').read_text())
         try:
             self.assertFalse((self.scopes / old['scope']).exists())
-            self.cli('send', root, '--message', 'after-delay')
-            self.assertEqual(self.done(root), 'resumed:after-delay')
+            self.cli('send', root, '--message', 'pending')
+            pending = self.approval(root)
             current = self.state(root)
             self.assertNotEqual(current['generation'], old['generation'])
             gate.touch()
             self.until(lambda: not process_alive(pid))
             self.assertEqual(self.state(root), current)
             self.assertFalse(list((root / 'turns' / old['generation'] / 'approvals').iterdir()))
+            self.cli('deny', root, pending.stem)
+            self.assertEqual(self.done(root), 'deny')
         finally:
             try:
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+    def test_large_assignment_is_delivered_intact(self):
+        root = self.start('claude', 'x' * (1024 * 1024) + '\nlarge')
+        self.assertEqual(self.done(root), 'complete large frame')
+
+    def test_interrupt_and_stop_with_vendor_stdin_backpressure(self):
+        for forced in (False, True):
+            with self.subTest(forced=forced):
+                marker = self.root / f'non-reader-{forced}'
+                root = self.start('claude', 'x' * (1024 * 1024),
+                                  '--env', 'BRIDGE_TEST_NOT_READING=' + str(marker))
+                pid = int(self.until(lambda: marker.read_text() if marker.exists() else None))
+                self.assertTrue(process_alive(pid))
+                bridge_pid = self.state(root)['pid']
+                if forced:
+                    os.kill(bridge_pid, signal.SIGSTOP)
+                try:
+                    if not forced:
+                        self.cli('interrupt', root)
+                        result = self.cli('wait', root, '--timeout', '2', success=False)
+                        self.assertEqual(result.returncode, 130)
+                    stopped = json.loads(self.cli('stop', root, '--timeout', '0.1').stdout)
+                    self.assertIn(stopped['status'], ('interrupted', 'failed') if forced else ('interrupted',))
+                    self.assertEqual(stopped['cleanup'], 'verified')
+                    self.until(lambda: not process_alive(pid))
+                    self.cli('stop', root, '--timeout', '0')
+                finally:
+                    if forced and process_alive(bridge_pid):
+                        os.kill(bridge_pid, signal.SIGCONT)
 
     def test_result_publication_has_one_commit_point(self):
         for point, status, code in (('before', 'failed', 1), ('after', 'done', 0)):

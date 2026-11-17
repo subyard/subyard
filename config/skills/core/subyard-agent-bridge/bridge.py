@@ -108,7 +108,7 @@ def directory(path):
         raise ValueError('state directories must be owned by you with mode 0700')
 
 
-def locked(path):
+def locked(path, blocking=True):
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     stream = os.fdopen(fd, 'w')
     info = os.fstat(stream.fileno())
@@ -116,8 +116,23 @@ def locked(path):
         stream.close()
         raise ValueError('unsafe lock file')
     os.fchmod(stream.fileno(), 0o600)
-    fcntl.flock(stream, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(stream, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        stream.close()
+        raise
     return stream
+
+
+def claim_turn(root, generation):
+    while True:
+        state = json.loads(read(root / 'state'))
+        if state['status'] != 'launching' or state['generation'] != generation:
+            return None
+        try:
+            return locked(root / 'worker.lock', blocking=False)
+        except BlockingIOError:
+            time.sleep(0.02)
 
 
 def append(path):
@@ -233,8 +248,8 @@ class Codex:
             deny = 'decline' if 'decline' in offered else 'cancel'
             item = self.items.get(params.get('itemId'), {})
             self.w.approval(event, params.get('command') or item.get('command', ''), params.get('reason', ''),
-                            method.split('/')[1], lambda allow: self.w.send({
-                                'id': event['id'], 'result': {'decision': 'accept' if allow else deny}}), item)
+                            method.split('/')[1], lambda allow, sent: self.w.send({
+                                'id': event['id'], 'result': {'decision': 'accept' if allow else deny}}, sent), item)
         elif method in ('item/started', 'item/completed'):
             item = event['params']['item']
             if item['type'] == 'agentMessage' and method == 'item/completed':
@@ -263,13 +278,12 @@ class Claude:
         self.w.ready = True
         self.user(self.w.task)
 
-    def user(self, text):
+    def user(self, text, sent=None):
         self.w.send({'type': 'user', 'message': {'role': 'user', 'content': [
-            {'type': 'text', 'text': text}]}})
+            {'type': 'text', 'text': text}]}}, sent)
 
     def message(self, path, text):
-        self.user(text)
-        path.unlink()
+        self.user(text, path.unlink)
 
     def interrupt(self):
         self.w.send({'type': 'control_request', 'request_id': 'interrupt-' + uuid.uuid4().hex,
@@ -283,11 +297,11 @@ class Claude:
                 raise ValueError('unsupported Claude control request')
             inputs = request['input']
             self.w.approval(event, inputs.get('command', ''), request.get('decision_reason', ''),
-                            request['tool_name'], lambda allow: self.w.send({
+                            request['tool_name'], lambda allow, sent: self.w.send({
                                 'type': 'control_response', 'response': {
                                     'subtype': 'success', 'request_id': event['request_id'],
                                     'response': ({'behavior': 'allow', 'updatedInput': inputs} if allow else
-                                                 {'behavior': 'deny', 'message': 'Operator denied this request.'})}}))
+                                                 {'behavior': 'deny', 'message': 'Operator denied this request.'})}}, sent))
         elif kind == 'system' and event.get('subtype') == 'init':
             self.w.model = event.get('model', self.w.model)
             session = event['session_id']
@@ -326,6 +340,8 @@ class Worker:
         self.env = {**os.environ, **self.config.get('env', {})}
         self.redact = event_redactor(self.env)
         self.pending = {}
+        self.replying = set()
+        self.outgoing = deque()
         self.approval_ids = set()
         self.sent = set()
         self.ready = False
@@ -349,9 +365,25 @@ class Worker:
         self.answers.append(text)
         self.record('message', text=text)
 
-    def send(self, event):
-        self.child.stdin.write((json.dumps(event) + '\n').encode())
-        self.child.stdin.flush()
+    def send(self, event, sent=None):
+        if not self.outgoing:
+            self.selector.register(self.child.stdin, selectors.EVENT_WRITE)
+        self.outgoing.append((memoryview((json.dumps(event) + '\n').encode()), sent))
+
+    def flush(self):
+        frame, sent = self.outgoing[0]
+        try:
+            count = os.write(self.child.stdin.fileno(), frame)
+        except BlockingIOError:
+            return
+        if count < len(frame):
+            self.outgoing[0] = (frame[count:], sent)
+            return
+        self.outgoing.popleft()
+        if not self.outgoing:
+            self.selector.unregister(self.child.stdin)
+        if sent:
+            sent()
 
     def approval(self, request, command, reason, tool, reply, item=None):
         request_id = request.get('request_id', request.get('id'))
@@ -373,6 +405,15 @@ class Worker:
         self.record('approval', id=name)
         self.save()
 
+    def reply_sent(self, path, decision):
+        name = path.stem
+        path.unlink()
+        path.with_suffix('.json').unlink()
+        self.pending.pop(name)
+        self.replying.remove(name)
+        self.record('approval_decision', id=name, decision=decision)
+        self.save()
+
     def controls(self):
         if (self.turn / 'interrupt').exists():
             self.interrupted = True
@@ -380,17 +421,15 @@ class Worker:
             return
         for path in sorted(self.approvals.glob('*.reply')):
             name = path.stem
+            if name in self.replying:
+                continue
             if name not in self.pending:
                 raise ValueError('unsolicited approval reply')
             decision = read(path).strip()
             if decision not in ('allow', 'deny'):
                 raise ValueError('approval reply must be allow or deny')
-            self.pending[name](decision == 'allow')
-            path.unlink()
-            path.with_suffix('.json').unlink()
-            self.pending.pop(name)
-            self.record('approval_decision', id=name, decision=decision)
-            self.save()
+            self.replying.add(name)
+            self.pending[name](decision == 'allow', lambda path=path, decision=decision: self.reply_sent(path, decision))
         if self.ready:
             for path in sorted((self.root / 'inbox').glob('*.md')):
                 if path.name not in self.sent:
@@ -398,6 +437,9 @@ class Worker:
                     self.adapter.message(path, read(path))
 
     def run(self):
+        if (self.turn / 'interrupt').exists():
+            self.outcome = 'interrupted'
+            return
         env = self.env
         executable = self.config.get('executable')
         if not executable:
@@ -416,8 +458,9 @@ class Worker:
         signal.signal(signal.SIGINT, lambda *_: setattr(self, 'interrupted', True))
         self.child = subprocess.Popen(argv, cwd=self.config['cwd'], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, env=env, bufsize=0)
-        selector = selectors.DefaultSelector()
-        selector.register(self.child.stdout, selectors.EVENT_READ)
+        self.selector = selectors.DefaultSelector()
+        os.set_blocking(self.child.stdin.fileno(), False)
+        self.selector.register(self.child.stdout, selectors.EVENT_READ)
         buffer = b''
         try:
             self.save()
@@ -425,10 +468,19 @@ class Worker:
             while not self.outcome:
                 self.controls()
                 if self.interrupted:
-                    self.adapter.interrupt()
+                    # An interrupt cannot overtake a partially sent JSON frame.
+                    if not self.outgoing:
+                        self.adapter.interrupt()
+                        if self.outgoing:
+                            self.flush()
                     self.outcome = 'interrupted'
                     break
-                for key, _ in selector.select(0.1):
+                for key, events in self.selector.select(0.1):
+                    if self.outcome:
+                        break
+                    if events == selectors.EVENT_WRITE:
+                        self.flush()
+                        continue
                     chunk = os.read(key.fileobj.fileno(), 65536)
                     if not chunk:
                         raise ValueError('worker stream closed before completion')
@@ -443,7 +495,7 @@ class Worker:
             if self.outcome == 'done' and self.pending:
                 raise ValueError('worker completed with unanswered approvals')
         finally:
-            selector.close()
+            self.selector.close()
             self.child.stdin.close()
             self.child.stdout.close()
 
@@ -488,7 +540,10 @@ def scope_command(*args):
                           capture_output=True, text=True, timeout=10)
 
 
-def scope_stopped(scope):
+def scope_stopped(root, state):
+    scope = state.get('scope')
+    if not scope or scope != 'subyard-bridge-' + turn_dir(root, state).name + '.scope':
+        return False
     try:
         scope_command('stop', scope)
         result = scope_command('show', '--property=LoadState,ActiveState,ControlGroup', scope)
@@ -509,25 +564,28 @@ def scope_stopped(scope):
         return False
 
 
-def recover(root, state):
+def cleanup_unverified():
+    print('Cleanup unverified. Could not verify that the systemd user scope is empty or gone.',
+          file=sys.stderr)
+    return False
+
+
+def recover(root, state, stopped=False):
     if state.get('cleanup') == 'verified' or (not state.get('scope') and not state.get('error')):
         return True
-    scope = state.get('scope')
-    if scope and scope == 'subyard-bridge-' + turn_dir(root, state).name + '.scope':
+    if state.get('scope'):
         # Publish the fence and failure result before contacting the manager. A
         # delayed _run can enter this scope but cannot start the vendor.
         if not state.get('result_file'):
             publish_result(root, state, state.get('model'))
-        if scope_stopped(scope):
+        if stopped or scope_stopped(root, state):
             for path in (turn_dir(root, state) / 'approvals').iterdir():
                 if path.suffix in ('.json', '.reply'):
                     path.unlink(missing_ok=True)
             state['cleanup'] = 'verified'
             save_state(root, state)
             return True
-    print('Cleanup unverified. Could not verify that the systemd user scope is empty or gone.',
-          file=sys.stderr)
-    return False
+    return cleanup_unverified()
 
 
 def launch(root, state, config, task):
@@ -638,7 +696,10 @@ def main():
     directory(root)
     directory(root / 'inbox')
     if args.command == '_run':
-        with locked(root / 'worker.lock'):
+        lock = claim_turn(root, args.generation)
+        if lock is None:
+            return 1
+        with lock:
             state = snapshot(root)
             if (state['status'] != 'launching' or state['generation'] != args.generation
                     or state['pid'] != os.getpid()):
@@ -758,10 +819,18 @@ def main():
                 raise ValueError('worker is not running')
             if args.command == 'stop':
                 state, code = wait(root, args.timeout, stopping=True)
-                if code != 124:
-                    with locked(root / 'worker.lock'):
-                        state = snapshot(root)
-                        code = 0 if recover(root, state) else 1
+                forced = code == 124
+                if forced and not scope_stopped(root, state):
+                    cleanup_unverified()
+                    print(json.dumps(state))
+                    return 1
+                with locked(root / 'worker.lock'):
+                    state = snapshot(root)
+                    if forced and state['status'] in ACTIVE_STATES:
+                        # A launcher can still be outside the scope while admission is pending.
+                        # Its interrupt file prevents vendor startup until we publish this fence.
+                        state.update(status='interrupted', pending_approvals=[])
+                    code = 0 if recover(root, state, stopped=forced) else 1
                 print(json.dumps(state))
                 return code
     return 0

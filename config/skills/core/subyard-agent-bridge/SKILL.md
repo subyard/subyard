@@ -33,8 +33,9 @@ omitted. The detached bridge owns the worker's stdio; commands return promptly.
 done `0`, failed `1`, pending approval `2`, interrupted `130`, timeout `124`.
 Use one background/event wait call for long waits; no coordinator polling loop is
 needed. `stop` waits for interruption, verifies the turn's scope is empty or gone,
-and is idempotent. A crashed turn reports `failed`. If scope cleanup cannot be
-verified, `stop` and `resume` fail with a cleanup diagnostic.
+and is idempotent. If the graceful wait times out, `stop` stops the scope directly.
+A crashed turn reports `failed`. If scope cleanup cannot be verified, `stop` and
+`resume` fail with a cleanup diagnostic.
 
 `start --role developer|reviewer|observer` supplies model/effort defaults: developer
 and reviewer use Codex `gpt-6.1-sol` or Claude `opus`, high effort; observer uses
@@ -60,6 +61,8 @@ launcher or bridge PID, session/turn IDs, scope, generation and pending approval
 messages with recognized credentials redacted, tool summaries, approval IDs and terminal
 outcomes. Terminal state publishes `result_file`, the path to the turn's
 `result.json` with state, exit code, session ID, model, duration and token usage.
+Immediately after a crash, `status` and `wait` can report `failed` before recovery
+publishes `result_file`.
 Only `done` publishes `final_file`, the path to `final.md` with the full report.
 Use the paths from the current state and keep the report private. Native stderr
 is private in `bridge.log`; do not dump logs or protocol
