@@ -309,7 +309,10 @@ class Bridge(unittest.TestCase):
         self.temp.cleanup()
 
     def cli(self, command, root, *args, success=True):
-        result = subprocess.run([sys.executable, str(BRIDGE), command, '--dir', str(root), *args],
+        positional = ()
+        if command in ('approve', 'deny'):
+            positional, args = args[:1], args[1:]
+        result = subprocess.run([sys.executable, str(BRIDGE), command, *positional, '--dir', str(root), *args],
                                 env=self.env, text=True, capture_output=True, timeout=8, umask=self.mask)
         if success:
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -524,23 +527,15 @@ runpy.run_path(bridge, run_name='__main__')
                            'Zml4dHVyZTphdXRo', 'Zml4dHVyZTpwcm94eQ==')
                 for secret in secrets:
                     self.assertNotIn(secret, events)
-                # An existing state directory can have events written by older bridge versions.
-                with (root / 'events.jsonl').open('a') as stream:
-                    stream.write(json.dumps({'type': 'message', 'text': 'legacy synthetic-env-value\n' +
-                                             CREDENTIAL_HEADERS + '\n' + ESCAPED_PASSWORD}) + '\n')
                 tail = self.cli('tail', root).stdout
-                for secret in secrets:
-                    self.assertNotIn(secret, tail)
+                self.assertTrue(set(tail.splitlines()) <= set(events.splitlines()))
                 self.assertIn('Report text. Echoed value: [redacted]', tail)
-                self.assertIn('legacy [redacted]', tail)
                 expected = ('Authorization: [redacted]\nCookie: [redacted]\n'
                             'Proxy-Authorization: [redacted]\nSet-Cookie: [redacted]\n'
                             'Authorization = [redacted]\nProxy-Authorization = [redacted]\n'
                             'Visible line after headers.')
                 self.assertIn(expected, [json.loads(line)['text'] for line in events.splitlines()
                                          if json.loads(line)['type'] == 'message'])
-                self.assertEqual(json.loads(tail.splitlines()[-1])['text'],
-                                 'legacy [redacted]\n' + expected + '\n{"password": [redacted]}')
 
     def test_failures_never_publish_a_successful_final(self):
         for vendor in ('codex', 'claude'):

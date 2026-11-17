@@ -39,6 +39,10 @@ PRIVATE_KEY = re.compile(r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [
                          re.DOTALL)
 
 
+class BridgeError(ValueError):
+    """A bridge-authored diagnostic safe to display."""
+
+
 def event_redactor(env):
     values = {value for name, value in env.items() if SECRET_ENV.search(name)
               and not name.upper().endswith(('_FILE', '_PATH', '_DIR', '_SOCK')) and len(value) >= 8}
@@ -83,7 +87,7 @@ def role_arguments(config, env):
     cwd = config['cwd']
     scratch = str(Path(env.get('TMPDIR', '/tmp')).resolve())
     if cwd in ('/tmp', scratch) or Path(cwd) in Path('/tmp').parents or Path(cwd) in Path(scratch).parents:
-        raise ValueError('reviewer cwd must be distinct from temporary roots')
+        raise BridgeError('reviewer cwd must be distinct from temporary roots')
     if config['vendor'] == 'codex':
         filesystem = {'/tmp': 'write', scratch: 'write', cwd: 'read'}
         return ['-c', 'default_permissions="bridge-reviewer"',
@@ -115,7 +119,7 @@ def read(path):
     with os.fdopen(fd) as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-            raise ValueError('unsafe state file')
+            raise BridgeError('unsafe state file')
         return stream.read()
 
 
@@ -141,7 +145,7 @@ def directory(path):
         pass
     info = path.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise ValueError('state directories must be owned by you with mode 0700')
+        raise BridgeError('state directories must be owned by you with mode 0700')
 
 
 def locked(path, blocking=True):
@@ -150,7 +154,7 @@ def locked(path, blocking=True):
     info = os.fstat(stream.fileno())
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
         stream.close()
-        raise ValueError('unsafe lock file')
+        raise BridgeError('unsafe lock file')
     os.fchmod(stream.fileno(), 0o600)
     try:
         fcntl.flock(stream, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -188,14 +192,14 @@ def append(path):
     info = os.fstat(stream.fileno())
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
         stream.close()
-        raise ValueError('unsafe log file')
+        raise BridgeError('unsafe log file')
     return stream
 
 
 def turn_dir(root, state):
     generation = state['generation']
     if not re.fullmatch(r'[0-9a-f]{32}', generation):
-        raise ValueError('invalid turn generation')
+        raise BridgeError('invalid turn generation')
     return root / 'turns' / generation
 
 
@@ -255,7 +259,7 @@ class Codex:
         self.w.model = result.get('model', self.w.model)
         session = result['thread']['id']
         if self.w.state.get('session_id') not in (None, session):
-            raise ValueError('Codex resumed a different session')
+            raise BridgeError('Codex resumed a different session')
         self.w.state['session_id'] = session
         queued = [self.w.root / 'inbox' / name for name in self.w.state.pop('carryover', [])]
         self.w.sent.update(path.name for path in queued)
@@ -291,13 +295,13 @@ class Codex:
                     # The inbox file has not been acknowledged. Deliver it on the next turn.
                     self.w.record('message_deferred')
                     return
-                raise ValueError('Codex request failed')
+                raise BridgeError('Codex request failed')
             callback(event['result'])
         elif method in ('item/commandExecution/requestApproval', 'item/fileChange/requestApproval'):
             params = event['params']
             offered = params.get('availableDecisions', ['accept', 'decline', 'cancel'])
             if 'accept' not in offered or not any(d in offered for d in ('decline', 'cancel')):
-                raise ValueError('single-use approval unavailable')
+                raise BridgeError('single-use approval unavailable')
             deny = 'decline' if 'decline' in offered else 'cancel'
             item = self.items.get(params.get('itemId'), {})
             self.w.approval(event, params.get('command') or item.get('command', ''), params.get('reason', ''),
@@ -320,7 +324,7 @@ class Codex:
             self.w.tokens = event['params']['tokenUsage']
         elif 'id' in event and method:
             # Unknown approval/user-input protocols must never be silently approved.
-            raise ValueError('unsupported Codex server request')
+            raise BridgeError('unsupported Codex server request')
 
 
 class Claude:
@@ -355,7 +359,7 @@ class Claude:
         if kind == 'control_request':
             request = event['request']
             if request['subtype'] != 'can_use_tool':
-                raise ValueError('unsupported Claude control request')
+                raise BridgeError('unsupported Claude control request')
             inputs = request['input']
             self.w.approval(event, inputs.get('command', ''), request.get('decision_reason', ''),
                             request['tool_name'], lambda allow, sent: self.w.send({
@@ -367,7 +371,7 @@ class Claude:
             self.w.model = event.get('model', self.w.model)
             session = event['session_id']
             if self.w.state.get('session_id') not in (None, session):
-                raise ValueError('Claude resumed a different session')
+                raise BridgeError('Claude resumed a different session')
             self.w.state['session_id'] = session
             self.w.save()
         elif kind == 'assistant':
@@ -450,7 +454,7 @@ class Worker:
     def approval(self, request, command, reason, tool, reply, item=None):
         request_id = request.get('request_id', request.get('id'))
         if not isinstance(request_id, (str, int)) or request_id in self.approval_ids:
-            raise ValueError('invalid or duplicate approval id')
+            raise BridgeError('invalid or duplicate approval id')
         self.approval_ids.add(request_id)
         self.state['approval_sequence'] += 1
         # Persist the sequence before publication, so a crash cannot reuse a displayed ID.
@@ -459,7 +463,7 @@ class Worker:
         path = self.approvals / (name + '.json')
         # A reply must follow publication of this request, never preauthorize a future one.
         if path.with_suffix('.reply').exists():
-            raise ValueError('unsolicited approval reply')
+            raise BridgeError('unsolicited approval reply')
         write(path, json.dumps({'vendor': self.config['vendor'], 'tool': tool,
                                'command': command, 'reason': reason, 'request': request,
                                'item': item}) + '\n')
@@ -486,10 +490,10 @@ class Worker:
             if name in self.replying:
                 continue
             if name not in self.pending:
-                raise ValueError('unsolicited approval reply')
+                raise BridgeError('unsolicited approval reply')
             decision = read(path).strip()
             if decision not in ('allow', 'deny'):
-                raise ValueError('approval reply must be allow or deny')
+                raise BridgeError('approval reply must be allow or deny')
             self.replying.add(name)
             self.pending[name](decision == 'allow', lambda path=path, decision=decision: self.reply_sent(path, decision))
         if self.ready:
@@ -508,7 +512,7 @@ class Worker:
             installed = '/usr/local/bin/' + self.config['vendor']
             executable = installed if Path(installed).is_file() else shutil.which(self.config['vendor'], path=env.get('PATH'))
         if not executable:
-            raise ValueError('worker executable missing')
+            raise BridgeError('worker executable missing')
         if self.config['vendor'] == 'codex':
             argv = [executable, *self.adapter.arguments, 'app-server']
         else:
@@ -547,18 +551,18 @@ class Worker:
                         continue
                     chunk = os.read(key.fileobj.fileno(), 65536)
                     if not chunk:
-                        raise ValueError('worker stream closed before completion')
+                        raise BridgeError('worker stream closed before completion')
                     buffer += chunk
                     while b'\n' in buffer and not self.outcome:
                         frame, buffer = buffer.split(b'\n', 1)
                         if len(frame) > 16 * 1024 * 1024:
-                            raise ValueError('worker frame too large')
+                            raise BridgeError('worker frame too large')
                         self.adapter.event(json.loads(frame))
                     if len(buffer) > 16 * 1024 * 1024:
-                        raise ValueError('worker frame too large')
+                        raise BridgeError('worker frame too large')
                 if self.outcome == 'done':
                     if self.pending:
-                        raise ValueError('worker completed with unanswered approvals')
+                        raise BridgeError('worker completed with unanswered approvals')
                     # Serialize the last inbox scan and terminal publication with send.
                     with locked(self.root / 'inbox.lock'):
                         if self.config['vendor'] == 'claude' and self.adapter.next_turn():
@@ -730,38 +734,71 @@ def wait(root, deadline, stopping=False):
         time.sleep(min(0.1, remaining))
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['start', 'send', 'interrupt', 'stop', 'status', 'wait', 'resume',
-                                          'tail', 'approvals', 'approve', 'deny', 'list', '_run'])
-    parser.add_argument('approval_id', nargs='?')
-    parser.add_argument('--dir', type=Path)
-    parser.add_argument('--generation', help=argparse.SUPPRESS)
-    parser.add_argument('--root', type=Path, help='parent of worker directories for list')
-    parser.add_argument('--vendor', choices=['codex', 'claude'])
-    parser.add_argument('--model')
-    parser.add_argument('--effort')
-    parser.add_argument('--cwd', type=Path)
-    parser.add_argument('--task', type=Path, help='assignment file for start or resume')
-    parser.add_argument('--role', choices=['developer', 'reviewer', 'observer'])
-    parser.add_argument('--name')
-    parser.add_argument('--env', action='append', default=[], metavar='K=V')
-    parser.add_argument('--executable', type=Path, help='explicit native CLI path (otherwise /usr/local/bin, then PATH)')
-    parser.add_argument('-n', type=int, default=20, help='number of summarized events for tail')
-    parser.add_argument('--message', help='send text; defaults to stdin')
-    parser.add_argument('--timeout', type=float, default=60, help='maximum wait seconds (default: 60)')
+    commands = parser.add_subparsers(dest='command', required=True, metavar='COMMAND')
+    descriptions = {
+        'start': 'Start a worker in a new state directory.',
+        'resume': 'Continue a stopped worker in the same session.',
+        'send': 'Send a message to an active turn.',
+        'interrupt': 'Request interruption of the active turn.',
+        'stop': 'Interrupt the worker and verify scope cleanup.',
+        'status': 'Show the current worker state.',
+        'wait': 'Wait for completion or a pending approval.',
+        'tail': 'Show recent summarized messages and tool events.',
+        'approvals': 'List pending approval requests.',
+        'approve': 'Allow a pending request once.',
+        'deny': 'Deny a pending request.',
+        'list': 'List workers below a parent directory.',
+    }
+    for name, description in descriptions.items():
+        command = commands.add_parser(name, help=description, description=description)
+        if name == 'list':
+            location = command.add_mutually_exclusive_group(required=True)
+            location.add_argument('--root', type=Path, help='parent of worker directories')
+            location.add_argument('--dir', type=Path, help='alias for --root')
+        else:
+            command.add_argument('--dir', type=Path, required=True, help='worker state directory')
+        if name in ('approve', 'deny'):
+            command.add_argument('id', help='pending approval ID')
+        if name in ('start', 'resume'):
+            command.add_argument('--task', type=Path, help='assignment file (defaults to task.md in the state directory)')
+        if name not in ('list', 'status', 'tail', 'approvals'):
+            command.add_argument('--timeout', type=float, default=60,
+                                 help='maximum wait seconds (default: 60)')
+        if name == 'start':
+            command.add_argument('--vendor', choices=['codex', 'claude'])
+            command.add_argument('--cwd', type=Path)
+            command.add_argument('--model')
+            command.add_argument('--effort')
+            command.add_argument('--role', choices=['developer', 'reviewer', 'observer'])
+            command.add_argument('--name')
+            command.add_argument('--env', action='append', default=[], metavar='K=V')
+            command.add_argument('--executable', type=Path,
+                                 help='explicit native CLI path (otherwise /usr/local/bin, then PATH)')
+            command.epilog = 'Pass native vendor arguments after --.'
+        if name == 'send':
+            command.add_argument('--message', help='send text; defaults to stdin')
+        if name == 'tail':
+            command.add_argument('-n', type=int, default=20, help='number of summarized events')
+    internal = commands.add_parser('_run')
+    internal.add_argument('--dir', type=Path, required=True)
+    internal.add_argument('--generation', required=True)
     arguments = sys.argv[1:]
     separator = arguments.index('--') if '--' in arguments else len(arguments)
     args = parser.parse_args(arguments[:separator])
-    if args.timeout < 0 or not math.isfinite(args.timeout):
-        raise ValueError('timeout must be finite and nonnegative')
+    if hasattr(args, 'timeout') and (args.timeout < 0 or not math.isfinite(args.timeout)):
+        raise BridgeError('timeout must be finite and nonnegative')
     vendor_args = arguments[separator + 1:]
     if vendor_args and args.command != 'start':
-        raise ValueError('vendor arguments are set at start and retained on resume')
+        raise BridgeError('vendor arguments are set at start and retained on resume')
+    return args, vendor_args
+
+
+def main():
+    args, vendor_args = parse_args()
     if args.command == 'list':
         root = args.root or args.dir
-        if root is None:
-            raise ValueError('list requires --root or --dir')
         directory(root)
         workers = []
         for path in sorted(root.rglob('state')):
@@ -775,8 +812,6 @@ def main():
                 workers.append({'dir': str(path.parent), 'status': 'failed'})
         print(json.dumps(workers))
         return 0
-    if args.dir is None:
-        raise ValueError('--dir is required')
     root = args.dir.absolute()
     if args.command == 'stop' and not (root / 'state').exists():
         return 0
@@ -824,15 +859,12 @@ def main():
         return 0
     if args.command == 'tail':
         if args.n < 0:
-            raise ValueError('tail count must not be negative')
+            raise BridgeError('tail count must not be negative')
         lines = deque(maxlen=args.n)
-        config = json.loads(read(root / 'config.json'))
-        redact = event_redactor({**os.environ, **config.get('env', {})})
         for line in read(root / 'events.jsonl').splitlines():
             event = json.loads(line)
             if event['type'] in ('message', 'tool'):
-                lines.append(json.dumps({
-                    key: redact(value) if isinstance(value, str) else value for key, value in event.items()}))
+                lines.append(line)
         print('\n'.join(lines), end='\n' if lines else '')
         return 0
     if args.command == 'approvals':
@@ -854,7 +886,7 @@ def main():
             print(hint, file=sys.stderr)
             return 1
         if args.message is None and sys.stdin.isatty():
-            raise ValueError('send requires --message or piped stdin')
+            raise BridgeError('send requires --message or piped stdin')
         message = args.message if args.message is not None else sys.stdin.read()
         lock = lock_until(root / 'inbox.lock', time.monotonic() + args.timeout)
         if lock is not None:
@@ -877,21 +909,21 @@ def main():
     with lock:
         if args.command in ('approve', 'deny'):
             state = snapshot(root)
-            name = args.approval_id
+            name = args.id
             if not name or not name.isascii() or not name.isdigit() or len(name) < 6 or name not in state['pending_approvals']:
-                raise ValueError('approval is not pending')
+                raise BridgeError('approval is not pending')
             reply = turn_dir(root, state) / 'approvals' / (name + '.reply')
             if os.path.lexists(reply):
-                raise ValueError('approval already answered')
+                raise BridgeError('approval already answered')
             read(reply.with_suffix('.json'))
             write(reply, 'allow\n' if args.command == 'approve' else 'deny\n')
             return 0
         if args.command in ('start', 'resume'):
             if args.command == 'start':
                 if (root / 'state').exists():
-                    raise ValueError('worker already exists; use resume')
+                    raise BridgeError('worker already exists; use resume')
                 if not args.vendor or not args.cwd:
-                    raise ValueError('start requires --vendor and --cwd')
+                    raise BridgeError('start requires --vendor and --cwd')
                 if args.role:
                     args.model = args.model or MODELS[args.vendor][args.role]
                     args.effort = args.effort or ('medium' if args.role == 'observer' else 'high')
@@ -900,14 +932,14 @@ def main():
                           file=sys.stderr)
                     return 1
                 if not args.model or not args.effort:
-                    raise ValueError('start requires --role or explicit --model and --effort')
+                    raise BridgeError('start requires --role or explicit --model and --effort')
                 if not args.cwd.is_dir():
-                    raise ValueError('worker cwd is not a directory')
+                    raise BridgeError('worker cwd is not a directory')
                 env = {}
                 for entry in args.env:
-                    key, value = entry.split('=', 1)
-                    if not key or '\0' in key + value:
-                        raise ValueError('invalid environment override')
+                    key, separator, value = entry.partition('=')
+                    if not separator or not key or '\0' in key + value:
+                        raise BridgeError('invalid environment override')
                     env[key] = value
                 config = dict(vendor=args.vendor, model=args.model, effort=args.effort, cwd=str(args.cwd.resolve()),
                               role=args.role, name=args.name or root.name, env=env, vendor_args=vendor_args,
@@ -917,7 +949,7 @@ def main():
             else:
                 state = snapshot(root)
                 if state['status'] in ACTIVE_STATES or not state['session_id']:
-                    raise ValueError('resume requires a stopped worker with a session id')
+                    raise BridgeError('resume requires a stopped worker with a session id')
                 config = json.loads(read(root / 'config.json'))
             task = read(args.task if args.task else root / 'task.md')
             return launch(root, state, config, task, deadline)
@@ -926,7 +958,7 @@ def main():
             if state['status'] in ACTIVE_STATES:
                 write(turn_dir(root, state) / 'interrupt', '')
             elif args.command == 'interrupt':
-                raise ValueError('worker is not running')
+                raise BridgeError('worker is not running')
             if args.command == 'stop':
                 state, code = wait(root, deadline, stopping=True)
                 lock_path = root / 'worker.lock'
@@ -957,6 +989,9 @@ def main():
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
+    except BridgeError as error:
+        print(error, file=sys.stderr)
+        raise SystemExit(1)
     except (OSError, ValueError, KeyError, TypeError):
         print('Bridge command failed; check arguments, private state directory and worker state.', file=sys.stderr)
         raise SystemExit(1)

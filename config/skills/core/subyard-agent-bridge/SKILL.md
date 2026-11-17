@@ -103,8 +103,8 @@ The request stays pending indefinitely until answered; `interrupt` remains avail
    by writing a temporary file in that directory and atomically renaming it.
 
 Alternatively, `approvals --dir /tmp/WORKER` lists pending requests; after obtaining
-the operator decision, run `approve --dir /tmp/WORKER NNNNNN` or
-`deny --dir /tmp/WORKER NNNNNN`. Each ID can be answered only once.
+the operator decision, run `approve NNNNNN --dir /tmp/WORKER` or
+`deny NNNNNN --dir /tmp/WORKER`. Each ID can be answered only once.
 
 The bridge sends a single-use response and removes both files. It sends no session
 allow, rule amendment or permission-mode change. Interruption/failure cancels pending
