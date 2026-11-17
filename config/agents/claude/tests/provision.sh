@@ -69,6 +69,12 @@ export CLAUDE_TEST_ROOT="$tmp"
 export SUBYARD_TEST_ARTIFACT_CURL="$ROOT/tests/helpers/artifact-curl.sh" SUBYARD_TEST_TRANSFER_LOG="$tmp/transfer.log"
 run_hook() { # installation root [architecture]
   local root="$1" arch="${2:-amd64}"
+  # Model the distro's runuser stack without changing the host's PAM configuration.
+  if [ ! -f "$root/etc/pam.d/runuser" ]; then
+    install -d -m 0755 "$root/etc/pam.d"
+    install -m 0644 /dev/null "$root/etc/pam.d/runuser"
+    printf 'session required pam_unix.so\n' > "$root/etc/pam.d/runuser"
+  fi
   env PATH="$tmp/bin:$PATH" HOME="$tmp/home" TMPDIR=/tmp \
     CLAUDE_POLICY_TEST_ALLOW_NON_ROOT=1 CLAUDE_ARCH="$arch" \
     CLAUDE_ETC_DIR="$root/etc" \
@@ -320,8 +326,12 @@ env -u CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT -u CLAUDE_CODE_DISABLE_SUBSTIT
 grep -q '^CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT=1$' "$environment" || fail 'PAM inline switch missing'
 grep -q '^CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1$' "$environment" || fail 'PAM substitution switch missing'
 cp "$environment" "$tmp/environment.expected"
+pam_runuser="$root/etc/pam.d/runuser"
+printf 'session required pam_unix.so\n\nsession required pam_env.so readenv=1\n' > "$tmp/runuser.expected"
+cmp "$pam_runuser" "$tmp/runuser.expected" || fail 'runuser PAM environment read missing or existing stack changed'
 run_hook "$root" >/dev/null
 cmp "$environment" "$tmp/environment.expected" || fail 'environment rerun was not idempotent'
+cmp "$pam_runuser" "$tmp/runuser.expected" || fail 'runuser PAM configuration was not idempotent'
 # Replace the whole owned block, retaining unrelated entries before and after it.
 printf 'FOREIGN_BEFORE=keep\n' > "$environment"
 cat "$tmp/environment.expected" >> "$environment"

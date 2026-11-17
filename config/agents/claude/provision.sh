@@ -183,6 +183,14 @@ CLAUDE_CODE_DISABLE_INLINE_SHELL_RM_PROMPT=1
 CLAUDE_CODE_DISABLE_SUBSTITUTION_RM_PROMPT=1
 # <<< subyard-claude <<<
 ENV
+# Unlike su/sshd, Debian's runuser PAM stack does not load /etc/environment by default.
+# yard shell -- cmd uses runuser without a login shell, so enable its system environment read.
+pam_runuser="$ETC_DIR/pam.d/runuser"
+[ -f "$pam_runuser" ] || die 'runuser PAM configuration is missing'
+pam_environment='session required pam_env.so readenv=1'
+if ! grep -Fxq "$pam_environment" "$pam_runuser"; then
+  printf '\n%s\n' "$pam_environment" >> "$pam_runuser"
+fi
 download "$RELEASE_BASE_URL/latest" "$tmp/latest" || die 'latest version download failed'
 VERSION="$(cat "$tmp/latest")"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'invalid latest release version'
