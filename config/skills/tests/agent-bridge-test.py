@@ -197,13 +197,15 @@ def begin(text):
         fail_turn({'codexErrorInfo': 'modelNotFound', 'message': 'The model "fixture-unknown-model" does not exist.',
                    'additionalDetails': 'fixture-private-native-body'})
     elif scenario == 'notification-error':
+        emit({'method': 'error', 'params': {'willRetry': False, 'error': {
+            'codexErrorInfo': 'badRequest', 'message': 'Unassociated error.'}}})
         emit({'method': 'error', 'params': {'turnId': 'fixture-turn', 'willRetry': False, 'error': {
             'codexErrorInfo': 'badRequest', 'message': 'Invalid request for this model.',
             'additionalDetails': 'fixture-private-native-body'}}})
         fail_turn()
     elif scenario == 'raw-request-error':
         fail_turn({'codexErrorInfo': 'badRequest',
-                   'message': 'Unexpected status 400: {"message":"fixture-private-native-body"}'})
+                   'message': 'Unexpected status 400: fixture-private-native-body'})
     elif scenario == 'report':
         say('The complete report.')
         if not codex:
@@ -479,7 +481,7 @@ class Bridge(unittest.TestCase):
         generation = self.state(root)['generation']
         result = self.cli('send', root, '--message', 'late', success=False)
         self.assertIn('finished or stopped', result.stderr)
-        self.assertIn('resume --dir DIR --task FILE', result.stderr)
+        self.assertIn(f'resume --dir {root} --task FILE', result.stderr)
         self.assertEqual(self.state(root)['generation'], generation)
         self.assertFalse(list((root / 'inbox').iterdir()))
 
@@ -623,6 +625,9 @@ runpy.run_path(bridge, run_name='__main__')
         error = json.loads(self.cli('tail', root, '-n', '1').stdout)
         self.assertEqual(error['error_type'], 'FileNotFoundError')
         self.assertNotIn(str(self.root), error['message'])
+        refused = self.cli('send', root, '--message', 'late', success=False)
+        self.assertIn('Start a new worker in a new --dir', refused.stderr)
+        self.assertNotIn('resume', refused.stderr)
         self.cli('resume', root, success=False)
 
     def test_exact_modes_under_restrictive_umask(self):
@@ -782,13 +787,18 @@ runpy.run_path(bridge, run_name='__main__')
                     self.assertEqual(datetime.fromisoformat(event['timestamp']).tzinfo, UTC)
                 if vendor == 'codex':
                     self.assertEqual(events[0]['stage'], 'item/started')
-                    self.assertEqual(message['stage'], 'item/completed')
+                    self.assertNotIn('stage', message)
                 else:
                     self.assertTrue(all('stage' not in event for event in events))
                 self.assertEqual(self.cli('tail', root, '-n', '0').stdout, '')
                 failed = self.start(vendor, 'result-error')
                 self.assertEqual(self.cli('wait', failed, '--timeout', '5', success=False).returncode, 1)
                 self.assertEqual(self.result(failed)['exit_code'], 1)
+                self.until(lambda: not (self.scopes / self.state(failed)['scope']).exists())
+                failure = self.cli('wait', failed, success=False)
+                self.assertEqual(failure.returncode, 1)
+                self.assertEqual(json.loads(failure.stdout)['cleanup'], 'verified')
+                self.assertEqual(self.state(failed)['cleanup'], 'unverified')
                 self.assert_send_refused(failed)
                 pending = self.start(vendor, 'pending')
                 self.approval(pending)
@@ -800,13 +810,14 @@ runpy.run_path(bridge, run_name='__main__')
                 self.cli('stop', pending)
 
     def test_approval_commands_and_independent_named_workers(self):
-        roots = [self.start('codex', 'approval', '--name', 'codex-worker', dirname='state'),
+        codex_name = 'codex-worker\t\n\x1b\u200b'
+        roots = [self.start('codex', 'approval', '--name', codex_name, dirname='state'),
                  self.start('claude', 'approval', '--name', 'claude-worker')]
         for root in roots:
             self.approval(root)
         listed = json.loads(self.cli('list', self.root, '--json').stdout)
         self.assertEqual({item['dir'] for item in listed}, {str(root) for root in roots})
-        self.assertEqual({item['name'] for item in listed}, {'codex-worker', 'claude-worker'})
+        self.assertEqual({item['name'] for item in listed}, {codex_name, 'claude-worker'})
         for root, command in zip(roots, ('approve', 'deny')):
             requests = json.loads(self.cli('approvals', root).stdout)
             self.assertEqual(len(requests), 1)
@@ -815,10 +826,14 @@ runpy.run_path(bridge, run_name='__main__')
             self.assertEqual(self.done(root), 'allow' if command == 'approve' else 'deny')
             self.cli(command, root, name, success=False)
             self.assertEqual(json.loads(self.cli('approvals', root).stdout), [])
+        self.until(lambda: all(not (self.scopes / self.state(root)['scope']).exists() for root in roots))
+        completed = json.loads(self.cli('list', self.root, '--json').stdout)
+        self.assertTrue(all(item['cleanup'] == 'verified' for item in completed))
         header, *rows = self.cli('list', self.root).stdout.splitlines()
         self.assertEqual(header.split(), ['NAME', 'VENDOR', 'STATUS', 'CLEANUP', 'DIR'])
+        names = {'codex': r'codex-worker\t\n\x1b\u200b', 'claude': 'claude-worker'}
         self.assertCountEqual([row.split(maxsplit=4) for row in rows],
-                              [[item['name'], item['vendor'], 'done', 'pending_stop', item['dir']] for item in listed])
+                              [[names[item['vendor']], item['vendor'], 'done', 'verified', item['dir']] for item in listed])
 
     def test_approval_stays_answered_during_request_retirement(self):
         gate = self.root / 'reply-gate'
@@ -1170,10 +1185,9 @@ main()
 
     def test_result_publication_has_one_commit_point(self):
         codex_reasons = {
-            'result-error': 'The model "fixture-unknown-model" does not exist.',
-            'rpc-error': 'Unsupported effort. Authorization: [redacted]',
-            'notification-error': 'Invalid request for this model.',
-            'raw-request-error': 'Codex rejected the request as invalid.',
+            'result-error': 'Codex model was not found (modelNotFound).',
+            **dict.fromkeys(('rpc-error', 'notification-error', 'raw-request-error'),
+                            'Codex rejected the request as invalid (badRequest).'),
         }
         failures = ('eof', 'malformed', 'unsupported', 'duplicate')
         for vendor in ('codex', 'claude'):
@@ -1190,8 +1204,9 @@ main()
                         result = self.result(root)
                         tail = self.cli('tail', root).stdout
                         self.assertEqual(result['error'], codex_reasons[scenario])
-                        messages = [json.loads(line).get('message') for line in tail.splitlines()]
-                        self.assertIn(result['error'], messages)
+                        events = [json.loads(line) for line in tail.splitlines()]
+                        diagnostic, = [event for event in events if event.get('message') == result['error']]
+                        self.assertNotIn('stage', diagnostic)
                         for private in ('fixture-private-native-body', 'fixture-native-credential'):
                             self.assertNotIn(private, json.dumps(result))
                             self.assertNotIn(private, tail)
@@ -1240,10 +1255,12 @@ main()
             self.until(lambda: stat_file.read_text().rsplit(') ', 1)[1].startswith('T '))
             result = self.result(root)
             status = json.loads(self.cli('status', root).stdout)
-            self.assertEqual(status['cleanup'], 'pending_stop')
+            self.assertEqual(status['cleanup'], 'unverified')
+            self.assertEqual(json.loads(self.cli('wait', root).stdout)['cleanup'], 'unverified')
+            self.assertTrue(process_alive(pid))
             late = self.cli('send', root, '--message', 'late', '--timeout', '0', success=False)
             self.assertEqual(late.returncode, 1)
-            self.assertIn('resume --dir DIR --task FILE', late.stderr)
+            self.assertIn(f'resume --dir {root} --task FILE', late.stderr)
             resumed = self.cli('resume', root, '--timeout', '0.1', success=False)
             self.assertEqual(resumed.returncode, 124)
             self.assertIn('worker lock', resumed.stderr)

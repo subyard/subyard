@@ -180,7 +180,7 @@ Spawn settings by client; record a comparable available alternative if needed:
 | Any | Strongest available model, high reasoning effort | Haiku or Codex `gpt-6-luna`, medium effort; do not default to Sonnet | Same worker, not a new one |
 | Codex → Codex | `spawn_agent` with `model`, `reasoning_effort="high"`, `fork_turns="none"` | `model="gpt-6-luna"`, `reasoning_effort="medium"`, `fork_turns="none"` | `send_message` while running; `followup_task` when idle |
 | Claude Code → Claude Code | Agent tool, `subagent_type="developer"` or `"reviewer"`, `model="opus"` | `subagent_type="general-purpose"`, `model="haiku"`, `effort="medium"`; include the observer contract | `SendMessage` to the same agent |
-| Either client → other vendor | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md): `start --vendor codex\|claude --role developer\|reviewer --cwd REPO --dir STATE --task ASSIGNMENT` | `--role observer --model gpt-6-luna\|haiku --effort medium` | `send` steers active Codex or queues Claude's next turn; `resume --task NEXT` continues a stopped session |
+| Either client → other vendor | [subyard-agent-bridge](../../../config/skills/core/subyard-agent-bridge/SKILL.md): `start --vendor codex\|claude --role developer\|reviewer --cwd REPO --dir STATE --task ASSIGNMENT` | `--role observer --model gpt-6-luna\|haiku --effort medium` | `send` steers active Codex or queues Claude's next turn; `resume --task NEXT` continues a finished or stopped worker |
 
 For cross-vendor work, use the installed skill's Python entrypoint, not the temporary
 `agent-bridge-local` command. Keep STATE outside the checkout. The bridge inherits

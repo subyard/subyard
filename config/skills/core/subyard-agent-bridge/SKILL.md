@@ -61,8 +61,9 @@ resume. An explicit sandbox mode conflicts with the Codex reviewer preset.
 
 `state` is JSON with `status` (`launching`, `running`, `done`, `failed`, `interrupted`),
 launcher or bridge PID, session/turn IDs, scope, generation and pending approval IDs.
-`status` lists queued message filenames. For a completed worker, cleanup shows
-`pending_stop` until verified. `events.jsonl` contains messages, tool summaries,
+`status` lists queued message filenames. For a finished or stopped worker,
+`status`, `wait`, and `list` report cleanup as `verified` once its scope is empty or
+gone, or `unverified` otherwise. `events.jsonl` contains messages, tool summaries,
 approval IDs and terminal outcomes. Terminal state
 publishes `result_file`, the path to the run's
 `result.json` with state, exit code, session ID, model, duration and token usage.
@@ -76,7 +77,7 @@ redaction when writing events. `tail` displays the stored summaries.
 Keep native stderr in `bridge.log` and protocol bodies private as well.
 
 Use `tail --dir /tmp/WORKER -n 20` for recent messages, tool summaries, and errors.
-New events have a UTC timestamp and include the vendor's stage when available.
+New events have a UTC timestamp and include the vendor's stage on tool events when available.
 `start --name NAME` names a worker. `list --root /tmp/PRIVATE-WORKER-ROOT` prints a
 table of workers under that root. Add `--json` for the full records.
 

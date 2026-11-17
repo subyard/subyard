@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shlex
 import shutil
 import signal
 import stat
@@ -23,7 +24,7 @@ import uuid
 
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
 ACTIVE_STATES = ('launching', 'running')
-RESUME_COMMAND = 'resume --dir DIR --task FILE'
+RESUME_COMMAND = 'resume --dir {} --task FILE'
 CLEANUP_UNVERIFIED = 'Cleanup unverified. Could not verify that the systemd user scope is empty or gone.'
 CODEX_SANDBOXES = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
                    'danger-full-access': 'dangerFullAccess'}
@@ -312,19 +313,10 @@ class Codex:
             return None
         info = error.get('codexErrorInfo')
         if info == 'modelNotFound':
-            fallback = 'Codex model was not found.'
-        elif info == 'badRequest' or error.get('code') in (-32600, -32602):
-            fallback = 'Codex rejected the request as invalid.'
-        else:
-            return None
-        message = error.get('message')
-        if isinstance(message, str):
-            message = message.strip()
-            # Provider responses can include raw bodies, endpoints, and headers.
-            if (0 < len(message) <= 512 and message.isprintable()
-                    and not re.search(r'[{}<>]|https?://', message, re.IGNORECASE)):
-                return self.w.redact(message)
-        return fallback
+            return 'Codex model was not found (modelNotFound).'
+        if info == 'badRequest' or error.get('code') in (-32600, -32602):
+            return 'Codex rejected the request as invalid (badRequest).'
+        return None
 
     def event(self, event):
         method = event.get('method')
@@ -350,7 +342,7 @@ class Codex:
         elif method in ('item/started', 'item/completed'):
             item = event['params']['item']
             if item['type'] == 'agentMessage' and method == 'item/completed':
-                self.w.message(item['text'], stage=method)
+                self.w.message(item['text'])
             elif item['type'] in ('commandExecution', 'fileChange', 'mcpToolCall'):
                 self.w.record('tool', tool=item['type'], status=item.get('status'), stage=method)
                 if method == 'item/started':
@@ -359,8 +351,9 @@ class Codex:
                     self.items.pop(item.get('id'), None)
         elif method == 'error':
             params = event['params']
-            if not params.get('willRetry') and (reason := self.error_message(params.get('error'))):
-                self.turn_error = (params['turnId'], reason)
+            turn_id = params.get('turnId')
+            if turn_id and not params.get('willRetry') and (reason := self.error_message(params.get('error'))):
+                self.turn_error = (turn_id, reason)
         elif method == 'turn/completed':
             turn = event['params']['turn']
             status = turn['status']
@@ -369,7 +362,7 @@ class Codex:
                 if not reason and self.turn_error and self.turn_error[0] == turn.get('id'):
                     reason = self.turn_error[1]
                 self.w.state['error'] = reason or 'Codex turn failed.'
-                self.w.record('error', message=self.w.state['error'], stage=method)
+                self.w.record('error', message=self.w.state['error'])
             self.w.outcome = {'completed': 'done', 'interrupted': 'interrupted', 'failed': 'failed'}[status]
         elif method == 'thread/tokenUsage/updated':
             self.w.tokens = event['params']['tokenUsage']
@@ -476,9 +469,9 @@ class Worker:
         fields = {key: self.redact(value) if isinstance(value, str) else value for key, value in fields.items()}
         record_event(self.root, kind, **fields)
 
-    def message(self, text, **fields):
+    def message(self, text):
         self.answers.append(text)
-        self.record('message', text=text, **fields)
+        self.record('message', text=text)
 
     def send(self, event, sent=None):
         if not self.outgoing:
@@ -672,12 +665,13 @@ def scope_command(*args):
                           capture_output=True, text=True, timeout=10)
 
 
-def scope_stopped(root, state):
+def scope_stopped(root, state, *, terminate=False):
     scope = state.get('scope')
     if not scope or scope != 'subyard-bridge-' + turn_dir(root, state).name + '.scope':
         return False
     try:
-        scope_command('stop', scope)
+        if terminate:
+            scope_command('stop', scope)
         result = scope_command('show', '--property=LoadState,ActiveState,ControlGroup', scope)
         properties = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
         if result.returncode != 0 or properties.get('ActiveState') not in ('inactive', 'failed'):
@@ -715,7 +709,7 @@ def recover(root, state, deadline, stopped=False):
         if not state.get('result_file') and not publish_failure(root, state, deadline):
             print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
             return False
-        if stopped or scope_stopped(root, state):
+        if stopped or scope_stopped(root, state, terminate=True):
             for path in (turn_dir(root, state) / 'approvals').iterdir():
                 if path.suffix in ('.json', '.reply'):
                     path.unlink(missing_ok=True)
@@ -806,7 +800,7 @@ def stop(root, deadline):
     lock = lock_until(lock_path, deadline)
     forced = lock is None
     if forced:
-        if not scope_stopped(root, state):
+        if not scope_stopped(root, state, terminate=True):
             print(CLEANUP_UNVERIFIED, file=sys.stderr)
             return snapshot(root), 1
         lock = lock_until(lock_path, deadline)
@@ -823,18 +817,18 @@ def stop(root, deadline):
     return state, 0 if recovered else 1
 
 
-def worker_view(state):
-    if state['status'] == 'done' and state.get('cleanup') == 'unverified':
-        return {**state, 'cleanup': 'pending_stop'}
+def worker_view(root, state):
+    if state['status'] in EXIT_CODES:
+        state['cleanup'] = 'verified' if scope_stopped(root, state) else 'unverified'
     return state
 
 
 def print_worker_table(workers):
     columns = ('name', 'vendor', 'status', 'cleanup', 'dir')
     rows = [tuple(column.upper() for column in columns)]
-    for state in map(worker_view, workers):
-        rows.append(tuple(str(state.get(column, '-')).replace('\n', r'\n').replace('\r', r'\r')
-                          for column in columns))
+    for state in workers:
+        rows.append(tuple(''.join(char if char.isprintable() else repr(char)[1:-1]
+                                  for char in str(state.get(column, '-'))) for column in columns))
     widths = [max(map(len, column)) for column in zip(*rows)]
     for row in rows:
         print('  '.join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip())
@@ -883,7 +877,7 @@ def parse_args():
                                  help='explicit native CLI path (otherwise /usr/local/bin, then PATH)')
             command.epilog = 'Pass native vendor arguments after --.'
         if name == 'resume':
-            command.epilog = f'Run {RESUME_COMMAND}.'
+            command.epilog = f'Run {RESUME_COMMAND.format("DIR")}.'
         if name == 'send':
             command.add_argument('--message', help='send text; defaults to stdin')
         if name == 'tail':
@@ -902,6 +896,15 @@ def parse_args():
     return args, vendor_args
 
 
+def require_active_turn(root, state):
+    if state.get('status') in ACTIVE_STATES:
+        return
+    if state.get('session_id'):
+        command = RESUME_COMMAND.format(shlex.quote(str(root)))
+        raise BridgeError(f'send requires an active turn. To continue a finished or stopped worker, use {command}.')
+    raise BridgeError('send requires an active turn. This worker has no session ID. Start a new worker in a new --dir.')
+
+
 def main():
     args, vendor_args = parse_args()
     if args.command == 'list':
@@ -914,10 +917,10 @@ def main():
                 if not stat.S_ISREG(path.lstat().st_mode):
                     continue
                 directory(path.parent, create=False)
-                state = snapshot(path.parent)
+                state = worker_view(path.parent, snapshot(path.parent))
                 workers.append({'dir': str(path.parent), **state})
             except (OSError, ValueError, KeyError):
-                workers.append({'dir': str(path.parent), 'status': 'failed'})
+                workers.append({'dir': str(path.parent), 'status': 'failed', 'cleanup': 'unverified'})
         if args.json:
             print(json.dumps(workers))
         else:
@@ -985,10 +988,10 @@ def main():
         return 0
     if args.command == 'wait':
         state, code = wait(root, time.monotonic() + args.timeout)
-        print(json.dumps(state))
+        print(json.dumps(worker_view(root, state)))
         return code
     if args.command == 'status':
-        print(json.dumps(worker_view(snapshot(root))))
+        print(json.dumps(worker_view(root, snapshot(root))))
         return 0
     if args.command == 'tail':
         if args.n < 0:
@@ -1015,18 +1018,15 @@ def main():
         print(json.dumps(requests))
         return 0
     if args.command == 'send':
-        hint = f'send requires an active turn. To continue a finished or stopped worker, use {RESUME_COMMAND}.'
-        original = snapshot(root) if (root / 'state').exists() else None
-        if original is None or original['status'] not in ACTIVE_STATES:
-            raise BridgeError(hint)
+        original = snapshot(root)
+        require_active_turn(root, original)
         if args.message is None and sys.stdin.isatty():
             raise BridgeError('send requires --message or piped stdin')
         message = args.message if args.message is not None else sys.stdin.read()
         lock = lock_until(root / 'inbox.lock', time.monotonic() + args.timeout)
         with lock if lock is not None else nullcontext():
             current = snapshot(root)
-            if current['status'] not in ACTIVE_STATES:
-                raise BridgeError(hint)
+            require_active_turn(root, current)
             if current['generation'] != original['generation']:
                 raise BridgeError('send refused because the active turn changed before enqueueing the message.')
             if lock is None:
