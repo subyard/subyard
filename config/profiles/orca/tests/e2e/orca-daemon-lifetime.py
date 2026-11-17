@@ -13,11 +13,11 @@ def output(*command):
     return subprocess.check_output(command, text=True).strip()
 
 
-def identity(pid):
+def identity(pid, proc=Path("/proc")):
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        fields = (proc / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
         return {"pid": int(pid), "start": fields[19], "parent": int(fields[1]),
-                "cgroup": Path(f"/proc/{pid}/cgroup").read_text().strip()}
+                "cgroup": (proc / str(pid) / "cgroup").read_text().strip()}
     except FileNotFoundError:
         return None
 
@@ -47,23 +47,62 @@ def placement_diagnostics(uid, pty):
         print(f"orca-resource: $ {' '.join(command)} (exit {result.returncode})\n{result.stdout}", file=sys.stderr)
 
 
-def check_boot_placement(uid):
+def check_boot_placement(uid, proc=Path("/proc"), runtime=Path("/srv/agents/orca/config/orca/daemon")):
     """The service must start after the user manager, or the daemon stays in the service."""
     deadline = time.monotonic() + 60
-    while True:
-        for path in Path("/proc").glob("[0-9]*/cmdline"):
+    boot_id = (proc / "sys/kernel/random/boot_id").read_text().strip()
+    while time.monotonic() < deadline:
+        for path in sorted(runtime.glob("daemon-v[0-9]*.pid")):
             try:
-                command = path.read_bytes()
-            except OSError:
+                record = json.loads(path.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
                 continue
-            if b"daemon-entry" in command and b"/srv/agents/orca/" in command:
-                daemon = identity(path.parent.name)
-                assert daemon and re.search(r"/user@" + str(uid) + r"\.service/(?:[^/]+/)*orca-daemon-[^/]+\.scope$",
-                                            daemon["cgroup"]), f"daemon placed outside its scope after boot: {daemon}"
-                print(f"orca-resource: lifetime boot: daemon={daemon['pid']} in its scope")
-                return
-        assert time.monotonic() < deadline, "Orca daemon did not start after boot"
+            if not isinstance(record, dict) or record.get("bootId") != boot_id:
+                continue
+            pid = record.get("pid")
+            if type(pid) is not int or pid <= 0:
+                continue
+            daemon = identity(pid, proc)
+            if daemon is None or daemon["start"] != record.get("linuxStartTicks"):
+                continue
+            assert re.search(r"/user@" + str(uid) + r"\.service/(?:[^/]+/)*orca-daemon-[^/]+\.scope$",
+                             daemon["cgroup"]), f"daemon placed outside its scope after boot: {daemon}"
+            print(f"orca-resource: lifetime boot: daemon={pid} in its scope")
+            return
         time.sleep(0.5)
+    raise AssertionError("Orca daemon did not publish a live PID record after boot")
+
+
+def test_boot_placement():
+    from tempfile import TemporaryDirectory
+    from unittest import TestCase
+    from unittest.mock import patch
+
+    with TemporaryDirectory(dir="/tmp") as tmp:
+        proc = Path(tmp) / "proc"
+        boot_id = proc / "sys/kernel/random/boot_id"
+        boot_id.parent.mkdir(parents=True)
+        boot_id.write_text("current-boot\n")
+        process = proc / "42"
+        process.mkdir()
+        (process / "stat").write_text("42 (systemd-run) S " + "1 " * 18 + "123\n")
+        (process / "cmdline").write_bytes(b"systemd-run\0--scope\0/srv/agents/orca/daemon-entry\0")
+        cgroup = process / "cgroup"
+        service = "0::/system.slice/subyard-orca.service"
+        cgroup.write_text(service)
+        pid_file = Path(tmp) / "daemon-v56.pid"
+
+        def publish(_delay):
+            cgroup.write_text("0::/user.slice/user-1000.slice/user@1000.service/orca-daemon-test.scope")
+            pid_file.write_text(json.dumps({"pid": 42, "bootId": "current-boot", "linuxStartTicks": "123"}))
+
+        with patch.object(time, "sleep", side_effect=publish) as sleep:
+            check_boot_placement(1000, proc, Path(tmp))
+            sleep.assert_called_once()
+        cgroup.write_text(service)
+        with patch.object(time, "sleep", side_effect=AssertionError("ready daemon was retried")):
+            with TestCase().assertRaisesRegex(AssertionError, "daemon placed outside its scope.*system.slice"):
+                check_boot_placement(1000, proc, Path(tmp))
 
 
 def main():
@@ -121,4 +160,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["self-test"]:
+        test_boot_placement()
+    else:
+        main()
