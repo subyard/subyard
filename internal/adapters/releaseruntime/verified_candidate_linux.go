@@ -461,7 +461,7 @@ func (runtime *Runtime) runVerifiedCandidate(
 	grant releasetransition.Authorization,
 ) error {
 	return runtime.runVerifiedRuntimeEngine(
-		ctx, candidate, candidate, runtimeRoot, arguments, stdin, stdout, grant,
+		ctx, candidate, candidate, runtimeRoot, arguments, stdin, stdout, grant, nil,
 	)
 }
 
@@ -473,6 +473,7 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	stdin io.Reader,
 	stdout io.Writer,
 	grant releasetransition.Authorization,
+	transitionLock *os.File,
 ) error {
 	if assets == nil || assets.root == nil || engine == nil || engine.engine == nil {
 		return errors.New("verified published runtime is unavailable")
@@ -516,7 +517,7 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	command.Args[0] = "yard-engine"
 	command.ExtraFiles = extra
 	repositoryRoot := fmt.Sprintf("/proc/self/fd/%d", rootChildFD)
-	if runtime.pinnedCandidateRoot != nil &&
+	if transitionLock == nil && runtime.pinnedCandidateRoot != nil &&
 		runtime.pinnedCandidateRelease == assets.candidate.release {
 		repositoryRoot = fmt.Sprintf(
 			"/proc/%d/fd/%d", os.Getpid(), runtime.pinnedCandidateRoot.Fd(),
@@ -527,6 +528,10 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 	)
 	if grant != "" {
 		command.Env = append(command.Env, "SUBYARD_RELEASE_TRANSITION_GRANT_FD=3")
+	}
+	if transitionLock != nil {
+		command.Env = append(command.Env, fmt.Sprintf("SUBYARD_RELEASE_TRANSITION_LOCK_FD=%d", 3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, transitionLock)
 	}
 	home := runtime.config.Inputs.value("SUBYARD_HOME", runtime.config.Context)
 	if home == "" {
@@ -596,7 +601,7 @@ func (runtime *Runtime) invokeVerifiedRuntimeTransition(
 	var stdout boundedResponseBuffer
 	if err := runtime.runVerifiedRuntimeEngine(
 		ctx, assets, engine, request.RuntimeRoot, []string{"_release-transition"},
-		bytes.NewReader(append(payload, '\n')), &stdout, grant,
+		bytes.NewReader(append(payload, '\n')), &stdout, grant, nil,
 	); err != nil {
 		return releasetransition.ProcessResponse{},
 			fmt.Errorf("candidate release transition failed: %w", err)

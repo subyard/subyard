@@ -6,6 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -23,17 +26,21 @@ func (cli *CLI) runRollbackTargetProcess(ctx context.Context, payload []byte, ou
 		cli.errorf("rollback target assets: %v", err)
 		return 1
 	}
-	expectedAuthorization, err := readReleaseTransitionGrant()
-	if err != nil {
-		cli.errorf("rollback target authorization channel is invalid")
-		return 2
-	}
 	if !domain.SafeID(cli.ensureOperationID()) {
 		cli.errorf("rollback target operation context is invalid")
 		return 2
 	}
 	actorRequest := releasetransition.ProcessRequest{SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect, RuntimeRoot: request.RuntimeRoot, ConfigHome: request.ConfigHome, Yard: request.Yard, Target: request.Releases.Target, Direction: releasetransition.DirectionActivatePrevious, ArtifactDigest: request.TargetArtifact, RegistryDigest: request.TargetRegistry, InheritedSettingIDs: request.InheritedSettingIDs}
+	var lock *os.File
 	if request.Execution != nil {
+		fd, err := strconv.Atoi(os.Getenv("SUBYARD_RELEASE_TRANSITION_LOCK_FD"))
+		if err != nil || fd < 3 || fd > 1<<31-1 {
+			cli.errorf("rollback target transition lock descriptor is invalid")
+			return 2
+		}
+		unix.CloseOnExec(fd)
+		lock = os.NewFile(uintptr(fd), "inherited release transition lock")
+		defer lock.Close()
 		actorRequest.Mode = releasetransition.ProcessConverge
 		if err := releaseruntime.CheckSourcePolicy(ctx, actorRequest); err != nil {
 			cli.errorf("rollback target source policy: %v", err)
@@ -57,10 +64,8 @@ func (cli *CLI) runRollbackTargetProcess(ctx context.Context, payload []byte, ou
 		OperatorHome: os.Getenv("SUBYARD_OPERATOR_HOME"), CandidateConfigDir: filepath.Join(cli.options.RepositoryRoot, "config"), CandidateVersion: Version,
 		RegistryPayload: registry, ArtifactDigest: request.TargetArtifact, RollbackTarget: &releasetransition.RollbackTarget{Version: version, RegistryDigest: request.TargetRegistry},
 		Reconcilers: reconcilers, OwnerRegistration: registration, InheritedSettingIDs: request.InheritedSettingIDs,
-		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
-		VerifyAuthorization: func(_ releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
-			return expectedAuthorization != "" && authorization == expectedAuthorization
-		},
+		ObserveLinks:        func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
+		VerifyAuthorization: func(releasetransition.PlanToken, releasetransition.Authorization) bool { return false },
 	}
 	if owner, ok := registration.(interface {
 		registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string)
@@ -82,7 +87,7 @@ func (cli *CLI) runRollbackTargetProcess(ctx context.Context, payload []byte, ou
 		}
 		response = releasetransition.RollbackTargetResponse{SchemaVersion: releasetransition.RollbackTargetProcessSchemaV1, Inspection: &inspection}
 	} else {
-		response, err = transition.ConvergeRollbackTargetActivation(ctx, request)
+		response, err = transition.ConvergeRollbackTargetActivation(ctx, request, lock)
 		if err != nil {
 			cli.errorf("rollback target activation: %v", err)
 			return 1

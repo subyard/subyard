@@ -151,7 +151,7 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 		processRuntime.config.Stderr = io.Discard
 	}
 	if err := processRuntime.runVerifiedRuntimeEngine(ctx, owner, owner, runtimeRoot, []string{"_release-transition"},
-		bytes.NewReader(append(payload, '\n')), &stdout, grant); err != nil {
+		bytes.NewReader(append(payload, '\n')), &stdout, grant, nil); err != nil {
 		return releasetransition.RecoveryProcessResponse{}, fmt.Errorf("verified recovery process failed: %w", err)
 	}
 	response, err := releasetransition.ParseRecoveryProcessResponse(stdout.Bytes())

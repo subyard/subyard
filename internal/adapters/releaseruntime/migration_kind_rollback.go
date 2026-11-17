@@ -71,7 +71,7 @@ func migrationKindRollbackFindings(target *verifiedPublishedCandidate, source, r
 		if published {
 			findings = append(findings, fmt.Sprintf("release %s does not know migration %s (kind %s); %s; rollback is incompatible", target.version, migration.ID, migration.Kind, state))
 		} else {
-			findings = append(findings, fmt.Sprintf("migration %s (kind %s): rollback compatibility with retained release %s cannot be established from its verified artifact; its registry is not a complete capability declaration", migration.ID, migration.Kind, target.version))
+			findings = append(findings, fmt.Sprintf("migration %s (kind %s): %s; rollback compatibility with retained release %s cannot be established from its verified artifact; its registry is not a complete capability declaration", migration.ID, migration.Kind, state, target.version))
 		}
 	}
 	return findings

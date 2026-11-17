@@ -836,6 +836,16 @@ func (store *POSIXV2Store) readTransactionGraph() (*v2TransactionGraph, error) {
 // v1. It is a convergence-only operation and may create the protected lock
 // directory and file.
 func (store *POSIXV2Store) Lock() (func(), error) {
+	file, err := store.OpenTransitionLock()
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = file.Close() }, nil
+}
+
+// OpenTransitionLock returns the locked open file description for delegation.
+// Close each reference to release it. An explicit unlock releases every copy.
+func (store *POSIXV2Store) OpenTransitionLock() (*os.File, error) {
 	if store == nil {
 		return nil, errors.New("release transition store is required")
 	}
@@ -869,10 +879,7 @@ func (store *POSIXV2Store) Lock() (func(), error) {
 		return nil, err
 	}
 	closeOnError = false
-	return func() {
-		_ = unix.Flock(fd, unix.LOCK_UN)
-		_ = unix.Close(fd)
-	}, nil
+	return os.NewFile(uintptr(fd), "release transition update.lock"), nil
 }
 
 func (store *POSIXV2Store) compareAndSwap(

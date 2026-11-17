@@ -80,13 +80,15 @@ func TestMigrationKindRollbackReportsAppliedState(t *testing.T) {
 	source := releasetransition.RegistryV2{Migrations: []releasetransition.MigrationDefinitionV2{{ID: "guard", Kind: "nm-device-guard-v1", Domain: "power-metadata", FromEpoch: 3, ToEpoch: 4}}}
 	for _, epoch := range []int{3, 4} {
 		ledger := releasetransition.LedgerV2{Domains: map[string]releasetransition.DomainLedgerV2{"power-metadata": {Epoch: epoch}}}
-		findings := migrationKindRollbackFindings(target, source, releasetransition.RegistryV2{}, &ledger)
 		want := "the registration has not been applied"
 		if epoch == 4 {
 			want = "the migration is applied"
 		}
-		if len(findings) != 1 || !strings.Contains(findings[0], want) {
-			t.Fatalf("epoch %d: %q", epoch, findings)
+		for _, candidate := range []*verifiedPublishedCandidate{target, {version: target.version}} {
+			findings := migrationKindRollbackFindings(candidate, source, releasetransition.RegistryV2{}, &ledger)
+			if len(findings) != 1 || !strings.Contains(findings[0], want) {
+				t.Fatalf("epoch %d: %q", epoch, findings)
+			}
 		}
 	}
 }

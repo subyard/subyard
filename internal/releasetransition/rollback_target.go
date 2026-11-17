@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
+	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -148,8 +152,8 @@ func (request RollbackTargetRequest) Validate() error {
 		if err := validatePlanToken(request.Execution.Plan); err != nil {
 			return err
 		}
-		if err := validateText(string(request.Execution.Authorization), "rollback authorization", maxDiagnosticText, true); err != nil {
-			return err
+		if request.Execution.Authorization != "" {
+			return invalid("rollback target execution uses the protected journal authorization")
 		}
 	} else if request.Plan != nil {
 		return invalid("rollback target inspection carries an execution plan")
@@ -248,9 +252,15 @@ func (transition *V2Transition) InspectRollbackTargetActivation(ctx context.Cont
 	return RollbackActivationInspection{Plan: plan, Blockers: slices.Clone(observation.blockers)}, nil
 }
 
-// ConvergeRollbackTargetActivation holds no second lock and writes no journal,
-// ledger, checkpoint, or links. S supplies the grant and owns durable progress.
-func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Context, request RollbackTargetRequest) (RollbackTargetResponse, error) {
+// ConvergeRollbackTargetActivation runs under S's already-held transition lock.
+// The caller owns the lock reference and keeps it open until convergence returns.
+func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Context, request RollbackTargetRequest, lock *os.File) (RollbackTargetResponse, error) {
+	if transition == nil {
+		return RollbackTargetResponse{}, invalid("rollback target transition is required")
+	}
+	if err := transition.store.checkInheritedTransitionLock(lock); err != nil {
+		return RollbackTargetResponse{}, err
+	}
 	inspected, err := transition.InspectRollbackTargetActivation(ctx, request)
 	if err != nil {
 		return RollbackTargetResponse{}, err
@@ -304,8 +314,15 @@ func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Con
 			bound = true
 		}
 	}
-	if !bound || fingerprintPayload([]byte(request.Execution.Authorization)) != journal.AuthorizationDigest || !transition.options.VerifyAuthorization(request.Execution.Plan, request.Execution.Authorization) {
-		return RollbackTargetResponse{}, invalid("rollback activation grant is not bound to S's journal")
+	if !bound || journal.AuthorizationDigest == fingerprintPayload(nil) {
+		return RollbackTargetResponse{}, invalid("rollback activation plan is not authorized by S's journal")
+	}
+	links, err := transition.options.ObserveLinks(ctx)
+	if err != nil {
+		return RollbackTargetResponse{}, err
+	}
+	if !activatedReleaseLinks(links, journal.Releases) {
+		return RollbackTargetResponse{}, invalid("rollback activation requires the switched release links")
 	}
 	state, err := transition.store.ReadMigrationLedger(transition.registry, transition.registryDigest)
 	if err != nil {
@@ -346,7 +363,7 @@ func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Con
 	if err != nil {
 		return RollbackTargetResponse{}, err
 	}
-	links, err := transition.options.ObserveLinks(ctx)
+	links, err = transition.options.ObserveLinks(ctx)
 	if err != nil {
 		return RollbackTargetResponse{}, err
 	}
@@ -359,6 +376,47 @@ func (transition *V2Transition) ConvergeRollbackTargetActivation(ctx context.Con
 	}
 	completion := RollbackTargetCompletion{RollbackTargetContractV1, journal.Transaction, journal.IntentDigest, token, transition.registryDigest, request.TargetArtifact, final.AuthoritySnapshot.Fingerprint, request.Projection, history}
 	return RollbackTargetResponse{SchemaVersion: RollbackTargetProcessSchemaV1, Completion: &completion}, nil
+}
+
+func (store *POSIXV2Store) checkInheritedTransitionLock(file *os.File) error {
+	if file == nil {
+		return invalid("rollback activation requires S's inherited transition lock")
+	}
+	fd := int(file.Fd())
+	if err := validateProtectedFileFD(fd, false); err != nil {
+		return err
+	}
+	parent, present, err := store.openParent([]string{"migrations"}, false)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return invalid("rollback transition lock parent is missing")
+	}
+	defer unix.Close(parent)
+	var inherited, current unix.Stat_t
+	if err := unix.Fstat(fd, &inherited); err != nil {
+		return err
+	}
+	if err := unix.Fstatat(parent, "update.lock", &current, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return err
+	}
+	if inherited.Dev != current.Dev || inherited.Ino != current.Ino {
+		return invalid("inherited rollback transition lock belongs to another inode")
+	}
+	// Linux reports flock ownership per open file description, including on
+	// inherited descriptors. Acquiring here would also accept an unlocked file.
+	info, err := os.ReadFile(fmt.Sprintf("/proc/self/fdinfo/%d", fd))
+	if err != nil {
+		return err
+	}
+	for line := range strings.SplitSeq(string(info), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 5 && fields[0] == "lock:" && fields[2] == "FLOCK" && fields[3] == "ADVISORY" && fields[4] == "WRITE" {
+			return nil
+		}
+	}
+	return invalid("inherited rollback transition lock is not held exclusively")
 }
 
 func ParseRollbackTargetResponse(payload []byte) (RollbackTargetResponse, error) {

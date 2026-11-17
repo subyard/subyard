@@ -22,6 +22,8 @@ type Inputs struct {
 	Releases                       rt.ReleasePair
 	SourceArtifact, TargetArtifact rt.Fingerprint
 	SourceRegistry, TargetRegistry []byte
+	Inspect                        func(rt.RollbackTargetRequest) rt.RollbackActivationInspection
+	Activate                       func(rt.RollbackTargetRequest) rt.RollbackTargetResponse
 }
 
 type artifact struct {
@@ -44,8 +46,12 @@ func Seed(t testing.TB, inputs Inputs) rt.JournalRecord {
 	}
 	native := rt.BaselineLedgerV2(registry)
 	pending, err := registry.PendingPath(native)
-	if err != nil || len(pending) != 0 {
-		t.Fatal("rollback fixture requires a complete baseline target registry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range pending {
+		prior := native.Domains[migration.Domain]
+		native.Domains[migration.Domain] = rt.DomainLedgerV2{Epoch: migration.ToEpoch, Applied: append(prior.Applied, migration.ID)}
 	}
 	store, err := rt.NewPOSIXV2Store(inputs.ConfigHome)
 	if err != nil {
@@ -73,19 +79,27 @@ func Seed(t testing.TB, inputs Inputs) rt.JournalRecord {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transition, err := rt.NewV2Transition(rt.V2Options{ConfigHome: inputs.ConfigHome, RegistryPayload: inputs.TargetRegistry, ArtifactDigest: inputs.TargetArtifact,
-		Releases: inputs.Releases, Direction: rt.DirectionActivatePrevious, RollbackTarget: &rt.RollbackTarget{Version: "0.30.0", RegistryDigest: digest},
-		ObserveLinks: func(context.Context) (rt.ReleaseLinks, error) {
-			return rt.ReleaseLinks{Active: inputs.Releases.Target, Previous: &inputs.Releases.From}, nil
-		},
-		VerifyAuthorization: func(_ rt.PlanToken, authorization rt.Authorization) bool { return authorization == "fixture-grant" },
-	})
-	if err != nil {
-		t.Fatal(err)
+	var transition *rt.V2Transition
+	if inputs.Inspect == nil || inputs.Activate == nil {
+		transition, err = rt.NewV2Transition(rt.V2Options{ConfigHome: inputs.ConfigHome, RegistryPayload: inputs.TargetRegistry, ArtifactDigest: inputs.TargetArtifact,
+			Releases: inputs.Releases, Direction: rt.DirectionActivatePrevious, RollbackTarget: &rt.RollbackTarget{Version: "0.30.0", RegistryDigest: digest},
+			ObserveLinks: func(context.Context) (rt.ReleaseLinks, error) {
+				return rt.ReleaseLinks{Active: inputs.Releases.Target, Previous: &inputs.Releases.From}, nil
+			},
+			VerifyAuthorization: func(_ rt.PlanToken, authorization rt.Authorization) bool { return authorization == "fixture-grant" },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	request := rt.RollbackTargetRequest{SchemaVersion: 3, Mode: "activate-under-v2", RuntimeRoot: inputs.RuntimeRoot, ConfigHome: inputs.ConfigHome, Releases: inputs.Releases,
 		SourceArtifact: inputs.SourceArtifact, SourceRegistry: fingerprint(inputs.SourceRegistry), TargetArtifact: inputs.TargetArtifact, TargetRegistry: digest, Projection: state.ProjectionSnapshot.Fingerprint, NativeHistory: &native}
-	inspection, err := transition.InspectRollbackTargetActivation(context.Background(), request)
+	var inspection rt.RollbackActivationInspection
+	if inputs.Inspect == nil {
+		inspection, err = transition.InspectRollbackTargetActivation(context.Background(), request)
+	} else {
+		inspection = inputs.Inspect(request)
+	}
 	if err != nil || len(inspection.Blockers) != 0 {
 		t.Fatalf("fixture target inspection: %+v, %v", inspection, err)
 	}
@@ -162,10 +176,23 @@ func Seed(t testing.TB, inputs Inputs) rt.JournalRecord {
 		t.Fatal(err)
 	}
 	request.Journal, request.Plan = selected.Fingerprint, &inspection.Plan
-	request.Execution = &rt.Execution{Plan: inspection.Plan.Token, Authorization: "fixture-grant"}
-	response, err := transition.ConvergeRollbackTargetActivation(context.Background(), request)
-	if err != nil || response.Completion == nil {
-		t.Fatalf("fixture target activation: %+v, %v", response, err)
+	request.Execution = &rt.Execution{Plan: inspection.Plan.Token}
+	var response rt.RollbackTargetResponse
+	if inputs.Activate == nil {
+		lock, err := store.OpenTransitionLock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Close()
+		response, err = transition.ConvergeRollbackTargetActivation(context.Background(), request, lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		response = inputs.Activate(request)
+	}
+	if response.Completion == nil {
+		t.Fatalf("fixture target activation: %+v", response)
 	}
 	journal.Checkpoint = rt.JournalComplete
 	payload, err = rt.MarshalJournal(journal)

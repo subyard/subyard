@@ -1,8 +1,11 @@
 package releaseruntime
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +14,31 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
+
+// InvokeRollbackTarget assesses or activates the sealed target. On execution,
+// the source passes its transition lock and the plan bound to its journal.
+func (runtime *Runtime) InvokeRollbackTarget(ctx context.Context, request releasetransition.RollbackTargetRequest, lock *os.File) (releasetransition.RollbackTargetResponse, error) {
+	if err := request.Validate(); err != nil {
+		return releasetransition.RollbackTargetResponse{}, err
+	}
+	if request.Mode != "activate-under-v2" || (request.Execution != nil) != (lock != nil) {
+		return releasetransition.RollbackTargetResponse{}, errors.New("rollback target execution requires a transition lock")
+	}
+	target, err := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: request.Releases.Target, root: filepath.Join(request.RuntimeRoot, "releases", string(request.Releases.Target))}, request.RuntimeRoot, &request.TargetArtifact)
+	if err != nil {
+		return releasetransition.RollbackTargetResponse{}, err
+	}
+	defer target.Close()
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return releasetransition.RollbackTargetResponse{}, err
+	}
+	var output boundedResponseBuffer
+	if err := runtime.runVerifiedRuntimeEngine(ctx, target, target, request.RuntimeRoot, []string{"_release-transition"}, bytes.NewReader(payload), &output, "", lock); err != nil {
+		return releasetransition.RollbackTargetResponse{}, fmt.Errorf("retained rollback target failed: %w", err)
+	}
+	return releasetransition.ParseRollbackTargetResponse(output.Bytes())
+}
 
 // VerifyRollbackTargetAssets checks both sealed endpoints before R constructs
 // activation adapters. Structural source provenance grants no execution support.
@@ -26,6 +54,7 @@ func VerifyRollbackTargetAssets(ctx context.Context, repositoryRoot string, requ
 	source, sourceErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: request.Releases.From, root: filepath.Join(request.RuntimeRoot, "releases", string(request.Releases.From))}, request.RuntimeRoot, &request.SourceArtifact)
 	target, targetErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: request.Releases.Target, root: filepath.Join(request.RuntimeRoot, "releases", string(request.Releases.Target))}, request.RuntimeRoot, &request.TargetArtifact)
 	refusals := []error{sourceErr, targetErr}
+	var sourceRegistry *releasetransition.RegistryV2
 	if source != nil {
 		defer source.Close()
 		if !strings.HasPrefix(string(source.candidate.release), source.version+"-") {
@@ -37,8 +66,10 @@ func VerifyRollbackTargetAssets(ctx context.Context, repositoryRoot string, requ
 		payload, readErr := readRollbackRegistryPayload(source)
 		if readErr != nil {
 			refusals = append(refusals, readErr)
-		} else if _, digest, parseErr := releasetransition.ParseRegistryV2Provenance(payload); parseErr != nil || digest != source.registryDigest {
+		} else if registry, digest, parseErr := releasetransition.ParseRegistryV2Provenance(payload); parseErr != nil || digest != source.registryDigest {
 			refusals = append(refusals, errors.New("rollback source registry has invalid structural provenance"))
+		} else {
+			sourceRegistry = &registry
 		}
 	}
 	if target != nil {
@@ -64,6 +95,9 @@ func VerifyRollbackTargetAssets(ctx context.Context, repositoryRoot string, requ
 			if parseErr != nil || digest != target.registryDigest {
 				refusals = append(refusals, errors.New("rollback target registry is not executable by this target"))
 			} else {
+				if sourceRegistry != nil {
+					refusals = append(refusals, releasetransition.CheckRollbackTargetPrefixes(*sourceRegistry, registry))
+				}
 				pending, historyErr := registry.PendingPath(*request.NativeHistory)
 				if historyErr != nil || len(pending) != 0 {
 					refusals = append(refusals, errors.New("rollback target preview is not complete native history"))

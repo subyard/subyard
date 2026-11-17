@@ -2238,6 +2238,7 @@ func releaseMigrationEnvironment(
 	environment := inputs.environment(context)
 	delete(environment, "YARD_ENGINE_PATH")
 	delete(environment, "SUBYARD_RELEASE_TRANSITION_GRANT_FD")
+	delete(environment, "SUBYARD_RELEASE_TRANSITION_LOCK_FD")
 	environment["SUBYARD_REPOSITORY_ROOT"] = repositoryRoot
 	environment["YARD_RUNTIME_ROOT"] = runtimeRoot
 	environment["SUBYARD_INTERNAL_MIGRATION_CHILD"] = "1"
