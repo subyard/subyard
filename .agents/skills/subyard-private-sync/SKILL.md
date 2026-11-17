@@ -1,9 +1,13 @@
 ---
 name: subyard-private-sync
-description: Commit, rebase and push the private planning overlay in private/ when it exists. Use after editing private task files, before the final answer, before removing a worktree, and when asked to sync the private repo.
+description: "Manual only: run when the operator explicitly invokes it; never invoke on your own. Commit, rebase and push the private planning overlay in private/."
+disable-model-invocation: true
 ---
 
 # Private overlay sync
+
+Run only on explicit operator invocation, never automatically after edits, at handoff
+or before worktree removal.
 
 `private/` is a separate Git repository without branches or pull requests: commit to its
 default branch, rebase, push. Its `AGENTS.md` lists *decision* changes that need the
@@ -27,5 +31,5 @@ operator's approval; everything else you changed is *progress*.
    and ask. Never `--force` or rewrite pushed history.
 6. Report what was pushed, what awaits approval and what was left for others.
 
-Run this skill before removing a worktree that contains `private/`: `git worktree remove`
-deletes it silently, including unpushed commits.
+Before removing a worktree containing `private/`, have the operator invoke this skill
+manually: `git worktree remove` deletes it silently, including unpushed commits.

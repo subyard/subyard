@@ -7,7 +7,8 @@ description: Inspect disk usage and clean explicitly disposable caches, or recre
 Soft cleanup removes only profile-declared `CLEANUP_CACHES`, preserving roots,
 permissions and nested mounts without following symlinks. Toolchains are not caches.
 
-For manual deletion, use a literal path or an empty-safe variable (`rm -rf -- "${dir:?}"/*`).
+Before manual deletion, identify the directory's owner and purpose; path checks do not prove disposability.
+Use a literal path or an empty-safe variable (`rm -rf -- "${dir:?}"/*`).
 For command-substituted paths, verify exactly one existing directory before deletion;
 never infer safety from name/age/size or delete `/tmp` wholesale.
 

@@ -30,9 +30,11 @@ Do not rely on umask for exact file modes. Preserve permission validation; use
 
 ## Private overlay
 An operator may keep private rules, task plans and notes in `private/`, a separate repository
-ignored here. If `private/AGENTS.md` exists, read and follow it in addition to this file and sync
-`private/` only with [subyard-private-sync](.agents/skills/subyard-private-sync/SKILL.md). If it is
-missing and no other instructions say where task plans and notes live, ask the operator.
+ignored here. If `private/AGENTS.md` exists, read and follow it in addition to this file.
+The operator runs [subyard-private-sync](.agents/skills/subyard-private-sync/SKILL.md)
+manually to sync `private/`; agents must never invoke it on their own.
+If the overlay is missing and no other instructions say where task plans and notes live,
+ask the operator.
 
 @private/AGENTS.md
 
