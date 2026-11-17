@@ -44,14 +44,15 @@ class SourceAnchorRefusalTest(unittest.TestCase):
         verify = module['verify_source_anchor_refusal']
         for failure in ('none', 'success', 'guidance', 'config', 'data', 'link', 'installer-config', 'installer-journal', 'check-json'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
-                root = Path(temporary)
+                root = Path(temporary)/'fixture'
+                root.mkdir()
                 config, runtime = root/'config', root/'runtime'
                 config.mkdir(); runtime.mkdir()
                 retained, marker = config/'settings.env', root/'project-data'
                 retained.write_text('operator settings'); marker.write_text('project data')
                 (runtime/'current').symlink_to('releases/source')
-                fixture = SimpleNamespace(config=config, runtime=runtime, project_marker=marker,
-                    retained=retained, retained_hash=module['digest'](retained), env={},
+                fixture = SimpleNamespace(root=root, config=config, runtime=runtime, project_marker=marker,
+                    retained=retained, retained_hash=module['digest'](retained), env={'PATH': '/usr/bin:/bin'},
                     version='0.29.0', baseline_version='0.11.0', old_launcher=root/'old-yard')
                 calls = []
                 def run(command, environment, timeout):
