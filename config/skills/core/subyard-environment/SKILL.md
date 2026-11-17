@@ -3,7 +3,7 @@ name: subyard-environment
 description: Inspect this Subyard yard's runtime version, selected profiles, and capability guidance.
 ---
 
-You work in a Subyard yard, an isolated development guest. From any project, run:
+Read this yard's offline runtime snapshot from any project:
 
 ```sh
 python3 /usr/local/share/subyard/skills/subyard-environment/facts.py
@@ -16,6 +16,4 @@ These are offline snapshots; owner changes appear after guest refresh.
 
 Find capability instructions in `/usr/local/share/subyard/skills/*/SKILL.md`.
 
-Claude and Codex commit/push approval prompts are a yard setting. To turn them off, the operator
-runs on the owner host `yard -Y <yard> config set CODING_TOOL_GIT_APPROVAL off --scope yard`, then
-`yard -Y <yard> init`; `prompt` instead of `off` restores them. New agent sessions apply the change.
+For owner-managed Git approval prompts, see [configuration](https://github.com/Subyard/Subyard/blob/master/docs/configuration.md#commit-and-push-approval-prompts).
