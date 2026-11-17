@@ -96,7 +96,7 @@ if yard provision --yes > "$state/collision-refusal.log" 2>&1; then
   printf 'collision unexpectedly provisioned\n' >&2; exit 1
 else refusal_exit=$?; fi
 cat "$state/collision-refusal.log"
-grep -Fq '"status":"migration-required"' "$state/collision-refusal.log"
+grep -Eq 'release gate: (yard default needs repair|release migration-required)' "$state/collision-refusal.log"
 guest cat /etc/subyard/guest-runtime.json > "$state/after-refusal.json"
 cmp "$state/before-collision.json" "$state/after-refusal.json"
 printf 'guest environment unapproved_drift_exit=%s facts_bytes=unchanged\n' "$refusal_exit"

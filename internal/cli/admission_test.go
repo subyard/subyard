@@ -286,7 +286,6 @@ func TestAdmissionPolicy(t *testing.T) {
 	type want struct {
 		readOnly      bool
 		gate          gatePolicy
-		recovery      gateRecovery
 		early         earlyPath
 		ownerRecovery bool
 		readOnlyRoute bool
@@ -305,18 +304,18 @@ func TestAdmissionPolicy(t *testing.T) {
 		{[]string{"code"}, false, with(writer, func(w *want) { w.readOnlyRoute = true })},
 		{[]string{"svc", "demo", "status"}, false, writer},
 		{[]string{"demo", "status"}, false, reader},
-		{[]string{"demo", "purge"}, false, with(writer, func(w *want) { w.recovery = recoveryResourceShutdown })},
+		{[]string{"demo", "purge"}, false, writer},
 		{[]string{"keys", "-y", "check-exclusive", "zone"}, false, reader},
 		{[]string{"_keys-init", "check-exclusive", "zone"}, false, writer},
 		{[]string{"ssh-agent", "unlock", "--key", "k", "--ttl", "1h"}, false, writer},
 		{[]string{"ssh-agent", "lock"}, false, reader},
-		{[]string{"init"}, false, with(writer, func(w *want) { w.recovery = recoveryProfileInit })},
-		{[]string{"config", "apply", "--all-local"}, false, with(writer, func(w *want) { w.recovery = recoveryConfigApply })},
+		{[]string{"init"}, false, writer},
+		{[]string{"config", "apply", "--all-local"}, false, writer},
 		{[]string{"config", "set", "SSH_PORT", "2223"}, false, writer},
 		{[]string{"config", "sync", "--check"}, false, reader},
 		{[]string{"config", "repair-registration", "default"}, false, want{gate: gateSkipRegistrationRepair, readOnlyRoute: true}},
 		{[]string{"config", "validate"}, false, with(writer, func(w *want) { w.early = earlyConfigValidate })},
-		{[]string{"integration", "enable", "tool"}, false, want{gate: gateRequired, recovery: recoveryIntegrationRetry, readOnlyRoute: true}},
+		{[]string{"integration", "enable", "tool"}, false, want{gate: gateRequired, readOnlyRoute: true}},
 		{[]string{"integration", "status"}, false, reader},
 		{[]string{"profile", "enable", "fixture"}, false, want{gate: gateRequired, readOnlyRoute: true}},
 		{[]string{"update"}, false, want{gate: gateHandlerOwned, ownerRecovery: true}},
@@ -337,7 +336,7 @@ func TestAdmissionPolicy(t *testing.T) {
 			definition, core := program.manifest.Lookup(test.arguments[0])
 			resourceDefinition, profileResource := program.resources.Lookup(test.arguments[0])
 			admission := program.admission(definition, core, resourceDefinition, profileResource, test.arguments[1:], test.explicit)
-			got := want{admission.readOnly, admission.gate, admission.recovery, admission.early, admission.ownerRecovery, admission.readOnlyRoute}
+			got := want{admission.readOnly, admission.gate, admission.early, admission.ownerRecovery, admission.readOnlyRoute}
 			if got != test.want {
 				t.Fatalf("admission=%+v want %+v", got, test.want)
 			}

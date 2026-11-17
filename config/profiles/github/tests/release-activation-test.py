@@ -668,6 +668,7 @@ class ConnectionFixtureInitTest(unittest.TestCase):
                 'transition-inspection-unavailable': 'the journal-selected release cannot provide a valid transition inspection',
                 'source-verification-unavailable': 'verify source support:',
                 'materialized-config-unavailable': 'cannot inspect materialized config for release activation',
+                'release-yard-repair': 'release gate: yard ',
                 'release-dependency-unavailable': 'dependency-unavailable',
                 'release-migration-required': 'migration-required',
                 'release-transition-required': 'transition-required',

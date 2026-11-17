@@ -210,6 +210,7 @@ type Incus struct {
 	Err               error
 	ExecSteps         []IncusExecStep
 	ExecCalls         []IncusExecCall
+	ProbeErr          error
 	ConfigUpdates     []InstanceConfigUpdate
 	PowerUpdates      []InstancePowerUpdate
 }
@@ -356,6 +357,11 @@ func (fake *Incus) Exec(
 	name string,
 	request ports.InstanceExecRequest,
 ) (ports.InstanceExecResult, error) {
+	// The core's guest-agent liveness probe is answered without consuming
+	// scripted steps; ProbeErr simulates a guest agent that does not answer.
+	if len(request.Command) == 1 && request.Command[0] == "true" {
+		return ports.InstanceExecResult{}, fake.ProbeErr
+	}
 	fake.ExecCalls = append(fake.ExecCalls, IncusExecCall{Project: project, Name: name, Request: request})
 	if len(fake.ExecSteps) == 0 {
 		return ports.InstanceExecResult{}, errors.New("testkit Incus exec steps exhausted")

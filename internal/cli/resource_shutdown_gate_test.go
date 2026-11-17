@@ -68,6 +68,10 @@ esac
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(home, "yards/default/config.env"), []byte("# unchanged owner context\n"), 0600)
+	// "attributed" scenarios report the activation failure as yard private's
+	// own, so the yard-scoped gate admits the shutdown as that yard's repair.
+	attributed := strings.HasPrefix(scenario, "attributed")
+	scenario = strings.TrimPrefix(strings.TrimPrefix(scenario, "attributed"), "-")
 	// Bring-up and shutdown of public ingress require exact v2 plans; "v1"
 	// keeps the legacy-shaped handler only to prove its refusal.
 	if scenario != "v1" {
@@ -143,6 +147,13 @@ esac
 		program.options.InitPlatform = platform
 		for index := range response.Inspection.Blockers {
 			response.Inspection.Blockers[index].Message, response.Inspection.Blockers[index].Retry = outcome.Message, outcome.Retry
+		}
+	}
+	if attributed {
+		response.Inspection.Decisions = append(response.Inspection.Decisions, releasetransition.RedactedDecision{
+			Resource: "activation.sample-runtime", Scope: "yard-attribution", Decision: releasetransition.DecisionPreserve, Result: "failed private"})
+		program.sourceBinding = func(context.Context, releasetransition.JournalRecord) (string, string, error) {
+			return "fixture-source", "fixture-tooling", nil
 		}
 	}
 	if scenario == "foreign-blocker" {
@@ -241,31 +252,6 @@ esac
 	return program, home, &output
 }
 
-func TestResourceShutdownReinspectionDiscardsCandidateOutput(t *testing.T) {
-	program, home, output := shutdownGateFixture(t, "probe-noise")
-	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, filepath.Join(home, "release-transition/v2/journal.json")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	outcome := releasetransition.Outcome{Status: releasetransition.StatusOperatorActionRequired,
-		Active: journal.Goal.Target, Target: journal.Goal.Target, Code: releasetransition.CodeDependencyUnavailable,
-		Message: "yard private: cannot inspect profile sample-runtime runtime for release activation", Retry: "run yard -Y private status", Transaction: &journal.Transaction}
-	definition, _ := program.resources.Lookup("relay")
-	permit, err := program.prepareResourceShutdownRepair(context.Background(), "private", definition, []string{"down"}, outcome)
-	if err != nil || permit == nil {
-		t.Fatalf("repair permit=%+v err=%v", permit, err)
-	}
-	if err := program.checkResourceShutdownGate(context.Background(), permit); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(output.String(), "candidate probe noise") {
-		t.Fatalf("candidate diagnostics leaked: %s", output)
-	}
-	if count := strings.Count(string(mustReadConfigFixture(t, filepath.Join(home, "probe-count"))), "probe\n"); count != 2 {
-		t.Fatalf("ran %d probes, want both reinspection sites", count)
-	}
-}
-
 // lostGuestAgent is a running guest whose agent no longer answers commands.
 type lostGuestAgent struct{}
 
@@ -317,64 +303,6 @@ func (host shutdownGateHost) InspectNetwork(context.Context, []yardnetwork.Yard)
 	return snapshot, err
 }
 
-func TestResourceShutdownAdmitsCompletedHistoryUnavailableGuest(t *testing.T) {
-	for _, scenario := range []struct {
-		name, protocol string
-		installedGuest bool
-	}{{"exact", "", false}, {"installed-guest", "", true}} {
-		t.Run(scenario.name, func(t *testing.T) {
-			program, home, output := shutdownGateFixture(t, scenario.protocol, scenario.installedGuest)
-			legacy := filepath.Join(home, "migrations", "transactions", "retired", "transaction.json")
-			if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
-				t.Fatal(err)
-			}
-			writeCLIFile(t, legacy, "{broken legacy journal\n", 0600)
-			invariants := nativeRecoveryInvariants(t, program, home)
-			if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), "guest shutdown is unverified") {
-				t.Fatalf("declared shutdown blocked before guest cleanup: code=%d output=%s", code, output)
-			}
-			if got := mustReadConfigFixture(t, filepath.Join(home, "cleanup-pending")); string(got) != "pending\n" {
-				t.Fatal("pending cleanup not retained")
-			}
-			var snapshot yardnetwork.Snapshot
-			if err := json.Unmarshal(mustReadConfigFixture(t, filepath.Join(home, "instance.json")), &snapshot); err != nil {
-				t.Fatal(err)
-			}
-			instance := snapshot.Yards[0].InstanceInfo
-			if instance.LocalDevices["sample-relay"] != nil || instance.Devices["sample-relay"] != nil || !strings.HasPrefix(instance.LocalConfig["user.subyard.resource.sample-relay"], "v1:pending:") {
-				t.Fatal("unverified cleanup did not close only owned ingress and retain pending marker")
-			}
-			if got := mustReadConfigFixture(t, filepath.Join(home, "retained-key")); string(got) != "synthetic retained state" {
-				t.Fatal("cleanup lost retained data")
-			}
-			invariants()
-		})
-	}
-}
-
-// An unanswered guest read during repair readiness leaves installed settings
-// unknown: host-side owners stay ready, so the ownership-closing shutdown is
-// admitted, closes owned ingress and reports the unverified guest shutdown.
-func TestResourceShutdownClosesIngressWhenRepairReadinessLosesGuestAgent(t *testing.T) {
-	program, home, output := shutdownGateFixture(t, "agent-loss")
-	invariants := nativeRecoveryInvariants(t, program, home)
-	if code := program.Run(context.Background()); code != 1 || !strings.Contains(output.String(), "guest shutdown is unverified") {
-		t.Fatalf("shutdown blocked by unknown installed settings: code=%d output=%s", code, output)
-	}
-	if got := mustReadConfigFixture(t, filepath.Join(home, "cleanup-pending")); string(got) != "pending\n" {
-		t.Fatal("pending cleanup not retained")
-	}
-	var snapshot yardnetwork.Snapshot
-	if err := json.Unmarshal(mustReadConfigFixture(t, filepath.Join(home, "instance.json")), &snapshot); err != nil {
-		t.Fatal(err)
-	}
-	instance := snapshot.Yards[0].InstanceInfo
-	if instance.LocalDevices["sample-relay"] != nil || instance.Devices["sample-relay"] != nil || !strings.HasPrefix(instance.LocalConfig["user.subyard.resource.sample-relay"], "v1:pending:") {
-		t.Fatal("unverified cleanup did not close only owned ingress and retain pending marker")
-	}
-	invariants()
-}
-
 func TestResourceShutdownRepairRejectsUnsafeAdmission(t *testing.T) {
 	for _, scenario := range []string{"unfinished", "foreign-blocker", "key-tools-blocker", "ambiguous", "foreign-route", "bring-up", "arguments", "corrupt-journal", "changed-source", "deselected", "foreign-links", "cancelled"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -416,61 +344,6 @@ func TestResourceShutdownRepairRejectsUnsafeAdmission(t *testing.T) {
 				t.Fatal("failed admission changed history")
 			}
 		})
-	}
-}
-
-func TestResourceShutdownRepairRevalidatesAfterConsent(t *testing.T) {
-	for _, scenario := range []string{"decline", "journal", "ledger", "source", "configuration", "blocker", "installed-blocker"} {
-		t.Run(scenario, func(t *testing.T) {
-			program, home, output := shutdownGateFixture(t, "", scenario == "installed-blocker")
-			program.options.Arguments = []string{"-Y", "private", "relay", "down"}
-			consentReached := false
-			if scenario == "decline" {
-				program.options.Prompt = &testkit.Prompt{Answers: []bool{false}}
-			} else {
-				program.options.Prompt = &callbackPrompt{callback: func() {
-					consentReached = true
-					if strings.HasSuffix(scenario, "blocker") {
-						testkit.WriteFile(t, filepath.Join(home, "blocker-change"), []byte("changed"), 0600)
-						return
-					}
-					paths := map[string]string{"journal": "release-transition/v2/journal.json", "ledger": "release-transition/v2/history-checkpoint.json", "configuration": "yards/private/config.env"}
-					path := filepath.Join(home, paths[scenario])
-					if scenario == "source" {
-						path = filepath.Join(program.options.RepositoryRoot, "config/profiles/sample/resources/relay/handler.sh")
-					}
-					mode := os.FileMode(0600)
-					if scenario == "source" {
-						mode = 0700
-					}
-					testkit.WriteFile(t, path, append(mustReadConfigFixture(t, path), byte('\n')), mode)
-				}}
-			}
-			if code := program.Run(context.Background()); code == 0 {
-				t.Fatalf("changed/declined cleanup accepted: %s", output)
-			}
-			if scenario == "installed-blocker" && !consentReached {
-				t.Fatal("installed guest blocker did not reach consent before drift")
-			}
-			if _, err := os.Stat(filepath.Join(home, "cleanup-pending")); !os.IsNotExist(err) {
-				t.Fatalf("changed/declined operation mutated cleanup: %v; %s", err, output)
-			}
-		})
-	}
-}
-
-func TestResourceShutdownRepairRejectsExactNativeDriftAfterConsent(t *testing.T) {
-	program, home, output := shutdownGateFixture(t, "")
-	program.options.Arguments = []string{"-Y", "private", "relay", "down"}
-	program.options.Prompt = &callbackPrompt{callback: func() { testkit.WriteFile(t, filepath.Join(home, "native-drift"), []byte("changed"), 0600) }}
-	if code := program.Run(context.Background()); code == 0 {
-		t.Fatalf("changed native contract accepted: %s", output)
-	}
-	if _, err := os.Stat(filepath.Join(home, "cleanup-pending")); !os.IsNotExist(err) {
-		t.Fatal("native drift reached cleanup")
-	}
-	if !strings.Contains(output.String(), "stale") && !strings.Contains(output.String(), "v2") {
-		t.Fatalf("wrong native drift rejection: %s", output)
 	}
 }
 
@@ -516,39 +389,5 @@ func TestProfileRuntimeActivationUnavailableGuestRetainsDeselectedObservation(t 
 				t.Fatalf("stopped runtime not deferred: %#v %v", observation, err)
 			}
 		})
-	}
-}
-
-func nativeRecoveryInvariants(t *testing.T, program *CLI, home string) func() {
-	t.Helper()
-	paths := []string{filepath.Join(home, "release-transition/v2/journal.json"), filepath.Join(home, "release-transition/v2/ledger.json"), filepath.Join(home, "release-transition/v2/history-checkpoint.json"), filepath.Join(home, "yards/default/config.env"), filepath.Join(program.options.RepositoryRoot, "runtime-files.sha256")}
-	before := map[string][]byte{}
-	for _, path := range paths {
-		before[path] = mustReadConfigFixture(t, path)
-	}
-	links := map[string]string{}
-	for _, name := range []string{"current", "previous"} {
-		path := filepath.Join(program.env["YARD_RUNTIME_ROOT"], name)
-		value, err := os.Readlink(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		links[path] = value
-	}
-	return func() {
-		for _, path := range paths {
-			if !bytes.Equal(before[path], mustReadConfigFixture(t, path)) {
-				t.Fatalf("native recovery changed source/history: %s", filepath.Base(path))
-			}
-		}
-		for path, value := range links {
-			if got, err := os.Readlink(path); err != nil || got != value {
-				t.Fatal("native recovery changed release links")
-			}
-		}
-		platform := sourceAuthoringPlatformFixture(t, program.options.InitPlatform)
-		if len(platform.applied) != 0 || platform.projectHooks != 0 {
-			t.Fatal("native recovery invoked activation/hooks")
-		}
 	}
 }

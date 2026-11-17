@@ -62,7 +62,7 @@ func waitForFile(t *testing.T, ctx context.Context, path string) {
 func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 	for _, order := range []string{"barrier-first", "verb-first"} {
 		t.Run(order, func(t *testing.T) {
-			program, home, output := shutdownGateFixture(t, "")
+			program, home, output := shutdownGateFixture(t, "attributed")
 			sync := filepath.Join(home, "lock-order")
 			if err := os.Mkdir(sync, 0o700); err != nil {
 				t.Fatal(err)
@@ -129,7 +129,7 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 // A legacy (v1) plan for a public-ingress lifecycle verb is refused before any
 // lock, so it neither waits on a held owner barrier nor changes anything.
 func TestResourceIngressRefusesLegacyPlan(t *testing.T) {
-	program, home, output := shutdownGateFixture(t, "v1")
+	program, home, output := shutdownGateFixture(t, "attributed-v1")
 	ctx, cancel := context.WithTimeout(context.Background(), lockOrderDeadline)
 	defer cancel()
 	loaded, err := program.loadContext("private")

@@ -194,6 +194,17 @@ type preparedCommand struct {
 	// profileFollowup offers pending profile provisioning after success.
 	profileFollowup *releaseExecution
 	pendingInit     *pendingInitPlan
+	// admission is how this command passed the release gate; subject is what
+	// its prepare declared to the gate. Only the gate methods read them.
+	gateRecord   *gateAdmission
+	gateDeclared *gateSubject
+	// gatePlanned is the repair an RPC plan was made under, when execute
+	// re-admitted it.
+	gatePlanned *gateAdmission
+	// gateSkip are the optional actions its early verdict left out; repairing
+	// is set by Execute's binding decision for a repair.
+	gateSkip  []string
+	repairing bool
 }
 
 // Both prepared commands and early source recovery capture these read-only
@@ -467,6 +478,9 @@ func (prepared *preparedCommand) preparePlan(ctx context.Context) error {
 		return &commandPreparationError{phase: "plan", err: err}
 	}
 	prepared.Plan.Steps = steps
+	if err := prepared.earlyGate(); err != nil {
+		return &commandPreparationError{phase: "release gate", err: err}
+	}
 
 	if prepared.Loaded.Context.AccessKind == domain.AccessLocal {
 		prepared.ownerAdmission, err = prepared.CLI.originalOwnerWrite(prepared.Loaded)
@@ -593,7 +607,7 @@ func (prepared *preparedCommand) consume() (func(), error) {
 	return state.mu.Unlock, nil
 }
 
-func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
+func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (result domain.AdapterResult, err error) {
 	if prepared == nil || prepared.lifecycle == nil || prepared.execute == nil {
 		return domain.AdapterResult{}, errors.New("prepared command is not executable")
 	}
@@ -602,6 +616,7 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 		return domain.AdapterResult{}, err
 	}
 	defer finish()
+	admission := prepared.gateAdmission()
 	if prepared.Loaded.Context.AccessKind == domain.AccessLocal && !prepared.remotePhased {
 		recovery := prepared.CLI.fullTeardownRecovery != "" || (prepared.Plan.Assessment != nil && prepared.Plan.Assessment.Action == "yard.teardown.full")
 		unlock, lockErr := prepared.CLI.acquireOwnerMutation(ctx, prepared.ownerAdmission, recovery, false)
@@ -609,9 +624,25 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 			return domain.AdapterResult{}, lockErr
 		}
 		defer unlock()
+		// The binding gate decision: under the barrier every journal writer
+		// holds, before any effect.
+		if err := prepared.bindGate(ctx); err != nil {
+			return domain.AdapterResult{}, err
+		}
 		if _, err := prepared.CLI.admitDeveloperIdentity(ctx, prepared.Loaded.Context.YardName, prepared.Definition.Handler, prepared.Arguments); err != nil {
 			return domain.AdapterResult{}, err
 		}
+		// Still under the barrier: the repair left history as admitted.
+		effectCtx := ctx
+		defer func() {
+			if err == nil && result.Status == "ok" {
+				if verifyErr := admission.verifyAfterEffect(effectCtx, prepared.CLI); verifyErr != nil {
+					result.Status, err = "error", verifyErr
+				}
+			}
+		}()
+	} else if err := prepared.bindGate(ctx); err != nil {
+		return domain.AdapterResult{}, err
 	}
 	noOp := func() (domain.AdapterResult, error) {
 		return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok"}, nil
@@ -623,7 +654,7 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 	defer release()
 	// Abort before releasing the host barrier, including failures after reservation.
 	defer prepared.CLI.abortProjectExecution(context.Background(), prepared.Project)
-	if prepared.initExecution != nil && prepared.initExecution.hooksOnly() && prepared.CLI.permits.profileInit == nil {
+	if prepared.initExecution != nil && prepared.initExecution.hooksOnly() {
 		var unlock func()
 		ctx, unlock, err = prepared.initExecution.lock(ctx)
 		if err != nil {
@@ -673,6 +704,9 @@ func (prepared *preparedCommand) Execute(ctx context.Context, orchestrator *appl
 			return domain.AdapterResult{}, err
 		}
 	}
+	if admission != nil && admission.kind == admissionRead && planHasEffect(prepared.Plan) {
+		return domain.AdapterResult{}, errors.New("this invocation was admitted as read-only and cannot run its effects; rerun it without read-only options")
+	}
 	return prepared.commitResult(ctx, func() (domain.AdapterResult, error) { return prepared.execute(ctx, orchestrator, diagnostics) })
 }
 
@@ -687,6 +721,9 @@ func (prepared *preparedCommand) commitResult(ctx context.Context, execute func(
 }
 
 func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *initBootstrap) error {
+	if parsed, err := parseInitArguments(prepared.Arguments); err == nil {
+		prepared.setGateSubject(initSubject(parsed))
+	}
 	if prepared.Loaded.Context.AccessKind == domain.AccessRemote {
 		prepared.execute = func(context.Context, *application.Orchestrator, io.Writer) (domain.AdapterResult, error) {
 			return domain.AdapterResult{}, errors.New("init requires the owner host")
@@ -731,9 +768,6 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 		if err != nil {
 			return err
 		}
-	}
-	if err := execution.validateProfileRepair(ctx, cli); err != nil {
-		return err
 	}
 	preset := ""
 	if bootstrap != nil {
@@ -818,16 +852,6 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 				runErr = fmt.Errorf("yard registration is complete; initialization did not finish; rerun yard init --adopt: %w", runErr)
 			}
 		}()
-		if cli.permits.profileInit != nil {
-			if err := execution.validateProfileRepair(ctx, cli); err != nil {
-				return domain.AdapterResult{}, err
-			}
-			unlock, err := cli.lockConfigApplyRepair(ctx, cli.permits.profileInit)
-			if err != nil {
-				return domain.AdapterResult{}, err
-			}
-			defer unlock()
-		}
 		if cli.options.InitPlatform == nil && execution.mode != initConfigs && !execution.hooksOnly() {
 			if err := cli.prepareSudoPrivileges(ctx, diagnostics, cli.effectiveUID(), prepared.Definition.Name); err != nil {
 				return domain.AdapterResult{}, err
@@ -840,10 +864,6 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 		}, nil)
 		if err == nil && execution.profileProvisionChanged() {
 			result, err = cli.executeInitProfileProvision(ctx, execution, orchestrator, prepared.Plan, diagnostics)
-		}
-		if err == nil && cli.permits.profileInit != nil {
-			// Readiness verification below reports what remains pending.
-			_, err = cli.finishConfigApplyRepair(ctx, cli.permits.profileInit)
 		}
 		if err == nil && !cli.releaseTransitionChild {
 			var pending []releasetransition.Blocker
@@ -880,6 +900,7 @@ func (prepared *preparedCommand) prepareLifecycle(ctx context.Context, _ *initBo
 	if err != nil {
 		return err
 	}
+	prepared.setGateSubject(lifecycleSubject(prepared.Definition.Name))
 	prepared.policy = execution.policy(prepared.Definition, prepared.Loaded.Context)
 	if err := prepared.CLI.observeLifecycleExecution(ctx, prepared.Loaded.Context, execution); err != nil {
 		return err
@@ -1113,6 +1134,7 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 	if err != nil {
 		return err
 	}
+	prepared.setGateSubject(gateSubject{declared: true, member: memberTeardown, pending: true})
 	if execution.full {
 		if err := prepared.CLI.checkNativeTargets(prepared.Loaded, true, nil); err != nil {
 			return err
@@ -1139,9 +1161,6 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 				return "", domain.ActionDelta{}, err
 			}
 			prepared.exactState = full.installationBinding()
-			if permit := prepared.CLI.permits.teardown; permit != nil {
-				prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
-			}
 			return "yard.teardown.full", domain.ActionDelta{Changed: true, Consequences: []string{"permanently remove this installation and all its local yards"}}, nil
 		}
 		if err := prepared.CLI.observeTeardownExecution(ctx, prepared.Loaded, execution); err != nil {
@@ -1149,9 +1168,6 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 		}
 		if prepared.exactState == "" {
 			prepared.exactState = execution.binding()
-			if permit := prepared.CLI.permits.teardown; permit != nil {
-				prepared.exactState = operationStateDigest([]string{prepared.exactState, permit.factsFingerprint})
-			}
 		}
 		return execution.actionPlan(prepared.Definition, prepared.Loaded.Context)
 	}
@@ -1163,19 +1179,7 @@ func (prepared *preparedCommand) prepareTeardown(ctx context.Context, _ *initBoo
 		return execution.steps(prepared.Loaded.Context)
 	}
 	prepared.execute = func(ctx context.Context, orchestrator *application.Orchestrator, diagnostics io.Writer) (domain.AdapterResult, error) {
-		permit := prepared.CLI.permits.teardown
-		if permit != nil {
-			unlock, err := prepared.CLI.lockConfigApplyRepair(ctx, permit)
-			if err != nil {
-				return domain.AdapterResult{}, err
-			}
-			defer unlock()
-		}
-		result, err := prepared.CLI.executeTeardown(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
-		if err == nil && result.Status == "ok" && permit != nil && !execution.full {
-			err = prepared.CLI.finishTeardownRepair(ctx, permit)
-		}
-		return result, err
+		return prepared.CLI.executeTeardown(ctx, orchestrator, prepared.Loaded, prepared.Plan, execution, diagnostics)
 	}
 	if !execution.full {
 		return prepared.bindServiceTeardown(ctx)

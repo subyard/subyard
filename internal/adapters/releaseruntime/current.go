@@ -475,6 +475,9 @@ func (runtime *Runtime) prepareCurrentReport(parsed currentOptions, report curre
 			}
 		}
 		for _, decision := range report.Decisions {
+			if decision.Scope == releasetransition.YardAttributionScope {
+				continue // attribution of findings reported elsewhere, not an action
+			}
 			if strings.HasPrefix(decision.Scope, "yard.") {
 				fmt.Fprintf(&output, "Diagnostic: yard %s %s: %s\n", strings.TrimPrefix(decision.Scope, "yard."), decision.Resource, decision.Result)
 			} else {

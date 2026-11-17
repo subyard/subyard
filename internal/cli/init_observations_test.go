@@ -141,7 +141,7 @@ func TestInitReadyStageObserverKeepsColdAndStoppedTailSerial(t *testing.T) {
 
 func TestInitStageBatchEligibilityKeepsInjectedAndRepairCallersSerial(t *testing.T) {
 	client := incusclient.New("unopened")
-	for _, scenario := range []string{"native", "injected platform", "injected reader", "injected executor", "child", "repair", "resource", "reset", "profile", "source"} {
+	for _, scenario := range []string{"native", "injected platform", "injected reader", "injected executor", "child", "resource", "reset", "profile", "source"} {
 		t.Run(scenario, func(t *testing.T) {
 			program := &CLI{}
 			runtime := reconcileruntime.Runtime{Incus: client, Executor: client}
@@ -155,8 +155,6 @@ func TestInitStageBatchEligibilityKeepsInjectedAndRepairCallersSerial(t *testing
 				program.options.Executor = client
 			case "child":
 				program.releaseTransitionChild = true
-			case "repair":
-				program.permits.profileInit = &configApplyRepairPermit{}
 			case "resource":
 				execution.resourceCommand = "sample"
 			case "reset":

@@ -140,6 +140,7 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 		return networkArgumentError("network requires status, link, unlink, isolation, or reconcile")
 	}
 	change := yardnetwork.Change{}
+	var endpoints []string
 	switch args[0] {
 	case "status", "reconcile":
 		if len(args) != 1 {
@@ -174,6 +175,7 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 		if link.A == link.B {
 			return networkArgumentError("a link needs two distinct local yards")
 		}
+		endpoints = names
 		if args[0] == "link" {
 			change.Link = link
 		} else {
@@ -225,6 +227,7 @@ func (prepared *preparedCommand) prepareNetwork(ctx context.Context, _ *initBoot
 	if err != nil {
 		return err
 	}
+	prepared.setGateSubject(networkGateSubject(plan, endpoints))
 	actionDelta := func(p yardnetwork.Plan) (domain.ActionID, domain.ActionDelta, error) {
 		action := domain.ActionID("yard.network.save")
 		consequences := []string{"save explicit network links on this host; isolation remains disabled"}
@@ -302,4 +305,35 @@ func (adapter networkPolicyAdapter) Run(ctx context.Context, request domain.Adap
 		return domain.AdapterResult{}, "", err
 	}
 	return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: request.OperationID, Status: "ok"}, "", nil
+}
+
+// networkGateSubject is what a network policy plan acts on: the yards it
+// stops or starts, its updated yards and every yard pending start, and the
+// endpoints of a link or unlink. Each is a required action; a yard the plan
+// restarts also refuses it while it has pending findings.
+func networkGateSubject(plan yardnetwork.Plan, endpoints []string) gateSubject {
+	restarted := map[string]bool{}
+	var order []string
+	add := func(name string) {
+		if _, seen := restarted[name]; !seen {
+			restarted[name] = false
+			order = append(order, name)
+		}
+	}
+	for _, update := range plan.Updates {
+		add(update.Yard.Name)
+		restarted[update.Yard.Name] = true
+	}
+	for _, name := range plan.Policy.PendingStart {
+		add(name)
+		restarted[name] = true
+	}
+	for _, name := range endpoints {
+		add(name)
+	}
+	subject := gateSubject{declared: true, host: true, pending: true}
+	for _, name := range order {
+		subject.acts = append(subject.acts, yardAction{yard: name, refusePending: restarted[name]})
+	}
+	return subject
 }

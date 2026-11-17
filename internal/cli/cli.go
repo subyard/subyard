@@ -128,16 +128,21 @@ type CLI struct {
 	retainedAdapterCompatibility bool
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
-	permits                      recoveryPermits
-	allowResetYard               bool
-	resourceSessionTransport     string
-	resourceWire                 string
-	fullTeardownRecovery         string
-	ownerMutationLock            *uninstall.Tree
-	ownerMutationLockExpected    *uninstall.Tree
-	ownerAdmission               *ownerWriteAdmission
-	ownerAdmissionMutex          *sync.Mutex
-	localMetadataDiagnostics     bool
+	// gateAdmitted records how a non-ready release gate admitted this
+	// invocation; a repair admission is rechecked once after consent.
+	gateAdmitted *gateAdmission
+	// sourceBinding replaces the installed-source proof of repair admissions
+	// in tests whose fixture CLI is not a published runtime.
+	sourceBinding             func(context.Context, releasetransition.JournalRecord) (string, string, error)
+	allowResetYard            bool
+	resourceSessionTransport  string
+	resourceWire              string
+	fullTeardownRecovery      string
+	ownerMutationLock         *uninstall.Tree
+	ownerMutationLockExpected *uninstall.Tree
+	ownerAdmission            *ownerWriteAdmission
+	ownerAdmissionMutex       *sync.Mutex
+	localMetadataDiagnostics  bool
 	// configGitSSH shares one SSH connection across a configuration command.
 	configGitSSH *configGitSSHSession
 
@@ -163,8 +168,6 @@ func (cli *CLI) rpcOperation(operationID string) *CLI {
 	operation.env["SUBYARD_OPERATION_ID"] = operationID
 	operation.inventoryRoutes = maps.Clone(cli.inventoryRoutes)
 	operation.discoveredOwners = maps.Clone(cli.discoveredOwners)
-	operation.permits.teardown = nil
-	operation.permits.resourceShutdown = nil
 	return &operation
 }
 
@@ -212,7 +215,9 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 			return err
 		}
 	}
-	operation.permits = recoveryPermits{}
+	// The parent's admission is the one of record; it holds the owner barrier
+	// and rechecked its repair before this in-process child runs.
+	operation.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	if slices.Equal(arguments, []string{"init", "--configs", "--yes"}) {
 		// Keep the native execution error in process. Only the outer command
 		// boundary renders it or converts it to an exit status.
@@ -467,7 +472,9 @@ func New(options Options) (*CLI, error) {
 func (cli *CLI) Run(ctx context.Context) int {
 	cli.localMetadataDiagnostics = !cli.releaseTransitionChild
 	cli.configResources, cli.configResourcesRoot = nil, ""
-	cli.permits = recoveryPermits{}
+	// No admission until a path decides one: each path before the release
+	// gate sets exempt where it dispatches, and the gate sets the rest below.
+	cli.gateAdmitted = nil
 	cli.updateProgress = cli.options.Stdout
 	arguments := append([]string(nil), cli.options.Arguments...)
 	yard, explicit, yes, remaining, err := parseGlobals(arguments, cli.env["SUBYARD_YARD"])
@@ -491,6 +498,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runInstallation(ctx, remaining[1:])
 	}
 	if name == "_uninstall-resume" {
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt} // the recovery owns its admission
 		return cli.runFullTeardownRecovery(ctx, remaining[1:])
 	}
 	commandArguments := append([]string(nil), remaining[1:]...)
@@ -537,6 +545,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 			return 1
 		}
 	}
+	if admission.early != earlyNone {
+		// Early dispatch owns its release admission.
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
+	}
 	switch admission.early {
 	case earlyNetworkHelp:
 		cli.networkUsage()
@@ -556,6 +568,10 @@ func (cli *CLI) Run(ctx context.Context) int {
 		cli.env["SUBYARD_YARD_EXPLICIT"] = "1"
 	}
 	cli.env["SUBYARD_YARD"] = yard
+	if admission.early != earlyNone {
+		// Early dispatch owns its release admission.
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
+	}
 	switch admission.early {
 	case earlyCurrentMigration:
 		return cli.runCurrentMigration(ctx, definition, commandArguments, explicit, yes)
@@ -604,12 +620,20 @@ func (cli *CLI) Run(ctx context.Context) int {
 			cli.registeredInitMigrated = true
 		}
 	}
-	if admission.gate == gateRequired && !cli.releaseTransitionChild && !identityRecovery {
-		permits, code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes)
-		if done {
+	// Every invocation carries an explicit admission kind to its prepared command.
+	switch {
+	case admission.gate == gateRequired && !cli.releaseTransitionChild && !identityRecovery:
+		if code, done := cli.admitReleaseGate(ctx, yard, admission, resourceDefinition, commandArguments, yes); done {
 			return code
 		}
-		cli.permits = permits
+	case admission.gate == gateSkipRead && admission.handler == "@client-projects":
+		// Desktop client integration writes only host-local client files and
+		// never yard or release state; the gate exempts it as on master.
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
+	case admission.gate == gateSkipRead:
+		cli.gateAdmitted = &gateAdmission{kind: admissionRead}
+	default:
+		cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 	}
 	ownerDataHome := cli.env["SUBYARD_HOME"]
 	if ownerDataHome == "" {
@@ -806,12 +830,11 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		if slices.Contains(commandArguments, "--full") {
 			cli.env["SUBYARD_NO_AUDIT"] = "1"
+			cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
 		} else if !cli.releaseTransitionChild {
-			permit, code, done := cli.admitTeardownGate(ctx, yard, loaded, commandArguments)
-			if done {
+			if code, done := cli.admitTeardownGate(ctx, yard, commandArguments); done {
 				return code
 			}
-			cli.permits.teardown = permit
 		}
 	}
 	cli.ensureOperationID()
@@ -1152,14 +1175,27 @@ func configSyncInvocation(arguments []string) (bool, bool, bool) {
 				return true, false, true
 			case "help", "--help", "-h", "path":
 				return false, false, false
+			case "pull", "push", "connect":
+				// Only the bare sync parser has --check; these verbs read it, if
+				// at all, as an option value, such as push -m --check.
+				return true, false, false
 			}
 		}
+		// The bare sync parser takes no option values: a --check token is the
+		// flag. A shape it would refuse is no reader.
+		check := false
 		for _, argument := range arguments[1:] {
-			if argument == "--check" {
-				return true, true, false
+			switch argument {
+			case "--check":
+				check = true
+			case "--adopt", "--apply", "-y", "--yes":
+			default:
+				if strings.HasPrefix(argument, "-") {
+					return true, false, false
+				}
 			}
 		}
-		return true, false, false
+		return true, check, false
 	default:
 		return false, false, false
 	}
@@ -1407,6 +1443,14 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 	}
 	results := cli.allOwnerInventoriesForStatus(ctx, loaded)
 	releases := cli.summaryReleaseReadiness(ctx, loaded, results)
+	var localGate yardGate
+	yardScoped := false
+	if len(releases) != 0 {
+		localGate, yardScoped = cli.statusYardGate(ctx, releases[0])
+	}
+	if yardScoped {
+		fmt.Fprintln(cli.options.Stdout, localGate.releaseLine())
+	}
 	code := 0
 	first := true
 	for index, result := range results {
@@ -1433,6 +1477,10 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 				owner = result.inventory.HostID
 			} else if local, err := cli.loadInventoryLoaded(yard.Name, loaded); err == nil {
 				printIgnoredAssignments(cli.options.Stdout, "  ", "", local)
+			}
+			if index == 0 && yardScoped {
+				cli.printYardAttention(localGate, yard.Name)
+				continue
 			}
 			cli.printReleaseReadiness(releases[index], owner)
 		}
@@ -1546,7 +1594,13 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	}
 	fmt.Fprintf(cli.options.Stdout, "  space    %s\n", status.Facts.Space)
 	printIgnoredAssignments(cli.options.Stdout, "  ", "", loaded)
-	cli.printReleaseReadiness(cli.releaseReadiness(ctx), "")
+	readiness := cli.releaseReadiness(ctx)
+	if gate, ok := cli.statusYardGate(ctx, readiness); ok {
+		fmt.Fprintln(cli.options.Stdout, "  "+gate.releaseLine())
+		cli.printYardAttention(gate, loaded.Context.YardName)
+		return 0
+	}
+	cli.printReleaseReadiness(readiness, "")
 	return 0
 }
 
@@ -3348,7 +3402,7 @@ func (cli *CLI) operationPlanner(operationID string) *application.Orchestrator {
 	if clock == nil {
 		clock = wallClock{}
 	}
-	return &application.Orchestrator{Clock: clock, IDs: fixedIDSource{value: operationID}, Actions: cli.coreActions}
+	return &application.Orchestrator{Clock: clock, IDs: fixedIDSource{value: operationID}, Actions: cli.coreActions, BeforeEffects: cli.guardEffects}
 }
 
 func structuredAdapterContext(yard domain.Context) map[string]string {
@@ -4347,8 +4401,17 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		} else if params.Digest != "" || planned.Definition.Handler == "@integration" {
 			return nil, &rpc.Error{Code: rpc.CodeExactPlanRequired, Message: "no exact plan is bound to this operation"}
 		}
+		planAdmission := planned.gateAdmission()
+		planned.CLI.gateAdmitted = planAdmission
 		if fault := planned.CLI.admitRPCOperation(ctx, planned.Loaded, planned.Definition, planned.Arguments, true); fault != nil {
 			return nil, fault
+		}
+		// The execute-time admission is the one of record; Execute decides the
+		// plan's subject on it. A plan made under a repair keeps that repair's
+		// binding, which Execute compares again under the owner barrier.
+		planned.gateRecord = planned.CLI.gateAdmitted
+		if planAdmission.repair() {
+			planned.gatePlanned = planAdmission
 		}
 		if planned.Plan.Target == domain.TargetRemoteOwner {
 			return nil, &rpc.Error{Code: rpc.CodeRemoteOwnerRequired, Message: "execute this plan through owner-host SSH stdio"}

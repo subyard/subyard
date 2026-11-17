@@ -120,9 +120,17 @@ func (prepared *preparedCommand) prepareResourceInvocation(ctx context.Context, 
 }
 
 func (prepared *preparedCommand) attachResourceExecution(runner *resourceApplyRunner, baseline config.Loaded, native resource.PrepareResult) error {
-	if err := prepared.CLI.validateResourceShutdownRepair(runner.definition, runner.verb, baseline, native); err != nil {
-		return err
+	// A resource verb is a repair only as its declared shutdown, and only a
+	// reversible shutdown without persistent data or external effects, as for
+	// an orphaned ingress. Both facts are always recorded, so the decision in
+	// Execute holds whatever admission is of record there.
+	subject := gateSubject{declared: true, pending: true, member: memberResourceShutdown}
+	if runner.verb != runner.definition.Shutdown || runner.definition.Shutdown == "" {
+		subject.unfit = fmt.Errorf("only the declared shutdown of resource %s repairs a yard", runner.definition.Command)
+	} else if err := validateOrphanShutdown(runner.definition, native.Assessment); err != nil {
+		subject.unfit = err
 	}
+	prepared.setGateSubject(subject)
 	handler, err := os.ReadFile(runner.definition.HandlerPath())
 	if err != nil {
 		return err

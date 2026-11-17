@@ -16,6 +16,9 @@ import (
 func releaseOperationSteps(request releasetransition.ProcessRequest, inspection releasetransition.Inspection) []domain.OperationStep {
 	steps := []domain.OperationStep{}
 	for index, decision := range inspection.Decisions {
+		if decision.Scope == releasetransition.YardAttributionScope {
+			continue
+		}
 		state := domain.StepApply
 		if decision.Decision == releasetransition.DecisionPreserve {
 			state = domain.StepSkip

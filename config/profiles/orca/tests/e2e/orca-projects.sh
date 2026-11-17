@@ -1162,9 +1162,8 @@ guest_root sh -c 'printf "%s\n" stale-hook > /etc/subyard/agent-project-hooks'
 if yard init --yes >"$STATE/changed-hooks.out" 2>"$STATE/changed-hooks.err"; then
   die 'init silently overwrote the changed owned hook list'
 fi
-jq -e --arg conflict 'owned artifact drift at "/etc/subyard/agent-project-hooks"' \
-  '.message | contains($conflict)' "$STATE/changed-hooks.err" >/dev/null \
-  || die 'init did not report the changed hook ownership conflict'
+grep -Fq 'owned artifact drift at "/etc/subyard/agent-project-hooks"' "$STATE/changed-hooks.err" \
+  || { cat "$STATE/changed-hooks.err" >&2; die 'init did not report the changed hook ownership conflict'; }
 guest_root grep -Fxq stale-hook /etc/subyard/agent-project-hooks \
   || die 'init changed the conflicting hook list'
 # Undo only this fixture's injected edit; missing owned files remain repairable.

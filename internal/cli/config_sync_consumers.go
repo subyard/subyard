@@ -93,28 +93,19 @@ func (consumers *configSyncConsumers) apply(ctx context.Context, cli *CLI, loade
 	if consumers == nil {
 		return nil
 	}
-	// The native source publication can create a config-only release transition.
-	// Reuse its protected repair admission without a second confirmation.
-	names := make([]string, 0, len(consumers.execution.approved))
-	for _, assessment := range consumers.execution.approved {
-		names = append(names, assessment.Target.Name)
-	}
+	// The refresh is decided again on the release state after publication:
+	// ready, it runs the ordinary child; otherwise only as a repair of these
+	// consumer yards, in this process under the barrier the sync holds.
+	finish := func() error { return nil }
 	if !cli.releaseTransitionChild {
-		outcome, err := cli.inspectMutationGate(ctx, loaded.Context.YardName)
+		names := make([]string, 0, len(consumers.execution.approved))
+		for _, assessment := range consumers.execution.approved {
+			names = append(names, assessment.Target.Name)
+		}
+		var err error
+		consumers.execution.inProcess, finish, err = cli.consumerRefreshAdmission(ctx, loaded.Context.YardName, names)
 		if err != nil {
 			return err
-		}
-		if outcome != nil {
-			permit, err := cli.prepareActivationRepair(ctx, loaded.Context.YardName, false, *outcome, activationRepairMode{requireDrift: true, selectedNames: names})
-			if err != nil {
-				return err
-			}
-			if permit == nil {
-				return fmt.Errorf("materialized configuration refresh blocked by release transition: %s; %s", outcome.Code, outcome.Retry)
-			}
-			previous := cli.permits.configApply
-			cli.permits.configApply = permit
-			defer func() { cli.permits.configApply = previous }()
 		}
 	}
 	consumers.execution.selector = func() ([]configTarget, error) {
@@ -135,5 +126,8 @@ func (consumers *configSyncConsumers) apply(ctx context.Context, cli *CLI, loade
 		}
 		return targets, nil
 	}
-	return cli.executeConfigApply(ctx, consumers.execution, consumers.approvedSteps, output)
+	if err := cli.executeConfigApply(ctx, consumers.execution, consumers.approvedSteps, output); err != nil {
+		return err
+	}
+	return finish()
 }
