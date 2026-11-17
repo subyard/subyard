@@ -259,7 +259,7 @@ prepare_native_clients() {
 }
 
 reboot_owner() {
-  local before after='' down=0 ready=0 rc
+  local before after='' down=0 ready=0
   printf 'amnezia_acceptance_stage=owner-host-reboot\n'
   before="$(guest 1 cat /proc/sys/kernel/random/boot_id </dev/null)"
   cleanup_guest 1
@@ -281,7 +281,7 @@ reboot_owner() {
     sleep 1
   done
   [ "$ready" = 1 ] || { owner_boot_evidence; die 'owner host did not return with a new boot ID'; }
-  prepare_guest 1 "$bundle" "$bundle_hash" || { rc=$?; owner_boot_evidence; return "$rc"; }
+  prepare_guest 1 "$bundle" "$bundle_hash"
   verify_boot_result
 }
 
@@ -304,8 +304,7 @@ owner_boot_evidence() {
   for attempt in 1 2 3; do
     timeout --foreground --signal=KILL 30 ssh -F "$CLIENT_CONFIG" -T \
       -o ConnectTimeout=5 -o ConnectionAttempts=1 e2e-vm-1 -- "$command" </dev/null 2>&1 \
-      | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/IPV4/g; s/^/amnezia_owner_boot: /' | head -c 65536 >&2
-    [ "${PIPESTATUS[0]}" != 0 ] || return 0
+      | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/IPV4/g; s/^/amnezia_owner_boot: /' | head -c 65536 >&2 && return 0
     printf 'amnezia_owner_boot_evidence_attempt=%s failed\n' "$attempt" >&2
     sleep 5
   done
