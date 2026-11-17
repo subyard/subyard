@@ -1,6 +1,13 @@
 rules:
   cache-poisoning:
     ignore:
+      # Core CI caches Go dependencies and pinned compatibility inputs for tests.
+      # It uploads failure diagnostics only. Release assets and acceptance evidence
+      # come from separate workflows.
+      - ci.yml:22:9
+      - ci.yml:45:9
+      - ci.yml:57:9
+      - ci.yml:89:9
       # setup-go caches only the native Go prerequisite for client contract tests.
       # Veranda's tag/manual triggers run tests and builds; this workflow never
       # uploads artifacts or publishes releases. Retain its test prerequisite cache.

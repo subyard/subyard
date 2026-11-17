@@ -84,7 +84,7 @@ Periodic E2E artifact names and interruption caveats.
 
 | Level | When | Checks | Typical time |
 | --- | --- | --- | --- |
-| Continuous | Every push and on a schedule, outside a release | `verify` and the GitHub-hosted matrix and lanes | Background |
+| Continuous | Pull requests, pushes to `master` and `release/**`, and scheduled lanes | `verify` and the GitHub-hosted matrix and lanes | Background |
 | Ordinary release or hotfix | No product migration or update-contract change since the previous release | CI preparation counted by `accept`; `p0-release-smoke` on the final bytes; the released-caller matrix; eligible hosted VM results counted; remaining VM checks stay `not-run` unless requested | About 2 hours |
 | Full release | Product migration or update-contract changes, or an operator request | Ordinary checks plus every VM profile check and every core VM check (`vm:<id>` from `dev/e2e/release-vm-checks.json`) | Up to 8 hours |
 
@@ -100,7 +100,9 @@ such paths exist; when the baseline or diff is unavailable locally it needs an e
 changes supply it, runs every VM check, and its attestation refuses an untouched `not-run` VM profile
 or core VM check; only an explicit `--defer-profile` operator deferral can leave a profile check unrun, and publication prints
 it. The level is a local receipt record: the publication workflow does not recheck it. Before a full release, fix a red continuous
-run before freezing the candidate. Optional unsupported-source VM checks listed in
+run before freezing the candidate. Release branch pushes provide core CI for standalone candidates.
+`dev/release.sh prepare` runs its own candidate checks through the dispatched release workflow.
+Optional unsupported-source VM checks listed in
 [Periodic E2E](../testing.md#periodic-e2e-on-hosted-runners) are excluded from this requirement
 and never gate a release or PR.
 Local long VM smoke and shipped-profile VM checks run on explicit request:

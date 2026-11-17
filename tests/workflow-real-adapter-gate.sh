@@ -42,14 +42,19 @@ done
 # The compatibility parser must come from the Ubuntu host, not a job image.
 ! grep -Eq '^[[:space:]]*container:' "$CI_WORKFLOW" \
   || fail 'core CI must use the host systemd 255 parser'
-grep -Fxq '  verify:' "$CI_WORKFLOW" && grep -Fxq '  deep-go:' "$DEEP_WORKFLOW" \
+grep -Fxq '  verify:' "$CI_WORKFLOW" && grep -Fxq '  compatibility:' "$CI_WORKFLOW" \
+  && grep -Fxq '  deep-go:' "$DEEP_WORKFLOW" \
   || fail 'core and deep CI must use distinct stable job names'
 
-grep -Fxq '  push:' "$CI_WORKFLOW" && grep -Fxq '  pull_request:' "$CI_WORKFLOW" \
-  && grep -Fxq '    branches:' "$CI_WORKFLOW" && grep -Fxq "      - '**'" "$CI_WORKFLOW" \
-  || fail 'core CI must run on branch pushes and pull requests'
-! grep -Eq '^[[:space:]]+tags(-ignore)?:' "$CI_WORKFLOW" \
-  || fail 'core CI must not run on tag pushes'
+ci_triggers="$(awk '/^on:$/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$CI_WORKFLOW")"
+[[ "$ci_triggers" == "$(cat <<'YAML'
+  push:
+    branches:
+      - master
+      - 'release/**'
+  pull_request:
+YAML
+)" ]] || fail 'core CI must run on master and release branch pushes and unfiltered pull requests'
 
 grep -Fxq '  workflow_dispatch:' "$DEEP_WORKFLOW" \
   && grep -Fxq '  schedule:' "$DEEP_WORKFLOW" \
