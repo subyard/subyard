@@ -716,7 +716,7 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 				case strings.HasPrefix(command, "query /1.0/instances/e2e-base-1/metadata?"):
 					return []byte(`{"templates":{}}`), nil, nil
 				case strings.HasPrefix(command, "exec e2e-base-1 "):
-					if strings.HasSuffix(command, "systemctl reload ssh") {
+					if strings.HasSuffix(command, "systemctl reload-or-restart ssh.service") {
 						return nil, nil, nativeFailure
 					}
 					if strings.Contains(command, "cloud-init status --wait") {

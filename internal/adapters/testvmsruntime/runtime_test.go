@@ -345,9 +345,18 @@ func TestEnsureGuestToolsReconcilesZshOnRetainedVM(t *testing.T) {
 // A retained guest can have the dependency marker but lose its SSH host keys.
 // Inspect adapter requests, rather than the source of the generated policy.
 func TestEnsureGuestToolsRepairsHostKeysBeforeSSHReadiness(t *testing.T) {
-	for _, repairFails := range []bool{false, true} {
-		t.Run(fmt.Sprintf("repair-fails-%t", repairFails), func(t *testing.T) {
+	for _, fixture := range []struct {
+		name        string
+		active      bool
+		repairFails bool
+	}{
+		{name: "active-service", active: true},
+		{name: "socket-activation"},
+		{name: "host-key-repair-fails", active: true, repairFails: true},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
 			repaired, readiness := false, false
+			sshActive := fixture.active
 			repairError := errors.New("host key repair failed")
 			runner := &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
 				joined := strings.Join(arguments, " ")
@@ -358,26 +367,40 @@ func TestEnsureGuestToolsRepairsHostKeysBeforeSSHReadiness(t *testing.T) {
 					policy := arguments[len(arguments)-1]
 					repair := strings.Index(policy, "ssh-keygen -A\n")
 					validate := strings.Index(policy, "sshd -t\n")
-					reload := strings.Index(policy, "systemctl reload ssh")
-					if repair < 0 || validate <= repair || reload <= validate {
-						t.Fatalf("host-key repair must precede validation and reload: %q", policy)
+					apply := strings.LastIndex(policy, "\nsystemctl ")
+					if repair < 0 || validate <= repair || apply <= validate {
+						t.Fatalf("host-key repair must precede validation and service reconciliation: %q", policy)
 					}
-					if repairFails {
+					if fixture.repairFails {
 						return nil, nil, repairError
 					}
 					repaired = true
+					switch policy[apply+1:] {
+					case "systemctl reload ssh", "systemctl reload ssh.service":
+						if !sshActive {
+							return nil, nil, errors.New("ssh.service is not active, cannot reload")
+						}
+					case "systemctl reload-or-restart ssh.service":
+						sshActive = true
+					default:
+						t.Fatalf("unexpected SSH service command: %s", policy[apply+1:])
+					}
 				case strings.Contains(joined, "sshd -T"):
 					readiness = true
 					if !repaired {
 						t.Fatal("SSH readiness ran before missing host keys were repaired")
 					}
 					return []byte("passwordauthentication no\n"), nil, nil
+				case strings.HasSuffix(joined, "systemctl is-active --quiet ssh"):
+					if !sshActive {
+						return nil, nil, errors.New("ssh.service is not active")
+					}
 				}
 				return nil, nil, nil
 			}}
 			runtime := &Runtime{Config: fixtureConfig(t), Runner: runner, Stdout: io.Discard, Now: time.Now}
 			err := runtime.ensureGuestTools(context.Background(), "e2e-vm-1")
-			if repairFails {
+			if fixture.repairFails {
 				if !errors.Is(err, repairError) || readiness {
 					t.Fatalf("failed host-key repair reached readiness: err=%v readiness=%t", err, readiness)
 				}
