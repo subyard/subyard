@@ -40,7 +40,7 @@ func (transition *V2Transition) retainSourceActivationView(observation *v2Observ
 		verified := observation.journal != nil && slices.ContainsFunc(observation.journal.Steps, func(step JournalStep) bool { return step.ID == work.intent.ID && step.Checkpoint == StepVerified })
 		if work.kind() == v2NativeWork && nativeMigration(work.migration) && !verified {
 			desired := view.RegisteredYards
-			if work.migration.Kind == guestDiskTmpMigration {
+			if migrationRecipeFor(work.migration) == guestDiskTmpRecipe {
 				desired = view.GuestDiskTmp
 			}
 			if before, exists := desired[work.intent.Resource]; exists && before != work.intent.Desired {

@@ -57,7 +57,7 @@ func observeRegisteredOwner(ctx context.Context, owner V2ActivationReconciler, r
 
 func (t *V2Transition) inspectRegisteredSettings(ctx context.Context, m MigrationDefinitionV2, view V2SettingsSnapshotView, links ReleaseLinks) (settingsV2Plan, error) {
 	plan := settingsV2Plan{}
-	if m.Kind != registeredYardsMigration {
+	if migrationRecipeFor(m) != registeredYardsRecipe {
 		return plan, nil
 	}
 	// One yard's refusal must not hide another's; these reads change nothing.
@@ -150,8 +150,11 @@ func (t *V2Transition) inspectRegisteredSettings(ctx context.Context, m Migratio
 }
 
 func settingsRecoveryKind(m MigrationDefinitionV2) string {
-	if m.Kind == localSSHPortMigration || m.Kind == registeredYardsMigration {
-		return m.Kind
+	switch migrationRecipeFor(m) {
+	case localSSHSettingsRecipe:
+		return localSSHPortMigration
+	case registeredYardsRecipe:
+		return registeredYardsMigration
 	}
 	return ""
 }

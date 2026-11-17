@@ -140,7 +140,7 @@ func (transition *V2Transition) validateWorkRecipe(work v2Work, journal JournalR
 			return invalid("registered yard recipe differs from its journal intent")
 		}
 	case *settingsWorkRecipe:
-		if !settingsWorkMigration(work.migration) || recipe.file.LocalSSHPort != (work.migration.Kind == localSSHPortMigration) || recipe.file.RegisteredEndpoints != (work.migration.Kind == registeredYardsMigration) || recipe.file.validate() != nil || settingsIntent(work.migration, recipe.file) != expected {
+		if !settingsWorkMigration(work.migration) || recipe.file.LocalSSHPort != (migrationRecipeFor(work.migration) == localSSHSettingsRecipe) || recipe.file.RegisteredEndpoints != (migrationRecipeFor(work.migration) == registeredYardsRecipe) || recipe.file.validate() != nil || settingsIntent(work.migration, recipe.file) != expected {
 			return invalid("settings recipe differs from its journal intent")
 		}
 	case *recordedSettingsWork:
@@ -152,7 +152,7 @@ func (transition *V2Transition) validateWorkRecipe(work v2Work, journal JournalR
 			return invalid("recorded settings work cannot provide a mutation recipe")
 		}
 	case *ownerWorkRecipe:
-		if work.migration.Kind != "test-yard-owner-v1-to-v2" || work.migration.Domain != "owner-registration" || step.ID != work.migration.ID+"."+ownerRegistrationResource || step.Decision != DecisionCanonicalize || transition.options.OwnerRegistration == nil || validateOwnerRegistrationObservation(recipe.plan.Before) != nil || recipe.plan.ExpectedFingerprint != step.Expected || recipe.plan.DesiredFingerprint != step.Desired || step.Resource != ownerRegistrationResource {
+		if migrationRecipeFor(work.migration) != ownerRegistrationRecipe || work.migration.Domain != "owner-registration" || step.ID != work.migration.ID+"."+ownerRegistrationResource || step.Decision != DecisionCanonicalize || transition.options.OwnerRegistration == nil || validateOwnerRegistrationObservation(recipe.plan.Before) != nil || recipe.plan.ExpectedFingerprint != step.Expected || recipe.plan.DesiredFingerprint != step.Desired || step.Resource != ownerRegistrationResource {
 			return invalid("owner recipe differs from its journal intent")
 		}
 	case *ingressWorkRecipe:
@@ -232,7 +232,7 @@ func (transition *V2Transition) validateObservationWork(observation v2Observatio
 }
 
 func settingsWorkMigration(migration MigrationDefinitionV2) bool {
-	return nativeMigration(migration) && migration.Kind == registeredYardsMigration || migration.Domain == "settings" && (migration.Kind == localSSHPortMigration || migration.Kind == "test-vms-settings-v1-to-v2")
+	return nativeMigration(migration) && migrationRecipeFor(migration) == registeredYardsRecipe || migration.Domain == "settings" && (migrationRecipeFor(migration) == localSSHSettingsRecipe || migrationRecipeFor(migration) == canonicalSettingsRecipe)
 }
 
 // boundWorkStep is the checked recipe/phase intersection consumed by effects.

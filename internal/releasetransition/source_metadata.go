@@ -322,9 +322,9 @@ func (store *POSIXV2Store) terminalStepArtifacts(journal JournalRecord, step Jou
 			return errors.New("terminal ledger step grammar is unsupported")
 		}
 	} else {
-		supported := migration.Kind == "test-vms-settings-v1-to-v2" && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && (step.Decision == DecisionCanonicalize || step.Decision == DecisionReset)
-		supported = supported || (migration.Kind == localSSHPortMigration || migration.Kind == registeredYardsMigration) && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && step.Decision == DecisionCanonicalize
-		supported = supported || migration.Kind == "test-yard-owner-v1-to-v2" && step.Resource == ownerRegistrationResource && step.ID == migration.ID+"."+ownerRegistrationResource && step.Decision == DecisionCanonicalize
+		supported := migrationRecipeFor(migration) == canonicalSettingsRecipe && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && (step.Decision == DecisionCanonicalize || step.Decision == DecisionReset)
+		supported = supported || (migrationRecipeFor(migration) == localSSHSettingsRecipe || migrationRecipeFor(migration) == registeredYardsRecipe) && domain.SafeName(step.Resource) && step.ID == migration.ID+"."+step.Resource && step.Decision == DecisionCanonicalize
+		supported = supported || migrationRecipeFor(migration) == ownerRegistrationRecipe && step.Resource == ownerRegistrationResource && step.ID == migration.ID+"."+ownerRegistrationResource && step.Decision == DecisionCanonicalize
 		supported = supported || nativeMigration(migration) && strings.HasPrefix(step.Resource, "yard.") && domain.SafeName(strings.TrimPrefix(step.Resource, "yard.")) && step.ID == migration.ID+"."+step.Resource && step.Decision == DecisionTransform
 		if !supported {
 			return errors.New("source repair requires a supported original terminal step grammar")
@@ -502,8 +502,8 @@ func (store *POSIXV2Store) sourceTypedRecovery(journal JournalRecord, step Journ
 		return errors.New("terminal typed recovery does not match journal evidence")
 	}
 	var canonical []byte
-	switch migration.Kind {
-	case "test-vms-settings-v1-to-v2", localSSHPortMigration, registeredYardsMigration:
+	switch migrationRecipeFor(migration) {
+	case canonicalSettingsRecipe, localSSHSettingsRecipe, registeredYardsRecipe:
 		var recovery settingsRecoveryV1
 		if err := decodeBoundedRecord(snapshot.Payload, 4096, &recovery); err != nil {
 			return err
@@ -518,7 +518,7 @@ func (store *POSIXV2Store) sourceTypedRecovery(journal JournalRecord, step Journ
 			return err
 		}
 		canonical, err = json.Marshal(recovery)
-	case "test-yard-owner-v1-to-v2":
+	case ownerRegistrationRecipe:
 		var recovery ownerRegistrationRecoveryV1
 		if err := decodeBoundedRecord(snapshot.Payload, 4096, &recovery); err != nil {
 			return err

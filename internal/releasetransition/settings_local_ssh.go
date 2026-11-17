@@ -152,11 +152,11 @@ func (transition *V2Transition) localSSHPortSnapshot(yard string, view V2Setting
 }
 
 func (transition *V2Transition) observeSettingsMigrationWork(migration MigrationDefinitionV2, yard string) (config.PersistentFileSnapshot, string, Fingerprint, error) {
-	if migration.Kind == registeredYardsMigration {
+	if migrationRecipeFor(migration) == registeredYardsRecipe {
 		snapshot, path, inheritance, err := transition.registeredSettingsSnapshot(yard, nil)
 		return snapshot, path, settingsV2ResourceFingerprint(snapshot, inheritance), err
 	}
-	if migration.Kind != localSSHPortMigration {
+	if migrationRecipeFor(migration) != localSSHSettingsRecipe {
 		return transition.observeSettingsWork(yard)
 	}
 	view := posixV2SettingsSnapshotView{configHome: transition.options.ConfigHome}
@@ -273,11 +273,11 @@ func (transition *V2Transition) observeJournalSettingsWork(journal JournalRecord
 }
 
 func (transition *V2Transition) settingsInheritance(migration MigrationDefinitionV2, yard string) (Fingerprint, error) {
-	switch migration.Kind {
-	case registeredYardsMigration:
+	switch migrationRecipeFor(migration) {
+	case registeredYardsRecipe:
 		_, _, inheritance, err := transition.registeredSettingsSnapshot(yard, nil)
 		return inheritance, err
-	case localSSHPortMigration:
+	case localSSHSettingsRecipe:
 		loaded, err := transition.loadSSHPortYard(yard, nil)
 		if err != nil {
 			return "", err

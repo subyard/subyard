@@ -33,17 +33,10 @@ func rollbackHasSourceWork(inspection releasetransition.Inspection) bool {
 	return false
 }
 
-// These original producers declare every source mutation in Decisions; pending
-// metadata-only edges do not require another capability. New kinds stay opaque
-// until their inspection contract is explicitly established here.
+// The compiled definition owns the source inspection contract. A pending
+// native recipe still requires its separately negotiated activation capability.
 func rollbackSourceDecisionsComplete(kind string) bool {
-	switch kind {
-	case "test-vms-settings-v1-to-v2", "test-yard-owner-v1-to-v2",
-		"local-ssh-port-settings-v2-to-v3", "owner-publication-state-v1":
-		return true
-	default:
-		return false
-	}
+	return releasetransition.MigrationSourceDecisionsComplete(kind)
 }
 
 func rollbackHasPendingOpaqueWork(ctx context.Context, target *verifiedPublishedCandidate, configHome string) (bool, error) {

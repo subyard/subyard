@@ -41,7 +41,7 @@ func (transition *V2Transition) sourceWorkStable(observation v2Observation) bool
 		if work.kind() == v2LedgerWork {
 			continue
 		}
-		if work.kind() != v2SettingsWork || work.migration.Kind != localSSHPortMigration ||
+		if work.kind() != v2SettingsWork || migrationRecipeFor(work.migration) != localSSHSettingsRecipe ||
 			!transition.localSSHPortScopeStable(work.intent) {
 			return false
 		}
@@ -63,7 +63,7 @@ func (transition *V2Transition) sourceWorkStable(observation v2Observation) bool
 
 func (transition *V2Transition) localSSHPortScopeStable(intent PlannerStepIntent) bool {
 	migration, known := transition.migration(intent.Migration)
-	return known && migration.Kind == localSSHPortMigration && migration.Domain == "settings" &&
+	return known && migrationRecipeFor(migration) == localSSHSettingsRecipe && migration.Domain == "settings" &&
 		migration.FromEpoch == 2 && migration.ToEpoch == 3 && transition.catalog.Supports(localSSHPortMigration, "settings") &&
 		domain.SafeName(intent.Resource) && intent.ID == migration.ID+"."+intent.Resource &&
 		intent.Decision == DecisionCanonicalize && validFingerprint(intent.Expected) && validFingerprint(intent.Desired) &&

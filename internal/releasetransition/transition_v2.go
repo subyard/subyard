@@ -364,10 +364,10 @@ func NewV2Transition(options V2Options) (*V2Transition, error) {
 		return nil, err
 	}
 	for _, migration := range registry.Migrations {
-		if nativeMigration(migration) && (migration.Kind == registeredYardsMigration && options.RegisteredYards == nil || migration.Kind == guestDiskTmpMigration && options.GuestDiskTmp == nil) {
+		if nativeMigration(migration) && (migrationRecipeFor(migration) == registeredYardsRecipe && options.RegisteredYards == nil || migrationRecipeFor(migration) == guestDiskTmpRecipe && options.GuestDiskTmp == nil) {
 			return nil, errors.New("v2 transition requires the registered yard migration owner")
 		}
-		if migration.Kind == "test-yard-owner-v1-to-v2" && options.OwnerRegistration == nil {
+		if migrationRecipeFor(migration) == ownerRegistrationRecipe && options.OwnerRegistration == nil {
 			return nil, errors.New("v2 transition requires the owner-registration capability port")
 		}
 	}
@@ -2086,109 +2086,17 @@ func (transition *V2Transition) observeFresh(
 	ledger := observation.ledger
 	ledgerSnapshot := observation.ledgerSnapshot
 	for _, migration := range pending {
-		switch migration.Kind {
-		case registeredYardsMigration, guestDiskTmpMigration:
-			var err error
-			settingsView, err = transition.appendNativeMigration(ctx, observation, migration, settingsView)
-			if err != nil {
-				return err
-			}
-		case "owner-publication-state-v1":
-			// Canonical power and owning receipt values retain their existing
-			// representation. The captured/applied/verified ledger transform
-			// publishes the reader boundary before runtime activation: epoch-1
-			// owners may not be activated against detached listener state.
-			if migration.Domain != "power-metadata" || migration.FromEpoch != 1 || migration.ToEpoch != 2 {
-				return invalid("owner publication migration requires power-metadata 1 to 2")
-			}
-			observation.decisions = append(observation.decisions, RedactedDecision{
-				Resource: "power-metadata", Scope: "power-metadata", Decision: DecisionTransform,
-				Result: "optional-publication-reader-v1",
-			})
-			observation.activationConsequences = append(observation.activationConsequences,
-				"preserve exact optional publication state; rollback to an epoch-1 power reader becomes unavailable")
-		case localSSHPortMigration:
-			plan, inspectErr := transition.inspectLocalSSHPorts(settingsView)
-			if inspectErr != nil {
-				return inspectErr
-			}
-			observation.decisions = append(observation.decisions, plan.Decisions...)
-			observation.blockers = append(observation.blockers, plan.Blockers...)
-			for index := range plan.Files {
-				file := plan.Files[index]
-				if err := file.validate(); err != nil {
-					return err
-				}
-				intent := settingsIntent(migration, file)
-				observation.intents = append(observation.intents, intent)
-				observation.observations = append(observation.observations, ResourceObservation{Resource: "yard." + file.Yard, Class: "local-ssh-port-settings-v1", Fingerprint: file.ExpectedFingerprint})
-				observation.work = append(observation.work, settingsMigrationWork(intent, migration, file))
-			}
-			settingsView = settingsViewAfterPlan(transition.options.ConfigHome, settingsView, plan.Files)
-		case "test-vms-settings-v1-to-v2":
-			capability := newTestVMSettingsV2Capability(
-				transition.options.ConfigHome, transition.options.InheritedSettingIDs,
-				settingsView,
-			)
-			capability.candidateConfigDir = transition.options.CandidateConfigDir
-			plan, inspectErr := capability.Inspect()
-			if inspectErr != nil {
-				return inspectErr
-			}
-			observation.decisions = append(observation.decisions, plan.Decisions...)
-			observation.blockers = append(observation.blockers, plan.Blockers...)
-			for index := range plan.Files {
-				file := plan.Files[index]
-				if err := file.validate(); err != nil {
-					return err
-				}
-				intent := settingsIntent(migration, file)
-				observation.intents = append(observation.intents, intent)
-				observation.observations = append(observation.observations, ResourceObservation{
-					Resource: "yard." + file.Yard, Class: "yard-settings-file-v1",
-					Fingerprint: file.ExpectedFingerprint,
-				})
-				observation.work = append(observation.work, settingsMigrationWork(intent, migration, file))
-			}
-			settingsView = settingsViewAfterPlan(
-				transition.options.ConfigHome, settingsView, plan.Files,
-			)
-		case "test-yard-owner-v1-to-v2":
-			plan, inspectErr := transition.inspectUnjournaledOwnerRegistration(ctx, observation, settingsView)
-			if inspectErr != nil {
-				if blocker, ok := ownerRegistrationDiagnosticBlocker(inspectErr, ctx); ok {
-					observation.blockers = append(observation.blockers, blocker)
-				} else {
-					return inspectErr
-				}
-			}
-			if plan != nil {
-				intent := PlannerStepIntent{
-					ID:        migration.ID + "." + ownerRegistrationResource,
-					Migration: migration.ID, Resource: ownerRegistrationResource,
-					Decision: DecisionCanonicalize,
-					Expected: plan.ExpectedFingerprint, Desired: plan.DesiredFingerprint,
-				}
-				observation.decisions = append(observation.decisions, RedactedDecision{
-					Resource: ownerRegistrationResource, Scope: "owner-registration",
-					Decision: DecisionCanonicalize, Result: "test-yard",
-				})
-				observation.intents = append(observation.intents, intent)
-				observation.observations = append(observation.observations, ResourceObservation{
-					Resource: "owner-registration." + ownerRegistrationResource,
-					Class:    "test-yard-owner-v1", Fingerprint: plan.ExpectedFingerprint,
-				})
-				observation.work = append(observation.work, ownerMigrationWork(intent, migration, *plan))
-			}
-		default:
-			observation.blockers = append(observation.blockers, Blocker{
-				Code: CodeUnsupportedKind, Resource: "migration." + migration.ID,
-				Message: "the pending migration kind is not compiled into this engine",
-				Retry:   "install an engine that supports the migration registry",
-			})
+		definition, known := compiledMigration(migration)
+		if !known || definition.forward == nil {
+			observation.blockers = append(observation.blockers, Blocker{Code: CodeUnsupportedKind, Resource: "migration." + migration.ID, Message: "the pending migration kind is not compiled into this engine", Retry: "install an engine that supports the migration registry"})
 			continue
 		}
-		if migration.Kind == "test-vms-settings-v1-to-v2" && ingressAfterSettings != nil {
+		var inspectErr error
+		settingsView, inspectErr = definition.forward(transition, ctx, observation, migration, settingsView)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if definition.recipe == canonicalSettingsRecipe && ingressAfterSettings != nil {
 			transition.appendFreshIngressWork(observation, *ingressAfterSettings)
 			ingressAfterSettings = nil
 		}
@@ -2292,19 +2200,11 @@ func (transition *V2Transition) observeResume(
 		if !slices.ContainsFunc(journal.Steps, func(step JournalStep) bool { return step.Migration == migration.ID }) {
 			continue
 		}
-		var capabilityPlan settingsV2Plan
-		switch migration.Kind {
-		case "test-vms-settings-v1-to-v2":
-			capability := newTestVMSettingsV2Capability(transition.options.ConfigHome, transition.options.InheritedSettingIDs, ownerSettingsView)
-			capability.candidateConfigDir = transition.options.CandidateConfigDir
-			capabilityPlan, err = capability.Inspect()
-		case localSSHPortMigration:
-			capabilityPlan, err = transition.inspectLocalSSHPorts(ownerSettingsView)
-		case registeredYardsMigration:
-			capabilityPlan, err = transition.inspectRegisteredSettings(ctx, migration, ownerSettingsView, observation.links)
-		default:
+		definition, known := compiledMigration(migration)
+		if !known || definition.settings == nil {
 			continue
 		}
+		capabilityPlan, err := definition.settings(transition, ctx, migration, ownerSettingsView, observation.links)
 		if err != nil {
 			return err
 		}
@@ -2390,7 +2290,7 @@ func (transition *V2Transition) observeResume(
 		if !exists {
 			return invalid("journal references unknown migration %q", step.Migration)
 		}
-		if migration.Kind == "test-yard-owner-v1-to-v2" {
+		if migrationRecipeFor(migration) == ownerRegistrationRecipe {
 			journalOwnerMigration = true
 		}
 		if strings.HasPrefix(step.Resource, "ledger.") {
@@ -2483,7 +2383,7 @@ func (transition *V2Transition) observeResume(
 			observation.observations = append(observation.observations, ResourceObservation{Resource: step.Resource, Class: migration.Kind, Fingerprint: actual})
 			continue
 		}
-		if migration.Kind == "test-yard-owner-v1-to-v2" {
+		if migrationRecipeFor(migration) == ownerRegistrationRecipe {
 			if step.Resource != ownerRegistrationResource {
 				return invalid("journaled owner-registration intent is invalid")
 			}
@@ -2805,7 +2705,7 @@ func (transition *V2Transition) convergeStep(
 						"the settings resource changed before its protected update",
 						"run yard update --check"), nil
 				}
-				if work.migration.Kind == registeredYardsMigration {
+				if migrationRecipeFor(work.migration) == registeredYardsRecipe {
 					plan, err := transition.inspectRegisteredSettings(ctx, work.migration, nil, links)
 					if err != nil {
 						return Outcome{}, err
@@ -2821,7 +2721,7 @@ func (transition *V2Transition) convergeStep(
 					}
 				}
 				publish := config.CompareAndSwapPersistentFile
-				if work.migration.Kind == localSSHPortMigration || work.migration.Kind == registeredYardsMigration {
+				if migrationRecipeFor(work.migration) == localSSHSettingsRecipe || migrationRecipeFor(work.migration) == registeredYardsRecipe {
 					publish = config.CompareAndSwapLocalSettingsFile
 				}
 				if err := publish(transition.options.ConfigHome, work.settingsFile().Path, expected, work.settingsFile().Desired); err != nil && !errors.Is(err, config.ErrPersistentTargetStale) {
@@ -3321,7 +3221,7 @@ func (transition *V2Transition) workFingerprint(
 		if err != nil {
 			return "", err
 		}
-		if work.migration.Kind == guestDiskTmpMigration {
+		if migrationRecipeFor(work.migration) == guestDiskTmpRecipe {
 			for _, step := range journal.Steps {
 				// Applied evidence proves the authorized attempt, not that every
 				// yard succeeded. Marker-derived activation warnings retain pending work.

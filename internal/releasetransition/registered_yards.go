@@ -19,9 +19,8 @@ const guestDiskTmpMigration = "registered-guest-disk-tmp-v2-to-v3"
 // owners observe only protected registered local yards; activation remains a
 // separate native observation after their verified ledger steps.
 func nativeMigration(m MigrationDefinitionV2) bool {
-	return m.FromEpoch == 2 && m.ToEpoch == 3 &&
-		(m.Kind == registeredYardsMigration && m.Domain == "owner-registration" ||
-			m.Kind == guestDiskTmpMigration && m.Domain == "power-metadata")
+	definition, known := compiledMigration(m)
+	return known && (definition.recipe == registeredYardsRecipe || definition.recipe == guestDiskTmpRecipe) && m.FromEpoch == definition.migration.FromEpoch && m.ToEpoch == definition.migration.ToEpoch
 }
 
 // VerifiedNativeMigrationKinds reports which native migrations this journal proves
@@ -33,8 +32,8 @@ func VerifiedNativeMigrationKinds(registry RegistryV2, journal JournalRecord, ya
 		}
 		for _, migration := range registry.Migrations {
 			if migration.ID == step.Migration && nativeMigration(migration) {
-				registered = registered || migration.Kind == registeredYardsMigration
-				guestDiskTmp = guestDiskTmp || migration.Kind == guestDiskTmpMigration
+				registered = registered || migrationRecipeFor(migration) == registeredYardsRecipe
+				guestDiskTmp = guestDiskTmp || migrationRecipeFor(migration) == guestDiskTmpRecipe
 			}
 		}
 	}
@@ -45,7 +44,7 @@ func (t *V2Transition) nativeOwners(m MigrationDefinitionV2) []V2ActivationRecon
 	if !nativeMigration(m) {
 		return nil
 	}
-	if m.Kind == registeredYardsMigration {
+	if migrationRecipeFor(m) == registeredYardsRecipe {
 		return t.options.RegisteredYards
 	}
 	return t.options.GuestDiskTmp
@@ -176,7 +175,7 @@ func (t *V2Transition) appendNativeMigration(ctx context.Context, observation *v
 			return view, err
 		}
 		observation.activationConsequences = append(observation.activationConsequences, observed.Consequences...)
-		if m.Kind == guestDiskTmpMigration {
+		if migrationRecipeFor(m) == guestDiskTmpRecipe {
 			for _, text := range observed.Consequences {
 				decision := DecisionTransform
 				if observed.Converged {

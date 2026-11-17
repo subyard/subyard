@@ -98,11 +98,19 @@ func preRegisteredYardsCapabilityCatalog() CapabilityCatalog {
 }
 
 func BuiltinCapabilityCatalog() CapabilityCatalog {
-	previous := preRegisteredYardsCapabilityCatalog()
-	catalog, err := NewCapabilityCatalog(append(slices.Clone(previous.descriptors),
-		CapabilityDescriptor{Kind: registeredYardsMigration, Domain: "owner-registration", Version: 1},
-		CapabilityDescriptor{Kind: guestDiskTmpMigration, Domain: "power-metadata", Version: 1},
-	))
+	var descriptors []CapabilityDescriptor
+	seen := map[string]CapabilityDescriptor{}
+	for _, definition := range builtinMigrationDefinitions() {
+		if previous, exists := seen[definition.capability.Kind]; exists {
+			if previous != definition.capability {
+				panic("authored migrations disagree on a compiled capability")
+			}
+			continue
+		}
+		seen[definition.capability.Kind] = definition.capability
+		descriptors = append(descriptors, definition.capability)
+	}
+	catalog, err := NewCapabilityCatalog(descriptors)
 	if err != nil {
 		panic(err)
 	}
