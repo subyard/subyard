@@ -221,6 +221,7 @@ type v2Observation struct {
 	checkpointCompaction    bool
 	journal                 *JournalRecord
 	journalSnapshot         ProtectedSnapshot
+	completedRollback       bool
 	assessment              domain.ActionAssessment
 	decisions               []RedactedDecision
 	blockers                []Blocker
@@ -461,7 +462,7 @@ func (transition *V2Transition) inspectionOutcome(observation v2Observation) (ou
 	defer func() { outcome = withActivationWarnings(outcome, observation.activationWarnings) }()
 	journal := observation.journal
 	completedHistory := transition.completedJournalMatches(observation) && !observation.checkpointConversion
-	if journal != nil && journal.Checkpoint == JournalComplete && journal.Goal != observation.goal {
+	if journal != nil && journal.Checkpoint == JournalComplete && journal.Goal != observation.goal && !completedHistory {
 		// A completed journal for another exact goal is immutable history, not
 		// recovery state for a new forward target or explicit rollback.
 		journal = nil
@@ -673,6 +674,11 @@ func (transition *V2Transition) preflightConverge(
 	}
 	if len(observation.work) == 0 && transition.fixedPoint(observation) &&
 		!observation.checkpointConversion {
+		if observation.completedRollback {
+			// Preserve S's transaction provenance and perform bounded cleanup
+			// only after the ordinary convergence path acquires the lock.
+			return "", nil, nil
+		}
 		proof, err := transition.observedReadyProof(observation)
 		if err != nil {
 			return "", nil, err
@@ -1312,6 +1318,17 @@ func (transition *V2Transition) cleanupOwnerRegistration(
 	if journal.Transaction != transaction || journal.Checkpoint != JournalComplete {
 		return invalid("owner cleanup journal is not the completed transaction")
 	}
+	if journal.RegistryDigest != transition.registryDigest || journal.CatalogDigest != transition.catalog.Digest() {
+		completion, err := transition.store.InspectCompletedRollback(transition.registry, transition.registryDigest, transition.options.ArtifactDigest)
+		if err != nil {
+			return err
+		}
+		if completion != nil {
+			// S closed its typed artifacts. R retires their exact inventory;
+			// it must not reinterpret inverse rows as forward owner cleanup.
+			return nil
+		}
+	}
 	found := false
 	for _, step := range journal.Steps {
 		if step.Resource != ownerRegistrationResource {
@@ -1537,7 +1554,17 @@ func (transition *V2Transition) observe(ctx context.Context, goal Goal) (v2Obser
 		checkpointAuthority:     checkpointAuthority,
 		journal:                 journal, journalSnapshot: journalSnapshot,
 	}
-	if rollbackBlocker == nil {
+	if journal != nil && journal.Checkpoint == JournalComplete && journal.Goal.Direction == DirectionActivatePrevious && journal.Goal.Target == goal.Target && journal.ArtifactDigest == transition.options.ArtifactDigest {
+		completion, err := transition.store.InspectCompletedRollback(transition.registry, transition.registryDigest, transition.options.ArtifactDigest)
+		if err != nil {
+			return v2Observation{}, err
+		}
+		observation.completedRollback = completion != nil
+		if observation.completedRollback {
+			rollbackBlocker = nil
+		}
+	}
+	if rollbackBlocker == nil && !observation.completedRollback {
 		rollbackBlocker = transition.rollbackCompatibilityBlocker(journal == nil || journal.Goal != goal)
 	}
 	if rollbackBlocker != nil {
@@ -3354,10 +3381,14 @@ func (transition *V2Transition) fixedPoint(observation v2Observation) bool {
 func (transition *V2Transition) completedJournalMatches(observation v2Observation) bool {
 	journal := observation.journal
 	if journal == nil || journal.Checkpoint != JournalComplete ||
-		journal.Goal != observation.goal ||
-		journal.ArtifactDigest != transition.options.ArtifactDigest ||
-		journal.RegistryDigest != transition.registryDigest ||
-		journal.CatalogDigest != transition.catalog.Digest() {
+		journal.Goal.Target != observation.goal.Target ||
+		journal.ArtifactDigest != transition.options.ArtifactDigest {
+		return false
+	}
+	if observation.completedRollback {
+		return activatedReleaseLinks(observation.links, journal.Releases)
+	}
+	if journal.Goal != observation.goal || journal.RegistryDigest != transition.registryDigest || journal.CatalogDigest != transition.catalog.Digest() {
 		return false
 	}
 	if releasePairsEqual(journal.Releases, transition.options.Releases) {

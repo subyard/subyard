@@ -9,6 +9,32 @@ type CompletedRollback struct {
 	Ledger  MigrationLedgerSnapshot
 }
 
+// InspectSealedCompletedRollback introduces native target admission only when
+// protected closure evidence exists. Historical targets retain their original
+// read-only completion path, including their historical registry codecs.
+func (store *POSIXV2Store) InspectSealedCompletedRollback(registryPayload []byte, artifact Fingerprint) (*CompletedRollback, error) {
+	snapshot, err := store.ReadCurrentJournal()
+	if err != nil || !snapshot.Exists {
+		return nil, err
+	}
+	journal, err := ParseJournal(snapshot.Payload)
+	if err != nil {
+		return nil, err
+	}
+	if journal.Checkpoint != JournalComplete || journal.Goal.Direction != DirectionActivatePrevious {
+		return nil, nil
+	}
+	closure, err := store.readRecord(rollbackClosureParts, string(journal.Transaction)+".json")
+	if err != nil || !closure.Exists {
+		return nil, err
+	}
+	registry, digest, err := ParseRegistryV2(registryPayload, BuiltinCapabilityCatalog())
+	if err != nil {
+		return nil, err
+	}
+	return store.InspectCompletedRollback(registry, digest, artifact)
+}
+
 // InspectCompletedRollback recognizes only an exactly closed foreign rollback.
 // A missing receipt is not compatibility evidence. Callers keep their ordinary
 // strict admission in that case and must observe current links and activation.

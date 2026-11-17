@@ -106,5 +106,5 @@ func (cli *CLI) pendingIntegrationConfigurationGate(outcome *releasetransition.O
 		return false
 	}
 	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	return err == nil && configApplyRepairJournalMatches(journal, *outcome) && (outcome.Transaction == nil || *outcome.Transaction == journal.Transaction)
+	return err == nil && cli.completedRepairJournalMatches(store, journal, *outcome) && (outcome.Transaction == nil || *outcome.Transaction == journal.Transaction)
 }

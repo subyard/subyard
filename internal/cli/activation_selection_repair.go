@@ -185,8 +185,14 @@ func (cli *CLI) runCompletedScalarAuthoring(ctx context.Context, yard string, re
 	if err != nil {
 		return fail(err)
 	}
-	if pendingSelection && (proof.Metadata.Journal == nil || !configApplyRepairJournalMatches(*proof.Metadata.Journal, outcome)) {
-		return fail(errors.New("selection reduction requires matching completed release history"))
+	if pendingSelection {
+		store, err := releasetransition.NewPOSIXV2Store(options.ConfigHome)
+		if err != nil {
+			return fail(err)
+		}
+		if proof.Metadata.Journal == nil || !cli.completedRepairJournalMatches(store, *proof.Metadata.Journal, outcome) {
+			return fail(errors.New("selection reduction requires matching completed release history"))
+		}
 	}
 	guard := func() error {
 		if pendingSelection {

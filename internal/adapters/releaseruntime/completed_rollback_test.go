@@ -1,0 +1,60 @@
+package releaseruntime
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/testkit"
+	rollbackfixture "github.com/Subyard/Subyard/internal/testkit/rollback"
+)
+
+func TestCompletedRollbackRoutesToTargetAndAdmitsNativeSourceMetadata(t *testing.T) {
+	root := testkit.TempDir(t)
+	runtimeRoot, home := filepath.Join(root, "runtime"), filepath.Join(root, "config")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.3\\n';; _release-transition) %s=ready exec %q -test.run '^TestSourceAdmissionCandidateProcessHelper$';; *) exit 64;; esac\n", sourceAdmissionProcessEnvironment, executable)
+	target := writeVersionedRuntimeCandidate(t, runtimeRoot, "1.2.3-target", "1.2.3", engine)
+	targetArtifact := sealSourceAdmissionCandidate(t, target)
+	sourceRegistry := []byte(`{"schemaVersion":2,"minimumEpochs":{"settings":1},"currentEpochs":{"settings":2},"migrations":[{"id":"future-v2","domain":"settings","fromEpoch":1,"toEpoch":2,"kind":"future-source-v1"}]}`)
+	source := writeDelegateRuntimeFixture(t, runtimeRoot, "1.3.0-source", "source", sourceRegistry, "#!/bin/sh\nprintf 'yard-engine 1.3.0\\n'\n")
+	adapter := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root})})
+	defer adapter.Close()
+	verified, err := adapter.verifyPublishedCandidate(context.Background(), source, runtimeRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceArtifact := verified.manifestDigest
+	verified.Close()
+	for name, release := range map[string]releasetransition.ReleaseID{"current": target.release, "previous": source.release} {
+		if err := os.Symlink("releases/"+string(release), filepath.Join(runtimeRoot, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	journal := rollbackfixture.Seed(t, rollbackfixture.Inputs{RuntimeRoot: runtimeRoot, ConfigHome: home, Releases: releasetransition.ReleasePair{From: source.release, Target: target.release}, SourceArtifact: sourceArtifact, TargetArtifact: targetArtifact, SourceRegistry: sourceRegistry, TargetRegistry: []byte(sourceAdmissionRegistry)})
+	// S is no longer executable. Its completed, protected provenance must not
+	// make its handlers a dependency of R's ordinary readiness or source repair.
+	if err := os.Remove(filepath.Join(source.root, "bin", "yard-engine")); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := adapter.InspectSourceAdmission(context.Background(), runtimeRoot, home)
+	if err != nil || proof.Metadata.Journal == nil || proof.Metadata.Journal.Transaction != journal.Transaction {
+		t.Fatalf("native source admission = %+v, %v", proof, err)
+	}
+	inspection, err := adapter.inspectProtectedTransition(context.Background(), runtimeRoot, home, "default", nil)
+	if err != nil || inspection == nil {
+		t.Fatalf("target-owned inspection = %+v, %v", inspection, err)
+	}
+	if inspection.owner.candidate.release != target.release || inspection.request.RegistryDigest == journal.RegistryDigest || inspection.inspection.Outcome == nil || inspection.inspection.Outcome.Status != releasetransition.StatusReady {
+		t.Fatalf("completed rollback did not route to native target readiness: %+v", inspection)
+	}
+}

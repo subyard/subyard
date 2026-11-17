@@ -55,9 +55,14 @@ func TestSourceAdmissionCandidateProcessHelper(t *testing.T) {
 	if mode := os.Getenv(sourceAdmissionProcessEnvironment); mode == "repair" || mode == "old-wire" {
 		reconcilers = []releasetransition.V2ActivationReconciler{v0111FixtureReconciler{statePath: filepath.Join(request.ConfigHome, "source-repair-state"), desired: v0111FixtureFingerprint("repaired")}}
 	}
+	var rollbackTarget *releasetransition.RollbackTarget
+	if request.Direction == releasetransition.DirectionActivatePrevious {
+		rollbackTarget = &releasetransition.RollbackTarget{Version: "1.2.3", RegistryDigest: request.RegistryDigest}
+	}
 	transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
 		ConfigHome: request.ConfigHome, RegistryPayload: []byte(sourceAdmissionRegistry), ArtifactDigest: request.ArtifactDigest,
-		Reconcilers:  reconcilers,
+		Reconcilers: reconcilers,
+		Direction:   request.Direction, RollbackTarget: rollbackTarget,
 		Releases:     releasetransition.ReleasePair{From: actual.Active, Previous: actual.Previous, Target: request.Target},
 		ObserveLinks: func(context.Context) (releasetransition.ReleaseLinks, error) { return links.Observe() },
 		ActivateLinks: func(_ context.Context, pair releasetransition.ReleasePair) (releasetransition.ReleaseLinks, error) {

@@ -361,7 +361,19 @@ func (runtime *Runtime) inspectProtectedTransition(
 	}
 	verifiedOwner := verifiedTarget
 	owner := target
-	if verifiedTarget.registryDigest != journal.RegistryDigest {
+	nativeRollback := false
+	if completedRollback {
+		registry, err := readRollbackRegistryPayload(verifiedTarget)
+		if err != nil {
+			return nil, publicCandidateFailure(err)
+		}
+		completion, err := store.InspectSealedCompletedRollback(registry, verifiedTarget.manifestDigest)
+		if err != nil {
+			return nil, publicCandidateFailure(err)
+		}
+		nativeRollback = completion != nil
+	}
+	if verifiedTarget.registryDigest != journal.RegistryDigest && !nativeRollback {
 		if journal.Goal.Direction != releasetransition.DirectionActivatePrevious {
 			return nil, publicCandidateFailure(
 				errors.New("journal target does not own the protected transition registry"),
@@ -398,12 +410,17 @@ func (runtime *Runtime) inspectProtectedTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       journal.SourceIngress,
 	}
-	if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
-		var public publicReleaseInspectionError
-		if errors.As(err, &public) {
-			return nil, err
+	if nativeRollback {
+		request.RegistryDigest = verifiedTarget.registryDigest
+	}
+	if !nativeRollback {
+		if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
+			var public publicReleaseInspectionError
+			if errors.As(err, &public) {
+				return nil, err
+			}
+			return nil, publicCandidateFailure(err)
 		}
-		return nil, publicCandidateFailure(err)
 	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
 	if err != nil {

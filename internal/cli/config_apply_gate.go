@@ -94,7 +94,7 @@ func (cli *CLI) prepareActivationRepair(
 		return nil, nil
 	}
 	journal, err := releasetransition.ParseJournal(snapshot.Payload)
-	if err != nil || !configApplyRepairJournalMatches(journal, outcome) {
+	if err != nil || !cli.completedRepairJournalMatches(store, journal, outcome) {
 		return nil, nil
 	}
 	observedGate, err := cli.inspectMutationGate(ctx, yard)
@@ -109,7 +109,10 @@ func (cli *CLI) prepareActivationRepair(
 	}
 	catalog := releasetransition.BuiltinCapabilityCatalog()
 	registry, registryDigest, err := releasetransition.ParseRegistryV2(registryPayload, catalog)
-	if err != nil || registryDigest != journal.RegistryDigest || catalog.Digest() != journal.CatalogDigest {
+	if err != nil {
+		return nil, nil
+	}
+	if (registryDigest != journal.RegistryDigest || catalog.Digest() != journal.CatalogDigest) && !cli.completedRollbackJournal(store, journal) {
 		return nil, nil
 	}
 	ledgerState, err := store.ReadMigrationLedger(registry, registryDigest)

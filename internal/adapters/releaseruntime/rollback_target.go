@@ -89,6 +89,11 @@ func VerifyRollbackTargetAssets(ctx context.Context, repositoryRoot string, requ
 }
 
 func readRollbackRegistryPayload(candidate *verifiedPublishedCandidate) ([]byte, error) {
+	if candidate.registryDigest == "" {
+		// Historical completion may predate V2. Native contract admission
+		// separately requires a nonempty, valid sealed registry payload.
+		return nil, nil
+	}
 	file, err := openCandidateFile(int(candidate.root.Fd()), "config/release-transition.json")
 	if err != nil {
 		return nil, err

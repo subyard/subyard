@@ -232,7 +232,19 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 	if err != nil {
 		return proof, err
 	}
-	if journal != nil && journal.RegistryDigest != verified.registryDigest {
+	nativeRollback := false
+	if journal != nil && journal.Checkpoint == releasetransition.JournalComplete && journal.Goal.Direction == releasetransition.DirectionActivatePrevious {
+		registry, err := readRollbackRegistryPayload(verified)
+		if err != nil {
+			return proof, err
+		}
+		completion, err := store.InspectSealedCompletedRollback(registry, verified.manifestDigest)
+		if err != nil {
+			return proof, err
+		}
+		nativeRollback = completion != nil
+	}
+	if journal != nil && journal.RegistryDigest != verified.registryDigest && !nativeRollback {
 		if journal.Goal.Direction != releasetransition.DirectionActivatePrevious {
 			return proof, errors.New("sealed target does not own the original registry")
 		}
@@ -259,7 +271,7 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 	if err != nil {
 		return proof, err
 	}
-	if journal != nil && !releasetransition.BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) {
+	if journal != nil && !nativeRollback && !releasetransition.BuiltinCapabilityCatalog().SupportsSourceMetadata(journal.CatalogDigest, registry) {
 		return proof, errors.New("unsupported original catalog")
 	}
 	phase = "resource declarations"

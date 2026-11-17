@@ -228,7 +228,10 @@ func (cli *CLI) completedHistoryClean(outcome releasetransition.Outcome) bool {
 	}
 	catalog := releasetransition.BuiltinCapabilityCatalog()
 	registry, registryDigest, err := releasetransition.ParseRegistryV2(registryPayload, catalog)
-	if err != nil || registryDigest != journal.RegistryDigest || catalog.Digest() != journal.CatalogDigest {
+	if err != nil {
+		return false
+	}
+	if (registryDigest != journal.RegistryDigest || catalog.Digest() != journal.CatalogDigest) && !cli.completedRollbackJournal(store, journal) {
 		return false
 	}
 	ledger, err := store.ReadMigrationLedger(registry, registryDigest)

@@ -99,6 +99,9 @@ func (source *releaseConfiguration) materializedScope(cli *CLI, releases release
 			return false, err
 		}
 	}
+	if snapshot.Exists && journal.Goal.Target == goal.Target && journal.ArtifactDigest == artifact && cli.completedRollbackJournal(store, journal) {
+		return true, nil
+	}
 	matches := snapshot.Exists && journal.Goal == goal && journal.ArtifactDigest == artifact &&
 		(registry == "" || journal.RegistryDigest == registry)
 	if matches && journal.Checkpoint == releasetransition.JournalComplete &&

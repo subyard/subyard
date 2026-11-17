@@ -37,6 +37,12 @@ func (store *POSIXV2Store) CaptureRegisteredYardBinding(resource string) (Regist
 	if err := store.ValidateCurrentRecovery(journal); err != nil {
 		return result, err
 	}
+	if journal.Goal.Direction == DirectionActivatePrevious {
+		if journal.Checkpoint == JournalComplete {
+			return result, nil
+		}
+		return result, invalid("an unfinished rollback cannot authorize forward native retirement")
+	}
 	if journal.Checkpoint != JournalAuthorized && journal.Checkpoint != JournalMigrating && journal.Checkpoint != JournalComplete {
 		for _, step := range journal.Steps {
 			if step.Resource != resource {
@@ -67,7 +73,7 @@ func (binding RegisteredYardJournalBinding) Matches(journal JournalRecord, resou
 		return false
 	}
 	old, err := ParseJournal(binding.Snapshot.Payload)
-	if err != nil || old.Transaction != journal.Transaction || old.AuthorizationPlan != journal.AuthorizationPlan || old.IntentDigest != journal.IntentDigest || old.ArtifactDigest != journal.ArtifactDigest || old.RegistryDigest != journal.RegistryDigest || old.CatalogDigest != journal.CatalogDigest || !releasePairsEqual(old.Releases, journal.Releases) {
+	if err != nil || old.Goal.Direction != DirectionActivateTarget || journal.Goal.Direction != DirectionActivateTarget || old.Transaction != journal.Transaction || old.AuthorizationPlan != journal.AuthorizationPlan || old.IntentDigest != journal.IntentDigest || old.ArtifactDigest != journal.ArtifactDigest || old.RegistryDigest != journal.RegistryDigest || old.CatalogDigest != journal.CatalogDigest || !releasePairsEqual(old.Releases, journal.Releases) {
 		return false
 	}
 	frozen := func(record JournalRecord) JournalRecord {
