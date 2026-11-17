@@ -660,19 +660,22 @@ def unanswered_approvals(root, state):
                 yield request
 
 
-def scope_command(*args):
+def scope_command(*args, timeout=10):
     return subprocess.run(['systemctl', '--user', *args], stdin=subprocess.DEVNULL,
-                          capture_output=True, text=True, timeout=10)
+                          capture_output=True, text=True, timeout=timeout)
 
 
-def scope_stopped(root, state, *, terminate=False):
+def scope_stopped(root, state, *, terminate=False, deadline=None):
     scope = state.get('scope')
     if not scope or scope != 'subyard-bridge-' + turn_dir(root, state).name + '.scope':
         return False
     try:
         if terminate:
             scope_command('stop', scope)
-        result = scope_command('show', '--property=LoadState,ActiveState,ControlGroup', scope)
+        remaining = 10 if deadline is None else min(10, deadline - time.monotonic())
+        if remaining <= 0:
+            return False
+        result = scope_command('show', '--property=LoadState,ActiveState,ControlGroup', scope, timeout=remaining)
         properties = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
         if result.returncode != 0 or properties.get('ActiveState') not in ('inactive', 'failed'):
             return False
@@ -817,9 +820,9 @@ def stop(root, deadline):
     return state, 0 if recovered else 1
 
 
-def worker_view(root, state):
+def worker_view(root, state, deadline=None):
     if state['status'] in EXIT_CODES:
-        state['cleanup'] = 'verified' if scope_stopped(root, state) else 'unverified'
+        state['cleanup'] = 'verified' if scope_stopped(root, state, deadline=deadline) else 'unverified'
     return state
 
 
@@ -900,7 +903,8 @@ def require_active_turn(root, state):
     if state.get('status') in ACTIVE_STATES:
         return
     if state.get('session_id'):
-        command = RESUME_COMMAND.format(shlex.quote(str(root)))
+        path = str(root)
+        command = RESUME_COMMAND.format(shlex.quote(path) if path.isprintable() else 'DIR')
         raise BridgeError(f'send requires an active turn. To continue a finished or stopped worker, use {command}.')
     raise BridgeError('send requires an active turn. This worker has no session ID. Start a new worker in a new --dir.')
 
@@ -912,12 +916,13 @@ def main():
         if os.path.lexists(root):
             directory(root, create=False)
         workers = []
+        deadline = time.monotonic() + 1
         for path in sorted(root.rglob('state')):
             try:
                 if not stat.S_ISREG(path.lstat().st_mode):
                     continue
                 directory(path.parent, create=False)
-                state = worker_view(path.parent, snapshot(path.parent))
+                state = worker_view(path.parent, snapshot(path.parent), deadline)
                 workers.append({'dir': str(path.parent), **state})
             except (OSError, ValueError, KeyError):
                 workers.append({'dir': str(path.parent), 'status': 'failed', 'cleanup': 'unverified'})
@@ -987,8 +992,9 @@ def main():
         scope_command('--no-block', 'stop', state['scope'])
         return 0
     if args.command == 'wait':
-        state, code = wait(root, time.monotonic() + args.timeout)
-        print(json.dumps(worker_view(root, state)))
+        deadline = time.monotonic() + args.timeout
+        state, code = wait(root, deadline)
+        print(json.dumps(worker_view(root, state, deadline)))
         return code
     if args.command == 'status':
         print(json.dumps(worker_view(root, snapshot(root))))

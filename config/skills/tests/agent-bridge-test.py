@@ -83,6 +83,11 @@ try:
 except FileNotFoundError:
     pid = None
 if 'show' in args:
+    slow_probe = scopes / 'slow-probe'
+    if slow_probe.exists():
+        with slow_probe.open('a') as log:
+            log.write(unit.name + '\n')
+        time.sleep(2)
     print('LoadState=loaded\nActiveState=active\nControlGroup=/fixture' if pid else
           'LoadState=not-found\nActiveState=inactive\nControlGroup=')
 elif pid and not (scopes / 'busy').exists():
@@ -835,6 +840,21 @@ runpy.run_path(bridge, run_name='__main__')
         self.assertCountEqual([row.split(maxsplit=4) for row in rows],
                               [[names[item['vendor']], item['vendor'], 'done', 'verified', item['dir']] for item in listed])
 
+        slow_probe = self.scopes / 'slow-probe'
+        slow_probe.touch()
+        try:
+            for timeout in ('0', '0.1'):
+                waited = json.loads(self.cli('wait', roots[0], '--timeout', timeout).stdout)
+                self.assertEqual((waited['status'], waited['cleanup']), ('done', 'unverified'))
+                if timeout == '0':
+                    self.assertEqual(slow_probe.read_text(), '')
+            slow_probe.write_text('')
+            limited = json.loads(self.cli('list', self.root, '--json').stdout)
+            self.assertEqual([item['cleanup'] for item in limited], ['unverified', 'unverified'])
+            self.assertLessEqual(len(slow_probe.read_text().splitlines()), 1)
+        finally:
+            slow_probe.unlink()
+
     def test_approval_stays_answered_during_request_retirement(self):
         gate = self.root / 'reply-gate'
         self.env['BRIDGE_TEST_REPLY_GATE'] = str(gate)
@@ -1244,7 +1264,7 @@ main()
     def test_stop_retires_bridge_suspended_after_publishing_done(self):
         self.env['BRIDGE_TEST_RESULT_CRASH'] = 'suspend'
         try:
-            root = self.start('codex', 'complete')
+            root = self.start('codex', 'complete', dirname='worker\t\x1b')
         finally:
             self.env.pop('BRIDGE_TEST_RESULT_CRASH')
         self.assertEqual(self.done(root), 'started:complete')
@@ -1260,7 +1280,8 @@ main()
             self.assertTrue(process_alive(pid))
             late = self.cli('send', root, '--message', 'late', '--timeout', '0', success=False)
             self.assertEqual(late.returncode, 1)
-            self.assertIn(f'resume --dir {root} --task FILE', late.stderr)
+            self.assertIn('resume --dir DIR --task FILE', late.stderr)
+            self.assertNotIn(root.name, late.stderr)
             resumed = self.cli('resume', root, '--timeout', '0.1', success=False)
             self.assertEqual(resumed.returncode, 124)
             self.assertIn('worker lock', resumed.stderr)
