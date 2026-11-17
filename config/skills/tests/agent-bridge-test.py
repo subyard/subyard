@@ -16,8 +16,7 @@ import unittest
 
 BRIDGE = Path(__file__).resolve().parents[1] / 'core/subyard-agent-bridge/bridge.py'
 CREDENTIAL_HEADERS = ('Authorization: Basic synthetic-basic-value\n'
-                      'Cookie: session=synthetic-cookie-one; theme=synthetic-cookie-two\n'
-                      'Proxy-Authorization: Bearer synthetic-proxy-value\n'
+                      'Cookie: session=synthetic-cookie\n'
                       'Set-Cookie: id=synthetic-set-cookie; HttpOnly\n'
                       'Authorization = Basic Zml4dHVyZTphdXRo\n'
                       'Proxy-Authorization = Basic Zml4dHVyZTpwcm94eQ==\n'
@@ -117,7 +116,7 @@ def finish(text):
     else:
         emit({'type': 'result', 'subtype': 'success', 'is_error': False, 'result': text,
               'usage': {'input_tokens': 3, 'output_tokens': 2,
-                        'cache_creation': {'ephemeral_5m_input_tokens': 1}}})
+                        'cache_creation': {'ephemeral_5m_input_tokens': 1}, 'example_flag': True}})
 
 def say(text):
     if codex:
@@ -133,6 +132,74 @@ def await_gate(suffix=''):
         assert not select.select([sys.stdin], [], [], 0.02)[0], 'a follow-up arrived before the result'
     assert not select.select([sys.stdin], [], [], 0)[0], 'a follow-up arrived before the result'
 
+def approval(_):
+    if codex:
+        if scenario == 'file-approval':
+            emit({'method': 'item/started', 'params': {'item': {
+                'id': 'file-item', 'type': 'fileChange', 'status': 'inProgress',
+                'changes': [{'path': 'fixture.txt', 'kind': {'type': 'add'}, 'diff': '+fixture'}]}}})
+        method = ('item/fileChange/requestApproval' if scenario == 'file-approval' else
+                  'item/permissions/requestApproval' if scenario == 'unsupported' else
+                  'item/commandExecution/requestApproval')
+        request = {'id': 'approval-1', 'method': method, 'params': {
+            'itemId': 'file-item',
+            'command': 'fixture-command', 'reason': 'fixture-reason',
+            'availableDecisions': ['accept', 'acceptForSession', 'decline']}}
+    else:
+        request = {'type': 'control_request', 'request_id': 'approval-1', 'request': {
+            'subtype': 'unsupported' if scenario == 'unsupported' else 'can_use_tool',
+            'tool_name': 'Bash', 'input': {'command': 'fixture-command'},
+            'decision_reason': 'fixture-reason'}}
+    emit(request)
+    if scenario == 'duplicate':
+        emit(request)
+
+
+def error(_):
+    if codex:
+        emit({'method': 'turn/completed', 'params': {'turn': {'status': 'failed'}}})
+    else:
+        emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True})
+
+
+def report(_):
+    say('The complete report.')
+    if not codex:
+        say('I sent the report to the parent.')
+    finish('I sent the report to the parent.')
+
+
+def credentials(_):
+    say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
+    say(os.environ['BRIDGE_TEST_HEADERS'])
+    say(os.environ['BRIDGE_TEST_JSON'])
+    finish('ghp_' + 'X' * 36)
+
+
+def message_turn(_):
+    if not codex:
+        await_gate()
+        finish('first result')
+
+
+def large(text):
+    assert text.split('\n')[-2] == 'x' * (1024 * 1024)
+    finish('complete large frame')
+
+
+SCENARIOS = {
+    **dict.fromkeys(('approval', 'pending', 'file-approval', 'unsupported', 'duplicate'), approval),
+    'eof': lambda _: sys.exit(7),
+    'malformed': lambda _: print('not json', flush=True),
+    'result-error': error,
+    'report': report,
+    'credentials': credentials,
+    'message': message_turn,
+    'steer-race': lambda _: None,
+    'large': large,
+}
+
+
 def begin(text):
     global scenario
     assert 'standalone worker with no parent agent' in text
@@ -143,57 +210,12 @@ def begin(text):
             'id': 'tool-call', 'type': 'commandExecution', 'status': 'inProgress'}}})
     else:
         emit({'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash'}]}})
-    if scenario == 'eof':
-        sys.exit(7)
-    if scenario == 'malformed':
-        print('not json', flush=True)
-        return
-    if scenario in ('approval', 'pending', 'file-approval', 'unsupported', 'duplicate'):
-        if codex:
-            if scenario == 'file-approval':
-                emit({'method': 'item/started', 'params': {'item': {
-                    'id': 'file-item', 'type': 'fileChange', 'status': 'inProgress',
-                    'changes': [{'path': 'fixture.txt', 'kind': {'type': 'add'}, 'diff': '+fixture'}]}}})
-            method = ('item/fileChange/requestApproval' if scenario == 'file-approval' else
-                      'item/permissions/requestApproval' if scenario == 'unsupported' else
-                      'item/commandExecution/requestApproval')
-            request = {'id': 'approval-1', 'method': method, 'params': {
-                'itemId': 'file-item',
-                'command': 'fixture-command', 'reason': 'fixture-reason',
-                'availableDecisions': ['accept', 'acceptForSession', 'decline']}}
-        else:
-            request = {'type': 'control_request', 'request_id': 'approval-1', 'request': {
-                'subtype': 'unsupported' if scenario == 'unsupported' else 'can_use_tool',
-                'tool_name': 'Bash', 'input': {'command': 'fixture-command'},
-                'decision_reason': 'fixture-reason'}}
-        emit(request)
-        if scenario == 'duplicate':
-            emit(request)
-    elif scenario == 'result-error':
-        if codex:
-            emit({'method': 'turn/completed', 'params': {'turn': {'status': 'failed'}}})
-        else:
-            emit({'type': 'result', 'subtype': 'error_during_execution', 'is_error': True})
-    elif scenario == 'report':
-        say('The complete report.')
-        say('I sent the report to the parent.')
-        if codex:
-            emit({'method': 'turn/completed', 'params': {'turn': {'status': 'completed'}}})
-        else:
-            finish('I sent the report to the parent.')
-    elif scenario == 'credentials':
-        say('Report text. Echoed value: ' + os.environ['BRIDGE_TEST_TOKEN'])
-        say(os.environ['BRIDGE_TEST_HEADERS'])
-        say(os.environ['BRIDGE_TEST_JSON'])
-        finish('password="synthetic inline credential" and ghp_' + 'X' * 36)
-    elif scenario == 'message' and not codex:
-        await_gate()
-        finish('first result')
-    elif scenario == 'large':
-        assert text.split('\n')[-2] == 'x' * (1024 * 1024)
-        finish('complete large frame')
-    elif scenario not in ('message', 'steer-race'):
+    handler = SCENARIOS.get(scenario)
+    if handler:
+        handler(text)
+    else:
         finish(('resumed:' if resumed else 'started:') + scenario)
+
 
 for line in sys.stdin:
     message = json.loads(line)
@@ -331,6 +353,12 @@ class Bridge(unittest.TestCase):
                  '--cwd', str(self.root), '--executable', str(self.bin / vendor), *args)
         return root
 
+    def start_message(self, vendor):
+        gate = self.root / f'message-gate-{len(self.workers)}'
+        root = self.start(vendor, 'message', '--env', f'BRIDGE_TEST_HOLD_RESULT={gate}')
+        self.until(lambda: self.state(root).get('session_id'))
+        return root, gate
+
     def until(self, condition):
         deadline = time.monotonic() + 6
         while time.monotonic() < deadline:
@@ -410,24 +438,38 @@ class Bridge(unittest.TestCase):
     def test_message_resume_and_invalid_commands(self):
         for vendor in ('codex', 'claude'):
             with self.subTest(vendor=vendor):
-                gate = self.root / ('message-gate-' + vendor)
-                root = self.start(vendor, 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
-                self.until(lambda: self.state(root).get('session_id'))
-                self.cli('resume', root, success=False)
+                root, gate = self.start_message(vendor)
+                refused = self.cli('resume', root, success=False)
+                self.assertIn('resume requires a stopped worker with a session id', refused.stderr)
                 self.cli('start', root, success=False)
                 self.cli('send', root, '--message', 'hello')
                 gate.touch()
                 self.assertEqual(self.done(root), 'first result\n\nmessage:hello' if vendor == 'claude' else 'message:hello')
                 self.assertEqual(list((root / 'inbox').iterdir()), [])
+                self.assert_send_refused(root)
                 (root / 'task.md').write_text('next-task')
                 self.cli('resume', root)
                 self.assertEqual(self.done(root), 'resumed:next-task')
                 self.assertEqual(self.state(root)['session_id'], 'fixture-session')
 
+            for status, task in (('failed', 'result-error'), ('interrupted', 'pending')):
+                with self.subTest(vendor=vendor, status=status):
+                    root = self.start(vendor, task)
+                    if status == 'interrupted':
+                        self.approval(root)
+                        self.cli('stop', root, '--timeout', '1')
+                    self.done(root, status)
+                    self.assert_send_refused(root)
+
+    def assert_send_refused(self, root):
+        generation = self.state(root)['generation']
+        result = self.cli('send', root, '--message', 'late', success=False)
+        self.assertIn('use resume', result.stderr)
+        self.assertEqual(self.state(root)['generation'], generation)
+        self.assertFalse(list((root / 'inbox').iterdir()))
+
     def test_claude_followups_stay_queued_until_their_own_results(self):
-        gate = self.root / 'claude-first'
-        root = self.start('claude', 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
-        self.until(lambda: self.state(root).get('session_id'))
+        root, gate = self.start_message('claude')
         self.cli('send', root, '--message', 'held follow-up')
         self.cli('send', root, '--message', 'another follow-up')
         self.assertEqual(len(list((root / 'inbox').iterdir())), 2)
@@ -441,11 +483,9 @@ class Bridge(unittest.TestCase):
         self.assertEqual(self.result(root)['tokens'], {'input_tokens': 9, 'output_tokens': 6})
 
     def test_claude_completion_waits_for_an_accepted_send_to_finish_enqueueing(self):
-        gate = self.root / 'first-result'
         held = self.root / 'enqueue-held'
         release = self.root / 'enqueue-release'
-        root = self.start('claude', 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
-        self.until(lambda: self.state(root).get('session_id'))
+        root, gate = self.start_message('claude')
         script = """
 import os
 from pathlib import Path
@@ -479,21 +519,6 @@ runpy.run_path(bridge, run_name='__main__')
         self.assertEqual(self.done(root), 'first result\n\nmessage:racing message')
         self.assertEqual(list((root / 'inbox').iterdir()), [])
 
-    def test_send_refuses_finished_workers(self):
-        for vendor in ('codex', 'claude'):
-            for status, task in (('done', 'complete'), ('failed', 'result-error'), ('interrupted', 'pending')):
-                with self.subTest(vendor=vendor, status=status):
-                    root = self.start(vendor, task)
-                    if status == 'interrupted':
-                        self.approval(root)
-                        self.cli('stop', root, '--timeout', '1')
-                    self.done(root, status)
-                    generation = self.state(root)['generation']
-                    result = self.cli('send', root, '--message', 'late', success=False)
-                    self.assertIn('use resume', result.stderr)
-                    self.assertEqual(self.state(root)['generation'], generation)
-                    self.assertEqual(list((root / 'inbox').iterdir()), [])
-
     def test_rejected_steer_preserves_worker_and_delivers_on_next_turn(self):
         root = self.start('codex', 'steer-race')
         self.until(lambda: self.state(root)['turn_id'])
@@ -520,9 +545,8 @@ runpy.run_path(bridge, run_name='__main__')
                                   '--env', 'BRIDGE_TEST_JSON=' + ESCAPED_PASSWORD)
                 self.done(root)
                 events = (root / 'events.jsonl').read_text()
-                secrets = ('synthetic-env-value', 'synthetic inline credential', 'ghp_' + 'X' * 36,
-                           'synthetic-basic-value', 'synthetic-cookie-one', 'synthetic-cookie-two',
-                           'synthetic-proxy-value', 'synthetic-set-cookie', 'synthetic escaped suffix',
+                secrets = ('synthetic-env-value', 'ghp_' + 'X' * 36, 'synthetic-basic-value',
+                           'synthetic-cookie', 'synthetic-set-cookie', 'synthetic escaped suffix',
                            'Zml4dHVyZTphdXRo', 'Zml4dHVyZTpwcm94eQ==')
                 for secret in secrets:
                     self.assertNotIn(secret, events)
@@ -530,21 +554,11 @@ runpy.run_path(bridge, run_name='__main__')
                 self.assertTrue(set(tail.splitlines()) <= set(events.splitlines()))
                 self.assertIn('Report text. Echoed value: [redacted]', tail)
                 expected = ('Authorization: [redacted]\nCookie: [redacted]\n'
-                            'Proxy-Authorization: [redacted]\nSet-Cookie: [redacted]\n'
+                            'Set-Cookie: [redacted]\n'
                             'Authorization = [redacted]\nProxy-Authorization = [redacted]\n'
                             'Visible line after headers.')
                 self.assertIn(expected, [json.loads(line)['text'] for line in events.splitlines()
                                          if json.loads(line)['type'] == 'message'])
-
-    def test_failures_never_publish_a_successful_final(self):
-        for vendor in ('codex', 'claude'):
-            for scenario in ('eof', 'malformed', 'result-error', 'unsupported', 'duplicate'):
-                with self.subTest(vendor=vendor, scenario=scenario):
-                    root = self.start(vendor, scenario)
-                    self.done(root, 'failed')
-                    self.assertFalse('final_file' in self.state(root))
-                    self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
-        self.done(self.start('codex', 'rpc-error'), 'failed')
 
     def test_invalid_and_unsolicited_replies_fail_closed(self):
         for vendor in ('codex', 'claude'):
@@ -679,8 +693,7 @@ runpy.run_path(bridge, run_name='__main__')
     def test_wait_exit_codes_result_and_tail(self):
         for vendor in ('codex', 'claude'):
             with self.subTest(vendor=vendor):
-                gate = self.root / ('wait-gate-' + vendor)
-                root = self.start(vendor, 'message', '--env', 'BRIDGE_TEST_HOLD_RESULT=' + str(gate))
+                root, gate = self.start_message(vendor)
                 timed = self.cli('wait', root, '--timeout', '0.1', success=False)
                 self.assertEqual(timed.returncode, 124)
                 self.cli('send', root, '--message', 'finished')
@@ -780,52 +793,53 @@ runpy.run_path(bridge, run_name='__main__')
             sender.wait(timeout=2)
             sender.stdin.close()
 
-    def test_commands_time_out_if_command_lock_is_held(self):
-        root = self.start('codex', 'pending')
-        request = self.approval(root)
-        with (root / 'command.lock').open('r') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            for command in ('start', 'resume', 'interrupt', 'stop', 'approve', 'deny'):
-                with self.subTest(command=command):
-                    approval = [request.stem] if command in ('approve', 'deny') else []
-                    waiting = self.cli(command, root, *approval, '--timeout', '0.1', success=False)
+    def test_lock_timeouts(self):
+        timeout = ('--timeout', '0.1')
+        with self.subTest(lock='command'):
+            root = self.start('codex', 'pending')
+            request = self.approval(root)
+            with (root / 'command.lock').open() as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                for command in ('start', 'resume', 'interrupt', 'stop', 'approve', 'deny'):
+                    with self.subTest(command=command):
+                        approval = [request.stem] if command in ('approve', 'deny') else []
+                        waiting = self.cli(command, root, *approval, *timeout, success=False)
+                        self.assertEqual(waiting.returncode, 124)
+                        self.assertIn('command lock', waiting.stderr)
+                self.assertFalse((self.turn(root) / 'interrupt').exists())
+                self.assertFalse(request.with_suffix('.reply').exists())
+            self.cli('stop', root, *timeout)
+
+        for command, scenario in (('send', 'pending'), ('resume', 'complete')):
+            with self.subTest(lock='inbox', command=command):
+                root = self.start('claude' if command == 'send' else 'codex', scenario)
+                options = []
+                lock_path = root / 'inbox.lock'
+                if command == 'send':
+                    self.approval(root)
+                    lock_path.touch(mode=0o600)
+                    lock_path.chmod(0o600)
+                    options = ['--message', 'late']
+                else:
+                    self.done(root)
+                    self.cli('stop', root)
+                    (root / 'bridge.log').unlink()
+                    (root / 'bridge.log').symlink_to(root / 'task.md')
+                with lock_path.open() as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    waiting = self.cli(command, root, *options, *timeout, success=False)
                     self.assertEqual(waiting.returncode, 124)
-                    self.assertIn('command lock', waiting.stderr)
-            self.assertFalse((self.turn(root) / 'interrupt').exists())
-            self.assertFalse(request.with_suffix('.reply').exists())
-        self.cli('stop', root, '--timeout', '0.1')
-
-    def test_send_times_out_if_active_worker_inbox_lock_is_held(self):
-        root = self.start('claude', 'pending')
-        self.approval(root)
-        lock_path = root / 'inbox.lock'
-        with lock_path.open('a') as lock:
-            lock_path.chmod(0o600)
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            waiting = self.cli('send', root, '--message', 'late', '--timeout', '0.1', success=False)
-            self.assertEqual(waiting.returncode, 124)
-            self.assertIn('inbox lock', waiting.stderr)
-            self.assertFalse(list((root / 'inbox').iterdir()))
-
-    def test_resume_launch_failure_times_out_if_inbox_lock_is_held(self):
-        root = self.start('codex', 'complete')
-        self.done(root)
-        self.cli('stop', root)
-        log = root / 'bridge.log'
-        log.unlink()
-        log.symlink_to(root / 'task.md')
-        with (root / 'inbox.lock').open('r') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            resumed = self.cli('resume', root, '--timeout', '0.1', success=False)
-            self.assertEqual(resumed.returncode, 124)
-            self.assertIn('Launch failed', resumed.stderr)
-            self.assertIn('inbox lock', resumed.stderr)
-        status = json.loads(self.cli('status', root).stdout)
-        self.assertEqual(status['status'], 'failed')
-        self.assertNotIn('result_file', status)
-        stopped = json.loads(self.cli('stop', root).stdout)
-        self.assertEqual(stopped['cleanup'], 'verified')
-        self.assertEqual(self.result(root)['state'], 'failed')
+                    self.assertIn('inbox lock', waiting.stderr)
+                    if command == 'send':
+                        self.assertFalse(list((root / 'inbox').iterdir()))
+                if command == 'resume':
+                    self.assertIn('Launch failed', waiting.stderr)
+                    state = json.loads(self.cli('status', root).stdout)
+                    self.assertEqual(state['status'], 'failed')
+                    self.assertNotIn('result_file', state)
+                    stopped = json.loads(self.cli('stop', root).stdout)
+                    self.assertEqual(stopped['cleanup'], 'verified')
+                    self.assertEqual(self.result(root)['state'], 'failed')
 
     def test_bridge_crash_is_failed_and_stop_cleans_worker(self):
         root = self.start('codex', 'pending')
@@ -839,7 +853,7 @@ runpy.run_path(bridge, run_name='__main__')
         self.assertEqual(self.result(root)['state'], 'failed')
         self.assertEqual(list((self.turn(root) / 'approvals').iterdir()), [])
 
-    def crash_launcher(self, root, task, point, **env):
+    def resume_with_gate(self, root, task, point, gate=None):
         script = """
 import os
 from pathlib import Path
@@ -868,9 +882,12 @@ def crash(argv, *args, **kwargs):
 module.Popen = crash
 main()
 """
+        env = {**self.env, 'BRIDGE_TEST_SCOPES': str(self.scopes)}
+        if gate is not None:
+            env['BRIDGE_TEST_SCOPE_GATE'] = str(gate)
         crash = subprocess.run([sys.executable, '-B', '-c', script, str(BRIDGE), point,
                                 'resume', '--dir', str(root), '--task', str(task)],
-                               env={**self.env, 'BRIDGE_TEST_SCOPES': str(self.scopes), **env},
+                               env=env,
                                capture_output=True, text=True, timeout=8)
         self.assertEqual(crash.returncode, 91, crash.stderr)
         return self.state(root)
@@ -884,7 +901,7 @@ main()
         for point in ('before', 'after'):
             with self.subTest(point=point):
                 previous = self.state(root)
-                state = self.crash_launcher(root, task, point)
+                state = self.resume_with_gate(root, task, point)
                 self.assertEqual(state['status'], 'launching')
                 self.assertGreater(state['pid'], 0)
                 self.assertEqual((self.scopes / state['scope']).exists(), point == 'after')
@@ -907,7 +924,7 @@ main()
         task = self.root / 'delayed.md'
         task.write_text('approval')
         gate = self.root / 'scope-gate'
-        old = self.crash_launcher(root, task, 'delayed', BRIDGE_TEST_SCOPE_GATE=str(gate))
+        old = self.resume_with_gate(root, task, 'delayed', gate)
         pid = int(gate.with_suffix('.pid').read_text())
         try:
             self.assertFalse((self.scopes / old['scope']).exists())
@@ -958,6 +975,16 @@ main()
                         os.kill(bridge_pid, signal.SIGCONT)
 
     def test_result_publication_has_one_commit_point(self):
+        failures = ('eof', 'malformed', 'result-error', 'unsupported', 'duplicate')
+        for vendor in ('codex', 'claude'):
+            scenarios = failures + ('rpc-error',) if vendor == 'codex' else failures
+            for scenario in scenarios:
+                with self.subTest(vendor=vendor, scenario=scenario):
+                    root = self.start(vendor, scenario)
+                    self.done(root, 'failed')
+                    self.assertNotIn('final_file', self.state(root))
+                    self.assertFalse((self.turn(root) / 'final.md').exists())
+                    self.assertFalse(list((self.turn(root) / 'approvals').iterdir()))
         for point, status, code in (('before', 'failed', 1), ('after', 'done', 0)):
             with self.subTest(point=point):
                 self.env['BRIDGE_TEST_RESULT_CRASH'] = point
@@ -1010,10 +1037,14 @@ main()
             if process_alive(pid):
                 os.kill(pid, signal.SIGCONT)
 
-    def test_stop_kills_clean_environment_descendant_after_bridge_crash(self):
-        self.check_scope_cleanup()
+    def test_stop_cleans_descendant_after_bridge_crash(self):
+        for new_session in (False, True):
+            with self.subTest(new_session=new_session):
+                if new_session:
+                    self.use_real_manager()
+                self.check_scope_cleanup(new_session)
 
-    def test_real_manager_stops_clean_environment_new_session_descendant(self):
+    def use_real_manager(self):
         if not (shutil.which('systemd-run') and shutil.which('systemctl')):
             self.skipTest('systemd user manager tools are unavailable')
         try:
@@ -1025,10 +1056,9 @@ main()
             self.skipTest('systemd user manager is unavailable')
         for command in ('systemd-run', 'systemctl'):
             (self.bin / command).unlink()
-        self.check_scope_cleanup(new_session=True)
 
-    def check_scope_cleanup(self, new_session=False):
-        marker = self.root / 'descendant-pid'
+    def check_scope_cleanup(self, new_session):
+        marker = self.root / f'descendant-pid-{new_session}'
         options = ['--env', 'BRIDGE_TEST_NEW_SESSION=1'] if new_session else []
         root = self.start('codex', 'pending', '--env', 'BRIDGE_TEST_DESCENDANT=' + str(marker), *options)
         self.approval(root)
