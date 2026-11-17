@@ -166,7 +166,7 @@ func validateMigrationDefinitions(definitions []migrationDefinition) error {
 	generations := map[string]int{}
 	for _, definition := range definitions {
 		migration, capability, policy := definition.migration, definition.capability, definition.rollback
-		if definition.catalogGeneration < 0 || migration.ID == RollbackSourceOwnerStep || migration.ID == RollbackTargetActivationStep || migration.ID == rollbackNativeCheckpointStep || ids[migration.ID] || migration.Kind != capability.Kind || migration.Domain != capability.Domain || definition.forward == nil || definition.recipe == "" {
+		if definition.catalogGeneration < 0 || migration.ID == RollbackSourceOwnerStep || migration.ID == RollbackTargetActivationStep || migration.ID == rollbackNativeCheckpointStep || migration.ID == rollbackSourcePlanStep || ids[migration.ID] || migration.Kind != capability.Kind || migration.Domain != capability.Domain || definition.forward == nil || definition.recipe == "" {
 			return invalid("migration %q has an incomplete or duplicate compiled definition", migration.ID)
 		}
 		if previous, exists := kinds[capability.Kind]; exists && (previous != capability || generations[capability.Kind] != definition.catalogGeneration) {
