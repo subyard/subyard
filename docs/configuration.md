@@ -702,9 +702,9 @@ provision prints none.
 ### Commit and push approval prompts
 
 `CODING_TOOL_GIT_APPROVAL` is a syncable setting with the values `prompt` (default) and `off`.
-It governs Claude and Codex only; OpenCode keeps its home ask patterns. The prompts live only in
-the root-owned files that provisioning writes, the Claude managed drop-in and the Codex managed
-requirements; the Claude and Codex home defaults carry no Git rules. To turn the prompts off for
+It governs Claude and Codex only. OpenCode keeps its home ask patterns. The Git prompt and hook
+registrations live in the root-owned files that provisioning writes, the Claude managed drop-in and the Codex managed
+requirements. The Claude and Codex home defaults carry no Git rules. To turn the prompts off for
 one yard:
 
 ```sh
@@ -714,15 +714,28 @@ yard -Y <yard> init
 
 Set `prompt` the same way to restore them; shared or host scope applies the choice to more yards.
 Until `yard init` applies a change, it is listed as a pending init-owned setting.
-`off` removes only these rules: the Claude update lock and the Codex approval policy, reviewer and
-`rm` rule stay. `claude-policy-check`, `codex-policy-check` and `yard status` verify the installed
+`off` removes the Git prompt rules and disables the Git hook. The Claude update lock and the Codex
+approval policy, reviewer and `rm` rule stay. `claude-policy-check`, `codex-policy-check` and `yard status` verify the installed
 mode, so `off` is expected state, not drift. Existing sessions keep their loaded policy until restarted.
 With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
 
+In `prompt` mode, a managed Bash `PreToolUse` hook rejects alternate literal spellings of
+`git commit` and `git push`, including Git global options such as `-C` and `-c`, quoted command
+words, executable paths, and literal shell `-c` commands. Use a direct `git commit` or `git push`
+to reach the normal approval prompt. For another directory, use `cd <directory> && git commit`
+or `cd <directory> && git push`. Commands such as `git stash push`, `git log --grep commit`
+and `git rebase` continue through the normal permission flow.
+
 Limits:
 
+- The hook is a client guardrail. It inspects literal shell command words without running or
+  expanding them. Aliases, computed commands, complex shell syntax such as heredocs, scripts,
+  Make targets, subprocesses and direct writes to `.git` are outside its coverage. Other Git
+  subcommands such as `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
+- Claude is configured to block a Bash call if the hook fails or times out. Codex continues
+  its normal permission flow on hook failures and timeouts, including its direct Git prompt rules.
 - When Claude runs under an organization's server-managed settings, the yard's drop-in is not the
-  effective source, so that policy must carry the commit/push ask rules itself.
+  effective source, so that policy must carry the commit/push ask rules and hook itself.
 - A release without this setting refuses it wherever it is set, and refuses an installed snapshot
   that records `off`. Before switching to such a release, run
   `yard -Y <yard> config unset CODING_TOOL_GIT_APPROVAL --scope <scope>` at every scope that sets it
@@ -766,9 +779,9 @@ even with `danger-full-access`. The allow rule relies on the yard as the isolati
 it does not limit removal to the current project. Managed commit/push prompts remain in force.
 
 After updating Subyard, run `yard init` to reconcile existing yards, then start new Codex sessions.
-Existing sessions must be restarted to load the policy. `codex-policy-check` checks the installed policy's
-contents, ownership and permissions; `yard init` repairs managed drift. Provisioning refuses to
-overwrite an existing requirements file owned by another policy.
+Existing sessions must be restarted to load the policy. `codex-policy-check` verifies the contents,
+ownership and permissions of the requirements and the registered hook. `yard init` repairs managed
+drift. Provisioning refuses to overwrite an existing requirements file owned by another policy.
 
 This is a Codex command policy, not an OS boundary against another executable, alternative Git
 spellings or direct writes to Git metadata. Yard root can change the requirements. Enterprise-managed
@@ -826,11 +839,12 @@ auto mode the default, with **Yes** preselected; decline it. Accepting writes
 and `yard config apply` restores. Declining leaves `yard config status` clean.
 
 Claude provisioning installs its own root-owned drop-in at
-`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds ask rules (in `prompt` mode) and the
-update lock described above; it preserves other managed files and user/project denies, and
+`/etc/claude-code/managed-settings.d/50-subyard-git-approval.json`. It adds the update lock described
+above, plus the ask rules and Bash hook in `prompt` mode. Provisioning preserves other managed
+files and user/project denies and
 refuses foreign files at its own managed path. It does not enable `allowManagedPermissionRulesOnly`,
 which would discard those user/project restrictions. `claude-policy-check` verifies the managed
-runtime and its command link, the drop-in's contents and permissions, and the absence of a native
+runtime and its command link, the drop-in and hook, and the absence of a native
 self-installed link; it does not show that an active client loaded the policy. Both `claude-policy-check`
 and `codex-policy-check` report every refusal they can determine, not only the first.
 In a new client, inspect `/status` for the managed file/drop-ins source and `/permissions` for

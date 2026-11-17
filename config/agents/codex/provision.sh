@@ -18,6 +18,143 @@ DEV_HOME="${CODEX_DEV_HOME:-}"
 MANAGED_CHECK_MARKER='# Managed by Subyard Codex provision.'
 GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
 
+# BEGIN generated Git approval hook
+git_approval_hook() {
+  cat <<'GIT_APPROVAL_HOOK'
+#!/usr/bin/python3 -I
+# Managed by Subyard Git approval provision.
+"""Recognize literal Git command words without executing or expanding shell input."""
+
+import json
+import posixpath
+import re
+import shlex
+import sys
+
+# Keep shell separators distinct from quoted words. Comments are recognized only
+# at token boundaries. A full shell evaluator is outside this hook's scope.
+TOKEN = re.compile(r"""[^\S\n]+|\#[^\n]*|[;&|()\n]+|<{1,3}|>+|(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s'";&|()<>\\])+""", re.S)
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree",
+                     "--namespace", "--config-env", "--super-prefix"}
+GIT_FLAGS = {"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
+             "--no-optional-locks", "--no-lazy-fetch", "--literal-pathspecs",
+             "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
+             "--bare", "--no-advice"}
+
+
+def git_action(words):
+    args = iter(words)
+    for arg in args:
+        if arg in GIT_VALUE_OPTIONS:
+            next(args, None)
+        elif arg in GIT_FLAGS or (
+            "=" in arg and arg.partition("=")[0] in GIT_VALUE_OPTIONS | {"--exec-path"}
+        ):
+            continue
+        else:
+            return arg if arg in {"commit", "push"} else None
+    return None
+
+
+def simple_commands(command):
+    words = []
+    offset = 0
+    while offset < len(command):
+        token = TOKEN.match(command, offset)
+        if token is None:
+            return
+        offset = token.end()
+        raw = token[0]
+        if raw == "<<":
+            # A heredoc body contains data, not a list of shell commands.
+            if words:
+                yield words
+            return
+        if raw.startswith("#"):
+            continue
+        if raw.startswith("\n") or raw[0] in ";&|()":
+            if words:
+                yield words
+                words = []
+        elif not raw.isspace():
+            words.append((raw, token.start(), token.end()))
+    if words:
+        yield words
+
+
+def denied_action(command, nested=False, depth=0):
+    if depth == 8:
+        return None
+    command = command.replace("\\\n", "")
+    for tokens in simple_commands(command):
+        try:
+            words = [shlex.split(raw, comments=False)[0] for raw, _, _ in tokens]
+        except (IndexError, ValueError):
+            continue
+        start = 0
+        while start < len(words) and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", tokens[start][0]):
+            start += 1
+        if start == len(words):
+            continue
+        executable = posixpath.basename(words[start])
+        args = words[start + 1:]
+        if executable == "git":
+            action = git_action(args)
+            if action and (nested or start or
+                           command[tokens[0][1]:tokens[1][2]] != f"git {action}"):
+                return action
+        elif executable in {"sh", "bash", "dash", "zsh", "ksh"}:
+            for index, arg in enumerate(args[:-1]):
+                if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", arg):
+                    action = denied_action(args[index + 1], nested=True, depth=depth + 1)
+                    if action:
+                        return action
+                    break
+                if arg == "--" or not arg.startswith("-"):
+                    break
+    return None
+
+
+def main():
+    payload = json.load(sys.stdin)
+    action = denied_action(payload["tool_input"]["command"])
+    if action:
+        print(f"Git approval requires a direct `git {action}` command. "
+              f"For another directory, use `cd <directory> && git {action}`.",
+              file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+GIT_APPROVAL_HOOK
+}
+# Publish the helper before the policy that references it.
+install_git_approval_hook() {
+  local hook_stage
+  [ "$GIT_APPROVAL" = prompt ] || return 0
+  hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
+  git_approval_hook > "$hook_stage"
+  chmod 0755 "$hook_stage"
+  mv -fT -- "$hook_stage" "$git_hook"
+}
+
+check_git_approval_hook() {
+  local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
+  [ -x /usr/bin/python3 ] || refuse 'managed Git approval hook interpreter is missing; run yard init'
+  if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
+    [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
+      || refuse 'managed Git approval hook permissions drifted; run yard init'
+    [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
+      || refuse 'managed Git approval hook content drifted; run yard init'
+  else
+    refuse 'managed Git approval hook is missing; run yard init'
+  fi
+}
+# END generated Git approval hook
+
+
 # Native requirements apply across projects, CODEX_HOME and client launch modes.
 # Keep this in the self-contained provision hook copied into the yard.
 requirements() {
@@ -27,12 +164,29 @@ allowed_approval_policies = ["on-request"]
 allowed_approvals_reviewers = ["user"]
 check_for_update_on_startup = false
 REQUIREMENTS
-  [ "$GIT_APPROVAL" = off ] || cat <<'REQUIREMENTS'
+  [ "$GIT_APPROVAL" = prompt ] || return 0
+  cat <<'REQUIREMENTS'
 
 [rules]
 prefix_rules = [
   { pattern = [{ token = "git" }, { any_of = ["commit", "push"] }], decision = "prompt", justification = "Creating or amending commits and pushing require explicit operator approval." },
 ]
+REQUIREMENTS
+  cat <<REQUIREMENTS
+
+[features]
+hooks = true
+
+[hooks]
+managed_dir = $(jq -n --arg path "$requirements_dir" '$path')
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = $(jq -n --arg path "$git_hook" '$path | @sh')
+timeout = 3
 REQUIREMENTS
 }
 
@@ -176,6 +330,15 @@ if [ -L "$REQUIREMENTS_PATH" ] || { [ -e "$REQUIREMENTS_PATH" ] && [ ! -f "$REQU
 elif [ -f "$REQUIREMENTS_PATH" ] && ! grep -Fxq "$MANAGED_CHECK_MARKER" "$REQUIREMENTS_PATH"; then
   refuse "$REQUIREMENTS_PATH is managed by another policy — leaving it unchanged"
 fi
+git_hook="$requirements_dir/subyard-git-approval-hook"
+if [ "$GIT_APPROVAL" = prompt ]; then
+  [ -x /usr/bin/python3 ] || refuse '/usr/bin/python3 is required for Git approval'
+  if [ -L "$git_hook" ] || { [ -e "$git_hook" ] && [ ! -f "$git_hook" ]; }; then
+    refuse 'managed Git approval hook is not a regular file'
+  elif [ -f "$git_hook" ] && ! grep -Fxq '# Managed by Subyard Git approval provision.' "$git_hook"; then
+    refuse 'existing Git approval hook belongs to another policy'
+  fi
+fi
 [ "$refusals" = 0 ] || exit 1
 
 install_requirements() {
@@ -187,11 +350,12 @@ install_requirements() {
   if [ "$(id -u)" -eq 0 ]; then
     chown 0:0 "$requirements_dir" "$requirements_stage"
   fi
+  install_git_approval_hook
   mv -fT -- "$requirements_stage" "$REQUIREMENTS_PATH"
 }
 
 install_check() {
-  local check_dir check_stage q_root q_link q_user q_home q_owner q_requirements requirements_sha
+  local q_hook hook_sha check_dir check_stage q_root q_link q_user q_home q_owner q_requirements requirements_sha
   check_dir="$(dirname "$CHECK_PATH")"
   mkdir -p "$check_dir"
   check_stage="$(mktemp "$check_dir/.codex-policy-check.XXXXXX")"
@@ -201,6 +365,8 @@ install_check() {
   printf -v q_home '%q' "$DEV_HOME"
   printf -v q_owner '%q' "$expected_owner"
   printf -v q_requirements '%q' "$REQUIREMENTS_PATH"
+  printf -v q_hook '%q' "$git_hook"
+  hook_sha="$(git_approval_hook | sha256sum | cut -d' ' -f1)"
   requirements_sha="$(requirements | sha256sum | cut -d' ' -f1)"
   cat > "$check_stage" <<EOF
 #!/usr/bin/env bash
@@ -213,10 +379,13 @@ DEV_USER="\$dev_user"
 DEV_HOME=$q_home
 expected_owner=$q_owner
 requirements=$q_requirements
+git_approval=$GIT_APPROVAL
+git_hook=$q_hook
+git_hook_sha=$hook_sha
 # Report every refusal that does not depend on a failed read, in this order.
 refusals=0
 refuse() { printf 'codex-policy-check: %s\\n' "\$*" >&2; refusals=\$((refusals + 1)); }
-$(declare -f dev_owned_directory standalone_shadow_state is_release_target)
+$(declare -f check_git_approval_hook dev_owned_directory standalone_shadow_state is_release_target)
 requirements_present=0
 if [ -f "\$requirements" ] && [ ! -L "\$requirements" ]; then
   requirements_present=1
@@ -232,6 +401,7 @@ if [ "\$requirements_present" = 1 ]; then
   [ "\$(sha256sum "\$requirements" | cut -d' ' -f1)" = '$requirements_sha' ] \
     || refuse "managed approval requirements drifted; run yard init"
 fi
+[ "\$git_approval" != prompt ] || check_git_approval_hook "\$git_hook" "\$git_hook_sha" "\$expected_owner"
 target="\$(readlink "\$install_root/codex" 2>/dev/null)" || target=''
 runtime="\$install_root/\$target"
 runtime_present=0

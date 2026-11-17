@@ -19,6 +19,143 @@ fi
 expected_owner="$(id -u):$(id -g)"
 die() { printf 'Claude policy: %s\n' "$*" >&2; exit 1; }
 GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
+
+# BEGIN generated Git approval hook
+git_approval_hook() {
+  cat <<'GIT_APPROVAL_HOOK'
+#!/usr/bin/python3 -I
+# Managed by Subyard Git approval provision.
+"""Recognize literal Git command words without executing or expanding shell input."""
+
+import json
+import posixpath
+import re
+import shlex
+import sys
+
+# Keep shell separators distinct from quoted words. Comments are recognized only
+# at token boundaries. A full shell evaluator is outside this hook's scope.
+TOKEN = re.compile(r"""[^\S\n]+|\#[^\n]*|[;&|()\n]+|<{1,3}|>+|(?:'[^']*'|"(?:\\.|[^"\\])*"|\\.|[^\s'";&|()<>\\])+""", re.S)
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree",
+                     "--namespace", "--config-env", "--super-prefix"}
+GIT_FLAGS = {"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
+             "--no-optional-locks", "--no-lazy-fetch", "--literal-pathspecs",
+             "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
+             "--bare", "--no-advice"}
+
+
+def git_action(words):
+    args = iter(words)
+    for arg in args:
+        if arg in GIT_VALUE_OPTIONS:
+            next(args, None)
+        elif arg in GIT_FLAGS or (
+            "=" in arg and arg.partition("=")[0] in GIT_VALUE_OPTIONS | {"--exec-path"}
+        ):
+            continue
+        else:
+            return arg if arg in {"commit", "push"} else None
+    return None
+
+
+def simple_commands(command):
+    words = []
+    offset = 0
+    while offset < len(command):
+        token = TOKEN.match(command, offset)
+        if token is None:
+            return
+        offset = token.end()
+        raw = token[0]
+        if raw == "<<":
+            # A heredoc body contains data, not a list of shell commands.
+            if words:
+                yield words
+            return
+        if raw.startswith("#"):
+            continue
+        if raw.startswith("\n") or raw[0] in ";&|()":
+            if words:
+                yield words
+                words = []
+        elif not raw.isspace():
+            words.append((raw, token.start(), token.end()))
+    if words:
+        yield words
+
+
+def denied_action(command, nested=False, depth=0):
+    if depth == 8:
+        return None
+    command = command.replace("\\\n", "")
+    for tokens in simple_commands(command):
+        try:
+            words = [shlex.split(raw, comments=False)[0] for raw, _, _ in tokens]
+        except (IndexError, ValueError):
+            continue
+        start = 0
+        while start < len(words) and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", tokens[start][0]):
+            start += 1
+        if start == len(words):
+            continue
+        executable = posixpath.basename(words[start])
+        args = words[start + 1:]
+        if executable == "git":
+            action = git_action(args)
+            if action and (nested or start or
+                           command[tokens[0][1]:tokens[1][2]] != f"git {action}"):
+                return action
+        elif executable in {"sh", "bash", "dash", "zsh", "ksh"}:
+            for index, arg in enumerate(args[:-1]):
+                if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", arg):
+                    action = denied_action(args[index + 1], nested=True, depth=depth + 1)
+                    if action:
+                        return action
+                    break
+                if arg == "--" or not arg.startswith("-"):
+                    break
+    return None
+
+
+def main():
+    payload = json.load(sys.stdin)
+    action = denied_action(payload["tool_input"]["command"])
+    if action:
+        print(f"Git approval requires a direct `git {action}` command. "
+              f"For another directory, use `cd <directory> && git {action}`.",
+              file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+GIT_APPROVAL_HOOK
+}
+# Publish the helper before the policy that references it.
+install_git_approval_hook() {
+  local hook_stage
+  [ "$GIT_APPROVAL" = prompt ] || return 0
+  hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
+  git_approval_hook > "$hook_stage"
+  chmod 0755 "$hook_stage"
+  mv -fT -- "$hook_stage" "$git_hook"
+}
+
+check_git_approval_hook() {
+  local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
+  [ -x /usr/bin/python3 ] || refuse 'managed Git approval hook interpreter is missing; run yard init'
+  if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
+    [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
+      || refuse 'managed Git approval hook permissions drifted; run yard init'
+    [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
+      || refuse 'managed Git approval hook content drifted; run yard init'
+  else
+    refuse 'managed Git approval hook is missing; run yard init'
+  fi
+}
+# END generated Git approval hook
+
 case "$GIT_APPROVAL" in
   prompt) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"},"permissions":{"ask":["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]}}' ;;
   off) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"}}' ;;
@@ -53,6 +190,16 @@ for path in "$INSTALL_ROOT" "$(dirname "$BIN_LINK")" "$(dirname "$CHECK_PATH")" 
   fi
 done
 policy="$POLICY_DIR/50-subyard-git-approval.json"
+git_hook="$(dirname "$POLICY_DIR")/subyard-git-approval-hook"
+if [ "$GIT_APPROVAL" = prompt ]; then
+  [ -x /usr/bin/python3 ] || die '/usr/bin/python3 is required for Git approval'
+  if [ -L "$git_hook" ] || { [ -e "$git_hook" ] && [ ! -f "$git_hook" ]; }; then
+    die 'managed Git approval hook is not a regular file'
+  fi
+  if [ -f "$git_hook" ] && ! grep -Fxq '# Managed by Subyard Git approval provision.' "$git_hook"; then
+    die 'existing Git approval hook belongs to another policy'
+  fi
+fi
 for path in "$policy" "$CHECK_PATH"; do
   if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
     die 'managed path is not a regular file'
@@ -159,6 +306,13 @@ download_artifact() {
 # repair, so a failed or slow download never leaves the CLI without it.
 install -d -m 0755 "$(dirname "$POLICY_DIR")" "$POLICY_DIR" "$(dirname "$CHECK_PATH")"
 stage="$(mktemp "$POLICY_DIR/.subyard.XXXXXX")"
+install_git_approval_hook
+if [ "$GIT_APPROVAL" = prompt ]; then
+  POLICY_JSON="$(jq -c --arg path "$git_hook" '
+    .hooks.PreToolUse = [{matcher:"Bash", hooks:[{
+      type:"command", command:($path | @sh), timeout:3, onFailure:"block"
+    }]}]' <<<"$POLICY_JSON")"
+fi
 jq . <<<"$POLICY_JSON" > "$stage"
 chmod 0644 "$stage"
 mv -fT -- "$stage" "$policy"
@@ -228,7 +382,8 @@ stage="$(mktemp "$(dirname "$CHECK_PATH")/.claude-policy-check.XXXXXX")"
   printf 'runtime=%q\nlink=%q\n' "$RUNTIME_PATH" "$BIN_LINK"
   printf 'DEV_USER=%q\nDEV_HOME=%q\n' "$DEV_USER" "$DEV_HOME"
   printf 'git_approval=%q\npolicy_json=%q\n' "$GIT_APPROVAL" "$POLICY_JSON"
-  declare -f is_working_binary dev_owned_directory native_shadow_state
+  printf 'git_hook=%q\ngit_hook_sha=%q\n' "$git_hook" "$(git_approval_hook | sha256sum | cut -d' ' -f1)"
+  declare -f check_git_approval_hook is_working_binary dev_owned_directory native_shadow_state
   cat <<'CHECK'
 # Report every refusal that does not depend on a failed read, in this order.
 refusals=0
@@ -243,6 +398,12 @@ if [ -f "$policy" ] && [ ! -L "$policy" ]; then
 else
   refuse 'managed policy is missing; run yard init'
 fi
+if [ "$git_approval" = prompt ]; then
+  hook_dir="$(dirname "$git_hook")"
+  [ ! -L "$hook_dir" ] && [ "$(stat -c '%a:%u:%g' "$hook_dir" 2>/dev/null)" = "755:$expected_owner" ] \
+    || refuse 'managed Git approval hook directory drifted; run yard init'
+  check_git_approval_hook "$git_hook" "$git_hook_sha" "$expected_owner"
+fi
 [ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] \
   || refuse 'canonical command does not point to the managed runtime; run yard init'
 is_working_binary "$runtime" || refuse 'managed runtime failed validation; run yard init'
@@ -253,7 +414,7 @@ if [ "$refusals" = 0 ]; then
   if [ "$git_approval" = off ]; then
     printf 'Managed Claude update lock installed; managed Git prompts off (CODING_TOOL_GIT_APPROVAL=off).\n'
   else
-    printf 'Managed Claude Git ask rules and update lock installed; inspect /status and /permissions in the active client.\n'
+    printf 'Managed Claude Git ask rules, Git hook and update lock installed; inspect /status and /permissions in the active client.\n'
   fi
 fi
 if [ "$shadow" = foreign ]; then
