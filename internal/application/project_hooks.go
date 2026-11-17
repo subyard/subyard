@@ -45,10 +45,12 @@ func RunProjectHooks(ctx context.Context, yard domain.Context,
 			}
 		}
 	}
-	var guestExit *ports.GuestExitError
+	var guestExit interface{ GuestExitCode() (int, bool) }
 	if errors.As(err, &guestExit) {
-		result.ExitCode = guestExit.Code
-		err = nil
+		if code, ok := guestExit.GuestExitCode(); ok {
+			result.ExitCode = code
+			err = nil
+		}
 	}
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -77,8 +79,15 @@ func (*ProjectHookFailure) Error() string {
 // ActivationDiagnostic reports that the pass failed or its state is undetermined;
 // retained state that an integration accepts is shown by that integration's status.
 func (failure *ProjectHookFailure) ActivationDiagnostic() (string, string) {
-	yard := failure.yardName()
-	if combined := failure.namedFailures(); combined != nil {
+	yard := failure.Yard
+	if yard == "" {
+		yard = "default"
+	}
+	var causes []error
+	for _, hook := range failure.Hooks {
+		causes = append(causes, fmt.Errorf("yard %s: project hook %s failed", yard, hook))
+	}
+	if combined := domain.CollectRefusals(causes...); combined != nil {
 		message := combined.Error()
 		if failure.Reason != projectHooksUnsuccessful {
 			message += fmt.Sprintf("; yard %s: optional agent project hooks %s", yard, failure.Reason)
@@ -86,19 +95,4 @@ func (failure *ProjectHookFailure) ActivationDiagnostic() (string, string) {
 		return message, "run yard migrate"
 	}
 	return fmt.Sprintf("yard %s: optional agent project hooks %s; the hook pass failed or its state is undetermined, see the integration's status", yard, failure.Reason), "run yard migrate"
-}
-
-func (failure *ProjectHookFailure) yardName() string {
-	if failure.Yard == "" {
-		return "default"
-	}
-	return failure.Yard
-}
-
-func (failure *ProjectHookFailure) namedFailures() error {
-	var causes []error
-	for _, hook := range failure.Hooks {
-		causes = append(causes, fmt.Errorf("yard %s: project hook %s failed", failure.yardName(), hook))
-	}
-	return domain.CollectRefusals(causes...)
 }

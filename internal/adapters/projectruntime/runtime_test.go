@@ -2,15 +2,47 @@ package projectruntime
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestRemoteProjectHookClassifiesSSHExit(t *testing.T) {
+	for _, scenario := range []struct {
+		code int
+		want string
+	}{
+		{1, "exited unsuccessfully"},
+		{124, "timed out"},
+		{137, "timed out"},
+		{255, "could not be executed"},
+		{0, "could not be executed"}, // Missing SSH executable.
+	} {
+		t.Run(strconv.Itoa(scenario.code), func(t *testing.T) {
+			ssh := filepath.Join(testkit.TempDir(t), "ssh")
+			if scenario.code != 0 {
+				testkit.WriteFile(t, ssh, []byte("#!/bin/sh\nexit "+strconv.Itoa(scenario.code)+"\n"), 0o700)
+			}
+			runtime := Runtime{SSHBinary: ssh}
+			yard := domain.Context{AccessKind: domain.AccessRemote, SSHHost: "yard"}
+			err := application.RunProjectHooks(context.Background(), yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				return runtime.Execute(ctx, yard, request)
+			})
+			var failure *application.ProjectHookFailure
+			if !errors.As(err, &failure) || failure.Reason != scenario.want {
+				t.Fatalf("SSH exit %d: failure=%#v, want %q", scenario.code, failure, scenario.want)
+			}
+		})
+	}
+}
 
 func TestRemoteCommandQuotingKeepsEveryArgumentLiteral(t *testing.T) {
 	got := shellquote.Command([]string{"git", "clone", "--", "x'; touch /tmp/escaped", "/srv/workspaces/id/src"})

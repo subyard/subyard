@@ -143,9 +143,8 @@ func (runner ProjectActionRunner) notifyProjectsChanged(ctx context.Context) str
 	warning := err.Error()
 	var failure *ProjectHookFailure
 	if errors.As(err, &failure) {
-		if named := failure.namedFailures(); named != nil {
-			warning = named.Error() + "; " + warning
-		}
+		message, _ := failure.ActivationDiagnostic()
+		warning = message + "; " + warning
 	}
 	return "warning: " + warning + "\n"
 }

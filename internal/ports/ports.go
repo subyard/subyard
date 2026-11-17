@@ -105,6 +105,10 @@ func (failure *GuestExitError) Error() string {
 	return fmt.Sprintf("instance command exited with status %d", failure.Code)
 }
 
+func (failure *GuestExitError) GuestExitCode() (int, bool) {
+	return failure.Code, true
+}
+
 type InstanceExecutor interface {
 	Exec(context.Context, string, string, InstanceExecRequest) (InstanceExecResult, error)
 }

@@ -612,30 +612,49 @@ func TestProjectBindUsesIncusDeviceAndWritesMetadata(t *testing.T) {
 
 func TestProjectHookFailureIsNonBlockingAndVisible(t *testing.T) {
 	const hook = "/usr/local/libexec/subyard/projects-changed.d/fixture"
-	data := &projectDataStub{}
-	data.run = func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-		if len(request.Command) == 5 && request.Command[4] == projectHooksDispatcher {
-			if request.Environment["SUBYARD_PROJECT_HOOK_REPORT"] != "1" {
-				t.Fatal("project action did not enable approved hook reporting")
+	const named = "yard sample: project hook " + hook + " failed"
+	for _, scenario := range []struct {
+		name    string
+		code    int
+		err     error
+		labeled bool
+		want    string
+	}{
+		{"exit 1", 1, &ports.GuestExitError{Code: 1}, true, named},
+		{"timeout after reported failure", 124, &ports.GuestExitError{Code: 124}, true, named + "; yard sample: optional agent project hooks timed out"},
+		{"timeout without a label", 124, &ports.GuestExitError{Code: 124}, false, "yard sample: optional agent project hooks timed out; the hook pass failed or its state is undetermined, see the integration's status"},
+		{"cancellation after reported failure", 0, context.Canceled, true, named + "; yard sample: optional agent project hooks were cancelled"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			data := &projectDataStub{}
+			data.run = func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+				if len(request.Command) != 5 || request.Command[4] != projectHooksDispatcher {
+					return ports.InstanceExecResult{}, nil
+				}
+				if request.Environment["SUBYARD_PROJECT_HOOK_REPORT"] != "1" {
+					t.Fatal("project action did not enable approved hook reporting")
+				}
+				output := "subyard-project-hook-failed:/private-path\nprivate stdout\n"
+				if scenario.labeled {
+					output += "subyard-project-hook-failed:" + hook + "\n"
+				}
+				return ports.InstanceExecResult{
+					ExitCode: scenario.code, Stdout: []byte(output), Stderr: []byte("private stderr"),
+				}, scenario.err
 			}
-			return ports.InstanceExecResult{
-				ExitCode: 1, Stdout: []byte("subyard-project-hook-failed:" + hook + "\nsubyard-project-hook-failed:/private-path\nprivate stdout\n"),
-				Stderr: []byte("private stderr"),
-			}, &ports.GuestExitError{Code: 1}
-		}
-		return ports.InstanceExecResult{}, nil
-	}
-	runner := ProjectActionRunner{
-		Data: data, Yard: domain.Context{YardName: "sample", AccessKind: domain.AccessRemote, DevUser: "dev", DevUID: 1000},
-		Project: cloneRecord(), ApprovedHookPaths: []string{hook},
-	}
-	result, message, err := runner.Run(context.Background(), domain.AdapterRequest{
-		Schema: 1, OperationID: "operation-clone", Adapter: "project", Action: "clone",
-	}, nil)
-	if err != nil || result.Status != "ok" || !strings.HasPrefix(message, "cloned ") ||
-		!strings.Contains(message, "warning: yard sample: project hook "+hook+" failed") ||
-		!strings.Contains(message, "optional agent project hook failed") || strings.Contains(message, "private") {
-		t.Fatalf("hook changed project result: result=%#v message=%q err=%v", result, message, err)
+			runner := ProjectActionRunner{
+				Data: data, Yard: domain.Context{YardName: "sample", AccessKind: domain.AccessRemote, DevUser: "dev", DevUID: 1000},
+				Project: cloneRecord(), ApprovedHookPaths: []string{hook},
+			}
+			result, message, err := runner.Run(context.Background(), domain.AdapterRequest{
+				Schema: 1, OperationID: "operation-clone", Adapter: "project", Action: "clone",
+			}, nil)
+			if err != nil || result.Status != "ok" || !strings.HasPrefix(message, "cloned ") ||
+				!strings.Contains(message, "warning: "+scenario.want+"; an optional agent project hook failed") ||
+				strings.Contains(message, "private") {
+				t.Fatalf("project hook outcome: result=%#v message=%q err=%v", result, message, err)
+			}
+		})
 	}
 }
 

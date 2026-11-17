@@ -88,10 +88,7 @@ run_hook() {
     "$path" && return 0
   fi
   status=1
-  if [ "${SUBYARD_PROJECT_HOOK_REPORT:-}" = 1 ]; then
-    if [[ "$path" != /* ]]; then
-      path="$(type -P -- "$path")" || return 0
-    fi
+  if [ "${SUBYARD_PROJECT_HOOK_REPORT:-}" = 1 ] && [[ "$path" = /* ]]; then
     printf 'subyard-project-hook-failed:%s\n' "$path" >&3
   fi
 }
@@ -136,6 +133,10 @@ for hook in /usr/local/libexec/subyard/projects-changed.d/*; do
 done
 while IFS= read -r hook; do
   [ -n "$hook" ] || continue
+  if [[ "$hook" != */* ]] && ! hook="$(type -P -- "$hook")"; then
+    status=1
+    continue
+  fi
   run_hook "$hook"
 done < /etc/subyard/agent-project-hooks
 exit "$status"
