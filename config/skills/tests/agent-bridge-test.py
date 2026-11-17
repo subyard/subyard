@@ -438,8 +438,7 @@ class Bridge(unittest.TestCase):
         gate.with_suffix('.second').touch()
         self.assertEqual(self.done(root), 'first result\n\nmessage:held follow-up\n\nmessage:another follow-up')
         self.assertEqual(list((root / 'inbox').iterdir()), [])
-        self.assertEqual(self.result(root)['tokens'], {'input_tokens': 9, 'output_tokens': 6,
-                                                        'cache_creation': {'ephemeral_5m_input_tokens': 3}})
+        self.assertEqual(self.result(root)['tokens'], {'input_tokens': 9, 'output_tokens': 6})
 
     def test_claude_completion_waits_for_an_accepted_send_to_finish_enqueueing(self):
         gate = self.root / 'first-result'

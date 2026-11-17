@@ -67,12 +67,13 @@ launcher or bridge PID, session/turn IDs, scope, generation and pending approval
 messages, tool summaries, approval IDs and terminal outcomes. Terminal state
 publishes `result_file`, the path to the run's
 `result.json` with state, exit code, session ID, model, duration and token usage.
-Claude token usage includes every user turn that returned a result in the run.
+Claude token usage sums top-level integer counters across all results in the run.
 Immediately after a crash, `status` and `wait` can report `failed` before recovery
 publishes `result_file`.
 Only `done` publishes `final_file`, the path to `final.md` with the full report.
 Use the paths from the current state. `events.jsonl`, `tail` output, and
-`final.md` are private and may contain secrets. Redaction is best effort.
+`final.md` are private and may contain secrets. The bridge applies best-effort
+redaction when writing events. `tail` displays the stored summaries.
 Keep native stderr in `bridge.log` and protocol bodies private as well.
 
 Use `tail --dir /tmp/WORKER -n 20` for recent summarized messages/tool calls.

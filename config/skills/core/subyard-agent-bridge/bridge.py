@@ -21,6 +21,7 @@ import uuid
 
 EXIT_CODES = {'done': 0, 'failed': 1, 'interrupted': 130}
 ACTIVE_STATES = ('launching', 'running')
+CLEANUP_UNVERIFIED = 'Cleanup unverified. Could not verify that the systemd user scope is empty or gone.'
 CODEX_SANDBOXES = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
                    'danger-full-access': 'dangerFullAccess'}
 MODELS = {'codex': {'developer': 'gpt-6.1-sol', 'reviewer': 'gpt-6.1-sol', 'observer': 'gpt-6-luna'},
@@ -105,21 +106,27 @@ def role_arguments(config, env):
 
 def add_usage(totals, usage):
     for key, value in usage.items():
-        previous = totals.get(key)
-        if isinstance(value, dict):
-            value = add_usage(previous if isinstance(previous, dict) else {}, value)
-        elif type(value) is int and type(previous) is int:
-            value += previous
-        totals[key] = value
+        if type(value) is int:
+            totals[key] = totals.get(key, 0) + value
     return totals
 
 
-def read(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd) as stream:
-        info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+def private_open(path, flags, mode, *, require_private=True):
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or (require_private and (info.st_mode & 0o077 or info.st_nlink != 1))):
             raise BridgeError('unsafe state file')
+        return os.fdopen(fd, mode)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def read(path):
+    # Assignment and reply files can be supplied by the caller.
+    with private_open(path, os.O_RDONLY, 'r', require_private=False) as stream:
         return stream.read()
 
 
@@ -149,14 +156,9 @@ def directory(path):
 
 
 def locked(path, blocking=True):
-    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    stream = os.fdopen(fd, 'w')
-    info = os.fstat(stream.fileno())
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
-        stream.close()
-        raise BridgeError('unsafe lock file')
-    os.fchmod(stream.fileno(), 0o600)
+    stream = private_open(path, os.O_CREAT | os.O_RDWR, 'w')
     try:
+        os.fchmod(stream.fileno(), 0o600)
         fcntl.flock(stream, fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         stream.close()
@@ -187,13 +189,7 @@ def claim_turn(root, generation):
 
 
 def append(path):
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
-    stream = os.fdopen(fd, 'w')
-    info = os.fstat(stream.fileno())
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1:
-        stream.close()
-        raise BridgeError('unsafe log file')
-    return stream
+    return private_open(path, os.O_WRONLY | os.O_APPEND, 'a')
 
 
 def turn_dir(root, state):
@@ -230,6 +226,8 @@ class Codex:
         self.requests = {}
         self.items = {}
         self.counter = 0
+        self.sent = set()
+        self.ready = False
         self.arguments, self.sandbox = codex_arguments(
             role_arguments(worker.config, worker.env) + worker.config.get('vendor_args', []))
 
@@ -262,7 +260,7 @@ class Codex:
             raise BridgeError('Codex resumed a different session')
         self.w.state['session_id'] = session
         queued = [self.w.root / 'inbox' / name for name in self.w.state.pop('carryover', [])]
-        self.w.sent.update(path.name for path in queued)
+        self.sent.update(path.name for path in queued)
         self.w.save()
         self.request('turn/start', {'threadId': self.w.state['session_id'],
                      'input': [{'type': 'text', 'text': text} for text in
@@ -273,16 +271,22 @@ class Codex:
         for path in queued:
             path.unlink()
         self.w.state['turn_id'] = result['turn']['id']
-        self.w.ready = True
+        self.ready = True
         self.w.save()
 
-    def message(self, path, text):
-        self.request('turn/steer', {'threadId': self.w.state['session_id'],
-                     'expectedTurnId': self.w.state['turn_id'],
-                     'input': [{'type': 'text', 'text': text}]}, lambda result: path.unlink())
+    def steer(self):
+        if not self.ready:
+            return
+        for path in sorted((self.w.root / 'inbox').glob('*.md')):
+            if path.name not in self.sent:
+                self.sent.add(path.name)
+                self.request('turn/steer', {'threadId': self.w.state['session_id'],
+                             'expectedTurnId': self.w.state['turn_id'],
+                             'input': [{'type': 'text', 'text': read(path)}]},
+                             lambda result, path=path: path.unlink())
 
     def interrupt(self):
-        if self.w.ready:
+        if self.ready:
             self.request('turn/interrupt', {'threadId': self.w.state['session_id'],
                          'turnId': self.w.state['turn_id']})
 
@@ -409,8 +413,6 @@ class Worker:
         self.replying = set()
         self.outgoing = deque()
         self.approval_ids = set()
-        self.sent = set()
-        self.ready = False
         self.outcome = None
         self.answers = []
         self.model = self.config['model']
@@ -462,14 +464,19 @@ class Worker:
         name = f'{self.state["approval_sequence"]:06d}'
         path = self.approvals / (name + '.json')
         # A reply must follow publication of this request, never preauthorize a future one.
-        if path.with_suffix('.reply').exists():
-            raise BridgeError('unsolicited approval reply')
+        if os.path.lexists(path.with_suffix('.reply')):
+            self.reply_handler(name)
         write(path, json.dumps({'vendor': self.config['vendor'], 'tool': tool,
                                'command': command, 'reason': reason, 'request': request,
                                'item': item}) + '\n')
         self.pending[name] = reply
         self.record('approval', id=name)
         self.save()
+
+    def reply_handler(self, name):
+        if name not in self.pending:
+            raise BridgeError('unsolicited approval reply')
+        return self.pending[name]
 
     def reply_sent(self, path, decision):
         name = path.stem
@@ -489,18 +496,14 @@ class Worker:
             name = path.stem
             if name in self.replying:
                 continue
-            if name not in self.pending:
-                raise BridgeError('unsolicited approval reply')
+            reply = self.reply_handler(name)
             decision = read(path).strip()
             if decision not in ('allow', 'deny'):
                 raise BridgeError('approval reply must be allow or deny')
             self.replying.add(name)
-            self.pending[name](decision == 'allow', lambda path=path, decision=decision: self.reply_sent(path, decision))
-        if self.ready:
-            for path in sorted((self.root / 'inbox').glob('*.md')):
-                if path.name not in self.sent:
-                    self.sent.add(path.name)
-                    self.adapter.message(path, read(path))
+            reply(decision == 'allow', lambda path=path, decision=decision: self.reply_sent(path, decision))
+        if isinstance(self.adapter, Codex):
+            self.adapter.steer()
 
     def run(self):
         if (self.turn / 'interrupt').exists():
@@ -639,10 +642,14 @@ def scope_stopped(root, state):
         return False
 
 
-def cleanup_unverified():
-    print('Cleanup unverified. Could not verify that the systemd user scope is empty or gone.',
-          file=sys.stderr)
-    return False
+def publish_failure(root, state, deadline=None):
+    path = root / 'inbox.lock'
+    lock = locked(path) if deadline is None else lock_until(path, deadline)
+    if lock is None:
+        return False
+    with lock:
+        publish_result(root, state, state.get('model'))
+    return True
 
 
 def recover(root, state, deadline, stopped=False):
@@ -651,13 +658,9 @@ def recover(root, state, deadline, stopped=False):
     if state.get('scope'):
         # Publish the fence and failure result before contacting the manager. A
         # delayed _run can enter this scope but cannot start the vendor.
-        if not state.get('result_file'):
-            lock = lock_until(root / 'inbox.lock', deadline)
-            if lock is None:
-                print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
-                return False
-            with lock:
-                publish_result(root, state, state.get('model'))
+        if not state.get('result_file') and not publish_failure(root, state, deadline):
+            print('Timed out waiting for the bridge inbox lock.', file=sys.stderr)
+            return False
         if stopped or scope_stopped(root, state):
             for path in (turn_dir(root, state) / 'approvals').iterdir():
                 if path.suffix in ('.json', '.reply'):
@@ -665,7 +668,8 @@ def recover(root, state, deadline, stopped=False):
             state['cleanup'] = 'verified'
             save_state(root, state)
             return True
-    return cleanup_unverified()
+    print(CLEANUP_UNVERIFIED, file=sys.stderr)
+    return False
 
 
 def launch(root, state, config, task, deadline):
@@ -693,8 +697,6 @@ def launch(root, state, config, task, deadline):
         write(root / 'config.json', json.dumps(config) + '\n')
         if config['vendor'] == 'codex':
             state['carryover'] = sorted(path.name for path in (root / 'inbox').glob('*.md'))
-        for name in ('final.md', 'result.json'):
-            (root / name).unlink(missing_ok=True)
         for name in ('events.jsonl', 'bridge.log'):
             if not (root / name).exists():
                 write(root / name, '')
@@ -708,12 +710,9 @@ def launch(root, state, config, task, deadline):
                                          stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         except OSError:
             state.update(status='failed', error='Systemd user scope launcher could not start.')
-            lock = lock_until(root / 'inbox.lock', deadline)
-            if lock is None:
+            if not publish_failure(root, state, deadline):
                 print('Launch failed and the bridge inbox lock timed out; use stop to recover.', file=sys.stderr)
                 return 124
-            with lock:
-                publish_result(root, state, config['model'])
             raise
         state.update(pid=child.pid, process_start=process_identity(child.pid))
         save_state(root, state)
@@ -732,6 +731,32 @@ def wait(root, deadline, stopping=False):
         if remaining <= 0:
             return state, 124
         time.sleep(min(0.1, remaining))
+
+
+def stop(root, deadline):
+    state = snapshot(root)
+    if state['status'] in ACTIVE_STATES:
+        write(turn_dir(root, state) / 'interrupt', '')
+    state, _ = wait(root, deadline, stopping=True)
+    lock_path = root / 'worker.lock'
+    lock = lock_until(lock_path, deadline)
+    forced = lock is None
+    if forced:
+        if not scope_stopped(root, state):
+            print(CLEANUP_UNVERIFIED, file=sys.stderr)
+            return snapshot(root), 1
+        lock = lock_until(lock_path, deadline)
+        if lock is None:
+            print('Scope stopped, but worker state is still locked.', file=sys.stderr)
+            return snapshot(root), 1
+    with lock:
+        state = snapshot(root)
+        if state['status'] in ACTIVE_STATES:
+            # A launcher may still be waiting to enter its scope. The worker
+            # lock and terminal state fence it off from starting the vendor.
+            state.update(status='interrupted', pending_approvals=[])
+        recovered = recover(root, state, deadline, stopped=forced)
+    return state, 0 if recovered else 1
 
 
 def parse_args():
@@ -837,8 +862,7 @@ def main():
                 # Native errors and protocol bodies can contain credentials. Keep diagnostics generic.
                 if worker is None:
                     state.update(status='failed', error='Worker initialization failed.')
-                    with locked(root / 'inbox.lock'):
-                        publish_result(root, state, state.get('model'))
+                    publish_failure(root, state)
                 else:
                     worker.outcome = 'interrupted' if worker.interrupted else 'failed'
                     worker.record('error', message='Worker executable, protocol or state operation failed.',
@@ -910,7 +934,7 @@ def main():
         if args.command in ('approve', 'deny'):
             state = snapshot(root)
             name = args.id
-            if not name or not name.isascii() or not name.isdigit() or len(name) < 6 or name not in state['pending_approvals']:
+            if not name.isascii() or not name.isdigit() or len(name) < 6 or name not in state['pending_approvals']:
                 raise BridgeError('approval is not pending')
             reply = turn_dir(root, state) / 'approvals' / (name + '.reply')
             if os.path.lexists(reply):
@@ -953,36 +977,15 @@ def main():
                 config = json.loads(read(root / 'config.json'))
             task = read(args.task if args.task else root / 'task.md')
             return launch(root, state, config, task, deadline)
-        if args.command in ('interrupt', 'stop'):
+        if args.command == 'stop':
+            state, code = stop(root, deadline)
+            print(json.dumps(state))
+            return code
+        if args.command == 'interrupt':
             state = snapshot(root)
-            if state['status'] in ACTIVE_STATES:
-                write(turn_dir(root, state) / 'interrupt', '')
-            elif args.command == 'interrupt':
+            if state['status'] not in ACTIVE_STATES:
                 raise BridgeError('worker is not running')
-            if args.command == 'stop':
-                state, code = wait(root, deadline, stopping=True)
-                lock_path = root / 'worker.lock'
-                lock = None if code == 124 else lock_until(lock_path, deadline)
-                forced = lock is None
-                if forced:
-                    if not scope_stopped(root, state):
-                        cleanup_unverified()
-                        print(json.dumps(snapshot(root)))
-                        return 1
-                    lock = lock_until(lock_path, deadline)
-                    if lock is None:
-                        print('Scope stopped, but worker state is still locked.', file=sys.stderr)
-                        print(json.dumps(snapshot(root)))
-                        return 1
-                with lock:
-                    state = snapshot(root)
-                    if forced and state['status'] in ACTIVE_STATES:
-                        # A launcher can still be outside the scope while admission is pending.
-                        # Its interrupt file prevents vendor startup until we publish this fence.
-                        state.update(status='interrupted', pending_approvals=[])
-                    code = 0 if recover(root, state, deadline, stopped=forced) else 1
-                print(json.dumps(state))
-                return code
+            write(turn_dir(root, state) / 'interrupt', '')
     return 0
 
 
