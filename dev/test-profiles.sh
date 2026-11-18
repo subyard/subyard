@@ -66,23 +66,27 @@ for record in "${records[@]}"; do
     printf 'PROFILE TESTS %s not-applicable: %s\n' "$profile" "$reason"
   fi
 done
-if [ "$suite" = run.sh ] && [ "$permissions" != passed ]; then
-  for runner in "${runners[@]}"; do
-    preflight="${runner%run.sh}permissions.sh"
-    if [ -e "$preflight" ] || [ -L "$preflight" ]; then
-      [ -f "$preflight" ] && [ ! -L "$preflight" ] \
-        || { printf 'PROFILE TESTS unsafe permission preflight: %s\n' "$preflight" >&2; exit 1; }
-      printf 'PROFILE PERMISSIONS %s\n' "${preflight#"$ROOT/"}"
-      bash "$preflight"
-    fi
-  done
+if [ "$suite" = run.sh ]; then
+  [ "${#runners[@]}" -gt 0 ] || exit 0
+  mkdir -p "$ROOT/.build/profile-test-runs"
+  log_dir="$(mktemp -d "$ROOT/.build/profile-test-runs/run.XXXXXX")"
+  printf 'PROFILE TESTS logs: %s\n' "$log_dir"
+  if [ "$permissions" != passed ]; then
+    for runner in "${runners[@]}"; do
+      preflight="${runner%run.sh}permissions.sh"
+      if [ -e "$preflight" ] || [ -L "$preflight" ]; then
+        [ -f "$preflight" ] && [ ! -L "$preflight" ] \
+          || { printf 'PROFILE TESTS unsafe permission preflight: %s\n' "$preflight" >&2; exit 1; }
+        profile="${runner%/tests/run.sh}"
+        printf 'PROFILE PERMISSIONS %s\n' "${preflight#"$ROOT/"}"
+        bash "$preflight" 2>&1 | tee "$log_dir/${profile##*/}.log"
+      fi
+    done
+  fi
+  [ "$permissions" != only ] || exit 0
+  exec python3 "$ROOT/dev/run-profile-tests.py" "$log_dir" "${#runners[@]}" "${runners[@]}" "$@"
 fi
-[ "$permissions" != only ] || exit 0
 for runner in "${runners[@]}"; do
   printf 'PROFILE TESTS %s\n' "${runner#"$ROOT/"}"
-  if [ "$suite" = run.sh ] && [ -f "${runner%run.sh}permissions.sh" ]; then
-    bash "$runner" --after-permissions "$@"
-  else
-    bash "$runner" "$@"
-  fi
+  bash "$runner" "$@"
 done

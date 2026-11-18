@@ -50,6 +50,8 @@ PREPARATION_WORKFLOW_POLICIES = {
     "9eb85775fcd01585c6f4a745d7b3b32c3d67700e": PREPARATION_JOBS,
     # host-free-verify runs the shared parallel ShellCheck runner.
     "c8c262c85a127ba8034478cbacc1720f15597b56": PREPARATION_JOBS,
+    # host-free-verify also uploads profile test logs.
+    "4796e78c8e1657f31f89a32a3f8e4f38dd6c0372": PREPARATION_JOBS,
 }
 
 
