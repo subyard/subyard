@@ -3,8 +3,8 @@
 import argparse
 import ast
 import copy
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from contextlib import contextmanager, ExitStack
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager, ExitStack, suppress
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -1250,6 +1250,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
     broker = report["broker"]
     observed_slots = {int(slot["id"].split("-")[1]): slot for slot in broker.get("slots", [])}
     selected_slots = [observed_slots.get(slot, {"id": f"slot-{slot}", "state": "unknown"}) for slot in slots]
+    observed_selection = [observed_slots[slot] for slot in slots if slot in observed_slots]
     headroom = broker.get("headroom", {})
     physical = any(check["physical"] and check["selected"] and check["status"] not in ("passed", "not-applicable")
                    for check in report["checks"])
@@ -1257,8 +1258,8 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
     if physical:
         if broker.get("admission_closed"):
             shortages.append("broker admission closed")
-        elif selected_slots and all(slot["state"] not in ("available", "unknown") for slot in selected_slots):
-            shortages = [slot["id"] + ": " + slot["state"] for slot in selected_slots]
+        elif observed_selection and all(slot["state"] != "available" for slot in observed_selection):
+            shortages = [slot["id"] + ": " + slot["state"] for slot in observed_selection]
         shortages += [kind + " headroom exhausted" for kind in ("memory", "disk") if headroom.get(kind + "_bytes") == 0]
     report["capacity_summary"] = {
         "selected_slots": selected_slots, "selected_types": list(dict.fromkeys(types)),
@@ -1416,81 +1417,96 @@ def broker_slots(env):
 
 def dispatch_live(work, slots, env, begin, execute_lane, record, refresh, wait_seconds):
     active, delayed, slot_waits, slot_refusals = {}, {}, {}, {}
-    reported = set()
-    retry_deadline = idle_deadline = None
+    reported, unavailable = set(), set()
+    deadline = None
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
-        while True:
-            for future in [future for future in active if future.done()]:
-                name, slot = active.pop(future)
-                result = record(name, future.result())
-                reason = result.get("reason", "")
-                if (result["status"] == "blocked" and result.get("termination") == "exit"
-                    and reason.startswith(("capacity_", "slot_"))):
-                    now = time.monotonic()
-                    # A controller's first run can spend time doing work before it refuses a later acquire.
-                    if retry_deadline is None:
-                        retry_deadline = now + wait_seconds
-                    key = (name, slot)
-                    delay = min(15, 2 * delayed.get(key, (0, SLOT_POLL_SECONDS / 2, ""))[1])
-                    delayed[key] = (now + delay, delay, reason)
-                    if reason.startswith("slot_"):
-                        slot_refusals[slot] = reason.removeprefix("slot_")
-                        slot_waits.setdefault(slot, now)
-                    work.append(name)
+        try:
+            while True:
+                for future in [future for future in active if future.done()]:
+                    name, slot = active.pop(future)
+                    result = record(name, future.result())
+                    reason = result.get("reason", "")
+                    if (result["status"] == "blocked" and result.get("termination") == "exit"
+                        and reason.startswith(("capacity_", "slot_"))):
+                        now = time.monotonic()
+                        # A controller's first run can spend time doing work before it refuses a later acquire.
+                        if deadline is None:
+                            deadline = now + wait_seconds
+                        key = (name, slot)
+                        delay = min(15, 2 * delayed.get(key, (0, SLOT_POLL_SECONDS / 2, ""))[1])
+                        delayed[key] = (now + delay, delay, reason)
+                        if reason.startswith("slot_"):
+                            slot_refusals[slot] = reason.removeprefix("slot_")
+                            slot_waits.setdefault(slot, now)
+                        work.append(name)
+                    else:
+                        deadline = None
+                        delayed = {key: refusal for key, refusal in delayed.items() if key[0] != name}
+                        slot_refusals.pop(slot, None)
+                        slot_waits.pop(slot, None)
+                        reported.discard(slot)
+                states = {}
+                if not STOP.is_set():
+                    running = {name for name, _ in active.values()}
+                    work.extend(name for name in refresh() if name not in work and name not in running)
+                    busy = {slot for _, slot in active.values()}
+                    idle = [slot for slot in slots if slot not in busy]
+                    if work and idle:
+                        states = broker_slots(env)
+                        now = time.monotonic()
+                        # Only a broker state transition renews the wait. Repeated available
+                        # snapshots can still race an acquire refusal.
+                        recovered = {slot for slot in idle if states.get(slot) == "available"} & unavailable
+                        if recovered:
+                            deadline = None
+                            unavailable -= recovered
+                        unavailable.update(slot for slot in idle if slot in states and states[slot] != "available")
+                        for slot in idle:
+                            state = states.get(slot, "unknown")
+                            refusal = state if state != "available" else slot_refusals.get(slot)
+                            if refusal:
+                                if now - slot_waits.setdefault(slot, now) >= wait_seconds and slot not in reported:
+                                    print(f"BROKER WAIT: slot-{slot}={refusal} persisted while checks queued", flush=True)
+                                    reported.add(slot)
+                            else:
+                                slot_waits.pop(slot, None)
+                                reported.discard(slot)
+                            if state != "available":
+                                continue
+                            # Give an untried lane and slot a chance even when earlier retries timed out.
+                            name = next((name for name in work if (name, slot) not in delayed or
+                                         ((deadline is None or now < deadline) and delayed[name, slot][0] <= now)), None)
+                            if name is not None and begin(name):
+                                if not delayed:
+                                    deadline = None
+                                work.remove(name)
+                                active[pool.submit(execute_lane, name, slot)] = (name, slot)
+                    elif not work:
+                        slot_waits.clear()
+                        reported.clear()
+                if active:
+                    wait(active, timeout=SLOT_POLL_SECONDS, return_when=FIRST_COMPLETED)
+                elif STOP.is_set() or not work:
+                    return False
                 else:
-                    retry_deadline = None
-                    delayed = {key: refusal for key, refusal in delayed.items() if key[0] != name}
-                    slot_refusals.pop(slot, None)
-                    slot_waits.pop(slot, None)
-                    reported.discard(slot)
-            states = {}
-            if not STOP.is_set():
-                running = {name for name, _ in active.values()}
-                work.extend(name for name in refresh() if name not in work and name not in running)
-                busy = {slot for _, slot in active.values()}
-                idle = [slot for slot in slots if slot not in busy]
-                if work and idle:
-                    states = broker_slots(env)
                     now = time.monotonic()
-                    for slot in idle:
-                        state = states.get(slot, "unknown")
-                        refusal = state if state != "available" else slot_refusals.get(slot)
-                        if refusal:
-                            if now - slot_waits.setdefault(slot, now) >= wait_seconds and slot not in reported:
-                                print(f"BROKER WAIT: slot-{slot}={refusal} persisted while checks queued", flush=True)
-                                reported.add(slot)
-                        else:
-                            slot_waits.pop(slot, None)
-                            reported.discard(slot)
-                        if state != "available":
-                            continue
-                        # Give an untried lane and slot a chance even when earlier retries timed out.
-                        name = next((name for name in work if (name, slot) not in delayed or
-                                     ((retry_deadline is None or now < retry_deadline) and delayed[name, slot][0] <= now)), None)
-                        if name is not None and begin(name):
-                            work.remove(name)
-                            active[pool.submit(execute_lane, name, slot)] = (name, slot)
-                elif not work:
-                    slot_waits.clear()
-                    reported.clear()
-            if active:
-                idle_deadline = None
-                wait(active, timeout=SLOT_POLL_SECONDS, return_when=FIRST_COMPLETED)
-            elif STOP.is_set() or not work:
-                return False
-            else:
-                now = time.monotonic()
-                if idle_deadline is None:
-                    idle_deadline = now + wait_seconds
-                wait_deadline = retry_deadline if retry_deadline is not None else idle_deadline
-                if now >= wait_deadline:
-                    state = ", ".join(f"slot-{slot}={states.get(slot, 'unknown')}" for slot in slots)
-                    refusals = ", ".join(f"{name}@slot-{slot}={reason}" for (name, slot), (_, _, reason) in delayed.items()
-                                         if name in work)
-                    print(f"INCOMPLETE: no broker progress for {', '.join(work)} ({state})"
-                          + (f"; last refusals: {refusals}" if refusals else ""), flush=True)
-                    return True
-                STOP.wait(min(SLOT_POLL_SECONDS, wait_deadline - now))
+                    if deadline is None:
+                        deadline = now + wait_seconds
+                    if now >= deadline:
+                        state = ", ".join(f"slot-{slot}={states.get(slot, 'unknown')}" for slot in slots)
+                        refusals = ", ".join(f"{name}@slot-{slot}={reason}" for (name, slot), (_, _, reason) in delayed.items()
+                                             if name in work)
+                        print(f"INCOMPLETE: no broker progress for {', '.join(work)} ({state})"
+                              + (f"; last refusals: {refusals}" if refusals else ""), flush=True)
+                        return True
+                    STOP.wait(min(SLOT_POLL_SECONDS, deadline - now))
+        except Exception:
+            # Running controllers still own their cleanup and their results.
+            for sibling in as_completed(active):
+                name, _ = active[sibling]
+                with suppress(Exception):
+                    record(name, sibling.result())
+            raise
 
 
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=(), hosted_job=False):
@@ -1645,7 +1661,11 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
         if hosted_job:
             env["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
             if live:
-                attempt(live[0], slots[0])
+                result = attempt(live[0], slots[0])
+                if (result and result["status"] == "blocked" and result.get("exit_code") == 4
+                    and result.get("termination") == "exit"
+                    and result.get("reason") in ("capacity_memory", "capacity_disk")):
+                    attempt(live[0], slots[0])
         elif waiting_live:
             limit = re.fullmatch(r"([0-9]{1,6})([sm])", capacity_wait)
             if not limit:

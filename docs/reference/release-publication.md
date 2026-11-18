@@ -480,7 +480,8 @@ the broker's current state guides dispatch to that slot. The exact-slot acquire 
 Memory and disk refusals requeue the lane with backoff so a smaller lane can run.
 `SUBYARD_E2E_CAPACITY_WAIT` bounds the wait without progress (default `120m`).
 The collector reports pending lanes and slot states if the wait expires. It finishes normally if
-fewer lanes remain than there are slots. Hosted single jobs keep the client's bounded capacity wait.
+fewer lanes remain than there are slots. Hosted single jobs keep the client's bounded capacity wait
+and retry once after a typed memory or disk capacity refusal.
 
 One collector owns the receipt. Requested VM checks remain required after interruption or exclusion.
 
@@ -491,8 +492,9 @@ are planning inputs, not passing evidence. `--slots` and `--types` identify the 
 they do not reserve capacity or change controller dispatch. A compact `CAPACITY` line on stderr
 summarizes these selections, numeric headroom, observation time/age and prerequisites; stdout remains
 the JSON report. Missing observation time stays unknown, independent of file read time or mtime.
-Missing telemetry and legacy reservations leave headroom unknown. Observed unavailable selected
-slots or exhausted headroom report planning `insufficient` and exit 1 before packaging or local checks.
+Missing telemetry and legacy reservations leave headroom unknown. Closed admission, exhausted
+headroom, or a snapshot that lists at least one selected slot with all listed selected slots
+unavailable report planning `insufficient` and exit 1 before packaging or local checks.
 Positive headroom does not prove the selected types fit: compare it with their actual resource contract
 and preserve the reported reserves. Run this worktree preflight before `prepare` and the local gates
 to avoid an obviously unsuitable attempt. The supplied snapshot is advisory; current native broker

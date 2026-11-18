@@ -200,6 +200,41 @@ class TestAcceptance(unittest.TestCase):
             self.assertFalse(m.dispatch_live(["p0-release-smoke"], (2, 4), {}, lambda _: True, execute, record, list, 1))
             self.assertEqual(results, [(2, "blocked", "slot_draining"), (4, "passed", None)])
 
+    def test_recovered_slot_retries_after_wait_expires_while_sibling_runs(self):
+        recorded, retried = threading.Event(), threading.Event()
+        states = iter(("draining", "draining", "available"))
+        now = 100
+        calls = []
+
+        def status(env):
+            nonlocal now
+            if not recorded.is_set():
+                return {2: "available", 4: "available"}
+            now += 1
+            return {2: "available", 4: next(states, "available")}
+
+        def execute(name, slot):
+            calls.append((name, slot))
+            if name == "sibling":
+                self.assertTrue(retried.wait(3), "recovered slot waited for the sibling")
+            elif not recorded.is_set():
+                return {"status": "blocked", "termination": "exit", "reason": "slot_draining"}
+            else:
+                retried.set()
+            return {"status": "passed"}
+
+        def record(name, result):
+            if result["status"] == "blocked":
+                recorded.set()
+            return result
+
+        self.slots.side_effect = status
+        with patch.object(m, "time", wraps=time) as clock:
+            clock.monotonic.side_effect = lambda: now
+            self.assertFalse(m.dispatch_live(["sibling", "retry"], (2, 4), {},
+                lambda _: True, execute, record, list, 1))
+        self.assertEqual([slot for name, slot in calls if name == "retry"], [4, 4])
+
     def test_initial_idle_wait_does_not_spend_capacity_retry_budget(self):
         calls, probes = [], []
         def status(env):
@@ -2090,16 +2125,23 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
     def test_hosted_job_keeps_the_physical_controller_capacity_wait(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
-        for capacity_wait in (None, "7s"):
-            with self.subTest(capacity_wait=capacity_wait), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        for capacity_wait, refusal, retry_passes in (
+            (None, None, True), ("7s", "capacity_memory", True),
+            ("7s", "capacity_disk", False), ("7s", "slot_draining", False),
+        ):
+            with self.subTest(capacity_wait=capacity_wait, refusal=refusal), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
                 root = output / "source"
                 receipt = {"version": "test", "source_fingerprint": "a" * 64, "profiles": {},
                            "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                            "checks": {name: {"status": "pending"} for name in ("verify", "profile:sample")}}
-                observed = {}
+                observed, slots = {}, []
                 def execute(name, command, root, output, environment, slot=None):
                     observed[name] = dict(environment)
+                    if slot:
+                        slots.append(slot)
+                        if refusal and (len(slots) == 1 or not retry_passes):
+                            return {"status": "blocked", "exit_code": 4, "termination": "exit", "reason": refusal}
                     return {"status": "passed", "exit_code": 0}
                 with patch.object(m, "load_bound", return_value=(root, receipt)), \
                      patch.object(m, "commands", return_value={"verify": ["true"], "profile:sample": ["true"]}), \
@@ -2111,7 +2153,9 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                         os.environ.pop("SUBYARD_E2E_CAPACITY_WAIT", None)
                     else:
                         os.environ["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
-                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True, hosted_job=True), 0)
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True, hosted_job=True),
+                                     0 if retry_passes else 1)
+                self.assertEqual(slots, [1, 1] if refusal in ("capacity_memory", "capacity_disk") else [1])
                 self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", set(observed["verify"]))
                 self.assertNotIn("SUBYARD_E2E_CONTROLLER_WORKSPACE", set(observed["verify"]))
                 self.assertNotIn("SUBYARD_E2E_CAPACITY_WAIT", set(observed["verify"]))
@@ -2275,6 +2319,12 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             value["resources"]["memory"]["available_bytes"] = 1000
             value["pool"]["slots"][0]["state"] = "held"
             self.assertEqual(inspect()["capacity_summary"]["shortages"], ["slot-001: held"])
+            with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
+                 patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status), "--with-vms"]), \
+                 redirect_stdout(io.StringIO()) as printed, redirect_stderr(io.StringIO()):
+                self.assertEqual(m.main(), 1)
+            summary = json.loads(printed.getvalue())["capacity_summary"]
+            self.assertEqual(summary["shortages"], ["slot-001: held"])
             value["pool"]["slots"] += [{"slot_id": "slot-002", "state": "available"},
                                        {"slot_id": "slot-003", "state": "available"},
                                        {"slot_id": "slot-004", "state": "recovering"}]
@@ -2928,6 +2978,42 @@ while True: time.sleep(1)
                 persisted = json.loads((output / "receipt.json").read_text())
                 record, _ = m.original_attempt(output, persisted, blocked, persisted["checks"][blocked])
                 self.assertEqual(record["result"]["status"], "passed")
+
+    def test_capture_error_drains_running_sibling_without_dispatching_queued_lane(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            failed, sibling, queued = ("profile:sample/" + name for name in ("one", "two", "three"))
+            checks = dict.fromkeys((failed, sibling, queued), ["true"])
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "checks": {name: {"status": "pending"} for name in checks}}
+            capture_failed = threading.Event()
+
+            def execute(name, *args):
+                if name == sibling:
+                    self.assertTrue(capture_failed.wait(3))
+                self.assertNotEqual(name, queued)
+                return {"status": "passed", "exit_code": 0}
+
+            def capture(output, root, receipt, name, result):
+                if name == failed:
+                    capture_failed.set()
+                    raise OSError("cannot read lane log")
+                return {"id": "a" * 32, "sha256": "b" * 64}
+
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "execute", side_effect=execute) as executed, \
+                 patch.object(m, "completed_attempt", side_effect=capture), \
+                 self.assertRaisesRegex(OSError, "cannot read lane log"):
+                m.run_checks(output, [1, 2], [], False, with_vms=True)
+            self.assertCountEqual([call.args[0] for call in executed.call_args_list], [failed, sibling])
+            persisted = json.loads((output / "receipt.json").read_text())
+            invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+            self.assertEqual(persisted["checks"][sibling]["status"], "passed")
+            self.assertEqual(persisted["checks"][queued]["status"], "pending")
+            self.assertEqual(invocation["checks"][sibling]["status"], "passed")
+            self.assertEqual(invocation["state"], "error")
 
     def test_unknown_refusal_fails_only_its_lane(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
