@@ -71,6 +71,22 @@ func (observation persistObservation) changed() bool {
 	return slices.ContainsFunc(observation.Entries, func(entry persistEntry) bool { return len(entry.Ops) != 0 })
 }
 
+// A batch failure can name an integration only if all planned effects
+// belong to that same integration.
+func (observation persistObservation) changedIntegration() string {
+	id := ""
+	for _, entry := range observation.Entries {
+		if len(entry.Ops) == 0 {
+			continue
+		}
+		if entry.Integration == "" || id != "" && id != entry.Integration {
+			return ""
+		}
+		id = entry.Integration
+	}
+	return id
+}
+
 // retireUnrecordedLinks plans removing the exact link of a deselected mapping
 // that the artifact inventory does not record: an adoption cut after its
 // exchange but before the inventory apply. A recorded link is retired by the

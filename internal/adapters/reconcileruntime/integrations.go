@@ -863,6 +863,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			continue
 		}
 		if err != nil {
+			if phase == "verify" {
+				err = runtime.integrationApplyDiagnostic(err, "verify", file.integration)
+			}
 			causes = append(causes, err)
 			continue
 		}
@@ -875,6 +878,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			err = runtime.releasedInstalledDocument(file.destination, observation)
 		}
 		if err != nil {
+			if phase == "verify" {
+				err = runtime.integrationApplyDiagnostic(err, "verify", file.integration)
+			}
 			causes = append(causes, err)
 			continue
 		}
@@ -901,6 +907,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		}
 		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
 		if err != nil {
+			if phase == "verify" {
+				err = runtime.integrationApplyDiagnostic(err, "verify", runtime.knownIntegrationID(entry.ID))
+			}
 			causes = append(causes, err)
 			continue
 		}
@@ -1513,24 +1522,25 @@ func (runtime Runtime) PrepareSourceIntegrationPlan(ctx context.Context, reader 
 func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPlan) error {
 	fresh, observed, err := runtime.observeIntegrationsPhase(ctx, "apply")
 	if err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "observe", "")
 	}
 	if err := CheckIntegrationPlan(plan, fresh); err != nil {
 		return runtime.integrationPlanDiagnostic(err, plan, fresh)
 	}
 	if err := runtime.checkIntegrationHookScope(); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "hooks scope", "")
 	}
 	if !fresh.Changed {
-		return runtime.storeAppliedIntegrationSettings(ctx)
+		return runtime.integrationApplyDiagnostic(runtime.storeAppliedIntegrationSettings(ctx), "inventory capture settings", "")
 	}
 	execution := runtime
+	runtime.applyingIntegrations = true
 	if err := runtime.reconcileIntegrationServices(ctx); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "integration services", "")
 	}
 	entries, err := runtime.integrationArtifactsPhase("apply")
 	if err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "inventory prepare", "")
 	}
 	expectedInventory := ""
 	if observed.Initial {
@@ -1540,52 +1550,62 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	// exact link that transfer published (the projection bound in the plan).
 	runtime.persistProjection = fresh.persist.projection()
 	if err := runtime.checkApprovedPersist(fresh.persist); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "persist approval", runtime.knownIntegrationID(fresh.persist.changedIntegration()))
 	}
 	if err := runtime.applyPersist(ctx, entries, fresh.persist); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "persist", runtime.knownIntegrationID(fresh.persist.changedIntegration()))
 	}
 	if _, err := runtime.integrationInventory(ctx, "apply", entries, expectedInventory); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "inventory apply", "")
 	}
 	if err := runtime.RefreshConfigs(ctx); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "configs", "")
 	}
-	if err := execution.runScript(ctx, runtime.Stderr, "reconcile-integrations.sh"); err != nil {
+	if err := execution.reconcileIntegrationScript(ctx); err != nil {
 		return err
 	}
 	// Keep the inventory pending until hooks succeed so the same requested
 	// selection remains retryable after a transient hook failure.
 	if err := execution.captureProvisionedProjectHooks(ctx); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "hooks capture", "")
 	}
 	if err := execution.RunProjectHooks(ctx); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "hooks run", "")
 	}
 	// Retirement effects follow the hooks: a failed init leaves the installed
 	// state, which the next successful init retires.
 	for _, entry := range observed.Retired {
 		if entry.Kind == "structured" {
 			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
-				return err
+				return runtime.integrationApplyDiagnostic(err, "retire structured config", runtime.knownIntegrationID(entry.ID))
 			}
 		}
 	}
 	if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "inventory commit", "")
 	}
 	verified, _, err := execution.observeIntegrationsPhase(ctx, "verify")
 	if err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "verify", "")
 	}
 	if verified.Changed {
 		return runtime.integrationDiagnostic(errors.New("integration reconcile verification failed; desired selection retained for retry"),
 			profile.IntegrationDefinition{}, "verify", "convergence-failed")
 	}
-	if err := runtime.storeAppliedIntegrationSettings(ctx); err != nil {
-		return err
+	return runtime.integrationApplyDiagnostic(runtime.storeAppliedIntegrationSettings(ctx), "inventory capture settings", "")
+}
+
+func (runtime Runtime) reconcileIntegrationScript(ctx context.Context) error {
+	if !runtime.PersistFinishOnly {
+		return runtime.integrationApplyDiagnostic(runtime.runScript(ctx, runtime.Stderr, "reconcile-integrations.sh"), "script", "")
 	}
-	return nil
+	var report bytes.Buffer
+	err := runtime.runScript(ctx, &report, "reconcile-integrations.sh", "--activation-diagnostics")
+	id, complete := strings.CutSuffix(report.String(), "\n")
+	if !complete || !slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), id) {
+		id = ""
+	}
+	return runtime.integrationApplyDiagnostic(err, "script", id)
 }
 
 type appliedIntegrationSettingsCapture struct {

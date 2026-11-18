@@ -87,7 +87,11 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 			return err
 		}
 		if len(paths) != 0 {
-			if err := runtime.runScript(ctx, runtime.Stderr, "refresh-agent-skills.sh", "apply"); err != nil {
+			output := runtime.Stderr
+			if runtime.applyingIntegrations && runtime.PersistFinishOnly {
+				output = nil
+			}
+			if err := runtime.runScript(ctx, output, "refresh-agent-skills.sh", "apply"); err != nil {
 				return err
 			}
 		}
@@ -177,7 +181,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 			continue
 		}
 		if err != nil {
-			refusals = append(refusals, fmt.Errorf("%s: %w", file.label, err))
+			refusals = append(refusals, runtime.integrationConfigApplyError(file, fmt.Errorf("%s: %w", file.label, err)))
 			continue
 		}
 		bytes += len(payload)
@@ -260,7 +264,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			continue
 		}
 		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
-			return fmt.Errorf("apply %s: %w", file.label, err)
+			return runtime.integrationConfigApplyError(file, fmt.Errorf("apply %s: %w", file.label, err))
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
@@ -278,6 +282,13 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	}
 	fmt.Fprintln(output, "  [ ok ] Agent instructions and configs refreshed.")
 	return nil
+}
+
+func (runtime Runtime) integrationConfigApplyError(file guestConfigFile, err error) error {
+	if runtime.applyingIntegrations {
+		return runtime.integrationApplyDiagnostic(err, "configs", file.integration)
+	}
+	return err
 }
 
 func (runtime Runtime) prepareConfigDiagnostics(ctx context.Context, prepared *PreparedConfigs) (*configDiagnosticCapture, error) {

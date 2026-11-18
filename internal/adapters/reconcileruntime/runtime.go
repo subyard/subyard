@@ -85,6 +85,7 @@ type Runtime struct {
 	RuntimePlan               *ProfileRuntimePlan
 	HookPlan                  *ProjectHookPlan
 	projectMetadataProjection []byte
+	applyingIntegrations      bool
 	Environment               []string
 	// FromUpdate marks stages applied by yard update, so their next steps name the update.
 	FromUpdate bool

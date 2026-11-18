@@ -3,6 +3,7 @@ package reconcileruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -266,4 +267,145 @@ func integrationSourceFixture(t *testing.T) (Runtime, profile.IntegrationDefinit
 	testkit.WriteFile(t, filepath.Join(root, "state"), []byte("unchanged"), 0600)
 	definition := profile.IntegrationDefinition{Name: "sample", Root: root}
 	return Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{definition}}, definition, "", ""
+}
+
+type applyDiagnosticExecutor struct {
+	retryableIntegrationExecutor
+	cut string
+}
+
+func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	args := request.Command
+	point := ""
+	if len(args) >= 5 && args[0] == "python3" {
+		switch args[3] {
+		case IntegrationInventoryReader():
+			point = "inventory " + args[4]
+			if args[4] == "observe" && fixture.commits != 0 {
+				point = "verify"
+			}
+			if fixture.cut == "retire structured config" && args[4] == "observe" {
+				payload, _ := json.Marshal(integrationObservation{Fingerprint: strings.Repeat("a", 64), Changed: true,
+					Retired: []integrationArtifact{{ID: "sample", Kind: "structured", Format: "json", Path: "/home/dev/settings.json"}}})
+				return ports.InstanceExecResult{Stdout: payload}, nil
+			}
+		case integrationPersistProgram:
+			if args[4] == "observe" {
+				payload, _ := json.Marshal(persistObservation{Fingerprint: strings.Repeat("b", 64),
+					Entries: []persistEntry{{Integration: "sample", Source: "/home/dev/.memory", Ops: []string{"finish"}}}})
+				return ports.InstanceExecResult{Stdout: payload}, nil
+			}
+			point = "persist"
+		default:
+			if args[4] == configmaterial.ModeAssessRetire {
+				return ports.InstanceExecResult{Stdout: []byte(`{"converged":false,"fingerprint":"` + strings.Repeat("c", 64) + `"}`)}, nil
+			}
+			if args[4] == configmaterial.ModeRetire {
+				point = "retire structured config"
+			}
+		}
+	}
+	if len(args) == 4 && args[3] == "--observe" {
+		point = "hooks run"
+	}
+	if len(args) > 3 && strings.Contains(args[3], "temporary=$(mktemp") {
+		point = "configs"
+	}
+	if point == fixture.cut {
+		return ports.InstanceExecResult{Stderr: []byte("private-native-stderr")}, errors.New("private-native-error")
+	}
+	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
+}
+
+func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
+	for _, test := range []struct{ cut, message string }{
+		{"persist", "integration sample apply persist failed"},
+		{"inventory apply", "integration apply inventory apply failed"},
+		{"inventory commit", "integration apply inventory commit failed"},
+		{"inventory capture-settings", "integration apply inventory capture settings failed"},
+		{"configs", "integration codex apply configs failed"},
+		{"script", "integration sample apply script failed"},
+		{"hooks run", "integration apply hooks run failed"},
+		{"hooks capture", "integration sample apply hooks capture failed"},
+		{"retire structured config", "integration sample apply retire structured config failed"},
+		{"verify", "integration apply verify failed"},
+	} {
+		t.Run(test.cut, func(t *testing.T) {
+			root := testkit.TempDir(t)
+			for _, dir := range []string{"config", "scripts/lib"} {
+				if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0755)
+			testkit.WriteFile(t, filepath.Join(root, "integration.json"), []byte("{}"), 0600)
+			script := []byte("#!/bin/sh\nexit 0\n")
+			executor := &applyDiagnosticExecutor{cut: test.cut}
+			executor.serviceChanged = true
+			var output bytes.Buffer
+			runtime := Runtime{RepositoryRoot: root, Executor: executor, PersistFinishOnly: true, Stderr: &output, Stdout: &output,
+				Incus:        &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
+				Yard:         domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
+				Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: root}}}
+			switch test.cut {
+			case "persist":
+				runtime.Environment = []string{"AGENT_sample_PERSIST=.memory:/mnt/host/agent-sessions/sample/memory"}
+			case "configs":
+				path := filepath.Join(root, "instructions.md")
+				testkit.WriteFile(t, path, []byte("instructions\n"), 0600)
+				runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + path}
+				bindInstructionTestPackage(t, &runtime, root, "codex")
+			case "script", "hooks capture":
+				provision := filepath.Join(root, "provision.sh")
+				testkit.WriteFile(t, provision, []byte("#!/bin/sh\nexit 0\n"), 0700)
+				runtime.Environment = []string{"PATH=" + root + ":/usr/bin:/bin", "CODING_TOOL_INTEGRATIONS=sample",
+					"AGENT_sample_PROVISION=" + provision, "AGENT_sample_COMMAND=true",
+					"INCUS_PROJECT=sample", "YARD_INSTANCE_NAME=sample", "DEV_USER=dev"}
+				if test.cut == "script" {
+					var err error
+					script, err = os.ReadFile("../../../scripts/reconcile-integrations.sh")
+					if err != nil {
+						t.Fatal(err)
+					}
+					for name, content := range map[string]string{
+						"lib/runtime.sh": "", "lib/native-installed-stage.sh": "",
+						"lib/engine-context.sh": "subyard_require_engine_context() { :; }\n",
+						"lib/ui.sh":             "die() { echo \"$*\" >&2; exit 1; }; info() { :; }\n",
+						"lib-power.sh":          "power_state() { echo RUNNING; }\n",
+					} {
+						testkit.WriteFile(t, filepath.Join(root, "scripts", name), []byte(content), 0600)
+					}
+					testkit.WriteFile(t, filepath.Join(root, "incus"), []byte("#!/bin/sh\necho private-native-stdout\necho private-native-stderr >&2\nexit 1\n"), 0700)
+				} else {
+					runtime.Environment = append(runtime.Environment, "AGENT_sample_PROJECTS_CHANGED=fixture-hook")
+					executor.observeHooks = func() hookObservation {
+						return hookObservation{Projects: strings.Repeat("a", 64), Wiring: strings.Repeat("b", 64)}
+					}
+				}
+			}
+			testkit.WriteFile(t, filepath.Join(root, "scripts/reconcile-integrations.sh"), script, 0755)
+			if strings.HasPrefix(test.cut, "hooks ") {
+				scope, _, err := runtime.IntegrationScope()
+				if err != nil {
+					t.Fatal(err)
+				}
+				runtime.HookPlan = &ProjectHookPlan{integrationScope: scope}
+			}
+			ctx := context.Background()
+			plan, err := runtime.IntegrationPlan(ctx)
+			if err != nil || !plan.Changed {
+				t.Fatalf("fixture plan: changed=%t, %v", plan.Changed, err)
+			}
+			err = runtime.ApplyIntegrations(ctx, plan)
+			var public interface{ ActivationDiagnostic() (string, string) }
+			if !errors.As(err, &public) {
+				t.Fatalf("missing public diagnostic: %v", err)
+			}
+			message, retry := public.ActivationDiagnostic()
+			if message != test.message+" in yard sample" || retry != "run yard migrate" ||
+				strings.Contains(err.Error()+output.String(), "private-native") {
+				t.Fatalf("diagnostic = %q / %q; private output leaked = %t", message, retry, strings.Contains(err.Error()+output.String(), "private-native"))
+			}
+		})
+	}
 }

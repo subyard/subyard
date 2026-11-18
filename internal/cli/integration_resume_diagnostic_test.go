@@ -128,13 +128,44 @@ func TestIntegrationApplyFailurePreservesPublicCauseAndExecutableRetry(t *testin
 	}
 }
 
+func TestIntegrationApplySubstepRendersAtActivationBoundary(t *testing.T) {
+	root, _, _, _ := configCommandFixture(t)
+	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Executor: resumeConflictExecutor{"apply"},
+		Incus:        &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
+		Yard:         domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
+		Integrations: []profile.IntegrationDefinition{}}
+	ctx := context.Background()
+	plan, err := runtime.IntegrationPlan(ctx)
+	if err != nil || !plan.Changed {
+		t.Fatalf("fixture plan: changed=%t, %v", plan.Changed, err)
+	}
+	cause := runtime.ApplyIntegrations(ctx, plan)
+	if cause == nil {
+		t.Fatal("inventory apply was expected to fail")
+	}
+	boundary := materializedConfigActivationError{
+		cause: &integrationActivationFailure{cause: cause, stage: "apply", projected: true},
+		yard:  "sample", phase: "integrations", action: "reconcile", command: "integration status",
+	}
+	message, retry := boundary.ActivationDiagnostic()
+	if message != "integration apply inventory apply failed in yard sample" || retry != "run yard migrate" {
+		t.Fatalf("activation diagnostic = %q / %q", message, retry)
+	}
+}
+
 type resumeConflictExecutor struct{ kind string }
 
 func (e resumeConflictExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	if strings.Contains(string(request.Stdin), `"mappings"`) && e.kind == "persist" {
 		return ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(`{"conflicts":[{"reason":"persist filesystem error","path":"","integration":"sample"}]}`)}, nil
 	}
-	if len(request.Command) >= 4 && request.Command[3] == reconcileruntime.IntegrationInventoryReader() {
+	if len(request.Command) >= 5 && request.Command[3] == reconcileruntime.IntegrationInventoryReader() {
+		if e.kind == "apply" {
+			if request.Command[4] == "apply" {
+				return ports.InstanceExecResult{Stderr: []byte("private native stderr")}, errors.New("private native error")
+			}
+			return ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":true}`)}, nil
+		}
 		return ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false}`)}, nil
 	}
 	if strings.Contains(strings.Join(request.Command, " "), "mode=$1") {

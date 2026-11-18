@@ -129,6 +129,47 @@ func (runtime Runtime) integrationDiagnostic(cause error, definition profile.Int
 	return &integrationLifecycleError{cause: cause, message: message + ": " + lifecycleReasons[reason], retry: retry, conflict: reason == "ambiguous-ownership" || reason == "foreign-ownership"}
 }
 
+// integrationApplyDiagnostic publishes only the failed substep and a known
+// component ID. Keep refusals separate so activation can render each finding.
+func (runtime Runtime) integrationApplyDiagnostic(cause error, step, id string) error {
+	if cause == nil {
+		return nil
+	}
+	if refusals, ok := cause.(*domain.Refusals); ok {
+		var public []error
+		for _, finding := range refusals.Unwrap() {
+			public = append(public, runtime.integrationApplyDiagnostic(finding, step, id))
+		}
+		return domain.CollectRefusals(public...)
+	}
+	var existing interface{ ActivationDiagnostic() (string, string) }
+	if errors.As(cause, &existing) {
+		return cause
+	}
+	message := "integration"
+	if len(id) <= 63 && domain.SafeName(id) {
+		message += " " + id
+	}
+	message += " apply " + step + " failed"
+	if yard := runtime.Yard.YardName; len(yard) <= 63 && domain.SafeName(yard) {
+		message += " in yard " + yard
+	}
+	return &integrationLifecycleError{cause: cause, message: message, retry: "run yard migrate"}
+}
+
+func (runtime Runtime) knownIntegrationID(id string) string {
+	if id == "" {
+		return ""
+	}
+	definitions, err := runtime.integrationDefinitions()
+	if err == nil && slices.ContainsFunc(definitions, func(definition profile.IntegrationDefinition) bool {
+		return definition.Name == id
+	}) {
+		return id
+	}
+	return ""
+}
+
 // Attribute rejected plans using owner-private evidence. This does not decide
 // whether a plan is stale or relax the existing convergence rules.
 func (runtime Runtime) integrationPlanDiagnostic(cause error, approved, fresh IntegrationPlan) error {
