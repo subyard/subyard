@@ -301,10 +301,20 @@ func (facade Facade) Run(originalCommand string) (runErr error) {
 			return facade.writeError("unavailable", "physical lease lifecycle is unavailable")
 		}
 		if err := facade.OnRelease(facade.Context, grant); err != nil {
-			if errors.Is(err, ErrLeaseLost) {
+			if !errors.Is(err, ErrLeaseLost) {
+				return facade.writeError("quarantined", "slot fencing or stop failed")
+			}
+			slot, readErr := storeSlot(facade.Store, grant.SlotID)
+			if readErr == nil && slot.LeaseEpoch == grant.LeaseEpoch && slot.LeaseID == grant.LeaseID &&
+				slot.CapabilityHash == capabilityDigest(grant.Capability) {
+				return facade.writeError("quarantined", "slot cleanup is unconfirmed")
+			}
+			// The store clears the lease only after cleanup or cancellation before
+			// provisioning. A later epoch can only be reserved after that transition.
+			if readErr != nil || !(slot.LeaseEpoch > grant.LeaseEpoch ||
+				slot.LeaseEpoch == grant.LeaseEpoch && slot.LeaseID == "") {
 				return facade.writeError("lease_lost", "lease is no longer current")
 			}
-			return facade.writeError("quarantined", "slot fencing or stop failed")
 		}
 		return facade.write(facadeResponse{
 			SchemaVersion: LeaseProtocolVersion, Status: "ok", Message: "released",

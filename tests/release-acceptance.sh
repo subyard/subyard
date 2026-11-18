@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
@@ -102,11 +103,12 @@ def broker_controller(scenario="pass"):
 PASS_CONTROLLER = ["bash", "-c", shlex.join(broker_controller()) + ' "$@"', "controller"]
 
 
-def lease_bytes(directory, slot=1):
-    log = directory / "fixture.leases.jsonl"
-    subprocess.run(broker_controller() + ["--slot", str(slot)], check=True,
-                   env=dict(m.clean_environment(), SUBYARD_E2E_LEASE_EVENTS=str(log)), capture_output=True)
-    return log.read_bytes()
+def lease_bytes(directory, slot=1, nonce="", scenario="pass"):
+    with tempfile.NamedTemporaryFile(dir=directory) as stream:
+        subprocess.run(broker_controller(scenario) + ["--slot", str(slot)], check=True,
+                       env=dict(m.clean_environment(), SUBYARD_E2E_LEASE_EVENTS=stream.name,
+                                SUBYARD_E2E_LEASE_NONCE=nonce), capture_output=True)
+        return stream.read()
 
 
 def fixture_checkout(directory, optional_vms=False):
@@ -584,8 +586,12 @@ exit "$COLLECTOR_EXIT"
                 self.assertEqual(m.run_checks(output, [], ["process-coverage"], False), 0)
                 self.assertEqual(calls, ["p0-release-smoke", "process-coverage"])
 
-    def transfer_fixture(self, directory, standalone=False, core=False):
+    def transfer_fixture(self, directory, standalone=False, core=False, scenario=None):
         checkout = fixture_checkout(directory)
+        if scenario:
+            runner = checkout / "config/profiles/sample/tests/e2e/acceptance.sh"
+            launcher = ["env", "-u", "SUBYARD_E2E_LEASE_EVENTS", *broker_controller()] if scenario == "legacy" else broker_controller(scenario)
+            runner.write_text("#!/bin/bash\n" + shlex.join(launcher) + ' "$@"\n')
         first, second = directory / "old", directory / "new"
         adapter = checkout / "tests/real-host/adapter-contracts.sh"
         adapter.parent.mkdir(parents=True, exist_ok=True)
@@ -604,14 +610,16 @@ exit "$COLLECTOR_EXIT"
                 + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
                 + "E2E lease released: slot=slot-002 run=sample\n")
             leases = m.lease_file(log)
-            leases.write_bytes(lease_bytes(directory, 2))
+            nonce = uuid.uuid4().hex
+            leases.write_bytes(lease_bytes(directory, 2, nonce))
             native.write_text(json.dumps({"chunk_id": "original", "exit_code": 0, "output": "", "wall_time_seconds": 1.5}))
             launch.write_text(json.dumps({"cwd": str(old_root), "source_fingerprint": old["source_fingerprint"],
                 "runtime_sha256": old["runtime_sha256"], "bundle_sha256": old["candidate_bundle_sha256"],
                 "acceptance_script_sha256": m.digest(old_root / command[1]), "launched_at_utc": "2026-01-01T00:00:00+00:00",
                 "argv": ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
                     "SUBYARD_E2E_CONTROLLER_WORKSPACE=/fixture/workspace", "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(first / "candidate-bundle.tar.gz"),
-                    "SUBYARD_E2E_CANDIDATE_SHA256=" + old["candidate_bundle_sha256"], "SUBYARD_E2E_LEASE_EVENTS=" + str(leases), *command, "--slot", "2"]}))
+                    "SUBYARD_E2E_CANDIDATE_SHA256=" + old["candidate_bundle_sha256"], "SUBYARD_E2E_LEASE_EVENTS=" + str(leases),
+                    "SUBYARD_E2E_LEASE_NONCE=" + nonce, *command, "--slot", "2"]}))
             artifacts = {role: {"path": str(path), "sha256": m.digest(path)} for role, path in (("log", log), ("native", native), ("launch", launch), ("leases", leases))}
         else:
             old["checks"][name] = m.execute(name, command, old_root, first, m.clean_environment())
@@ -1572,6 +1580,50 @@ exit "$COLLECTOR_EXIT"
                 m.transfer_evidence(second, first, name, declaration)
             self.assertEqual(m.load_bound(second)[1]["checks"][name]["status"], "pending")
 
+    def test_standalone_rejects_stale_evidence_and_matches_live_capacity_verdict(self):
+        for scenario in ("legacy", "release-then-memory"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                first, second, name, declaration, review = self.transfer_fixture(Path(temporary), standalone=True, scenario=scenario)
+                files = {role: Path(item["path"]) for role, item in review["standalone"].items()}
+                launch = json.loads(files["launch"].read_text())
+                old_stream = files["leases"].read_bytes()
+                nonce = uuid.uuid4().hex
+                launch["argv"][10] = "SUBYARD_E2E_LEASE_NONCE=" + nonce
+                if scenario != "legacy":
+                    files["leases"] = Path(temporary) / (nonce + ".leases.jsonl")
+                    launch["argv"][9] = "SUBYARD_E2E_LEASE_EVENTS=" + str(files["leases"])
+                    with m.private_file(files["leases"], "xb"):
+                        pass
+                files["launch"].write_text(json.dumps(launch))
+                run = subprocess.run(launch["argv"], cwd=launch["cwd"], env=m.clean_environment(),
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True)
+                files["log"].write_bytes(run.stdout)
+                files["native"].write_text(json.dumps({"chunk_id": "fixture", "exit_code": run.returncode,
+                                                        "output": "", "wall_time_seconds": 1.5}))
+                if scenario == "legacy":
+                    self.assertEqual(files["leases"].read_bytes(), old_stream)
+                else:
+                    stream = files["leases"].read_bytes()
+                    self.assertEqual([json.loads(line)["event"] for line in stream.splitlines()],
+                                     ["start", "grant", "release", "start", "refusal"])
+                    result = m.execute(name, ["bash", "-c", 'cat "$1" > "$SUBYARD_E2E_LEASE_EVENTS"',
+                                              "replay", str(files["leases"])], root, second, m.clean_environment(), 2)
+                    self.assertEqual((result["status"], result["reason"], result["lease_state"]),
+                                     ("blocked", "capacity_memory", "released"))
+                    self.assertEqual(m.lease_file(second / result["log"]).read_bytes(), stream)
+                review["standalone"] = {role: {"path": str(path), "sha256": m.digest(path)} for role, path in files.items()}
+                declaration.write_text(json.dumps(review))
+                with self.assertRaises(m.UnprovenLease):
+                    m.transfer_evidence(second, first, name, declaration)
+                self.assertEqual(m.load_bound(second)[1]["checks"][name]["status"], "pending")
+                if scenario == "legacy":
+                    del launch["argv"][10]
+                    files["launch"].write_text(json.dumps(launch))
+                    review["standalone"]["launch"]["sha256"] = m.digest(files["launch"])
+                    declaration.write_text(json.dumps(review))
+                    with self.assertRaisesRegex(m.UnprovenLease, "invocation-bound"):
+                        m.transfer_evidence(second, first, name, declaration)
+
     def raw_standalone_fixture(self, directory):
         first, second, name, declaration, review = self.transfer_fixture(directory, standalone=True)
         launch_path = Path(review["standalone"]["launch"]["path"])
@@ -1602,6 +1654,11 @@ exit "$COLLECTOR_EXIT"
                 self.assertEqual((second / result["evidence_files"][role]).read_bytes(), original)
             first.rename(directory / "retired-original")
             self.assertEqual(m.load_bound(second)[1]["checks"][name], result)
+            saved = (second / "receipt.json").read_bytes()
+            target["checks"][name]["evidence_transfer"]["actual_command"].remove(m.STANDALONE_NONCE_ARG)
+            m.save(second, target)
+            self.assertEqual(m.load_bound(second)[1]["checks"][name]["status"], "incomplete")
+            (second / "receipt.json").write_bytes(saved)
             copied = second / result["evidence_files"]["launch"]
             data = json.loads(copied.read_text())
             data["started_at"] = "not-a-time"
@@ -1624,7 +1681,7 @@ exit "$COLLECTOR_EXIT"
                     else:
                         invalid_launch.update(source_fingerprint=review["tested"]["source_fingerprint"],
                             runtime_sha256=review["tested"]["runtime_sha256"], bundle_sha256=review["tested"]["candidate_bundle_sha256"],
-                            acceptance_script_sha256=m.digest(first / "source" / launch["argv"][11]))
+                            acceptance_script_sha256=m.digest(first / "source" / launch["argv"][12]))
                         key = {"bad-source": "source_fingerprint", "bad-runtime": "runtime_sha256", "bad-bundle": "bundle_sha256", "bad-script": "acceptance_script_sha256"}[change]
                         invalid_launch[key] = None
                 elif change == "cwd":
@@ -1632,7 +1689,7 @@ exit "$COLLECTOR_EXIT"
                 elif change in ("wrapper", "hash", "path", "env", "command", "slot"):
                     index, value = {"wrapper": (0, "sh"), "hash": (8, "SUBYARD_E2E_CANDIDATE_SHA256=" + "f" * 64),
                         "path": (7, "SUBYARD_E2E_CANDIDATE_BUNDLE=/wrong/bundle"), "env": (6, "OTHER=/wrong"),
-                        "command": (10, "foreign.sh"), "slot": (-1, "0")}[change]
+                        "command": (11, "foreign.sh"), "slot": (-1, "0")}[change]
                     invalid_launch["argv"][index] = value
                 elif change == "missing-time":
                     del invalid_launch["started_at"]
@@ -2277,6 +2334,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 "unknown subsequent start": valid + start.replace(handle, other) + unknown,
                 "wrong slot": valid + start.replace(handle, other) + (unknown + release.replace(handle, other)).replace(b"slot-001", b"slot-002"),
                 "unknown release": valid + start.replace(handle, other) + unknown + release,
+                "ambiguous historic release": start + grant + release.replace(b'"release"', b'"lease_lost"'),
                 "reused handle": valid + start,
                 "duplicate field": valid + start.replace(b'"event":', b'"event":"start","event":'),
                 "truncated": valid[:-1],
@@ -2303,7 +2361,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
     def test_real_client_reconciles_early_cleanup_and_keeps_failed_v3_cancellation_unknown(self):
         for scenario, transitions, state in (
             ("released", ["start", "unknown", "release"], "closed"),
-            ("lease_lost", ["start", "unknown", "lease_lost"], "closed"),
+            ("lease_lost", ["start", "unknown"], "unconfirmed"),
             ("unavailable", ["start", "unknown"], "unconfirmed"),
             ("invalid-grant", ["start", "release"], "closed"),
             ("failed-cancellation", ["start", "unknown"], "unconfirmed"),
@@ -2328,6 +2386,40 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual(result.returncode, 2)
             self.assertIn(b"cannot record lease start", result.stderr)
             self.assertEqual(trace.read_text(), "status\n")
+
+    def test_broker_release_reply_and_capability_refusal_control_slot_reuse(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            env = dict(m.clean_environment(), TMPDIR="/tmp", SUBYARD_TEST_RELEASE_REPLIES=temporary)
+            subprocess.run(["go", "test", "-count=1", "-run", "^TestFacadeReleaseDistinguishesCompletedAndRetainedLease$",
+                            "./internal/adapters/testvmsruntime"], cwd=root, env=env, check=True)
+            for scenario, reusable in (("retained", False), ("legacy", False), ("completed", True), ("unsupported-count", True)):
+                with self.subTest(scenario=scenario):
+                    trace = output / (scenario + ".trace")
+                    lanes = ["vm:first", "vm:next"]
+                    results = []
+                    def execute(name, slot):
+                        if name == "vm:next":
+                            return m.execute(name, broker_controller(), root, output, m.clean_environment(), slot)
+                        env = dict(m.clean_environment(), LEASE_FIXTURE_TRACE=str(trace))
+                        command = broker_controller(scenario if scenario == "unsupported-count" else "pass")
+                        if scenario != "unsupported-count":
+                            env["LEASE_FIXTURE_RELEASE_REPLY"] = str(output / (scenario + ".json"))
+                        return m.execute(name, command, root, output, env, slot)
+                    self.assertFalse(m.run_live(output, lanes, set(lanes), [1], lambda _: True, execute,
+                                                lambda _, result: results.append(result), lambda _: None))
+                    self.assertEqual(len(results), 2 if reusable else 1)
+                    evidence = m.lease_file(output / results[0]["log"])
+                    if scenario == "unsupported-count":
+                        self.assertEqual(trace.read_text(), "status\n")
+                        self.assertEqual([json.loads(line)["event"] for line in evidence.read_bytes().splitlines()], ["no_acquire"])
+                        self.assertEqual((results[0]["status"], results[0]["lease_state"]), ("failed", "closed"))
+                    elif scenario == "completed":
+                        m.validate_pass_leases(evidence, m.digest(evidence), 1)
+                    else:
+                        self.assertEqual(results[0]["lease_state"], "unconfirmed")
+                        with self.assertRaises(m.UnprovenLease):
+                            m.validate_pass_leases(evidence, m.digest(evidence), 1)
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2701,6 +2793,37 @@ while True: time.sleep(1)
                 self.assertEqual([record["event"] for record in events], ["start", "refusal", "start", "grant", "release"]
                                  if hosted else ["start", "refusal"])
                 self.assertEqual(len({record["handle"] for record in events}), 2 if hosted else 1)
+
+    def test_blocked_sibling_release_wakes_waiting_lane_without_unbounded_retries(self):
+        for persistent in (False, True):
+            with self.subTest(persistent=persistent), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                output = Path(temporary)
+                small, sibling = lanes = ["vm:small", "vm:sibling"]
+                first_refusal = threading.Event()
+                attempts, results = [], []
+
+                def execute(name, slot):
+                    attempts.append((name, slot))
+                    if name == sibling:
+                        self.assertTrue(first_refusal.wait(5))
+                    if persistent or name == sibling:
+                        scenario = "release-then-memory"
+                    else:
+                        scenario = "pass" if first_refusal.is_set() else "memory"
+                    return m.execute(name, broker_controller(scenario), root, output, m.clean_environment(), slot)
+
+                def record(name, result):
+                    results.append((name, result["status"], result["lease_state"]))
+                    if name == small:
+                        first_refusal.set()
+                    if len(results) > 4:
+                        self.fail("persistent capacity refusals kept waking each other")
+
+                self.assertFalse(m.run_live(output, lanes, set(lanes), [2, 4], lambda _: True, execute, record, lambda _: None))
+                self.assertIn((sibling, "blocked", "released"), results)
+                self.assertEqual([name for name, _ in attempts].count(small), 2)
+                self.assertEqual([name for name, _ in attempts].count(sibling), 2)
+                self.assertIn((small, "blocked", "released") if persistent else (small, "passed", "released"), results)
 
     def test_capacity_retry_follows_waiting_checks_and_records_both_attempts(self):
         for slow_exit in (0, 23):
@@ -3356,6 +3479,29 @@ while True: time.sleep(1)
             self.assertEqual(refused, set(deferred))
             self.assertTrue(any(attempts.count((name, 2)) == 2 for name in deferred), attempts)
             self.assertEqual(len(attempts), 7)
+
+    def test_recovered_higher_slot_gets_the_last_waiting_lane(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            running, waiting = lanes = ["vm:running", "vm:waiting"]
+            recovered = threading.Event()
+            attempts = []
+
+            def execute(name, slot):
+                attempts.append((name, slot))
+                if name == running:
+                    self.assertTrue(recovered.wait(5))
+                    scenario = "pass"
+                else:
+                    scenario = "pass" if slot == 4 and recovered.is_set() else "busy"
+                return m.execute(name, broker_controller(scenario), root, output, m.clean_environment(), slot)
+
+            def record(name, result):
+                if (name, result.get("reason"), result["slot"]) == (waiting, "slot-unavailable", 4):
+                    recovered.set()
+
+            self.assertFalse(m.run_live(output, lanes, set(lanes), [2, 4], lambda _: True, execute, record, lambda _: None))
+            self.assertEqual([slot for name, slot in attempts if name == waiting], [4, 4])
 
     def test_explicit_slot_refusal_survives_lane_completion_on_another_slot(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

@@ -47,7 +47,11 @@ def export(output, destination, check):
                 raise ValueError("hosted evidence exceeds total byte limit")
             target = destination / path.relative_to(output)
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(path, target)
+            if pattern == "*.leases.jsonl":
+                with path.open("rb") as source, a.private_file(target, "xb") as copied:
+                    shutil.copyfileobj(source, copied)
+            else:
+                shutil.copyfile(path, target)
 
 
 # Diagnostic snapshots are deliberately ineligible for evidence import. Keep tails rather

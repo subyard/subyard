@@ -16,10 +16,12 @@ import os
 import shlex
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 import zipfile
 import zlib
 from unittest.mock import patch
@@ -36,16 +38,19 @@ LEASE_FIXTURE = ["bash", str(ROOT / "tests/helpers/release-lease-fixture.sh"), s
 
 
 @cache
-def fixture_capture(slot):
+def fixture_capture(slot, nonce):
     with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
         leases = Path(temporary) / "fixture.leases.jsonl"
+        with m.a.private_file(leases, "xb"):
+            pass
         native = subprocess.run(LEASE_FIXTURE + ["--slot", str(slot)], check=True, stderr=subprocess.STDOUT,
-                                stdout=subprocess.PIPE, env=dict(m.a.clean_environment(), SUBYARD_E2E_LEASE_EVENTS=str(leases)))
+                                stdout=subprocess.PIPE, env=dict(m.a.clean_environment(), SUBYARD_E2E_LEASE_EVENTS=str(leases),
+                                                                 SUBYARD_E2E_LEASE_NONCE=nonce))
         return native.stdout, leases.read_bytes()
 
 
-def physical_log(log, slot=1):
-    output, events = fixture_capture(slot)
+def physical_log(log, slot=1, nonce=""):
+    output, events = fixture_capture(slot, nonce)
     m.a.lease_file(log).write_bytes(events)
     log.write_bytes(output)
     return {"slot": slot, "lease_events_sha256": m.a.digest(m.a.lease_file(log)),
@@ -1398,13 +1403,14 @@ class Contracts(unittest.TestCase):
         m.a.save(self.output, target)
         command = m.a.command_identity(m.a.commands(original_root, identity["version"], original["profiles"])[name], original_root)
         log = self.directory / "failure.log"
-        physical_log(log, 2)
+        nonce = uuid.uuid4().hex
+        physical_log(log, 2, nonce)
         leases = m.a.lease_file(log)
         argv = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE=" + str(self.directory / "controller"),
                 "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
                 "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"],
-                "SUBYARD_E2E_LEASE_EVENTS=" + str(leases), *command, "--slot", "2"]
+                "SUBYARD_E2E_LEASE_EVENTS=" + str(leases), "SUBYARD_E2E_LEASE_NONCE=" + nonce, *command, "--slot", "2"]
         launch = {"argv": argv, "cwd": str(original_root), "started_at": "2026-10-12T00:00:00+00:00", "started_monotonic": 1000.0}
         timing = {**launch, "ended_at": "2026-10-12T00:02:03.500000+00:00", "ended_monotonic": 1123.5,
                   "whole_duration_seconds": 123.5, "exit_code": 1}
@@ -1581,7 +1587,8 @@ class Contracts(unittest.TestCase):
         review_text = {"unchanged_scope": "Exact synthetic fixture behavior", "reason": "Reviewed complete candidate delta",
                        "authorization_reference": "operator:batch-fixture"}
         native, launch, log = (self.directory / ("standalone-" + role) for role in ("native", "launch", "log"))
-        physical_log(log, 2)
+        nonce = uuid.uuid4().hex
+        physical_log(log, 2, nonce)
         leases = m.a.lease_file(log)
         native.write_text(json.dumps({"exit_code": 0, "chunk_id": "original", "output": "", "wall_time_seconds": 1}))
         command = m.a.commands(original_root, self.identity["version"], original["profiles"])["profile:sample/two"]
@@ -1592,7 +1599,7 @@ class Contracts(unittest.TestCase):
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE=/fixture/controller",
                 "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
                 "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"],
-                "SUBYARD_E2E_LEASE_EVENTS=" + str(leases), *command, "--slot", "2"]}))
+                "SUBYARD_E2E_LEASE_EVENTS=" + str(leases), "SUBYARD_E2E_LEASE_NONCE=" + nonce, *command, "--slot", "2"]}))
         standalone = {role: {"path": str(path), "sha256": m.a.digest(path)} for role, path in
                       (("native", native), ("launch", launch), ("log", log), ("leases", leases))}
         request = {"schema_version": 1, "target": m.a.transfer_candidate(receipt), "checks": []}
@@ -1723,6 +1730,18 @@ class Contracts(unittest.TestCase):
             with self.subTest(change=change), self.assertRaisesRegex(ValueError, "lacks confirmed lease cleanup"
                     if change in ("outstanding lease", "unresolved allocation", "release") else "."):
                 m.attestation(self.output, self.identity, [path])
+
+    def test_operator_acceptance_cannot_replace_an_acknowledged_retry(self):
+        name = "profile:sample"
+        path, _, _ = self.operator_failure()
+        _, receipt = m.a.load_bound(self.output)
+        receipt["checks"][name] = m.a.QUEUED_RETRY.copy()
+        m.a.save(self.output, receipt)
+        before = (self.output / "receipt.json").read_bytes()
+        with self.assertRaisesRegex(ValueError, "collector status"):
+            m.attestation(self.output, self.identity, [path])
+        self.assertEqual((self.output / "receipt.json").read_bytes(), before)
+        self.assertEqual(m.a.load_bound(self.output)[1]["checks"][name], m.a.QUEUED_RETRY)
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
         path, _, _ = self.operator_failure()
@@ -2748,8 +2767,17 @@ class HostedChecks(unittest.TestCase):
         selection = {"selected": ["profile:sample"], "state": "finished", "capture_status": "recorded", "selected_status": "passed"}
         (runs / ("d" * 32 + ".json")).write_text(json.dumps(selection))
         destination = self.directory / "export"
+        leases = m.a.lease_file(self.remote / receipt["checks"]["profile:sample"]["log"])
+        leases.chmod(0o600)
         with patch.dict(os.environ, {"GITHUB_RUN_ID": "456", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": self.identity["commit"]}):
-            helper.export(self.remote, destination, "profile:sample")
+            old_umask = os.umask(0o022)
+            try:
+                helper.export(self.remote, destination, "profile:sample")
+            finally:
+                os.umask(old_umask)
+            exported_leases = destination / leases.name
+            self.assertEqual(stat.S_IMODE(exported_leases.stat().st_mode), 0o600)
+            self.assertEqual(exported_leases.read_bytes(), leases.read_bytes())
             exported = json.loads((destination / "receipt.json").read_text())
             self.assertEqual(exported["checks"]["p0-release-smoke"], {"status": "pending"})
             self.assertEqual(exported["reproducible_result"], "incomplete")

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Image choice is bounded and preserves old requests when omitted.
 set -euo pipefail
+unset SUBYARD_E2E_LEASE_EVENTS SUBYARD_E2E_LEASE_NONCE
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 # shellcheck source=config/profiles/test-vms-client/skills/subyard-test-vms/client.sh
 . "$ROOT/config/profiles/test-vms-client/skills/subyard-test-vms/client.sh"

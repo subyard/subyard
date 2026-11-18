@@ -536,12 +536,8 @@ def validate_operator_acceptance(document, name, command, identity):
         or any(not sha(value) for value in document["artifacts"].values())):
         raise ValueError("operator acceptance original evidence hashes missing")
     actual = document["actual_command"]
-    prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
-              "SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
-              "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}",
-              "SUBYARD_E2E_CANDIDATE_SHA256=" + tested["candidate_bundle_sha256"],
-              "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"]
-    if (not isinstance(actual, list) or actual[:-2] != prefix + command or actual[-2:-1] != ["--slot"]
+    if (not isinstance(actual, list) or actual[:-2] != a.standalone_command(command, tested["candidate_bundle_sha256"])
+        or actual[-2:-1] != ["--slot"]
         or not isinstance(actual[-1], str) or not re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1])):
         raise ValueError("operator acceptance original command differs")
     duration = document["duration_seconds"]
@@ -611,18 +607,19 @@ def operator_acceptances(paths, identity, root, receipt):
             or type(native.get("wall_time_seconds")) not in (int, float) or not math.isfinite(native["wall_time_seconds"])
             or native["wall_time_seconds"] < 0):
             raise ValueError("operator acceptance requires complete original native failure")
-        prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
+        prefix = a.STANDALONE_WRAPPER
+        command_start = len(prefix) + len(a.STANDALONE_ENV_FIELDS)
         argv = launch.get("argv")
         if (launch.get("cwd") != str(source_root) or not isinstance(argv, list) or not all(isinstance(value, str) for value in argv)
-            or argv[:6] != prefix or len(argv) != len(prefix) + 4 + len(command) + 2):
+            or argv[:len(prefix)] != prefix or len(argv) != command_start + len(command) + 2):
             raise ValueError("operator acceptance original launcher differs")
-        assignments = dict(value.split("=", 1) for value in argv[6:10] if "=" in value)
-        if (set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256", "SUBYARD_E2E_LEASE_EVENTS"}
+        assignments = dict(value.split("=", 1) for value in argv[len(prefix):command_start] if "=" in value)
+        if (set(assignments) != a.STANDALONE_ENV_FIELDS or not a.lease_nonce(assignments["SUBYARD_E2E_LEASE_NONCE"])
             or not Path(assignments["SUBYARD_E2E_LEASE_EVENTS"]).is_absolute()
             or Path(assignments["SUBYARD_E2E_LEASE_EVENTS"]).resolve() != files["leases"]
             or assignments["SUBYARD_E2E_CANDIDATE_BUNDLE"] != str(source_output / "candidate-bundle.tar.gz")
             or assignments["SUBYARD_E2E_CANDIDATE_SHA256"] != original["candidate_bundle_sha256"]
-            or a.command_identity(argv[10:-2], source_root) != command or argv[-2] != "--slot"
+            or a.command_identity(argv[command_start:-2], source_root) != command or argv[-2] != "--slot"
             or not re.fullmatch(r"[1-9][0-9]{0,2}", argv[-1])):
             raise ValueError("operator acceptance original transport or command differs")
         duration = timing.get("whole_duration_seconds")
@@ -633,7 +630,7 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        a.validate_pass_leases(files["leases"], hashes["leases"], int(argv[-1]))
+        a.validate_pass_leases(files["leases"], hashes["leases"], int(argv[-1]), assignments["SUBYARD_E2E_LEASE_NONCE"])
         scan = a.PhaseLog()
         environments, cleanup, controller_cleanup = set(), {}, []
         for _, stage, environment in scan.read(files["log"], final=True):
@@ -650,16 +647,15 @@ def operator_acceptances(paths, identity, root, receipt):
             or cleanup != {vm: 0 for vm in range(1, max(count for _, count, _ in environments) + 1)}):
             raise ValueError("operator acceptance original cleanup or release unconfirmed")
         for original_result in (original["checks"][name], receipt["checks"][name]):
-            if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
+            if (original_result.get("status") not in ("pending", "failed") or original_result == a.QUEUED_RETRY
+                or original_result.get("inherited")
                 or "evidence_transfer" in original_result or original_result.get("status") == "failed" and
                 (original_result.get("exit_code") != native["exit_code"] or original_result.get("log_sha256") != hashes["log"]
                  or original_result.get("lease_events_sha256") != hashes["leases"]
                  or original_result.get("command") != command)):
                 raise ValueError("operator acceptance collector status or original failure differs")
         public = {"schema_version": 1, "check": name, "target": identity, "tested": declaration["tested"], "command": command,
-                  "actual_command": prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
-                      "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"],
-                      "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"] + command + argv[-2:],
+                  "actual_command": a.standalone_command(command + argv[-2:], original["candidate_bundle_sha256"]),
                   "decision": declaration["decision"], "artifacts": hashes, "source_status": original["checks"][name]["status"],
                   "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
                   "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),

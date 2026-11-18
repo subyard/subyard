@@ -122,7 +122,7 @@ export SUBYARD_E2E_TEST_MODE=1 SUBYARD_E2E_TEST_RENEW_SECONDS=1
 export SUBYARD_E2E_TEST_RENEW_RETRY_SECONDS=1 SUBYARD_E2E_TEST_RENEW_STALE_SECONDS=5
 export SUBYARD_E2E_STATE_DIR="$TMP/client" SUBYARD_E2E_ROUTE_REGISTRY="$TMP/routes"
 export SUBYARD_E2E_GUEST_FACTS="$TMP/facts.json"
-unset SUBYARD_E2E_ROLLOUT_YARD SUBYARD_E2E_CAPACITY_WAIT
+unset SUBYARD_E2E_ROLLOUT_YARD SUBYARD_E2E_CAPACITY_WAIT SUBYARD_E2E_LEASE_EVENTS SUBYARD_E2E_LEASE_NONCE
 client() { (cd "$TMP/vm" && bash "$CLIENT" "$@"); }
 count() { grep -c -- "^$1" "$TMP/facade.log" || true; }
 keeper_pid() { cut -d' ' -f1 "$TMP/client/handles/$1/keeper.ready"; }
@@ -158,6 +158,7 @@ grep -Fq -- '--project must be a safe project label' "$TMP/err" || fail 'missing
 # One lease spans separate processes: state written by one exec is read by the next.
 for protocol in v3 v4; do
   export SUBYARD_E2E_LEASE_EVENTS="$TMP/$protocol.leases.jsonl"
+  : > "$SUBYARD_E2E_LEASE_EVENTS"
   rm -f "$TMP/v4" "$TMP/vm/state"
   [ "$protocol" = v3 ] || touch "$TMP/v4"
   : > "$TMP/facade.log"
@@ -305,27 +306,36 @@ client release "$handle" 2>/dev/null || fail 'release after abandoned idle relea
 
 # Idle limit: the keeper releases an unused lease, but not while an exec runs.
 : > "$TMP/facade.log"
+export SUBYARD_E2E_LEASE_EVENTS="$TMP/keeper.leases.jsonl"
+export SUBYARD_E2E_LEASE_NONCE=0123456789abcdef0123456789abcdef
+: > "$SUBYARD_E2E_LEASE_EVENTS"
 handle="$(client acquire --yard test-yard --slot 2 --idle 2s 2>/dev/null)"
 client exec "$handle" -- sleep 4
 grep -Fq release "$TMP/facade.log" && fail 'idle release interrupted a running exec'
 wait_for '[ "$(count release)" = 1 ]' || fail 'idle lease was not released'
 wait_for '[ ! -e "$TMP/client/handles/$handle" ]' || fail 'idle release kept the handle'
+client release "$handle" || fail 'release after keeper cleanup failed'
+jq -se 'map(.event) == ["start", "grant", "release"] and (map(.handle) | unique | length) == 1
+  and all(.[]; .nonce == env.SUBYARD_E2E_LEASE_NONCE)' \
+  "$SUBYARD_E2E_LEASE_EVENTS" >/dev/null || fail 'keeper cleanup was missing from the lease stream'
+unset SUBYARD_E2E_LEASE_EVENTS SUBYARD_E2E_LEASE_NONCE
 awk '/^guest-end/ {ended=NR} /^release/ {released=NR} END {exit !(ended && released > ended)}' "$TMP/facade.log" \
   || fail 'idle release did not wait for the running exec'
 
-# A failed renewal marks the lease lost; exec refuses and release clears the handle.
+# An ambiguous response from an older broker keeps the handle available for retry.
 : > "$TMP/facade.log"
 handle="$(client acquire --yard test-yard --slot 2 2>/dev/null)"
 touch "$TMP/renew-fails"
 wait_for '[ -e "$TMP/client/handles/$handle/lost" ]' || fail 'renewal failure was not recorded'
 if client exec "$handle" -- true 2>"$TMP/err"; then fail 'exec succeeded on a lost lease'; fi
 grep -Fq "lease $handle was lost" "$TMP/err" || fail 'missing lost-lease diagnostic'
-client release "$handle" 2>"$TMP/err" || fail 'release of a lost lease failed'
-grep -Fq 'had already ended' "$TMP/err" || fail 'release did not report the ended lease'
+if client release "$handle" 2>"$TMP/err"; then fail 'ambiguous release succeeded'; fi
+grep -Fq '(lease_lost)' "$TMP/err" || fail 'release did not report the broker refusal'
 grep -Eq '^E2E_RELEASE state=end duration_seconds=[0-9]+ budget_seconds=180 grace_seconds=5 exit_code=1$' "$TMP/err" \
   || fail 'an unconfirmed release was recorded as a successful cleanup'
-[ ! -e "$TMP/client/handles/$handle" ] || fail 'lost handle was kept after release'
+[ -e "$TMP/client/handles/$handle" ] || fail 'ambiguous release removed the handle'
 rm -f "$TMP/renew-fails"
+client release "$handle" 2>/dev/null || fail 'confirmed release after ambiguity failed'
 
 # Only the reply status releases: a refusal whose code reads "ok" keeps the handle.
 : > "$TMP/facade.log"

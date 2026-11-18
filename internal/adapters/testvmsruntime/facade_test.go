@@ -620,9 +620,10 @@ func TestFacadeRequestedDisk(t *testing.T) {
 	}
 }
 
-func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
+func TestFacadeReleaseDistinguishesCompletedAndRetainedLease(t *testing.T) {
+	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
 	var output bytes.Buffer
+	var stopErr error
 	facade := Facade{
 		Store: store, Output: &output,
 		OnAcquire: func(ctx context.Context, grant LeaseGrant, _ string) (LeaseGrant, error) {
@@ -634,7 +635,7 @@ func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
 			if err := store.BeginDrain(grant); err != nil {
 				return err
 			}
-			return store.FinishDrain(grant.SlotID, nil)
+			return errors.Join(store.FinishDrain(grant.SlotID, stopErr), stopErr)
 		},
 	}
 	key := strings.Fields(fixturePublicKey(t))
@@ -660,20 +661,44 @@ func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
 	if !strings.Contains(output.String(), `"code":"lease_lost"`) {
 		t.Fatalf("wrong credential response = %s", output.String())
 	}
+	saveReply := func(name string) {
+		t.Helper()
+		if dir := os.Getenv("SUBYARD_TEST_RELEASE_REPLIES"); dir != "" {
+			testkit.WriteFile(t, filepath.Join(dir, name+".json"), output.Bytes(), 0o600)
+		}
+	}
+	saveReply("legacy")
+	output.Reset()
+	stopErr = errors.New("fixture cleanup failed")
+	for range 2 {
+		output.Reset()
+		if err := facade.Run(command(grant.Capability)); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output.String(), `"code":"quarantined"`) {
+			t.Fatalf("retained lease response = %s", output.String())
+		}
+	}
+	slot, err := storeSlot(store, grant.SlotID)
+	if err != nil || slot.State != SlotQuarantined || slot.LeaseID != grant.LeaseID {
+		t.Fatalf("expected retained lease: %v, %v", slot.State, err)
+	}
+	saveReply("retained")
+	// Use the broker's recovery transitions to finish cleanup for the same grant.
+	if err := store.BeginRecovery(grant.SlotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishRecovery(grant.SlotID, nil, "", ""); err != nil {
+		t.Fatal(err)
+	}
 	output.Reset()
 	if err := facade.Run(command(grant.Capability)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(output.String(), `"message":"released"`) {
-		t.Fatalf("release response = %s", output.String())
-	}
-	output.Reset()
-	if err := facade.Run(command(grant.Capability)); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(output.String(), `"code":"lease_lost"`) {
 		t.Fatalf("replayed release response = %s", output.String())
 	}
+	saveReply("completed")
 }
 
 func TestFacadeRejectsUnboundedInput(t *testing.T) {

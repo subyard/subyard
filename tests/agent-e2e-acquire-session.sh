@@ -190,6 +190,7 @@ full_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"su
   LOCAL_TEMP="$TMP/guard-wrapper-release"
   install -d -m 0700 "$LOCAL_TEMP"
   export SUBYARD_E2E_LEASE_EVENTS="$LOCAL_TEMP/lease-events.jsonl"
+  : > "$SUBYARD_E2E_LEASE_EVENTS"
   LEASE_ACQUIRE_REPLY="$LOCAL_TEMP/replies"
   LEASE_REQUESTED_SLOT='slot-001'
   LEASE_RUN=abcdef14
@@ -199,12 +200,8 @@ full_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"su
     case "$1" in
       acquire-v4\ *) printf '%s\n' "$reservation_json"; sleep 30 ;;
       release\ *)
-        if [ -e "$LOCAL_TEMP/released" ]; then
-          printf '%s\n' '{"schema_version":1,"status":"error","code":"lease_lost"}'
-        else
-          : > "$LOCAL_TEMP/released"
-          printf '%s\n' '{"schema_version":1,"status":"ok","message":"released"}'
-        fi ;;
+        : > "$LOCAL_TEMP/released"
+        printf '%s\n' '{"schema_version":1,"status":"ok","message":"released"}' ;;
     esac
   }
   lease_keeper_wait() {
@@ -220,7 +217,7 @@ full_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"su
   parse_lease_reservation "$reservation_json"
   record_lease_outcome unknown "$LEASE_SLOT"
   if record_lease_outcome grant "$LEASE_SLOT"; then exit 38; fi
-  release_lease || [ "$RELEASE_CODE" = lease_lost ]
+  release_lease
   jq -se 'map(.event) == ["start", "release"] and (map(.handle) | unique | length) == 1' "$SUBYARD_E2E_LEASE_EVENTS" >/dev/null
 ) || fail 'the guard and wrapper recorded conflicting outcomes for one reservation'
 

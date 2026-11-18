@@ -34,6 +34,16 @@ TERM_GRACE_SECONDS = 30
 KILL_GRACE_SECONDS = 10
 DEFAULT_SLOTS = (1, 2, 3, 4)
 SLOT_REFUSAL_EXIT = 2
+STANDALONE_WRAPPER = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
+STANDALONE_NONCE_ARG = "SUBYARD_E2E_LEASE_NONCE=${LEASE_NONCE}"
+STANDALONE_ENV_FIELDS = {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE",
+                         "SUBYARD_E2E_CANDIDATE_SHA256", "SUBYARD_E2E_LEASE_EVENTS", "SUBYARD_E2E_LEASE_NONCE"}
+
+
+def standalone_command(command, bundle_sha256):
+    return STANDALONE_WRAPPER + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
+        "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + bundle_sha256,
+        "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}", STANDALONE_NONCE_ARG] + command
 
 
 def slot_list(value):
@@ -119,7 +129,8 @@ def acceptance_lock(output, shared=False):
 
 
 def private_file(path, mode="w"):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | (os.O_APPEND if "a" in mode else os.O_TRUNC), 0o600)
+    flags = {"a": os.O_APPEND, "w": os.O_TRUNC, "x": os.O_EXCL}
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | flags[mode[0]], 0o600)
     os.fchmod(fd, 0o600)
     return os.fdopen(fd, mode)
 
@@ -208,7 +219,7 @@ def source_fingerprint(root):
 def clean_environment():
     env = os.environ.copy()
     for key in ("SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256",
-                "SUBYARD_E2E_LOCAL_EVIDENCE", "SUBYARD_E2E_LEASE_EVENTS",
+                "SUBYARD_E2E_LOCAL_EVIDENCE", "SUBYARD_E2E_LEASE_EVENTS", "SUBYARD_E2E_LEASE_NONCE",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE",
                 "SUBYARD_REPOSITORY_ROOT", "YARD_ENGINE_PATH"):
         env.pop(key, None)
@@ -787,13 +798,14 @@ def execute(name, command, root, output, env, slot=None):
     phases = {}
     scan = PhaseLog()
     next_heartbeat = start + HEARTBEAT_SECONDS
-    process, code, capture_error = None, None, False
+    process, code, capture_error, lease_created = None, None, False, False
     lease_path = lease_file(log)
     ledger, lease_sha256 = LeaseLedger(), None
     try:
         if slot:
-            with private_file(lease_path, "wb"):
+            with private_file(lease_path, "xb"):
                 pass
+            lease_created = True
             env = dict(env, SUBYARD_E2E_LEASE_EVENTS=str(lease_path.resolve()))
         with private_file(log, "wb") as stream:
             process = subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=stream,
@@ -832,7 +844,7 @@ def execute(name, command, root, output, env, slot=None):
             log_sha256 = digest(log)
         except OSError:
             log_sha256 = None
-    if slot and cleanup_status != "unconfirmed":
+    if lease_created and cleanup_status != "unconfirmed":
         try:
             with lease_path.open("rb") as stream:
                 os.fsync(stream.fileno())
@@ -872,7 +884,7 @@ def execute(name, command, root, output, env, slot=None):
         result["slot"] = slot
         result["lease_events_sha256"] = lease_sha256
         result["lease_state"] = ledger.state
-        if result["status"] == "passed" and ledger.state != "released":
+        if result["status"] == "passed" and not ledger.allows_pass:
             result.update(status="failed", reason="lease-cleanup-unproven")
     try:
         event(output, "check-result", check=name, **{key: value for key, value in result.items() if key != "command"})
@@ -996,8 +1008,12 @@ class LeaseLedger:
             return reason if reason in ("slot", "memory", "disk") else None
         return None
 
+    @property
+    def allows_pass(self):
+        return self.state == "released" and self.refusal is None
+
     def apply(self, record):
-        if (not isinstance(record, dict) or set(record) != {"schema_version", "event", "handle", "slot", "reason"}
+        if (not isinstance(record, dict) or set(record) - {"nonce"} != {"schema_version", "event", "handle", "slot", "reason"}
             or type(record["schema_version"]) is not int or record["schema_version"] != 1):
             raise ValueError("invalid lease record")
         kind, handle, slot, reason = (record[key] for key in ("event", "handle", "slot", "reason"))
@@ -1008,20 +1024,22 @@ class LeaseLedger:
         original, previous, _ = self.handles.get(handle, (slot, None, None))
         if original != slot:
             raise ValueError("lease changed slots")
-        if kind == "start" and previous is None:
+        if kind in ("start", "no_acquire") and previous is None:
             self.last_handle = handle
+            if kind == "no_acquire":
+                kind = "closed"
         elif kind in ("grant", "refusal") and previous == "start":
             self.granted |= kind == "grant"
         elif kind == "unknown" and previous in ("start", "grant"):
             pass
-        elif kind in ("release", "lease_lost") and previous in ("start", "grant", "unknown"):
+        elif kind == "release" and previous in ("start", "grant", "unknown"):
             kind = "closed"
         else:
             raise ValueError("invalid lease transition")
         self.handles[handle] = slot, kind, reason
 
     @classmethod
-    def read(cls, stream, slot=None):
+    def read(cls, stream, slot=None, nonce=None):
         ledger = cls()
         checksum = hashlib.sha256()
         while line := stream.readline(1025):
@@ -1032,7 +1050,15 @@ class LeaseLedger:
                 if len(line) > 1024 or not line.endswith(b"\n"):
                     raise ValueError("incomplete lease record")
                 record = json.loads(line, object_pairs_hook=unique_evidence_fields)
+                first = not ledger.handles
                 ledger.apply(record)
+                measured_nonce = record.get("nonce")
+                if "nonce" in record and not lease_nonce(measured_nonce):
+                    raise ValueError("invalid lease evidence nonce")
+                if first and nonce is None:
+                    nonce = measured_nonce
+                if measured_nonce != nonce:
+                    raise ValueError("lease evidence belongs to a different invocation")
                 if slot is not None and record["slot"] != f"slot-{slot:03d}":
                     raise ValueError("lease used a different slot")
             except (ValueError, RecursionError):
@@ -1044,16 +1070,20 @@ def lease_file(log):
     return log.with_suffix(".leases.jsonl")
 
 
+def lease_nonce(value):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value) is not None
+
+
 class UnprovenLease(ValueError):
     pass
 
 
-def validate_pass_leases(path, sha256, slot=None):
+def validate_pass_leases(path, sha256, slot=None, nonce=None):
     if is_sha(sha256):
         try:
             with path.open("rb") as stream:
-                ledger, measured = LeaseLedger.read(stream, slot)
-            if measured == sha256 and ledger.state == "released":
+                ledger, measured = LeaseLedger.read(stream, slot, nonce)
+            if measured == sha256 and ledger.allows_pass:
                 return
         except OSError:
             pass
@@ -1534,9 +1564,13 @@ def print_acceptance_summary(output, receipt):
 def run_live(output, live, eligible, slots, start, execute_check, record, queue_retry):
     pending, free, active = list(live), set(slots or DEFAULT_SLOTS), {}
     deferred, unsafe, slot_refused, reported = {}, set(), set(), set()
-    # Blocked attempts cannot keep each other eligible. A sibling completion
-    # permits another attempt, including when it finished during the refusal.
-    completed = 0
+    # A sibling completion or first confirmed release can wake deferred work.
+    # Repeated releases by blocked lanes cannot keep waking each other.
+    progress = {}
+    generation = 0
+
+    def sibling_progress(name):
+        return max((value for lane, value in progress.items() if lane != name), default=0)
 
     with retry_socket(output, listen=True) as listener, ThreadPoolExecutor(max_workers=len(free)) as pool:
         while not STOP.is_set():
@@ -1566,13 +1600,14 @@ def run_live(output, live, eligible, slots, start, execute_check, record, queue_
                             channel.sendall(b"queued")
                         except OSError:
                             pass
-            for slot in sorted(free):
+            # Give a previously refused slot the first chance to prove recovery.
+            for slot in sorted(free, key=lambda slot: (slot not in slot_refused, slot)):
                 name = next((item for item in pending
-                             if all(deferred.get(item, {}).get(key) != completed for key in (None, slot))), None)
+                             if all(deferred.get(item, {}).get(key) != sibling_progress(item) for key in (None, slot))), None)
                 if name is not None and start(name):
                     pending.remove(name)
                     free.remove(slot)
-                    active[pool.submit(execute_check, name, slot)] = slot, name, completed
+                    active[pool.submit(execute_check, name, slot)] = slot, name, sibling_progress(name)
             if not active:
                 break
             done, _ = wait(active, timeout=0.2, return_when=FIRST_COMPLETED)
@@ -1580,9 +1615,11 @@ def run_live(output, live, eligible, slots, start, execute_check, record, queue_
                 slot, name, dispatched_at = active.pop(future)
                 result = future.result()
                 record(name, result)
-                if result["status"] != "blocked":
-                    completed += 1
-                if result.get("lease_state") not in ("closed", "released"):
+                lease_state = result.get("lease_state")
+                if result["status"] != "blocked" or lease_state == "released" and name not in progress:
+                    generation += 1
+                    progress[name] = generation
+                if lease_state not in ("closed", "released"):
                     unsafe.add(name)
                     print(f"SLOT-CLEANUP-UNCONFIRMED slot=slot-{slot} check={name} log={result.get('log')}", flush=True)
                     continue
@@ -1596,7 +1633,7 @@ def run_live(output, live, eligible, slots, start, execute_check, record, queue_
                         reported.add(slot)
                         print(f"SLOT-UNAVAILABLE slot=slot-{slot} check={name} log={result['log']}", flush=True)
                 else:
-                    if result.get("lease_state") == "released":
+                    if lease_state == "released":
                         slot_refused.discard(slot)
                     if reason in ("capacity_memory", "capacity_disk"):
                         deferred.setdefault(name, {})[None] = dispatched_at
@@ -2393,12 +2430,10 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
     actual = document["actual_command"]
     if not isinstance(actual, list) or not actual or any(not public_text(value, 4096) for value in actual):
         raise ValueError("transferred actual command missing")
-    actual_prefix = (["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
-        "SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}", "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}",
-        "SUBYARD_E2E_CANDIDATE_SHA256=" + document["tested"]["candidate_bundle_sha256"],
-        "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"]
-        if document["origin"] == "standalone" else [])
-    base = actual_prefix + command
+    base = (standalone_command(command, document["tested"]["candidate_bundle_sha256"])
+            if document["origin"] == "standalone" else command)
+    if document["origin"] == "standalone" and actual[:-2] == [part for part in base if part != STANDALONE_NONCE_ARG]:
+        raise UnprovenLease("PASS lacks invocation-bound lease evidence")
     if (actual[:len(base)] != base or (actual != base and
         (len(actual) != len(base) + 2 or actual[-2] != "--slot" or not re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1])))
         or document["origin"] == "standalone" and (actual == base or document["duration_seconds"] is not None
@@ -2492,18 +2527,21 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
     if not isinstance(argv, list) or any(not isinstance(value, str) for value in argv):
         raise ValueError("standalone launcher command missing")
     # Manual evidence must bind the separate client capture to the exact launcher.
-    prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
-    if argv[:len(prefix)] != prefix or len(argv) < len(prefix) + 4:
+    prefix = STANDALONE_WRAPPER
+    command_start = len(prefix) + len(STANDALONE_ENV_FIELDS)
+    if argv[:len(prefix)] != prefix or len(argv) < command_start:
         raise ValueError("standalone launcher wrapper differs")
-    assignments = argv[len(prefix):len(prefix) + 4]
+    assignments = argv[len(prefix):command_start]
     env = dict(value.split("=", 1) for value in assignments if "=" in value)
-    if (set(env) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256", "SUBYARD_E2E_LEASE_EVENTS"}
+    if env.keys() == STANDALONE_ENV_FIELDS - {"SUBYARD_E2E_LEASE_NONCE"}:
+        raise UnprovenLease("PASS lacks invocation-bound lease evidence")
+    if (set(env) != STANDALONE_ENV_FIELDS or not lease_nonce(env["SUBYARD_E2E_LEASE_NONCE"])
         or not Path(env["SUBYARD_E2E_LEASE_EVENTS"]).is_absolute()
         or verify_source and Path(env["SUBYARD_E2E_LEASE_EVENTS"]).resolve() != files["leases"].resolve()
         or env["SUBYARD_E2E_CANDIDATE_BUNDLE"] != str(root.parent / "candidate-bundle.tar.gz")
         or env["SUBYARD_E2E_CANDIDATE_SHA256"] != receipt["candidate_bundle_sha256"]):
         raise ValueError("standalone launcher transport differs")
-    actual = argv[len(prefix) + 4:]
+    actual = argv[command_start:]
     if (actual[:len(command)] != command or len(actual) != len(command) + 2
         or actual[-2] != "--slot" or not re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1])):
         raise ValueError("standalone actual check command differs")
@@ -2530,7 +2568,8 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
             launched = parsed.astimezone(timezone.utc).isoformat()
     if raw and verify_source:
         validate_standalone_bundle(root, receipt, entries)
-    validate_pass_leases(files["leases"], lease_sha256 or digest(files["leases"]), int(actual[-1]))
+    validate_pass_leases(files["leases"], lease_sha256 or digest(files["leases"]), int(actual[-1]),
+                         env["SUBYARD_E2E_LEASE_NONCE"])
     # Direct controllers need not use run_guest's transport/guest timing wrapper.
     environments, stages = set(), set()
     for line, stage, environment in PhaseLog().read(files["log"], final=True):
@@ -2545,9 +2584,7 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
     if (not environments or ("cleanup/release", None) not in stages
         or any(("guest-cleanup", vm) not in stages for _, count, _ in environments for vm in range(1, count + 1))):
         raise ValueError("standalone controller evidence incomplete")
-    sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
-        "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"],
-        "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"] + command_identity(actual, root)
+    sanitized = standalone_command(command_identity(actual, root), receipt["candidate_bundle_sha256"])
     return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launched,
             "execution_environment": None, "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base}
                 for kind, count, base in sorted(environments)]}

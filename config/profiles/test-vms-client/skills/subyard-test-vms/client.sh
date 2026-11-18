@@ -82,8 +82,25 @@ die() { printf '%s: %s\n' "$E2E_PROGRAM" "$*" >&2; exit 2; }
 lease_event() {
   [ -n "${SUBYARD_E2E_LEASE_EVENTS:-}" ] && [ -n "$LEASE_EVENT_HANDLE" ] || return 0
   [[ "$2" =~ ^slot-[0-9]{3}$ ]] || return 1
-  printf '{"schema_version":1,"event":"%s","handle":"%s","slot":"%s","reason":"%s"}\n' \
-    "$1" "$LEASE_EVENT_HANDLE" "$2" "${3:-}" >> "$SUBYARD_E2E_LEASE_EVENTS"
+  [ -f "$SUBYARD_E2E_LEASE_EVENTS" ] && [ ! -L "$SUBYARD_E2E_LEASE_EVENTS" ] || return 1
+  local nonce=''
+  if [ -n "${SUBYARD_E2E_LEASE_NONCE:-}" ]; then
+    [[ "$SUBYARD_E2E_LEASE_NONCE" =~ ^[0-9a-f]{32}$ ]] || return 1
+    nonce=",\"nonce\":\"$SUBYARD_E2E_LEASE_NONCE\""
+  fi
+  printf '{"schema_version":1,"event":"%s","handle":"%s","slot":"%s","reason":"%s"%s}\n' \
+    "$1" "$LEASE_EVENT_HANDLE" "$2" "${3:-}" "$nonce" >> "$SUBYARD_E2E_LEASE_EVENTS"
+}
+
+next_lease_event_handle() {
+  LEASE_EVENT_SEQUENCE=$((LEASE_EVENT_SEQUENCE + 1))
+  LEASE_EVENT_HANDLE="$LEASE_RUN.$LEASE_EVENT_SEQUENCE"
+}
+
+refuse_lease_capability() {
+  next_lease_event_handle
+  lease_event no_acquire "$LEASE_REQUESTED_SLOT" || die "cannot record lease capability refusal"
+  die "$1"
 }
 
 die_acquire_unknown() {
@@ -883,18 +900,18 @@ acquire_lease() {
     (.capabilities | type == "array" and index("attribution-v2") != null and
       index("environment-acquire-v3") != null and index("disposable-v1") != null)' \
     <<<"$status_response" >/dev/null \
-    || die "broker does not support required attribution-v2/environment-acquire-v3/disposable-v1 acquire"
+    || refuse_lease_capability "broker does not support required attribution-v2/environment-acquire-v3/disposable-v1 acquire"
   if [ -n "$VM_COUNT_REQUESTED" ]; then
     jq -e '(.capabilities // []) | index("vm-count-v1") != null' <<<"$status_response" >/dev/null \
-      || die 'broker does not support explicit VM counts (vm-count-v1)'
+      || refuse_lease_capability 'broker does not support explicit VM counts (vm-count-v1)'
   fi
   if [ -n "$DISK_REQUESTED" ]; then
     jq -e '(.capabilities // []) | index("disk-size-v1") != null' <<<"$status_response" >/dev/null \
-      || die 'broker does not support explicit disk size (disk-size-v1)'
+      || refuse_lease_capability 'broker does not support explicit disk size (disk-size-v1)'
   fi
   if [ -n "$IMAGE_REQUESTED" ]; then
     jq -e '(.capabilities // []) | index("image-v1") != null' <<<"$status_response" >/dev/null \
-      || die 'broker does not support explicit images (image-v1)'
+      || refuse_lease_capability 'broker does not support explicit images (image-v1)'
   fi
   LEASE_ACQUIRE_PROTOCOL=acquire-v3
   if jq -e '(.capabilities // []) | index("process-acquire-v4") != null' <<<"$status_response" >/dev/null; then
@@ -922,8 +939,7 @@ acquire_lease() {
       return 4
     fi
     attempt=$((attempt + 1))
-    LEASE_EVENT_SEQUENCE=$((LEASE_EVENT_SEQUENCE + 1))
-    LEASE_EVENT_HANDLE="$LEASE_RUN.$LEASE_EVENT_SEQUENCE"
+    next_lease_event_handle
     lease_event start "$LEASE_REQUESTED_SLOT" || die "cannot record lease start"
     if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ]; then
       lease_acquire_stream "$request" || die_acquire_unknown "${LEASE_ACQUIRE_FAILURE:-stream-failed}"
@@ -1087,7 +1103,7 @@ record_lease_outcome() (
     [ "$1" != grant ]
   else
     lease_event "$1" "$2" || return 1
-    case "$1" in release|lease_lost) : > "$marker" ;; esac
+    [ "$1" != release ] || : > "$marker"
   fi
 )
 lease_release_request() {
@@ -1095,7 +1111,8 @@ lease_release_request() {
   RELEASE_STATE=failed RELEASE_CODE=''
   printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
   if response="$(facade_request "$(lease_command release)" 180)"; then
-    if jq -se 'length == 1 and (.[0] | type == "object" and .status == "ok")' <<<"$response" >/dev/null 2>&1; then
+    if jq -se 'length == 1 and (.[0] | type == "object" and
+      .schema_version == 1 and .status == "ok" and .message == "released")' <<<"$response" >/dev/null 2>&1; then
       RELEASE_STATE=released
     else
       RELEASE_STATE=refused rc=1
@@ -1107,15 +1124,8 @@ lease_release_request() {
   fi
   printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' \
     "$((SECONDS - started))" "$rc" >&2 || true
-  if [ -n "${SUBYARD_E2E_LEASE_EVENTS:-}" ] && [ -n "$LEASE_EVENT_HANDLE" ]; then
-    case "$RELEASE_STATE:$RELEASE_CODE" in
-      released:*)
-        jq -e '.schema_version == 1 and .message == "released"' <<<"$response" >/dev/null 2>&1 \
-          && record_lease_outcome release "$LEASE_SLOT" ;;
-      refused:lease_lost)
-        jq -e '.schema_version == 1 and .status == "error"' <<<"$response" >/dev/null 2>&1 \
-          && record_lease_outcome lease_lost "$LEASE_SLOT" ;;
-    esac
+  if [ "$RELEASE_STATE" = released ]; then
+    record_lease_outcome release "$LEASE_SLOT"
   fi
 }
 
@@ -1131,7 +1141,6 @@ release_lease() {
     *)
       printf '%s: release rejected for slot=%s run=%s (%s)\n' "$E2E_PROGRAM" \
         "$released_slot" "$released_run" "$RELEASE_CODE" >&2
-      [ "$RELEASE_CODE" != lease_lost ] || LEASE_ID=''
       return 1 ;;
   esac
   LEASE_ID=""
@@ -1571,8 +1580,8 @@ remove_handle_directory() {
   find "$dir" -depth -delete 2>/dev/null
 }
 
-# Release the loaded handle's lease once. Returns 0 when the broker released it or it
-# had already ended; the handle is then removed. A failed release keeps the handle.
+# Release the loaded handle's lease once. The handle is removed when closure is
+# confirmed. A failed or ambiguous release keeps the handle.
 release_handle() {
   local dir="$HANDLE_DIRECTORY" reason="$1" fd rc=0
   exec {fd}>>"$dir/release.lock" || return 1
@@ -1581,7 +1590,6 @@ release_handle() {
     lease_release_request || rc=1
     case "$RELEASE_STATE:$RELEASE_CODE" in
       released:*) printf 'E2E lease released: handle=%s slot=%s reason=%s\n' "$LEASE_RUN" "$LEASE_SLOT" "$reason" >&2 ;;
-      refused:lease_lost) printf 'E2E lease had already ended: handle=%s slot=%s\n' "$LEASE_RUN" "$LEASE_SLOT" >&2 ;;
       failed:*)
         printf '%s: release failed for handle=%s slot=%s; the handle is kept, retry release\n' \
           "$E2E_PROGRAM" "$LEASE_RUN" "$LEASE_SLOT" >&2
@@ -1712,7 +1720,7 @@ handle_keeper_main() {
 start_handle_keeper() {
   local dir="$HANDLE_DIRECTORY" waited=0
   write_handle_state
-  env -u SUBYARD_E2E_LEASE_EVENTS setsid -f bash "$CLIENT_SELF" _keeper "$dir" </dev/null >>"$dir/keeper.log" 2>&1 \
+  setsid -f bash "$CLIENT_SELF" _keeper "$dir" </dev/null >>"$dir/keeper.log" 2>&1 \
     || die 'cannot start the lease keeper'
   while [ ! -s "$dir/keeper.ready" ]; do
     [ "$waited" -lt 100 ] || die 'lease keeper did not start'

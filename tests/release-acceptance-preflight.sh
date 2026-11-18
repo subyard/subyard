@@ -29,6 +29,28 @@ class ProfilePreflightTests(unittest.TestCase):
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         self.addCleanup(m.STOP.clear)
 
+    def test_client_preflight_cannot_write_into_live_attempt(self):
+        preflight = str(REPO / "config/profiles/test-vms-client/tests/e2e/acceptance.sh")
+        controller = str(REPO / "tests/helpers/release-lease-fixture.sh")
+        lanes = ["profile:test-vms-client", "vm:following"]
+        results = []
+
+        def execute(name, slot):
+            command = ["bash", controller, str(REPO), "pass"]
+            if name == lanes[0]:
+                command = ["bash", "-ec", 'bash "$1" --preflight; shift; exec "$@"', "preflight", preflight, *command]
+            return m.execute(name, command, REPO, self.root, m.clean_environment(), slot)
+
+        self.assertFalse(m.run_live(self.root, lanes, set(lanes), [2], lambda _: True, execute,
+                                    lambda _, result: results.append(result), lambda _: None))
+        self.assertEqual([result["status"] for result in results], ["passed", "passed"])
+        for result in results:
+            stream = m.lease_file(self.root / result["log"])
+            events = [json.loads(line) for line in stream.read_text().splitlines()]
+            self.assertEqual([item["event"] for item in events], ["start", "grant", "release"])
+            self.assertTrue(all(item["slot"] == "slot-002" for item in events))
+            m.validate_pass_leases(stream, result["lease_events_sha256"], 2)
+
     def inventory(self, declarations):
         rows = []
         for name, declaration in declarations.items():

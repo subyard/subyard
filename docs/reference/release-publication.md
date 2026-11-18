@@ -353,11 +353,11 @@ The declaration has exactly these fields:
 Paths resolve relative to the declaration. Repeat `--operator-acceptance` for separately authorized
 checks. Keep the original frozen source, runtime, bundle and full asset inventory. Original and target
 commands and versions must match. Evidence must prove terminal nonzero exit, complete launch/timing,
-VM identities, successful cleanup of every guest and confirmed lease closure. The launcher must
-set `SUBYARD_E2E_LEASE_EVENTS` to the original `leases` file. Interrupted, incomplete, changed
-or ambiguous evidence is refused. Only pending/uncollected or matching failed entries qualify;
-passing or inherited entries cannot use this path. Publication reports `native_status=failed` and
-the original exit and log hash without claiming a PASS.
+VM identities, successful cleanup of every guest and confirmed lease closure. The launcher uses
+the same fresh file and nonce as a [standalone transfer](#reviewed-evidence-transfers).
+Interrupted, incomplete, changed or ambiguous evidence is refused. Only uncollected pending
+entries or matching failures qualify. An acknowledged local retry remains queued. Publication
+reports `native_status=failed` and the original exit and log hash without claiming a PASS.
 
 For an explicitly authorized runnable profile check that has never run:
 
@@ -546,19 +546,27 @@ before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfi
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
 every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
-periodic-only lane as an unknown check. After an attempt with confirmed lease cleanup, or a refusal
-that acquired no lease, the slot can take more work. A typed slot refusal lets another selected
-slot try that check. A later grant makes the recovered slot eligible to retry the check. Controllers
-return memory and disk refusals immediately so waiting lanes can use free slots. Capacity refusals
-defer the lane across the pool until further lease releases. Replaying the same sequence of lease
-releases on a retry does not reopen other deferred lanes.
+periodic-only lane as an unknown check. A slot can take more work after an attempt with confirmed
+cleanup or affirmative proof that no lease was acquired. A typed slot refusal defers that check
+on the affected slot and lets other selected slots try it. Once eligible work is waiting, dispatch
+gives previously refused slots priority so they can prove recovery. Controllers return memory and
+disk refusals immediately so waiting lanes can use free slots. These refusals defer the lane
+across the pool. A sibling's terminal completion or its first confirmed release in a blocked
+attempt makes deferred work eligible again. Repeated blocked attempts by the same sibling cannot
+keep waking a lane.
 A refusal can follow an earlier lease if that lease was released. Each attempt retains its log and
 immutable record. A slot with unconfirmed cleanup stays out of dispatch for the rest of the run.
 
-The collector requires an outcome for every allocation start. A grant or unknown outcome requires
-a named release for that handle or a broker response that the same handle already ended. Reuse, evidence import and
-operator acceptance validate the same log against its recorded hash. A historical live PASS
-without confirmed cleanup is incomplete and reruns when selected locally. A newer local failure
+The collector creates a fresh private JSONL lease stream for each live attempt. Preflights and
+host-free fixtures run outside that capture. The ledger requires an outcome for every allocation
+start. A grant or unknown outcome requires a confirmed release for the same handle. The broker
+also confirms replayed releases after it verifies that cleanup already completed. A retained lease
+or an ambiguous `lease_lost` reply leaves cleanup unconfirmed. A capability refusal before an
+acquire request records `no_acquire`, which lets the slot continue without proving a live PASS.
+Live PASS requires at least one grant, closure of every allocation, no final typed slot or capacity
+refusal, and successful workload execution. Reuse, evidence import and operator acceptance validate
+the same lease stream and ledger verdict against its recorded hash. A historical live PASS without
+confirmed cleanup is incomplete and reruns when selected locally. A newer local failure
 remains authoritative over any previously available hosted PASS.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
@@ -588,7 +596,8 @@ preparation system/machine/Go identity. An attempt contains exactly `schema_vers
 `manifest_sha256`, `check`, normalized `command` and `result`. The result has exactly `status`,
 `exit_code`, `termination`, `signal`, `duration_seconds`, `log_sha256`, `execution_environment`,
 `environments`, `environment_evidence`, `slot`, `cleanup`, `cleanup_status`, `capture_status`,
-`last_completed_phase`, `phase_budgets`, `failure_class` and `reason`. Absent measurements are null
+`last_completed_phase`, `phase_budgets`, `failure_class` and `reason`. Live collector attempts
+also include `lease_events_sha256`. Absent measurements are null
 (`environments` is an empty list); capture, timing or environment evidence is never reconstructed.
 An incomplete capture cannot certify PASS. `events.jsonl` retains starts, results, minute heartbeats and bounded controller phases;
 phase durations use the controller clock. An unfinished phase has no successful end marker.
@@ -722,10 +731,13 @@ and timezone-aware `started_at` are also supported. Their checksum-bound bundle 
 the frozen source, executable modes, candidate metadata and complete release inventory; do not
 add hashes to original records. Contradictory bindings or malformed timestamps/clocks are refused.
 The command must be the exact check plus `--slot N`, in the supported
-`timeout --signal=TERM --kill-after=300s 90m env` wrapper with `TMPDIR`, the three
-controller/transport assignments and `SUBYARD_E2E_LEASE_EVENTS` set to the absolute path of the
-private lease stream for that attempt. Unmeasured duration and execution environment stay unknown;
-preparation environment and final-poll duration cannot substitute for them.
+`timeout --signal=TERM --kill-after=300s 90m env` wrapper with `TMPDIR` and the three
+controller/transport assignments. Before launching, create an empty mode-0600 lease stream with
+`mktemp` and generate a fresh 32-digit lowercase hex nonce for this invocation. Set
+`SUBYARD_E2E_LEASE_EVENTS` to the stream's absolute path and `SUBYARD_E2E_LEASE_NONCE` to that
+nonce in the recorded launcher arguments. Every lease record must carry the same nonce. A frozen
+client that cannot emit the bound proof requires a new candidate. Unmeasured duration and execution
+environment stay unknown. Preparation environment and final-poll duration cannot substitute for them.
 
 Single and batch transfers stage and validate evidence before replacing the receipt. A copy failure
 leaves the receipt unchanged; a later capture failure reports the commit state and preserves evidence.

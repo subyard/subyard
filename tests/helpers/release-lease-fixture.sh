@@ -18,6 +18,7 @@ trap 'find "$fixture" -depth -delete' EXIT
   done
   STATE_ROOT="$fixture/state"
   IDENTITY="$fixture/identity"
+  [ "$scenario" != unsupported-count ] || VM_COUNT_REQUESTED=2
   resolve_bastion_route() { :; }
   lease_attribution() { printf 'yard\tProject\n'; }
   facade_request() {
@@ -50,8 +51,12 @@ trap 'find "$fixture" -depth -delete' EXIT
               touch "$fixture/refused"
               printf '%s\n' '{"schema_version":1,"status":"error","code":"capacity","reason":"memory","message":"fixture refusal"}'
             fi ;;
-          memory|disk)
-            printf '{"schema_version":1,"status":"error","code":"capacity","reason":"%s","message":"fixture refusal"}\n' "$scenario" ;;
+          memory|disk|release-then-memory)
+            if [ "$scenario" = release-then-memory ] && [ ! -f "$fixture/released" ]; then
+              fixture_grant
+            else
+              printf '{"schema_version":1,"status":"error","code":"capacity","reason":"%s","message":"fixture refusal"}\n' "${scenario##*-}"
+            fi ;;
           busy)
             printf '%s\n' '{"schema_version":1,"status":"error","code":"busy","state":"provisioning","reason":"provisioning","message":"requested slot is unavailable"}' ;;
           failed-cancellation)
@@ -61,6 +66,11 @@ trap 'find "$fixture" -depth -delete' EXIT
         ;;
       release\ *)
         [[ "$1" == *' aabb 1 ccdd' ]] || return 22
+        if [ -n "${LEASE_FIXTURE_RELEASE_REPLY:-}" ]; then
+          cat "$LEASE_FIXTURE_RELEASE_REPLY"
+          return
+        fi
+        touch "$fixture/released"
         case "$scenario" in
           lease_lost|unavailable)
             printf '{"schema_version":1,"status":"error","code":"%s"}\n' "$scenario" ;;
@@ -85,5 +95,10 @@ trap 'find "$fixture" -depth -delete' EXIT
   }
   acquire_run_lease
   for vm in 1 2; do phase_marker guest-cleanup end 0 0 "$vm"; done
+  if [ "$scenario" = release-then-memory ]; then
+    release_lease
+    mv "$GUEST_IDENTITY" "$GUEST_IDENTITY.pub" "$fixture"
+    acquire_lease || [ "$?" = 4 ]
+  fi
   exit "${LEASE_FIXTURE_EXIT:-0}"
 )
