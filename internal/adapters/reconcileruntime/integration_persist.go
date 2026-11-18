@@ -356,8 +356,17 @@ func (runtime Runtime) PersistRetainedLines(retained []PersistRetained) []string
 type persistPlanChanged struct{ yard string }
 
 func (err persistPlanChanged) Error() string {
-	return fmt.Sprintf("%v: persist transfer state in yard %s changed after the init plan was confirmed; nothing was transferred. Next, on the owner host: %s",
-		domain.ErrPlanStale, err.yard, shellquote.Command([]string{"yard", "-Y", err.yard, "init"}))
+	message, retry := err.ActivationDiagnostic()
+	return fmt.Sprintf("%v: %s. Next, on the owner host: %s", domain.ErrPlanStale, message, retry)
+}
+
+func (err persistPlanChanged) ActivationDiagnostic() (string, string) {
+	message := "persist transfer state changed after the init plan was confirmed; nothing was transferred"
+	if !domain.SafeName(err.yard) || len(err.yard) > 63 {
+		return message, "yard init"
+	}
+	return fmt.Sprintf("persist transfer state in yard %s changed after the init plan was confirmed; nothing was transferred", err.yard),
+		shellquote.Command([]string{"yard", "-Y", err.yard, "init"})
 }
 func (persistPlanChanged) Unwrap() error                         { return domain.ErrPlanStale }
 func (persistPlanChanged) PendingIntegrationConfiguration() bool { return true }

@@ -813,10 +813,10 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	runtime.persistProjection = persist.projection()
 	observed, err := runtime.integrationInventory(ctx, "observe", entries, "")
 	if err != nil {
-		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, err))
+		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, phase, reader, observed, err))
 	}
 	if persistErr != nil {
-		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, nil))
+		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, phase, reader, observed, nil))
 	}
 	persist = persist.retireUnrecordedLinks(observed.Retired)
 	// Passive installed admission may ignore redundant labels, but apply must
@@ -863,10 +863,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			continue
 		}
 		if err != nil {
-			if phase == "verify" {
-				err = runtime.integrationApplyDiagnostic(err, "verify", file.integration)
-			}
-			causes = append(causes, err)
+			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
 			continue
 		}
 		mode := configmaterial.ModeObserve
@@ -878,10 +875,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			err = runtime.releasedInstalledDocument(file.destination, observation)
 		}
 		if err != nil {
-			if phase == "verify" {
-				err = runtime.integrationApplyDiagnostic(err, "verify", file.integration)
-			}
-			causes = append(causes, err)
+			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
 			continue
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
@@ -907,10 +901,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		}
 		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
 		if err != nil {
-			if phase == "verify" {
-				err = runtime.integrationApplyDiagnostic(err, "verify", runtime.knownIntegrationID(entry.ID))
-			}
-			causes = append(causes, err)
+			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, runtime.knownIntegrationID(entry.ID)))
 			continue
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
@@ -931,26 +922,31 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		return plan, observed, err
 	}
 	for _, command := range commands {
-		ready, err := runtime.guestCheck(ctx, []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command})
+		ready, err := runtime.guestCheck(ctx, []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command.command})
 		if err != nil {
-			return plan, observed, err
+			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, command.integration))
+			continue
 		}
 		plan.Changed = plan.Changed || !ready
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
 	checks, err := runtime.provisionAgentChecks()
 	if err != nil {
 		return plan, observed, err
 	}
 	for _, check := range checks {
-		ready, err := runtime.guestCheck(ctx, []string{check})
+		ready, err := runtime.guestCheck(ctx, []string{check.command})
 		if err != nil {
-			return plan, observed, err
+			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, check.integration))
+			continue
 		}
 		plan.Changed = plan.Changed || !ready
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	}
+	if err := domain.CollectRefusals(causes...); err != nil {
+		return plan, observed, err
 	}
 	ready, err := runtime.projectHooksConverged(ctx)
 	if err != nil {
@@ -1054,7 +1050,7 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 	candidate.persistProjection = persist.projection()
 	observed, err := candidate.integrationInventory(ctx, "observe", entries, "")
 	if err != nil {
-		return runtime, IntegrationPlan{}, domain.CollectRefusals(persistErr, candidate.collectIntegrationConfigRefusals(ctx, reader, observed, err))
+		return runtime, IntegrationPlan{}, domain.CollectRefusals(persistErr, candidate.collectIntegrationConfigRefusals(ctx, "inspect", reader, observed, err))
 	}
 	files, err := candidate.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
@@ -1100,7 +1096,7 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 
 // An inventory refusal does not prevent reading independent structured documents.
 // Keep all causes visible, while withholding the unusable operation plan.
-func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, reader func(config.MaterializedAsset) ([]byte, error), observed integrationObservation, inventoryError error) error {
+func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error), observed integrationObservation, inventoryError error) error {
 	causes := []error{inventoryError}
 	files, err := runtime.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
@@ -1115,7 +1111,7 @@ func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, rea
 			continue
 		}
 		if err != nil {
-			causes = append(causes, err)
+			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
 			continue
 		}
 		mode := configmaterial.ModeObserve
@@ -1126,14 +1122,14 @@ func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, rea
 		if err == nil {
 			err = runtime.releasedInstalledDocument(file.destination, observation)
 		}
-		causes = append(causes, err)
+		causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
 	}
 	for _, entry := range observed.Retired {
 		if entry.Kind != "structured" {
 			continue
 		}
 		_, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
-		causes = append(causes, err)
+		causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, runtime.knownIntegrationID(entry.ID)))
 	}
 	return domain.CollectRefusals(causes...)
 }

@@ -271,7 +271,9 @@ func integrationSourceFixture(t *testing.T) (Runtime, profile.IntegrationDefinit
 
 type applyDiagnosticExecutor struct {
 	retryableIntegrationExecutor
-	cut string
+	cut            string
+	applyStarted   bool
+	persistApplied bool
 }
 
 func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
@@ -281,6 +283,9 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 		switch args[3] {
 		case IntegrationInventoryReader():
 			point = "inventory " + args[4]
+			if args[4] == "settings" {
+				return ports.InstanceExecResult{Stdout: []byte(`{}`)}, nil
+			}
 			if args[4] == "observe" && fixture.commits != 0 {
 				point = "verify"
 			}
@@ -296,7 +301,17 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 				return ports.InstanceExecResult{Stdout: payload}, nil
 			}
 			point = "persist"
+			fixture.persistApplied = true
 		default:
+			if args[4] == configmaterial.ModeObserve {
+				if fixture.applyStarted && fixture.cut == "structured observe" {
+					return ports.InstanceExecResult{Stdout: []byte("private-native-stdout"), Stderr: []byte("private-native-stderr")}, errors.New("private-native-error")
+				}
+				return ports.InstanceExecResult{Stdout: []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("c", 64) + `"}`)}, nil
+			}
+			if args[4] == configmaterial.ModeApply && fixture.cut == "structured apply" {
+				return ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: unowned-invalid-destination-v1 JSON; private-native-document")}, nil
+			}
 			if args[4] == configmaterial.ModeAssessRetire {
 				return ports.InstanceExecResult{Stdout: []byte(`{"converged":false,"fingerprint":"` + strings.Repeat("c", 64) + `"}`)}, nil
 			}
@@ -311,8 +326,16 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 	if len(args) > 3 && strings.Contains(args[3], "temporary=$(mktemp") {
 		point = "configs"
 	}
+	if fixture.commits != 0 {
+		switch {
+		case len(args) == 5 && args[4] == "private-native-command":
+			point = "verify command"
+		case len(args) == 1 && args[0] == "private-native-check":
+			point = "verify check"
+		}
+	}
 	if point == fixture.cut {
-		return ports.InstanceExecResult{Stderr: []byte("private-native-stderr")}, errors.New("private-native-error")
+		return ports.InstanceExecResult{Stdout: []byte("private-native-stdout"), Stderr: []byte("private-native-stderr")}, errors.New("private-native-error")
 	}
 	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
 }
@@ -329,6 +352,11 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 		{"hooks capture", "integration sample apply hooks capture failed"},
 		{"retire structured config", "integration sample apply retire structured config failed"},
 		{"verify", "integration apply verify failed"},
+		{"verify command", "integration second apply verify failed"},
+		{"verify check", "integration second apply verify failed"},
+		{"structured observe", "integration codex apply observe failed"},
+		{"structured apply", "unowned invalid configuration preserved"},
+		{"persist approval", "persist transfer state in yard sample changed after the init plan was confirmed; nothing was transferred"},
 	} {
 		t.Run(test.cut, func(t *testing.T) {
 			root := testkit.TempDir(t)
@@ -348,8 +376,24 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 				Yard:         domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
 				Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: root}}}
 			switch test.cut {
-			case "persist":
+			case "persist", "persist approval":
 				runtime.Environment = []string{"AGENT_sample_PERSIST=.memory:/mnt/host/agent-sessions/sample/memory"}
+			case "verify command", "verify check":
+				secondRoot := filepath.Join(root, "second")
+				if err := os.Mkdir(secondRoot, 0700); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(secondRoot, "integration.json"), []byte("{}"), 0600)
+				runtime.Integrations = append(runtime.Integrations, profile.IntegrationDefinition{Name: "second", Root: secondRoot})
+				provision := filepath.Join(root, "provision.sh")
+				testkit.WriteFile(t, provision, []byte("#!/bin/sh\nexit 0\n"), 0700)
+				runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=sample second",
+					"AGENT_sample_PROVISION=" + provision, "AGENT_sample_COMMAND=first-command", "AGENT_sample_CHECK=first-check",
+					"AGENT_second_PROVISION=" + provision, "AGENT_second_COMMAND=private-native-command", "AGENT_second_CHECK=private-native-check"}
+			case "structured observe", "structured apply":
+				runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex",
+					"AGENT_codex_CONFIG=" + filepath.Join(root, "config/agents/codex/config"), "AGENT_codex_CONFIG_DEST=.codex/settings.json"}
+				bindInstructionTestPackage(t, &runtime, root, "codex")
 			case "configs":
 				path := filepath.Join(root, "instructions.md")
 				testkit.WriteFile(t, path, []byte("instructions\n"), 0600)
@@ -396,13 +440,31 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 			if err != nil || !plan.Changed {
 				t.Fatalf("fixture plan: changed=%t, %v", plan.Changed, err)
 			}
+			if test.cut == "persist approval" {
+				runtime.PersistFinishOnly = false
+				oldFingerprint := strings.Repeat("a", 64)
+				runtime.ApprovedPersist = &oldFingerprint
+			}
+			executor.applyStarted = true
 			err = runtime.ApplyIntegrations(ctx, plan)
 			var public interface{ ActivationDiagnostic() (string, string) }
 			if !errors.As(err, &public) {
 				t.Fatalf("missing public diagnostic: %v", err)
 			}
 			message, retry := public.ActivationDiagnostic()
-			if message != test.message+" in yard sample" || retry != "run yard migrate" ||
+			wantMessage, wantRetry := test.message+" in yard sample", "run yard migrate"
+			switch test.cut {
+			case "structured apply":
+				wantMessage = test.message
+				wantRetry = "run " + runtime.preserveInvalidConfigCommand("/home/dev/.codex/settings.json") + "; then run yard -Y sample config apply"
+			case "persist approval":
+				wantMessage = test.message
+				wantRetry = "'yard' '-Y' 'sample' 'init'"
+				if executor.persistApplied || !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), wantMessage) || !strings.Contains(err.Error(), wantRetry) {
+					t.Fatalf("init lost the stale approval refusal or executed the transfer: %v", err)
+				}
+			}
+			if message != wantMessage || retry != wantRetry ||
 				strings.Contains(err.Error()+output.String(), "private-native") {
 				t.Fatalf("diagnostic = %q / %q; private output leaked = %t", message, retry, strings.Contains(err.Error()+output.String(), "private-native"))
 			}

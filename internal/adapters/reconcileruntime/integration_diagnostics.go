@@ -157,6 +157,17 @@ func (runtime Runtime) integrationApplyDiagnostic(cause error, step, id string) 
 	return &integrationLifecycleError{cause: cause, message: message, retry: "run yard migrate"}
 }
 
+func (runtime Runtime) integrationObservationDiagnostic(cause error, phase, id string) error {
+	switch phase {
+	case "apply":
+		return runtime.integrationApplyDiagnostic(cause, "observe", id)
+	case "verify":
+		return runtime.integrationApplyDiagnostic(cause, "verify", id)
+	default:
+		return cause
+	}
+}
+
 func (runtime Runtime) knownIntegrationID(id string) string {
 	if id == "" {
 		return ""

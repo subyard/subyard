@@ -2070,7 +2070,9 @@ for command do command -v "$command" >/dev/null || exit 1; done
 jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
   && ! iptables -S FORWARD 2>/dev/null | grep -qx -- '-P FORWARD DROP'
 `, "subyard"}
-	commandCheck = append(commandCheck, commands...)
+	for _, command := range commands {
+		commandCheck = append(commandCheck, command.command)
+	}
 	if ok, err := runtime.guestCheck(ctx, commandCheck); err != nil || !ok {
 		return false, err
 	}
@@ -2079,7 +2081,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 		return false, err
 	}
 	for _, check := range checks {
-		if ok, err := runtime.guestCheck(ctx, []string{check}); err != nil || !ok {
+		if ok, err := runtime.guestCheck(ctx, []string{check.command}); err != nil || !ok {
 			return false, err
 		}
 	}
@@ -2210,8 +2212,13 @@ exec "$1" --version
 `, "subyard", path, "regular file|755|" + owner}
 }
 
-func (runtime Runtime) provisionAgentCommands() ([]string, error) {
-	commands := make([]string, 0)
+type integrationProbe struct {
+	integration string
+	command     string
+}
+
+func (runtime Runtime) provisionAgentCommands() ([]integrationProbe, error) {
+	commands := make([]integrationProbe, 0)
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		provision := runtime.environmentValue("AGENT_" + agent + "_PROVISION")
 		if provision == "" {
@@ -2229,13 +2236,13 @@ func (runtime Runtime) provisionAgentCommands() ([]string, error) {
 		if !safeCommand(command) {
 			return nil, fmt.Errorf("agent %s command is invalid", agent)
 		}
-		commands = append(commands, command)
+		commands = append(commands, integrationProbe{integration: agent, command: command})
 	}
 	return commands, nil
 }
 
-func (runtime Runtime) provisionAgentChecks() ([]string, error) {
-	checks := make([]string, 0)
+func (runtime Runtime) provisionAgentChecks() ([]integrationProbe, error) {
+	checks := make([]integrationProbe, 0)
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		check := runtime.environmentValue("AGENT_" + agent + "_CHECK")
 		if check == "" {
@@ -2244,7 +2251,7 @@ func (runtime Runtime) provisionAgentChecks() ([]string, error) {
 		if !safeCommand(check) {
 			return nil, fmt.Errorf("agent %s check command is invalid", agent)
 		}
-		checks = append(checks, check)
+		checks = append(checks, integrationProbe{integration: agent, command: check})
 	}
 	return checks, nil
 }

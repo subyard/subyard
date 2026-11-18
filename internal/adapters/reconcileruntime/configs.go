@@ -574,7 +574,10 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 			if domain.SafeName(runtime.Yard.YardName) {
 				repair = "yard -Y " + runtime.Yard.YardName + " config apply"
 			}
-			return fmt.Errorf("unowned invalid configuration preserved; next: run %s; then run %s", preserve, repair)
+			return integrationOwnershipError{
+				message: "unowned invalid configuration preserved",
+				retry:   "run " + preserve + "; then run " + repair,
+			}
 		}
 		return errors.New("structured configuration apply failed")
 	}

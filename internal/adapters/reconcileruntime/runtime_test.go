@@ -1455,7 +1455,7 @@ func TestProvisionAgentCommandsAreValidated(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=opencode", "AGENT_opencode_PROVISION=" + hook, "AGENT_opencode_COMMAND=opencode",
 	}}
 	commands, err := runtime.provisionAgentCommands()
-	if err != nil || len(commands) != 1 || commands[0] != "opencode" {
+	if err != nil || len(commands) != 1 || commands[0] != (integrationProbe{integration: "opencode", command: "opencode"}) {
 		t.Fatalf("valid agent command rejected: %v, %v", commands, err)
 	}
 	runtime.Environment[2] = "AGENT_opencode_COMMAND=bad command"
@@ -1469,7 +1469,7 @@ func TestProvisionAgentChecksAreValidated(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=relay", "AGENT_relay_CHECK=relay-check",
 	}}
 	checks, err := runtime.provisionAgentChecks()
-	if err != nil || len(checks) != 1 || checks[0] != "relay-check" {
+	if err != nil || len(checks) != 1 || checks[0] != (integrationProbe{integration: "relay", command: "relay-check"}) {
 		t.Fatalf("valid agent check rejected: %v, %v", checks, err)
 	}
 	runtime.Environment[1] = "AGENT_relay_CHECK=bad check"
@@ -1500,7 +1500,7 @@ func TestConfigurationOnlyProvisionRequiresExplicitSafeCheck(t *testing.T) {
 			}
 			if test.valid {
 				checks, err := runtime.provisionAgentChecks()
-				if len(commands) != 0 || err != nil || len(checks) != 1 || checks[0] != test.check {
+				if len(commands) != 0 || err != nil || len(checks) != 1 || checks[0].command != test.check {
 					t.Fatalf("configuration-only convergence = %v, %v, %v", commands, checks, err)
 				}
 			}
