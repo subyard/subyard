@@ -114,8 +114,16 @@ func TestMigrationKindRollbackRefusesMissingAuthoritativeHistory(t *testing.T) {
 }
 
 func TestUpdateResumesFirstPublicationWithoutMigrationHistory(t *testing.T) {
-	for _, previous := range []bool{false, true} {
-		t.Run(fmt.Sprintf("previous=%t", previous), func(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		retained bool
+		previous bool
+	}{
+		{name: "first publication"},
+		{name: "retained release without previous link", retained: true},
+		{name: "retained release with previous link", retained: true, previous: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			runtime, candidate, request, called, args := retainedVersionFixture(t)
 			request.Direction = releasetransition.DirectionActivateTarget
 			current := filepath.Join(request.RuntimeRoot, "current")
@@ -129,8 +137,14 @@ func TestUpdateResumesFirstPublicationWithoutMigrationHistory(t *testing.T) {
 			if err := os.Remove(previousLink); err != nil {
 				t.Fatal(err)
 			}
-			if previous {
+			if tc.previous {
 				if err := os.Symlink("releases/release-a", previousLink); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.retained {
+				retained := filepath.Join(request.RuntimeRoot, "releases", "release-a")
+				if err := os.Rename(retained, filepath.Join(filepath.Dir(request.RuntimeRoot), "unpublished-fixture")); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -138,7 +152,7 @@ func TestUpdateResumesFirstPublicationWithoutMigrationHistory(t *testing.T) {
 				t.Fatal(err)
 			}
 			prepared, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
-			if previous {
+			if tc.retained {
 				assertMigrationRollbackRefused(t, request, err, "authoritative active migration history is missing")
 				if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("engine was invoked without migration history: %v", err)

@@ -31,6 +31,7 @@ type releaseSelection struct {
 	state                          currentSnapshot
 	draft                          os.FileInfo
 	draftPath                      string
+	firstPublication               bool
 	refusal                        string
 	cause                          error
 }
@@ -152,10 +153,32 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 		request.Replacement == nil && request.MigrationOwnerReplacement == nil &&
 		links.current.target == "releases/"+string(request.Target) && !links.previous.present &&
 		!selection.state.journal.Exists && missingHistory
-	if identity != "" && !firstPublication {
+	var publicationErr error
+	if identity != "" && firstPublication {
+		selection.firstPublication, publicationErr = solePublishedRelease(request.RuntimeRoot, request.Target)
+	}
+	if identity != "" && !selection.firstPublication {
 		selection.refusal, selection.cause = verifyRetainedHistory(target, retained, selection.state.ledger, selection.state.checkpoint)
+		selection.cause = domain.CollectRefusals(selection.cause, publicationErr)
 	}
 	return selection, nil
+}
+
+func solePublishedRelease(root string, target releasetransition.ReleaseID) (bool, error) {
+	entries, err := os.ReadDir(filepath.Join(root, "releases"))
+	if err != nil {
+		return false, fmt.Errorf("cannot list published releases: %w", err)
+	}
+	found := false
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if entry.Name() != string(target) {
+				return false, nil
+			}
+			found = true
+		}
+	}
+	return found, nil
 }
 
 // Bootstrap stages its launcher before invoking update. Preserve the source
@@ -245,6 +268,12 @@ func (runtime *Runtime) revalidateReleaseSelection(selection *releaseSelection, 
 	observed, err := runtime.readCurrentSnapshot(request.RuntimeRoot, request.ConfigHome)
 	if err != nil || !sameCurrentSnapshot(observed, selection.state) {
 		return stale()
+	}
+	if selection.firstPublication {
+		sole, err := solePublishedRelease(request.RuntimeRoot, request.Target)
+		if err != nil || !sole {
+			return stale()
+		}
 	}
 	return nil
 }
