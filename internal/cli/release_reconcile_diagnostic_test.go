@@ -390,7 +390,7 @@ func TestIntegrationActivationFailureBoundaries(t *testing.T) {
 			message, retry := boundary.ActivationDiagnostic()
 			attributed := strings.Contains(message, "stage="+stage+" projected=")
 			if stage == "apply" {
-				attributed = message == "integration apply observe failed in yard default" && retry == "run yard migrate"
+				attributed = message == "integration apply observe inventory failed in yard default" && retry == "run yard migrate"
 			}
 			if !attributed || strings.Contains(message, "private-sentinel") || len(message) > 512 {
 				t.Fatalf("unsafe or unattributed failure: %s / %s", message, retry)

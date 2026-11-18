@@ -21,27 +21,51 @@ func (refusals *Refusals) Unwrap() []error { return refusals.causes }
 
 // CollectRefusals returns nil for no causes and a lone cause unchanged. Others are
 // sorted by text with repeats dropped, so map iteration cannot change the result.
+// A finding's owner and input take precedence over its rendered wording.
 func CollectRefusals(causes ...error) error {
 	causes = slices.DeleteFunc(slices.Clone(causes), func(cause error) bool { return cause == nil })
-	slices.SortStableFunc(causes, func(left, right error) int { return strings.Compare(left.Error(), right.Error()) })
-	causes = slices.CompactFunc(causes, func(left, right error) bool { return left.Error() == right.Error() })
-	switch len(causes) {
-	case 0:
-		return nil
-	case 1:
-		return causes[0]
-	}
-	return &Refusals{causes}
+	slices.SortStableFunc(causes, func(left, right error) int {
+		if order := strings.Compare(left.Error(), right.Error()); order != 0 {
+			return order
+		}
+		first, _ := PublicFinding(left)
+		second, _ := PublicFinding(right)
+		if order := strings.Compare(first.Owner, second.Owner); order != 0 {
+			return order
+		}
+		return strings.Compare(first.Input, second.Input)
+	})
+	return collectDistinctRefusals(causes)
 }
 
 // CollectOrderedRefusals keeps the caller's stable order (such as YardNames:
 // default first, then by name), dropping nil causes and exact repeats.
 func CollectOrderedRefusals(causes ...error) error {
-	kept := []error{}
+	return collectDistinctRefusals(slices.Clone(causes))
+}
+
+func collectDistinctRefusals(causes []error) error {
+	keys := map[[2]string]bool{}
+	messages := map[string]bool{}
+	kept := causes[:0]
 	for _, cause := range causes {
-		if cause != nil && !slices.ContainsFunc(kept, func(seen error) bool { return seen.Error() == cause.Error() }) {
-			kept = append(kept, cause)
+		if cause == nil {
+			continue
 		}
+		if finding, ok := PublicFinding(cause); ok && finding.Input != "" {
+			key := finding.Key()
+			if keys[key] {
+				continue
+			}
+			keys[key] = true
+		} else {
+			message := cause.Error()
+			if messages[message] {
+				continue
+			}
+			messages[message] = true
+		}
+		kept = append(kept, cause)
 	}
 	switch len(kept) {
 	case 0:

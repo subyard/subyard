@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
@@ -3182,12 +3184,19 @@ func TestV2TransitionReportsActivationObservationFailureAsBlocker(t *testing.T) 
 }
 
 func TestV2TransitionPreservesExplicitPublicActivationDiagnostic(t *testing.T) {
+	path := `/home/dev/settings&notes's;copy|.json`
+	command := shellquote.RecoveryCommand([]string{"printf", "%s", path})
+	if output, err := exec.Command("sh", "-c", command).Output(); err != nil || string(output) != path {
+		t.Fatalf("quoted recovery changed the input: %q, %v", output, err)
+	}
 	for _, test := range []struct {
 		message, retry string
 		valid          bool
 	}{
 		{"Known legacy file has unexpected contents; file preserved.", "incus exec yard --project subyard -- sha256sum /usr/local/libexec/subyard/projects-changed", true},
 		{"Owned integration conflict; artifacts preserved.", "'/tmp/candidate with quotes/bin/yard-engine' '-Y' 'fixture' 'integration' 'cleanup' 'synthetic' '--check'", true},
+		{"File preserved.", "run " + command, true},
+		{"File preserved.", "run " + command + " && yard migrate", false},
 		{"unsafe\nmessage", "yard update --check", false},
 		{strings.Repeat("x", maxDiagnosticText+1), "yard update --check", false},
 		{"known message", "inspect; mutate", false},
@@ -3208,6 +3217,10 @@ func TestV2TransitionPreservesExplicitPublicActivationDiagnostic(t *testing.T) {
 				inspection.Blockers[0].Message != test.message || inspection.Blockers[0].Retry != test.retry {
 				t.Fatalf("public diagnostic lost: %#v", inspection)
 			}
+			response := ProcessResponse{SchemaVersion: 1, ActivationReconciliationOwned: true, Inspection: &inspection}
+			if _, err := json.Marshal(response); err != nil {
+				t.Fatalf("process v1 rejected recovery %q: %v", outcome.Retry, err)
+			}
 		} else if outcome.Message != `activation reconciler "materialized-config" cannot be observed safely` || outcome.Retry != "run yard update --check" {
 			t.Fatalf("invalid diagnostic escaped: %#v", outcome)
 		}
@@ -3221,6 +3234,11 @@ func (err v2PublicActivationError) ActivationDiagnostic() (string, string) {
 	return err.message, err.retry
 }
 
+type v2FindingError struct{ domain.Finding }
+
+func (err v2FindingError) Error() string                     { return err.Message }
+func (err v2FindingError) ActivationFinding() domain.Finding { return err.Finding }
+
 func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
 	cause := domain.CollectRefusals(
 		fmt.Errorf("first: %w", v2PublicActivationError{"yard work: profile unavailable", "run yard -Y work config status"}),
@@ -3229,6 +3247,24 @@ func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
 	message, retry := publicActivationDiagnostic(cause, "fallback", "run yard update --check")
 	if message != "yard default: profile unavailable; yard work: profile unavailable; Additional recovery: run yard -Y work config status" || retry != "run yard -Y default config status" || strings.Contains(message, "private observation") {
 		t.Fatalf("diagnostic %q / %q", message, retry)
+	}
+
+	first := v2FindingError{domain.Finding{Owner: "codex", Input: "manifest", Message: "source unavailable", Recovery: "run yard migrate"}}
+	second := first
+	second.Input = "instructions"
+	second.Recovery = "inspect " + strings.Repeat("x", maxDiagnosticText-len("inspect "))
+	duplicate := first
+	duplicate.Message = "source unavailable again"
+	cause = domain.CollectRefusals(first, fmt.Errorf("wrapped: %w", second), duplicate)
+	message, retry = publicActivationDiagnostic(cause, "fallback", "run yard update --check")
+	if message != "source unavailable; source unavailable" || retry != first.Recovery {
+		t.Fatalf("distinct inputs or omitted recovery misreported: %q / %q", message, retry)
+	}
+
+	second.Message = "unavailable " + strings.Repeat("x", maxDiagnosticText-len("unavailable "))
+	message, retry = publicActivationDiagnostic(domain.CollectRefusals(first, second), "fallback", "run yard update --check")
+	if !strings.HasPrefix(message, "source unavailable; and 1 more findings") || retry != first.Recovery {
+		t.Fatalf("omitted finding misreported: %q / %q", message, retry)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
 
@@ -83,10 +84,31 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 		}
 	}
 	var approved []string
+	declared := map[string][]integrationWorkItem{}
 	if runtime.HookPlan != nil {
 		for _, hook := range runtime.HookPlan.allowedHooks {
 			if path := runtime.HookPlan.current.Resolved[hook]; path != "" {
 				approved = append(approved, path)
+			}
+		}
+	} else if runtime.PersistFinishOnly {
+		for _, owner := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
+			hook := runtime.environmentValue("AGENT_" + owner + "_PROJECTS_CHANGED")
+			if safeCommand(hook) {
+				item := runtime.integrationItem("apply hooks run", owner).forSource(hook)
+				declared[hook] = append(declared[hook], item)
+			}
+		}
+	}
+	byPath := map[string][]integrationWorkItem{}
+	if len(declared) != 0 {
+		if observation, err := runtime.observeProjectHookInputs(ctx); err == nil {
+			for hook, items := range declared {
+				path := observation.Resolved[hook]
+				if filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Base(path) == hook {
+					approved = append(approved, path)
+					byPath[path] = items
+				}
 			}
 		}
 	}
@@ -96,6 +118,18 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 		}
 		return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	}, approved...); err != nil {
+		var failure *application.ProjectHookFailure
+		if errors.As(err, &failure) {
+			var findings []error
+			for _, path := range failure.Hooks {
+				for _, item := range byPath[path] {
+					findings = append(findings, item.failure(err, ""))
+				}
+			}
+			if reported := domain.CollectRefusals(findings...); reported != nil {
+				return reported
+			}
+		}
 		return err
 	}
 	if err := runtime.CheckProjectHookPlan(ctx, false); err != nil {

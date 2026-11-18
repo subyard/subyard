@@ -90,7 +90,7 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 		refusals := []error{settingsErr}
 		for _, line := range strings.Split(string(result.Stderr), "\n") {
 			if line == "subyard-integration-conflict:ccusage" {
-				refusals = append(refusals, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry})
+				refusals = append(refusals, integrationOwnershipFailure("this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry, false))
 			}
 			if strings.HasPrefix(line, "Bubblewrap AppArmor: ") {
 				refusals = append(refusals, errors.New(line))

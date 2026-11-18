@@ -221,7 +221,7 @@ func TestInstalledViewRefusesReleasedDocument(t *testing.T) {
 	}
 	installed := runtime.WithInstalledConfiguration()
 	_, err := installed.IntegrationPlan(context.Background())
-	var finding integrationOwnershipError
+	var finding integrationFailure
 	if !errors.As(err, &finding) || !finding.PendingIntegrationConfiguration() {
 		t.Fatalf("installed view did not refuse the released document: %v", err)
 	}

@@ -4153,68 +4153,83 @@ func activationObservationBlocker(ctx context.Context, id string, err error) Blo
 }
 
 func publicActivationDiagnostic(err error, message, retry string) (string, string) {
-	// Adapters may explicitly provide a public diagnostic; never expose raw
-	// errors from guest commands, configuration parsing or transport failures.
-	var refusals *domain.Refusals
-	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
-		if _, public := cause.(interface{ ActivationDiagnostic() (string, string) }); public {
-			break
+	// Only explicitly public diagnostics cross this boundary.
+	fallback := domain.Finding{Message: message, Recovery: retry}
+	var findings []domain.Finding
+	seen := map[[2]string]bool{}
+	for _, cause := range refusalCauses(err) {
+		finding, ok := domain.PublicFinding(cause)
+		if !ok || !utf8.ValidString(finding.Message) || validateText(finding.Message, "activation diagnostic", maxDiagnosticText, true) != nil {
+			finding = fallback
 		}
-		if aggregate, ok := cause.(*domain.Refusals); ok {
-			refusals = aggregate
-			break
-		}
-	}
-	if refusals != nil {
-		var messages, actions []string
-		for _, cause := range refusals.Unwrap() {
-			text, action := publicActivationDiagnostic(cause, message, retry)
-			if text == "" {
-				continue
-			}
-			messages = append(messages, text)
-			if validateSafeAction(action) == nil {
-				actions = append(actions, action)
+		if !utf8.ValidString(finding.Recovery) || validateSafeAction(finding.Recovery) != nil {
+			if finding.Input == "" {
+				finding = fallback
+			} else {
+				finding.Recovery = fallback.Recovery
 			}
 		}
-		if len(messages) > 0 {
-			slices.Sort(messages)
-			messages = slices.Compact(messages)
-			slices.Sort(actions)
-			actions = slices.Compact(actions)
-			if len(actions) != 0 {
-				retry = actions[0]
-				for _, action := range actions[1:] {
-					messages = append(messages, "Additional recovery: "+action)
-				}
-			}
-			kept := []string{}
-			for index, text := range messages {
-				candidate := strings.Join(append(slices.Clone(kept), text), "; ")
-				remaining := len(messages) - index - 1
-				suffix := ""
-				if remaining > 0 {
-					suffix = fmt.Sprintf("; and %d more findings; full details: stderr of yard update --check --json", remaining)
-				}
-				if len(candidate)+len(suffix) > maxDiagnosticText {
-					break
-				}
-				kept = append(kept, text)
-			}
-			if len(kept) < len(messages) {
-				kept = append(kept, fmt.Sprintf("and %d more findings; full details: stderr of yard update --check --json", len(messages)-len(kept)))
-			}
-			message = strings.Join(kept, "; ")
-			return message, retry
+		key := finding.Key()
+		if finding.Input == "" {
+			key = [2]string{finding.Message, finding.Recovery}
+		}
+		if finding.Message != "" && !seen[key] {
+			seen[key] = true
+			findings = append(findings, finding)
 		}
 	}
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if errors.As(err, &diagnostic) {
-		publicMessage, publicRetry := diagnostic.ActivationDiagnostic()
-		if utf8.ValidString(publicMessage) && utf8.ValidString(publicRetry) &&
-			validateText(publicMessage, "activation diagnostic", maxDiagnosticText, true) == nil &&
-			validateSafeAction(publicRetry) == nil {
-			message, retry = publicMessage, publicRetry
+	if len(findings) == 0 {
+		return message, retry
+	}
+	slices.SortStableFunc(findings, func(left, right domain.Finding) int {
+		return strings.Compare(left.Message, right.Message)
+	})
+	return renderActivationFindings(findings)
+}
+
+// renderActivationFindings preserves finding order and spends the message
+// budget on findings first. An omitted recovery action does not hide a finding.
+func renderActivationFindings(findings []domain.Finding) (string, string) {
+	retry := findings[0].Recovery
+	omitted := func(count int) string {
+		return fmt.Sprintf("and %d more findings; full details: stderr of yard update --check --json", count)
+	}
+	join := func(message, next string) string {
+		if message == "" {
+			return next
+		}
+		return message + "; " + next
+	}
+	message := ""
+	visible := len(findings)
+	for _, finding := range findings {
+		message = join(message, finding.Message)
+	}
+	if len(message) > maxDiagnosticText {
+		message = ""
+		for index, finding := range findings {
+			candidate := join(message, finding.Message)
+			if len(join(candidate, omitted(len(findings)-index-1))) > maxDiagnosticText {
+				visible = index
+				break
+			}
+			message = candidate
+		}
+		if visible == 0 {
+			visible = 1
+			message = boundedFailureText(findings[0].Message, maxDiagnosticText-len(omitted(len(findings)-1))-2)
+		}
+		message = join(message, omitted(len(findings)-visible))
+	}
+	actions := map[string]bool{retry: true}
+	for _, finding := range findings[1:visible] {
+		action := finding.Recovery
+		if actions[action] || validateSafeAction(action) != nil {
+			continue
+		}
+		actions[action] = true
+		if candidate := join(message, "Additional recovery: "+action); len(candidate) <= maxDiagnosticText {
+			message = candidate
 		}
 	}
 	return message, retry

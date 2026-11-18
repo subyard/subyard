@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -189,6 +190,8 @@ func TestIntegrationActivationConflictRetriesRemainInspection(t *testing.T) {
 				runtime.Integrations = []profile.IntegrationDefinition{}
 			}
 			if kind == "persist" {
+				runtime.Integrations[0].Root = testkit.TempDir(t)
+				testkit.WriteFile(t, filepath.Join(runtime.Integrations[0].Root, "integration.json"), []byte("{}"), 0600)
 				runtime.Environment = []string{"AGENT_sample_PERSIST=.memory:/mnt/host/agent-sessions/sample/memory"}
 			}
 			_, cause := runtime.IntegrationPlan(context.Background())

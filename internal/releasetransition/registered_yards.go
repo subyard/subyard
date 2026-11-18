@@ -363,16 +363,17 @@ func (failure migrationBlockerError) ActivationDiagnostic() (string, string) {
 }
 
 func refusalCauses(err error) []error {
-	if _, public := err.(interface{ ActivationDiagnostic() (string, string) }); public {
-		return []error{err}
-	}
-	var refusals *domain.Refusals
-	if errors.As(err, &refusals) {
-		var causes []error
-		for _, cause := range refusals.Unwrap() {
-			causes = append(causes, refusalCauses(cause)...)
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if _, public := domain.DirectFinding(cause); public {
+			break
 		}
-		return causes
+		if refusals, ok := cause.(*domain.Refusals); ok {
+			var causes []error
+			for _, refusal := range refusals.Unwrap() {
+				causes = append(causes, refusalCauses(refusal)...)
+			}
+			return causes
+		}
 	}
 	return []error{err}
 }

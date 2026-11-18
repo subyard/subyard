@@ -159,7 +159,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 			}
 		}
 		if runtime.applyingIntegrations {
-			err = runtime.integrationItem("apply configs", source.owner).refusal(err)
+			err = runtime.integrationItem("apply configs", source.owner).forSource(source.input).refusal(err)
 		}
 		refusals = append(refusals, err)
 	}
@@ -185,7 +185,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 		}
 		if err != nil {
 			if runtime.applyingIntegrations {
-				err = runtime.integrationItem("apply configs", file.integration).refusal(err)
+				err = runtime.integrationItem("apply configs", file.integration).atDestination(file.destination).refusal(err)
 			} else {
 				err = fmt.Errorf("%s: %w", file.label, err)
 			}
@@ -271,7 +271,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			fmt.Fprintf(output, "  [ ok ] %s: no source — skipping\n", file.label)
 			continue
 		}
-		item := runtime.integrationItem("apply configs", file.integration)
+		item := runtime.integrationItem("apply configs", file.integration).atDestination(file.destination)
 		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
 			if runtime.applyingIntegrations {
 				return item.refusal(err)
@@ -554,7 +554,7 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 }
 
 func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
-	return shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
+	return shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
 }
 
 func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
@@ -579,10 +579,11 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 			if domain.SafeName(runtime.Yard.YardName) {
 				repair = "yard -Y " + runtime.Yard.YardName + " config apply"
 			}
-			return integrationOwnershipError{
-				message: "unowned invalid configuration preserved. Move it aside first, then run " + repair,
-				retry:   "run " + preserve,
+			if runtime.PersistFinishOnly {
+				repair = "yard migrate"
 			}
+			return integrationOwnershipFailure("unowned invalid configuration preserved. Move it aside first, then run "+repair,
+				"run "+preserve, false)
 		}
 		return errors.New("structured configuration apply failed")
 	}
@@ -688,8 +689,8 @@ func firstError(primary, fallback error) error {
 }
 
 type artifactPackageSource struct {
-	asset config.MaterializedAsset
-	owner string
+	asset        config.MaterializedAsset
+	owner, input string
 }
 
 // Artifact declarations enter the existing captured-source grammar. This adds no
@@ -713,12 +714,12 @@ func (runtime Runtime) artifactPackageSources() ([]artifactPackageSource, error)
 			path, err := definition.ArtifactSourcePath(source)
 			if err != nil {
 				if runtime.applyingIntegrations {
-					err = runtime.integrationItem("apply configs", definition.Name).refusal(err)
+					err = runtime.integrationItem("apply configs", definition.Name).forSource(source).refusal(err)
 				}
 				refusals = append(refusals, err)
 				continue
 			}
-			sources = append(sources, artifactPackageSource{config.MaterializedAsset{Source: path}, definition.Name})
+			sources = append(sources, artifactPackageSource{config.MaterializedAsset{Source: path}, definition.Name, source})
 		}
 	}
 	return sources, domain.CollectRefusals(refusals...)

@@ -1084,29 +1084,36 @@ func (err materializedConfigActivationError) appendTo(refusals []error) []error 
 }
 
 func (err materializedConfigActivationError) ActivationDiagnostic() (string, string) {
+	finding := err.ActivationFinding()
+	return finding.Message, finding.Recovery
+}
+
+func (err materializedConfigActivationError) ActivationFinding() domain.Finding {
 	if errors.Is(err.cause, domain.ErrIncusAccessDenied) {
-		return domain.IncusAccessDiagnostic(err.yard)
+		message, recovery := domain.IncusAccessDiagnostic(err.yard)
+		return domain.Finding{Message: message, Recovery: recovery}
 	}
 	retry := fmt.Sprintf("run yard -Y %s %s", err.yard, err.command)
-	// Preserve more specific, explicitly public diagnostics from the adapter.
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if errors.As(err.cause, &diagnostic) {
-		message, next := diagnostic.ActivationDiagnostic()
-		if next != "" {
-			retry = next
+	if finding, ok := domain.PublicFinding(err.cause); ok {
+		if finding.Recovery != "" {
+			retry = finding.Recovery
 		}
 		if err.action == "reconcile" && err.phase == "integrations" {
 			retry = integrationActivationRetry(err.cause, retry)
 		}
-		if message != "" {
-			return message, retry
+		if finding.Message != "" {
+			finding.Recovery = retry
+			if finding.Input != "" {
+				finding.Input = err.yard + ":" + finding.Input
+			}
+			return finding
 		}
 	}
 	if source, ok := config.SourceDiagnostic(err.configHome, err.cause); ok {
 		if choice := config.SourceAliasRepairRetry(err.configHome, err.yard, err.cause); choice != "" {
 			retry = choice
 		}
-		return fmt.Sprintf("yard %s, %s %s: %s", err.yard, err.phase, err.action, source), retry
+		return domain.Finding{Message: fmt.Sprintf("yard %s, %s %s: %s", err.yard, err.phase, err.action, source), Recovery: retry}
 	}
 	// Only validated yard names and fixed phase/command text cross this boundary.
 	message := fmt.Sprintf("yard %s: cannot %s %s for release activation", err.yard, err.action, err.phase)
@@ -1114,7 +1121,7 @@ func (err materializedConfigActivationError) ActivationDiagnostic() (string, str
 	if errors.As(err.cause, &integration) {
 		message += integration.diagnostic()
 	}
-	return message, retry
+	return domain.Finding{Message: message, Recovery: retry}
 }
 
 // Attribute a failed activation without exposing plans, sources or native errors.
@@ -1131,13 +1138,12 @@ type integrationComparison struct {
 
 func (failure *integrationActivationFailure) Error() string { return failure.cause.Error() }
 func (failure *integrationActivationFailure) Unwrap() error { return failure.cause }
-func (failure *integrationActivationFailure) ActivationDiagnostic() (string, string) {
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if errors.As(failure.cause, &diagnostic) {
-		message, retry := diagnostic.ActivationDiagnostic()
-		return message, integrationActivationRetry(failure.cause, retry)
+func (failure *integrationActivationFailure) ActivationFinding() domain.Finding {
+	if finding, ok := domain.PublicFinding(failure.cause); ok {
+		finding.Recovery = integrationActivationRetry(failure.cause, finding.Recovery)
+		return finding
 	}
-	return "", "run yard migrate"
+	return domain.Finding{Recovery: "run yard migrate"}
 }
 
 func integrationActivationRetry(cause error, retry string) string {
@@ -1617,10 +1623,9 @@ func activationPendingFindings(err error) ([]releasetransition.V2PendingConfigur
 		if !typed.ActivationPendingConfiguration() {
 			return nil, false
 		}
-		var diagnostic interface{ ActivationDiagnostic() (string, string) }
 		finding := releasetransition.V2PendingConfiguration{Message: "pending configuration awaits yard init"}
-		if errors.As(err, &diagnostic) {
-			finding.Message, finding.Retry = diagnostic.ActivationDiagnostic()
+		if diagnostic, ok := domain.PublicFinding(err); ok {
+			finding.Message, finding.Retry = diagnostic.Message, diagnostic.Recovery
 		}
 		return []releasetransition.V2PendingConfiguration{finding}, true
 	}
@@ -1656,33 +1661,38 @@ func (refusals *activationRefusals) Unwrap() []error { return refusals.causes }
 // many were omitted and the status views that report them in full.
 func (refusals *activationRefusals) ActivationDiagnostic() (string, string) {
 	const limit, firstBudget = 512, 160
-	messages := make([]string, 0, len(refusals.causes))
-	actions := make([]string, 0, len(refusals.causes))
+	findings := make([]domain.Finding, 0, len(refusals.causes))
+	var joined strings.Builder
 	for _, cause := range refusals.causes {
-		message, action := "release activation cannot be observed safely", "run yard update --check"
-		var diagnostic interface{ ActivationDiagnostic() (string, string) }
-		if errors.As(cause, &diagnostic) {
-			message, action = diagnostic.ActivationDiagnostic()
+		finding, ok := domain.PublicFinding(cause)
+		if !ok {
+			finding = domain.Finding{Message: "release activation cannot be observed safely", Recovery: "run yard update --check"}
 		}
-		messages = append(messages, message)
-		actions = append(actions, action)
+		findings = append(findings, finding)
+		if joined.Len() != 0 {
+			joined.WriteString("; ")
+		}
+		joined.WriteString(finding.Message)
 	}
-	retry := actions[0]
-	if joined := strings.Join(messages, "; "); len(joined) <= limit {
-		return joined, retry
+	retry := findings[0].Recovery
+	if joined.Len() <= limit {
+		return joined.String(), retry
 	}
-	omitted := len(messages) - 1
+	omitted := len(findings) - 1
 	const separator = "; first: "
 	// The first refusal keeps at least firstBudget characters; status views take
 	// only the remaining space and an oversized first retry is left to the action.
-	head := fmt.Sprintf("%d release activation refusals, %d omitted; complete detail: %s", len(messages), omitted, retry)
+	head := fmt.Sprintf("%d release activation refusals, %d omitted; complete detail: %s", len(findings), omitted, retry)
 	if len(head)+len(separator)+firstBudget > limit {
-		head = fmt.Sprintf("%d release activation refusals, %d omitted", len(messages), omitted)
+		head = fmt.Sprintf("%d release activation refusals, %d omitted", len(findings), omitted)
 	} else {
-		for index, action := range actions[1:] {
-			if slices.Contains(actions[:index+1], action) {
+		actions := map[string]bool{retry: true}
+		for index, finding := range findings[1:] {
+			action := finding.Recovery
+			if actions[action] {
 				continue
 			}
+			actions[action] = true
 			rest := fmt.Sprintf(", and %d more", omitted-index)
 			if len(head)+len(", ")+len(action)+len(rest)+len(separator)+firstBudget > limit {
 				head += rest
@@ -1692,7 +1702,7 @@ func (refusals *activationRefusals) ActivationDiagnostic() (string, string) {
 		}
 	}
 	prefix := head + separator
-	first := messages[0]
+	first := findings[0].Message
 	if budget := limit - len(prefix); len(first) > budget {
 		end := budget - len("...")
 		for end > 0 && !utf8.RuneStart(first[end]) {

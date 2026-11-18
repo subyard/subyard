@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -30,7 +31,7 @@ type PersistMapping struct {
 }
 
 type persistEntry struct {
-	owner         string   // declared mapping owner, independent of the plan binding
+	item          integrationWorkItem
 	Integration   string   `json:"integration"`
 	Source        string   `json:"source"`
 	Target        string   `json:"target"`
@@ -80,10 +81,10 @@ func (observation persistObservation) changedIntegration() string {
 		if len(entry.Ops) == 0 {
 			continue
 		}
-		if entry.owner == "" || id != "" && id != entry.owner {
+		if entry.item.Owner == "" || id != "" && id != entry.item.Owner {
 			return ""
 		}
-		id = entry.owner
+		id = entry.item.Owner
 	}
 	return id
 }
@@ -131,7 +132,7 @@ func (observation persistObservation) projection() map[string]string {
 	return result
 }
 
-func (observation persistObservation) facts(item integrationWorkItem) []integrationFact {
+func (observation persistObservation) facts() []integrationFact {
 	var facts []integrationFact
 	for _, entry := range observation.Entries {
 		if len(entry.Ops) == 0 {
@@ -139,14 +140,7 @@ func (observation persistObservation) facts(item integrationWorkItem) []integrat
 		}
 		desired, _ := json.Marshal(persistStep{entry.Ops, entry.Source, entry.Target, entry.Selected, entry.Existing, entry.ExistingCount})
 		observed, _ := json.Marshal(entry)
-		var scope integrationWorkItem
-		if entry.Persist != "deferred" {
-			scope = item.withOwner(entry.owner)
-			if scope.owner != "" {
-				scope = scope.atDestination(entry.Source)
-			}
-		}
-		facts = append(facts, integrationFact{item: scope, Key: "persist:" + strings.Join(entry.Ops, "+") + ":" + entry.Source,
+		facts = append(facts, integrationFact{item: entry.item, Key: "persist:" + strings.Join(entry.Ops, "+") + ":" + entry.Source,
 			Desired: string(desired), Observed: string(observed)})
 	}
 	return facts
@@ -255,7 +249,10 @@ func (runtime Runtime) runPersist(ctx context.Context, mode string, mappings []P
 		return result.Stdout, nil
 	}
 	if refusal := ownershipRefusal("persist transfer evidence is unavailable; data was preserved", result, err); !IntegrationOwnershipConflict(refusal) {
-		return nil, item.refusal(refusal)
+		if item.Input != "" {
+			return nil, item.failure(refusal, ": "+refusal.Error())
+		}
+		return nil, refusal
 	}
 	return nil, runtime.persistRefusal(result.Stderr, mappings, item)
 }
@@ -287,7 +284,9 @@ func (runtime Runtime) observePersist(ctx context.Context, entries []integration
 		owners[mapping.Source] = mapping.Integration
 	}
 	for i, entry := range observation.Entries {
-		observation.Entries[i].owner = owners[entry.Source]
+		if owner, declared := owners[entry.Source]; declared && entry.Persist != "deferred" {
+			observation.Entries[i].item = item.withOwner(owner).atDestination(entry.Source)
+		}
 		delete(owners, entry.Source)
 	}
 	if err != nil {
@@ -323,7 +322,7 @@ func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationAr
 		return item.refusal(errors.New("invalid persist transfer result"))
 	}
 	if runtime.Stderr != nil {
-		for _, line := range persistOutcomeLines(applied.Results) {
+		for _, line := range persistOutcomeLines(applied.Results, mappings) {
 			fmt.Fprintln(runtime.Stderr, line)
 		}
 	}
@@ -331,19 +330,19 @@ func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationAr
 }
 
 // persistOutcomeLines states, bounded, what a transfer left behind.
-func persistOutcomeLines(results []persistOutcome) []string {
+func persistOutcomeLines(results []persistOutcome, mappings []PersistMapping) []string {
 	var lines []string
 	for _, result := range results {
-		if count := len(result.NotTransferred); count != 0 {
-			listed := result.NotTransferred[:min(count, 20)]
-			line := fmt.Sprintf("persist %s: %d entries not transferred (the target already had them): %s", result.Source, count, strings.Join(listed, ", "))
-			if count > len(listed) {
-				line += fmt.Sprintf(" and %d more", count-len(listed))
-			}
-			lines = append(lines, line)
+		index := slices.IndexFunc(mappings, func(mapping PersistMapping) bool { return mapping.Source == result.Source })
+		if index < 0 {
+			continue
 		}
-		for _, path := range result.Retained {
-			lines = append(lines, "persist "+result.Source+": retained "+path+"; see yard integration status")
+		source := mappings[index].Source
+		if count := len(result.NotTransferred); count != 0 {
+			lines = append(lines, fmt.Sprintf("persist %q: %d entries not transferred because the target already had them", source, count))
+		}
+		if count := len(result.Retained); count != 0 {
+			lines = append(lines, fmt.Sprintf("persist %q: %d backup or stage paths retained; see yard integration status", source, count))
 		}
 	}
 	return lines
@@ -383,25 +382,6 @@ func (runtime Runtime) PersistRetainedLines(retained []PersistRetained) []string
 	return lines
 }
 
-// persistPlanChanged refuses a transfer that differs from the confirmed plan.
-type persistPlanChanged struct{ yard string }
-
-func (err persistPlanChanged) Error() string {
-	message, retry := err.ActivationDiagnostic()
-	return fmt.Sprintf("%v: %s. Next, on the owner host: %s", domain.ErrPlanStale, message, retry)
-}
-
-func (err persistPlanChanged) ActivationDiagnostic() (string, string) {
-	message := "persist transfer state changed after the init plan was confirmed; nothing was transferred"
-	if !domain.SafeName(err.yard) || len(err.yard) > 63 {
-		return message, "yard init"
-	}
-	return fmt.Sprintf("persist transfer state in yard %s changed after the init plan was confirmed; nothing was transferred", err.yard),
-		shellquote.Command([]string{"yard", "-Y", err.yard, "init"})
-}
-func (persistPlanChanged) Unwrap() error                         { return domain.ErrPlanStale }
-func (persistPlanChanged) PendingIntegrationConfiguration() bool { return true }
-
 // checkApprovedPersist binds execution to the confirmed persist plan: S and T
 // identities, operations and the disclosed existing entries are all in the
 // fingerprint. A fresh observation without work needs no binding.
@@ -409,7 +389,17 @@ func (runtime Runtime) checkApprovedPersist(fresh persistObservation) error {
 	if runtime.ApprovedPersist == nil || !fresh.changed() || fresh.Fingerprint == *runtime.ApprovedPersist {
 		return nil
 	}
-	return persistPlanChanged{runtime.Yard.YardName}
+	item := runtime.integrationItem("apply persist approval", fresh.changedIntegration())
+	message, recovery := "persist transfer state changed after the init plan was confirmed; nothing was transferred", "yard init"
+	if item.yard != "" {
+		message = fmt.Sprintf("persist transfer state in yard %s changed after the init plan was confirmed; nothing was transferred", item.yard)
+		recovery = shellquote.Command([]string{"yard", "-Y", item.yard, "init"})
+	}
+	if item.Owner != "" {
+		message = item.label() + ": " + message
+	}
+	item.Message, item.Recovery = message, recovery
+	return integrationFailure{Finding: item.Finding, cause: domain.ErrPlanStale, pending: true}
 }
 
 // PersistFingerprint is the persist observation an operator confirms with this plan.
@@ -427,79 +417,133 @@ type persistRefused struct {
 
 func (err persistRefused) Unwrap() error { return err.error }
 
+// persistConflictMapping resolves evidence against the request, even when the
+// guest returned no entries. Only declared paths enter the public diagnostic.
+func persistConflictMapping(mappings []PersistMapping, owner, path string) (PersistMapping, string) {
+	var matched PersistMapping
+	var matchedPath string
+	for _, mapping := range mappings {
+		if owner != "" && mapping.Integration != owner {
+			continue
+		}
+		for _, root := range []string{mapping.Source, mapping.Target} {
+			if path == root || strings.HasPrefix(path, root+"/") || path == mapping.Source+".subyard-transfer.json" && root == mapping.Source {
+				if len(root) > len(matchedPath) {
+					matched, matchedPath = mapping, root
+				}
+			}
+		}
+	}
+	if matchedPath != "" {
+		return matched, matchedPath
+	}
+	var matches int
+	for _, mapping := range mappings {
+		if owner == "" || owner == mapping.Integration {
+			if matches != 0 && matched.Integration != mapping.Integration {
+				return PersistMapping{}, ""
+			}
+			matched = mapping
+			matches++
+		}
+	}
+	if matches > 1 {
+		return PersistMapping{Integration: matched.Integration}, ""
+	}
+	return matched, ""
+}
+
 // Only typed persist conflicts are pending configuration.
 func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, item integrationWorkItem) error {
 	var report struct {
-		Conflicts []struct{ Reason, Path, Detail, Integration string } `json:"conflicts"`
-		Entries   []persistEntry                                       `json:"entries"`
-		Error     string                                               `json:"error"`
+		Conflicts []struct{ Reason, Path, Integration string } `json:"conflicts"`
+		Entries   []persistEntry                               `json:"entries"`
+		Error     string                                       `json:"error"`
 	}
 	yard, instance, project := runtime.Yard.YardName, runtime.Yard.YardInstanceName, runtime.Yard.IncusProject
 	status := shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 	if json.Unmarshal(stderr, &report) != nil || len(report.Conflicts) == 0 {
-		// Only the exception class is reported, never paths or data.
 		message := "persist transfer program failed; data was preserved"
-		if report.Error != "" && len(report.Error) <= 63 && domain.SafeID(report.Error) {
-			message = fmt.Sprintf("persist transfer program failed (%s); data was preserved", report.Error)
+		if report.Error == "MemoryError" {
+			message = "persist transfer program failed (MemoryError); data was preserved"
 		}
-		return item.refusal(errors.New(message))
+		if item.Input == "" {
+			return errors.New(message)
+		}
+		return item.failure(errors.New(message), ": "+message)
 	}
-	inspect := func(path string) string {
-		return shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "namei", "-l", "--", path})
+	inspect := func(command ...string) string {
+		return shellquote.RecoveryCommand(append([]string{"incus", "exec", instance, "--project", project, "--"}, command...))
 	}
 	causes := []error{}
 	for _, conflict := range report.Conflicts {
+		mapping, path := persistConflictMapping(mappings, conflict.Integration, conflict.Path)
 		finding := item
-		if slices.ContainsFunc(mappings, func(mapping PersistMapping) bool { return mapping.Integration == conflict.Integration }) {
-			finding = runtime.integrationItem(item.step, conflict.Integration)
+		if mapping.Integration != "" {
+			finding = finding.withOwner(mapping.Integration)
 		}
-		message, retry := "", shellquote.Command([]string{"yard", "-Y", yard, "init"})
+		if path == "" && conflict.Path != "" {
+			path = mapping.Source
+		}
+		message, retry := "", status
 		switch conflict.Reason {
 		case "persist adoption pending":
-			message = fmt.Sprintf("persist adoption of %q in yard %s is pending: release activation does not start data transfers; data was preserved", conflict.Path, yard)
-		case "unsafe persist data", "unsupported persist entry", "unsafe persist target", "session mount is unavailable":
-			message = fmt.Sprintf("persist transfer in yard %s: %s at %q; data was preserved. Inspect it, then repeat yard init", yard, conflict.Reason, conflict.Path)
-			if conflict.Detail != "" {
-				message = fmt.Sprintf("persist transfer in yard %s: %s at %q (%s); data was preserved. Inspect it, then repeat yard init", yard, conflict.Reason, conflict.Path, conflict.Detail)
+			message = "persist adoption is pending: release activation does not start data transfers"
+			retry = shellquote.Command([]string{"yard", "-Y", yard, "init"})
+		case "unsafe persist data", "unsupported persist entry", "unsafe persist target", "session mount is unavailable",
+			"persist filesystem error", "persist target entry refused", "persist target filesystem":
+			message = conflict.Reason
+			if path != "" {
+				retry = inspect("namei", "-l", "--", path)
 			}
-			retry = inspect(conflict.Path)
-		case "persist target entry refused":
-			message = fmt.Sprintf("persist transfer in yard %s: the target refused %q (%s); nothing was exchanged and the source directory is unchanged. Fix the target permissions or free space, then repeat yard init", yard, conflict.Path, conflict.Detail)
-			retry = inspect(conflict.Path[:strings.LastIndex(conflict.Path, "/")+1])
 		case "persist mount boundary":
-			message = fmt.Sprintf("persist transfer in yard %s: %q is a mount point inside persist data; nothing below it was copied or removed. Unmount or move it, then repeat", yard, conflict.Path)
-			retry = shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "findmnt", "--target", conflict.Path})
-		case "persist filesystem error":
-			message = fmt.Sprintf("persist transfer in yard %s: filesystem error at %q (%s); data was preserved. Inspect it, then repeat yard init", yard, conflict.Path, conflict.Detail)
-			retry = inspect(conflict.Path)
-			if conflict.Path == "" {
-				retry = status
+			message = "a mount point lies inside persist data"
+			if path != "" {
+				retry = inspect("findmnt", "--submounts", "--target", path)
 			}
-		case "persist paths overlap", "persist target filesystem":
-			message = fmt.Sprintf("persist mapping in yard %s: %s for %q and %q; data was preserved. Correct the persist mapping, then repeat yard init", yard, conflict.Reason, conflict.Path, conflict.Detail)
-			retry = shellquote.Command([]string{"yard", "-Y", yard, "config", "show", "AGENT_" + conflict.Integration + "_PERSIST"})
+		case "persist paths overlap":
+			message = conflict.Reason
+			if finding.Owner != "" {
+				retry = shellquote.Command([]string{"yard", "-Y", yard, "config", "show", "AGENT_" + finding.Owner + "_PERSIST"})
+			}
 		case "persist space unavailable":
-			message = fmt.Sprintf("persist transfer in yard %s: not enough space for %q (%s); data was preserved. Free space on the sessions volume, then repeat yard init", yard, conflict.Path, conflict.Detail)
-			retry = shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "df", "-h", "--", conflict.Path[:strings.LastIndex(conflict.Path, "/")+1]})
+			message = "not enough space on the sessions volume"
+			if path != "" {
+				retry = inspect("df", "-h", "--", filepath.Dir(path))
+			}
 		case "atomic exchange unsupported", "no-replace rename unsupported":
-			message = fmt.Sprintf("persist transfer for %s in yard %s: %s (%s); nothing was copied. Deselect the integration to keep its data in place", conflict.Integration, yard, conflict.Reason, conflict.Detail)
-			retry = shellquote.Command([]string{"yard", "-Y", yard, "integration", "disable", conflict.Integration})
+			message = conflict.Reason + "; nothing was copied"
+			if finding.Owner != "" && !runtime.PersistFinishOnly {
+				retry = shellquote.Command([]string{"yard", "-Y", yard, "integration", "disable", finding.Owner})
+			}
 		case "persist transfer identity unavailable":
-			message = fmt.Sprintf("persist transfer in yard %s: the transfer descriptor %q is not a complete Subyard record; data was preserved. Inspect it and move it aside, then repeat yard init", yard, conflict.Path)
-			retry = inspect(conflict.Path)
+			message = "the transfer descriptor is not a complete Subyard record"
+			if mapping.Source != "" {
+				path = mapping.Source + ".subyard-transfer.json"
+				retry = inspect("namei", "-l", "--", path)
+			}
 		case "integration plan is stale":
-			causes = append(causes, finding.refusal(fmt.Errorf("%w: persist transfer state changed after planning", domain.ErrPlanStale)))
+			causes = append(causes, finding.atDestination(path).failure(domain.ErrPlanStale, ": persist transfer state changed after planning"))
 			continue
 		default:
-			message = "unrecognized persist transfer refusal; data was preserved. Inspect the pending transfers, then repeat"
-			retry = status
+			message = "unrecognized persist transfer refusal"
 		}
-		causes = append(causes, finding.refusal(integrationOwnershipError{pendingConfiguration: true, message: message, retry: retry}))
+		if path != "" {
+			message += fmt.Sprintf(" at %q", path)
+		}
+		finding.Message = message + "; data was preserved"
+		if finding.Input != "" {
+			finding.Message = finding.label() + ": " + finding.Message
+		}
+		finding.Input += ": " + conflict.Reason + " " + conflict.Path
+		finding.Recovery = retry
+		causes = append(causes, integrationFailure{Finding: finding.Finding, ownership: true, pending: true})
 	}
+	cause := domain.CollectRefusals(causes...)
 	if len(report.Entries) != 0 {
-		return persistRefused{domain.CollectRefusals(causes...), report.Entries}
+		return persistRefused{cause, report.Entries}
 	}
-	return domain.CollectRefusals(causes...)
+	return cause
 }
 
 // InspectPersistTransfers discloses pending transfers for an already running

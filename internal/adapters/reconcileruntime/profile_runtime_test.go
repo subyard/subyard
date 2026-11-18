@@ -820,7 +820,7 @@ func TestProfilePublicRefusalIsExplicitBoundedAndNotRawStderr(t *testing.T) {
 		{`{"message":"` + strings.Repeat("x", 481) + `","retry":"run private"}`, false},
 	} {
 		stderr := []byte("PRIVATE ordinary stderr\nsubyard-profile-observation-refusal-v1 " + test.payload + "\n")
-		failure := runtime.profileRuntimeObservationFailure(definition, errors.New("PRIVATE"), stderr).(*integrationLifecycleError)
+		failure := runtime.profileRuntimeObservationFailure(definition, errors.New("PRIVATE"), stderr).(*integrationFailure)
 		message, retry := failure.ActivationDiagnostic()
 		if strings.Contains(message+retry, "PRIVATE") || strings.Contains(message, "invalid unmanaged configuration") != test.valid {
 			t.Fatal(message, retry)

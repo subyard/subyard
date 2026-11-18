@@ -77,11 +77,11 @@ func profileFailureDetail(definition profile.Definition, stderr []byte) string {
 }
 
 func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Definition, cause error, stderr []byte) error {
-	failure := runtime.profileObservationFailure(definition.Runtime.ActivationID, "", cause).(*integrationLifecycleError)
-	failure.message += profileFailureDetail(definition, stderr)
-	failure.retry = "run yard config paths"
+	failure := runtime.profileObservationFailure(definition.Runtime.ActivationID, "", cause).(*integrationFailure)
+	failure.Message += profileFailureDetail(definition, stderr)
+	failure.Recovery = "run yard config paths"
 	if domain.SafeName(definition.Name) && domain.SafeName(runtime.Yard.YardName) {
-		failure.retry = "run yard -Y " + runtime.Yard.YardName + " config paths"
+		failure.Recovery = "run yard -Y " + runtime.Yard.YardName + " config paths"
 	}
 	// Only explicitly public owner refusals may add a path and executable step.
 	// Exception text and ordinary stderr remain private.
@@ -112,7 +112,7 @@ func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Defin
 		}
 		var tail any
 		if decoder.Decode(&record) == nil && decoder.Decode(&tail) == io.EOF && valid(record.Message) && valid(record.Retry) && strings.HasPrefix(record.Retry, "run ") {
-			failure.message, failure.retry = record.Message, record.Retry
+			failure.Message, failure.Recovery = record.Message, record.Retry
 		}
 	}
 	return failure
@@ -147,7 +147,7 @@ func (runtime Runtime) profileObservationFailure(owner, reason string, cause err
 	if len(yard) > 63 || !domain.SafeName(yard) {
 		yard = "unknown"
 	}
-	return &integrationLifecycleError{cause: cause, message: fmt.Sprintf("yard %s: profile %s observation failed (%s)", yard, owner, reason), retry: "run yard update --check"}
+	return &integrationFailure{cause: cause, Finding: domain.Finding{Message: fmt.Sprintf("yard %s: profile %s observation failed (%s)", yard, owner, reason), Recovery: "run yard update --check"}}
 }
 
 func (runtime Runtime) ObserveProfileRuntimes(ctx context.Context) (map[string]ports.RuntimeObservation, error) {
@@ -670,5 +670,5 @@ func PendingProfileRuntimeError(yard, id string, observation ports.RuntimeObserv
 	if domain.SafeName(yard) {
 		retry = "run yard -Y " + yard + " config apply"
 	}
-	return &integrationLifecycleError{message: message, retry: retry}
+	return &integrationFailure{Finding: domain.Finding{Message: message, Recovery: retry}}
 }
