@@ -142,6 +142,11 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 			scope = "owner host networking for " + target + " bridge " + yard.IncusBridge
 			desired = fmt.Sprintf("host NetworkManager and route safety; bridge DHCP/DNS and forwarding rules if UFW is active; native policy lock access for operator UID %d; with NetworkManager active, the first init or a migration without evidence needs one host reboot; a soft reboot does not count (the host boot ID must change)", os.Getuid())
 		}
+		if native.Stage.ID == ports.ReconcileStageProvision {
+			if disclosure := execution.bubblewrapProvisionConsequence(); disclosure != "" {
+				desired += ". " + disclosure
+			}
+		}
 		consequence := desired
 		if detach := execution.extrasDetach; native.Stage.ID == ports.ReconcileStageExtras && detach.Unverified {
 			consequence = fmt.Sprintf("yard %s: detaches any attached yx-* device that no selected profile requests (the instance is not readable now)", yard.YardName)
@@ -194,6 +199,16 @@ func (execution *initExecution) operationSteps() []domain.OperationStep {
 		"restore and commit the configured desired yard power state", execution.hooksOnly(), !execution.hooksOnly())
 	steps = append(steps, execution.profileProvision.operationSteps(execution.loaded)...)
 	return steps
+}
+
+func (execution *initExecution) bubblewrapProvisionConsequence() string {
+	if execution.loaded.Environment["BWRAP_APPARMOR"] == "off" {
+		return "If Subyard owns Bubblewrap AppArmor policy in this yard, disable its boot loader and unload the two verified profiles"
+	}
+	if execution.loaded.Context.YardKind == domain.YardContainer {
+		return "If the developer sandbox needs AppArmor policy or the yard's managed policy needs repair, load the two distribution Bubblewrap AppArmor profiles and enable their boot loader as needed"
+	}
+	return ""
 }
 
 func (execution *initExecution) stateBinding() string {

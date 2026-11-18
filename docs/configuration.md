@@ -627,9 +627,11 @@ The boot loader verifies the two profiles against the Subyard ownership record i
 registration and missing live profiles. Administrator overrides, unrecorded policy installations,
 and missing or changed owned files require operator review.
 
-To opt out, set `BWRAP_APPARMOR=off` in the yard's settings and run `yard setup` for that yard.
-Setup disables the boot loader and unloads the two verified profiles, attachment first. Stop any
-affected sandbox jobs before opting out.
+To opt out, remove `codex` from the yard's `CODING_TOOL_INTEGRATIONS`, set `BWRAP_APPARMOR=off`
+in the yard's settings, and run `yard setup` for that yard. Setup refuses this setting before
+changing the yard if Codex is still selected. With the opt-out approved, setup disables the boot
+loader and unloads the two verified profiles, attachment first. Stop any affected sandbox jobs
+before opting out.
 
 #### Codex version drift
 

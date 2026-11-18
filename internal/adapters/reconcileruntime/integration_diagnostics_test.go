@@ -17,6 +17,32 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestIntegrationPlanReportsStructuredConfigAndBubblewrapRefusals(t *testing.T) {
+	runtime, definition, _, _ := integrationSourceFixture(t)
+	path := filepath.Join(definition.Root, "config.toml")
+	testkit.WriteFile(t, path, []byte("managed = 'new'\n"), 0644)
+	definition.Artifacts = []profile.IntegrationArtifact{{ID: "config", Kind: "config", Source: "config.toml", Destination: ".sample/config.toml", Format: "toml"}}
+	runtime.Integrations = []profile.IntegrationDefinition{definition}
+	runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_CONFIG=" + path}
+	runtime.Yard = domain.Context{YardName: "sample", IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}
+	incus := runningIncus(4)
+	incus.ExecSteps[1].Result.Stdout = []byte(`{"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	incus.ExecSteps[2].Result = ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: invalid current TOML\n")}
+	incus.ExecSteps[2].Err = &ports.GuestExitError{Code: 2}
+	const policyRefusal = "Bubblewrap AppArmor: the owned policy directory is missing or changed"
+	incus.ExecSteps[3].Result = ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(policyRefusal + "\n")}
+	runtime.Incus, runtime.Executor = incus, incus
+	_, err := runtime.IntegrationPlan(context.Background())
+	var refusals *domain.Refusals
+	if !errors.As(err, &refusals) {
+		t.Fatalf("expected both independent refusals: %v", err)
+	}
+	causes := refusals.Unwrap()
+	if len(causes) != 2 || causes[0].Error() != policyRefusal || !strings.Contains(causes[1].Error(), "/home/dev/.sample/config.toml") {
+		t.Fatalf("expected both refusals in stable order: %v", err)
+	}
+}
+
 func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testing.T) {
 	for _, kind := range []string{"completed", "exit-only", "edited", "invalid-json", "invalid-toml", "transport", "unknown-stderr"} {
 		t.Run(kind, func(t *testing.T) {

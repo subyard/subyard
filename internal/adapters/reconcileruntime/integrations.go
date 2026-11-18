@@ -767,11 +767,20 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase string) (IntegrationPlan, integrationObservation, error) {
 	return runtime.observeIntegrationsWithSourceReader(ctx, phase, runtime.SourceReader)
 }
-func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (IntegrationPlan, integrationObservation, error) {
+func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (_ IntegrationPlan, _ integrationObservation, refusal error) {
 	instance, err := runtime.integrationPrecondition(ctx)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
 	}
+	// Service ownership is independent of the structured documents and integration
+	// inventory. A refusal in any of those checks must still report service refusals.
+	servicesObserved := false
+	defer func() {
+		if refusal != nil && !servicesObserved {
+			_, _, serviceErr := runtime.integrationServices(ctx, "observe")
+			refusal = domain.CollectRefusals(refusal, serviceErr)
+		}
+	}()
 	entries, err := runtime.integrationArtifactsWithSourceReader(phase, reader)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
@@ -919,6 +928,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	plan.Changed = plan.Changed || !ready
 	fingerprints = append(fingerprints, fmt.Sprint(ready))
 	plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	servicesObserved = true
 	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
 	if err != nil {
 		return plan, observed, err

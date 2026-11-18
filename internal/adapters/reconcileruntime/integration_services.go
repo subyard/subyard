@@ -15,10 +15,24 @@ import (
 //go:embed bwrap_policy.sh
 var bubblewrapPolicy string
 
+// ValidateBubblewrapSelection rejects a selection incompatible with Codex's
+// provisioning check before setup can change the yard.
+func ValidateBubblewrapSelection(setting, selection string) error {
+	if setting == "off" && slices.Contains(strings.Fields(selection), "codex") {
+		return errors.New("BWRAP_APPARMOR=off requires deselecting Codex; keep BWRAP_APPARMOR=on or remove codex from CODING_TOOL_INTEGRATIONS")
+	}
+	return nil
+}
+
 // Integration services are reconciled even when the yard selects no coding tools.
 func (runtime Runtime) integrationServices(ctx context.Context, mode string) (string, bool, error) {
 	setting := runtime.environmentDefault("BWRAP_APPARMOR", "on")
-	selected := strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))
+	selection := runtime.environmentValue("CODING_TOOL_INTEGRATIONS")
+	settingsErr := ValidateBubblewrapSelection(setting, selection)
+	if mode == "apply" && settingsErr != nil {
+		return "", false, settingsErr
+	}
+	selected := strings.Fields(selection)
 	claude, bubblewrap := "0", "0"
 	if slices.Contains(selected, "claude") {
 		claude = "1"
@@ -71,7 +85,7 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 			yard = "default"
 		}
 		retry := "run " + shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
-		var refusals []error
+		refusals := []error{settingsErr}
 		for _, line := range strings.Split(string(result.Stderr), "\n") {
 			if line == "subyard-integration-conflict:ccusage" {
 				refusals = append(refusals, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry})
@@ -80,10 +94,13 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 				refusals = append(refusals, errors.New(line))
 			}
 		}
-		if refusal := domain.CollectRefusals(refusals...); refusal != nil {
-			return "", false, refusal
+		if len(refusals) == 1 {
+			refusals = append(refusals, errors.New("integration service or utility ownership is unknown or changed"))
 		}
-		return "", false, errors.New("integration service or utility ownership is unknown or changed")
+		return "", false, domain.CollectRefusals(refusals...)
+	}
+	if settingsErr != nil {
+		return "", false, settingsErr
 	}
 	output := string(result.Stdout)
 	lines := strings.Split(output, "\n")

@@ -1306,6 +1306,28 @@ func (fixture *initPlatformFixture) Teardown(context.Context) error {
 	return nil
 }
 
+func TestNativeInitRefusesBubblewrapOptOutWithCodexBeforeChanges(t *testing.T) {
+	root, environment, _ := nativeFixture(t)
+	dir := filepath.Join(root, "state", "yards", "default")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeCLIFile(t, filepath.Join(dir, "config.env"), "CODING_TOOL_INTEGRATIONS=codex\nBWRAP_APPARMOR=off\n", 0600)
+	platform := newInitPlatformFixture()
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
+		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, InitPlatform: platform})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "BWRAP_APPARMOR=off requires deselecting Codex") {
+		t.Fatalf("unexpected opt-out result: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if len(platform.preflightFresh) != 0 || len(platform.applied) != 0 || platform.projectHooks != 0 {
+		t.Fatalf("incompatible setup reached reconciliation: %+v", platform)
+	}
+}
+
 func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	platform := newInitPlatformFixture()

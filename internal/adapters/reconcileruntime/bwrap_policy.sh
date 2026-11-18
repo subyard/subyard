@@ -129,8 +129,12 @@ check_record() {
 check_loader() {
   [ -f "$policy/load" ] && root_path "$policy/load" 755 || return 1
   [ "$mode" = boot ] || cmp -s "$policy/load" <(printf '%s' "$BASH_EXECUTION_STRING") ||
-    # Keep the loader shipped before resumable ownership verifiable for repair and opt-out.
-    [ "$(sha256sum < "$policy/load")" = '67af6296afdba16d3511438b80184e5deefe1dfc9bab2d632def0b268a3b1e30  -' ]
+    # Keep previously shipped loaders verifiable for repair and opt-out.
+    case "$(sha256sum < "$policy/load")" in
+      '67af6296afdba16d3511438b80184e5deefe1dfc9bab2d632def0b268a3b1e30  -' | \
+      '3a3bfed285a93bd59669f466e65c4ff61802a519820783a45502be7072d77d72  -') return 0 ;;
+      *) return 1 ;;
+    esac
 }
 
 check_files() {
@@ -449,6 +453,7 @@ chmod 0644 "$receipt_stage"
 publish_path "$receipt_stage" "$pending"
 publish_path "$stage/policy" "$policy"
 publish_path "$pending" "$marker"
+record=$marker
 check_files
 check_refusals
 load_missing
