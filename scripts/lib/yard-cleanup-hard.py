@@ -10,6 +10,15 @@ import sys
 
 
 def inspect(request, srv='/srv'):
+    try:
+        return _inspect_once(request, srv)
+    except FileNotFoundError:
+        # A listed entry vanished. Rebuild the witness from a fresh walk.
+        pass
+    return _inspect_once(request, srv)
+
+
+def _inspect_once(request, srv):
     srv = os.fspath(srv)
     projects = request['projects']
     workspace = srv + '/workspaces'
@@ -41,6 +50,9 @@ def inspect(request, srv='/srv'):
         resolved = snapshot_path(path)
         return any(resolved == root or resolved.startswith(root + '/') for root in roots) and not any(resolved == bind or resolved.startswith(bind + '/') for bind in binds)
 
+    def walk_error(error):
+        raise error
+
     records = {}
     hardlinks = {}
     project_paths = {}
@@ -49,7 +61,7 @@ def inspect(request, srv='/srv'):
         if os.path.islink(root) or not os.path.isdir(root):
             raise ValueError('project wrapper must be a real directory')
         paths = [root]
-        for directory, dirs, files in os.walk(root, followlinks=False):
+        for directory, dirs, files in os.walk(root, onerror=walk_error, followlinks=False):
             dirs.sort()
             for name in sorted(dirs + files):
                 path = directory + '/' + name
