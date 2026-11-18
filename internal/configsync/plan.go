@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,16 +128,18 @@ func BuildPlan(options Options) (Plan, error) {
 				continue
 			}
 			delete(previousFiles, file.Path)
-			live, err := observeLocalInput(options.ConfigHome, file.Path)
+			target := filepath.Join(options.ConfigHome, filepath.FromSlash(file.Path))
+			snapshot, err := config.ReadPersistentFileSnapshot(options.ConfigHome, target)
 			if err != nil {
 				return Plan{}, err
 			}
-			if !live.Exists {
+			if !snapshot.Exists {
 				if err := guardDeletedGitYard(options, source, previous, file.Path); err != nil {
 					return Plan{}, err
 				}
 				continue
 			}
+			live := liveFile{Digest: digestBytes(snapshot.Content), Mode: snapshot.Identity.Mode & 0o777, content: snapshot.Content}
 			if live.Digest != file.Digest || live.Mode != file.Mode {
 				plan.Changes = append(plan.Changes, Change{
 					Path: file.Path, Action: "retain-local", BeforeDigest: live.Digest,
@@ -150,7 +153,7 @@ func BuildPlan(options Options) (Plan, error) {
 			}
 			plan.Changes = append(plan.Changes, Change{
 				Path: file.Path, Action: "delete", BeforeDigest: live.Digest, Mode: live.Mode,
-				Applications: applicationsForPath(file.Path),
+				Applications: applicationsWithPrevious(catalog, file.Path, live.content, nil),
 				Detail:       "move unchanged legacy setting to Git fallback storage",
 			})
 		}
@@ -167,6 +170,7 @@ func BuildPlan(options Options) (Plan, error) {
 		if err != nil {
 			return Plan{}, err
 		}
+		applications := applicationsWithPrevious(catalog, path, live.content, desired.Applications)
 		managed, wasManaged := previousFiles[path]
 		if !wasManaged {
 			if exists && !options.Adopt {
@@ -184,7 +188,7 @@ func BuildPlan(options Options) (Plan, error) {
 			plan.Changes = append(plan.Changes, Change{
 				Path: path, Action: action, BeforeDigest: live.Digest,
 				AfterDigest: desired.Digest, Mode: desired.Mode,
-				Applications: desired.Applications, Detail: detail,
+				Applications: applications, Detail: detail,
 			})
 			continue
 		}
@@ -194,7 +198,7 @@ func BuildPlan(options Options) (Plan, error) {
 			plan.Changes = append(plan.Changes, Change{
 				Path: path, Action: "restore-missing", BeforeDigest: managed.Digest,
 				AfterDigest: desired.Digest, Mode: desired.Mode,
-				Applications: desired.Applications,
+				Applications: applications,
 			})
 		case live.Digest != managed.Digest || live.Mode != managed.Mode:
 			action := "restore-drift"
@@ -206,13 +210,13 @@ func BuildPlan(options Options) (Plan, error) {
 			plan.Changes = append(plan.Changes, Change{
 				Path: path, Action: action, BeforeDigest: live.Digest,
 				AfterDigest: desired.Digest, Mode: desired.Mode,
-				Applications: desired.Applications, Detail: detail,
+				Applications: applications, Detail: detail,
 			})
 		case live.Digest != desired.Digest || live.Mode != desired.Mode:
 			plan.Changes = append(plan.Changes, Change{
 				Path: path, Action: "update", BeforeDigest: live.Digest,
 				AfterDigest: desired.Digest, Mode: desired.Mode,
-				Applications: desired.Applications,
+				Applications: applications,
 			})
 		}
 	}
@@ -241,22 +245,22 @@ func BuildPlan(options Options) (Plan, error) {
 		if err := guardDeletedGitYard(options, source, previous, path); err != nil {
 			return Plan{}, err
 		}
+		applications := applicationsWithPrevious(catalog, path, live.content, nil)
+		action, detail := "delete", ""
 		if !exists {
-			plan.Changes = append(plan.Changes, Change{
-				Path: path, Action: "record-deleted", BeforeDigest: managed.Digest,
-				Mode: managed.Mode, Applications: applicationsForPath(path),
-				Detail: "managed live path is already missing",
-			})
-			continue
-		}
-		if live.Digest != managed.Digest || live.Mode != managed.Mode {
+			action, detail = "record-deleted", "managed live path is already missing"
+			if len(applications) == 0 {
+				// The missing managed scalar may still have an applied guest effect.
+				applications = []config.SettingApplication{config.SettingYardInit}
+			}
+		} else if live.Digest != managed.Digest || live.Mode != managed.Mode {
 			return Plan{}, fmt.Errorf(
 				"managed target %s has local drift and cannot be deleted", path,
 			)
 		}
 		plan.Changes = append(plan.Changes, Change{
-			Path: path, Action: "delete", BeforeDigest: live.Digest,
-			Mode: managed.Mode, Applications: applicationsForPath(path),
+			Path: path, Action: action, BeforeDigest: managed.Digest, Mode: managed.Mode,
+			Applications: applications, Detail: detail,
 		})
 	}
 	sort.Slice(plan.Changes, func(left, right int) bool {
@@ -470,8 +474,9 @@ func validateInventory(contexts []config.Loaded) error {
 }
 
 type liveFile struct {
-	Digest string
-	Mode   uint32
+	Digest  string
+	Mode    uint32
+	content []byte
 }
 
 func inspectLiveFile(configHome, path string, local ...bool) (liveFile, bool, error) {
@@ -520,7 +525,7 @@ func inspectLiveFile(configHome, path string, local ...bool) (liveFile, bool, er
 	if int64(len(content)) > maximum {
 		return liveFile{}, false, fmt.Errorf("live target exceeds size limit: %s", path)
 	}
-	return liveFile{Digest: digestBytes(content), Mode: uint32(info.Mode().Perm())}, true, nil
+	return liveFile{Digest: digestBytes(content), Mode: uint32(info.Mode().Perm()), content: content}, true, nil
 }
 
 func readManifest(configHome string) (Manifest, error) {
@@ -605,12 +610,23 @@ func deletedYardDefinition(path string) (string, bool) {
 	return "", false
 }
 
-func applicationsForPath(path string) []config.SettingApplication {
-	if strings.Contains(filepath.ToSlash(path), "/overrides/") ||
-		strings.HasPrefix(filepath.ToSlash(path), "overrides/") {
+func applicationsWithPrevious(catalog config.Catalog, path string, live []byte, desired []config.SettingApplication) []config.SettingApplication {
+	if asset, _ := managedSettingRole(localSettingsPath(path)); asset != "" {
+		if len(desired) != 0 {
+			return desired
+		}
 		return []config.SettingApplication{config.SettingConfigApply}
 	}
-	return []config.SettingApplication{config.SettingYardInit}
+	names, err := config.AssignedSettingNames(path, func(string) ([]byte, error) { return live, nil })
+	var applications []config.SettingApplication
+	if err != nil {
+		applications = []config.SettingApplication{config.SettingYardInit}
+	} else {
+		applications = settingApplications(catalog, names)
+	}
+	applications = append(applications, desired...)
+	slices.Sort(applications)
+	return slices.Compact(applications)
 }
 
 func planDigest(plan Plan) string {

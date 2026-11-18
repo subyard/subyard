@@ -26,7 +26,12 @@ func normalizeGitSSHCache(source *sourceSnapshot) ([]string, error) {
 		if bytes.Equal(content, candidate.Content) {
 			continue
 		}
+		names, err := config.AssignedSettingNames(candidate.SourcePath, func(string) ([]byte, error) { return content, nil })
+		if err != nil {
+			return nil, err
+		}
 		candidate.Content, candidate.Digest = content, digestBytes(content)
+		candidate.Applications = settingApplications(source.catalog, names)
 		source.files[path] = candidate
 		changed = append(changed, path)
 	}
