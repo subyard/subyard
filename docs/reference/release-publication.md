@@ -58,7 +58,8 @@ leaves those checks open. It downloads the exact preparation run/attempt artifac
 hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to
 350 minutes). Repeating preparation discovers the durable request instead of dispatching another.
 `accept` waits up to six hours for that request, then collects only completed successful jobs before
-running the remaining requested checks. `--ci-wait-seconds 0` collects the current snapshot immediately;
+running the remaining requested checks, including hosted prerequisites of queued retries.
+`--ci-wait-seconds 0` collects the current snapshot immediately;
 a nonzero override is bounded to 86400 seconds. Failed, running, missing or refused results stay open
 for local execution when requested. After a local check fails, `accept` neither waits nor runs hosted
 checks locally: it counts finished hosted results and leaves the rest pending for a later `accept`. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
@@ -477,11 +478,13 @@ Live acceptance uses slots 1–4 by default. Use `--slot-count 2` for slots 1 an
 `--slots slot-2,slot-4` to select those exact slots. A bare `--slots 2` is rejected. The collector
 runs one lane at a time per slot and polls broker status while work waits. After a lane exits,
 the broker's current state guides dispatch to that slot. The exact-slot acquire decides admission.
-Memory and disk refusals requeue the lane with backoff so a smaller lane can run.
-`SUBYARD_E2E_CAPACITY_WAIT` bounds the wait without progress (default `120m`).
-The collector reports pending lanes and slot states if the wait expires. It finishes normally if
-fewer lanes remain than there are slots. Hosted single jobs keep the client's bounded capacity wait
-and retry once after a typed memory or disk capacity refusal.
+Memory, disk and exact-slot refusals requeue the lane with per-slot backoff so other lanes can run.
+`SUBYARD_E2E_CAPACITY_WAIT` (default `120m`) starts at each lane's first refusal. At expiry the lane
+gets a final acquire attempt on each selected slot observed available since its last regular refusal.
+Each final attempt uses the same exact-slot admission check and spends that slot's final attempt for
+the lane. The collector also uses this duration to limit an idle wait for the first available slot.
+Hosted single jobs keep the client's bounded capacity wait and retry once after a typed memory or
+disk capacity refusal.
 
 One collector owns the receipt. Requested VM checks remain required after interruption or exclusion.
 
@@ -548,7 +551,7 @@ periodic-only lane as an unknown check. Available approved slots take the next q
 after their controller exits. A typed capacity or exact-slot refusal puts the lane back in the
 queue with a backoff for that slot. Other lanes and selected slots can proceed. Each attempt
 retains its log and immutable record. The collector reports slots that stay unavailable while work
-waits and leaves the candidate incomplete if the queue stalls. A terminal lane failure leaves
+waits and reports each lane that exhausts its attempts. A terminal lane failure leaves
 its result in the receipt and the slot can take another check.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per

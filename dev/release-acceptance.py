@@ -1415,86 +1415,142 @@ def broker_slots(env):
     return {}
 
 
+class BlockedLane:
+    def __init__(self, deadline):
+        self.deadline = deadline
+        self.retries = {}
+        self.available = set()
+        self.final_attempts = set()
+        self.refusal = None
+
+    def refuse(self, slot, reason, now, wait_seconds):
+        _, previous_delay = self.retries.get(slot, (0, SLOT_POLL_SECONDS / 2))
+        delay = min(2 * previous_delay, wait_seconds + SLOT_POLL_SECONDS)
+        retry_at = now + delay
+        if now < self.deadline:
+            retry_at = min(retry_at, self.deadline)
+        self.retries[slot] = retry_at, delay
+        self.refusal = slot, reason
+
+
 def dispatch_live(work, slots, env, begin, execute_lane, record, refresh, wait_seconds,
                   eligible=lambda name: True):
-    active, retries, last_refusals = {}, {}, {}
-    last_states = {}
-    deadline = time.monotonic() + wait_seconds
+    active, blocked = {}, {}
+    exhausted, reported = set(), set()
+    last_states, last_available = {}, {}
+    idle_deadline = None
+
+    def execute_timed(name, slot):
+        result = execute_lane(name, slot)
+        return result, time.monotonic()
+
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
         try:
             while True:
                 for future in [future for future in active if future.done()]:
-                    name, slot = active.pop(future)
-                    result = record(name, future.result())
-                    now = time.monotonic()
-                    deadline = now + wait_seconds
+                    name, slot, final = active.pop(future)
+                    result, finished_at = future.result()
+                    result = record(name, result)
                     reason = result.get("reason", "")
                     if (result["status"] == "blocked" and result.get("termination") == "exit"
                         and reason.startswith(("capacity_", "slot_"))):
-                        _, previous_delay = retries.get((name, slot), (0, SLOT_POLL_SECONDS / 2))
-                        # Back off beyond the idle window if admission keeps refusing.
-                        delay = min(2 * previous_delay, wait_seconds + SLOT_POLL_SECONDS)
-                        retries[name, slot] = (now + delay, delay)
-                        last_refusals[name] = (slot, reason)
-                        if reason.startswith("slot_"):
-                            last_states[slot] = reason.removeprefix("slot_")
+                        if name not in blocked:
+                            blocked[name] = BlockedLane(finished_at + wait_seconds)
+                        lane = blocked[name]
+                        lane.refuse(slot, reason, finished_at, wait_seconds)
+                        if not final:
+                            # A status poll can finish before the collector records a refusal.
+                            lane.available = {other for other, observed_at in last_available.items()
+                                              if observed_at > finished_at}
                         work.append(name)
                     else:
-                        last_refusals.pop(name, None)
-                        for other in slots:
-                            retries.pop((name, other), None)
+                        blocked.pop(name, None)
                 if not STOP.is_set():
-                    running = {name for name, _ in active.values()}
-                    work.extend(name for name in refresh() if name not in work and name not in running)
+                    running = {name for name, _, _ in active.values()}
+                    work.extend(name for name in refresh()
+                                if name not in exhausted and name not in work and name not in running)
                     work[:] = [name for name in work if eligible(name)]
-                    busy = {slot for _, slot in active.values()}
+                    busy = {slot for _, slot, _ in active.values()}
                     idle = [slot for slot in slots if slot not in busy]
                     if work and idle:
+                        if not active and idle_deadline is None:
+                            idle_deadline = time.monotonic() + wait_seconds
                         states = broker_slots(env)
                         now = time.monotonic()
-                        if any(states.get(slot) == "available" and last_states.get(slot) not in (None, "available")
-                               for slot in idle):
-                            deadline = now + wait_seconds
-                        last_states.update({slot: states[slot] for slot in idle if slot in states})
+                        available = {slot for slot in slots if states.get(slot) == "available"}
+                        last_available.update(dict.fromkeys(available, now))
+                        for lane in blocked.values():
+                            lane.available.update(available)
                         for slot in idle:
-                            if states.get(slot) != "available":
-                                continue
+                            state = states.get(slot)
+                            if state and state != "available" and state == last_states.get(slot) and slot not in reported:
+                                print(f"WAIT broker slot-{slot}={state}", flush=True)
+                                reported.add(slot)
+                        last_states.update({slot: states[slot] for slot in idle if slot in states})
+                        for slot in sorted(idle, key=lambda slot: slot not in available):
                             for name in work:
-                                retry = retries.get((name, slot))
-                                if retry and (now < retry[0] or (not active and retry[0] > deadline)):
+                                lane = blocked.get(name)
+                                retry_at = lane.retries.get(slot, (None, 0))[0] if lane else None
+                                # A retry scheduled at the deadline can still run there.
+                                # Afterward, a slot only gets one final attempt, even if it
+                                # keeps reporting available after refusing.
+                                final = bool(lane and now >= lane.deadline and
+                                             (lane.final_attempts or retry_at != lane.deadline or slot not in available))
+                                if retry_at is not None and now < retry_at:
+                                    continue
+                                if final and (slot not in lane.available or slot in lane.final_attempts):
+                                    continue
+                                if not final and slot not in available:
                                     continue
                                 if begin(name):
                                     work.remove(name)
-                                    active[pool.submit(execute_lane, name, slot)] = (name, slot)
-                                    deadline = time.monotonic() + wait_seconds
+                                    if final:
+                                        lane.final_attempts.add(slot)
+                                    active[pool.submit(execute_timed, name, slot)] = (name, slot, final)
                                     break
+                        if not active:
+                            expired = []
+                            for name in work:
+                                lane = blocked.get(name)
+                                if lane:
+                                    if now < lane.deadline or lane.available - lane.final_attempts:
+                                        continue
+                                elif now < idle_deadline:
+                                    continue
+                                expired.append(name)
+                            if expired:
+                                current = ", ".join(
+                                    f"slot-{slot}={states[slot]}" if slot in states else
+                                    f"slot-{slot}=unknown (last known: {last_states[slot]})" if slot in last_states else
+                                    f"slot-{slot}=unknown" for slot in slots)
+                                reasons = []
+                                for name in expired:
+                                    if name in blocked:
+                                        slot, reason = blocked.pop(name).refusal
+                                        reasons.append(f"{name}@slot-{slot}={reason}")
+                                    else:
+                                        reasons.append(name)
+                                print(f"INCOMPLETE: no broker progress for {', '.join(reasons)} ({current})", flush=True)
+                                exhausted.update(expired)
+                                work[:] = [name for name in work if name not in exhausted]
                 if active:
+                    idle_deadline = None
                     wait(active, timeout=SLOT_POLL_SECONDS, return_when=FIRST_COMPLETED)
                 elif STOP.is_set() or not work:
-                    return False
+                    return bool(exhausted)
                 else:
-                    now = time.monotonic()
-                    if now >= deadline:
-                        current = ", ".join(
-                            f"slot-{slot}={states[slot]}" if slot in states else
-                            f"slot-{slot}=unknown (last known: {last_states[slot]})" if slot in last_states else
-                            f"slot-{slot}=unknown" for slot in slots)
-                        reasons = []
-                        for name in work:
-                            if name in last_refusals:
-                                slot, reason = last_refusals[name]
-                                reasons.append(f"{name}@slot-{slot}={reason}")
-                            else:
-                                reasons.append(name)
-                        print(f"INCOMPLETE: no broker progress for {', '.join(reasons)} ({current})", flush=True)
-                        return True
-                    STOP.wait(min(SLOT_POLL_SECONDS, deadline - now))
+                    wakeups = [idle_deadline]
+                    for name in work:
+                        if (lane := blocked.get(name)):
+                            wakeups.append(lane.deadline)
+                            wakeups.extend(retry_at for retry_at, _ in lane.retries.values())
+                    STOP.wait(min([SLOT_POLL_SECONDS, *(when - now for when in wakeups if when > now)]))
         except Exception:
             # Running controllers still own their cleanup and their results.
             for sibling in as_completed(active):
-                name, _ = active[sibling]
+                name, _, _ = active[sibling]
                 with suppress(Exception):
-                    record(name, sibling.result())
+                    record(name, sibling.result()[0])
             raise
 
 
@@ -1624,9 +1680,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                     break
         # A targeted hosted fallback must honor results recorded by the first pass.
         # Fresh targeted jobs may leave unselected preflights pending.
-        waiting_live = live or pending_retries(output, receipt)
+        waiting_live = live or (pending_retries(output, receipt).keys() - excluded)
         stopped = [name for name in preflights
-                   if (local_ready and name in selected and receipt["checks"][name]["status"] != "passed")
+                   if (local_ready and (name in selected or (not only and waiting_live))
+                       and receipt["checks"][name]["status"] != "passed")
                    or (waiting_live and receipt["checks"][name]["status"] in ("failed", "blocked", "interrupted", "incomplete", "running"))]
         if stopped:
             for label, states in (("refused", ("failed", "blocked")), ("interrupted", ("interrupted",)),
@@ -1663,6 +1720,8 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                     and result.get("reason") in ("capacity_memory", "capacity_disk")):
                     attempt(live[0], slots[0])
         elif waiting_live:
+            if not slots:
+                raise ValueError("live checks require at least one slot")
             limit = re.fullmatch(r"([0-9]{1,6})([sm])", capacity_wait)
             if not limit:
                 raise ValueError("SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s")

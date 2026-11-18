@@ -2859,7 +2859,7 @@ class HostedChecks(unittest.TestCase):
              patch.object(m.a, "run_checks", side_effect=record("run")), \
              patch.object(m, "wait_ci_hosted", side_effect=record("wait")):
             m.accept_checks(self.github, self.directory, self.identity, [], [], False, [], 60)
-        self.assertEqual(calls, [("run", (), [])])
+        self.assertEqual(calls, [("run", ["profile:sample"], [])])
         # A failed local pass is reported without waiting for hosted jobs or running them locally.
         calls.clear()
         receipt = json.loads((self.output / "receipt.json").read_text())
@@ -2871,6 +2871,49 @@ class HostedChecks(unittest.TestCase):
              patch.object(m, "collect_ci", side_effect=record("collect")):
             self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 1)
         self.assertEqual([call[0] for call in calls], ["run", "collect"])
+
+    def test_targeted_accept_waits_for_hosted_split_required_by_retry(self):
+        owner, split, profile = "vm:p0-full", "vm:p0-power-systemd", "profile:github"
+        attempt = {"id": "a" * 32, "sha256": "b" * 64}
+        for queued in (True, False):
+            with self.subTest(queued=queued), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+                directory = Path(temporary)
+                output = directory / "acceptance"
+                output.mkdir(mode=0o700)
+                checks = {name: ["true"] for name in (owner, split, profile)}
+                receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                           "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                           "requirements": {owner: [split]}, "checks": {
+                               owner: {"status": "failed", "original_attempt": attempt},
+                               split: {"status": "pending"}, profile: {"status": "pending"}}}
+                m.a.save(output, receipt)
+                calls = []
+
+                def execute(name, *args):
+                    calls.append(name)
+                    if name == profile and not queued:
+                        m.a.request_retry(output, owner, attempt["id"])
+                    return {"status": "passed", "exit_code": 0}
+
+                def collect(*args):
+                    calls.append("collect")
+                    receipt["checks"][split] = {"status": "passed"}
+                    m.a.save(output, receipt)
+
+                with (patch.object(m, "hosted_open", return_value=[split]),
+                      patch.object(m, "wait_ci_hosted", side_effect=lambda *args: calls.append("wait")),
+                      patch.object(m, "collect_ci", side_effect=collect),
+                      patch.object(m.a, "load_bound", return_value=(output, receipt)),
+                      patch.object(m.a, "commands", return_value=checks),
+                      patch.object(m.a, "source_fingerprint", return_value="a" * 64),
+                      patch.object(m.a, "broker_slots", return_value={1: "available"}),
+                      patch.object(m.a, "completed_attempt", return_value=attempt),
+                      patch.object(m.a, "execute", side_effect=execute)):
+                    if queued:
+                        m.a.request_retry(output, owner, attempt["id"])
+                    self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], [profile], False, [], 60), 0)
+                self.assertEqual(calls, [profile, "wait", "collect", owner])
+                self.assertEqual(m.a.pending_retries(output, receipt), {})
 
     def test_wait_is_bounded_and_zero_override_collects_without_wait(self):
         with patch.object(m, "discover") as discover:

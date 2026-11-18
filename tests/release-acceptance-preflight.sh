@@ -63,7 +63,8 @@ class ProfilePreflightTests(unittest.TestCase):
             with self.subTest(command=command), self.assertRaisesRegex(ValueError, "preflight command"):
                 self.inventory({"sample": {"schema_version": 1, "preflight": command}})
 
-    def run_collector(self, outcomes, *, only=(), local_failure=False, local_pending=False, excluded=(), stop=False, live="profile:plain", with_vms=True):
+    def run_collector(self, outcomes, *, only=(), local_failure=False, local_pending=False, excluded=(), stop=False,
+                      live="profile:plain", with_vms=True, retry_during_verify=False):
         # Synthetic profile names and commands; no installed services or leases.
         checks = {"verify": ["true"], "profile-preflight:zeta": ["true"],
                   "profile-preflight:alpha": ["true"], live: ["true"]}
@@ -72,12 +73,16 @@ class ProfilePreflightTests(unittest.TestCase):
                    "checks": {name: {"status": "pending"} for name in checks}}
         if not with_vms:
             receipt["checks"][live] = m.OPTIONAL_VM_NOT_RUN.copy()
+        if retry_during_verify:
+            receipt["checks"][live] = {"status": "failed", "original_attempt": {"id": "a" * 32}}
         if only and not local_pending:
             receipt["checks"]["verify"] = {"status": "passed"}
         calls = []
         native_execute = m.execute
         def execute(name, command, root, output, env, slot=None):
             calls.append((name, slot))
+            if name == "verify" and retry_during_verify:
+                m.request_retry(output, live, "a" * 32)
             if name.startswith("profile-preflight:"):
                 self.assertEqual(env["SUBYARD_E2E_LOCAL_EVIDENCE"], str(self.root))
                 self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", env)
@@ -92,7 +97,8 @@ class ProfilePreflightTests(unittest.TestCase):
              patch.object(m, "execution_environment", return_value={}), \
              patch.object(m, "source_fingerprint", return_value="a" * 64), \
              patch.object(m, "execute", side_effect=execute), redirect_stdout(stdout):
-            code = m.run_checks(self.root, [1] if with_vms else [], only, False, exclude=excluded, with_vms=with_vms)
+            slots = [1] if with_vms or retry_during_verify else []
+            code = m.run_checks(self.root, slots, only, False, exclude=excluded, with_vms=with_vms)
         return code, calls, stdout.getvalue(), receipt
 
     def test_all_refusals_are_collected_in_stable_order_before_any_live_dispatch(self):
@@ -183,6 +189,14 @@ class ProfilePreflightTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be excluded"):
             self.run_collector({}, excluded=["profile-preflight:alpha"])
 
+    def test_retry_requested_during_verify_awaits_excluded_preflight(self):
+        code, calls, stdout, receipt = self.run_collector(
+            {}, excluded=["profile-preflight:alpha"], with_vms=False, retry_during_verify=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(calls, [("verify", None), ("profile-preflight:zeta", None)])
+        self.assertIn("INCOMPLETE: profile preflights not run: profile-preflight:alpha", stdout)
+        self.assertEqual(m.pending_retries(self.root, receipt), {"profile:plain": "a" * 32})
+
     def test_interruption_stops_preflights_and_live_dispatch(self):
         code, calls, stdout, _ = self.run_collector({}, stop=True)
         self.assertEqual(code, 1)
@@ -209,7 +223,7 @@ class ProfilePreflightTests(unittest.TestCase):
                  patch.object(m, "run_checks", side_effect=run_checks):
                 self.assertEqual(publication.accept_checks(None, directory, {}, [1], ["vm:p0-full"], False, [], 60), 0)
             # The hosted split result is awaited instead of rerun locally; an unrelated hosted check is not.
-            self.assertEqual(calls, [(["vm:p0-full"], ["vm:p0-split"]), (["vm:p0-split"], [])])
+            self.assertEqual(calls, [(["vm:p0-full"], ["vm:other", "vm:p0-split"]), (["vm:p0-split"], [])])
 
     def test_accept_only_full_failure_never_runs_pending_hosted_split_checks_locally(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -247,6 +261,7 @@ class ProfilePreflightTests(unittest.TestCase):
                 receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
                            "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                            "checks": {name: {"status": "pending"} for name in checks}}
+                m.save(output, receipt)
                 calls = []
                 def execute(name, *args, **kwargs):
                     calls.append(name)

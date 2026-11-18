@@ -1405,31 +1405,35 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
     """Run local checks while hosted jobs are still going; only then wait, count the hosted
     results and run the hosted checks that did not pass there."""
     output = directory / "acceptance"
-    # Only checks this invocation would run anyway; ordinary acceptance leaves optional VM checks not run.
-    hosted = hosted_open(directory, output) if wait_seconds and (with_vms or only) else []
-    if only:
-        # The selection also runs required checks, so their hosted results count here too.
-        receipt = json.loads((output / "receipt.json").read_text())
-        wanted = a.select_checks(receipt["checks"], only)
-        wanted |= a.selected_requirements(receipt, wanted)
-        hosted = [name for name in hosted if name in wanted]
-    if hosted:
-        with a.acceptance_lock(output):
+    with a.acceptance_lock(output):
+        hosted = hosted_open(directory, output) if wait_seconds else []
+        if hosted:
+            # Retries submitted during the local pass can select new hosted work.
             first = a.run_checks(output, slots, only, False, exclude=hosted, with_vms=with_vms, previous=previous)
-            failed = first and json.loads((output / "receipt.json").read_text()).get("result") == "failed"
-        if failed:
-            # Hosted jobs may still run: never duplicate them locally. Count those already finished;
-            # the rest stay pending for a later accept, and the receipt keeps the local failure.
-            print("CI-HOSTED-SKIP all: a local check failed; not waiting for hosted jobs or running them locally", flush=True)
-            with a.acceptance_lock(output):
+            receipt = json.loads((output / "receipt.json").read_text())
+            retries = a.pending_retries(output, receipt)
+            wanted = a.select_checks(receipt["checks"], only)
+            if with_vms and not only:
+                wanted.update(hosted)
+            wanted.update(retries)
+            wanted |= a.selected_requirements(receipt, wanted)
+            hosted = [name for name in hosted if name in wanted]
+            if not hosted:
+                return first
+            deferred = {name for name in retries
+                        if name in hosted or a.selected_requirements(receipt, {name}).intersection(hosted)}
+            # A deferred retry retains its failed attempt until it can run.
+            failed = (first and receipt.get("result") == "failed"
+                      and (not deferred or any(entry["status"] == "failed" and name not in deferred
+                                               for name, entry in receipt["checks"].items())))
+            if failed:
+                print("CI-HOSTED-SKIP all: a local check failed; not waiting for hosted jobs or running them locally", flush=True)
                 collect_ci(github, directory, identity)
-            return first
-        with a.acceptance_lock(output):
+                return first
             wait_ci_hosted(github, directory, identity, wait_seconds)
             collect_ci(github, directory, identity)
-        # Local failures of the first pass are not repeated; the receipt result covers every check.
-        only = hosted
-    with a.acceptance_lock(output):
+            # Local failures of the first pass are not repeated; the receipt result covers every check.
+            only = hosted
         return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous)
 
 

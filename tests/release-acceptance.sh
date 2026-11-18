@@ -246,27 +246,33 @@ class TestAcceptance(unittest.TestCase):
         self.assertEqual([slot for name, slot in calls if name == "retry"], [4, 4])
 
     def test_recovered_slot_keeps_collector_alive_until_retry(self):
-        for recovery in (6, 8):
-            with self.subTest(recovery=recovery):
-                self.check_recovered_slot_retry(recovery)
+        for limit, recovery, refusals, expected in (
+            (8, 6, 3, [0, 2, 6, 8]),
+            (8, 8, 3, [0, 2, 6, 8]),
+            (1, 0, 1, [0, 1]),
+            (8, 14, 4, [0, 2, 6, 8, 24]),
+        ):
+            with self.subTest(limit=limit, recovery=recovery, refusals=refusals):
+                self.check_recovered_slot_retry(limit, recovery, refusals, expected)
 
-    def check_recovered_slot_retry(self, recovery):
+    def check_recovered_slot_retry(self, limit, recovery, refusals, expected):
         now = 0
         calls = []
 
         def status(env):
-            # The third exact acquire races with a drain. The slot recovers
-            # before the retry's eight-second backoff ends.
-            return {2: "draining" if now < recovery and len(calls) == 3 else "available"}
+            return {2: "draining" if now < recovery and len(calls) == refusals else "available"}
 
         def advance(seconds):
             nonlocal now
             now += seconds
-            self.assertLessEqual(now, 14)
+            self.assertLessEqual(now, expected[-1])
 
         def execute(name, slot):
+            nonlocal now
             calls.append(now)
-            if len(calls) <= 3:
+            if len(calls) <= refusals:
+                if refusals == len(calls) == 4:
+                    now = 14
                 return {"status": "blocked", "termination": "exit", "reason": "slot_draining"}
             return {"status": "passed"}
 
@@ -275,9 +281,67 @@ class TestAcceptance(unittest.TestCase):
               patch.object(m, "SLOT_POLL_SECONDS", 2),
               patch.object(m.STOP, "wait", side_effect=advance)):
             clock.monotonic.side_effect = lambda: now
-            self.assertFalse(m.dispatch_live(["lane"], (2,), {}, lambda _: True, execute,
-                                             lambda name, result: result, list, 8))
-        self.assertEqual(calls, [0, 2, 6, 14])
+            self.assertFalse(m.dispatch_live(["p0-release-smoke"], (2,), {}, lambda _: True, execute,
+                                             lambda name, result: result, list, limit))
+        self.assertEqual(calls, expected)
+
+    def test_permanent_refusals_exhaust_fixed_budget_with_flapping_or_stable_slots(self):
+        for flapping in (True, False):
+            with self.subTest(flapping=flapping):
+                now = 0
+                slots = (2,) if flapping else (2, 4)
+                probes, calls = [], []
+
+                def status(env):
+                    probes.append(now)
+                    if flapping and len(probes) % 2 == 0:
+                        return {2: "held"}
+                    return dict.fromkeys(slots, "available")
+
+                def advance(seconds):
+                    nonlocal now
+                    now += seconds
+                    self.assertLessEqual(now, 24, "refusals renewed the budget")
+
+                def execute(name, slot):
+                    calls.append((slot, now))
+                    if not flapping:
+                        advance(2)
+                    return {"status": "blocked", "termination": "exit", "reason": "capacity_memory"}
+
+                self.slots.side_effect = status
+                with (patch.object(m, "time", wraps=time) as clock,
+                      patch.object(m, "SLOT_POLL_SECONDS", 2),
+                      patch.object(m.STOP, "wait", side_effect=advance),
+                      redirect_stdout(io.StringIO()) as printed):
+                    clock.monotonic.side_effect = lambda: now
+                    self.assertTrue(m.dispatch_live(["lane"], slots, {}, lambda _: True, execute,
+                                                    lambda name, result: result, list, 8))
+                self.assertEqual({slot for slot, _ in calls}, set(slots))
+                self.assertEqual(printed.getvalue().count("INCOMPLETE:"), 1)
+
+    def test_final_attempts_keep_observed_slots_across_missing_polls(self):
+        now = 0
+        calls = []
+
+        def advance(seconds):
+            nonlocal now
+            now += seconds
+            self.assertLessEqual(now, 2)
+
+        def execute(name, slot):
+            calls.append(slot)
+            return {"status": "blocked", "termination": "exit", "reason": "capacity_memory"}
+
+        self.slots.side_effect = lambda env: {2: "available", 4: "available"} if len(calls) < 2 else {}
+        with (patch.object(m, "time", wraps=time) as clock,
+              patch.object(m, "SLOT_POLL_SECONDS", 2),
+              patch.object(m.STOP, "wait", side_effect=advance),
+              redirect_stdout(io.StringIO())):
+            clock.monotonic.side_effect = lambda: now
+            self.assertTrue(m.dispatch_live(["lane"], (2, 4), {}, lambda _: True, execute,
+                                            lambda name, result: result, list, 0))
+        self.assertEqual(calls, [2, 4, 2])
 
     def test_expiry_reports_current_unknown_and_latest_refusal_once(self):
         now = 0
@@ -304,7 +368,7 @@ class TestAcceptance(unittest.TestCase):
         self.assertEqual(printed.getvalue(), "INCOMPLETE: no broker progress for lane@slot-4=capacity_disk "
                          "(slot-2=unknown (last known: available), slot-4=unknown (last known: available))\n")
 
-    def test_successful_sibling_completion_renews_wait_for_capacity_retry(self):
+    def test_successful_sibling_frees_slot_for_final_capacity_attempt(self):
         calls = []
         now = 0
 
@@ -357,8 +421,11 @@ class TestAcceptance(unittest.TestCase):
                                               lambda name, result: result, list, 0.01)
                 self.assertEqual(calls[:2], expected)
                 self.assertEqual(expired, len(slots) == 1)
+                if expired:
+                    self.assertGreaterEqual(len(calls), 3)
+                    self.assertEqual(calls[-1], ("large", 2))
 
-    def test_held_slot_does_not_report_expiry_during_sibling_progress(self):
+    def test_held_slot_reports_wait_without_expiring_sibling_work(self):
         self.slots.return_value = {2: "available", 4: "held"}
         calls = []
         def execute(name, slot):
@@ -369,7 +436,7 @@ class TestAcceptance(unittest.TestCase):
             self.assertFalse(m.dispatch_live(["one", "two", "three"], (2, 4), {},
                 lambda _: True, execute, lambda name, result: result, list, 0.03))
         self.assertEqual(calls, [(name, 2) for name in ("one", "two", "three")])
-        self.assertEqual(printed.getvalue(), "")
+        self.assertEqual(printed.getvalue(), "WAIT broker slot-4=held\n")
 
     def test_shellcheck_command_preserves_historical_receipts(self):
         self.assertEqual(m.commands(root, "test", {})["shellcheck"], ["bash", "dev/shellcheck.sh"])
