@@ -651,7 +651,7 @@ actual_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
   || die "checksum mismatch for Codex $VERSION ($ARCH)"
 tar -tvzf "$archive" > "$tmp/members" 2>/dev/null || die "Codex archive is invalid"
 tar -tzf "$archive" > "$tmp/names" 2>/dev/null || die "Codex archive is invalid"
-if cut -c1 "$tmp/members" | grep -q '[^-d]' || grep -Eq '^/|(^|/)\.\.(/|$)' "$tmp/names"; then
+if grep -Eq '^[^-d]' "$tmp/members" || grep -Eq '^/|(^|/)\.\.(/|$)' "$tmp/names"; then
   die "Codex archive has a member that is not a contained file or directory"
 fi
 

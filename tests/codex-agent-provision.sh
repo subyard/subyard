@@ -83,10 +83,12 @@ PY
 symlink_tar() { python3 - "$1" <<'PY'
 import sys, tarfile
 with tarfile.open(sys.argv[1], 'w:gz') as archive:
-    info = tarfile.TarInfo('bin')
+    info = tarfile.TarInfo('unexpected-link')
     info.type = tarfile.SYMTYPE
     info.linkname = '/etc'
     archive.addfile(info)
+    for i in range(16384):
+        archive.addfile(tarfile.TarInfo(f'benign-{i:05d}'))
 PY
 }
 no_binary_tar() { tar -czf "$1" -C "$tmp/work" --files-from /dev/null; }
@@ -334,6 +336,10 @@ for bad in "8.8.7 $sha_traversal" "8.8.6 $sha_symlink" "8.8.5 $sha_no_binary"; d
   set_latest "${bad% *}" "${bad#* }" "$sha_147_arm64"
   if run_hook amd64 "$root" >/dev/null 2>"$tmp/archive.err"; then
     fail "unsafe archive unexpectedly succeeded: ${bad% *}"
+  fi
+  if [ "${bad% *}" = 8.8.6 ]; then
+    grep -Fq 'Codex archive has a member that is not a contained file or directory' "$tmp/archive.err" \
+      || fail "long archive was not rejected by the member check"
   fi
   [ "$(realpath "$link")" = "$runtime" ] || fail "unsafe archive moved the command: ${bad% *}"
   [ ! -e "$release_root/${bad% *}" ] || fail "unsafe archive was published: ${bad% *}"
