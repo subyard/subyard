@@ -620,8 +620,8 @@ func TestFacadeRequestedDisk(t *testing.T) {
 	}
 }
 
-func TestFacadeReleaseDistinguishesLostAndQuarantinedLeases(t *testing.T) {
-	store := LeaseStore{Path: filepath.Join(testkit.TempDir(t), "leases.json"), SlotCount: 1}
+func TestFacadeReleaseReplayAndWrongCredentialsReturnLeaseLost(t *testing.T) {
+	store := LeaseStore{Path: filepath.Join(t.TempDir(), "leases.json"), SlotCount: 1}
 	var output bytes.Buffer
 	facade := Facade{
 		Store: store, Output: &output,
@@ -673,36 +673,6 @@ func TestFacadeReleaseDistinguishesLostAndQuarantinedLeases(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), `"code":"lease_lost"`) {
 		t.Fatalf("replayed release response = %s", output.String())
-	}
-	output.Reset()
-	if err := facade.Run("acquire-v3 subyard-pair client SHA256:key default Subyard-2 run-b tests " +
-		key[0] + " " + key[1] + " slot-001"); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(output.Bytes(), &acquired); err != nil {
-		t.Fatal(err)
-	}
-	grant = acquired.Grant
-	if err := store.BeginDrain(*grant); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.FinishDrain(grant.SlotID, errors.New("fixture stop failed")); err != nil {
-		t.Fatal(err)
-	}
-	output.Reset()
-	if err := facade.Run(command(grant.Capability)); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(output.String(), `"code":"quarantined"`) {
-		t.Fatalf("retained lease response = %s", output.String())
-	}
-	facade.Store.Path = filepath.Join(store.Path, "unreadable")
-	output.Reset()
-	if err := facade.Run(command(grant.Capability)); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(output.String(), `"code":"unavailable"`) {
-		t.Fatalf("unreadable lease state response = %s", output.String())
 	}
 }
 

@@ -527,7 +527,7 @@ python3 dev/release-acceptance.py retry --output DIR --check CHECK --attempt ATT
 
 A running local collector picks up the request when the lane is eligible to run. A continuation
 also selects requested retries alongside its explicit checks. The request survives a restart
-and requires fresh execution before publication. Repeating the same request is safe.
+so a later collector can pick it up. Repeating the same request is safe.
 With the collector idle, `run --output DIR --only CHECK --rerun` also reruns the selected lane.
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
@@ -597,11 +597,10 @@ projects only this bounded grammar into phase events, without copying fixture ou
 cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
-Exit 124 is a timeout and known signal exits retain the signal number. A final typed refusal is
-retryable when any earlier sequential leases have clean release evidence. An unexplained exit 4
-remains a failed check with its native exit. Fresh and saved passes both require a clean outcome
-for every logged acquisition. A retryable refusal is an environment failure. Other causes stay
-unknown unless the fixture emits the bounded
+Exit 124 is a timeout and known signal exits retain the signal number. A final typed capacity
+refusal can requeue the lane when earlier leases have ended with a witnessed clean release.
+An unexplained exit 4 remains a failed check with its native exit. A typed capacity refusal is
+an environment failure. Other causes stay unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
 budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub

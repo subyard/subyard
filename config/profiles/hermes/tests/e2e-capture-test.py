@@ -96,9 +96,7 @@ if args[2:] == ['profile', 'status', 'github', '--json']:
     print(json.dumps(dict(runtime='ready' if len((root/'calls').read_text().splitlines()) > 1 else 'unavailable', configured=False, ready=False)))
     raise SystemExit()
 assert args[2:] == ['migrate', '--check', '--json']
-(root/'called').touch()
 print('PRIVATE_SENTINEL', file=sys.stderr)
-if os.environ['READINESS_MODE'] == 'timeout' and not os.environ.get('WAIT_ONLY'): time.sleep(2)
 print((root/'response').read_text())
 raise SystemExit({'native-failure': 17, 'oversize': 23}.get(os.environ['READINESS_MODE'], 0))
 ''')
@@ -106,9 +104,15 @@ raise SystemExit({'native-failure': 17, 'oversize': 23}.get(os.environ['READINES
         bound = root/'timeout'
         bound.write_text('''#!/bin/sh
 test "$1 $2" = '--signal=TERM --kill-after=2' || exit 99
-case "$3" in 1|2|3|4|5|15) ;; *) exit 99 ;; esac
+deadline=$3
+case "$deadline" in 1|2|3|4|5|15) ;; *) exit 99 ;; esac
 shift 3
-if [ "$READINESS_MODE" = timeout ]; then
+if [ "$deadline" = 15 ]; then
+    test "$*" = "${0%/*}/yard -Y fixture migrate --check --json" || exit 99
+    : > "${0%/*}/inspection-attempted" || exit 99
+    # Model a deadline that expires before the engine can start.
+    [ "$READINESS_MODE" != repeat-timeout ] || exit 124
+elif [ "$READINESS_MODE" = timeout ]; then
     exec /usr/bin/timeout --signal=TERM --kill-after=0.1 0.1 "$@"
 fi
 exec "$@"
@@ -135,8 +139,9 @@ yard() {
 ''' + repeat
         for mode, original, native, capture in (('report', 23, 0, 0), ('invalid', 23, 0, 2),
                 ('native-failure', 23, 17, 0), ('oversize', 37, 23, 2),
-                ('timeout', 23, 124, 2), ('success', 0, 0, 0)):
-            (root/'called').unlink(missing_ok=True)
+                ('repeat-timeout', 23, 124, 2), ('success', 0, 0, 0)):
+            (root/'inspection-attempted').unlink(missing_ok=True)
+            (root/'calls').unlink(missing_ok=True)
             (root/'response').write_text({'invalid': 'PRIVATE_SENTINEL', 'oversize': 'PRIVATE_SENTINEL' * 131072}
                                         .get(mode, json.dumps(report)))
             result = subprocess.run(['bash', '-c', script, 'fixture', str(SOURCE/'failure-capture.sh'), str(engine)],
@@ -144,7 +149,8 @@ yard() {
                          REPEAT_EXIT=str(original)), capture_output=True, text=True, timeout=5)
             assert result.returncode == original, 'repeat-init failure was replaced'
             assert 'PRIVATE_SENTINEL' not in result.stdout+result.stderr, 'private inspection bytes escaped'
-            assert (root/'called').exists() == bool(original), 'inspection ran outside repeat-init failure'
+            assert (root/'inspection-attempted').exists() == bool(original), mode
+            assert (root/'calls').exists() == bool(original and mode != 'repeat-timeout'), mode
             if not original:
                 assert result.stdout == '' and result.stderr == ''
                 continue
@@ -171,7 +177,7 @@ yard() { printf '%s\\n' "$*" >>"$YARD_BIN.route-calls"; return 23; }
             started = time.monotonic()
             result = subprocess.run(['bash', '-c', script + (route if mode == 'route-failure' else wait),
                 'fixture', str(SOURCE/'failure-capture.sh'), str(engine)], capture_output=True, text=True,
-                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, REPEAT_ROOT=str(root), WAIT_ONLY='1'), timeout=7)
+                env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, REPEAT_ROOT=str(root)), timeout=7)
             assert result.returncode == {'reconnect': 0, 'timeout': 124, 'route-failure': 23}[mode]
             assert time.monotonic() - started < 5, 'reconnect wait was not bounded'
             assert 'PRIVATE_SENTINEL' not in result.stdout+result.stderr

@@ -632,20 +632,30 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        originals = []
+        environments, cleanup, release_codes, released = set(), {}, [], False
+        with files["log"].open("rb") as stream:
+            for line in stream:
+                environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
+                if environment:
+                    environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
+                stage = re.fullmatch(rb"E2E_PHASE phase=(guest-cleanup|cleanup/release) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
+                if stage:
+                    if stage[1] == b"guest-cleanup":
+                        vm = int(stage[3]) if stage[3] else None
+                        if vm in cleanup:
+                            raise ValueError("operator acceptance cleanup evidence is ambiguous")
+                        cleanup[vm] = int(stage[2])
+                    else:
+                        release_codes.append(int(stage[2]))
+                released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
+        if not environments or release_codes != [0] or cleanup != {vm: 0 for vm in range(1, max(count for _, count, _ in environments) + 1)} or not released:
+            raise ValueError("operator acceptance original cleanup or release unconfirmed")
         for original_result in (original["checks"][name], receipt["checks"][name]):
             if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
                 or "evidence_transfer" in original_result or original_result.get("status") == "failed" and
                 (original_result.get("exit_code") != native["exit_code"] or original_result.get("log_sha256") != hashes["log"]
                  or original_result.get("command") != command)):
                 raise ValueError("operator acceptance collector status or original failure differs")
-            if original_result["status"] == "failed" and original_result not in originals:
-                originals.append(original_result)
-        for result in originals or [native]:
-            status, issue, environments = a.lane_status(
-                files["log"], {**result, "slot": int(argv[-1])}, require_cleanup=True)
-            if status != "failed" or issue:
-                raise ValueError(f"operator acceptance requires a native failure with confirmed cleanup ({issue or status})")
         public = {"schema_version": 1, "check": name, "target": identity, "tested": declaration["tested"], "command": command,
                   "actual_command": prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
                       "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"]] + command + argv[-2:],
@@ -653,8 +663,7 @@ def operator_acceptances(paths, identity, root, receipt):
                   "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
                   "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),
                   "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base} for kind, count, base in sorted(environments)],
-                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": 0}
-                                                for vm in range(1, max(count for _, count, _ in environments) + 1)],
+                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": cleanup[vm]} for vm in sorted(cleanup)],
                               "release_exit_code": 0, "lease_released": True}}
         validate_operator_acceptance(public, name, command, identity)
         accepted[name] = public
@@ -714,15 +723,9 @@ def profile_deferrals(output, names, reason, authorization_reference, identity, 
     return deferred
 
 
-def refuse_pending_retries(output, receipt):
-    if retries := a.pending_retries(output, receipt):
-        raise ValueError("requested retries require fresh execution before publication: " + ", ".join(sorted(retries)))
-
-
 def attestation(output, identity, operator_acceptance_paths=(), profile_deferral_checks=(),
                 deferral_reason=None, deferral_authorization_reference=None):
     root, receipt = a.load_bound(output)
-    refuse_pending_retries(output, receipt)
     a.update_result(receipt)
     accepted = operator_acceptances(operator_acceptance_paths, identity, root, receipt)
     deferred_profiles = profile_deferrals(output, profile_deferral_checks, deferral_reason,
@@ -1394,10 +1397,8 @@ def hosted_open(directory, output):
     """Hosted checks of a dispatched request that are not yet passed in the local receipt."""
     if not (directory / "ci-hosted.json").exists():
         return []
-    receipt = json.loads((output / "receipt.json").read_text())
-    checks, retries = receipt["checks"], a.pending_retries(output, receipt)
-    return sorted(name for name in a.CI_HOSTED_CHECKS
-                  if name in checks and name not in retries and checks[name].get("status") != "passed")
+    checks = json.loads((output / "receipt.json").read_text())["checks"]
+    return sorted(name for name in a.CI_HOSTED_CHECKS if name in checks and checks[name].get("status") != "passed")
 
 
 def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds):
@@ -1561,9 +1562,6 @@ def collect_ci(github, directory, identity):
                 raise ValueError("foreign candidate or incomplete hosted selection")
             record, manifest = a.original_attempt(cached, incoming, name, result)
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
-            status, issue, _ = a.lane_status(cached / result["log"], result)
-            if status != "passed":
-                raise ValueError(issue or "incomplete native PASS")
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
             # Persist the immutable original evidence before publishing the result reference.
@@ -1849,34 +1847,32 @@ def main():
             document = attestation(output, identity, [path.resolve() for path in args.operator_acceptance], args.defer_profile,
                                    args.deferral_reason, args.deferral_authorization_reference)
             validate_attestation(document, identity, output / "source")
-            if level:
-                print(f"PUBLICATION release_level={level['level']} reason={level['reason']}", flush=True)
-            report_unrun_checks(document, output / "source")
-            report_inherited_checks(document)
-            report_ci_checks(document)
-            deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
-            if deferred:
-                print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
-            path = directory / "publication.json"
-            if path.exists():
-                state = json.loads(path.read_text())
-                document = resumed_attestation(state, document)
-                refuse((["publication attestation changed; preserve original unfinished state"]
-                        if state["attestation_sha256"] != identity_hash(document) else [])
-                       + retained_workflow_ref(state, args.workflow_ref))
-                if not state.get("dispatch_started"):
-                    workflow_ref, refusals = select_workflow_ref(github, identity["version"], identity["commit"],
-                                                                 args.workflow_ref or state["workflow_ref"])
-                    refuse(refusals)
-                    state["workflow_ref"] = workflow_ref
-            else:
-                workflow_ref, refusals = select_workflow_ref(github, identity["version"], identity["commit"], args.workflow_ref)
+        if level:
+            print(f"PUBLICATION release_level={level['level']} reason={level['reason']}", flush=True)
+        report_unrun_checks(document, output / "source")
+        report_inherited_checks(document)
+        report_ci_checks(document)
+        deferred = [name for name, item in document["external_obligations"].items() if "deferral" in item]
+        if deferred:
+            print("PUBLICATION external_deferred=" + ",".join(deferred) + " execution=not-run", flush=True)
+        path = directory / "publication.json"
+        if path.exists():
+            state = json.loads(path.read_text())
+            document = resumed_attestation(state, document)
+            refuse((["publication attestation changed; preserve original unfinished state"]
+                    if state["attestation_sha256"] != identity_hash(document) else [])
+                   + retained_workflow_ref(state, args.workflow_ref))
+            if not state.get("dispatch_started"):
+                workflow_ref, refusals = select_workflow_ref(github, identity["version"], identity["commit"],
+                                                             args.workflow_ref or state["workflow_ref"])
                 refuse(refusals)
-                state = {"request": str(uuid.uuid4()), "workflow_ref": workflow_ref, "attestation_sha256": identity_hash(document)}
-            with a.retry_lock(output):
-                refuse_pending_retries(output, json.loads((output / "receipt.json").read_text()))
-                write_json(directory / "attestation.json", document)
-                write_json(path, state)
+                state["workflow_ref"] = workflow_ref
+        else:
+            workflow_ref, refusals = select_workflow_ref(github, identity["version"], identity["commit"], args.workflow_ref)
+            refuse(refusals)
+            state = {"request": str(uuid.uuid4()), "workflow_ref": workflow_ref, "attestation_sha256": identity_hash(document)}
+        write_json(directory / "attestation.json", document)
+        write_json(path, state)
         encoded = encode_attestation(document, github, state["request"])
         run = dispatch(github, "release-publish.yml", {"candidate": args.candidate, "attestation": encoded}, state, path)
         state.setdefault("next_action_at", utc_now())

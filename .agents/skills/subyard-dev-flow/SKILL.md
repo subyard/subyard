@@ -48,6 +48,8 @@ coordinator, and do not create or close shared task files or start another full 
    editing. Keep task plans where the private overlay or other instructions say; otherwise ask
    the operator. Follow the overlay's task-file workflow when present. Keep
    remaining steps current; change the agreed scope only with the user's agreement.
+   For a substantial change, first run a read-only design pass listing invariants, failure,
+   interruption, upgrade, security and privacy cases and the simplest structure covering them.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
    For ordinary checks, inherit shared Go caches and developer Cargo/Rustup homes;
@@ -213,6 +215,8 @@ The coordinator owns original requirements, editable scope, one shared task and 
 2. After the writer stops and relevant checks reach native terminal outcomes, assign review of
    that exact dirty/untracked candidate. An observer handoff alone does not meet this condition.
    Preliminary review with incomplete checks cannot establish readiness.
+   Review hunts corner cases and vulnerabilities wherever the change reaches; before merge,
+   review the full branch diff, since the bar applies to what lands on the base branch.
 3. Resolve unsupported findings with a reason; return confirmed repairs to
    the same developer while its context is relevant. Recheck affected claims after writing stops.
 4. Accept when original requirements, findings and required evidence match the final candidate.
