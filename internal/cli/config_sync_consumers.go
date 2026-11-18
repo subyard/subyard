@@ -14,9 +14,9 @@ import (
 type configSyncConsumers struct {
 	execution   configApplyExecution
 	all         bool
-	retry       bool
 	names       map[string]bool
 	conditional bool
+	discovery   []error
 }
 
 func configSyncConsumerScope(plan configsync.Plan) (bool, map[string]bool) {
@@ -41,7 +41,7 @@ func (consumers *configSyncConsumers) observe(ctx context.Context, cli *CLI, pla
 	var targets []configTarget
 	for _, loaded := range contexts {
 		name := loaded.Context.YardName
-		if loaded.Context.AccessKind != domain.AccessRemote && (consumers.all || consumers.retry || consumers.names[name]) {
+		if loaded.Context.AccessKind != domain.AccessRemote {
 			targets = append(targets, configTarget{Name: name, Loaded: loaded})
 		}
 	}
@@ -50,7 +50,8 @@ func (consumers *configSyncConsumers) observe(ctx context.Context, cli *CLI, pla
 			return item.Target.Name == name
 		})
 	}
-	observed, err := cli.assessConfigTargets(ctx, targets, phase, required)
+	observed, discovery, err := cli.assessConfigTargets(ctx, targets, phase, required)
+	consumers.discovery = append(consumers.discovery, discovery...)
 	if err != nil {
 		return nil, err
 	}
@@ -63,14 +64,10 @@ func (consumers *configSyncConsumers) observe(ctx context.Context, cli *CLI, pla
 
 func (prepared *preparedCommand) prepareConfigSyncConsumers(ctx context.Context, execution *configSyncExecution) error {
 	all, names := configSyncConsumerScope(execution.approved)
-	retry := len(execution.approved.Changes) == 0 || execution.action == "config.sync.pull" || execution.action == "config.sync.push"
-	if !retry && !all && len(names) == 0 {
-		return nil
-	}
-	consumers := &configSyncConsumers{all: all, retry: retry, names: names, conditional: execution.approved.NeedsApply()}
+	consumers := &configSyncConsumers{all: all, names: names, conditional: execution.approved.NeedsApply()}
 	approved, err := consumers.observe(ctx, prepared.CLI, execution.approved, "inspect")
 	if err != nil {
-		return err
+		return domain.CollectRefusals(err, consumers.incomplete())
 	}
 	consumers.execution.approved = approved
 	consumers.execution.current = slices.Clone(approved)
@@ -101,6 +98,13 @@ func (consumers *configSyncConsumers) refresh(ctx context.Context, cli *CLI, pla
 		return err
 	}
 	return consumers.execution.accept(observed)
+}
+
+func (consumers *configSyncConsumers) incomplete() error {
+	if consumers == nil || len(consumers.discovery) == 0 {
+		return nil
+	}
+	return fmt.Errorf("configuration refresh is incomplete: %w", domain.CollectRefusals(consumers.discovery...))
 }
 
 func (consumers *configSyncConsumers) apply(ctx context.Context, cli *CLI, loaded config.Loaded, output io.Writer) error {

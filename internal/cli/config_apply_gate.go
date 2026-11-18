@@ -370,8 +370,11 @@ func (cli *CLI) finishConfigApplyRepair(
 		return nil, err
 	}
 	if outcome != nil {
-		if gate, ok := cli.yardScopedGate(outcome, inspection); ok && !gate.state(permit.yard).repairOnly() {
-			return cli.otherYardFindings(ctx, gate, permit.yard), nil
+		if gate, ok := cli.yardScopedGate(outcome, inspection); ok {
+			if !gate.state(permit.yard).repairOnly() {
+				return cli.otherYardFindings(ctx, gate, permit.yard), nil
+			}
+			return nil, fmt.Errorf("materialized configuration did not restore release readiness: %w", cli.withYardAdvice(ctx, gate).selectedYardRefusal(permit.yard))
 		}
 	}
 	if outcome != nil {

@@ -20,7 +20,7 @@ func TestRPCGateErrorCodesFixtureMatchesGateRefusals(t *testing.T) {
 		outcome := releasetransition.Outcome{
 			Status: releasetransition.StatusOperatorActionRequired, Code: code, Message: "refused",
 		}
-		want = append(want, mutationGateRPCError(&outcome, nil).Code)
+		want = append(want, mutationGateRPCError(&outcome, nil, nil).Code)
 	}
 	slices.Sort(got)
 	slices.Sort(want)

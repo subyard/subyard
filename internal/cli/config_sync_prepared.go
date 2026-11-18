@@ -90,7 +90,8 @@ func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution
 	prepared.stepsComplete = true
 	prepared.steps = execution.steps
 	prepared.executeNoOp = true
-	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, output io.Writer) (domain.AdapterResult, error) {
+	prepared.execute = func(ctx context.Context, _ *application.Orchestrator, output io.Writer) (_ domain.AdapterResult, err error) {
+		defer func() { err = domain.CollectRefusals(err, execution.consumers.incomplete()) }()
 		if execution.guard != nil {
 			if err := execution.guard(ctx); err != nil {
 				return domain.AdapterResult{}, configPreparedStale(err)
@@ -128,13 +129,17 @@ func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution
 		}
 		if applied.NeedsApply() {
 			fmt.Fprintf(output, "config sync: applied generation %d\n", applied.Generation)
-		} else {
-			fmt.Fprintln(output, "config sync: already converged")
 		}
 		if !execution.consumersApplied {
 			if err := execution.consumers.apply(ctx, &copyCLI, loaded, output); err != nil {
 				return domain.AdapterResult{}, err
 			}
+		}
+		if execution.consumers.incomplete() != nil {
+			return domain.AdapterResult{}, nil // The deferred diagnostic includes the failed observations.
+		}
+		if !applied.NeedsApply() {
+			fmt.Fprintln(output, "config sync: already converged")
 		}
 		copyCLI.writeConfigSyncFollowups(loaded, applied, execution.consumers != nil && len(execution.consumers.execution.approved) != 0)
 		return configPreparedResult(prepared), nil
@@ -447,7 +452,9 @@ func (execution *configSyncExecution) gateSubject() gateSubject {
 	var consumers []string
 	if execution.consumers != nil {
 		for _, assessment := range execution.consumers.execution.approved {
-			consumers = append(consumers, assessment.Target.Name)
+			if assessment.Changed {
+				consumers = append(consumers, assessment.Target.Name)
+			}
 		}
 	}
 	subject := configSyncSubject(paths, consumers)

@@ -7,11 +7,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 )
@@ -44,8 +46,8 @@ type yardGate struct {
 	order []string
 	// everyYard is set when the default yard's own configuration is invalid:
 	// it underlies every yard, so each yard admits only its repair commands.
-	everyYard     bool
-	sourceRefusal error
+	everyYard bool
+	advice    func(string) (error, string)
 }
 
 func (gate yardGate) state(yard string) yardGateState {
@@ -259,18 +261,16 @@ func yardNextStep(yard string, state yardGateState) string {
 	return "yard -Y " + yard + " init"
 }
 
-// yardGateRefusal is the one text refusal of a yard that admits only repair.
-func yardGateRefusal(yard string, gate yardGate) string {
+type yardGateRefusal struct {
+	text string
+	next string
+}
+
+func (refusal yardGateRefusal) Error() string { return refusal.text }
+
+// selectedYardRefusal reports a yard that admits only repair.
+func (gate yardGate) selectedYardRefusal(yard string) error {
 	state := gate.state(yard)
-	if !state.repairOnly() && !state.pending {
-		// Only a host or shared setting is refused for another yard's sake.
-		for _, name := range gate.order {
-			if other := gate.state(name); other.pending {
-				return fmt.Sprintf("release gate: a host or shared setting reaches yard %s, whose pending configuration refuses it\nnext: %s, then repeat this setting",
-					name, yardNextStep(name, other))
-			}
-		}
-	}
 	cause := "the release is active and complete, but this yard needs attention"
 	if len(state.messages) != 0 {
 		cause = state.messages[0]
@@ -282,10 +282,13 @@ func yardGateRefusal(yard string, gate yardGate) string {
 	} else if gate.everyYard && yard != "default" {
 		cause = "the default yard's configuration is invalid; every yard admits only its repair commands"
 		yard = "default"
-		state = gate.state("default")
 	}
-	return fmt.Sprintf("release gate: yard %s needs repair: %s\nnext: %s\nuntil then only its repair commands run: %s",
-		yard, cause, yardNextStep(yard, state), yardRepairSetText())
+	prerequisite, next := gate.adviceFor(yard)
+	return yardGateRefusal{
+		text: fmt.Sprintf("release gate: yard %s needs repair: %s\n%s\nuntil then only its repair commands run: %s",
+			yard, cause, repairHint(prerequisite, next), yardRepairSetText()),
+		next: next,
+	}
 }
 
 // gateRequest is one invocation as the release gate decides it.
@@ -360,6 +363,7 @@ func (cli *CLI) decideGate(ctx context.Context, request gateRequest, outcome *re
 	if !ok {
 		return nil, gate, nil, false
 	}
+	gate = cli.withYardAdvice(ctx, gate)
 	subject := cli.provisionalSubject(request)
 	subject.scope, subject.named, subject.acts = scopeSelected, nil, nil
 	verdict := gate.verdict(request.yard, subject)
@@ -445,21 +449,22 @@ func (cli *CLI) admitGate(
 	if admitted == nil || !admitted.repair() {
 		return admitted, outcome, inspection, refusal, scoped, nil
 	}
-	after, afterErr := cli.readReleaseHistory()
-	if err = errors.Join(beforeErr, afterErr); err != nil {
-		return nil, outcome, inspection, nil, scoped, err
+	// A shell into a yard that needs repair diagnoses it with any tooling; its
+	// history is still recorded.
+	var after *releaseHistoryToken
+	var afterErr error
+	if admitted.kind == admissionRepair && request.handler != "@shell" {
+		after, admitted.sources, afterErr = cli.repairPrerequisites(ctx)
+	} else {
+		after, afterErr = cli.readReleaseHistory()
+	}
+	if err = domain.CollectRefusals(beforeErr, afterErr); err != nil {
+		return nil, outcome, inspection, nil, scoped, fmt.Errorf("%w: %w; next: %s", domain.ErrPlanStale, err, admitted.gate.sourceRepairNext())
 	}
 	if before == nil || after == nil || *before != *after {
 		return nil, outcome, inspection, nil, scoped, fmt.Errorf("%w: the release changed during admission; rerun the command", domain.ErrPlanStale)
 	}
 	admitted.history = *after
-	// A shell into a yard that needs repair diagnoses it with any tooling; its
-	// history was still recorded above.
-	if admitted.kind == admissionRepair && request.handler != "@shell" {
-		if admitted.sources, err = cli.repairSources(ctx); err != nil {
-			return nil, outcome, inspection, nil, scoped, fmt.Errorf("%w: %w; next: %s", domain.ErrPlanStale, err, admitted.gate.sourceRepairNext())
-		}
-	}
 	return admitted, outcome, inspection, nil, scoped, nil
 }
 
@@ -486,15 +491,9 @@ func (cli *CLI) readReleaseHistory() (*releaseHistoryToken, error) {
 		return nil, err
 	}
 	journal, err := store.ReadCurrentJournal()
-	if err != nil {
-		return nil, err
-	}
-	ledger, err := store.ReadLedger()
-	if err != nil {
-		return nil, err
-	}
-	checkpoint, err := store.ReadMigrationCheckpoint()
-	if err != nil {
+	ledger, ledgerErr := store.ReadLedger()
+	checkpoint, checkpointErr := store.ReadMigrationCheckpoint()
+	if err := domain.CollectRefusals(err, ledgerErr, checkpointErr); err != nil {
 		return nil, err
 	}
 	return &releaseHistoryToken{journal: string(journal.Fingerprint), ledger: string(ledger.Fingerprint),
@@ -509,6 +508,17 @@ func (cli *CLI) readReleaseHistory() (*releaseHistoryToken, error) {
 type repairSourceBinding struct{ source, tooling string }
 
 const repairSourceNext = "yard update"
+
+// repairPrerequisites is the installed source and history check shared by
+// repair admission, consumer refresh, and the advice for those operations.
+func (cli *CLI) repairPrerequisites(ctx context.Context) (*releaseHistoryToken, *repairSourceBinding, error) {
+	history, historyErr := cli.readReleaseHistory()
+	if historyErr != nil || history == nil {
+		historyErr = errors.New("protected release history could not be read")
+	}
+	sources, sourceErr := cli.repairSources(ctx)
+	return history, sources, domain.CollectRefusals(historyErr, sourceErr)
+}
 
 func (cli *CLI) repairSources(ctx context.Context) (*repairSourceBinding, error) {
 	options, available, err := cli.mutationGateReleaseOptions()
@@ -601,8 +611,11 @@ func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
 		return err
 	}
 	if outcome != nil {
-		again, gate, _, _ := cli.decideGate(ctx, admission.request, outcome, inspection)
+		again, gate, refusal, _ := cli.decideGate(ctx, admission.request, outcome, inspection)
 		if again == nil {
+			if refusal != nil {
+				return fmt.Errorf("%w: the release changed after confirmation: %w", domain.ErrPlanStale, refusal)
+			}
 			return fmt.Errorf("%w: the release changed after confirmation: %s", domain.ErrPlanStale, strings.TrimSpace(mutationGateRefusalText(outcome, inspection)))
 		}
 		if again.kind == admissionBounded {
@@ -613,7 +626,7 @@ func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
 		admission.gate = &yardGate{}
 	}
 	if admission.sources != nil {
-		sources, err := cli.repairSources(ctx)
+		_, sources, err := cli.repairPrerequisites(ctx)
 		if err != nil {
 			return fmt.Errorf("%w: %w; next: %s", domain.ErrPlanStale, err, admission.gate.sourceRepairNext())
 		}
@@ -654,10 +667,7 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 	if gate, ok := cli.yardScopedGate(outcome, inspection); ok {
 		if state := gate.state(admission.request.yard); state.repairOnly() || state.pending {
 			yard := admission.request.yard
-			if state.materializedDrift && admission.sources == nil {
-				_, gate.sourceRefusal = cli.repairSources(ctx)
-			}
-			cause, next := cli.yardAdvice(ctx, gate, yard)
+			cause, next := cli.withYardAdvice(ctx, gate).adviceFor(yard)
 			if cause != nil {
 				fmt.Fprintf(cli.options.Stderr, "yard: %v\n", cause)
 			}
@@ -683,27 +693,27 @@ func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names
 		return false, nil, fmt.Errorf("configuration was published, but its refresh is refused: %w", cause)
 	}
 	if cli.ownerMutationLock == nil {
-		return refuse(errors.New("owner barrier is not held"), "yard config sync pull --apply")
+		return refuse(errors.New("owner barrier is not held"), "retry the same sync on the owner host")
 	}
 	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, yard)
 	if err != nil {
-		return refuse(errors.New("release readiness could not be inspected"), repairSourceNext)
+		return refuse(errors.New("release readiness could not be inspected"), "yard migrate --check")
 	}
 	if outcome == nil {
 		return false, done, nil
 	}
 	gate, ok := cli.yardScopedGate(outcome, inspection)
 	if !ok {
-		text := strings.TrimPrefix(mutationGateRefusalText(outcome, inspection), mutationGateRefusalPrefix+" ")
+		text := strings.Replace(mutationGateRefusalText(outcome, inspection), "; this command is not run", "", 1)
+		text = strings.TrimPrefix(text, mutationGateRefusalPrefix+" ")
 		return refuse(errors.New(strings.TrimSpace(strings.ReplaceAll(text, "\nyard: ", "; "))), "")
 	}
-	history, err := cli.readReleaseHistory()
-	var historyErr error
-	if err != nil || history == nil {
-		historyErr = errors.New("protected release history could not be read")
-	}
-	sources, sourceErr := cli.repairSources(ctx)
-	if cause, next := gate.configRefreshRefusal(names, domain.CollectRefusals(historyErr, sourceErr)); cause != nil {
+	history, sources, sourceErr := cli.repairPrerequisites(ctx)
+	if blocked, cause := gate.configRefreshRefusal(names); cause != nil || sourceErr != nil {
+		if sourceErr != nil {
+			return refuse(domain.CollectRefusals(cause, sourceErr), gate.sourceRepairNext())
+		}
+		_, next := cli.withYardAdvice(ctx, gate).adviceFor(blocked)
 		return refuse(cause, next)
 	}
 	admission := &gateAdmission{kind: admissionRepair, request: gateRequest{yard: yard, handler: "@config", name: "config"}, history: *history, sources: sources, rechecked: true}
@@ -721,19 +731,16 @@ func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names
 // A yard blocker can prevent update from repairing the source, while the
 // source failure prevents yard repair. Resolve the source prerequisite first.
 func (gate yardGate) sourceRepairNext() string {
-	for _, name := range gate.order {
-		state := gate.state(name)
-		if state.config || state.failed || state.unreachable || state.pending {
-			return "resolve the protected release source failure with the sealed active release owner before retrying"
-		}
+	if _, err := gate.configRefreshRefusal(gate.order); err != nil {
+		return "resolve the protected release source failure with the sealed active release owner before retrying"
 	}
 	return repairSourceNext
 }
 
-// configRefreshRefusal is shared by consumer admission and read-only advice.
-func (gate yardGate) configRefreshRefusal(names []string, sourceErr error) (error, string) {
+// configRefreshRefusal is shared by consumer admission and repair advice.
+func (gate yardGate) configRefreshRefusal(names []string) (string, error) {
 	var refusals []error
-	var blockedNext string
+	var blocked string
 	for _, name := range names {
 		state := gate.state(name)
 		for _, finding := range []struct {
@@ -742,42 +749,77 @@ func (gate yardGate) configRefreshRefusal(names []string, sourceErr error) (erro
 		}{{state.config, "invalid configuration"}, {state.failed, "failed activation"}, {state.unreachable, "unreachable guest"}, {state.pending, "pending configuration"}} {
 			if finding.present {
 				refusals = append(refusals, fmt.Errorf("yard %s has %s", name, finding.reason))
-				if blockedNext == "" {
-					blockedNext = yardNextStep(name, state)
+				if blocked == "" {
+					blocked = name
 				}
 			}
 		}
 	}
-	switch {
-	case sourceErr != nil:
-		return domain.CollectRefusals(append(refusals, sourceErr)...), gate.sourceRepairNext()
-	case blockedNext != "":
-		return domain.CollectRefusals(refusals...), blockedNext
-	default:
-		return nil, ""
-	}
+	return blocked, domain.CollectRefusals(refusals...)
 }
 
-func (cli *CLI) fileRefreshNeeded(ctx context.Context, yard string) bool {
-	loaded, err := cli.resolveReleaseTransitionContext(ctx, yard, "")
+func (cli *CLI) fileRefreshNeeded(ctx context.Context, yard string) (bool, error) {
+	operation := *cli
+	operation.env = cli.baseEnv
+	loaded, err := operation.resolveContextWithYardSettings(yard, "")
 	if err != nil {
-		return false
+		return false, err
 	}
-	assessment, err := cli.assessConfigTarget(ctx, configTarget{Name: yard, Loaded: loaded}, true)
-	return err == nil && assessment.Changed
+	assessment, err := operation.prepareConfigApply(ctx, []configTarget{{Name: yard, Loaded: loaded}}, nil)
+	return err == nil && assessment.changed(), err
 }
 
-func (cli *CLI) yardAdvice(ctx context.Context, gate yardGate, yard string) (error, string) {
-	state := gate.state(yard)
-	if state.materializedDrift {
-		if cause, next := gate.configRefreshRefusal([]string{yard}, gate.sourceRefusal); cause != nil {
-			return cause, next
+// Advice uses the same subject verdict and installed-source prerequisites as
+// the command it proposes. Keep the undecorated gate for testing candidates.
+func (cli *CLI) withYardAdvice(ctx context.Context, gate yardGate) yardGate {
+	checkSource := sync.OnceValue(func() error {
+		_, _, err := cli.repairPrerequisites(ctx)
+		return err
+	})
+	decisions := gate
+	decisions.advice = nil
+	gate.advice = func(yard string) (error, string) {
+		state := decisions.state(yard)
+		init := decisions.verdict(yard, initSubject(initArguments{mode: initReconcile}))
+		if init.repair {
+			if err := checkSource(); err != nil {
+				return err, decisions.sourceRepairNext()
+			}
 		}
-		if cli.fileRefreshNeeded(ctx, yard) {
-			return nil, "yard -Y " + yard + " config apply"
+		if state.materializedDrift {
+			_, refusal := decisions.configRefreshRefusal([]string{yard})
+			if refusal == nil {
+				changed, err := cli.fileRefreshNeeded(ctx, yard)
+				if err != nil {
+					return err, "yard -Y " + yard + " config status"
+				}
+				if changed {
+					return nil, "yard -Y " + yard + " config apply"
+				}
+			}
 		}
+		return nil, yardNextStep(yard, state)
 	}
+	return gate
+}
+
+func (gate yardGate) adviceFor(yard string) (error, string) {
+	if gate.advice != nil {
+		return gate.advice(yard)
+	}
+	state := gate.state(yard)
 	return nil, yardNextStep(yard, state)
+}
+
+func (gate yardGate) repairHint(yard string) string {
+	return repairHint(gate.adviceFor(yard))
+}
+
+func repairHint(cause error, next string) string {
+	if cause != nil {
+		return fmt.Sprintf("prerequisite: %v\nnext: %s", cause, next)
+	}
+	return "next: " + next
 }
 
 // guardEffects refuses an adapter while a repair admission has not passed its
@@ -791,6 +833,7 @@ func (cli *CLI) guardEffects(context.Context) error {
 
 // otherYardFindings reports each other implicated yard once, with its step.
 func (cli *CLI) otherYardFindings(ctx context.Context, gate yardGate, yard string) []releasetransition.Blocker {
+	gate = cli.withYardAdvice(ctx, gate)
 	var findings []releasetransition.Blocker
 	for _, name := range gate.order {
 		if name == yard {
@@ -801,7 +844,7 @@ func (cli *CLI) otherYardFindings(ctx context.Context, gate yardGate, yard strin
 		if len(state.messages) != 0 {
 			message = state.messages[0]
 		}
-		cause, next := cli.yardAdvice(ctx, gate, name)
+		cause, next := gate.adviceFor(name)
 		if cause != nil {
 			message += "; " + cause.Error()
 		}
@@ -848,42 +891,37 @@ func (cli *CLI) statusYardGate(ctx context.Context, readiness *domain.ReleaseRea
 		return yardGate{}, false
 	}
 	gate, ok := cli.yardScopedGate(outcome, inspection)
-	if ok && len(gate.materializedDriftYards()) != 0 {
-		_, gate.sourceRefusal = cli.repairSources(ctx)
-	}
-	return gate, ok
-}
-
-func (gate yardGate) materializedDriftYards() []string {
-	var names []string
-	for _, name := range gate.order {
-		if gate.state(name).materializedDrift {
-			names = append(names, name)
-		}
-	}
-	return names
+	return cli.withYardAdvice(ctx, gate), ok
 }
 
 func (cli *CLI) updateAdvice(ctx context.Context, inspection *releasetransition.Inspection) (string, string) {
+	ctx, cancel := context.WithTimeout(ctx, profile.ReadinessTimeout)
+	defer cancel()
 	gate, ok := cli.yardScopedGate(inspection.Outcome, inspection)
-	if !ok {
+	if !ok || len(gate.order) == 0 {
 		return "", ""
 	}
-	_, sourceErr := cli.repairSources(ctx)
-	cause, next := gate.configRefreshRefusal(gate.order, sourceErr)
+	gate = cli.withYardAdvice(ctx, gate)
+	cause, next := gate.releaseAdvice()
 	if cause != nil {
 		return cause.Error(), next
 	}
-	names := gate.materializedDriftYards()
-	if len(names) == 0 {
-		return "", ""
-	}
-	for _, name := range names {
-		if cli.fileRefreshNeeded(ctx, name) {
-			return "materialized configuration files need refresh in " + name, "yard -Y " + name + " config apply"
+	return "activation needs attention in " + strings.Join(gate.order, ", "), next
+}
+
+func (gate yardGate) releaseAdvice() (error, string) {
+	yard, refusal := gate.configRefreshRefusal(gate.order)
+	if yard == "" {
+		yard = gate.order[0]
+		for _, name := range gate.order {
+			if gate.state(name).materializedDrift {
+				yard = name
+				break
+			}
 		}
 	}
-	return "activation needs attention in " + strings.Join(names, ", "), yardNextStep(names[0], gate.state(names[0]))
+	cause, next := gate.adviceFor(yard)
+	return domain.CollectRefusals(refusal, cause), next
 }
 
 // releaseLine states the release once; the protocol word ready is never used
@@ -901,24 +939,23 @@ func (gate yardGate) releaseLine() string {
 }
 
 // printYardAttention prints one yard's findings under it, with its next step.
-func (cli *CLI) printYardAttention(ctx context.Context, gate yardGate, yard string) {
-	state := gate.state(yard)
+func (cli *CLI) printYardAttention(gate yardGate, yard string) {
 	if _, implicated := gate.yards[yard]; !implicated && !gate.everyYard {
 		return
 	}
 	if gate.everyYard && yard != "default" {
 		fmt.Fprintln(cli.options.Stdout, "  attention the default yard's configuration is invalid; it underlies this yard")
-		fmt.Fprintf(cli.options.Stdout, "    next: %s\n", yardNextStep("default", gate.state("default")))
-		return
+		yard = "default"
+	} else {
+		messages := gate.state(yard).messages
+		if len(messages) == 0 {
+			messages = []string{"this yard needs attention"}
+		}
+		for _, message := range messages {
+			fmt.Fprintf(cli.options.Stdout, "  attention %s\n", message)
+		}
 	}
-	messages := state.messages
-	if len(messages) == 0 {
-		messages = []string{"this yard needs attention"}
-	}
-	for _, message := range messages {
-		fmt.Fprintf(cli.options.Stdout, "  attention %s\n", message)
-	}
-	cause, next := cli.yardAdvice(ctx, gate, yard)
+	cause, next := gate.adviceFor(yard)
 	if cause != nil {
 		fmt.Fprintf(cli.options.Stdout, "  attention %s\n", cause)
 	}

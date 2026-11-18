@@ -367,8 +367,14 @@ const (
 	rpcTransitionRequiredCode = rpc.CodeTransitionRequired
 )
 
-func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) *rpc.Error {
-	payload, err := json.Marshal(publicInspectedMutationGateOutcome(outcome, inspection))
+func mutationGateRPCError(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection, refusal error) *rpc.Error {
+	result := publicInspectedMutationGateOutcome(outcome, inspection)
+	var scoped yardGateRefusal
+	if errors.As(refusal, &scoped) {
+		result.Action = scoped.next
+		result.Message = refusal.Error()
+	}
+	payload, err := json.Marshal(result)
 	if err != nil {
 		return &rpc.Error{Code: rpc.ErrorCode(outcome.Code), Message: outcome.Message}
 	}
@@ -1456,11 +1462,13 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 		return cli.printYardStatus(ctx, loaded)
 	}
 	results := cli.allOwnerInventoriesForStatus(ctx, loaded)
-	releases := cli.summaryReleaseReadiness(ctx, loaded, results)
+	readinessCtx, cancel := context.WithTimeout(ctx, profile.ReadinessTimeout)
+	defer cancel()
+	releases := cli.summaryReleaseReadiness(ctx, readinessCtx, loaded, results)
 	var localGate yardGate
 	yardScoped := false
 	if len(releases) != 0 {
-		localGate, yardScoped = cli.statusYardGate(ctx, releases[0])
+		localGate, yardScoped = cli.statusYardGate(readinessCtx, releases[0])
 	}
 	if yardScoped {
 		fmt.Fprintln(cli.options.Stdout, localGate.releaseLine())
@@ -1493,7 +1501,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 				printIgnoredAssignments(cli.options.Stdout, "  ", "", local)
 			}
 			if index == 0 && yardScoped {
-				cli.printYardAttention(ctx, localGate, yard.Name)
+				cli.printYardAttention(localGate, yard.Name)
 				continue
 			}
 			cli.printReleaseReadiness(releases[index], owner)
@@ -1519,6 +1527,10 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		cli.errorf("status: %v", err)
 		return 1
 	}
+	readinessCtx, cancel := context.WithTimeout(ctx, profile.ReadinessTimeout)
+	defer cancel()
+	readiness := cli.releaseReadiness(readinessCtx)
+	gate, yardScoped := cli.statusYardGate(readinessCtx, readiness)
 	label := loaded.Context.YardName
 	if label == "default" {
 		label = "yard"
@@ -1549,9 +1561,12 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	if status.SSHConfigured {
 		fmt.Fprintf(cli.options.Stdout, "  ssh      127.0.0.1:%d  (ssh %s)\n",
 			status.Context.SSHPort, status.Context.SSHHost)
-	} else {
+	} else if readiness.Status == string(releasetransition.StatusReady) || readiness.Status == "unknown" ||
+		yardScoped && !gate.state(loaded.Context.YardName).repairOnly() && !gate.state(loaded.Context.YardName).pending {
 		fmt.Fprintf(cli.options.Stdout, "  ssh      not set up  (run: %s init)\n",
 			cli.yardHint(status.Context))
+	} else {
+		fmt.Fprintln(cli.options.Stdout, "  ssh      not set up")
 	}
 	fmt.Fprintf(cli.options.Stdout, "  ssh-id   %s\n", identityState)
 	mounts := "none"
@@ -1609,10 +1624,9 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	}
 	fmt.Fprintf(cli.options.Stdout, "  space    %s\n", status.Facts.Space)
 	printIgnoredAssignments(cli.options.Stdout, "  ", "", loaded)
-	readiness := cli.releaseReadiness(ctx)
-	if gate, ok := cli.statusYardGate(ctx, readiness); ok {
+	if yardScoped {
 		fmt.Fprintln(cli.options.Stdout, "  "+gate.releaseLine())
-		cli.printYardAttention(ctx, gate, loaded.Context.YardName)
+		cli.printYardAttention(gate, loaded.Context.YardName)
 		cli.printNetworkManagerRebootReminder()
 		return 0
 	}
@@ -4597,7 +4611,7 @@ func (handler *rpcHandler) Handle(ctx context.Context, call rpc.Call, emit rpc.E
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
-		return handler.cli.releaseReadiness(ctx), nil
+		return handler.cli.ownerReleaseReadiness(ctx), nil
 	case rpc.MethodOwnerInventory:
 		if err := decodeRPCParams(call.Params, &struct{}{}); err != nil {
 			return nil, err

@@ -795,8 +795,9 @@ func TestNetworkCommandsAreGatedByTheYardsTheyActOn(t *testing.T) {
 		t.Run("repair endpoint "+test.a+"-"+test.b+" from "+test.selected, func(t *testing.T) {
 			harness := newRepairHarness(t)
 			code, output, host := link(t, harness.scenario, "-Y", test.selected, "network", "link", test.a, test.b)
-			if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first; next: yard -Y named init") ||
-				strings.Contains(output, "Operation plan") {
+			if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first") ||
+				!strings.Contains(output, "next: resolve the protected release source failure with the sealed active release owner") ||
+				strings.Contains(output, "yard -Y named init") || strings.Contains(output, "Operation plan") {
 				t.Fatalf("link to a yard that needs repair: code=%d writes=%d\n%s", code, host.writes, output)
 			}
 		})

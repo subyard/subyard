@@ -1601,25 +1601,17 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 					Message string `json:"message"`
 					Retry   string `json:"retry"`
 				}
-				report := inspection
 				var next *advice
 				if !parsed.json && runtime.config.UpdateAdvice != nil {
 					if message, retry := runtime.config.UpdateAdvice(ctx, &inspection); retry != "" {
 						next = &advice{Message: message, Retry: retry}
-						outcome := *report.Outcome
-						outcome.Retry = retry
-						report.Outcome = &outcome
-						report.Blockers = slices.Clone(report.Blockers)
-						for i := range report.Blockers {
-							report.Blockers[i].Retry = retry
-						}
 					}
 				}
 				return runtime.writeInspection(parsed, struct {
 					releasetransition.Inspection
 					Configuration []config.ConfigurationState `json:"configuration,omitempty"`
 					Advice        *advice                     `json:"advice,omitempty"`
-				}{report, runtime.configurationState(), next})
+				}{inspection, runtime.configurationState(), next})
 			},
 		}, nil
 	}

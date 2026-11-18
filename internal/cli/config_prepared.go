@@ -440,28 +440,28 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 	if len(targets) == 0 {
 		return nil, errors.New("config apply: no local yards selected")
 	}
-	assessments, err := cli.assessConfigTargets(ctx, targets, "inspect", nil)
+	assessments, _, err := cli.assessConfigTargets(ctx, targets, "inspect", nil)
 	if err != nil {
 		return nil, err
 	}
 	return &configApplyExecution{selector: selector, approved: assessments, current: slices.Clone(assessments)}, nil
 }
 
-// An unreadable optional discovery target cannot establish drift. Required
-// targets, including previously approved consumers, must be observable.
-func (cli *CLI) assessConfigTargets(ctx context.Context, targets []configTarget, phase string, required func(string) bool) ([]configTargetAssessment, error) {
+// Discovery failures leave the refresh incomplete without blocking independent
+// writes. Required targets must be observable before any write.
+func (cli *CLI) assessConfigTargets(ctx context.Context, targets []configTarget, phase string, required func(string) bool) ([]configTargetAssessment, []error, error) {
 	if len(targets) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	loaded := targets[0].Loaded
 	if err := domain.CollectRefusals(
 		cli.checkNativeTargets(loaded, len(targets) > 1, nil),
 		validateManagedConfigTree(loaded.Context.Paths.ConfigHome),
 	); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var assessments []configTargetAssessment
-	var refusals []error
+	var discovery, refusals []error
 	for _, target := range targets {
 		if target.Loaded.Context.AccessKind == domain.AccessRemote {
 			refusals = append(refusals, fmt.Errorf("config apply does not implicitly operate on remote yard %s", target.Name))
@@ -469,14 +469,17 @@ func (cli *CLI) assessConfigTargets(ctx context.Context, targets []configTarget,
 		}
 		assessment, err := cli.assessConfigTarget(ctx, target, true)
 		if err != nil {
+			finding := materializedConfigActivationError{err, target.Name, "materialized config", "config status", phase, target.Loaded.Context.Paths.ConfigHome}
 			if required == nil || required(target.Name) {
-				refusals = append(refusals, materializedConfigActivationError{err, target.Name, "materialized config", "config status", phase, target.Loaded.Context.Paths.ConfigHome})
+				refusals = finding.appendTo(refusals)
+			} else {
+				discovery = finding.appendTo(discovery)
 			}
 			continue
 		}
 		assessments = append(assessments, assessment)
 	}
-	return assessments, domain.CollectRefusals(refusals...)
+	return assessments, discovery, domain.CollectRefusals(refusals...)
 }
 
 func (execution *configApplyExecution) changed() bool {
@@ -509,7 +512,7 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 	if !sameConfigTargetSet(execution.approved, targets) {
 		return fmt.Errorf("%w: selected local yard set changed after confirmation", domain.ErrPlanStale)
 	}
-	assessments, err := cli.assessConfigTargets(ctx, targets, "verify", nil)
+	assessments, _, err := cli.assessConfigTargets(ctx, targets, "verify", nil)
 	if err != nil {
 		return err
 	}

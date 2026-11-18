@@ -30,7 +30,7 @@ func (cli *CLI) remoteReleaseReadiness(ctx context.Context, endpoint string) *do
 	return readiness
 }
 
-func (cli *CLI) summaryReleaseReadiness(ctx context.Context, loaded config.Loaded, results []ownerInventoryResult) []*domain.ReleaseReadiness {
+func (cli *CLI) summaryReleaseReadiness(ctx, localCtx context.Context, loaded config.Loaded, results []ownerInventoryResult) []*domain.ReleaseReadiness {
 	readiness := make([]*domain.ReleaseReadiness, len(results))
 	if len(results) == 0 {
 		return readiness
@@ -39,7 +39,7 @@ func (cli *CLI) summaryReleaseReadiness(ctx context.Context, loaded config.Loade
 	wait.Add(1)
 	go func() {
 		defer wait.Done()
-		readiness[0] = cli.releaseReadiness(ctx)
+		readiness[0] = cli.releaseReadiness(localCtx)
 	}()
 	connections, err := (ownerinventory.Connections{
 		Root: loaded.Context.Paths.DataHome + "/owner-inventory",
@@ -96,6 +96,24 @@ func (cli *CLI) releaseReadiness(ctx context.Context) *domain.ReleaseReadiness {
 		return unknown
 	}
 	return releaseReadinessResult(outcome)
+}
+
+func (cli *CLI) ownerReleaseReadiness(ctx context.Context) *domain.ReleaseReadiness {
+	ctx, cancel := context.WithTimeout(ctx, profile.ReadinessTimeout)
+	defer cancel()
+	readiness := cli.releaseReadiness(ctx)
+	if gate, ok := cli.statusYardGate(ctx, readiness); ok && len(gate.order) != 0 {
+		cause, next := gate.releaseAdvice()
+		readiness.Next = next
+		if cause != nil {
+			if message := cause.Error(); len(message) <= 8192 {
+				readiness.Message = message
+			} else {
+				readiness.Message = "inspect the release readiness findings on the owner host with yard status"
+			}
+		}
+	}
+	return readiness
 }
 
 func releaseReadinessResult(outcome releasetransition.Outcome) *domain.ReleaseReadiness {

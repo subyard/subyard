@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -11,9 +12,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
@@ -146,15 +150,76 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 		args []string
 	}{
 		{0, []string{"update", "--check", "--offline"}},
+		{0, []string{"status"}},
+		{0, []string{"-Y", "named", "status"}},
 		{1, []string{"-Y", "named", "init"}},
+		{1, []string{"-Y", "named", "provision"}},
 		{1, []string{"update"}},
 	} {
 		output := run(check.exit, check.args...)
+		if slices.Contains(check.args, "--check") {
+			var report struct {
+				Advice json.RawMessage `json:"advice"`
+			}
+			if err := json.Unmarshal([]byte(output), &report); err != nil {
+				t.Fatalf("decode update check: %v\n%s", err, output)
+			}
+			output = string(report.Advice)
+		}
 		if !strings.Contains(output, refusal) || !strings.Contains(output, "resolve the protected release source failure") ||
 			strings.Contains(output, "yard -Y named init") || strings.Contains(output, "next: yard update") {
 			t.Fatalf("%v sent the operator back to a blocked command: %s", check.args, output)
 		}
 	}
+	program, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	named, err := program.loadContext("named")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, execute := range []bool{false, true} {
+		fault := program.admitRPCOperation(context.Background(), named, command.Definition{Handler: "@provision", Name: "provision"}, nil, execute)
+		var report mutationGateOutcome
+		if fault == nil || json.Unmarshal([]byte(fault.Message), &report) != nil || !strings.Contains(report.Action, "resolve the protected release source failure") ||
+			strings.Contains(report.Message, "yard -Y named init") {
+			t.Fatalf("RPC admission advice: %#v", fault)
+		}
+	}
+	ctx := context.Background()
+	if readiness := program.ownerReleaseReadiness(ctx); !strings.Contains(readiness.Message, refusal) ||
+		!strings.Contains(readiness.Next, "resolve the protected release source failure") {
+		t.Fatalf("owner readiness advised a blocked repair: %#v", readiness)
+	}
+	outcome, inspection, err := program.inspectMutationGateInspection(ctx, "named")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, ok := program.yardScopedGate(outcome, inspection)
+	if !ok {
+		t.Fatal("mixed readiness was not yard scoped")
+	}
+	gate = program.withYardAdvice(ctx, gate)
+	var skipped bytes.Buffer
+	program.options.Stderr = &skipped
+	prepared := &preparedCommand{CLI: program, gateRecord: &gateAdmission{kind: admissionOpen, request: gateRequest{yard: "healthy"}, gate: &gate}}
+	prepared.setGateSubject(gateSubject{declared: true, member: memberConfig, acts: []yardAction{{yard: "named", optional: true}}})
+	if kept := prepared.gateSkipped([]configTarget{{Name: "named"}}, true); len(kept) != 0 || !strings.Contains(skipped.String(), refusal) ||
+		strings.Contains(skipped.String(), "yard -Y named init") {
+		t.Fatalf("optional target suggested a blocked repair: %v\n%s", kept, &skipped)
+	}
+	if err := os.Remove(pending); err != nil {
+		t.Fatal(err)
+	}
+	recheckPrompt := &callbackPrompt{callback: func() { writeCLIFile(t, pending, "pending-fixture\n", 0o600) }}
+	options.Prompt = recheckPrompt
+	options.Executor = &selectionOnlyIntegrationExecutor{source: published, staleFiles: true}
+	if output := run(1, "-Y", "named", "config", "apply"); len(recheckPrompt.requests) != 1 || len(applier.yards) != 0 ||
+		!strings.Contains(output, refusal) || !strings.Contains(output, "resolve the protected release source failure") {
+		t.Fatalf("post-consent source refusal or effects: %s, %v", output, applier.yards)
+	}
+	options.Prompt, options.Executor = nil, fake
 	sealCurrentEngine(t, fixture, engine)
 	if err := os.Remove(pending); err != nil {
 		t.Fatal(err)
@@ -167,13 +232,22 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 		t.Fatalf("update JSON changed its retry: %s", output)
 	}
 	observe(true, 1)
-	if output := run(0, "update", "--check", "--offline"); !strings.Contains(output, "yard -Y default init") ||
-		strings.Contains(output, "config apply") {
+	if output := run(0, "update", "--check", "--offline"); !strings.Contains(output, "yard -Y default init") || strings.Contains(output, "config apply") {
 		t.Fatalf("update check recommended a file refresh for current files: %s", output)
 	}
-	options.Executor = &selectionOnlyIntegrationExecutor{source: published, staleFiles: true}
+	probe := &readinessProbeExecutor{InstanceExecutor: &selectionOnlyIntegrationExecutor{source: published, staleFiles: true}}
+	options.Executor = probe
+	started := time.Now()
 	if output := run(0, "-Y", "named", "status"); !strings.Contains(output, "next: yard -Y named config apply") {
 		t.Fatalf("status omitted admissible repair: %s", output)
+	}
+	if len(probe.deadlines) == 0 {
+		t.Fatal("status did not probe materialized files")
+	}
+	for _, deadline := range probe.deadlines {
+		if deadline.IsZero() || deadline.After(started.Add(profile.ReadinessTimeout+time.Second)) || deadline != probe.deadlines[0] {
+			t.Fatalf("status file probes did not share the release readiness deadline: %v", probe.deadlines)
+		}
 	}
 	options.Executor = fake
 
@@ -284,20 +358,38 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 			result.Stdout = bytes.ReplaceAll(result.Stdout, []byte(afterHash), fmt.Appendf(nil, "%x", sha256.Sum256([]byte("named only\n"))))
 		}
 	}
-	output = run(0, "-Y", "named", "config", "sync", "pull", "--apply", "--yes")
+	output = run(1, "-Y", "named", "config", "sync", "pull", "--apply", "--yes")
 	namedPublished := filepath.Join(home, config.GitSettingsRelativePath, "yards/named/overrides/agents", asset)
 	if string(mustReadConfigFixture(t, namedPublished)) != "named only\n" || !slices.Equal(applier.yards, []string{"named"}) ||
-		len(fake.ExecSteps) != 0 || strings.Contains(output, "config.apply.default") {
+		len(fake.ExecSteps) != 0 || strings.Contains(output, "config.apply.default") ||
+		!strings.Contains(output, "configuration refresh is incomplete: yard default materialized config") {
 		t.Fatalf("named publication selected the wrong consumers: %s, %v", output, applier.yards)
 	}
 
+	fake.ExecSteps = nil
+	applier.yards = nil
+	for range 2 {
+		for _, target := range []config.Loaded{defaultTarget, namedTarget} {
+			start := len(fake.ExecSteps)
+			appendHashSteps(t, fake, target)
+			for i := start; i < len(fake.ExecSteps); i++ {
+				fake.ExecSteps[i] = testkit.IncusExecStep{Err: fmt.Errorf("guest agent is unreachable")}
+			}
+		}
+	}
+	output = run(1, "config", "sync", "pull", "--apply", "--yes")
+	if strings.Contains(output, "already converged") || !strings.Contains(output, "configuration refresh is incomplete") ||
+		!strings.Contains(output, "yard default materialized config") || !strings.Contains(output, "yard named materialized config") || len(applier.yards) != 0 {
+		t.Fatalf("no-change pull hid unreadable consumers: %s, %v", output, applier.yards)
+	}
+
 	for _, scenario := range []struct{ verb, result string }{
-		{"pull", "already converged"}, {"pull", "applied generation"}, {"push", "applied generation"},
+		{"pull", "already converged"}, {"pull", "applied generation"}, {"push", "applied generation"}, {"", "applied generation"},
 	} {
 		if scenario.result == "applied generation" {
-			repo := publisher
-			if scenario.verb == "push" {
-				repo = checkout
+			repo := checkout
+			if scenario.verb == "pull" {
+				repo = publisher
 			}
 			writeConfigCommandFile(t, filepath.Join(repo, "hosts/owner-a/yards/named/config.env"),
 				fmt.Sprintf("# Document the named yard port on %s.\nSSH_PORT=2223\n", scenario.verb))
@@ -313,7 +405,11 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 				appendHashSteps(t, fake, loadConfigCommandContext(t, active, options.Environment, yard))
 			}
 		}
-		if output := run(0, "config", "sync", scenario.verb, "--apply", "--yes"); !strings.Contains(output, scenario.result) ||
+		args := []string{"config", "sync"}
+		if scenario.verb != "" {
+			args = append(args, scenario.verb)
+		}
+		if output := run(0, append(args, "--apply", "--yes")...); !strings.Contains(output, scenario.result) ||
 			!slices.Equal(applier.yards, []string{"default", "named"}) || len(fake.ExecSteps) != 0 {
 			t.Fatalf("%s retry did not converge exactly both consumers: %s, %v", scenario.verb, output, applier.yards)
 		}
@@ -323,6 +419,20 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	if err != nil || after == nil || *after != *history {
 		t.Fatalf("consumer refresh changed release history: %v", err)
 	}
+}
+
+type readinessProbeExecutor struct {
+	ports.InstanceExecutor
+	deadlines []time.Time
+}
+
+func (executor *readinessProbeExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	command := request.Command
+	if len(command) > 2 && command[0] == "sha256sum" || len(command) == 11 && command[0] == "python3" && command[4] == "observe" {
+		deadline, _ := ctx.Deadline()
+		executor.deadlines = append(executor.deadlines, deadline)
+	}
+	return executor.InstanceExecutor.Exec(ctx, project, instance, request)
 }
 
 type sampleRepairPlatformFixture struct {

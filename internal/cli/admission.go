@@ -440,7 +440,7 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 	}
 	planned := cli.gateAdmitted
 	cli.gateAdmitted = &gateAdmission{kind: admissionExempt}
-	admitted, outcome, gateInspection, _, _, err := cli.admitGate(ctx, cli.rpcGateRequest(yard, definition, arguments), func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+	admitted, outcome, gateInspection, refusal, _, err := cli.admitGate(ctx, cli.rpcGateRequest(yard, definition, arguments), func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
 		return cli.inspectCommandMutationGate(ctx, yard, definition.Handler, arguments)
 	})
 	if err != nil {
@@ -455,7 +455,7 @@ func (cli *CLI) admitRPCOperation(ctx context.Context, loaded config.Loaded, def
 		}
 	}
 	if admitted == nil {
-		return mutationGateRPCError(outcome, gateInspection)
+		return mutationGateRPCError(outcome, gateInspection, refusal)
 	}
 	cli.gateAdmitted = admitted
 	return nil

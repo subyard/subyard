@@ -1213,11 +1213,9 @@ func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) ([]
 	// its own yard converged in a clean completed release.
 	if gate, ok := cli.yardScopedGate(outcome, inspection); ok {
 		if state := gate.state(yard); !state.repairOnly() && !state.pending {
-			if len(gate.materializedDriftYards()) != 0 {
-				_, gate.sourceRefusal = cli.repairSources(ctx)
-			}
 			return cli.otherYardFindings(ctx, gate, yard), nil
 		}
+		return nil, fmt.Errorf("release readiness after init: %w", cli.withYardAdvice(ctx, gate).selectedYardRefusal(yard))
 	}
 	// One text line: the release state, its first cause and next step.
 	text := strings.TrimPrefix(mutationGateRefusalText(outcome, inspection), mutationGateRefusalPrefix+" ")

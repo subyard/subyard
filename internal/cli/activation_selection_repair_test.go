@@ -1070,7 +1070,7 @@ func TestCompletedSelectionAuthoringAdmitsIntegrationOnlyDriftWithCurrentFiles(t
 					adviceGate := yardGate{yards: map[string]*yardGateState{
 						"default": {drift: true, materializedDrift: true},
 					}}
-					_, next := apply.yardAdvice(context.Background(), adviceGate, "default")
+					_, next := apply.withYardAdvice(context.Background(), adviceGate).adviceFor("default")
 					want := "yard -Y default init"
 					if drift == "files" {
 						want = "yard -Y default config apply"

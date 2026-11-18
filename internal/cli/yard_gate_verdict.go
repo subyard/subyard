@@ -12,7 +12,7 @@ import (
 
 // The yard-scoped release gate decides on facts the command itself prepared.
 // Each prepare attaches a gateSubject from the request its handler already
-// parsed and from its plan; one pure verdict decides it against a yard gate.
+// parsed and from its plan; one verdict decides it against a yard gate.
 // The binding decision runs in preparedCommand.Execute after the owner barrier;
 // an early verdict refuses before consent.
 
@@ -154,13 +154,13 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 		state := gate.state(selected)
 		switch {
 		case state.repairOnly() && subject.member == memberNone:
-			refuse(selected, errors.New(yardGateRefusal(selected, gate)))
+			refuse(selected, gate.selectedYardRefusal(selected))
 		case state.repairOnly() && subject.unfit != nil:
-			refuse(selected, fmt.Errorf("%s\nthis invocation is not that repair: %v", yardGateRefusal(selected, gate), subject.unfit))
+			refuse(selected, fmt.Errorf("%w\nthis invocation is not that repair: %v", gate.selectedYardRefusal(selected), subject.unfit))
 		case state.repairOnly():
 			result.repair = true
 		case state.pending && !subject.pending:
-			refuse(selected, errors.New(yardGateRefusal(selected, gate)))
+			refuse(selected, gate.selectedYardRefusal(selected))
 		}
 	}
 	var desired []string
@@ -179,16 +179,16 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 		state := gate.state(yard)
 		switch {
 		case state.repairOnly() && !configRepair:
-			refuse(yard, fmt.Errorf("release gate: this command writes the desired configuration of yard %s, which needs repair\nnext: %s", yard, yardNextStep(yard, state)))
+			refuse(yard, fmt.Errorf("release gate: this command writes the desired configuration of yard %s, which needs repair\n%s", yard, gate.repairHint(yard)))
 		case state.pending:
-			refuse(yard, fmt.Errorf("release gate: this command writes the desired configuration of yard %s, whose pending configuration refuses it\nnext: %s, then repeat this command",
-				yard, yardNextStep(yard, state)))
+			refuse(yard, fmt.Errorf("release gate: this command writes the desired configuration of yard %s, whose pending configuration refuses it\n%s, then repeat this command",
+				yard, gate.repairHint(yard)))
 		}
 	}
 	// A host command skipped the selected yard's check: each yard it acts on is
 	// checked here, the selected one included.
 	for _, action := range subject.acts {
-		if action.yard == selected && !subject.host || refused[action.yard] || slices.Contains(result.skip, action.yard) {
+		if action.yard == selected && !subject.host && !action.driftOnly || refused[action.yard] || slices.Contains(result.skip, action.yard) {
 			continue
 		}
 		state := gate.state(action.yard)
@@ -196,12 +196,14 @@ func (gate yardGate) verdict(selected string, subject gateSubject) gateVerdict {
 		case action.optional && (state.repairOnly() || state.pending):
 			result.skip = append(result.skip, action.yard)
 		case action.optional:
-		case action.driftOnly && (state.failed || state.config || state.unreachable):
-			refuse(action.yard, fmt.Errorf("yard %s needs %s before its configuration is refreshed", action.yard, yardNextStep(action.yard, state)))
+		case action.driftOnly:
+			if _, err := gate.configRefreshRefusal([]string{action.yard}); err != nil {
+				refuse(action.yard, fmt.Errorf("%w; %s", err, gate.repairHint(action.yard)))
+			}
 		case state.repairOnly() && !configRepair:
-			refuse(action.yard, fmt.Errorf("yard %s needs repair first; next: %s", action.yard, yardNextStep(action.yard, state)))
+			refuse(action.yard, fmt.Errorf("yard %s needs repair first; %s", action.yard, gate.repairHint(action.yard)))
 		case state.pending && action.refusePending:
-			refuse(action.yard, fmt.Errorf("yard %s has pending configuration that this command would act on; next: %s", action.yard, yardNextStep(action.yard, state)))
+			refuse(action.yard, fmt.Errorf("yard %s has pending configuration that this command would act on; %s", action.yard, gate.repairHint(action.yard)))
 		}
 	}
 	return result
@@ -420,7 +422,7 @@ func (prepared *preparedCommand) gateSkipped(targets []configTarget, report bool
 			return false
 		}
 		if report {
-			fmt.Fprintf(prepared.CLI.options.Stderr, "yard: skipped yard %s: it needs attention; next: %s\n", target.Name, yardNextStep(target.Name, admission.gate.state(target.Name)))
+			fmt.Fprintf(prepared.CLI.options.Stderr, "yard: skipped yard %s: it needs attention; %s\n", target.Name, admission.gate.repairHint(target.Name))
 		}
 		return true
 	})
@@ -435,8 +437,11 @@ func (admission *gateAdmission) bindingCurrent(ctx context.Context, cli *CLI) er
 		return stale
 	}
 	if admission.sources != nil {
-		sources, err := cli.repairSources(ctx)
-		if err != nil || *sources != *admission.sources {
+		_, sources, err := cli.repairPrerequisites(ctx)
+		if err != nil {
+			return fmt.Errorf("%w: %w; next: yard update --check", domain.ErrPlanStale, err)
+		}
+		if *sources != *admission.sources {
 			return stale
 		}
 	}
