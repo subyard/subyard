@@ -185,25 +185,6 @@ func verifyPreparedRouteConsumers(ctx context.Context, options Options, before s
 	return verifyRouteConsumers(ctx, options, false, prepared, activation)
 }
 
-// VerifyRouteConsumersRollback checks the exact non-owner mount snapshot.
-func VerifyRouteConsumersRollback(ctx context.Context, options Options, before string) error {
-	if err := validateOptions(&options); err != nil {
-		return err
-	}
-	prepared, err := decodeRouteConsumersState(before)
-	if err != nil {
-		return err
-	}
-	if !prepared.Active {
-		return nil
-	}
-	yards, err := inspectManagedYards(ctx, options)
-	if err != nil {
-		return err
-	}
-	return validatePreparedSet(prepared.Consumers, nonOwnerYards(yards), false)
-}
-
 func verifyRouteConsumers(
 	ctx context.Context,
 	options Options,
