@@ -89,6 +89,8 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 type discardPolicy struct {
 	retired, ignored func(string) bool
 	report           func(name, value string)
+	batch            *localBatch
+	unavailable      *bool
 }
 
 func (policy discardPolicy) discards(name string) bool {
@@ -190,6 +192,8 @@ func scanQuote(line string, quote byte) byte {
 }
 
 func applyRecordRetired(record string, values environment, observer func(name, value string), policy discardPolicy) error {
+	unavailable := false
+	policy.unavailable = &unavailable
 	record = strings.TrimSpace(record)
 	if strings.HasPrefix(record, ":") {
 		expression := strings.TrimSpace(strings.TrimPrefix(record, ":"))
@@ -217,6 +221,7 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 		// defaults to affect current settings, provenance, or sync exports.
 		values = cloneEnvironment(values)
 		observer = nil
+		policy.batch = nil
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
@@ -236,6 +241,9 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 		return nil
 	}
 	values[name] = value
+	if policy.batch != nil {
+		policy.batch.setAvailable(name, !unavailable)
+	}
 	if observer != nil {
 		observer(name, value)
 	}
@@ -303,7 +311,11 @@ func expandValue(
 			index++
 			continue
 		}
-		result.WriteString(values[value[index+1:end]])
+		name := value[index+1 : end]
+		if policy.batch != nil && !policy.batch.available(name) {
+			*policy.unavailable = true
+		}
+		result.WriteString(values[name])
 		index = end
 	}
 	return result.String(), nil
@@ -342,8 +354,13 @@ func expandParameter(
 		// A default of a discarded name stays inside this expansion.
 		values = cloneEnvironment(values)
 		observer = nil
+		policy.batch = nil
 	}
 	current := values[name]
+	if policy.batch != nil && !policy.batch.available(name) {
+		*policy.unavailable = true
+		return current, nil
+	}
 	switch operator {
 	case "":
 		return current, nil
@@ -356,11 +373,18 @@ func expandParameter(
 			// it is ignored too, without evaluating its message.
 			return "", nil
 		}
-		expanded, err := expandValue(fallback, values, observer, policy)
+		unavailable := false
+		fallbackPolicy := policy
+		fallbackPolicy.unavailable = &unavailable
+		expanded, err := expandValue(fallback, values, observer, fallbackPolicy)
 		if err != nil {
 			return "", err
 		}
+		*policy.unavailable = *policy.unavailable || unavailable
 		if operator == ":?" {
+			if unavailable {
+				return expanded, nil
+			}
 			if expanded == "" {
 				expanded = name + " is required"
 			}
@@ -368,6 +392,9 @@ func expandParameter(
 		}
 		if operator == ":=" {
 			values[name] = expanded
+			if policy.batch != nil {
+				policy.batch.setAvailable(name, !unavailable)
+			}
 			if observer != nil {
 				observer(name, expanded)
 			}

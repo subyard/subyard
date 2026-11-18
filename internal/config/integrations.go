@@ -36,11 +36,8 @@ func normalizeLegacySelection(name, value string) string {
 
 // resolveLoadedIntegrations returns a role refusal separately from load errors,
 // so the loader collects it with the other independent role refusals.
-func resolveLoadedIntegrations(values environment, tracker *settingTracker, rejected []string) (refusal, err error) {
+func resolveLoadedIntegrations(values environment, tracker *settingTracker) (refusal, err error) {
 	requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
-	if len(rejected) != 0 && slices.Equal(requested, rejected) {
-		requested = nil
-	}
 	var retired []string
 	for _, definition := range tracker.catalog.Integrations() {
 		if !definition.Retired {
@@ -62,16 +59,8 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker, reje
 	}
 	// The role prohibition reads only authored assignments, so it is checked
 	// before and independently of resolving the requested selection.
+	refusal = integrationRoleRefusal(values, tracker)
 	assignments := tracker.assignments["CODING_TOOL_INTEGRATIONS"]
-	if values["ALLOWS_CODING_TOOLS"] == "false" || values["ALLOWS_CODING_TOOLS"] == "0" {
-		// An inherited default can be suppressed; a concrete forbidden request cannot.
-		for _, assignment := range assignments {
-			layer := tracker.layers[assignment.Layer]
-			if refusal == nil && (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
-				refusal = fmt.Errorf("%w in %s", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools), assignment.Path)
-			}
-		}
-	}
 	selection, err := tracker.catalog.ResolveIntegrationSelection(values, requested)
 	if err != nil {
 		return refusal, err
@@ -95,6 +84,22 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker, reje
 	values["CODING_TOOL_INTEGRATIONS"] = strings.Join(selection.Effective, " ")
 	tracker.integrations = selection
 	return refusal, nil
+}
+
+func codingToolsForbidden(values environment) bool {
+	return values["ALLOWS_CODING_TOOLS"] == "false" || values["ALLOWS_CODING_TOOLS"] == "0"
+}
+
+func integrationRoleRefusal(values environment, tracker *settingTracker) error {
+	if codingToolsForbidden(values) {
+		for _, assignment := range tracker.assignments["CODING_TOOL_INTEGRATIONS"] {
+			layer := tracker.layers[assignment.Layer]
+			if (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
+				return fmt.Errorf("%w in %s", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools), assignment.Path)
+			}
+		}
+	}
+	return nil
 }
 
 // ResolveIntegrationSelection validates roots and computes the existing ordered
@@ -158,11 +163,6 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 	return result, nil
 }
 
-// CheckIntegrationNames checks the requested roots without resolving dependencies.
-func (settings Catalog) CheckIntegrationNames(values map[string]string, requested []string) error {
-	return checkIntegrationNames(values, requested, settings.ShippedIntegration, settings.RetiredIntegration)
-}
-
 func knownIntegration(values map[string]string, agent string) bool {
 	if !domain.SafeName(agent) {
 		return false
@@ -176,22 +176,37 @@ func knownIntegration(values map[string]string, agent string) bool {
 }
 
 func checkIntegrationNames(values map[string]string, requested []string, shipped, retired func(string) bool) error {
-	// Only a shipped integration is named in the rendered diagnostic; the
-	// supplied text of any other request stays in the Go error only.
-	refusal := func(known, unknown domain.ConfigRefusalCode, agent string) error {
-		if name, ok := domain.ConfigIntegrationName(agent); ok && knownIntegration(values, agent) && shipped(agent) {
-			return domain.NewConfigRefusal(known, name)
-		}
-		return fmt.Errorf("%w %q", domain.NewConfigRefusal(unknown), agent)
-	}
+	repeated := checkRepeatedIntegrations(requested, func(id string) bool { return shipped(id) && knownIntegration(values, id) })
+	unknown := checkUnknownIntegrations(values, requested, retired, func(map[string]string, string) bool { return true })
+	return domain.CollectRefusals(append(refusalCauses(repeated), refusalCauses(unknown)...)...)
+}
+
+// CheckRepeatedIntegrations checks list structure without reading metadata layers.
+func (settings Catalog) CheckRepeatedIntegrations(requested []string) error {
+	return checkRepeatedIntegrations(requested, settings.ShippedIntegration)
+}
+
+func checkRepeatedIntegrations(requested []string, shipped func(string) bool) error {
 	var refusals []error
 	selected := make(map[string]int, len(requested))
 	for _, agent := range requested {
-		if selected[agent]++; selected[agent] == 2 {
-			refusals = append(refusals, refusal(domain.ConfigDuplicateIntegration, domain.ConfigDuplicateUnknownIntegration, agent))
+		if selected[agent]++; selected[agent] != 2 {
+			continue
 		}
-		// A retired integration has its own refusal; it is not also unknown.
-		if selected[agent] == 1 && !knownIntegration(values, agent) && !retired(agent) {
+		// Only shipped IDs may appear in the rendered diagnostic.
+		if name, ok := domain.ConfigIntegrationName(agent); ok && shipped(agent) {
+			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigDuplicateIntegration, name))
+		} else {
+			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigDuplicateUnknownIntegration), agent))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
+func checkUnknownIntegrations(values map[string]string, requested []string, retired func(string) bool, metadataKnown func(map[string]string, string) bool) error {
+	var refusals []error
+	for _, agent := range requested {
+		if !knownIntegration(values, agent) && !retired(agent) && metadataKnown(values, agent) {
 			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownIntegration), agent))
 		}
 	}

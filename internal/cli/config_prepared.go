@@ -144,7 +144,7 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	defer prepared.setGateSubject(configAuthoringSubject(prepared.Loaded.Context.YardName, requests))
 	if len(requests) > 1 {
 		if !requests[0].git {
-			return prepared.prepareLocalConfigScalars(ctx, requests)
+			return prepared.prepareLocalConfigBatch(ctx, requests)
 		}
 		if err := prepared.CLI.configGitScalarsRefusal(prepared.Loaded, requests); err != nil {
 			return configUsage(err)
@@ -155,7 +155,7 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 }
 
 func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context, action string, request configAuthoringRequest, protected ...bool) error {
-	loaded := prepared.Loaded
+	cli, loaded := prepared.CLI, prepared.Loaded
 	definition, err := configAuthoringDefinition(loaded.Catalog, action, request.scope, request.name, false)
 	if err != nil || definition.Kind != config.SettingScalar || (definition.Sensitive && (len(protected) == 0 || !protected[0])) {
 		return configUsageText("only non-sensitive scalar settings support exact authoring")
@@ -171,37 +171,12 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		}
 		return prepared.prepareConfigPush(ctx, configSyncPushOptions{message: configGitAuthoringMessage([]configAuthoringRequest{request}), authoring: []configAuthoringRequest{request}})
 	}
+	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
+		return configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
+	}
 	// The same collector as the plain authoring path reports every refusal.
 	if err := configScalarAuthoringRefusal(loaded, definition, request); err != nil {
 		return configUsage(err)
-	}
-	return prepared.prepareLocalConfigScalars(ctx, []configAuthoringRequest{request})
-}
-
-func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, requests []configAuthoringRequest) (result error) {
-	cli, loaded := prepared.CLI, prepared.Loaded
-	isBatch := len(requests) > 1
-	var assignmentRefusal, writableRefusal error
-	var rejectedTemplate bool
-	if isBatch {
-		requests, rejectedTemplate, assignmentRefusal = checkConfigScalarBatch(loaded, requests)
-		defer func() {
-			if err := domain.CollectRefusals(assignmentRefusal, writableRefusal, result); err != nil {
-				result = configProspectiveError{loaded.Context.Paths.ConfigHome, err}
-			}
-		}()
-		if len(requests) == 0 {
-			return nil
-		}
-	}
-	request := requests[0]
-	action := request.action
-	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
-		refusal := configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
-		if !isBatch {
-			return refusal
-		}
-		writableRefusal = refusal
 	}
 	path, err := configScalarAuthoringPath(loaded, request.scope)
 	if err != nil {
@@ -211,25 +186,14 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	names := make([]string, 0, len(requests))
-	assignments := make([]config.PersistentAssignment, 0, len(requests))
-	for _, assignment := range requests {
-		names = append(names, assignment.name)
-		assignments = append(assignments, config.PersistentAssignment{Name: assignment.name, Value: assignment.value})
+	var value *string
+	if action == "set" {
+		value = &request.value
 	}
-	if rejectedTemplate {
-		assignments = append(assignments, config.PersistentAssignment{Name: "YARD_TEMPLATE", Value: ""})
-	}
-	var candidate []byte
-	if action == "unset" {
-		candidate, err = cli.catalog.EditPersistentAssignmentContent(path, baseline.Content, request.name, nil)
-	} else {
-		candidate, err = cli.catalog.EditPersistentAssignmentsContent(path, baseline.Content, assignments)
-	}
+	candidate, err := cli.catalog.EditPersistentAssignmentContent(path, baseline.Content, request.name, value)
 	if err != nil {
 		return err
 	}
-	settingNames := strings.Join(names, ", ")
 	desired := config.PersistentFileSnapshot{Exists: true, Content: candidate}
 	if action == "unset" && len(candidate) == 0 {
 		desired = config.PersistentFileSnapshot{}
@@ -238,23 +202,12 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 	if request.sourceGuard != nil && slices.Contains([]string{"CODING_TOOL_INTEGRATIONS", "ENVIRONMENT_PROFILES"}, request.name) {
 		prospectiveRequest.action = "selection-repair"
 	}
-	var batch []configAuthoringRequest
-	if isBatch {
-		batch = requests
-	}
-	changed := !sameConfigAuthoringSnapshot(baseline, desired)
-	var ingressRefusal error
-	if isBatch && changed {
-		ingressRefusal = cli.checkResourceConfigChanges(ctx, loaded, requests)
-	}
-	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired, batch...)
-	if domain.CollectRefusals(assignmentRefusal, writableRefusal, ingressRefusal, err) != nil {
-		if prospective != nil {
-			prospective.close()
-		}
-		return domain.CollectRefusals(ingressRefusal, err)
+	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired)
+	if err != nil {
+		return err
 	}
 	prepared.closeResource = func() error { prospective.close(); return nil }
+	changed := !sameConfigAuthoringSnapshot(baseline, desired)
 	if changed {
 		protected, err := readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
 		if err != nil {
@@ -264,11 +217,27 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 			return domain.ErrPlanStale
 		}
 	}
-	if changed && !isBatch {
-		if err := cli.checkResourceConfigChanges(ctx, loaded, requests); err != nil {
+	if changed {
+		if err := cli.checkResourceConfigChange(ctx, loaded, request); err != nil {
 			return err
 		}
 	}
+	return prepared.attachLocalConfigScalars(ctx, []configAuthoringRequest{request}, prospective, baseline, desired, func(guard func() error) error {
+		return cli.catalog.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, guard)
+	})
+}
+
+func (prepared *preparedCommand) attachLocalConfigScalars(ctx context.Context, requests []configAuthoringRequest, prospective *configProspective, baseline, desired config.PersistentFileSnapshot, write func(func() error) error) error {
+	cli, loaded := prepared.CLI, prepared.Loaded
+	request := requests[0]
+	action, path := request.action, prospective.path
+	changed := !sameConfigAuthoringSnapshot(baseline, desired)
+	names := make([]string, 0, len(requests))
+	for _, request := range requests {
+		names = append(names, request.name)
+	}
+	settingNames := strings.Join(names, ", ")
+	var err error
 	var captures []integrationSettingsCapture
 	if changed && slices.ContainsFunc(requests, func(assignment configAuthoringRequest) bool {
 		return loaded.Catalog.IntegrationInitSetting(assignment.name)
@@ -319,13 +288,22 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 	if changed {
 		step.Decision = domain.StepApply
 	}
-	prepared.exactState = operationStateDigest(struct {
-		Action, Scope, Path             string
-		Names                           []string
-		Before, Desired                 config.PersistentFileSnapshot
-		Dependencies, Semantics, Source string
-		Captures                        []string
-	}{action, string(request.scope), path, names, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding, captureBindings})
+	if len(requests) == 1 {
+		prepared.exactState = operationStateDigest(struct {
+			Action, Name, Value, Scope, Path string
+			Before, Desired                  config.PersistentFileSnapshot
+			Dependencies, Semantics, Source  string
+			Captures                         []string
+		}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding, captureBindings})
+	} else {
+		prepared.exactState = operationStateDigest(struct {
+			Action, Scope, Path             string
+			Names                           []string
+			Before, Desired                 config.PersistentFileSnapshot
+			Dependencies, Semantics, Source string
+			Captures                        []string
+		}{action, string(request.scope), path, names, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding, captureBindings})
+	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return domain.ActionID("config." + action), domain.ActionDelta{Changed: changed, Consequences: []string{step.Consequence}}, nil
 	}
@@ -414,12 +392,7 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 			}
 			return nil
 		}
-		if action == "unset" {
-			err = cli.catalog.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, nil, baseline, guard)
-		} else {
-			err = config.WritePersistentFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, desired.Content, guard)
-		}
-		if err != nil {
+		if err := write(guard); err != nil {
 			if errors.Is(err, config.ErrPersistentTargetStale) {
 				return domain.AdapterResult{}, fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 			}

@@ -18,15 +18,6 @@ import (
 )
 
 type LoadOptions struct {
-	// AuthoredIntegrations also checks an explicit draft selection that a
-	// higher-priority layer may mask.
-	AuthoredIntegrations []string
-	// RejectedIntegrations may contribute a role refusal. Their dependency
-	// closure is unavailable because the batch already refused these roots.
-	RejectedIntegrations []string
-	// ValidateScalarBatch also checks ports after an independent role or selection refusal.
-	ValidateScalarBatch bool
-
 	// NativeTargetOnly resolves scalar address/paths for registry assessment. Its
 	// result must never be used for guest access, provisioning or activation.
 	NativeTargetOnly bool
@@ -197,12 +188,15 @@ func load(
 		}
 		defer unlock()
 	}
-	pending, err := options.ProspectiveFiles.pendingTransaction(configHome)
-	if err != nil {
-		return domain.Context{}, nil, err
-	}
-	if pending && !options.AllowPendingTransaction {
-		return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
+	// Batch storage is checked separately, alongside target and assignment refusals.
+	if tracker.batch == nil {
+		pending, err := options.ProspectiveFiles.pendingTransaction(configHome)
+		if err != nil {
+			return domain.Context{}, nil, err
+		}
+		if pending && !options.AllowPendingTransaction {
+			return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
+		}
 	}
 	dataHome := values["SUBYARD_HOME"]
 	if dataHome == "" {
@@ -313,7 +307,7 @@ func load(
 			}
 		}
 		if yardName != "default" && options.YardSettingsFile == "" {
-			if (len(options.FileOverrides) != 0 || options.ProspectiveFiles != nil) && len(options.YardDirs) == 0 {
+			if (len(options.FileOverrides) != 0 || options.ProspectiveFiles != nil || tracker.batch != nil) && len(options.YardDirs) == 0 {
 				candidates := append(YardFileCandidates(configDir, configHome, yardName), gitYard)
 				if resetFallback {
 					candidates = []string{localYard, filepath.Join(configHome, "yards", yardName+".env")}
@@ -353,6 +347,10 @@ func load(
 	delete(probe, "YARD_TEMPLATE")
 	yardPresent := false
 	templateSource := gitYard
+	batch := tracker.batch
+	if batch != nil {
+		tracker.batch = batch.fork()
+	}
 	for _, path := range []string{gitYard, localYard} {
 		if options.LayerPaths != nil && path == localYard && options.LayerPaths.ExcludedLocalPaths[path] {
 			continue
@@ -368,7 +366,7 @@ func load(
 			yardPresent = true
 			templateSource = path
 			source := tracker.fileSource(path)
-			if err := tracker.catalog.applyEnvFileValidatedFrom(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, nil, tracker.prospectiveReader()); err != nil {
+			if err := tracker.applyScalarSource(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, nil); err != nil {
 				return domain.Context{}, nil, err
 			}
 		}
@@ -376,7 +374,20 @@ func load(
 	if yardName != "default" && !yardPresent && !(options.AllowResetYard && resetFallback) {
 		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
 	}
-	if err := applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], templateSource, values, tracker); err != nil {
+	templateAvailable := tracker.batch == nil || tracker.batch.available("YARD_TEMPLATE")
+	tracker.batch = batch
+	err = nil
+	if templateAvailable {
+		err = applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], templateSource, values, tracker)
+	}
+	if batch != nil {
+		batch.templateUnavailable = !templateAvailable || err != nil
+		if err != nil {
+			// The failed source did not apply any values or declarations.
+			clear(batch.unavailable)
+			batch.templateRefusal = err
+		}
+	} else if err != nil {
 		return domain.Context{}, nil, err
 	}
 	logicalAssets := agentAssetMappings(values, configDir)
@@ -473,6 +484,9 @@ func load(
 			}
 		}
 		values[name] = value
+		if batch != nil {
+			batch.setAvailable(name, true)
+		}
 		tracker.record(commandLayer, name, value, "environment", 0, "")
 	}
 	// A refused override is not applied; later independent checks still run on
@@ -483,6 +497,9 @@ func load(
 	for _, owner := range tracker.catalog.Integrations() {
 		for _, input := range owner.Inputs {
 			values[input.Name] = input.Value
+			if batch != nil {
+				batch.setAvailable(input.Name, true)
+			}
 			tracker.record(defaultLayer, input.Name, input.Value, filepath.Join(owner.Root, "integration.json"), 0, "immutable shipped input")
 		}
 	}
@@ -507,14 +524,13 @@ func load(
 		}
 		return domain.Context{YardName: yardName, AccessKind: domain.AccessKind(values["ACCESS_KIND"]), IncusProject: values["INCUS_PROJECT"], YardInstanceName: values["YARD_INSTANCE_NAME"], SSHHost: values["SSH_HOST"], Paths: domain.RuntimePaths{RepositoryRoot: root, ConfigDir: configDir, ConfigHome: configHome, OperatorHome: values["SUBYARD_OPERATOR_HOME"], DataHome: values["SUBYARD_HOME"], HostBase: values["HOST_BASE"]}}, values, nil
 	}
+	if batch != nil {
+		return domain.Context{}, values, batch.checkConstraints(options, root, configDir, yardName, values, tracker, defaultLayer, normalizationLayer, commandRefusals)
+	}
 	// One collection point: command overrides, asset sources, integration
 	// selection, role, profile and context refusals are reported together.
 	roleRefusals := append(commandRefusals, refusalCauses(normalizeAgentAssetPaths(values, tracker))...)
-	if len(options.AuthoredIntegrations) != 0 {
-		_, authoredErr := tracker.catalog.ResolveIntegrationSelection(values, options.AuthoredIntegrations)
-		roleRefusals = append(roleRefusals, refusalCauses(authoredErr)...)
-	}
-	integrationRefusal, err := resolveLoadedIntegrations(values, tracker, options.RejectedIntegrations)
+	integrationRefusal, err := resolveLoadedIntegrations(values, tracker)
 	roleRefusals = append(roleRefusals, integrationRefusal)
 	if err != nil {
 		// Edge D5: unresolved integration roots select nothing for the checks below.
@@ -534,46 +550,31 @@ func load(
 	// Role, profile and context checks read independent settings, so each stage
 	// runs and every refusal is reported. Edge D6: any earlier refusal (command
 	// override, asset source, integration, role or profile constraint) skips
-	// profile resolution for ordinary loads. Batch validation collects its
-	// independent findings as well.
+	// profile resolution, which only adds shipped package integrity refusals.
 	var refusals []error
 	if err := validateProfileConstraints(configDir, yardName, values, roleRefusals...); err != nil {
 		refusals = append(refusals, refusalCauses(err)...)
-	}
-	if len(refusals) == 0 || options.ValidateScalarBatch {
-		if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
-			refusals = append(refusals, err)
-		}
+	} else if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
+		refusals = append(refusals, err)
 	}
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
-	// Edge D8: ordinary loads stop here. A batch continues with the
-	// endpoint and port checks whose context inputs are available.
-	refusals = append(refusals, refusalCauses(err)...)
-	if !options.ValidateScalarBatch && len(refusals) != 0 {
-		return domain.Context{}, nil, domain.CollectRefusals(refusals...)
+	// Edge D8: any refusal up to the context skips saved endpoints, derived
+	// ports and all collision checks, which need a valid context.
+	if err := domain.CollectRefusals(append(refusals, refusalCauses(err)...)...); err != nil {
+		return domain.Context{}, nil, err
 	}
 	// Edge D10: an unreadable saved endpoint skips only the collisions of the
 	// listener ports it would provide; the other port checks still run.
+	unchecked, endpointErr := applySavedResourceEndpoints(root, options, ctx, values, tracker)
+	// Edge D9: a derived-port source failure skips collisions and the web
+	// preview check. Collisions are otherwise collected once per pair.
 	collisions := newPortCollisions()
-	if filepath.IsAbs(ctx.Paths.DataHome) {
-		unchecked, endpointErr := applySavedResourceEndpoints(root, options, ctx, values, tracker)
-		collisions.unchecked = unchecked
-		refusals = append(refusals, refusalCauses(endpointErr)...)
+	collisions.unchecked = unchecked
+	if err := normalizeDerivedPorts(values, tracker, collisions); err != nil {
+		return ctx, values, domain.CollectRefusals(append(refusalCauses(endpointErr), err)...)
 	}
-	// Edge D9: ordinary loads stop on a derived-port source failure. A
-	// batch can still check the ports whose values are available.
-	derivedErr := normalizeDerivedPorts(values, tracker, collisions)
-	refusals = append(refusals, refusalCauses(derivedErr)...)
-	if derivedErr != nil {
-		if !options.ValidateScalarBatch {
-			return ctx, values, domain.CollectRefusals(refusals...)
-		}
-		addHostListenerCollisions(values, tracker.catalog, collisions)
-	}
-	if err == nil || values["WEB_PREVIEW_HOST_PORT"] != "" || (ctx.SSHPort > 0 && ctx.SSHPort <= 65535) {
-		refusals = append(refusals, normalizeWebPreviewPort(values, tracker, ctx.SSHPort, collisions))
-	}
-	return ctx, values, domain.CollectRefusals(append(refusals, collisions.refusals...)...)
+	webPreview := normalizeWebPreviewPort(values, tracker, ctx.SSHPort, collisions)
+	return ctx, values, domain.CollectRefusals(append(append(refusalCauses(endpointErr), collisions.refusals...), webPreview)...)
 }
 
 // refusalCauses lets independent stages merge into one stable collection.
@@ -640,17 +641,35 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 // normalizeDerivedPorts returns only a derived-source failure; collisions are
 // recorded in collisions.
 func normalizeDerivedPorts(values environment, tracker *settingTracker, collisions *portCollisions) error {
+	if err := normalizeDerivedPortValues(values, tracker, func(string) bool { return true }); err != nil {
+		return err
+	}
+	addDerivedPortCollisions(values, tracker, collisions)
+	return nil
+}
+
+func normalizeDerivedPortValues(values environment, tracker *settingTracker, available func(string) bool) error {
 	var derive func(string) error
 	derive = func(name string) error {
 		definition, ok := tracker.catalog.LookupSetting(name)
-		if !ok || definition.DefaultFrom == nil || values[name] != "" {
+		if !ok || definition.DefaultFrom == nil || values[name] != "" || !available(name) {
 			return nil
 		}
-		if err := derive(definition.DefaultFrom.Setting); err != nil {
+		sourceName := definition.DefaultFrom.Setting
+		if err := derive(sourceName); err != nil {
 			return err
 		}
-		source, err := strconv.Atoi(values[definition.DefaultFrom.Setting])
+		if !available(sourceName) {
+			if tracker.batch != nil {
+				tracker.batch.setAvailable(name, false)
+			}
+			return nil
+		}
+		source, err := strconv.Atoi(values[sourceName])
 		if err != nil {
+			if tracker.batch != nil {
+				tracker.batch.setAvailable(name, false)
+			}
 			return domain.SettingRefusal(domain.ConfigDerivedPortSource, name)
 		}
 		width := definition.Maximum - definition.Minimum + 1
@@ -659,16 +678,17 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker, collisio
 			value += width
 		}
 		values[name] = strconv.Itoa(definition.Minimum + value)
-		tracker.normalize(name, values[name], "derived from "+definition.DefaultFrom.Setting)
+		tracker.normalize(name, values[name], "derived from "+sourceName)
 		return nil
 	}
 	var sources []error
 	for _, definition := range tracker.catalog.SettingCatalog() {
 		sources = append(sources, derive(definition.Name))
 	}
-	if err := domain.CollectRefusals(sources...); err != nil {
-		return err
-	}
+	return domain.CollectRefusals(sources...)
+}
+
+func addDerivedPortCollisions(values environment, tracker *settingTracker, collisions *portCollisions) {
 	// Integration listeners preserve reservations against configured peer listeners,
 	// including packages whose service is stopped or not yet initialized.
 	for _, definition := range tracker.catalog.SettingCatalog() {
@@ -689,7 +709,6 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker, collisio
 		}
 	}
 	addHostListenerCollisions(values, tracker.catalog, collisions)
-	return nil
 }
 
 func validateHostListenerCollisions(values map[string]string, settings Catalog) error {
@@ -939,7 +958,7 @@ func normalizeAgentAssetPaths(
 	}
 	var refusals []error
 	for _, name := range slices.Sorted(maps.Keys(values)) {
-		if value := values[name]; sourceValuedAgentSetting(name) && value != "" {
+		if value := values[name]; sourceValuedAgentSetting(name) && value != "" && tracker.inputsAvailable(name) {
 			refusals = append(refusals, normalize(name, value))
 		}
 	}
@@ -1020,23 +1039,6 @@ func applyYardConfigTracked(
 	)
 }
 
-// CheckYardTemplate checks an authored template and returns its declarations
-// for other assignment checks that recognize names supplied by a template.
-func CheckYardTemplate(loaded Loaded, template string) (map[string]string, error) {
-	if template == "" {
-		return nil, nil
-	}
-	path, err := yardTemplateFile(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, template, "")
-	if err != nil {
-		return nil, err
-	}
-	values := cloneEnvironment(loaded.Environment)
-	if err := loaded.Catalog.applyEnvFileValidated(path, values, ScopeShipped, false, nil); err != nil {
-		return nil, err
-	}
-	return values, nil
-}
-
 func yardTemplateFile(configDir, yardName, template, yardFile string) (string, error) {
 	if !domain.SafeName(template) {
 		return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
@@ -1106,9 +1108,10 @@ func applyEnvFileTracked(
 }
 
 type observedAssignment struct {
-	name  string
-	value string
-	line  int
+	name        string
+	value       string
+	line        int
+	unavailable bool
 }
 
 func applyEnvFileTrackedValidated(
@@ -1120,12 +1123,12 @@ func applyEnvFileTrackedValidated(
 	requireSyncable bool,
 ) error {
 	source := tracker.fileSource(path)
-	return tracker.catalog.applyEnvFileValidatedFrom(path, source, values, scope, requireSyncable,
+	return tracker.applyScalarSource(path, source, values, scope, requireSyncable,
 		func(name, value string, line int) {
 			tracker.record(layer, name, value, path, line, "")
 		}, func(name, value string, line int) {
 			tracker.observeProfileOnly(layer, name, value, path, line)
-		}, tracker.prospectiveReader())
+		})
 }
 
 func (settings Catalog) applyEnvFileValidated(
@@ -1166,21 +1169,34 @@ type ignoredObserver func(name, value string, line int)
 // setting while the file is read (see discardPolicy). It is reported to
 // ignored, never validated, applied or observed as a setting.
 func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver) error {
+	return settings.evaluateScalarSource(reader, path, values, scope, requireSyncable, observer, ignored, nil)
+}
+
+func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver, batch *localBatch) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
 	var discarded []observedAssignment
 	var content bytes.Buffer
-	policy := discardPolicy{retired: settings.retiredSetting}
+	policy := discardPolicy{retired: settings.retiredSetting, batch: batch}
 	if scope != ScopeShipped {
 		policy.ignored = IsProfileOnlySetting
 	}
-	if err := applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, func(name, value string, line int) {
-		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
-	}, policy, func(name, value string, line int) {
+	observe := func(name, value string, line int) {
+		unknown := batch != nil && !batch.available(name)
+		assignments = append(assignments, observedAssignment{name: name, value: value, line: line, unavailable: unknown})
+	}
+	discard := func(name, value string, line int) {
 		if policy.ignores(name) {
 			discarded = append(discarded, observedAssignment{name: name, value: value, line: line})
 		}
-	}); err != nil {
+	}
+	var err error
+	if batch != nil && path == batch.path {
+		err = batch.applyTarget(reader, probe, observe, discard, policy)
+	} else {
+		err = applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, observe, policy, discard)
+	}
+	if err != nil {
 		return err
 	}
 	normalized := make([]observedAssignment, 0, len(assignments))
@@ -1214,6 +1230,9 @@ func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path s
 		delete(probe, legacy)
 	}
 	for _, assignment := range assignments {
+		if assignment.unavailable {
+			continue
+		}
 		syncable := requireSyncable
 		if syncable && assignment.name == "SSH_PORT" {
 			if err := LegacyGitSSHPort(path, content.Bytes()); err != nil {
@@ -1233,7 +1252,9 @@ func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path s
 	}
 	if observer != nil {
 		for _, assignment := range assignments {
-			observer(assignment.name, assignment.value, assignment.line)
+			if !assignment.unavailable {
+				observer(assignment.name, assignment.value, assignment.line)
+			}
 		}
 	}
 	if ignored != nil {
@@ -1424,7 +1445,7 @@ func setYardDefault(
 			}
 		}
 	}
-	if values[name] == "" || values[name] == generic {
+	if (tracker == nil || tracker.inputsAvailable(name)) && (values[name] == "" || values[name] == generic) {
 		values[name] = derived
 		tracker.record(layer, name, derived, "", 0, "derived from yard name")
 	}
@@ -1481,7 +1502,7 @@ func contextFrom(
 	restrictedBase := values["RESTRICTED_DISK_PATHS"]
 	// Each check reads only its own settings, so every refusal is reported.
 	var refusals []error
-	if hostBase != restrictedBase {
+	if tracker.inputsAvailable("HOST_BASE", "RESTRICTED_DISK_PATHS") && hostBase != restrictedBase {
 		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigHostBaseMismatch))
 	}
 	stateDir := values["SUBYARD_STATE_DIR"]
@@ -1489,18 +1510,23 @@ func contextFrom(
 		stateDir = filepath.Join(configHome, "projects")
 	}
 	sshPort, err := optionalInt(values["SSH_PORT"])
-	sshPortRefused := err != nil // Edge D7: the SSH port range is checked only after it parses.
-	if err != nil {
+	sshPortRefused := err != nil || !tracker.inputsAvailable("SSH_PORT") // Edge D7: the SSH port range is checked only after it parses.
+	if err != nil && tracker.inputsAvailable("SSH_PORT") {
 		refusals = append(refusals, domain.WithRefusalCause(domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), err))
 	}
 	devUID, err := strconv.Atoi(values["DEV_UID"])
-	if err != nil {
+	if err != nil && tracker.inputsAvailable("DEV_UID") {
 		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingNumeric, "DEV_UID"))
 	}
-	forwardAgent, devSudo, nestedE2EVMs := zeroOne(values, "FORWARD_SSH_AGENT", &refusals), zeroOne(values, "DEV_SUDO", &refusals), zeroOne(values, "NESTED_E2E_VMS", &refusals)
+	boolSetting := func(name string) bool {
+		return tracker.inputsAvailable(name) && zeroOne(values, name, &refusals)
+	}
+	forwardAgent, devSudo, nestedE2EVMs := boolSetting("FORWARD_SSH_AGENT"), boolSetting("DEV_SUDO"), boolSetting("NESTED_E2E_VMS")
 	rawE2EVMCPU := values["E2E_VM_CPU"]
 	e2eVMCPU, err := resolveE2EVMCPU(rawE2EVMCPU, runtime.NumCPU())
-	if err != nil {
+	if !tracker.inputsAvailable("E2E_VM_CPU") {
+		e2eVMCPU = rawE2EVMCPU
+	} else if err != nil {
 		refusals = append(refusals, err)
 	} else {
 		values["E2E_VM_CPU"] = e2eVMCPU
@@ -1512,7 +1538,7 @@ func contextFrom(
 		}
 	}
 	// Edge D7: the CPU count is validated only after it resolves.
-	refusals = append(refusals, refusalCauses(validateE2EConfig(values, err == nil))...)
+	refusals = append(refusals, refusalCauses(validateE2EConfigAvailable(values, err == nil && tracker.inputsAvailable("E2E_VM_CPU"), tracker.inputsAvailable))...)
 	ctx := domain.Context{
 		YardName:         yardName,
 		AccessKind:       domain.AccessKind(values["ACCESS_KIND"]),
@@ -1546,18 +1572,33 @@ func contextFrom(
 		ctx.OwnerYardName = "default"
 	}
 	normalized, err := domain.NormalizeContext(ctx)
-	if len(refusals) == 0 && err == nil {
-		return normalized, nil
+	if tracker.batch != nil {
+		for _, cause := range refusalCauses(err) {
+			if tracker.batch.contextRefusalAvailable(cause) && !sshPortRefusedFor(cause, sshPortRefused) {
+				refusals = append(refusals, cause)
+			}
+		}
+		if err == nil {
+			ctx = normalized
+		}
+		return ctx, domain.CollectRefusals(refusals...)
+	}
+	if len(refusals) == 0 {
+		return normalized, err
 	}
 	// Context validation is independent of the setting checks above, except that
 	// an unparsed SSH_PORT already explains the port range refusal.
 	for _, cause := range refusalCauses(err) {
-		var typed *domain.ConfigRefusal
-		if !(sshPortRefused && errors.As(cause, &typed) && typed.Code() == domain.ConfigSSHPortRange) {
+		if !sshPortRefusedFor(cause, sshPortRefused) {
 			refusals = append(refusals, cause)
 		}
 	}
-	return ctx, domain.CollectRefusals(refusals...)
+	return domain.Context{}, domain.CollectRefusals(refusals...)
+}
+
+func sshPortRefusedFor(cause error, sshPortRefused bool) bool {
+	var typed *domain.ConfigRefusal
+	return sshPortRefused && errors.As(cause, &typed) && typed.Code() == domain.ConfigSSHPortRange
 }
 
 func resolveE2EVMCPU(value string, hostCPUs int) (string, error) {
@@ -1606,11 +1647,18 @@ func zeroOne(values environment, name string, refusals *[]error) bool {
 // validateE2EConfig reports every independent E2E setting refusal; checkCPU is
 // false when E2E_VM_CPU already failed to resolve.
 func validateE2EConfig(values environment, checkCPU bool) error {
+	return validateE2EConfigAvailable(values, checkCPU, func(...string) bool { return true })
+}
+
+func validateE2EConfigAvailable(values environment, checkCPU bool, available func(...string) bool) error {
 	var refusals []error
 	if value, err := strconv.Atoi(values["E2E_VM_CPU"]); checkCPU && (err != nil || value < 1) {
 		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingPositiveInteger, "E2E_VM_CPU"))
 	}
 	sizeMiB := func(name string) (int, bool) {
+		if !available(name) {
+			return 0, false
+		}
 		value := values[name]
 		factor, raw := 1, strings.TrimSuffix(value, "MiB")
 		if strings.HasSuffix(value, "GiB") {
@@ -1637,14 +1685,14 @@ func validateE2EConfig(values environment, checkCPU bool) error {
 		min, max int
 		code     domain.ConfigRefusalCode
 	}{{"E2E_VM_SLOT_COUNT", 1, 1<<20 - 1, domain.ConfigE2EVMSlotCountRange}, {"E2E_VM_BOOT_TIMEOUT", 30, 1800, domain.ConfigE2EVMBootTimeoutRange}} {
-		if value, err := strconv.Atoi(values[bound.name]); err != nil || value < bound.min || value > bound.max {
+		if value, err := strconv.Atoi(values[bound.name]); available(bound.name) && (err != nil || value < bound.min || value > bound.max) {
 			refusals = append(refusals, domain.NewConfigRefusal(bound.code))
 		}
 	}
 	image := values["E2E_VM_IMAGE"]
-	if image == "" || strings.HasPrefix(image, "-") || strings.ContainsFunc(image, func(char rune) bool {
+	if available("E2E_VM_IMAGE") && (image == "" || strings.HasPrefix(image, "-") || strings.ContainsFunc(image, func(char rune) bool {
 		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/@+-", char)
-	}) {
+	})) {
 		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigE2EVMImageUnsafe))
 	}
 	return domain.CollectRefusals(refusals...)

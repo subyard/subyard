@@ -485,8 +485,9 @@ func CreatePersistentFile(configHome, path string, content []byte, guards ...fun
 }
 
 type envEditRecord struct {
-	content []byte
-	name    string
+	replacement *PersistentAssignment
+	content     []byte
+	name        string
 }
 
 func editAssignmentContent(
@@ -506,40 +507,24 @@ func (settings Catalog) EditPersistentAssignmentsContent(path string, content []
 }
 
 func (settings Catalog) editPersistentAssignments(path string, content []byte, assignments []PersistentAssignment, unset bool) ([]byte, error) {
-	records, err := parseEnvEditRecords(path, content, settings)
+	records, err := settings.persistentEditRecords(path, content, assignments, unset)
 	if err != nil {
 		return nil, err
 	}
-	last := make(map[string]int, len(assignments))
 	values := make(map[string]string, len(assignments))
 	for _, assignment := range assignments {
 		values[canonicalSettingName(assignment.Name)] = assignment.Value
 	}
-	for index := range records {
-		records[index].name = canonicalSettingName(records[index].name)
-		if _, selected := values[records[index].name]; selected {
-			last[records[index].name] = index
-		}
-	}
 	var result bytes.Buffer
-	for index, record := range records {
-		if value, selected := values[record.name]; !selected {
+	for _, record := range records {
+		if record.replacement == nil {
 			result.Write(record.content)
-		} else if !unset && index == last[record.name] {
-			result.WriteString(record.name + "=" + quotePersistentValue(value) + "\n")
+			continue
 		}
-	}
-	if !unset {
-		for _, assignment := range assignments {
-			name := canonicalSettingName(assignment.Name)
-			if _, exists := last[name]; exists {
-				continue
-			}
-			if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
-				result.WriteByte('\n')
-			}
-			result.WriteString(name + "=" + quotePersistentValue(assignment.Value) + "\n")
+		if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
+			result.WriteByte('\n')
 		}
+		result.WriteString(record.name + "=" + quotePersistentValue(record.replacement.Value) + "\n")
 	}
 	// Preserved records can still assign the selected settings. Verify what
 	// the final draft actually assigns before approving publication.
@@ -571,6 +556,45 @@ func (settings Catalog) editPersistentAssignments(path string, content []byte, a
 		return nil, err
 	}
 	return result.Bytes(), nil
+}
+
+// persistentEditRecords locates replacements without evaluating their values.
+func (settings Catalog) persistentEditRecords(path string, content []byte, assignments []PersistentAssignment, unset bool) ([]envEditRecord, error) {
+	records, err := parseEnvEditRecords(path, content, settings)
+	if err != nil {
+		return nil, err
+	}
+	last := make(map[string]int, len(assignments))
+	replacements := make(map[string]*PersistentAssignment, len(assignments))
+	for index := range assignments {
+		replacement := &assignments[index]
+		replacements[canonicalSettingName(replacement.Name)] = replacement
+	}
+	for index, record := range records {
+		name := canonicalSettingName(record.name)
+		if replacements[name] != nil {
+			last[name] = index
+		}
+	}
+	edited := make([]envEditRecord, 0, len(records))
+	for index, record := range records {
+		name := canonicalSettingName(record.name)
+		if replacement := replacements[name]; replacement == nil {
+			edited = append(edited, record)
+		} else if !unset && index == last[name] {
+			edited = append(edited, envEditRecord{name: name, replacement: replacement})
+		}
+	}
+	if !unset {
+		for index := range assignments {
+			replacement := &assignments[index]
+			name := canonicalSettingName(replacement.Name)
+			if _, exists := last[name]; !exists {
+				edited = append(edited, envEditRecord{name: name, replacement: replacement})
+			}
+		}
+	}
+	return edited, nil
 }
 
 func parseEnvEditRecords(path string, content []byte, settings Catalog) ([]envEditRecord, error) {

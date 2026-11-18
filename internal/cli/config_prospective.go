@@ -19,30 +19,18 @@ import (
 // The binding includes absent layer inputs and inode/security metadata, so an
 // equivalent-value replacement still requires a new assessment.
 type configProspective struct {
-	cli                  *CLI
-	loaded               config.Loaded
-	request              configAuthoringRequest
-	integrations         []string
-	rejectedIntegrations []string
-	scalarBatch          bool
-	path, draft          string
-	binding              string
-	semantics            string
-	directoryInputs      map[string]bool
+	cli             *CLI
+	loaded          config.Loaded
+	request         configAuthoringRequest
+	path, draft     string
+	binding         string
+	semantics       string
+	directoryInputs map[string]bool
+	checkBatch      func(locked bool) error
 }
 
-func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot, batch ...configAuthoringRequest) (*configProspective, error) {
-	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path, scalarBatch: len(batch) != 0}
-	for _, assignment := range batch {
-		if assignment.name == "CODING_TOOL_INTEGRATIONS" {
-			ids := strings.Fields(assignment.value)
-			if assignment.rejectedSelection {
-				plan.rejectedIntegrations = ids
-			} else {
-				plan.integrations = ids
-			}
-		}
-	}
+func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot) (*configProspective, error) {
+	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path}
 	if desired.Exists {
 		file, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
 		if err != nil {
@@ -80,6 +68,11 @@ func (plan *configProspective) close() {
 func (plan *configProspective) check() error { return plan.checkLocked(false) }
 
 func (plan *configProspective) checkLocked(locked bool) error {
+	if plan.checkBatch != nil {
+		if err := plan.checkBatch(locked); err != nil {
+			return fmt.Errorf("%w: %w", domain.ErrPlanStale, configProspectiveError{plan.loaded.Context.Paths.ConfigHome, err})
+		}
+	}
 	binding, semantics, err := plan.inspect(true, locked)
 	if err != nil {
 		return fmt.Errorf("%w: prospective configuration can no longer be validated: %w", domain.ErrPlanStale, err)
@@ -135,6 +128,22 @@ func (cli *CLI) reportConfigNext(err error) {
 	}
 }
 
+func (cli *CLI) configProspectiveEnvironment(loaded config.Loaded) map[string]string {
+	paths := loaded.Context.Paths
+	environment := make(map[string]string)
+	for name, value := range cli.baseEnv {
+		if _, setting := loaded.Catalog.LookupSetting(name); setting || loaded.Catalog.IsLegacySetting(name) {
+			continue
+		}
+		environment[name] = value
+	}
+	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
+	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
+	environment["SUBYARD_HOME"] = paths.DataHome
+	delete(environment, "SUBYARD_YARD")
+	return environment
+}
+
 func (plan *configProspective) inspect(draft, locked bool) (binding, semantics string, result error) {
 	defer func() {
 		if result != nil {
@@ -150,17 +159,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 			return "", "", err
 		}
 	}
-	environment := make(map[string]string)
-	for name, value := range plan.cli.baseEnv {
-		if _, setting := plan.loaded.Catalog.LookupSetting(name); setting || plan.loaded.Catalog.IsLegacySetting(name) {
-			continue
-		}
-		environment[name] = value
-	}
-	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
-	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
-	environment["SUBYARD_HOME"] = paths.DataHome
-	delete(environment, "SUBYARD_YARD")
+	environment := plan.cli.configProspectiveEnvironment(plan.loaded)
 	var overrides map[string]string
 	if draft {
 		overrides = map[string]string{plan.path: plan.draft}
@@ -228,8 +227,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	var refusals []error
 	for _, name := range names {
 		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
-			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked, AuthoredIntegrations: plan.integrations,
-			RejectedIntegrations: plan.rejectedIntegrations, ValidateScalarBatch: plan.scalarBatch})
+			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked})
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 			continue

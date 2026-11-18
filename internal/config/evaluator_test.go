@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
@@ -55,5 +56,51 @@ func TestBuildCatalogUsesRootFreeMetadata(t *testing.T) {
 	}
 	if _, err := BuildCatalog([]profile.Metadata{{}}, nil); err == nil {
 		t.Fatal("zero metadata accepted")
+	}
+}
+
+func TestLocalBatchListenerChecksUseAvailableInputs(t *testing.T) {
+	metadata, err := profile.Decode("fixture", []byte(`{
+		"schema_version": 1, "settings": [
+			{"name":"FIRST_PORT","type":"port","scopes":["host"],"application":"next-command","minimum":1024,"maximum":65535,"host_listener":true},
+			{"name":"SECOND_PORT","type":"port","scopes":["host"],"application":"next-command","minimum":1024,"maximum":65535,"host_listener":true},
+			{"name":"DERIVED_PORT","type":"port","scopes":["host"],"application":"next-command","minimum":1024,"maximum":65535,"host_listener":true,"default_from":{"setting":"SSH_PORT","offset":100}},
+			{"name":"CHAIN_PORT","type":"port","scopes":["host"],"application":"next-command","minimum":1024,"maximum":65535,"host_listener":true,"default_from":{"setting":"DERIVED_PORT","offset":100}}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := BuildCatalog([]profile.Metadata{metadata}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name        string
+		initial     environment
+		unavailable []string
+		want        string
+	}{
+		{"invalid SSH and transitive defaults", environment{
+			"SSH_PORT": "2400", "ENVIRONMENT_PROFILES": "fixture",
+			"FIRST_PORT": "2600", "SECOND_PORT": "2600", "WEB_PREVIEW_HOST_PORT": "2400",
+		}, []string{"SSH_PORT"}, "SECOND_PORT collides with FIRST_PORT; choose another port"},
+		{"invalid profile selection", environment{
+			"SSH_PORT": "2400", "ENVIRONMENT_PROFILES": "fixture",
+			"FIRST_PORT": "2400", "WEB_PREVIEW_HOST_PORT": "2400",
+		}, []string{"ENVIRONMENT_PROFILES"}, "WEB_PREVIEW_HOST_PORT collides with SSH_PORT; choose another port"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tracker := newSettingTracker()
+			tracker.catalog = catalog
+			tracker.batch = &localBatch{catalog: catalog, unavailable: map[string]bool{}}
+			for _, name := range test.unavailable {
+				tracker.batch.setAvailable(name, false)
+			}
+			err := tracker.batch.checkPorts("", LoadOptions{SyncSource: true}, domain.Context{SSHPort: 2400}, test.initial, tracker)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("port refusals = %v, want %q", err, test.want)
+			}
+		})
 	}
 }

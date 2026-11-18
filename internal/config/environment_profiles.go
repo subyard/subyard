@@ -17,6 +17,13 @@ type EnvironmentProfileSelection struct {
 }
 
 func resolveEnvironmentProfiles(configDir, yard string, values map[string]string, catalog Catalog) (EnvironmentProfileSelection, error) {
+	return resolveEnvironmentProfilesWith(yard, values, catalog, func(name string) (bool, error) {
+		eligible, _, err := EnvironmentProfileEligibility(configDir, yard, values, catalog, name)
+		return eligible, err
+	})
+}
+
+func resolveEnvironmentProfilesWith(yard string, values map[string]string, catalog Catalog, eligibleProfile func(string) (bool, error)) (EnvironmentProfileSelection, error) {
 	value, present := values["ENVIRONMENT_PROFILES"]
 	selection := EnvironmentProfileSelection{Requested: strings.Fields(value), Effective: []string{}, Present: present}
 	candidates := slices.Clone(selection.Requested)
@@ -30,7 +37,7 @@ func resolveEnvironmentProfiles(configDir, yard string, values map[string]string
 	// Every broken candidate package is reported, not only the first.
 	var refusals []error
 	for _, name := range candidates {
-		eligible, _, err := EnvironmentProfileEligibility(configDir, yard, values, catalog, name)
+		eligible, err := eligibleProfile(name)
 		if err != nil {
 			refusals = append(refusals, err)
 			continue

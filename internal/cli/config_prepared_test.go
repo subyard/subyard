@@ -1005,52 +1005,93 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 		duplicate       = `duplicate agent "codex"`
 		unknown         = "unknown integration"
 		invalidPort     = "SSH_PORT (scalar settings): invalid port value"
+		invalidName     = "CODING_TOOL_INTEGRATIONS (scalar settings): invalid name value"
 		role            = "yard role forbids non-empty CODING_TOOL_INTEGRATIONS"
 		portCollision   = "WEB_PREVIEW_HOST_PORT collides with SSH_PORT"
 		storageConflict = "HOST_BASE must equal RESTRICTED_DISK_PATHS"
+		manifestSchema  = "unsupported configuration sync manifest schema"
+		unknownSetting  = "UNKNOWN_SETTING: configuration (scalar settings): unknown setting"
+		hardLinks       = "target has hard links"
+		interrupted     = "an interrupted configuration transaction requires recovery"
 	)
 	for _, test := range []struct {
 		name, yardConfig, scope string
 		assignments             []string
 		code                    int
 		refusals                []string
+		manifest, link, pending bool
+		namedConfig             string
 	}{
-		{"masked integration", "CODING_TOOL_INTEGRATIONS=codex\n", "host",
-			[]string{"CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "2390"}, 1,
-			[]string{unknown}},
-		{"role and invalid port", "YARD_TEMPLATE=no-tools\n", "yard",
-			[]string{"CODING_TOOL_INTEGRATIONS", "codex", "SSH_PORT", "invalid"}, 2,
-			[]string{role, invalidPort}},
-		{"template and invalid port", "CODING_TOOL_INTEGRATIONS=codex\n", "yard",
-			[]string{"YARD_TEMPLATE", "no-tools", "SSH_PORT", "invalid"}, 2,
-			[]string{role, invalidPort}},
-		{"template, unknown integration and invalid port", "", "yard",
-			[]string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "invalid"}, 2,
-			[]string{role, unknown, invalidPort}},
-		{"unknown template and duplicate integration", "", "yard",
-			[]string{"YARD_TEMPLATE", "missing-template", "CODING_TOOL_INTEGRATIONS", "codex codex", "SSH_PORT", "invalid"}, 2,
-			[]string{unknownTemplate, duplicate, invalidPort}},
-		{"unknown template and unknown integration", "", "yard",
-			[]string{"CODING_TOOL_INTEGRATIONS", "missing-one", "YARD_TEMPLATE", "missing-template"}, 1,
-			[]string{unknownTemplate, unknown}},
-		{"unknown template with an existing restrictive role", "YARD_TEMPLATE=no-tools\n", "yard",
-			[]string{"YARD_TEMPLATE", "missing-template", "CODING_TOOL_INTEGRATIONS", "codex codex missing-one", "SSH_PORT", "invalid"}, 2,
-			[]string{unknownTemplate, duplicate, unknown, invalidPort}},
-		{"role, duplicate and unknown integration and invalid port", "", "yard",
-			[]string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "codex codex missing-one", "SSH_PORT", "invalid"}, 2,
-			[]string{role, duplicate, unknown, invalidPort}},
-		{"role, duplicate integration and port collision", "", "yard",
-			[]string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "codex codex", "SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2390"}, 1,
-			[]string{role, duplicate, portCollision}},
-		{"context conflict and port collision", "", "yard",
-			[]string{"HOST_BASE", "/var/lib/subyard-validation-fixture", "SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2390"}, 1,
-			[]string{storageConflict, portCollision}},
+		{name: "masked integration", yardConfig: "CODING_TOOL_INTEGRATIONS=codex\n", scope: "host",
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "2390"}, code: 1, refusals: []string{unknown}},
+		{name: "masked custom metadata is resolved for each yard", yardConfig: "CODING_TOOL_INTEGRATIONS=codex\nAGENT_testhelper_COMMAND=testhelper\n",
+			namedConfig: "CODING_TOOL_INTEGRATIONS=codex\n", scope: "host",
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "testhelper", "SSH_PORT", "2390"}, code: 1, refusals: []string{unknown}},
+		{name: "role and invalid port", yardConfig: "YARD_TEMPLATE=no-tools\n", scope: "yard",
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "codex", "SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort, role}},
+		{name: "template and invalid port", yardConfig: "CODING_TOOL_INTEGRATIONS=codex\n", scope: "yard",
+			assignments: []string{"YARD_TEMPLATE", "no-tools", "SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort, role}},
+		{name: "template, unknown integration and invalid port", scope: "yard",
+			assignments: []string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "invalid"}, code: 2, refusals: []string{unknown, invalidPort, role}},
+		{name: "unknown template and duplicate integration", scope: "yard",
+			assignments: []string{"YARD_TEMPLATE", "missing-template", "CODING_TOOL_INTEGRATIONS", "codex codex", "SSH_PORT", "invalid"}, code: 2, refusals: []string{unknownTemplate, duplicate, invalidPort}},
+		{name: "unknown template and unknown integration", scope: "yard",
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "missing-one", "YARD_TEMPLATE", "missing-template"}, code: 1, refusals: []string{unknown, unknownTemplate}},
+		{name: "unknown template with an existing restrictive role", yardConfig: "YARD_TEMPLATE=no-tools\n", scope: "yard",
+			assignments: []string{"YARD_TEMPLATE", "missing-template", "CODING_TOOL_INTEGRATIONS", "codex codex missing-one", "SSH_PORT", "invalid"}, code: 2, refusals: []string{unknownTemplate, duplicate, unknown, invalidPort}},
+		{name: "role, duplicate and unknown integration and invalid port", scope: "yard",
+			assignments: []string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "codex codex missing-one", "SSH_PORT", "invalid"}, code: 2, refusals: []string{duplicate, unknown, invalidPort, role}},
+		{name: "role, duplicate integration and port collision", scope: "yard",
+			assignments: []string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "codex codex", "SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2390"}, code: 1, refusals: []string{duplicate, portCollision, role}},
+		{name: "context conflict and port collision", scope: "yard",
+			assignments: []string{"HOST_BASE", "/var/lib/subyard-validation-fixture", "SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2390"}, code: 1, refusals: []string{storageConflict, portCollision}},
+		{name: "malformed selection keeps nonempty role input", yardConfig: "YARD_TEMPLATE=no-tools\n", scope: "yard",
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "claude,codex", "SSH_PORT", "2390"}, code: 2, refusals: []string{invalidName, unknown, role}},
+		{name: "unsupported manifest with every assignment refused", scope: "host", manifest: true,
+			assignments: []string{"SSH_PORT", "invalid", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{manifestSchema, invalidPort, unknownSetting}},
+		{name: "invalid port makes its old value unavailable", yardConfig: "SSH_PORT=2390\n", scope: "yard",
+			assignments: []string{"SSH_PORT", "invalid", "WEB_PREVIEW_HOST_PORT", "2390"}, code: 2, refusals: []string{invalidPort}},
+		{name: "unsafe target and unknown setting", scope: "yard", link: true,
+			assignments: []string{"SSH_PORT", "2390", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{hardLinks, unknownSetting}},
+		{name: "both storage and target refused before assignments", scope: "yard", manifest: true, link: true,
+			assignments: []string{"SSH_PORT", "invalid", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{manifestSchema, hardLinks, invalidPort, unknownSetting}},
+		{name: "pending transaction and unsupported manifest", scope: "yard", pending: true, manifest: true,
+			assignments: []string{"SSH_PORT", "invalid", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{interrupted, manifestSchema, invalidPort, unknownSetting}},
+		{name: "operational refusal alone exits one", scope: "host", manifest: true,
+			assignments: []string{"SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2490"}, code: 1, refusals: []string{manifestSchema}},
+		{name: "singleton checks manifest first", scope: "host", manifest: true,
+			assignments: []string{"SSH_PORT", "invalid"}, code: 1, refusals: []string{manifestSchema}},
+		{name: "singleton rejects port with writable storage", scope: "host",
+			assignments: []string{"SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
 			withSyntheticYardTemplate(t, root, environment)
 			yardPath := filepath.Join(configHome, "yards", "default", "config.env")
 			writeConfigCommandFile(t, yardPath, test.yardConfig)
+			files := map[string]string{filepath.Join(configHome, "config.env"): "", yardPath: test.yardConfig}
+			if test.namedConfig != "" {
+				path := filepath.Join(configHome, "yards", "named", "config.env")
+				writeConfigCommandFile(t, path, test.namedConfig)
+				files[path] = test.namedConfig
+			}
+			if test.manifest {
+				path, content := filepath.Join(configHome, ".sync", "manifest.json"), `{"schemaVersion":3}`
+				writeConfigCommandFile(t, path, content)
+				files[path] = content
+			}
+			if test.pending {
+				path, content := filepath.Join(configHome, ".sync", "transaction.json"), "{}\n"
+				writeConfigCommandFile(t, path, content)
+				files[path] = content
+			}
+			if test.link {
+				link := filepath.Join(filepath.Dir(yardPath), "hardlink.env")
+				if err := os.Link(yardPath, link); err != nil {
+					t.Fatal(err)
+				}
+				files[link] = test.yardConfig
+			}
 			var stderr bytes.Buffer
 			arguments := append([]string{"config", "set"}, test.assignments...)
 			arguments = append(arguments, "--scope", test.scope, "--yes")
@@ -1061,18 +1102,26 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 			if code := program.Run(context.Background()); code != test.code {
 				t.Errorf("exit = %d, want %d: %s", code, test.code, &stderr)
 			}
-			if strings.Contains(stderr.String(), "missing-template") || strings.Contains(stderr.String(), "missing-one") {
-				t.Errorf("refusal disclosed an unknown name: %s", &stderr)
+			output := stderr.String()
+			if strings.Contains(output, "missing-template") || strings.Contains(output, "missing-one") || strings.Contains(output, "claude,codex") {
+				t.Errorf("refusal disclosed an input value: %s", output)
 			}
-			for _, refusal := range []string{unknownTemplate, duplicate, unknown, invalidPort, role, portCollision, storageConflict} {
-				count := strings.Count(stderr.String(), refusal)
-				if want := slices.Contains(test.refusals, refusal); (want && count != 1) || (!want && count != 0) {
-					t.Errorf("refusal %q appeared %d times, want present=%t: %s", refusal, count, want, &stderr)
+			remaining := output
+			for _, refusal := range test.refusals {
+				_, rest, found := strings.Cut(remaining, refusal)
+				if !found || strings.Count(output, refusal) != 1 {
+					t.Errorf("want one %q in order %v: %s", refusal, test.refusals, output)
+				}
+				remaining = rest
+			}
+			for _, refusal := range []string{unknownTemplate, duplicate, unknown, invalidPort, invalidName, role, portCollision, storageConflict, manifestSchema, unknownSetting, hardLinks, interrupted} {
+				if !slices.Contains(test.refusals, refusal) && strings.Contains(output, refusal) {
+					t.Errorf("unexpected %q: %s", refusal, output)
 				}
 			}
-			for path, want := range map[string]string{filepath.Join(configHome, "config.env"): "", yardPath: test.yardConfig} {
+			for path, want := range files {
 				if content, err := os.ReadFile(path); err != nil || string(content) != want {
-					t.Errorf("rejected batch changed settings at %s: %v", path, err)
+					t.Errorf("rejected set changed settings at %s: %v", path, err)
 				}
 			}
 		})
