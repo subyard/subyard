@@ -231,7 +231,7 @@ func (cli *CLI) runReleaseTransitionYardCommandIO(
 		}
 		prepared, err := operation.prepareCommand(ctx, prepareCommandRequest{
 			Loaded: loaded, Definition: definition, Arguments: arguments[1:],
-			ExplicitYard: true, Bootstrap: bootstrap, InteractiveSetup: true, RepairModes: true,
+			ExplicitYard: true, Bootstrap: bootstrap, InteractiveSetup: true,
 		})
 		if err != nil {
 			return err
@@ -902,7 +902,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if behavior.prepare != nil && definition.Handler != "@resource" && (definition.Handler != "@keys" || credentialExactInvocation(definition, commandArguments)) && (definition.Handler != "@config" || configExactInvocation(loaded, commandArguments)) {
 			prepared, prepareErr := cli.prepareCommand(ctx, prepareCommandRequest{
 				Loaded: loaded, Definition: definition, Arguments: commandArguments,
-				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap, InteractiveSetup: true, RepairModes: true,
+				ExplicitYard: explicit, ReadOnly: readOnlyInvocation, Bootstrap: bootstrap, InteractiveSetup: true,
 				OnResolved: func(resolved config.Loaded, arguments []string) {
 					remote := ""
 					if resolved.Context.AccessKind == domain.AccessRemote {

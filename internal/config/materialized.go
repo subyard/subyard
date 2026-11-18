@@ -120,15 +120,6 @@ func validateMaterializedDestinations(assets []MaterializedAsset, values map[str
 	return validateManagedDestinations(destinations, values["INTEGRATION_HOST_LINKS"], filepath.Join("/home", developer))
 }
 
-// SelectedStructuredConfigDestinations scopes permission requests to selected
-// integrations. The guest independently checks each destination's receipt.
-func SelectedStructuredConfigDestinations(values map[string]string, developer string, definitions ...profile.IntegrationDefinition) []string {
-	selected := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
-	return StructuredConfigDestinations(values, developer, slices.DeleteFunc(slices.Clone(definitions), func(definition profile.IntegrationDefinition) bool {
-		return !slices.Contains(selected, definition.Name)
-	})...)
-}
-
 // StructuredConfigDestinations includes declared native destinations even when
 // a template source is disabled. Another owner can still contribute there.
 func StructuredConfigDestinations(values map[string]string, developer string, definitions ...profile.IntegrationDefinition) []string {

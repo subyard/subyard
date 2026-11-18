@@ -94,6 +94,8 @@ class Runtime:
         return dict(schema=1,source=source,original=original,target=target,installed=self.owned(),files=self.identity_files(wanted),manager=manager)
 
     def identity_check(self,recipe,phase):
+        pending = native.pending_publications(self.home, self.control/'native.json')
+        native.raise_refusals(list(pending.items()))
         wanted=self.identity_runtime(recipe['target'])
         if recipe['original']['uid']!=recipe['target']['uid'] or recipe['original']['gid']!=recipe['target']['gid'] or recipe['files']!=self.identity_files(wanted):
             raise ValueError('telemetry identity scope changed')
@@ -323,21 +325,15 @@ class Runtime:
             value['retained'] = {str(path): mode for path, mode in self.retained.items()}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
-    def repair_native_modes(self):
-        native.repair_modes(self.home, self.control/'native.json', self.agents, self.uid,
-                            developer=getattr(self, 'user', None))
-
     def apply(self):
-        self.repair_native_modes()
         installed = self.owned()
+        token_path = self.data/'auth.token'
+        token = self.token() if self.selected and self.agents and native.snapshot(token_path) is not None else None
+        native_current = self.reconcile_native(token, check=True)
         if not self.selected and not installed:
-            if not self.reconcile_native('', check=True):
+            if not native_current:
                 self.reconcile_native('')
             return
-        token_path = self.data/'auth.token'
-        if self.selected and self.agents:
-            token = self.token() if native.snapshot(token_path) is not None else None
-            self.reconcile_native(token, check=True)
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         if not installed:
             if self.library.exists():
@@ -397,12 +393,12 @@ def main():
     if os.getuid() != 0:
         raise ValueError('guest root required')
     mode, selected, user, agents, *bindings = sys.argv[1:]
-    if mode == 'repair-modes':
+    if mode == 'check-publication':
         account = pwd.getpwnam(user)
         if account.pw_uid == 0:
             raise ValueError('developer account required')
-        native.repair_modes(Path(account.pw_dir), Path('/var/lib/subyard/telemetry-control/native.json'),
-                            agents.split(), account.pw_uid, developer=user)
+        pending = native.pending_publications(Path(account.pw_dir), Path('/var/lib/subyard/telemetry-control/native.json'))
+        native.raise_refusals(list(pending.items()))
         return
     if mode in ('identity-observe','identity-apply'):
         import authority
@@ -424,6 +420,9 @@ def main():
         return
     runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1' and mode != 'startup', agents.split())
     runtime.selected = selected == '1'
+    if mode in ('pause', 'resume', 'startup'):
+        pending = native.pending_publications(runtime.home, runtime.control/'native.json')
+        native.raise_refusals(list(pending.items()))
     if mode == 'pause':
         if runtime.owned() and runtime.manager(COLLECTOR).get('ActiveState') == 'active':
             systemctl('stop', COLLECTOR)
@@ -436,8 +435,6 @@ def main():
     if mode == 'startup':
         print(json.dumps(runtime.startup()))
         return
-    if mode in ('apply', 'refresh'):
-        runtime.repair_native_modes()
     if mode != 'apply':
         observation = runtime.observe()
     if mode == 'observe':
@@ -485,7 +482,7 @@ if __name__ == '__main__':
             elif isinstance(failure, native.materializer.ContributionConflict):
                 print('telemetry-config-contribution-conflict-v1 '+str(failure), file=sys.stderr)
             elif isinstance(failure, native.materializer.PendingContributionPublication):
-                print('telemetry-agent-config-publication-pending-v1 '+Path(failure.destination).parent.name[1:], file=sys.stderr)
+                print(str(failure), file=sys.stderr)
             elif isinstance(failure, native.materializer.PublicationRefusal) and failure.recovery:
                 print('telemetry-agent-config-recovery-v1 '+agent+' '+failure.recovery, file=sys.stderr)
             elif agent:

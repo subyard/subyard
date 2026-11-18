@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/ports"
@@ -122,10 +121,10 @@ func TestMaterializationChecksAndRepairsRegisteredContribution(t *testing.T) {
 	}
 	journalPath := strings.TrimSuffix(state, ".json") + ".intent"
 	testkit.WriteFile(t, journalPath, journal, 0o600)
-	for _, mode := range []string{ModeObserve, ModeApply, ModeAssessRetire, ModeRetire, ModeRepair} {
+	for _, mode := range []string{ModeObserve, ModeApply, ModeApplyInstalled, ModeAssessAdopt, ModeAssessRetire, ModeRetire} {
 		stderr, err := h.run(template, mode)
 		result := ports.InstanceExecResult{ExitCode: 2, Stderr: []byte(stderr)}
-		if err == nil || !strings.Contains(WriteRefusal(result, nil, h.destination), "check the document") {
+		if err == nil || !strings.Contains(WriteRefusal(result, nil, h.destination), "restore prior fields") {
 			t.Fatalf("%s did not report a typed publication refusal: %v %q", mode, err, stderr)
 		}
 		if WriteRefusal(result, nil, h.destination+".other") != "" {
@@ -320,39 +319,6 @@ func TestTOMLMaterializationRejectsInvalidInputsWithoutOverwrite(t *testing.T) {
 	}
 }
 
-func TestPermissionRepairRequiresPublishedOwnership(t *testing.T) {
-	h := newGuestHarness(t)
-	payload := []byte(`{"managed":true}`)
-	testkit.WriteFile(t, h.destination, []byte(`{}`), 0400)
-	assertMode := func(want os.FileMode) {
-		t.Helper()
-		info, err := os.Stat(h.destination)
-		if err != nil || info.Mode().Perm() != want {
-			t.Fatalf("mode after repair = %v, want %o: %v", info, want, err)
-		}
-	}
-	repair := func() {
-		t.Helper()
-		if stderr, err := h.run(nil, ModeRepair); err != nil {
-			t.Fatalf("repair failed: %v %s", err, stderr)
-		}
-	}
-	repair()
-	assertMode(0400)
-	h.apply(t, payload)
-	if err := os.Chmod(h.destination, 0644); err != nil {
-		t.Fatal(err)
-	}
-	repair()
-	assertMode(0600)
-	h.observeMode(t, nil, ModeRetire)
-	if err := os.Chmod(h.destination, 0400); err != nil {
-		t.Fatal(err)
-	}
-	repair()
-	assertMode(0400)
-}
-
 func TestTOMLMaterializationPreservesTimePrecision(t *testing.T) {
 	h := newGuestHarness(t)
 	h.format = "toml"
@@ -374,11 +340,13 @@ func TestTOMLMaterializationPreservesTimePrecision(t *testing.T) {
 			t.Fatal("unowned time literal reported converged")
 		}
 		h.apply(t, []byte(original))
+		h.writeDestination(t, "# editor adds a comment\n"+original)
 		if !h.observe(t, []byte(original)).Converged {
-			t.Fatal("byte-identical time literal did not converge")
+			t.Fatal("unchanged time literal did not converge")
 		}
-		if got, err := os.ReadFile(h.destination); err != nil || string(got) != original {
-			t.Fatalf("exact template changed time literal: %v", err)
+		h.apply(t, []byte(original))
+		if got, err := os.ReadFile(h.destination); err != nil || string(got) != "# editor adds a comment\n"+original {
+			t.Fatalf("unchanged template rewrote the time literal or comment: %v", err)
 		}
 		if err := os.Remove(h.baselinePath(t)); err != nil {
 			t.Fatal(err)
@@ -1747,196 +1715,78 @@ func TestInstalledViewNeverWritesReleasedDocument(t *testing.T) {
 	}
 }
 
-// A release record bound to another projection, such as one an older runtime
-// left behind, does not turn an interrupted ordinary retirement into a release.
-func TestStaleReleaseRecordDoesNotChangeOrdinaryRetirement(t *testing.T) {
-	h := newGuestHarness(t)
-	h.apply(t, []byte(`{"managed":1}`))
-	h.writeDestination(t, `{"managed":1,"history":["kept"]}`)
-	request, err := h.request(nil, ModeRetire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	needle := "            atomic_write(destination, payload, uid, 0o600, gid, publish)"
-	request.Command[3] = strings.Replace(request.Command[3], needle, "            raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
-	command := exec.Command(request.Command[0], request.Command[1:]...)
-	command.Stdin = bytes.NewReader(request.Stdin)
-	if err := command.Run(); err == nil {
-		t.Fatal("interruption did not occur")
-	}
-	marker := strings.TrimSuffix(h.baselinePath(t), ".json") + ".release"
-	testkit.WriteFile(t, marker, []byte(`{"schema":1,"release":"changed","retired_digest":"`+strings.Repeat("0", 64)+`"}`), 0o600)
-	if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != "" {
-		t.Fatalf("stale release record changed an ordinary retirement: %#v", result)
-	}
-	if got := h.readDestination(t); !jsonEqual(got, map[string]any{"history": []any{"kept"}}) {
-		t.Fatalf("ordinary retirement did not finish: %#v", got)
-	}
-}
-
-// An interrupted ordinary retirement keeps its strict retry proof; a release
-// applies only to an applied document whose owned fields changed.
-func TestInterruptedRetirementStillRefusesChangedOwnedFields(t *testing.T) {
-	h := newGuestHarness(t)
-	h.apply(t, []byte(`{"managed":1}`))
-	request, err := h.request(nil, ModeRetire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	needle := "            atomic_write(destination, payload, uid, 0o600, gid, publish)"
-	request.Command[3] = strings.Replace(request.Command[3], needle, "            raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
-	command := exec.Command(request.Command[0], request.Command[1:]...)
-	command.Stdin = bytes.NewReader(request.Stdin)
-	if err := command.Run(); err == nil {
-		t.Fatal("interruption did not occur")
-	}
-	h.writeDestination(t, `{"managed":"changed-secret"}`)
-	before := snapshotMaterialization(t, h.root)
-	for _, mode := range []string{ModeAssessRetire, ModeRetire} {
-		if stderr, err := h.run(nil, mode); err == nil || !strings.Contains(stderr, "retirement owned fields changed") || strings.Contains(stderr, "secret") {
-			t.Fatalf("interrupted retirement accepted drift: %s %v %q", mode, err, stderr)
-		}
-	}
-	if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
-		t.Fatal("refused retirement changed files")
-	}
-}
-
-func TestRetirementResumesInterruptedReplacement(t *testing.T) {
-	for _, stage := range []string{"before", "after", "released-baseline", "legacy-schema2"} {
+func TestInterruptedStructuredPublicationRequiresManualRestore(t *testing.T) {
+	for _, stage := range []string{"creation", "update", "retirement"} {
 		t.Run(stage, func(t *testing.T) {
 			h := newGuestHarness(t)
-			h.apply(t, []byte(`{"managed":1}`))
-			h.writeDestination(t, `{"managed":1,"history":["kept"]}`)
-			if stage == "legacy-schema2" {
-				receipt, err := os.ReadFile(h.receiptPath(t))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(h.baselinePath(t), receipt, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Remove(h.receiptPath(t)); err != nil {
-					t.Fatal(err)
-				}
+			payload := []byte(`{"managed":2}`)
+			mode := ModeApply
+			before := `{"managed":1,"history":["kept"]}`
+			if stage != "creation" {
+				h.apply(t, []byte(`{"managed":1}`))
+				h.writeDestination(t, before)
 			}
-			request, err := h.request(nil, ModeRetire)
+			needle := "                rename_destination(directory, temporary, name, 1)  # RENAME_NOREPLACE"
+			fault := needle + "\n                os._exit(57)"
+			if stage != "creation" {
+				needle = "            verify()\n        finally:"
+				fault = "            os._exit(57)\n" + needle
+			}
+			if stage == "retirement" {
+				mode = ModeRetire
+			}
+			request, err := h.request(payload, mode)
 			if err != nil {
 				t.Fatal(err)
 			}
-			needle := "            atomic_write(destination, payload, uid, 0o600, gid, publish)"
-			injected := "            raise MaterializationError(\"synthetic interruption\")\n" + needle
-			if stage == "after" {
-				injected = needle + "\n            raise MaterializationError(\"synthetic interruption\")"
-			}
-			if stage == "released-baseline" {
-				needle = "        baseline[\"phase\"] = \"retired\""
-				injected = "        raise MaterializationError(\"synthetic interruption\")\n" + needle
-			}
-			if stage == "legacy-schema2" {
-				needle = "            # Convert an earlier candidate's schema2 before any document edit."
-				injected = "            raise MaterializationError(\"synthetic interruption\")\n" + needle
-			}
-			request.Command[3] = strings.Replace(request.Command[3], needle, injected, 1)
+			request.Command[3] = strings.Replace(request.Command[3], needle, fault, 1)
 			command := exec.Command(request.Command[0], request.Command[1:]...)
 			command.Stdin = bytes.NewReader(request.Stdin)
-			if err := command.Run(); err == nil {
-				t.Fatal("interruption did not occur")
+			if err := command.Run(); command.ProcessState == nil || command.ProcessState.ExitCode() != 57 {
+				t.Fatalf("interruption did not occur: %v", err)
 			}
-			if h.observeMode(t, nil, ModeAssessRetire).Converged {
-				t.Fatal("unfinished retirement reported complete")
-			}
-			interrupted, err := os.ReadFile(h.destination)
-			if err != nil {
+			if err := os.Chmod(h.destination, 0644); err != nil {
 				t.Fatal(err)
 			}
-			h.writeDestination(t, `{"managed":"changed-secret","history":["kept"]}`)
-			before := snapshotMaterialization(t, h.root)
-			if stderr, err := h.run(nil, ModeRetire); err == nil || strings.Contains(stderr, "secret") {
-				t.Fatalf("retry accepted drift: %v %q", err, stderr)
+			saved := snapshotMaterialization(t, h.root)
+			want := `"/managed":{"present":true,"value":1}`
+			if stage == "creation" {
+				want = `"/managed":{"present":false}`
 			}
-			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
-				t.Fatal("retry overwrote drift")
-			}
-			h.writeDestination(t, string(interrupted))
-			if !h.observeMode(t, nil, ModeRetire).Converged {
-				t.Fatal("retirement retry failed")
-			}
-			if got := h.readDestination(t); !jsonEqual(got, map[string]any{"history": []any{"kept"}}) {
-				t.Fatalf("retry changed runtime fields: %#v", got)
-			}
-		})
-	}
-}
-
-func TestInterruptedFirstCreationCanRetry(t *testing.T) {
-	h := newGuestHarness(t)
-	payload := []byte(`{"managed":true}`)
-	request, err := h.request(payload, ModeApply)
-	if err != nil {
-		t.Fatal(err)
-	}
-	needle := "                rename_destination(directory, temporary, name, 1)  # RENAME_NOREPLACE"
-	request.Command[3] = strings.Replace(request.Command[3], needle, needle+"\n                os._exit(57)", 1)
-	command := exec.Command(request.Command[0], request.Command[1:]...)
-	command.Stdin = bytes.NewReader(request.Stdin)
-	if err := command.Run(); command.ProcessState == nil || command.ProcessState.ExitCode() != 57 {
-		t.Fatalf("creation interruption did not occur: %v", err)
-	}
-	info, err := os.Stat(h.destination)
-	if err != nil || info.Sys().(*syscall.Stat_t).Nlink != 1 || info.Mode().Perm() != 0600 {
-		t.Fatalf("interrupted creation left invalid metadata: %v %v", info, err)
-	}
-	h.apply(t, payload)
-	if !h.observe(t, payload).Converged {
-		t.Fatal("interrupted creation did not converge on retry")
-	}
-}
-
-func TestMaterializationResumesInterruptedReceiptPublication(t *testing.T) {
-	for _, stage := range []string{"baseline", "receipt"} {
-		t.Run(stage, func(t *testing.T) {
-			h := newGuestHarness(t)
-			h.apply(t, []byte(`{"managed":1}`))
-			h.writeDestination(t, `{"managed":1,"history":["kept"]}`)
-			desired := []byte(`{"managed":2}`)
-			request, err := h.request(desired, ModeApply)
-			if err != nil {
-				t.Fatal(err)
-			}
-			needle := "        atomic_write(baseline_path, semantic_payload(compatible_baseline(evidence))"
-			if stage == "receipt" {
-				needle = "        atomic_write(receipt_path, semantic_payload(evidence)"
-			}
-			request.Command[3] = strings.Replace(request.Command[3], needle, "        raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
-			command := exec.Command(request.Command[0], request.Command[1:]...)
-			command.Stdin = bytes.NewReader(request.Stdin)
-			if err := command.Run(); err == nil {
-				t.Fatal("interruption did not occur")
-			}
-			if h.observe(t, desired).Converged {
-				t.Fatal("incomplete ownership publication reported ready")
-			}
-			// Incomplete proof never authorizes removal. Unmatched evidence refuses;
-			// intact old evidence only releases ownership of the changed document.
-			document := snapshotMaterialization(t, filepath.Dir(h.destination))
-			if stage == "receipt" {
-				if _, err := h.run(nil, ModeRetire); err == nil {
-					t.Fatal("incomplete ownership publication authorized retirement")
+			for _, operation := range []string{ModeApply, ModeApplyInstalled, ModeObserve, ModeAssessAdopt, ModeAssessRetire, ModeRetire} {
+				stderr, err := h.run(payload, operation)
+				result := ports.InstanceExecResult{ExitCode: 2, Stderr: []byte(stderr)}
+				if err == nil || !strings.Contains(WriteRefusal(result, nil, h.destination), want) {
+					t.Fatalf("%s did not report prior fields: %v %q", operation, err, stderr)
 				}
-			} else if result := h.observeMode(t, nil, ModeRetire); !result.Converged || !slices.Equal(result.Released, []string{"/managed"}) {
-				t.Fatalf("incomplete ownership publication was not released: %#v", result)
 			}
-			if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
-				t.Fatal("incomplete ownership publication authorized removal")
+			if !jsonEqual(saved, snapshotMaterialization(t, h.root)) {
+				t.Fatal("refusal changed document bytes, permissions, or evidence")
 			}
-			h.apply(t, desired)
-			if !h.observe(t, desired).Converged {
-				t.Fatal("apply did not repair ownership proof")
+
+			journals, err := filepath.Glob(filepath.Join(h.state, "*.intent"))
+			if err != nil || len(journals) != 1 {
+				t.Fatalf("expected a pending journal, got %v (%v)", journals, err)
 			}
-			h.observeMode(t, nil, ModeRetire)
-			if got := h.readDestination(t); !jsonEqual(got, map[string]any{"history": []any{"kept"}}) {
-				t.Fatalf("retry lost unrelated data: %#v", got)
+			if stage == "creation" {
+				if err := os.Remove(h.destination); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				h.writeDestination(t, before)
+			}
+			if err := os.Rename(journals[0], journals[0]+".manual"); err != nil {
+				t.Fatal(err)
+			}
+			if mode == ModeRetire {
+				if !h.observeMode(t, payload, mode).Converged {
+					t.Fatal("manual restoration did not unblock retirement")
+				}
+			} else {
+				h.apply(t, payload)
+				if !h.observe(t, payload).Converged {
+					t.Fatal("manual restoration did not unblock application")
+				}
 			}
 		})
 	}

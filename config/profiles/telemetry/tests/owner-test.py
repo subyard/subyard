@@ -44,10 +44,12 @@ if args[0]=='list': assert args[-2:]==['-c','ns']; print(args[1]+'-neighbour,STO
 assert args[0]=='exec'
 arguments=args[args.index('subyard')+1:]
 if os.environ.get('TELEMETRY_FIXTURE_PENDING')=='1':
-    print('telemetry-agent-config-publication-pending-v1 codex', file=sys.stderr)
+    print('contribution-publication-pending-v1 '+json.dumps(dict(destination='/home/dev/.codex/config.toml',
+          journal='/var/lib/subyard/telemetry-control/native.intent', prior={'/otel/log_user_prompt': {'present':True,'value':True}})),
+          file=sys.stderr)
     sys.exit(2)
 if os.environ.get('TELEMETRY_FIXTURE_REPAIR_FAIL')=='1':
-    assert arguments[0]=='repair-modes'
+    assert arguments[0]=='check-publication'
     print('telemetry-agent-config-unavailable-v1 claude', file=sys.stderr)
     sys.exit(2)
 with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') as temporary:
@@ -59,6 +61,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
     if arguments[0]=='startup':
         assert not (stage/'subyard-telemetry').exists()
         assert '--env' in args and 'SUBYARD_STARTUP_REMAINING_MS=1234' in args
+    if arguments[0]=='check-publication': sys.exit()
     sys.path.insert(0,str(stage))
     import guest
     if os.environ.get('TELEMETRY_FIXTURE_BAD_OUTPUT')=='1': print('unexpected-check-output')
@@ -73,10 +76,11 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
                 observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
             return observation
         def startup(self): return {'state':'ready' if marker.exists() else 'drift'}
-        def repair_native_modes(self): self.repaired = True
         def apply(self):
-            assert self.repaired
             marker.write_text(str(int(self.selected)))
+    guest.native.pending_publications=lambda *args: {}
+    Runtime.home=stage
+    Runtime.control=stage
     guest.Runtime=Runtime
     guest.os.getuid=lambda:0
     guest.sys.argv=['guest.py',*arguments]
@@ -136,9 +140,11 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(refusal['retry'], 'run yard -Y secondary config paths')
             pending = invoke('--remove', TELEMETRY_FIXTURE_PENDING='1')
             self.assertEqual(pending.returncode, 2, pending.stderr)
-            refusal = next(json.loads(line[len(prefix):]) for line in pending.stderr.decode().splitlines() if line.startswith(prefix))
-            self.assertIn('/home/dev/.codex/config.toml', refusal['message'])
-            self.assertIn('publication journal or ownership receipt', refusal['message'])
+            marker = 'contribution-publication-pending-v1 '
+            refusal = next(json.loads(line[len(marker):]) for line in pending.stderr.decode().splitlines() if line.startswith(marker))
+            self.assertEqual(refusal['destination'], '/home/dev/.codex/config.toml')
+            self.assertEqual(refusal['journal'], '/var/lib/subyard/telemetry-control/native.intent')
+            self.assertTrue(refusal['prior']['/otel/log_user_prompt']['value'])
             result = invoke('--yes', CODING_TOOL_INTEGRATIONS='claude', AGENT_claude_CONFIG=str(missing_source),
                             AGENT_claude_CONFIG_DEST='.claude/settings.json', TELEMETRY_FIXTURE_REPAIR_FAIL='1')
             self.assertEqual(result.returncode, 2, result.stderr)
@@ -178,6 +184,9 @@ if args[0]=='list': assert args[-2:]==['-c','ns']; print(args[1]+'-neighbour,STO
 with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
     members=sorted(member.name for member in archive)
 with open(os.environ['TELEMETRY_FIXTURE_EXEC'],'a') as log: log.write(json.dumps(members)+'\\n')
+if args[args.index('subyard')+1] == 'check-publication':
+    assert 'subyard-telemetry' not in members
+    sys.exit()
 print(json.dumps({'state':'absent','actual':'','desired':''}))
 """)
         (commands/'incus').chmod(0o755)
@@ -255,7 +264,8 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                         overrides.update(CODING_TOOL_INTEGRATIONS='codex', AGENT_codex_CONFIG_DEST='.config/other.toml')
                     result, archives = observe(**overrides)
                     self.assertEqual(result.returncode, 2)
-                    self.assertEqual(archives, [], 'a refusal must precede the guest transport')
+                    self.assertEqual(len(archives), 1)
+                    self.assertNotIn('subyard-telemetry', archives[0])
                     self.assertIn('telemetry: refused: '+'; '.join(refusals)+'\n', result.stderr)
 
     def test_failed_guest_forwards_only_closed_public_diagnostic(self):

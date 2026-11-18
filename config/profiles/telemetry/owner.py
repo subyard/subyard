@@ -34,11 +34,9 @@ def run(arguments, **kwargs):
                     refusals.append(detail)
             if line in ('telemetry-agent-config-unavailable-v1 claude', 'telemetry-agent-config-unavailable-v1 codex'):
                 refusals.append('agent configuration unavailable: '+line.rsplit(' ', 1)[1])
-            pending = re.fullmatch(r'telemetry-agent-config-publication-pending-v1 (claude|codex)', line)
-            if pending:
-                path = '/home/'+os.environ['DEV_USER']+('/.claude/settings.json' if pending[1] == 'claude' else '/.codex/config.toml')
-                refusals.append('unresolved configuration publication for '+path+
-                                ' (check the document and its publication journal or ownership receipt before retrying)')
+            if line.startswith('contribution-publication-pending-v1 ') and line.isprintable():
+                print(line, file=sys.stderr)
+                refusals.append('unresolved configuration publication')
             if line in ('telemetry-agent-config-invalid-v1 claude', 'telemetry-agent-config-invalid-v1 codex'):
                 agent = line.rsplit(' ', 1)[1]
                 path = '/home/'+os.environ['DEV_USER']+('/.claude/settings.json' if agent == 'claude' else '/.codex/config.toml')
@@ -154,10 +152,8 @@ def main():
             except (OSError, ValueError):
                 if selected:
                     refusals.append('managed agent source missing, unsafe or unreadable: '+source_path)
-    if refusals and operation not in ('apply', 'refresh'):
-        raise Refusal(refusals)
     if refusals:
-        operation, bindings, binary, templates = 'repair-modes', [], None, {}
+        operation, bindings, binary, templates = 'check-publication', [], None, {}
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode='w') as archive:
         for name in FILES:
@@ -181,7 +177,7 @@ def main():
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         if not refusals:
             raise
-        detail = str(error) if isinstance(error, Refusal) else 'agent configuration permission repair failed'
+        detail = str(error) if isinstance(error, Refusal) else 'agent configuration publication check failed'
         raise Refusal([*refusals, detail]) from None
     if refusals:
         raise Refusal(refusals)

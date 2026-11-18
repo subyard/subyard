@@ -104,6 +104,16 @@ func TestProfileServiceObservationSeparatesDriftFromProbeFailure(t *testing.T) {
 	if err != nil || !observation.Converged {
 		t.Fatalf("successful check changed: %#v %v", observation, err)
 	}
+	exit := exec.Command("bash", "-c", "exit 2").Run()
+	output := domain.ConfigPublicationPendingPrefix +
+		`{"destination":"/home/dev/settings.json","journal":"/state/write.intent","prior":{"/field":{"present":true,"value":42}}}` +
+		"\nprofile service check owner=sample native-exit=2\n"
+	_, err = profileServiceObservation(output, false, exit)
+	var pending domain.ConfigPublicationPending
+	if !errors.As(err, &pending) || pending.Destination != "/home/dev/settings.json" ||
+		!strings.Contains(err.Error(), `"/field":{"present":true,"value":42}`) {
+		t.Fatalf("profile service lost pending publication: %v", err)
+	}
 }
 
 func TestScopedProfileServiceObservationRetainsOneBoundedCheck(t *testing.T) {

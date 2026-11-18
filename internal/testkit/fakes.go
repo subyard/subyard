@@ -210,7 +210,6 @@ type Incus struct {
 	Err               error
 	ExecSteps         []IncusExecStep
 	ExecCalls         []IncusExecCall
-	ConfigModeRepairs []IncusExecCall
 	ProbeErr          error
 	ConfigUpdates     []InstanceConfigUpdate
 	PowerUpdates      []InstancePowerUpdate
@@ -362,10 +361,6 @@ func (fake *Incus) Exec(
 	// scripted steps; ProbeErr simulates a guest agent that does not answer.
 	if len(request.Command) == 1 && request.Command[0] == "true" {
 		return ports.InstanceExecResult{}, fake.ProbeErr
-	}
-	if len(request.Command) == 11 && request.Command[0] == "python3" && request.Command[4] == "repair-mode" {
-		fake.ConfigModeRepairs = append(fake.ConfigModeRepairs, IncusExecCall{Project: project, Name: name, Request: request})
-		return ports.InstanceExecResult{}, nil
 	}
 	fake.ExecCalls = append(fake.ExecCalls, IncusExecCall{Project: project, Name: name, Request: request})
 	if len(fake.ExecSteps) == 0 {

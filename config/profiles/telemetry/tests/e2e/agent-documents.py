@@ -64,11 +64,11 @@ def main():
         assert refused.returncode == 2 and b'configuration contribution conflicts at' in refused.stderr, name
         assert path.read_text() == content and stat.S_IMODE(path.stat().st_mode) == 0o600, name
         assert materialize('apply', template).returncode == 0, name
-        for before, after in ((0o644, 0o600), (0o400, 0o400)):
+        for before in (0o644, 0o400):
             path.chmod(before)
             retired = materialize('retire', b'{}' if file_format == 'json' else b'')
             assert retired.returncode == 0 and json.loads(retired.stdout)['converged'], name
-            assert stat.S_IMODE(path.stat().st_mode) == after, name
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, name
             content = path.read_text()
             assert 'fixture_template' not in content and 'Bearer ' in content, name
     if phase == 'disabled':

@@ -82,22 +82,6 @@ class LifecycleTest(unittest.TestCase):
                 self.assertFalse(runtime.control.exists())
                 self.assertFalse(runtime.data.exists())
 
-            # The receipt fits, but the first publication journal has more metadata.
-            runtime.agents = ['claude']
-            fields = guest.native.desired('claude', runtime.endpoint, None)
-            owned = {key: {'present': False, 'value': None, 'managed': value} for key, value in fields.items()}
-            owned['OTEL_LOGS_EXPORTER'].update(present=True, value='')
-            baseline = {'schema': 1, 'agents': {'claude': owned}}
-            prior = 'x'*(guest.native.CONFIG_LIMIT-32-len(guest.native.receipt(baseline)))
-            owned['OTEL_LOGS_EXPORTER']['value'] = prior
-            self.assertEqual(len(guest.native.receipt(baseline)), guest.native.CONFIG_LIMIT-32)
-            path.write_text(json.dumps({'env': {'OTEL_LOGS_EXPORTER': prior}}))
-            for operation in (runtime.observe, runtime.apply):
-                with self.assertRaisesRegex(ValueError, 'native ownership exceeds size bound'):
-                    operation()
-                self.assertFalse(runtime.control.exists())
-                self.assertFalse(runtime.data.exists())
-
     def test_disable_does_not_require_missing_owned_agent_documents_or_valid_templates(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
@@ -356,7 +340,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                                  patch.object(guest, 'os', wraps=os) as guest_os, patch.object(sys, 'argv', arguments):
                                 guest_os.getuid.return_value = 0
                                 guest.main()
-                    self.assertEqual(codex.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(codex.stat().st_mode & 0o777, 0o644)
                     self.assertEqual(codex.read_bytes(), before)
                 runtime.templates.clear()
                 asset = runtime.library/'guest_json.py'

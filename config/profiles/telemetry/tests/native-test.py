@@ -56,16 +56,15 @@ class NativeTest(unittest.TestCase):
                 with self.assertRaises(refused) as error:
                     native.reconcile(*args[:2], selected, *args[3:], check=check)
                 self.assertEqual(error.exception.destination, str(path))
+                self.assertNotIn(args[4], str(error.exception))
                 self.assertEqual(evidence(), before)
-            with self.assertRaises(refused):
-                native.repair_modes(home, state, selected, args[6])
-            self.assertEqual(evidence(), before)
-        for mode in ('observe', 'apply', 'apply-installed', 'assess-retire', 'retire', 'repair-mode'):
+        for mode in ('observe', 'apply', 'apply-installed', 'assess-adopt', 'assess-retire', 'retire'):
             with self.subTest(mode=mode):
                 result = self.materialize(agent, path, template, mode)
                 self.assertEqual(result.returncode, 2, result.stderr)
-                self.assertIn(b'contribution-publication-pending-v1 '+os.fsencode(path), result.stderr)
-                self.assertIn(b'check the document', result.stderr)
+                self.assertIn(b'contribution-publication-pending-v1 ', result.stderr)
+                self.assertIn(os.fsencode(path), result.stderr)
+                self.assertNotIn(args[4].encode(), result.stderr)
                 self.assertEqual(evidence(), before)
 
     def test_repair_mode_when_exporters_already_match(self):
@@ -291,7 +290,8 @@ class NativeTest(unittest.TestCase):
                 root = Path(name)
                 state = root/'native.json'
                 path = native.agent_path(root, agent)
-                original = encode({'unrelated': True}).encode()
+                section = 'env' if agent == 'claude' else 'otel'
+                original = encode({section: native.desired(agent, 'http://localhost:14318', 'x'*64)}).encode()
                 path.parent.mkdir()
                 path.write_bytes(original)
                 path.chmod(0o644)
@@ -306,6 +306,10 @@ class NativeTest(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), original)
                 self.assertEqual(path.stat().st_mode & 0o777, 0o644)
                 self.assertFalse(list(self.state_root.glob('*.ownership')))
+                template_journal, = self.state_root.glob('*.intent')
+                self.assertIn(os.fsencode(path), template_journal.read_bytes())
+                self.assertNotIn(b'x'*64, template_journal.read_bytes())
+                template_journal.unlink()
                 with patch.object(native.materializer, 'exchange_destination', side_effect=OSError('interrupted')):
                     with self.assertRaisesRegex(ValueError, 'publication failed'):
                         native.reconcile(*args)
@@ -313,6 +317,13 @@ class NativeTest(unittest.TestCase):
                 self.assertTrue(state.with_suffix('.intent').exists())
                 self.assertEqual(path.read_bytes(), original)
                 self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+                self.assert_pending_publication(args, agent, template)
+                state.with_suffix('.intent').unlink()
+                with patch.object(native.materializer, 'exchange_destination', return_value=None):
+                    with self.assertRaises(native.AgentConfigRefusals) as error:
+                        native.reconcile(*args)
+                self.assertIn('concurrent destination change', str(error.exception.failures[0][1]))
+                self.assertFalse(state.exists(), 'identical bytes alone must never establish ownership')
                 self.assert_pending_publication(args, agent, template)
 
     def test_interrupted_legacy_publication_preserves_transitional_receipt(self):
@@ -347,125 +358,57 @@ class NativeTest(unittest.TestCase):
                 path.chmod(0o644)
                 self.assert_pending_publication(args, agent, template)
 
-    def test_retry_and_opt_out_recover_publication_before_receipt(self):
+    def test_interrupted_publication_requires_manual_restoration(self):
         for agent, section, field, prior, encode, decode in (
                 ('claude', 'env', 'OTEL_LOGS_EXPORTER', 'console', json.dumps, json.loads),
                 ('codex', 'otel', 'log_user_prompt', True, tomli_w.dumps, tomllib.loads)):
-            for refresh in (False, True):
-                for retry in (False, True):
-                    with self.subTest(agent=agent, refresh=refresh, retry=retry), tempfile.TemporaryDirectory(dir='/tmp') as name:
-                        root = Path(name)
-                        path, state = native.agent_path(root, agent), root/'native.json'
-                        journal = state.with_suffix('.intent')
-                        path.parent.mkdir()
-                        initial = {section: {field: prior}, 'unrelated': 'keep'}
-                        if agent == 'codex':
-                            initial[section]['metrics_exporter'] = {'ratio': float('inf')}
-                        path.write_text(encode(initial))
-                        args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-                        if refresh:
-                            native.reconcile(*args)
-                            args = (*args[:4], 'y'*64, *args[5:])
-                        baseline = native.snapshot(state)
-                        publish = native.publish
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                path, state = native.agent_path(root, agent), root/'native.json'
+                journal = state.with_suffix('.intent')
+                template = encode({'unrelated': 'keep'}).encode()
+                self.assertEqual(self.materialize(agent, path, template).returncode, 0)
+                before = {'unrelated': 'keep', section: {field: prior}}
+                path.write_text(encode(before))
+                args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                publish = native.publish
 
-                        def interrupt(destination, payload, expected):
-                            if destination == state:
-                                self.assertEqual(journal.stat().st_mode & 0o777, 0o600)
-                                self.assertEqual(decode(path.read_text())[section], native.desired(agent, *args[3:5]))
-                                raise OSError('interrupted after publication')
-                            publish(destination, payload, expected)
+                def interrupt(destination, content, expected):
+                    if destination == state:
+                        raise OSError('interrupted publication')
+                    publish(destination, content, expected)
 
-                        with patch.object(native, 'publish', side_effect=interrupt):
-                            with self.assertRaisesRegex(OSError, 'interrupted after publication'):
-                                native.reconcile(*args)
-                        self.assertEqual(native.snapshot(state), baseline)
-                        self.assertFalse(native.reconcile(*args, check=True))
-                        # An inode replacement with identical bytes still proves publication.
-                        editor = root/'editor'
-                        editor.write_bytes(path.read_bytes())
-                        editor.replace(path)
-                        if retry:
-                            native.reconcile(*args)
-                            self.assertTrue(native.reconcile(*args, check=True))
-                            published = native.snapshot(state)
-
-                            def interrupt_opt_out(destination, payload, expected):
-                                if destination == state:
-                                    self.assertTrue(journal.exists())
-                                    self.assertEqual(decode(path.read_text()), initial)
-                                    raise OSError('interrupted opt-out')
-                                publish(destination, payload, expected)
-
-                            with patch.object(native, 'publish', side_effect=interrupt_opt_out):
-                                with self.assertRaisesRegex(OSError, 'interrupted opt-out'):
-                                    native.reconcile(*args[:2], [], *args[3:])
-                            self.assertEqual(native.snapshot(state), published)
-                        native.reconcile(*args[:2], [], *args[3:])
-                        self.assertEqual(decode(path.read_text()), initial)
-                        self.assertEqual(json.loads(state.read_bytes())['agents'], {})
-                        self.assertFalse(journal.exists())
-
-    def test_edited_interrupted_publication_refuses_all_operations(self):
-        for agent, section, field, encode, decode in (
-                ('claude', 'env', 'OTEL_LOGS_EXPORTER', json.dumps, json.loads),
-                ('codex', 'otel', 'log_user_prompt', tomli_w.dumps, tomllib.loads)):
-            for change in ('removed exporter', 'unrelated save', 'in-place save', 'after receipt'):
-                with self.subTest(agent=agent, change=change), tempfile.TemporaryDirectory(dir='/tmp') as name:
-                    root = Path(name)
-                    path, state = native.agent_path(root, agent), root/'native.json'
-                    journal = state.with_suffix('.intent')
-                    template = encode({'unrelated': 'keep'}).encode()
-                    self.assertEqual(self.materialize(agent, path, template).returncode, 0)
-                    args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-                    if change == 'in-place save':
+                with patch.object(native, 'publish', side_effect=interrupt):
+                    with self.assertRaisesRegex(OSError, 'interrupted publication'):
                         native.reconcile(*args)
-                        args = (*args[:4], 'y'*64, *args[5:])
-                    publish = native.publish
+                active = decode(path.read_text())
+                self.assertEqual(active[section], native.desired(agent, *args[3:5]))
+                self.assertFalse(state.exists())
+                intent = json.loads(journal.read_bytes())
+                self.assertEqual(intent['prior']['/'+section+'/'+field], {'present': True, 'value': prior})
+                path.chmod(0o644)
+                self.assert_pending_publication(args, agent, template)
+                path.write_text(encode({**before, 'unrelated': 'editor save'}))
+                self.assert_pending_publication(args, agent, template)
+                journal.unlink()
+                native.reconcile(*args[:2], [], *args[3:])
+                self.assertEqual(decode(path.read_text()), {**before, 'unrelated': 'editor save'})
 
-                    def interrupt(destination, content, expected):
-                        if destination == state and change != 'after receipt':
-                            raise OSError('interrupted publication')
-                        publish(destination, content, expected)
-                        if destination == state:
-                            raise OSError('interrupted publication')
-
-                    with patch.object(native, 'publish', side_effect=interrupt):
-                        with self.assertRaisesRegex(OSError, 'interrupted publication'):
-                            native.reconcile(*args)
-                    staged = path.read_bytes()
-                    self.assertTrue(journal.exists())
-                    self.assertFalse(native.reconcile(*args, check=True))
-                    updated = decode(path.read_text())
-                    if change == 'removed exporter':
-                        del updated[section][field]
-                    else:
-                        updated['unrelated'] = 'editor'
-                    editor = path if change == 'in-place save' else root/'editor'
-                    editor.write_text(encode(updated))
-                    editor.chmod(0o644)
-                    if editor != path:
-                        editor.replace(path)
-                    self.assert_pending_publication(args, agent, template)
-                    if change == 'after receipt':
-                        path.write_bytes(staged)
-                        native.reconcile(*args)
-                        self.assertFalse(journal.exists())
-                        self.assertTrue(native.reconcile(*args, check=True))
-
-    def test_permission_repair_requires_selection_and_receipt(self):
-        root, state = self.root, self.root/'native.json'
-        claude, codex = (native.agent_path(root, agent) for agent in ('claude', 'codex'))
-        native.reconcile(root, state, ['claude'], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-        claude.chmod(0o644)
-        codex.parent.mkdir()
-        codex.write_text('')
-        codex.chmod(0o400)
-        native.repair_modes(root, state, ['codex'], os.getuid())
-        self.assertEqual(claude.stat().st_mode & 0o777, 0o644)
-        self.assertEqual(codex.stat().st_mode & 0o777, 0o400)
-        native.repair_modes(root, state, ['claude'], os.getuid())
-        self.assertEqual(claude.stat().st_mode & 0o777, 0o600)
+    def test_pending_claude_publication_does_not_hide_invalid_codex(self):
+        state = self.root/'native.json'
+        path = native.agent_path(self.root, 'codex')
+        path.parent.mkdir(mode=0o700)
+        path.write_bytes(b'[invalid')
+        claude = str(native.agent_path(self.root, 'claude'))
+        native.publish(state.with_suffix('.intent'), native.receipt(
+            native.materializer.document_intent(claude, {}, ['/env/OTEL_LOGS_EXPORTER'])), None)
+        with self.assertRaises(native.AgentConfigRefusals) as error:
+            native.reconcile(self.root, state, ['claude', 'codex'], 'http://localhost:14318',
+                             None, tomli_w, os.getuid(), os.getgid(), check=True)
+        failures = error.exception.failures
+        self.assertEqual([agent for agent, _ in failures], ['claude', 'codex'])
+        self.assertIsInstance(failures[0][1], native.materializer.PendingContributionPublication)
+        self.assertIsInstance(failures[1][1], native.AgentConfigRefusal)
 
     def test_template_retirement_repairs_mode_when_contribution_remains(self):
         for agent, encode, decode in (('claude', json.dumps, json.loads), ('codex', tomli_w.dumps, tomllib.loads)):
@@ -745,6 +688,25 @@ class NativeTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(json.loads(result.stdout)['converged'])
 
+    def test_opt_out_restores_user_edit_to_template_owned_header(self):
+        for agent, section, fields, encode, decode in (
+                ('claude', 'env', {'OTEL_EXPORTER_OTLP_LOGS_HEADERS': 'Authorization=Bearer user'},
+                 json.dumps, json.loads),
+                ('codex', 'otel', {'exporter': {'otlp-http': {'headers': {'Authorization': 'Bearer user'}}}},
+                 tomli_w.dumps, tomllib.loads)):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                path, state = native.agent_path(root, agent), root/'native.json'
+                template = encode({section: fields}).encode()
+                self.assertEqual(self.materialize(agent, path, template).returncode, 0)
+                edited = {section: json.loads(json.dumps(fields).replace('Bearer user', 'Bearer edited-user'))}
+                path.write_text(encode(edited))
+                args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                native.reconcile(*args)
+                self.assertIn('x'*64, path.read_text())
+                native.reconcile(*args[:2], [], *args[3:])
+                self.assertEqual(decode(path.read_text()), edited)
+
     def test_concurrent_edit_during_publication_is_preserved(self):
         for agent, encode, decode in [('claude', json.dumps, json.loads), ('codex', tomli_w.dumps, tomllib.loads)]:
             with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -861,8 +823,12 @@ class NativeTest(unittest.TestCase):
                 receipt = json.loads(args[1].read_bytes())
                 managed = {key: record['managed'] for key, record in receipt['agents'][agent].items()}
                 self.assertEqual(managed, native.desired(agent, *args[3:5]))
-                native.reconcile(*args[:4], 'y'*64, *args[5:])
-                self.assertFalse(args[1].with_suffix('.intent').exists())
+                intent = args[1].with_suffix('.intent').read_bytes()
+                self.assertIn(b'[redacted]', intent)
+                self.assertNotIn(b'x'*64, intent)
+                self.assertNotIn(b'y'*64, intent)
+                self.assert_pending_publication(args, agent, b'{}' if agent == 'claude' else b'')
+                self.assertEqual(saved.read_bytes(), original + b'\n')
 
     def test_claude_strict_parse_and_precise_round_trip(self):
         state = self.root/'native.json'

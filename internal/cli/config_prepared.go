@@ -118,11 +118,6 @@ func (prepared *preparedCommand) prepareConfig(ctx context.Context, _ *initBoots
 		}
 		prepared.setGateSubject(subject)
 		targets = prepared.gateSkipped(targets, true)
-		if prepared.repairModes {
-			if err := prepared.CLI.repairConfigTargetModes(ctx, targets); err != nil {
-				return err
-			}
-		}
 		execution, err := prepared.CLI.prepareConfigApply(ctx, targets, func() ([]configTarget, error) {
 			refreshed, err := prepared.CLI.refreshLocalConfigTargets(prepared.Loaded, allLocal)
 			if allLocal {
@@ -463,9 +458,6 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 		return err
 	}
 	if err := validateManagedConfigTree(targets[0].Loaded.Context.Paths.ConfigHome); err != nil {
-		return err
-	}
-	if err := cli.repairConfigTargetModes(ctx, targets); err != nil {
 		return err
 	}
 	byName := make(map[string]configTargetAssessment, len(targets))

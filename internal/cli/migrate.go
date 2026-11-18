@@ -52,7 +52,7 @@ func (cli *CLI) runCurrentMigration(ctx context.Context, definition command.Defi
 		cli.audit(definition.Name, arguments, "", "")
 	}
 	prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{
-		Loaded: loaded, Definition: definition, Arguments: arguments, RepairModes: true,
+		Loaded: loaded, Definition: definition, Arguments: arguments,
 	})
 	if err != nil {
 		return cli.reportPreparationError(definition, err)
@@ -71,11 +71,6 @@ func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ 
 		return err
 	}
 	prepared.Loaded = loaded
-	if prepared.repairModes {
-		if err := cli.repairModesBeforeReleaseInspection(ctx, "default", "@migrate", prepared.Arguments); err != nil {
-			return err
-		}
-	}
 	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{
 		OperatorHome: loaded.Context.Paths.OperatorHome, DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: loaded.Environment["YARD_RUNTIME_ROOT"], OperationID: cli.env["SUBYARD_OPERATION_ID"],
 	}))

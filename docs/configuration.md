@@ -269,12 +269,33 @@ JSON predecessors use `legacy-config/*.json` in the owning integration. A raw co
 historical digest in `legacy-config/<destination-basename>.sha256`; it is accepted only during
 confirmed initial adoption with the usual file metadata checks, and is not persisted as ownership.
 
-Subyard serializes its own writes per asset and atomically replaces the destination before updating
-the baseline. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
-fails without overwriting it; diagnostics omit configuration contents. Running tools do not share
+Subyard serializes its own writes per asset, records a private intent journal, and verifies
+that the staged inode became the destination before updating ownership. A pending journal blocks
+observation and writes to the document until [manual resolution](#resolve-an-interrupted-configuration-write).
+Invalid JSON or an invalid baseline fails without overwriting it. Running tools do not share
 Subyard's lock: application reads the current file and verifies its result, but cannot serialize
 arbitrary concurrent third-party writes. Invalid TOML, like invalid JSON, fails without overwriting
 the current document or printing its contents.
+
+### Resolve an interrupted configuration write
+
+The pending-publication diagnostic names the guest document and its journal. The prior fields
+use JSON Pointer paths. A field with `"present": false` was absent. A field shown as `null`
+could not be read. If the field list is too large for the diagnostic, consult the private
+journal. Credential values are redacted. The document, its permissions and the journal stay
+as found, even if the current bytes match the intended output.
+
+In the affected guest, stop editors and other writers to the document. Compare the live file
+with any private `.subyard-config-recovery.*/document` files beside it. Restore the reported
+fields manually and preserve unrelated edits. Use the private displaced file for redacted
+values when available. If the completed ownership receipt was already written, keep its matching
+document or restore the preceding ownership records together with the prior document.
+
+After verifying the document and its ownership state, move the exact journal named by the
+diagnostic out of the way, for example by appending `.manual` to its filename as guest root.
+Keep the renamed file private. Then rerun the original command. Older interrupted writes
+may name an ownership receipt instead of a separate journal. For a shared receipt, restore
+the affected entry from a known-good backup and preserve entries for other documents.
 
 ## Per-yard coding tool selection
 
@@ -347,9 +368,8 @@ before any ownership write and keeps it until that fresh ownership. Once its pen
 receipt is written, an interrupted release resumes as the same release and never edits the
 document, even if the operator restored Subyard's values in between. An interruption before that
 receipt decides again from the document: restored values are then retired normally. An
-interrupted ordinary retirement still accepts only the exact recorded before and after fields;
-if its document is deleted meanwhile, it completes without a notice when nothing owned was left
-in it, and otherwise refuses. A reason left behind by an older runtime after a rollback is
+interrupted ordinary retirement requires manual resolution of its publication journal.
+A reason left behind by an older runtime after a rollback is
 ignored when its recorded fields differ from the current retirement. It still counts when both
 recorded no remaining owned field, for example a missing-document release followed there by an
 ordinary retirement of the same document; the only effect is a release notice for that

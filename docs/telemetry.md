@@ -32,8 +32,8 @@ workloads.
 
 The telemetry owner records existing native exporter fields before applying its own
 settings through the agent config materializer. Both agent configuration formats use mode
-`0600` while they contain telemetry settings. Before a template refusal or a rewrite, current writers tighten permissions on selected
-documents with a completed ownership receipt. Readiness checks are read-only.
+`0600` while they contain telemetry settings. Writers tighten permissions on documents with
+completed ownership during reconciliation. Readiness checks are read-only.
 An agent template that specifies a different value for the same field is refused with the
 field path. Refresh also refuses when a user deletes an owned exporter field. Disabling leaves
 that deletion in place. Each structured replacement retains the displaced inode as
@@ -42,11 +42,10 @@ open can still save its changes. A publication refusal names the retained file w
 Treat recovery files as sensitive. The writer refuses a TOML rewrite if its parser would truncate
 a time literal with more than six fractional digits.
 
-After an interrupted publication, telemetry finishes the receipt only if the live document
-matches the full staged output byte for byte. Template updates and retirement wait for telemetry
-to finish that recovery. A changed or missing document, or an interrupted v0.30 publication,
-requires an operator to check the named document and its journal or ownership receipt.
-Commands preserve that evidence and leave the document's contents and mode as found.
+After an interrupted publication, telemetry and template commands report the same
+pending-publication diagnostic with prior field values and redacted authorization credentials.
+The document and journal are left in place for
+[manual resolution](configuration.md#resolve-an-interrupted-configuration-write).
 
 Rolling back to v0.28–v0.30 carries a known risk. A retained template writer can
 change agent config permissions to `0644` while the file still contains the collector

@@ -37,10 +37,16 @@ class InvalidContributionDestination(MaterializationError):
 
 
 class PendingContributionPublication(MaterializationError):
-    def __init__(self, destination):
+    marker = "contribution-publication-pending-v1 "
+
+    def __init__(self, destination, journal, prior=None):
         self.destination = str(destination)
-        super().__init__("contribution-publication-pending-v1 " + self.destination +
-                         " (check the document and its publication journal or ownership receipt before retrying)")
+        record = {"destination": self.destination, "journal": str(journal), "prior": prior}
+        payload = publication_payload(record)
+        if len(payload) > 24*1024:
+            record["prior"] = None
+            payload = publication_payload(record)
+        super().__init__(self.marker + payload.decode())
 
 
 class GeneratedValue(str):
@@ -407,14 +413,14 @@ def validate_destination_parent(destination, allowed_home, uid, create, gid=None
     return True
 
 
-def semantic_payload(value, compact_numbers=False, typed_floats=False):
+def semantic_payload(value, compact_numbers=False, typed_floats=False, ascii_only=False):
     if isinstance(value, dict):
         return ("{" + ",".join(
-            json.dumps(key, ensure_ascii=False, separators=(",", ":")) + ":" +
-            semantic_payload(value[key], compact_numbers, typed_floats).decode()
+            json.dumps(key, ensure_ascii=ascii_only, separators=(",", ":")) + ":" +
+            semantic_payload(value[key], compact_numbers, typed_floats, ascii_only).decode()
             for key in sorted(value)) + "}").encode()
     if isinstance(value, list):
-        return ("[" + ",".join(semantic_payload(item, compact_numbers, typed_floats).decode() for item in value) + "]").encode()
+        return ("[" + ",".join(semantic_payload(item, compact_numbers, typed_floats, ascii_only).decode() for item in value) + "]").encode()
     if isinstance(value, Decimal):
         if compact_numbers:
             if value.is_nan():
@@ -431,7 +437,11 @@ def semantic_payload(value, compact_numbers=False, typed_floats=False):
         if "." in normalized:
             normalized = normalized.rstrip("0").rstrip(".")
         return normalized.encode()
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    return json.dumps(value, ensure_ascii=ascii_only, separators=(",", ":")).encode()
+
+
+def publication_payload(value):
+    return semantic_payload(value, compact_numbers=True, ascii_only=True)
 
 
 def fingerprint(current, desired, baseline_digest, state, tracked):
@@ -632,6 +642,18 @@ def replace_destination(destination, allowed_home, uid, original, payload, creat
         if (not os.path.samestat(parent, os.fstat(directory)) or
                 read_destination(name, private, dir_fd=directory) != original):
             raise MaterializationError("concurrent destination change")
+        staged = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+
+        def verify():
+            before = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            content = read_destination(name, private, dir_fd=directory)
+            after = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (not os.path.samestat(staged, before) or not os.path.samestat(before, after) or
+                    before.st_ctime_ns != after.st_ctime_ns or content != payload or
+                    not os.path.samestat(os.stat(os.path.dirname(destination), follow_symlinks=False),
+                                        os.fstat(directory))):
+                raise MaterializationError("concurrent destination change")
+
         if original is None:
             if before_publish is not None:
                 before_publish()
@@ -639,6 +661,7 @@ def replace_destination(destination, allowed_home, uid, original, payload, creat
                 rename_destination(directory, temporary, name, 1)  # RENAME_NOREPLACE
             except FileExistsError:
                 raise MaterializationError("concurrent destination change") from None
+            verify()
             return
 
         # The exchanged inode can still have an editor's wider mode. Keep it
@@ -682,6 +705,7 @@ def replace_destination(destination, allowed_home, uid, original, payload, creat
                 finally:
                     os.fsync(vault_fd)
                     os.fsync(directory)
+            verify()
         finally:
             os.close(vault_fd)
             if recovery is None:
@@ -692,7 +716,7 @@ def replace_destination(destination, allowed_home, uid, original, payload, creat
         validate_destination_parent(destination, allowed_home, uid, create, gid, directory_mode)
         if establish_ownership or original is None or payload != original:
             atomic_write(destination, payload, uid, 0o600, gid, publish)
-        if read_destination(destination, private) != payload:
+        elif read_destination(destination, private) != payload:
             raise MaterializationError("concurrent destination change")
     except (OSError, MaterializationError) as error:
         reason = str(error) if isinstance(error, MaterializationError) else "configuration publication failed"
@@ -815,13 +839,13 @@ def contribution_reference(path):
     return entry
 
 
-def published_contribution(owned, destination):
+def published_contribution(owned, destination, receipt, section):
     if not isinstance(owned, dict) or any(not isinstance(record, dict) or "managed" not in record
                                          for record in owned.values()):
         raise MaterializationError("invalid contribution state")
     if any("previous" in record for record in owned.values()):
         # The retained writer recorded intent in the receipt without a document digest.
-        raise PendingContributionPublication(destination)
+        raise PendingContributionPublication(destination, receipt, contribution_prior(owned, section))
     return owned
 
 
@@ -843,6 +867,75 @@ def read_publication_intent(path):
     return intent
 
 
+def redacted_prior(value):
+    if isinstance(value, dict):
+        return {redacted_prior(key): redacted_prior(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redacted_prior(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(r"(?i)\bBearer\s+[^,;\s]+|[0-9a-f]{64}", "[redacted]", value)
+    if isinstance(value, (date, time)) or isinstance(value, Decimal) and not value.is_finite():
+        return str(value)
+    return value
+
+
+def contribution_prior(owned, section):
+    return {"/" + pointer_part(section) + "/" + pointer_part(key):
+            {"present": record["present"], **({"value": redacted_prior(record["value"])}
+                                             if record["present"] else {})}
+            for key, record in owned.items()}
+
+
+def document_intent(destination, before, paths):
+    prior = {}
+    for path in sorted(set(paths)):
+        if before is None:
+            prior[path] = None
+        else:
+            found, value = lookup(before, pointer_parts(path))
+            prior[path] = {"present": found, **({"value": redacted_prior(value)} if found else {})}
+    return {"schema": 3, "destination": destination, "prior": prior}
+
+
+def pending_publication(journal, destination, section=None):
+    try:
+        intent = read_publication_intent(journal)
+        if intent is None:
+            return None
+        if intent["destination"] != destination:
+            return PendingContributionPublication(destination, journal) if section is None else None
+        prior = intent.get("prior")
+        if intent.get("schema") == 2 and section is not None:
+            prior = contribution_prior(intent["owned"], section)
+        return PendingContributionPublication(destination, journal, redacted_prior(prior))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return PendingContributionPublication(destination, journal)
+
+
+def require_completed_publication(journal, destination, section=None):
+    if pending := pending_publication(journal, destination, section):
+        raise pending
+
+
+def sync_directory(path):
+    directory = os.open(path, os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def clear_publication_intent(journal):
+    os.unlink(journal)
+    sync_directory(os.path.dirname(journal))
+
+
+def template_intent(journal, destination, before, owned):
+    intent = document_intent(destination, before, (entry["path"] for entry in owned))
+    atomic_write(journal, publication_payload(intent), STATE_UID, 0o600)
+    sync_directory(os.path.dirname(STATE_ROOT))
+
+
 def contribution_values(entry, destination):
     if entry is None:
         return {}
@@ -851,12 +944,7 @@ def contribution_values(entry, destination):
     info = os.lstat(parent)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != STATE_UID or info.st_mode & 0o077:
         raise MaterializationError("invalid contribution state")
-    try:
-        intent = read_publication_intent(publication_journal(path))
-    except (OSError, ValueError):
-        raise PendingContributionPublication(destination) from None
-    if intent is not None and intent["destination"] == destination:
-        raise PendingContributionPublication(destination)
+    require_completed_publication(publication_journal(path), destination, entry["section"])
     if not os.path.lexists(path):
         return {}  # Registration can precede the first successful publication.
     validate_regular(path, STATE_UID, 0o600)
@@ -867,7 +955,7 @@ def contribution_values(entry, destination):
     found, owned = lookup(state, pointer_parts(entry["path"]))
     if not found:
         return {}  # A retained owner may have retired its contribution.
-    owned = published_contribution(owned, destination)
+    owned = published_contribution(owned, destination, path, entry["section"])
     return {entry["section"]: {key: record["managed"] for key, record in owned.items()}} if owned else {}
 
 
@@ -934,32 +1022,33 @@ def set_contribution_reference(path, entry):
 
 
 def template_ownership(key, developer, destination, file_format):
+    require_completed_publication(key + ".intent", destination)
     baseline = key + ".json"
     if not os.path.lexists(baseline):
         return None
     validate_regular(baseline, STATE_UID, 0o600)
     with open(baseline, "rb") as source:
         saved = validate_baseline(source.read(), developer, destination, file_format)
-    return read_ownership(key + ".ownership", saved, developer, destination, file_format) or saved
-
-
-def repair_owned_document_mode(key, developer, destination, home, uid):
-    with asset_lock(key + ".lock", True, allow_missing=True):
-        contribution = document_contribution(contribution_reference(key + ".contribution"), destination, home)
-        baseline = template_ownership(key, developer, destination, "any")
-        if contribution or baseline is not None and baseline.get("phase") == "applied":
-            repair_document_mode(destination, home, uid)
+    receipt = key + ".ownership"
+    evidence = read_ownership(receipt, saved, developer, destination, file_format) or saved
+    if evidence.get("phase") == "retiring" and not read_release_marker(key + ".release", evidence):
+        raise PendingContributionPublication(destination, receipt if os.path.exists(receipt) else baseline)
+    return evidence
 
 
 def restore_contribution(group, key, present, prior, managed, file_format, template_owned):
-    if key not in group or template_owned.get(()) == "value":
+    if key not in group:
         return
     actual = group[key]
-    if not template_owned and any(json_equal(actual, value, file_format) for value in managed):
+    template_value = template_owned.get(()) == "value"
+    if (not template_owned or template_value and present) and any(
+            json_equal(actual, value, file_format) for value in managed):
         if present:
             group[key] = prior
         else:
             del group[key]
+        return
+    if template_value:
         return
     tables = [value for value in managed if isinstance(value, dict)]
     if isinstance(actual, dict) and actual and tables:
@@ -992,13 +1081,13 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
         raise MaterializationError("configuration contribution ownership conflict")
     register = partial(set_contribution_reference, reference_path, entry) if enabled and reference is None else None
 
+    baseline = template_ownership(asset, developer, destination, file_format)
     parent = validate_destination_parent(destination, home, uid, False)
     current, original = read_current(destination, allow_invalid=True, file_format=file_format,
                                      private=True) if parent else ({}, None)
     mode_drift = document_mode_drift(destination)
     blank = original is not None and not original.strip()
     previous = current
-    baseline = template_ownership(asset, developer, destination, file_format)
     template_paths = {}
     if baseline is not None and baseline.get("phase", "applied") == "applied":
         template_paths = {tuple(pointer_parts(item["path"])): item["kind"] for item in baseline["owned"]}
@@ -1088,7 +1177,8 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
     edit = partial(replace_destination, destination, home, uid, original, payload, enabled,
                    private=True, gid=gid, repair=bool(owned), establish_ownership=enabled and not owned)
     publishes = payload != original or enabled and not owned
-    return final, edit, register, hashlib.sha256(payload).hexdigest() if publishes else None
+    paths = ["/" + pointer_part(section) + "/" + pointer_part(key) for key in owned.keys() | final.keys()]
+    return final, edit, register, document_intent(destination, previous, paths) if publishes else None
 
 
 def contribution_owns(entry, contribution):
@@ -1152,10 +1242,12 @@ def printable_paths(paths):
     return paths
 
 
-def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution):
+def retire(mode, baseline, baseline_path, receipt_path, release_path, journal, current, original, destination, allowed_home, uid, contribution):
     if baseline is None or baseline["schema"] != 2:
         raise MaterializationError("retirement ownership evidence unavailable")
     marker = read_release_marker(release_path, baseline)
+    if baseline["phase"] == "retiring" and not marker:
+        raise PendingContributionPublication(destination, receipt_path if os.path.exists(receipt_path) else baseline_path)
     if mode == "retire" and contribution:
         repair_document_mode(destination, allowed_home, uid)
     phase = baseline["phase"]
@@ -1166,28 +1258,19 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
     # A release keeps the document byte-for-byte: changed owned fields no longer
     # prove which values are ours, and a missing document leaves nothing to remove.
     release = ""
-    if phase != "retired":
-        expected = {baseline["projection_digest"]}
-        if phase == "retiring":
-            expected.add(baseline["retired_digest"])
-        if missing and phase == "applied":
+    if phase == "applied":
+        if missing:
             release = "missing-document"
-        elif actual not in expected:
-            if phase != "applied":
-                raise MaterializationError("retirement owned fields changed")
+        elif actual != baseline["projection_digest"]:
             release = "changed"
-        elif missing and actual != baseline["retired_digest"]:
-            raise MaterializationError("retirement destination missing")
-    if phase != "applied":
+    else:
         # A committed release finishes and stays a release; it never edits the document.
         release = marker
     if release == "missing-document" and not missing:
         release = "changed"
-    # A release, or its interrupted tail, leaves owned paths in place; an
-    # interrupted ordinary retirement has already removed them.
-    released = (retained_paths(current, baseline["owned"])
-                if release or phase != "retired" and actual != baseline["projection_digest"] else [])
+    released = retained_paths(current, baseline["owned"]) if release else []
     if mode == "retire" and phase != "retired":
+        published = False
         if phase == "applied" and release:
             record = {"schema": 1, "release": release, "retired_digest": actual}
             atomic_write(release_path, semantic_payload(record) + b"\n", STATE_UID, 0o600)
@@ -1195,25 +1278,24 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
             baseline["retired_digest"] = actual
             atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
             atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
-        elif not release and (phase == "applied" or not missing and actual == baseline["projection_digest"]):
+        elif not release:
             previous = copy.deepcopy(current)
             for entry in sorted(baseline["owned"], key=lambda item: item["path"].count("/"), reverse=True):
                 if not contribution_owns(entry, contribution):
                     remove_owned(current, entry)
             payload = document_payload(current, previous, original, private=bool(contribution))
             remove_release_marker(release_path)
-            # Commit intent before replacing the document. A retry accepts only
-            # the recorded before/after managed projections, never arbitrary drift.
-            baseline["phase"] = "retiring"
             baseline["retired_digest"] = projection_digest(current, baseline["owned"])
-            atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
-            # Convert an earlier candidate's schema2 before any document edit.
-            atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
-            replace_destination(destination, allowed_home, uid, original, payload, False,
-                                private=bool(contribution))
+            if payload != original:
+                replace_destination(destination, allowed_home, uid, original, payload, False,
+                                    private=bool(contribution),
+                                    before_publish=lambda: template_intent(journal, destination, previous, baseline["owned"]))
+                published = True
         atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline, True)) + b"\n", STATE_UID, 0o600)
         baseline["phase"] = "retired"
         atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
+        if published:
+            clear_publication_intent(journal)
         phase = "retired"
     mode_drift = bool(contribution) and document_mode_drift(destination)
     if mode == "retire" and mode_drift:
@@ -1234,7 +1316,7 @@ def main():
     if len(sys.argv) != 8:
         fail("invalid request")
     mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest = sys.argv[1:]
-    if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire", "repair-mode"):
+    if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire"):
         fail("invalid request")
     # An installed-view repair applies like apply, but never takes back ownership
     # that a retirement released; only a deliberate enable does.
@@ -1247,10 +1329,7 @@ def main():
     except ValueError:
         fail("invalid request")
     key = asset_key(developer, destination)
-    if not read_only and mode != "retire":
-        repair_owned_document_mode(key, developer, destination, allowed_home, uid)
-    if mode == "repair-mode":
-        return
+    journal = key + ".intent"
     try:
         payload = sys.stdin.buffer.read()
         if hashlib.sha256(payload).hexdigest() != payload_digest:
@@ -1266,6 +1345,7 @@ def main():
 
     if mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
         with asset_lock(lock_path, True, allow_missing=True):
+            require_completed_publication(journal, destination)
             reference = contribution_reference(key+".contribution")
             contribution = document_contribution(reference, destination, allowed_home)
             check_contribution(desired, contribution)
@@ -1313,20 +1393,26 @@ def main():
 
     if mode in ("assess-retire", "retire") and not os.path.lexists(baseline_path):
         with asset_lock(lock_path, True, allow_missing=True):
+            require_completed_publication(journal, destination)
             document_contribution(contribution_reference(key+".contribution"), destination, allowed_home)
         raise MaterializationError("retirement ownership evidence unavailable")
 
     if mode != "apply" and not os.path.lexists(lock_path):
         raise MaterializationError("invalid materialization baseline")
     with asset_lock(lock_path, read_only, create=mode == "apply"):
+        require_completed_publication(journal, destination)
         contribution = document_contribution(contribution_reference(key+".contribution"), destination, allowed_home)
-        check_contribution(desired, contribution)
         baseline = None
         if os.path.lexists(baseline_path):
             validate_regular(baseline_path, STATE_UID, 0o600)
             with open(baseline_path, "rb") as source:
                 baseline = validate_baseline(source.read(), developer, destination)
         evidence = read_ownership(receipt_path, baseline, developer, destination)
+        if evidence is not None and evidence["phase"] == "retiring" and not read_release_marker(release_path, evidence):
+            raise PendingContributionPublication(destination, receipt_path if os.path.exists(receipt_path) else baseline_path)
+        if mode == "apply" and (contribution or evidence is not None and evidence["phase"] == "applied"):
+            repair_document_mode(destination, allowed_home, uid)
+        check_contribution(desired, contribution)
         # Decide a released document before reading it: whatever it now holds
         # (invalid, missing or replaced), it is the operator's.
         released = (evidence is not None and evidence.get("phase") == "retired" and
@@ -1342,8 +1428,6 @@ def main():
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         allow_invalid = mode in ("observe", "apply") or mode == "assess-adopt" and bool(contribution)
         current, original = read_current(destination, allow_invalid=allow_invalid, private=bool(contribution)) if parent_exists else ({}, None)
-        if FORMAT == "toml" and payload != original:
-            check_toml_time_precision(payload)
         mode_drift = document_mode_drift(destination)
         previous = current
         if current is None:
@@ -1356,7 +1440,7 @@ def main():
                 return
             current = {}
         if mode in ("assess-retire", "retire"):
-            retire(mode, evidence, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution)
+            retire(mode, evidence, baseline_path, receipt_path, release_path, journal, current, original, destination, allowed_home, uid, contribution)
             return
 
         check_contribution_sections(current, contribution)
@@ -1420,13 +1504,17 @@ def main():
                 if not contribution_owns(entry, contribution):
                     remove_owned(current, entry)
         overlay(current, desired)
-        payload = document_payload(current, previous, original, private=bool(contribution))
-        # Fresh ownership supersedes the reason of an earlier release.
-        remove_release_marker(release_path)
+        merged = document_payload(current, previous, original, private=bool(contribution))
+        if FORMAT == "toml" and merged != original:
+            check_toml_time_precision(payload)
         template_owned = baseline is not None and baseline.get("phase") != "retired"
         repair = bool(contribution) or evidence is not None and evidence.get("phase") == "applied"
-        replace_destination(destination, allowed_home, uid, original, payload, True,
-                            private=bool(contribution), repair=repair, establish_ownership=not template_owned)
+        published = merged != original or not template_owned
+        prior_owned = baseline["owned"] if template_owned else []
+        replace_destination(destination, allowed_home, uid, original, merged, True,
+                            private=bool(contribution), repair=repair, establish_ownership=not template_owned,
+                            before_publish=lambda: template_intent(journal, destination, previous, prior_owned + wanted_owned))
+        remove_release_marker(release_path)
         evidence = {"schema": 2, "developer": developer,
                     "destination": destination, "desired_digest": desired_digest,
                     "format": FORMAT, "phase": "applied",
@@ -1437,6 +1525,8 @@ def main():
         atomic_write(key + ".ownership-fields", semantic_payload(fields) + b"\n", STATE_UID, 0o600)
         atomic_write(baseline_path, semantic_payload(compatible_baseline(evidence)) + b"\n", STATE_UID, 0o600)
         atomic_write(receipt_path, semantic_payload(evidence) + b"\n", STATE_UID, 0o600)
+        if published:
+            clear_publication_intent(journal)
         if not repair and document_mode_drift(destination):
             repair_document_mode(destination, allowed_home, uid)
 

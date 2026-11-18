@@ -152,7 +152,6 @@ type prepareCommandRequest struct {
 	ExplicitYard     bool
 	ReadOnly         bool
 	InteractiveSetup bool
-	RepairModes      bool
 	Bootstrap        *initBootstrap
 	// OnResolved lets the direct boundary audit canonical inputs before assessment.
 	OnResolved func(config.Loaded, []string)
@@ -171,7 +170,6 @@ type preparedCommand struct {
 	exactState       string
 	ownerPlan        bool
 	interactiveSetup bool
-	repairModes      bool
 	Project          *projectExecution
 	release          *releaseExecution
 	policy           domain.CommandPolicy
@@ -374,8 +372,7 @@ func (cli *CLI) prepareCommand(ctx context.Context, request prepareCommandReques
 	}
 	cli.ensureOperationID()
 	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: request.Definition,
-		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded, interactiveSetup: request.InteractiveSetup && !request.ReadOnly,
-		repairModes: request.RepairModes && !request.ReadOnly}
+		Arguments: slices.Clone(request.Arguments), Loaded: request.Loaded, interactiveSetup: request.InteractiveSetup && !request.ReadOnly}
 	defer func() {
 		if err != nil {
 			_ = prepared.Close()
@@ -759,11 +756,6 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 
 func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootstrap *initBootstrap) error {
 	cli := prepared.CLI
-	if prepared.repairModes {
-		if err := cli.repairStructuredConfigModes(ctx, prepared.Loaded); err != nil {
-			return err
-		}
-	}
 	execution, err := cli.prepareInitExecutionPlan(ctx, prepared.Loaded, prepared.Arguments, bootstrap, true)
 	if err != nil {
 		return err
@@ -803,9 +795,6 @@ func (prepared *preparedCommand) prepareOrdinaryInit(ctx context.Context, bootst
 		return action, delta, err
 	}
 	prepared.refresh = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
-		if err := cli.repairStructuredConfigModes(ctx, execution.loaded); err != nil {
-			return "", domain.ActionDelta{}, err
-		}
 		if err := execution.legacyContinuation.check(ctx, cli, execution); err != nil {
 			return "", domain.ActionDelta{}, err
 		}
@@ -1238,11 +1227,6 @@ func (prepared *preparedCommand) prepareRemote(ctx context.Context, _ *initBoots
 }
 
 func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBootstrap) error {
-	if prepared.repairModes {
-		if err := prepared.CLI.repairModesBeforeReleaseInspection(ctx, prepared.Loaded.Context.YardName, "@update", prepared.Arguments); err != nil {
-			return err
-		}
-	}
 	execution, err := prepared.CLI.prepareRelease(ctx, prepared.Loaded, prepared.Arguments)
 	if err != nil {
 		return err

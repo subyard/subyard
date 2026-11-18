@@ -382,11 +382,6 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 	converged := true
 	if request.verb != "setup" && !removed {
 		runtime = cli.profileRuntime(candidate)
-		if prepared.repairModes {
-			if err := cli.repairStructuredConfigModes(ctx, candidate); err != nil {
-				return err
-			}
-		}
 		converged, err = runtime.ProfileServiceConverged(ctx, request.id)
 		if err != nil {
 			return err
@@ -486,11 +481,6 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		}
 		if len(keysPlan.Steps) != 0 {
 			if err := reconciler.CheckApproved(ctx, keysPlan); err != nil {
-				return err
-			}
-		}
-		if runtime != nil {
-			if err := cli.repairStructuredConfigModes(ctx, candidate); err != nil {
 				return err
 			}
 		}

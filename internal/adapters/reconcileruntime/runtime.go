@@ -2545,7 +2545,7 @@ func (runtime Runtime) observeProfileServices(ctx context.Context) (ports.Reconc
 	if state.InstanceFound && strings.EqualFold(state.Instance.Status, "stopped") && instanceIntentionallyStopped(state.Instance) {
 		environment["SUBYARD_PROFILE_STOPPED"] = "1"
 	}
-	output := &profileRuntimeBoundedBuffer{limit: 256}
+	output := &profileRuntimeBoundedBuffer{limit: profileRuntimeOutputLimit}
 	err = runtime.runScriptEnvironment(ctx, output, environment, "profile-services.sh", "--check")
 	return profileServiceObservation(output.String(), output.exceeded, err)
 }
@@ -2556,6 +2556,11 @@ func profileServiceObservation(output string, exceeded bool, err error) (ports.R
 	}
 	observation := ports.ReconcileStageObservation{}
 	var exit *exec.ExitError
+	if !exceeded && errors.As(err, &exit) && exit.ExitCode() == 2 {
+		if failures := domain.ConfigPublicationRefusals([]byte(output), ""); len(failures) != 0 {
+			return observation, domain.CollectRefusals(failures...)
+		}
+	}
 	fields := strings.Fields(output)
 	if !exceeded && errors.As(err, &exit) && (len(fields) == 5 || len(fields) == 6) && strings.Join(fields[:3], " ") == "profile service check" {
 		if len(fields) == 6 {
@@ -2587,7 +2592,7 @@ func (runtime Runtime) ProfileServiceConverged(ctx context.Context, name string)
 // ProfileServiceObservation retains the same bounded check used for convergence.
 func (runtime Runtime) ProfileServiceObservation(ctx context.Context, name string) (ports.ReconcileStageObservation, error) {
 	ctx = readOnlyProbeContext(ctx)
-	output := &profileRuntimeBoundedBuffer{limit: 256}
+	output := &profileRuntimeBoundedBuffer{limit: profileRuntimeOutputLimit}
 	err := runtime.runScriptEnvironment(ctx, output, map[string]string{"SUBYARD_PROFILE_DIAGNOSTICS": "1"}, "profile-services.sh", "--check", name)
 	return profileServiceObservation(output.String(), output.exceeded, err)
 }
