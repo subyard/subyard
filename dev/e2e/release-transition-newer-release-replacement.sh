@@ -18,9 +18,7 @@ STATE_ROOT="/var/tmp/subyard-newer-release-$TOKEN"
 SUCCESS_ROOT="$STATE_ROOT/success"
 MARKER="subyard-newer-release-$TOKEN"
 SUCCESS_YARD="newer-release-$TOKEN"
-IFS=$'\t' read -r SOURCE_VERSION SOURCE_INSTALLER_SHA256 SOURCE_AMD64_SHA256 _ < <(
-  published_anchor
-)
+SOURCE_VERSION=0.30.0
 SOURCE_BUNDLE="subyard-$SOURCE_VERSION-linux-amd64.tar.gz"
 ASSET_ROOT="$STATE_ROOT/assets"
 SOURCE_ASSETS="$ASSET_ROOT/source"
@@ -28,6 +26,10 @@ VERSIONS=(0.99.1 0.99.2 0.99.3 0.99.4 0.99.5)
 LAUNCHER=
 
 die() { printf 'release-transition-newer-release-replacement: %s\n' "$*" >&2; exit 2; }
+
+IFS=$'\t' read -r _ SOURCE_INSTALLER_SHA256 SOURCE_AMD64_SHA256 _ < <(
+  awk -F '\t' -v version="$SOURCE_VERSION" '$1 == version && $4 == "direct"' "$ROOT/dev/e2e/published-upgrade-baselines.tsv"
+) || die "missing direct release pin for $SOURCE_VERSION"
 
 # Adoption owns user.subyard.*. Keep fixture authority outside that namespace,
 # including every inherited cleanup guard that calls project_is_marked.
@@ -81,17 +83,19 @@ cleanup_newer_release() {
 }
 
 fetch_source_assets() {
-  local name
-  [ -n "$SOURCE_VERSION" ] || die 'missing direct anchor pin'
+  local name publisher_sha
   install -d -m 0700 "$SOURCE_ASSETS"
   for name in "$SOURCE_BUNDLE" "$SOURCE_BUNDLE.sha256" "$SOURCE_BUNDLE.manifest.json" \
-    "$SOURCE_BUNDLE.provenance.json" subyard-install-runtime-release.sh subyard-install-runtime-release.sh.sha256 subyard-install.sh; do
+    "$SOURCE_BUNDLE.provenance.json" subyard-install-runtime-release.sh subyard-install.sh; do
     curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$SOURCE_ASSETS/$name" \
       "https://github.com/Subyard/Subyard/releases/download/v$SOURCE_VERSION/$name"
   done
   [ "$(sha256sum "$SOURCE_ASSETS/$SOURCE_BUNDLE" | awk '{print $1}')" = "$SOURCE_AMD64_SHA256" ] \
     && [ "$(sha256sum "$SOURCE_ASSETS/subyard-install.sh" | awk '{print $1}')" = "$SOURCE_INSTALLER_SHA256" ] \
     || die 'published source differs from its immutable pin'
+  publisher_sha="$(sed -nE "s/^publisher_sha='([0-9a-f]{64})'$/\1/p" "$SOURCE_ASSETS/subyard-install.sh")"
+  [ "$(sha256sum "$SOURCE_ASSETS/subyard-install-runtime-release.sh" | awk '{print $1}')" = "$publisher_sha" ] \
+    || die 'published runtime installer differs from the authenticated bootstrap digest'
 }
 
 stage() { # version: sets LAUNCHER to the published release's own launcher
@@ -177,9 +181,13 @@ require_refusal() { # case reason...
 check_refusals() {
   local srv foreign=user.subyard.disk_tmp srv_reason='a missing or different srv device'
   local foreign_reason='foreign guest temporary policy metadata' plan="$FIXTURE_ROOT/refusal-plan.json"
-  # These are named migration-precondition verdicts. A candidate at the anchor's
+  # These are named migration-precondition verdicts. A candidate at the source's
   # epochs updates without migration steps, so there is nothing to refuse.
-  fixture_env "$LAUNCHER" update --check --offline --version "${VERSIONS[0]}" --json > "$plan" 2>/dev/null || true
+  if ! fixture_env "$LAUNCHER" update --check --offline --version "${VERSIONS[0]}" --json > "$plan" \
+    || ! jq -e '(.plan | type == "string" and length > 0) and ((.blockers // []) | length == 0)' "$plan" >/dev/null; then
+    cat "$plan" >&2
+    die "initial staged update inspection from $SOURCE_VERSION to ${VERSIONS[0]} failed or was blocked"
+  fi
   if ! jq -e '[.. | objects | .resource? | strings | select(startswith("migration."))] | length > 0' "$plan" >/dev/null; then
     printf 'refusals: no candidate migration from %s; skipped named migration verdicts\n' "$SOURCE_VERSION"
     return 0
@@ -239,7 +247,7 @@ main_newer_release() {
   fixture_env bash "$SOURCE_ASSETS/subyard-install-runtime-release.sh" --runtime-root "$RUNTIME_ROOT" \
     --bundle "$installed" --checksum "$installed.sha256" \
     --manifest "$installed.manifest.json" --provenance "$installed.provenance.json"
-  # As the installer's first install does, complete the anchor's protected
+  # As the installer's first install does, complete the source's protected
   # transition before init can use its persisted-state capabilities.
   fixture_env "$RUNTIME_ROOT/current/bin/yard" migrate --yes
   local source_launcher="$RUNTIME_ROOT/current/bin/yard"
@@ -266,7 +274,7 @@ main_newer_release() {
   local rc source_active
   source_active="$(readlink "$RUNTIME_ROOT/current")"
 
-  # Before activation: the anchor and candidates share epochs, so the update has no
+  # Before activation: the source and candidates share a registry, so the update has no
   # migration steps. Stop it at authorization, leaving its journal unfinished.
   stage "${VERSIONS[0]}"
   check_refusals
