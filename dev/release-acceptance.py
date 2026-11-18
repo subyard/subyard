@@ -275,6 +275,8 @@ CI_COUNTED_POLICIES = frozenset({
     "9eb85775fcd01585c6f4a745d7b3b32c3d67700e",
     # host-free-verify runs the shared parallel ShellCheck runner.
     "c8c262c85a127ba8034478cbacc1720f15597b56",
+    # host-free-verify also uploads profile test logs.
+    "4796e78c8e1657f31f89a32a3f8e4f38dd6c0372",
 })
 
 
