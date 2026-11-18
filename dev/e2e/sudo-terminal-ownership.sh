@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Real sudo/PTY acceptance. Run only through dev/agent-e2e.sh on a disposable leased VM.
+# Real sudo/PTY acceptance runs on a disposable leased VM. --check-fixture is host-free.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+LOCAL_RELEASE="$ROOT/.build/sudo-terminal-release"
+LOCAL_VERSION=1.0.0-candidate.e2e
 TMP=''
 FIXTURE_USER=''
 SUDOERS=''
@@ -51,69 +53,86 @@ cleanup() {
   set +e
   cleanup_real_project
   if [ -n "$SUDOERS" ]; then
-    case "$SUDOERS" in /etc/sudoers.d/subyard-sudo-terminal-*) rm -f -- "$SUDOERS" ;; esac
+    case "$SUDOERS" in
+      /etc/sudoers.d/subyard-sudo-terminal-*) rm -f -- "$SUDOERS" || rc=1 ;;
+    esac
   fi
   if [ -n "$FIXTURE_USER" ] && getent passwd "$FIXTURE_USER" >/dev/null 2>&1; then
-    case "$FIXTURE_USER" in sy-sudo-*) userdel -r "$FIXTURE_USER" >/dev/null 2>&1 ;; esac
+    case "$FIXTURE_USER" in sy-sudo-*) userdel -r "$FIXTURE_USER" || rc=1 ;; esac
   fi
   if [ -n "$TMP" ] && [[ "$TMP" = /tmp/subyard-sudo-terminal.* ]] && [ -d "$TMP" ]; then
-    find "$TMP" -depth -delete
+    find "$TMP" -depth -delete || rc=1
   fi
   exit "$rc"
 }
-[ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
-for command in sg sudo script runuser useradd userdel visudo; do
-  command -v "$command" >/dev/null 2>&1 || die "$command is required"
-done
-
-if [ "$(id -u)" -ne 0 ]; then
-  # The controller runs as dev. Prepare the platform and candidate before
-  # switching to root for fixture user and sudoers management.
-  bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
-  # shellcheck source=tests/helpers/release-candidate.sh
-  . "$ROOT/tests/helpers/release-candidate.sh"
-  if engine="$(release_candidate_prepare "$ROOT")"; then
-    :
-  elif [ "$?" = 1 ]; then
-    "$ROOT/dev/build-engine.sh"
-    engine="$ROOT/.build/yard"
-  else
-    die 'could not verify frozen candidate'
+if [ "${1:-}" = --check-fixture ]; then
+  [ "$#" -le 2 ] || die 'usage: --check-fixture [runtime-directory]'
+  runtime="${2:-$ROOT/.build/runtime/current}"
+else
+  [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
+  for command in sg sudo script runuser useradd userdel visudo; do
+    command -v "$command" >/dev/null 2>&1 || die "$command is required"
+  done
+  if [ "$(id -u)" -ne 0 ]; then
+    # The controller prepares the platform and candidate as dev before
+    # switching to root for fixture user and sudoers management.
+    bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
+    # shellcheck source=tests/helpers/release-candidate.sh
+    . "$ROOT/tests/helpers/release-candidate.sh"
+    if engine="$(release_candidate_prepare "$ROOT")"; then
+      :
+    elif [ "$?" = 1 ]; then
+      "$ROOT/dev/package-engine.sh" --version "$LOCAL_VERSION" --output-dir "$LOCAL_RELEASE"
+      engine=--local-release
+    else
+      die 'could not verify frozen candidate'
+    fi
+    exec sudo -n env SUBYARD_E2E_VM="$SUBYARD_E2E_VM" bash "$0" "$engine"
   fi
-  exec sudo -n env SUBYARD_E2E_VM="$SUBYARD_E2E_VM" bash "$0" "$engine"
-fi
 
-engine="${1:-}"
-case "$engine" in
-  "$ROOT/.subyard-acceptance/runtime/bin/yard-engine"|"$ROOT/.build/yard") ;;
-  *) die 'candidate engine path is required' ;;
-esac
-[ -x "$engine" ] || die 'candidate engine is missing'
+  case "${1:-}" in
+    "$ROOT/.subyard-acceptance/runtime/bin/yard-engine")
+      runtime="$ROOT/.subyard-acceptance/runtime"
+      release="$ROOT/.subyard-acceptance/release"
+      ;;
+    --local-release)
+      runtime=''
+      release="$LOCAL_RELEASE"
+      case "$(uname -m)" in
+        x86_64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) die 'unsupported candidate architecture' ;;
+      esac
+      ;;
+    *) die 'candidate runtime is required' ;;
+  esac
+fi
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 TMP="$(mktemp -d /tmp/subyard-sudo-terminal.XXXXXX)"
-chmod 0711 "$TMP"
-token="${TMP##*.}"
-fixture_user="sy-sudo-$$"
-sudoers="/etc/sudoers.d/subyard-sudo-terminal-$token"
-getent passwd "$fixture_user" >/dev/null 2>&1 \
-  && die "refusing existing fixture user $fixture_user"
-[ ! -e "$sudoers" ] && [ ! -L "$sudoers" ] || die "refusing existing sudoers fixture $sudoers"
-FIXTURE_USER="$fixture_user"
-SUDOERS="$sudoers"
-
+chmod 0750 "$TMP"
+if [ -z "$runtime" ]; then
+  runtime="$TMP/local-runtime"
+  install -d -m 0755 "$runtime"
+  tar -xzf "$release/subyard-$LOCAL_VERSION-linux-$arch.tar.gz" -C "$runtime"
+fi
+[ -x "$runtime/bin/yard-engine" ] || die 'candidate engine is missing'
 fixture_repo="$TMP/repository"
+real_repo="$TMP/real-repository"
 fixture_home="$TMP/home"
-install -d -m 0755 "$fixture_repo/config/profiles" "$fixture_repo/scripts/lib" "$fixture_home"
-for config in commands.registry incus.project.env subyard.env host.env agents.env ports.env; do
-  install -m 0644 "$ROOT/config/$config" "$fixture_repo/config/$config"
-done
-install -m 0755 "$engine" "$fixture_repo/yard"
-install -m 0644 "$ROOT/scripts/lib-power.sh" "$fixture_repo/scripts/lib-power.sh"
-for library in runtime.sh engine-context.sh ui.sh download.sh host.sh; do
-  install -m 0644 "$ROOT/scripts/lib/$library" "$fixture_repo/scripts/lib/$library"
-done
+
+stage_runtime() {
+  local destination="$1"
+  cp -a --no-preserve=ownership "$runtime/." "$destination"
+  # Frozen-candidate extraction can leave every directory private to its preparer.
+  find "$destination" -type d -exec chmod 0755 {} +
+  (cd "$destination" && sha256sum --check --quiet --strict runtime-files.sha256) \
+    || die 'staged candidate runtime is incomplete or changed'
+}
+
+stage_runtime "$fixture_repo"
+install -d -m 0755 "$fixture_home"
 
 cat > "$fixture_repo/scripts/teardown-physical.sh" <<'SH'
 #!/usr/bin/env bash
@@ -137,7 +156,10 @@ operator_home='$fixture_home'
 [ "\$(id -u)" != 0 ] || operator_home='$TMP/root-home'
 install -d -m 0700 "\$operator_home" "\$operator_home/.config" \\
   "\$operator_home/.config/subyard" "\$operator_home/.config/subyard/projects"
-exec env \\
+if [ "\$#" -eq 0 ]; then
+  set -- teardown --yes --keep-data
+fi
+exec env -i PATH="\$PATH" LANG=C.UTF-8 TERM="\${TERM:-dumb}" \\
   HOME="\$operator_home" \\
   SUBYARD_OPERATOR_HOME="\$operator_home" \\
   SUBYARD_CONFIG_HOME="\$operator_home/.config/subyard" \\
@@ -149,15 +171,38 @@ exec env \\
   RESTRICTED_DISK_PATHS="\$operator_home/host" \\
   SHIFT_MODE=shift \\
   FORWARD_SSH_AGENT=0 \\
+  CODING_TOOL_INTEGRATIONS= \\
   DEV_SUDO=0 \\
   DEV_UID=1000 \\
   DEV_USER=dev \\
   SSH_PORT=2222 \\
-  '$fixture_repo/yard' teardown --yes --keep-data
+  '$fixture_repo/bin/yard-engine' "\$@"
 SH
 chmod 0755 "$TMP/run-teardown"
 
+if [ "${1:-}" = --check-fixture ]; then
+  "$TMP/run-teardown" config show CODING_TOOL_INTEGRATIONS >/dev/null
+  # Exercise the staged guard used by native teardown planning without Incus or sudo.
+  printf '{"Path":"%s"}\n' "$fixture_home" \
+    | python3 -B "$fixture_repo/scripts/lib/teardown-plan.py" capture-artifact \
+    | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["Binding"] else 1)'
+  printf 'ok: complete candidate runtime verified and its teardown guard captures an artifact\n'
+  exit 0
+fi
+
+token="${TMP##*.}"
+fixture_user="sy-sudo-$$"
+sudoers="/etc/sudoers.d/subyard-sudo-terminal-$token"
+getent passwd "$fixture_user" >/dev/null 2>&1 \
+  && die "refusing existing fixture user $fixture_user"
+if [[ -e "$sudoers" || -L "$sudoers" ]]; then
+  die "refusing existing sudoers fixture $sudoers"
+fi
+FIXTURE_USER="$fixture_user"
+SUDOERS="$sudoers"
 useradd --user-group --groups incus-admin --home-dir "$fixture_home" --shell /bin/bash "$FIXTURE_USER"
+# The artifact guard opens each ancestor O_RDONLY before inspecting state.
+chgrp "$FIXTURE_USER" "$TMP"
 chown -R "$FIXTURE_USER:$FIXTURE_USER" "$fixture_home"
 password="$(dd if=/dev/urandom bs=32 count=1 status=none | sha256sum | cut -c1-24)"
 printf '%s:%s\n' "$FIXTURE_USER" "$password" | chpasswd
@@ -171,26 +216,64 @@ run_as_fixture() {
   runuser -u "$FIXTURE_USER" -- "$@"
 }
 
+# The platform fixture stops short of yard init, which normally provisions this lock.
+"$fixture_repo/bin/yard-engine" _network-lock ensure
+run_as_fixture "$fixture_repo/bin/yard-engine" _network-lock check
+
+run_prompted_pty() {
+  local output="$1" limit="$2" command_line="$3" input pid input_fd count=0 deadline
+  shift 3
+  pty_child_rc=0
+  mkfifo -m 0600 "$output.input" || return
+  # Keep the writer open until script exits, with a deadline even after the final input.
+  timeout --kill-after=5s "$limit" runuser -u "$FIXTURE_USER" -- \
+    script --echo never -qefc "$command_line" /dev/null \
+    <"$output.input" >"$output" 2>&1 &
+  pid=$!
+  exec {input_fd}>"$output.input" || return
+  for input in "$@"; do
+    count=$((count + 1))
+    deadline=$((SECONDS + 30))
+    # sudo can discard input during the delay before a retry prompt.
+    until [ "$(grep -Fc '[sudo] password for' "$output" || true)" -ge "$count" ]; do
+      if ! kill -0 "$pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+        kill "$pid" 2>/dev/null || true
+        exec {input_fd}>&-
+        wait "$pid" || true
+        printf 'PTY ended or timed out waiting for sudo prompt %s\n' "$count" >&2
+        return 1
+      fi
+      sleep 0.1
+    done
+    if ! kill -0 "$pid" 2>/dev/null || ! (trap '' PIPE; printf '%s' "$input" >&"$input_fd"); then
+      kill "$pid" 2>/dev/null || true
+      exec {input_fd}>&-
+      wait "$pid" || true
+      printf 'could not deliver PTY input for sudo prompt %s\n' "$count" >&2
+      return 1
+    fi
+  done
+  wait "$pid" || pty_child_rc=$?
+  exec {input_fd}>&-
+  case "$pty_child_rc" in
+    124|137)
+      printf 'PTY session exceeded its %s limit (status %s)\n' "$limit" "$pty_child_rc" >&2
+      return 1
+      ;;
+    125|126|127) return 1 ;;
+  esac
+}
+
 run_as_fixture sudo -k
 pty_output="$TMP/pty.out"
 wrong="incorrect-$token"
 printf '  [ .. ] checking wrong-password retry, success and cached credential\n'
-set +e
-{
-  sleep 1
-  printf '%s\n' "$wrong"
-  sleep 1
-  printf '%s\n' "$password"
-} | run_as_fixture script --echo never -qefc \
-  "sudo -k; '$TMP/run-teardown'; '$TMP/run-teardown'" /dev/null \
-  >"$pty_output" 2>&1
-pty_rc=$?
-set -e
-if [ "$pty_rc" -ne 0 ]; then
+if ! run_prompted_pty "$pty_output" 90s "sudo -k; '$TMP/run-teardown'; '$TMP/run-teardown'" \
+  "$wrong"$'\n' "$password"$'\n' || [ "$pty_child_rc" -ne 0 ]; then
   tr -d '\r' < "$pty_output" \
-    | grep -E '(\[sudo\] password for|Sorry, try again|root-step=|yard:|adapter|not found|unknown|failed)' \
-    >&2 || true
-  die "interactive PTY command failed with status $pty_rc"
+    | sed "s/$password/[redacted]/g" \
+    | tail -n 120 >&2
+  die "interactive PTY check failed (child status $pty_child_rc)"
 fi
 grep -Fq '[sudo] password for' "$pty_output" \
   || die 'standard sudo password prompt was not visible'
@@ -218,15 +301,9 @@ printf '  [ ok ] no-TTY invocation failed before root mutation\n'
 run_as_fixture sudo -k
 interrupt_output="$TMP/interrupt.out"
 printf '  [ .. ] checking Ctrl-C at the standard sudo prompt\n'
-set +e
-{
-  sleep 1
-  printf '\003'
-} | run_as_fixture script --echo never -qefc \
-  "sudo -k; '$TMP/run-teardown'" /dev/null >"$interrupt_output" 2>&1
-interrupt_rc=$?
-set -e
-[ "$interrupt_rc" -ne 0 ] || die 'Ctrl-C did not cancel sudo authorization'
+run_prompted_pty "$interrupt_output" 90s "sudo -k; '$TMP/run-teardown'" $'\003' \
+  || die 'could not complete the Ctrl-C PTY exchange'
+[ "$pty_child_rc" -ne 0 ] || die 'Ctrl-C did not cancel sudo authorization'
 grep -Fq '[sudo] password for' "$interrupt_output" \
   || die 'Ctrl-C fixture did not reach the sudo prompt'
 grep -Fq 'root-step=' "$interrupt_output" \
@@ -253,11 +330,12 @@ if ! incus storage show default --project default >/dev/null 2>&1; then
     || die 'could not restore the disposable VM default storage pool'
 fi
 if incus storage show "$E2E_POOL" --project default >/dev/null 2>&1; then
-  [ "$(incus storage show "$E2E_POOL" --project default \
+  if ! { [ "$(incus storage show "$E2E_POOL" --project default \
     | awk '!found && $1 == "driver:" { print $2; found=1 }')" = dir ] \
     && [ "$(incus storage get "$E2E_POOL" user.subyard.owner --project default)" = \
-      sudo-terminal-e2e-v1 ] \
-    || die "refusing unexpected existing storage pool $E2E_POOL"
+      sudo-terminal-e2e-v1 ]; }; then
+    die "refusing unexpected existing storage pool $E2E_POOL"
+  fi
 else
   incus storage create "$E2E_POOL" dir user.subyard.owner=sudo-terminal-e2e-v1 \
     --project default >/dev/null \
@@ -272,25 +350,41 @@ incus project show "$real_project" >/dev/null 2>&1 \
 REAL_PROJECT="$real_project"
 REAL_INSTANCE="yard-$real_yard"
 REAL_VOLUME="yard-srv-$real_yard"
-real_repo="$TMP/real-repository"
-install -d -m 0755 "$real_repo"
-cp -a "$ROOT/config" "$ROOT/scripts" "$real_repo/"
-install -m 0755 "$engine" "$real_repo/yard"
-chmod -R o+rX "$real_repo"
+stage_runtime "$real_repo"
+real_config="$fixture_home/.config/subyard"
+real_data="$fixture_home/.subyard-real"
+real_storage_path="$(incus storage get default source)"
+# The published runtime commits the metadata required by real init and its boot service.
+cp -a --no-preserve=ownership "$release/." "$TMP/release"
+chmod -R a+rX "$TMP/release"
+candidate_version="$("$real_repo/bin/yard-engine" version)"
+candidate_version="${candidate_version##* }"
+(
+  cd "$fixture_home"
+  run_as_fixture env HOME="$fixture_home" SUBYARD_OPERATOR_HOME="$fixture_home" \
+    SUBYARD_CONFIG_HOME="$real_config" SUBYARD_HOME="$real_data" \
+    SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 YARD_RELEASE_BASE_URL="file://$TMP/release" \
+    bash "$TMP/release/subyard-install.sh" --version "$candidate_version" --yes
+)
 install -d -m 0755 "$real_repo/config/profiles/sudo-smoke"
 cat > "$real_repo/config/profiles/sudo-smoke/profile.conf" <<'EOF'
 # Empty smoke profile: the provision hook only proves lifecycle and adapter continuation.
 EOF
+chmod 0644 "$real_repo/config/profiles/sudo-smoke/profile.conf"
 cat > "$real_repo/config/profiles/sudo-smoke/provision.sh" <<'SH'
 #!/usr/bin/env bash
 # subyard-provision-check-v1
 set -euo pipefail
-[ "${1:-}" != --check ] || exit 0
+marker=/var/lib/subyard-sudo-smoke
+if [ "${1:-}" = --check ]; then
+  [ -f "$marker" ] || exit 10
+  exit 0
+fi
+touch "$marker"
 printf 'sudo-smoke-hook-ok\n'
 SH
 chmod 0755 "$real_repo/config/profiles/sudo-smoke/provision.sh"
 
-real_config="$fixture_home/.config/subyard"
 install -d -m 0700 -o "$FIXTURE_USER" -g "$FIXTURE_USER" \
   "$fixture_home/.config" "$real_config" "$real_config/yards"
 real_ssh_port=$((30000 + ($$ % 20000)))
@@ -308,7 +402,6 @@ DEV_UID=1001
 ENVIRONMENT_PROFILES=sudo-smoke
 CODING_TOOL_INTEGRATIONS=
 SRV_POOL=$E2E_POOL
-STORAGE_PATH=$(incus storage get default source)
 HOST_MOUNTS=sudo-host:/mnt/host/sudo:rw:0700
 HOST_BASE=$fixture_home/host-real
 RESTRICTED_DISK_PATHS=$fixture_home/host-real
@@ -323,33 +416,6 @@ DEV_SUDO=0
 NESTED_E2E_VMS=0
 EOF
 chmod 0600 "$real_config"/yards/*/config.env
-install -d -m 0700 -o "$FIXTURE_USER" -g "$FIXTURE_USER" "$real_config/tools/bin"
-cat > "$real_config/tools/bin/age" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = --version ] && { printf 'age 1.3.1\n'; exit 0; }
-exit 2
-SH
-cat > "$real_config/tools/bin/age-keygen" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-case "${1:-}" in
-  --version) printf 'age-keygen 1.3.1\n' ;;
-  -o)
-    recipient="age1$(printf '%s-%s-%s' "$2" "$$" "$RANDOM" | sha256sum | cut -c1-58)"
-    printf 'FAKE:%s\n' "$recipient" > "$2"
-    printf 'Public key: %s\n' "$recipient" >&2
-    ;;
-  -y) sed -n 's/^FAKE://p' "$2" ;;
-  *) exit 2 ;;
-esac
-SH
-cat > "$real_config/tools/bin/sops" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = --version ] && { printf 'sops 3.13.2\n'; exit 0; }
-exit 2
-SH
-chmod 0755 "$real_config/tools/bin/age" \
-  "$real_config/tools/bin/age-keygen" "$real_config/tools/bin/sops"
 chown -R "$FIXTURE_USER:$FIXTURE_USER" "$real_config"
 run_real_as_fixture() {
   run_as_fixture "$@"
@@ -380,10 +446,11 @@ exec env -i \\
   SHELL='/bin/bash' \\
   SUBYARD_OPERATOR_HOME='$fixture_home' \\
   SUBYARD_CONFIG_HOME='$real_config' \\
-  SUBYARD_HOME='$fixture_home/.subyard-real' \\
+  SUBYARD_HOME='$real_data' \\
   SUBYARD_NO_AUDIT=1 \\
   SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \\
   SUBYARD_REPOSITORY_ROOT='$real_repo' \\
+  STORAGE_PATH='$real_storage_path' \\
   MIN_DISK_GIB=1 \\
   HOST_CLAUDE_MD= \\
   HOST_CODEX_AGENTS_MD= \\
@@ -394,7 +461,7 @@ exec env -i \\
   DEV_UID=1001 \\
   DEV_USER=dev \\
   NESTED_E2E_VMS=0 \\
-  '$real_repo/yard' -Y '$real_yard' "\$@"
+  '$real_repo/bin/yard-engine' -Y '$real_yard' "\$@"
 SH
 cat > "$TMP/run-real-yard" <<SH
 #!/usr/bin/env bash
@@ -410,7 +477,7 @@ chmod 0755 "$TMP/run-real-yard"
 printf '  [ ok ] real-command names are absent and reserved for this run\n'
 
 run_real_pty() {
-  local label="$1" output="$2" command_line argument quoted rc
+  local label="$1" output="$2" command_line argument quoted
   shift 2
   command_line="$(printf '%q' "$TMP/run-real-yard")"
   for argument in "$@"; do
@@ -419,15 +486,8 @@ run_real_pty() {
   done
   run_real_as_fixture sudo -k
   printf '  [ .. ] %s\n' "$label"
-  set +e
-  {
-    sleep 1
-    printf '%s\n' "$password"
-  } | run_real_as_fixture script --echo never -qefc \
-    "$command_line" /dev/null >"$output" 2>&1
-  rc=$?
-  set -e
-  if [ "$rc" -ne 0 ]; then
+  if ! run_prompted_pty "$output" 15m "$command_line" "$password"$'\n' \
+    || [ "$pty_child_rc" -ne 0 ]; then
     tr -d '\r' < "$output" \
       | sed "s/$password/[redacted]/g" \
       | tail -n 120 >&2
@@ -435,7 +495,7 @@ run_real_pty() {
       && incus info "$REAL_INSTANCE" --project "$REAL_PROJECT" >/dev/null 2>&1; then
       incus info "$REAL_INSTANCE" --project "$REAL_PROJECT" --show-log >&2 || true
     fi
-    die "$label failed with status $rc"
+    die "$label failed (child status $pty_child_rc)"
   fi
 }
 
@@ -458,6 +518,7 @@ run_real_checked 'real yard start' "$TMP/real-start.out" start --yes
 grep -Fq 'started' "$TMP/real-start.out" || die 'real lifecycle start did not complete'
 grep -Fq '[sudo] password for' "$TMP/real-start.out" \
   && die 'inactive NetworkManager caused an unnecessary lifecycle sudo prompt'
+incus exec "$REAL_INSTANCE" --project "$REAL_PROJECT" -- rm -f -- /var/lib/subyard-sudo-smoke
 run_real_checked 'second real yard stop' "$TMP/real-restop.out" stop --force --yes
 run_real_as_fixture sudo -k
 run_real_checked 'real stopped-yard provision' "$TMP/real-provision.out" \
