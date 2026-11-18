@@ -123,56 +123,75 @@ func applyEnvReaderObserved(reader io.Reader, source string, values environment,
 func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, policy discardPolicy, discarded func(name, value string, line int)) error {
 	discardRetiredSettings(values)
 
+	return scanEnvRecords(reader, source, "scalar settings", func(record envRecord) error {
+		if record.text == "" {
+			return nil
+		}
+		evaluation := envEvaluation{values: values, policy: policy}
+		if observer != nil {
+			evaluation.observe = func(name, value string) { observer(name, value, record.line) }
+		}
+		if discarded != nil {
+			evaluation.policy.report = func(name, value string) { discarded(name, value, record.line) }
+		}
+		return evaluation.applyRecord(record.text)
+	})
+}
+
+type envRecord struct {
+	raw  string
+	text string
+	line int
+}
+
+// scanEnvRecords preserves raw bytes for edits and supplies the same
+// evaluation text and line numbers to each consumer. Blank and comment lines
+// outside an assignment have empty evaluation text.
+func scanEnvRecords(reader io.Reader, source, purpose string, visit func(envRecord) error) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
 	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
-		advance, line, err := bufio.ScanLines(data, atEOF)
-		// Keep carriage returns inside multiline values. Record trimming
-		// still handles CRLF at the end of an assignment.
-		if line != nil && advance > len(line)+1 {
-			line = data[:advance-1]
+		if end := bytes.IndexByte(data, '\n'); end >= 0 {
+			return end + 1, data[:end+1], nil
 		}
-		return advance, line, err
+		if atEOF && len(data) != 0 {
+			return len(data), data, nil
+		}
+		return 0, nil, nil
 	})
-	var record strings.Builder
-	quote := byte(0)
-	lineNumber := 0
-	recordLine := 0
+	var raw strings.Builder
+	var quote byte
+	lineNumber, recordLine := 0, 0
 	for scanner.Scan() {
 		lineNumber++
 		line := scanner.Text()
-		if record.Len() == 0 {
-			trimmed := strings.TrimSpace(line)
+		body := strings.TrimSuffix(line, "\n")
+		if raw.Len() == 0 {
+			trimmed := strings.TrimSpace(body)
 			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				if err := visit(envRecord{raw: line, line: lineNumber}); err != nil {
+					return err
+				}
 				continue
 			}
 			recordLine = lineNumber
-		} else {
-			record.WriteByte('\n')
 		}
-		record.WriteString(line)
-		quote = scanQuote(line, quote)
+		raw.WriteString(line)
+		quote = scanQuote(body, quote)
 		if quote != 0 {
 			continue
 		}
-		recordObserver := func(name, value string) {
-			if observer != nil {
-				observer(name, value, recordLine)
-			}
+		record := envRecord{raw: raw.String(), text: strings.TrimSpace(raw.String()), line: recordLine}
+		if err := visit(record); err != nil {
+			return sourceContext(source, record.line, recordSettingKey(record.text), purpose, err)
 		}
-		if discarded != nil {
-			policy.report = func(name, value string) { discarded(name, value, recordLine) }
-		}
-		if err := applyRecordRetired(record.String(), values, recordObserver, policy); err != nil {
-			return sourceContext(source, recordLine, recordSettingKey(record.String()), "scalar settings", err)
-		}
-		record.Reset()
+		raw.Reset()
 	}
 	if err := scanner.Err(); err != nil {
-		return sourceError(source, lineNumber+1, "", "scalar settings", "cannot read config within the line size bound", err)
+		return sourceError(source, lineNumber+1, "", purpose, "cannot read config within the line size bound", err)
 	}
-	if quote != 0 || record.Len() != 0 {
-		return sourceError(source, recordLine, recordSettingKey(record.String()), "scalar settings", "unterminated quoted assignment", nil)
+	if raw.Len() != 0 {
+		return sourceError(source, recordLine, recordSettingKey(raw.String()), purpose, "unterminated quoted assignment", nil)
 	}
 	return nil
 }
@@ -200,15 +219,23 @@ func scanQuote(line string, quote byte) byte {
 	return quote
 }
 
-func applyRecordRetired(record string, values environment, observer func(name, value string), policy discardPolicy) error {
-	record = strings.TrimSpace(record)
+type envEvaluation struct {
+	values  environment
+	observe func(name, value string)
+	policy  discardPolicy
+
+	// possible visits defaults that may run over a different input layer.
+	possible bool
+}
+
+func (evaluation envEvaluation) applyRecord(record string) error {
 	if strings.HasPrefix(record, ":") {
 		expression := strings.TrimSpace(strings.TrimPrefix(record, ":"))
 		value, expand := decodeValue(expression)
 		if !expand {
 			return nil
 		}
-		_, err := expandValue(value, values, observer, policy)
+		_, err := evaluation.expandValue(value)
 		return err
 	}
 	if strings.HasPrefix(record, "export ") {
@@ -222,18 +249,18 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	if !ValidVariable(name) {
 		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
-	discard := policy.discards(name)
+	discard := evaluation.policy.discards(name)
 	if discard {
 		// Validate the old expression without allowing its assignments or nested
 		// defaults to affect current settings, provenance, or sync exports.
-		values = cloneEnvironment(values)
-		observer = nil
+		evaluation.values = cloneEnvironment(evaluation.values)
+		evaluation.observe = nil
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
-	if expand {
-		expanded, err := expandValue(value, values, observer, policy)
-		if err != nil && !(discard && policy.ignores(name)) {
+	if expand && !(discard && evaluation.possible) {
+		expanded, err := evaluation.expandValue(value)
+		if err != nil && !(discard && evaluation.policy.ignores(name)) {
 			return err
 		}
 		if err == nil {
@@ -241,16 +268,22 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 		}
 	}
 	if discard {
-		if policy.report != nil {
-			policy.report(name, value)
+		if evaluation.policy.report != nil {
+			evaluation.policy.report(name, value)
 		}
 		return nil
 	}
-	values[name] = value
-	if observer != nil {
-		observer(name, value)
-	}
+	evaluation.assign(name, value)
 	return nil
+}
+
+func (evaluation envEvaluation) assign(name, value string) {
+	if !evaluation.possible {
+		evaluation.values[name] = value
+	}
+	if evaluation.observe != nil {
+		evaluation.observe(name, value)
+	}
 }
 
 func decodeValue(value string) (string, bool) {
@@ -266,12 +299,7 @@ func decodeValue(value string) (string, bool) {
 	return value, true
 }
 
-func expandValue(
-	value string,
-	values environment,
-	observer func(name, value string),
-	policy discardPolicy,
-) (string, error) {
+func (evaluation envEvaluation) expandValue(value string) (string, error) {
 	if strings.Contains(value, "$(") || strings.ContainsRune(value, '`') {
 		return "", sourceError("", 0, "", "scalar settings", "command substitution is not allowed in config", nil)
 	}
@@ -297,7 +325,7 @@ func expandValue(
 			if err != nil {
 				return "", err
 			}
-			expanded, err := expandParameter(value[index+2:end], values, observer, policy)
+			expanded, err := evaluation.expandParameter(value[index+2 : end])
 			if err != nil {
 				return "", err
 			}
@@ -314,7 +342,7 @@ func expandValue(
 			index++
 			continue
 		}
-		result.WriteString(values[value[index+1:end]])
+		result.WriteString(evaluation.values[value[index+1:end]])
 		index = end
 	}
 	return result.String(), nil
@@ -338,37 +366,39 @@ func parameterEnd(value string, start int) (int, error) {
 	return 0, sourceError("", 0, "", "scalar settings", "unterminated parameter expansion", nil)
 }
 
-func expandParameter(
-	expression string,
-	values environment,
-	observer func(name, value string),
-	policy discardPolicy,
-) (string, error) {
+func (evaluation envEvaluation) expandParameter(expression string) (string, error) {
 	name, operator, fallback := splitParameter(expression)
 	if !ValidVariable(name) {
 		return "", sourceError("", 0, "", "scalar settings", "invalid parameter name", nil)
 	}
-	discard := policy.discards(name)
+	discard := evaluation.policy.discards(name)
 	if discard {
 		// A default of a discarded name stays inside this expansion.
-		values = cloneEnvironment(values)
-		observer = nil
+		if evaluation.possible {
+			return "", nil
+		}
+		evaluation.values = cloneEnvironment(evaluation.values)
+		evaluation.observe = nil
 	}
-	current := values[name]
+	current := evaluation.values[name]
 	switch operator {
 	case "":
 		return current, nil
 	case ":-", ":=", ":?":
-		if current != "" {
+		if current != "" && !evaluation.possible {
 			return current, nil
 		}
-		if operator == ":?" && policy.ignores(name) {
-			// Operators never assign an ignored name, so a required check of
-			// it is ignored too, without evaluating its message.
+		if operator == ":?" && (evaluation.possible || evaluation.policy.ignores(name)) {
+			// A required check evaluates its message only on failure.
+			// For an ignored name the check itself is skipped.
 			return "", nil
 		}
-		expanded, err := expandValue(fallback, values, observer, policy)
+		expanded, err := evaluation.expandValue(fallback)
 		if err != nil {
+			// A different input layer can skip an invalid fallback.
+			if evaluation.possible {
+				return "", nil
+			}
 			return "", err
 		}
 		if operator == ":?" {
@@ -378,10 +408,7 @@ func expandParameter(
 			return "", sourceError("", 0, recognizedSettingKey(Catalog{}, name), "scalar settings", "required parameter is unset", errors.New(expanded))
 		}
 		if operator == ":=" {
-			values[name] = expanded
-			if observer != nil {
-				observer(name, expanded)
-			}
+			evaluation.assign(name, expanded)
 		}
 		return expanded, nil
 	default:

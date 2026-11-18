@@ -79,10 +79,76 @@ func TestPersistentAssignmentRefusesSharedRecords(t *testing.T) {
 	}
 }
 
+func TestPersistentAssignmentRefusesLatentSharedRecordForEitherSetting(t *testing.T) {
+	const initial = "GATE=earlier\n: \"${GATE:-${GIT_USER_NAME:=original}${GIT_USER_EMAIL:=old@example.invalid}}\"\n"
+	for _, name := range []string{"GIT_USER_NAME", "GIT_USER_EMAIL"} {
+		t.Run(name, func(t *testing.T) {
+			_, err := EditPersistentAssignmentContent("config.env", []byte(initial), name, nil)
+			var source *SourceError
+			if !errors.As(err, &source) || source.Key != name || source.Line != 2 ||
+				!strings.Contains(source.Reason, "record can also assign") {
+				t.Fatalf("expected refusal for shared record, got %v", err)
+			}
+		})
+	}
+}
+
+func TestPersistentAssignmentKeepsRecordBoundariesAfterQuotedComments(t *testing.T) {
+	const prefix = `# '
+CODEX_VERSION='first
+GIT_USER_EMAIL="old
+'
+SSH_PORT=2222
+# "
+# '
+# '
+`
+	path := filepath.Join(testkit.TempDir(t), "config.env")
+	testkit.WriteFile(t, path, []byte(prefix+"GIT_USER_EMAIL=prior@example.invalid\n"), 0o600)
+	value := "new@example.invalid"
+	if err := WritePersistentAssignment(filepath.Dir(path), path, "GIT_USER_EMAIL", &value); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if want := prefix + "GIT_USER_EMAIL='new@example.invalid'\n"; err != nil || string(content) != want {
+		t.Fatalf("edited content = %q, %v; want %q", content, err, want)
+	}
+	values, err := ReadAssignments(path)
+	if err != nil || values["SSH_PORT"] != "2222" || values["GIT_USER_EMAIL"] != value {
+		t.Fatalf("read assignments = %q, %v", values, err)
+	}
+}
+
+func TestPersistentAssignmentCanEditDefaultInsideDiscardedExpansion(t *testing.T) {
+	for _, discarded := range []string{"YARD_CAPS", "CODEX_VERSION"} {
+		t.Run(discarded, func(t *testing.T) {
+			initial := "GIT_USER_EMAIL=\"${" + discarded + ":-${GIT_USER_NAME:=original}}@example.invalid\"\n"
+			value := "new@example.invalid"
+			content, err := EditPersistentAssignmentContent("config.env", []byte(initial), "GIT_USER_EMAIL", &value)
+			if err != nil || string(content) != "GIT_USER_EMAIL='new@example.invalid'\n" {
+				t.Fatalf("edited content = %q, %v", content, err)
+			}
+		})
+	}
+}
+
+func TestPersistentAssignmentKeepsExistingMultilineCRLF(t *testing.T) {
+	const initial = "# keep\r\nGIT_USER_NAME='first\r\nsecond'\r\n"
+	value := "new@example.invalid"
+	content, err := EditPersistentAssignmentContent("config.env", []byte(initial), "GIT_USER_EMAIL", &value)
+	if err != nil || !bytes.HasPrefix(content, []byte(initial)) {
+		t.Fatalf("edited content = %q, %v", content, err)
+	}
+	values, err := EvaluateAssignments(bytes.NewReader(content), "config.env", nil)
+	if err != nil || values["GIT_USER_NAME"] != "first\r\nsecond" {
+		t.Fatalf("read assignments = %q, %v", values, err)
+	}
+}
+
 func TestPersistentAssignmentValueRoundTrip(t *testing.T) {
 	configHome := testkit.TempDir(t)
 	path := filepath.Join(configHome, "config.env")
-	value := " O'Connor \\\" $HOME ${X:=default} $(literal) `literal` #\r\nsecond line\n "
+	value := " O'Connor \\\" $HOME ${X:=default} $(literal) `literal` #\r\n東京 café 🐈\n "
 	if err := WritePersistentAssignment(configHome, path, "GIT_USER_NAME", &value); err != nil {
 		t.Fatal(err)
 	}
@@ -601,17 +667,18 @@ func TestWritePersistentAssignmentRejectsPreservedConditionalAlias(t *testing.T)
 	for _, setting := range []struct {
 		initial string
 		values  []*string
+		reason  string
 	}{
-		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}},
-		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}},
-		{"ENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{nil, &empty}},
-		{"YARD_PROFILES=neighbor\nENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{&empty}},
+		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "preserved record"},
+		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "record can also assign"},
+		{"ENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{nil, &empty}, "preserved record"},
+		{"YARD_PROFILES=neighbor\nENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{&empty}, "preserved record"},
 	} {
 		for _, value := range setting.values {
 			configHome := testkit.TempDir(t)
 			path := filepath.Join(configHome, "config.env")
 			testkit.WriteFile(t, path, []byte(setting.initial), 0o600)
-			if err := WritePersistentAssignment(configHome, path, "ENVIRONMENT_PROFILES", value); err == nil || !strings.Contains(err.Error(), "preserved record") {
+			if err := WritePersistentAssignment(configHome, path, "ENVIRONMENT_PROFILES", value); err == nil || !strings.Contains(err.Error(), setting.reason) {
 				t.Fatalf("conditional alias accepted: %v", err)
 			}
 			content, err := os.ReadFile(path)

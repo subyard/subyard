@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -201,48 +200,26 @@ func (settings Catalog) ParsePersistentAssignments(path string, content []byte) 
 	if len(content) > 8<<20 {
 		return nil, errors.New("persistent setting content exceeds its size bound")
 	}
-	lines := bytes.SplitAfter(content, []byte{'\n'})
 	values := environment{}
 	var assignments []PersistentAssignment
-	var current bytes.Buffer
-	quote := byte(0)
-	lineNumber := 0
-	recordLine := 0
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
+	err := scanEnvRecords(bytes.NewReader(content), path, "persistent settings", func(record envRecord) error {
+		if record.text == "" {
+			return nil
 		}
-		lineNumber++
-		if current.Len() == 0 {
-			recordLine = lineNumber
-		}
-		current.Write(line)
-		quote = scanQuote(strings.TrimSuffix(string(line), "\n"), quote)
-		if quote != 0 {
-			continue
-		}
-		record := strings.TrimSpace(current.String())
-		current.Reset()
-		if record == "" || strings.HasPrefix(record, "#") {
-			continue
-		}
-		direct, dynamic := persistentDirectAssignment(record)
+		direct, dynamic := persistentDirectAssignment(record.text)
 		observe := func(name, value string) {
 			isDirect := direct != "" && name == direct
 			assignments = append(assignments, PersistentAssignment{
-				Name: name, Value: value, Line: recordLine,
+				Name: name, Value: value, Line: record.line,
 				Direct: isDirect, Dynamic: dynamic || !isDirect,
 			})
 		}
-		// A profile-only assignment is discarded as the loader discards it: it
-		// never refuses parsing or affects later records, and only its own
-		// record remains visible, so config unset can still remove it.
-		if err := applyRecordRetired(record, values, observe, operatorDiscardPolicy(observe, settings)); err != nil {
-			return nil, sourceContext(path, recordLine, recordSettingKey(record), "persistent settings", err)
-		}
-	}
-	if quote != 0 || current.Len() != 0 {
-		return nil, sourceError(path, recordLine, recordSettingKey(current.String()), "persistent settings", "unterminated quoted assignment", nil)
+		// Report discarded direct assignments so config unset can remove them.
+		evaluation := envEvaluation{values: values, observe: observe, policy: operatorDiscardPolicy(observe, settings)}
+		return evaluation.applyRecord(record.text)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return assignments, nil
 }
@@ -487,13 +464,12 @@ func CreatePersistentFile(configHome, path string, content []byte, guards ...fun
 }
 
 type envEditRecord struct {
-	content []byte
-	names   []string
-	line    int
+	envRecord
+	assigned []string
+	// Dormant defaults count for shared-record refusals. Only actual
+	// assignments are candidates for replacement.
+	possible []string
 }
-
-// The first alternative skips escaped bytes, including escaped dollars.
-var envEditDefault = regexp.MustCompile(`\\[\s\S]|\$\{([A-Za-z_][A-Za-z0-9_]*):=`)
 
 func editAssignmentContent(
 	path string,
@@ -512,30 +488,13 @@ func editAssignmentContent(
 	var refusals []error
 	for index := range records {
 		record := records[index]
-		if !slices.Contains(record.names, name) {
+		if slices.Contains(record.assigned, name) {
+			last = index
+		}
+		if !slices.Contains(record.possible, name) {
 			continue
 		}
-		last = index
-		others := record.names
-		raw := strings.TrimSpace(string(record.content))
-		direct, _ := persistentDirectAssignment(raw)
-		policy := operatorDiscardPolicy(nil, settings)
-		if !policy.discards(direct) {
-			expression, conditional := strings.CutPrefix(raw, ":")
-			if !conditional {
-				_, expression, _ = strings.Cut(raw, "=")
-			}
-			// A default skipped in the isolated edit parse can still run
-			// when this file is loaded over another layer.
-			if expression, expands := decodeValue(strings.TrimSpace(expression)); expands {
-				for _, match := range envEditDefault.FindAllStringSubmatch(expression, -1) {
-					if match[1] != "" && !policy.discards(match[1]) {
-						others = append(others, canonicalSettingName(match[1]))
-					}
-				}
-			}
-		}
-		for _, other := range others {
+		for _, other := range record.possible {
 			if other != name {
 				refusals = append(refusals, sourceError(path, record.line, name, "persistent settings", "record can also assign "+other+"; split the assignments before editing", nil))
 			}
@@ -546,8 +505,8 @@ func editAssignmentContent(
 	}
 	var result bytes.Buffer
 	for index, record := range records {
-		if !slices.Contains(record.names, name) {
-			result.Write(record.content)
+		if !slices.Contains(record.assigned, name) {
+			result.WriteString(record.raw)
 			continue
 		}
 		if value != nil && index == last {
@@ -584,45 +543,35 @@ func editAssignmentContent(
 }
 
 func parseEnvEditRecords(path string, content []byte, settings Catalog) ([]envEditRecord, error) {
-	lines := bytes.SplitAfter(content, []byte{'\n'})
-	values := environment{}
 	var records []envEditRecord
-	var current bytes.Buffer
-	quote := byte(0)
-	lineNumber := 0
-	recordLine := 0
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-		lineNumber++
-		if current.Len() == 0 {
-			recordLine = lineNumber
-		}
-		current.Write(line)
-		scan := strings.TrimSuffix(string(line), "\n")
-		quote = scanQuote(scan, quote)
-		if quote != 0 {
-			continue
-		}
-		raw := append([]byte(nil), current.Bytes()...)
-		trimmed := strings.TrimSpace(string(raw))
-		record := envEditRecord{content: raw, line: recordLine}
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+	evaluation := envEvaluation{values: environment{}, policy: operatorDiscardPolicy(nil, settings)}
+	err := scanEnvRecords(bytes.NewReader(content), path, "persistent settings", func(record envRecord) error {
+		edit := envEditRecord{envRecord: record}
+		if record.text != "" {
+			actual := evaluation
+			actual.observe = func(name, _ string) {
+				edit.assigned = append(edit.assigned, canonicalSettingName(name))
+			}
+			actual.policy.report = actual.observe
+			if err := actual.applyRecord(record.text); err != nil {
+				return err
+			}
 			observe := func(name, _ string) {
-				record.names = append(record.names, canonicalSettingName(name))
+				name = canonicalSettingName(name)
+				if !slices.Contains(edit.possible, name) {
+					edit.possible = append(edit.possible, name)
+				}
 			}
-			if err := applyRecordRetired(trimmed, values, observe, operatorDiscardPolicy(observe, settings)); err != nil {
-				return nil, sourceContext(path, recordLine, recordSettingKey(trimmed), "persistent settings", err)
+			possible := envEvaluation{observe: observe, policy: actual.policy, possible: true}
+			possible.policy.report = observe
+			if err := possible.applyRecord(record.text); err != nil {
+				return err
 			}
 		}
-		records = append(records, record)
-		current.Reset()
-	}
-	if quote != 0 || current.Len() != 0 {
-		return nil, sourceError(path, recordLine, recordSettingKey(current.String()), "persistent settings", "unterminated quoted assignment", nil)
-	}
-	return records, nil
+		records = append(records, edit)
+		return nil
+	})
+	return records, err
 }
 
 func quotePersistentValue(value string) string {

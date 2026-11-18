@@ -114,6 +114,11 @@ highest precedence. It is never persisted by config sync. `yard [-Y <yard>] conf
 is the authoritative explanation of the actual chain, including derived values. Start from
 [`config/settings.env.example`](../config/settings.env.example).
 
+Inside a quoted multiline scalar value, line endings are part of the value.
+Both LF and CRLF are preserved. Older readers normalized CRLF to LF, so
+converting an existing multiline settings file between line-ending styles
+can now change its values.
+
 `YARD_MOUNTS`, `YARD_CAPS` and `YARD_DEVICES` belong to environment profiles. Only a selected
 profile's own `profile.conf` declares them, and operator values never reach its evaluation:
 select the profile instead. `config set` refuses to assign them. The loader ignores a value
