@@ -108,10 +108,10 @@ and never gate a release or PR.
 Local long VM smoke and shipped-profile VM checks run on explicit request:
 
 ```sh
-dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slots 1 2 3
+dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slot-count 3
 # Or select one check from an existing frozen collector:
 python3 dev/release-acceptance.py run --output .build/release-local \
-  --only p0-release-smoke --slots 1
+  --only p0-release-smoke --slots slot-1
 ```
 
 `--slots` alone does not request local VM execution. Checks without counted hosted evidence or an
@@ -226,7 +226,7 @@ VM status. Collector selectors can target the downloaded candidate's acceptance 
 
 ```sh
 python3 dev/release-acceptance.py preflight \
-  --output .build/release-publication/ID/acceptance --with-vms --slots 1 2 3
+  --output .build/release-publication/ID/acceptance --with-vms --slot-count 3
 ```
 
 Source, asset or tooling changes require a new candidate. Never amend a frozen tree, its policy
@@ -415,8 +415,9 @@ Agents preparing a release apply the
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).
   Long VM smoke and shipped-profile VM checks run only on explicit operator request:
-  `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
-  Available slots alone do not request a VM run. Core `p0-release-smoke` is mandatory:
+  `accept --with-vms` or collector `run --only CHECK`.
+  The collector uses broker slots 1–4 by default. Use `--slots slot-2,slot-4` to select
+  exact slots, or `--slot-count 2` for slots 1–2. A slot selection alone does not request a VM run. Core `p0-release-smoke` is mandatory:
   local-only acceptance remains incomplete until it passes, and it cannot be excluded
   or waived as optional. Unrequested shipped-profile VM checks remain `not-run`,
   never passed; requested incomplete or failed checks block acceptance/publication.
@@ -461,22 +462,24 @@ python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/releas
 python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
-Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke, core and profile checks,
-or use `run --only p0-release-smoke --slots 1` for one check. `--slots` alone does not
+Add `--with-vms` to `preflight`/`run` to request all VM smoke, core and profile checks,
+or use `run --only p0-release-smoke --slots slot-1` for one check. `--slots` alone does not
 request VM execution. Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
 (full P0 and its split lanes, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
 and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
 selects one family. A catalog entry's optional `requires` lists sibling checks that must also pass
 whenever that check is requested or recorded; preparation records them in the receipt and the
 candidate's catalog must still match. Selecting a check also runs its required checks that have not
-passed for the candidate, so `run --only vm:p0-full --slots 1 2 3` runs the full P0 outside a release:
-`vm:p0-full --split-covered` plus its split checks; `--exclude` keeps a required check not run and the
-result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
-runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
-the next check; a refusal, interruption, timeout, cleanup failure or attempt without a lease stops the slot,
-so an unusable slot cannot turn later checks into failures. One collector owns a candidate's receipt
-at a time; run every check through it rather than separately, so the result is recorded. Once explicitly requested, a pending VM check remains required on
-continuation; interruption or exclusion cannot turn it back into optional passing acceptance.
+passed for the candidate, so `run --only vm:p0-full` runs the full P0 outside a release:
+`vm:p0-full --split-covered` plus its split checks. A split scheduled for rerun must pass before
+its owner starts. Excluding a required check leaves acceptance incomplete.
+A candidate whose pinned source has no catalog has no `vm:` checks.
+
+One collector owns the candidate receipt and starts at most one controller per check and slot.
+It dispatches ready checks on the selected slots as the broker reports them available.
+The exact-slot acquire decides admission. A typed memory, disk, or slot refusal sends the check
+behind ready siblings and rotates its next slot. A slot can take new work when the broker reports
+it available again. An explicitly requested VM check stays required on continuation.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
 `--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
@@ -495,7 +498,6 @@ regression after required local gates. Remaining live checks run longest-first u
 durations in the current receipt, then earlier candidate receipts already found by release publication.
 Unknown durations and ties retain declaration order. Explicit `--exclude CHECK` leaves the required gate incomplete.
 
-Select available slots using `dev/agent-e2e.sh --status`; each slot runs one controller at a time.
 Source fingerprints use Git executable-bit semantics; snapshots normalize public file modes explicitly,
 so the checkout umask cannot change the candidate. One plain source copy is retained for local
 checks and controllers, with the runtime assets under its `.subyard-acceptance/release/` directory.
@@ -509,15 +511,18 @@ Process coverage (`dev/process-coverage.sh`) is optional; ordinary process contr
 Run the aggregator from the managed workspace checkout: it supplies that workspace for lease
 attribution while executing controllers and guest payloads from the frozen candidate.
 
-A repeated `run` executes only checks without a passing result. Use `--only profile:NAME` or
-`--only p0-release-smoke` for a remaining independent check; `--rerun` also repeats passed checks.
-After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
-the same frozen candidate with `run --output DIR --slots N --only CHECK`. Passing local checks remain
-bound to that identity and are retained; capacity alone does not require another `prepare`.
-This is a separate continuation run: retry the blocked check after conditions change, retaining
-its original attempt logs/events and applicable PASS results from the same candidate.
-Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
-`capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
+Repeated `run` and `accept` continue the same local check requests and reuse passing evidence.
+`SUBYARD_E2E_CAPACITY_WAIT` sets a fixed number of five-second retry rounds per check
+(default `120m`). Each controller launch spends one round. A full idle poll interval with no
+admissible slot also spends one round. Time spent waiting on prerequisites or active siblings
+does not spend rounds. `0s` permits one immediate decision. The receipt retains the remaining
+rounds and the last attempted slot across hosted fallback and subsequent runs.
+
+Use `run --output DIR --only CHECK --rerun` to open a fresh allowance for a failed, exhausted,
+or already passed check. To queue a failed or interrupted check while a collector is running,
+use `retry --output DIR --check CHECK --attempt ID` with its original attempt ID from the receipt.
+Repeating that submission queues the same request. Terminal attempts retain their logs and
+applicable sibling PASS results.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
 and ordered `lanes` entries containing `id` and runner `arguments`. A lane marked
 `"periodic_only": true` runs only in Periodic E2E: it is not a release check, so release

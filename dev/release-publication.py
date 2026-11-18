@@ -1402,35 +1402,20 @@ def hosted_open(directory, output):
 
 
 def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds):
-    """Run local checks while hosted jobs are still going; only then wait, count the hosted
-    results and run the hosted checks that did not pass there."""
+    """Reserve hosted work until the local phase finishes, then collect or fall back."""
     output = directory / "acceptance"
-    # Only checks this invocation would run anyway; ordinary acceptance leaves optional VM checks not run.
-    hosted = hosted_open(directory, output) if wait_seconds and (with_vms or only) else []
-    if only:
-        # The selection also runs required checks, so their hosted results count here too.
-        receipt = json.loads((output / "receipt.json").read_text())
-        wanted = a.select_checks(receipt["checks"], only)
-        wanted |= a.selected_requirements(receipt, wanted)
-        hosted = [name for name in hosted if name in wanted]
-    if hosted:
-        with a.acceptance_lock(output):
-            first = a.run_checks(output, slots, only, False, exclude=hosted, with_vms=with_vms, previous=previous)
-            failed = first and json.loads((output / "receipt.json").read_text()).get("result") == "failed"
+
+    def collect_hosted(failed):
         if failed:
-            # Hosted jobs may still run: never duplicate them locally. Count those already finished;
-            # the rest stay pending for a later accept, and the receipt keeps the local failure.
-            print("CI-HOSTED-SKIP all: a local check failed; not waiting for hosted jobs or running them locally", flush=True)
-            with a.acceptance_lock(output):
-                collect_ci(github, directory, identity)
-            return first
-        with a.acceptance_lock(output):
+            print("CI-HOSTED-SKIP all: a local check failed; collecting finished jobs", flush=True)
+        elif wait_seconds:
             wait_ci_hosted(github, directory, identity, wait_seconds)
-            collect_ci(github, directory, identity)
-        # Local failures of the first pass are not repeated; the receipt result covers every check.
-        only = hosted
-    with a.acceptance_lock(output):
-        return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous)
+        collect_ci(github, directory, identity)
+        return json.loads((output / "receipt.json").read_text())["checks"]
+
+    with a.acceptance_lock(output) as guard:
+        return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous,
+                            hosted=hosted_open(directory, output), collect_hosted=collect_hosted, guard=guard)
 
 
 DISCOVERY_SECONDS = 600
@@ -1631,7 +1616,7 @@ def release_level(requested, reason, scope, recorded=None):
     if requested == "ordinary":
         if changed:
             refusals.append(f"full release required: migration or update-contract changes since {baseline}: {listed}; "
-                            "rerun accept with --level full --slots N [N ...]")
+                            "rerun accept with --level full")
         elif changed is None and reason is None:
             refusals.append("cannot determine migration changes since the previous release from local tags; "
                             "use --level full, or --level-reason to record why an ordinary release is safe")
@@ -1708,7 +1693,7 @@ def main():
         command = sub.add_parser(action)
         command.add_argument("--candidate", required=True)
         if action == "accept":
-            command.add_argument("--slots", nargs="+", type=int, default=[])
+            a.add_slot_arguments(command)
             command.add_argument("--ci-wait-seconds", type=int, default=21600,
                                  help="bounded hosted-check wait (default six hours); 0 collects finished jobs immediately")
             command.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
@@ -1822,8 +1807,6 @@ def main():
         if args.action == "accept":
             for signum in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(signum, lambda signum, frame: a.STOP.set())
-            if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
-                raise ValueError("slots must be unique integers from 1 to 999")
             ensure_acceptance(directory, identity, prepared)
             if not 0 <= args.ci_wait_seconds <= 86400:
                 raise ValueError("--ci-wait-seconds must be from 0 to 86400")
@@ -1837,7 +1820,7 @@ def main():
             print(f"RELEASE_LEVEL {level['level']} reason={level['reason']}", flush=True)
             previous = earlier_candidates(state_dir, directory, identity)
             a.reuse_isolated_tests(output, previous)
-            result = accept_checks(github, directory, identity, args.slots, args.only,
+            result = accept_checks(github, directory, identity, a.selected_slots(args), args.only,
                                    args.with_vms or level["level"] == "full", previous, args.ci_wait_seconds)
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
