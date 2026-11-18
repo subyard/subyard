@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,6 +108,17 @@ func TestNarrowPolicyControlsLiveAndReplayedSessionRelations(t *testing.T) {
 	if err := RunCLI([]string{"replay", "--data-dir", dest, "--input", input, "--policy-file", policyFile}, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := RunCLI([]string{"replay", "--data-dir", dest, "--input", input}, nil); err != nil {
+		t.Fatal("unchanged export after widening the policy", err)
+	}
+	changed := bytes.ReplaceAll(exported.Bytes(), []byte(source.key.id("mixed")), []byte(source.key.id("changed")))
+	if bytes.Equal(changed, exported.Bytes()) {
+		t.Fatal("fixture did not change the exported session ID")
+	}
+	testkit.WriteFile(t, input, changed, 0600)
+	if err := RunCLI([]string{"replay", "--data-dir", dest, "--input", input}, nil); !errors.Is(err, errEventCollision) {
+		t.Fatalf("modified export after widening the policy: %v", err)
+	}
 	db, err := OpenReadOnly(dest)
 	if err != nil {
 		t.Fatal(err)
@@ -188,6 +200,16 @@ func TestPythonSpoolKeepsCaptureAcrossPolicyChanges(t *testing.T) {
 			if err != nil || bytes.Contains(raw, []byte(hexID)) || strings.Contains(files[0], hexID) {
 				t.Fatalf("caller ID reached spool: %v", err)
 			}
+			wantStream := store.key.id(digestID)
+			if policyFingerprint(change.before) == policyFingerprint(p) {
+				if bytes.Contains(raw, []byte(wantStream)) {
+					t.Fatal("filtered run binding reached spool contents")
+				}
+				wantStream = "broker"
+			}
+			if filepath.Base(files[0]) != wantStream+".open" || !bytes.HasPrefix(raw, []byte(spoolVersion+" "+wantStream+" ")) {
+				t.Fatal("spool routing disagrees with capture policy")
+			}
 			if err := store.publishCapturePolicy(change.after); err != nil {
 				t.Fatal(err)
 			}
@@ -219,6 +241,27 @@ func TestPythonSpoolKeepsCaptureAcrossPolicyChanges(t *testing.T) {
 			if err := replay.db.QueryRow("SELECT count(*),min(body) FROM records").Scan(&count, &body); err != nil ||
 				count != 1 || strings.Contains(body, "agent_run_id") || strings.Contains(body, "thread.id") {
 				t.Fatalf("replay reconstructed missing fields: %d %q (%v)", count, body, err)
+			}
+			if err := store.publishCapturePolicy(p); err != nil {
+				t.Fatal(err)
+			}
+			const producer = `
+import sys
+sys.path.insert(0, '..')
+import records
+records.MAX_RECORDS = 0
+assert not records.emit(sys.argv[1], 'relation', {'agent_run_id':sys.argv[2],
+    'session_id':'session', 'session_attributes':['session.id']})
+`
+			if output, err := exec.Command("python3", "-B", "-c", producer, store.dir, digestID).CombinedOutput(); err != nil {
+				t.Fatalf("force producer admission failure: %v\n%s", err, output)
+			}
+			if err := store.drainSpool(ctx, p); err != nil {
+				t.Fatal(err)
+			}
+			var run string
+			if err := store.db.QueryRow("SELECT agent_run_id FROM gaps WHERE json_extract(body,'$.reason')='producer_spool_capacity'").Scan(&run); err != nil || run != "" {
+				t.Fatalf("loss marker retained filtered run binding: %v", err)
 			}
 		})
 	}

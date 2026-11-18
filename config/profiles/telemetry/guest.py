@@ -448,10 +448,10 @@ class Runtime:
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
                         or stat.S_IMODE(info.st_mode) != 0o600):
                     raise ValueError('foreign telemetry database')
-                if not legacy:
-                    with database.open('rb') as stream:
-                        stream.seek(60)
-                        legacy = 0 < int.from_bytes(stream.read(4), 'big') < 5
+                with database.open('rb') as stream:
+                    stream.seek(60)
+                    version = int.from_bytes(stream.read(4), 'big')
+                legacy = 0 < version < 5 or (version == 0 and legacy)
             if not legacy:
                 return False
             if (self.data/PENDING).exists() or (self.data/PENDING).is_symlink():
@@ -536,10 +536,9 @@ class Runtime:
                 info = lock.lstat()
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1:
                     raise ValueError('foreign producer outbox lock')
-                if mode != 0o1500:
-                    # Resume an interruption between the two mode changes.
-                    os.fchmod(directory, 0o1500)
-                    os.fsync(directory)
+                # Resume retirement if interrupted after the lock mode changed.
+                os.fchmod(directory, 0o1500)
+                os.fsync(directory)
                 return
             fd = os.open('.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
             try:
@@ -553,7 +552,6 @@ class Runtime:
                         if time.monotonic() >= deadline:
                             raise
                         time.sleep(0.01)
-                os.fchmod(directory, 0o1700)
                 os.fchmod(fd, 0)
                 os.fsync(fd)
                 # An already-open descriptor can still acquire flock after chmod.
@@ -611,7 +609,8 @@ class Runtime:
         retiring = cutover and not prepared
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
         stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded'
-                and (retiring or changed or not self.running_no_new_privs(fields))]
+                and (retiring or changed or not self.running_no_new_privs(fields)
+                     or (unit == COLLECTOR and self.selected and not prepared))]
         if retiring:
             for path in (self.commands/'subyard-telemetry-run', self.library/'broker-correlation.py'):
                 if self.asset_snapshot(path) is not None:

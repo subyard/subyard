@@ -290,9 +290,6 @@ func (s *Store) Ingest(ctx context.Context, records []Record) error {
 func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) error {
 	entries := make([]Envelope, 0, len(records))
 	for _, r := range records {
-		if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
-			return errInvalidRecord
-		}
 		e, err := recordEnvelope(r)
 		if err != nil {
 			return err
@@ -303,6 +300,9 @@ func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) err
 }
 
 func recordEnvelope(r Record) (Envelope, error) {
+	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
+		return Envelope{}, errInvalidRecord
+	}
 	body, err := json.Marshal(r.Body)
 	if err != nil {
 		return Envelope{}, errInvalidRecord
@@ -354,7 +354,7 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 		} else if e.local && claim != "" {
 			e.PolicyVersion = claim
 		}
-		if e.Kind != "" {
+		if e.Kind != "" || e.inputID != "" {
 			entries = append(entries, e)
 		}
 		entries = append(entries, projected...)
@@ -519,6 +519,12 @@ func (s *Store) commit(batch []writeRequest) error {
 }
 
 func (s *Store) putRecord(tx *sql.Tx, e Envelope, policy Policy) error {
+	if e.inputID != "" {
+		duplicate, err := registerInput(tx, e.OriginID, e.EventID, e.inputID)
+		if err != nil || duplicate || e.Kind == "" {
+			return err
+		}
+	}
 	res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion)
 	if err != nil {
 		return ErrStorage
@@ -607,7 +613,7 @@ func (s *Store) prune() error {
 	// Lifecycle responsibility outlives high-volume samples. In particular, an
 	// expired lease or exited agent is not evidence that its resource stopped.
 	_, err = tx.Exec(`DELETE FROM spool_inputs WHERE (origin,event) IN
-		(SELECT origin_id,event_id FROM (SELECT origin_id,event_id,kind FROM records WHERE received_time<? AND (kind='sample' OR kind LIKE 'otlp/%') ORDER BY sequence LIMIT 1000) WHERE kind='sample')`, cutoff)
+		(SELECT origin_id,event_id FROM records WHERE received_time<? AND (kind='sample' OR kind LIKE 'otlp/%') ORDER BY sequence LIMIT 1000)`, cutoff)
 	if err != nil {
 		return err
 	}
@@ -770,7 +776,7 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 			id, object, run, stringValue(b, "quality"), start, end, shared, merged)
 		return err
 	case "gap":
-		_, err := tx.Exec("INSERT INTO gaps VALUES(?,?,?,?,?,?)", e.OriginID, e.EventID, object, run, e.SourceTime, body)
+		_, err := tx.Exec("INSERT INTO gaps VALUES(?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING", e.OriginID, e.EventID, object, run, e.SourceTime, body)
 		return err
 	case "relation", "session":
 		_, err := tx.Exec("INSERT INTO relations VALUES(?,?,?,?,?)", e.OriginID, e.EventID, run, stringValue(b, "session_id"), body)
@@ -941,6 +947,22 @@ func (s *Store) replayEnvelope(data []byte) (Envelope, error) {
 		proof, err := s.key.exportProof(s.origin, e)
 		e.local = err == nil && hmac.Equal(signature, proof)
 	}
+	// Identify the input before sanitizing it for the destination's policy.
+	// Delivery metadata can differ between exports of the same record.
+	var body map[string]any
+	if e.Encoding == "json" {
+		var err error
+		body, err = decodeBody(e.Body)
+		if err != nil {
+			return Envelope{}, err
+		}
+	}
+	payload, err := json.Marshal([]any{e.SourceID, e.SourceVersion, e.SourceTime,
+		e.Kind, e.Encoding, e.PolicyVersion, body, e.Protobuf})
+	if err != nil {
+		return Envelope{}, err
+	}
+	e.inputID = hex.EncodeToString(s.key.digest("replay-input/v1\x00" + string(payload)))
 	e.ImportPolicyVersion = ""
 	e.Redactions = min(max(e.Redactions, 0), math.MaxInt64/2)
 	e.ReceivedTime = canonicalTimestamp(e.ReceivedTime)

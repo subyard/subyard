@@ -166,6 +166,10 @@ for _ in range(60):
                             enabled[unit] = action == 'enable'
                         if action == 'stop' or '--now' in args:
                             active[unit] = action == 'enable'
+                    if action == 'stop' and unit == guest.COLLECTOR and collector is not None:
+                        collector.terminate()
+                        collector.wait(timeout=10)
+                        collector = None
                     if action == 'enable' and unit == guest.COLLECTOR and collector is None:
                         collector = child(runtime.library/'subyard-telemetry', 'serve', '--data-dir', data,
                                           '--listen', address, '--auth-file', data/'auth.token')
@@ -206,7 +210,11 @@ for _ in range(60):
                 code = '''
 import sys, types
 sys.path.insert(0, sys.argv[1])
-import launcher
+import launcher, records
+assert records.emit(sys.argv[2], 'run', {'agent_run_id':'before-outage', 'state':'running',
+    'start_time':'2000-01-01T00:00:00Z'}, source_time='2000-01-01T00:00:00Z')
+assert records.emit(sys.argv[2], 'run', {'agent_run_id':'before-outage', 'agent_exited':True,
+    'end_time':'2000-01-01T00:00:01Z'}, source_time='2000-01-01T00:00:01Z')
 launcher.MAX_RUNS = 0
 args = types.SimpleNamespace(command=['/bin/true'], data_dir=sys.argv[2], agent='other',
     agent_version='1', scope_mode='partial', task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
@@ -221,16 +229,22 @@ assert launcher.launch(args) == 0
             self.assertTrue(select.select([workload.stdout], [], [], 10)[0])
             self.assertEqual(workload.stdout.readline(), b'200\n')
             deadline = time.monotonic()+10
+            key = records.identity_key(data)
+            before_id = records.opaque_id(key, 'before-outage')
             with closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
                 while True:
                     reason = "json_extract(body,'$.reason')"
                     count, = db.execute(f"SELECT count(*) FROM gaps WHERE {reason}='possible_native_loss' AND agent_run_id=?",
-                                        (records.opaque_id(records.identity_key(data), offline_id),)).fetchone()
-                    if count:
+                                        (records.opaque_id(key, offline_id),)).fetchone()
+                    done = db.execute("SELECT 1 FROM runs WHERE agent_run_id=? AND json_extract(body,'$.end_time') IS NOT NULL",
+                                      (before_id,)).fetchone()
+                    if count and done:
                         break
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(.05)
                 self.assertEqual(count, 1)
+                self.assertIsNone(db.execute(f"SELECT 1 FROM gaps WHERE {reason}='possible_native_loss' AND agent_run_id=?",
+                                             (before_id,)).fetchone())
                 health = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
                     f"SELECT {reason},json_extract(body,'$.missing'),json_extract(body,'$.coverage_start'),"
                     "json_extract(body,'$.coverage_end') FROM gaps")}
@@ -242,6 +256,17 @@ assert launcher.launch(args) == 0
             with closing(sqlite3.connect(archive.as_uri()+'?mode=ro', uri=True)) as db:
                 self.assertEqual(db.execute("SELECT json_extract(body,'$.reason') FROM gaps").fetchall(),
                                  [('interrupted_by_upgrade',)])
+            database = data/'telemetry.sqlite'
+            active_inode = database.stat().st_ino
+            (data/'spool-policy.json').unlink()
+            invoked.clear()
+            with patch.object(guest, 'systemctl', side_effect=systemctl), patch.object(guest.native, 'reconcile', return_value=True):
+                runtime.apply()
+            self.assertEqual(database.stat().st_ino, active_inode)
+            self.assertTrue((data/'spool-policy.json').is_file())
+            self.assertFalse((data/guest.CUTOVER).exists())
+            self.assertEqual(list(data.glob('archive*')), [archive.parent])
+            self.assertNotIn('disable', invoked)
 
     def test_missing_managed_document_waits_before_first_telemetry_install(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -501,7 +526,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
-                 patch.object(guest.Runtime, 'prepare_store'), \
+                 patch.object(guest.Runtime, 'prepare_store', side_effect=lambda: (root/'data/spool-policy.json').touch()), \
                  patch.object(guest.Runtime, 'skill_delivery', side_effect=skill_delivery), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
                 runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -118,15 +119,18 @@ func (c cutover) checkpointArchive(dir, path string) error {
 		return err
 	}
 	defer db.Close()
+	if version == storeVersion {
+		return errors.New("active telemetry store cannot be archived by legacy cutover")
+	}
 	if version != 0 {
-		key, err := loadIdentityKey(dir)
+		var key identityKey
+		if version == 4 {
+			key, err = storeIdentityKey(db, dir, version)
+		} else {
+			key, err = loadIdentityKey(dir)
+		}
 		if err != nil {
 			return err
-		}
-		if version == 4 {
-			if _, err = storeIdentityKey(db, dir, version); err != nil {
-				return err
-			}
 		}
 		if err = c.recordHistoricalGaps(db, dir, key, version); err != nil {
 			return err
@@ -188,11 +192,12 @@ func (c cutover) recordHistoricalGaps(db *sql.DB, dir string, key identityKey, v
 	defer tx.Rollback()
 	store := Store{key: key}
 	for _, run := range runs {
-		for _, id := range []string{run.ID, key.legacy(run.ID), key.id(run.ID)} {
-			var body string
-			err = tx.QueryRow(`SELECT body FROM runs WHERE agent_run_id=?
+		ids := []string{run.ID, key.legacy(run.ID), key.id(run.ID)}
+		for _, id := range slices.Compact(ids) {
+			var present int
+			err = tx.QueryRow(`SELECT 1 FROM runs WHERE agent_run_id=?
 				AND json_extract(body,'$.resource_completed') IS NOT 1
-				AND coalesce(json_extract(body,'$.state'),'') NOT IN ('not_started','resources_complete','resources_unknown')`, id).Scan(&body)
+				AND coalesce(json_extract(body,'$.state'),'') NOT IN ('not_started','resources_complete','resources_unknown')`, id).Scan(&present)
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
@@ -202,13 +207,19 @@ func (c cutover) recordHistoricalGaps(db *sql.DB, dir string, key identityKey, v
 			e := store.localRecord("gap", "legacy-cutover", "upgrade:"+id, c.Started,
 				map[string]any{"agent_run_id": id, "reason": "interrupted_by_upgrade", "quality": "partial", "missing": "final_tail"})
 			columns := "origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf"
-			_, err = tx.Exec("INSERT INTO records("+columns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(origin_id,event_id) DO NOTHING",
+			res, err := tx.Exec("INSERT INTO records("+columns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(origin_id,event_id) DO NOTHING",
 				e.OriginID, e.EventID, c.Started, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, PolicyVersion, 0, []byte(e.Body))
 			if err != nil {
 				return err
 			}
-			if err = key.project(tx, e); err != nil {
+			count, err := res.RowsAffected()
+			if err != nil {
 				return err
+			}
+			if count == 1 {
+				if err = key.project(tx, e); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -275,10 +286,10 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 			producer = meta.Source
 		}
 	}
-	add := func(name string, r Record) error {
+	add := func(r Record) error {
 		e, err := recordEnvelope(r)
 		if err != nil {
-			return err
+			return nil // Invalid legacy files remain in the retired directory.
 		}
 		id := identity(key.id)
 		if e.local {
@@ -292,12 +303,7 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 		if e.local && claim != "" {
 			e.PolicyVersion = claim
 		}
-		journal := "legacy:" + key.id(name)
-		res, err := tx.Exec("INSERT INTO spool_offsets VALUES(?,1,0) ON CONFLICT DO NOTHING", journal)
-		if err != nil {
-			return err
-		}
-		if count, _ := res.RowsAffected(); count == 1 && e.Kind != "" {
+		if e.Kind != "" {
 			e.ReceivedTime = c.Started
 			if err = store.putRecord(tx, e, policy); errors.Is(err, errEventCollision) {
 				return nil
@@ -319,13 +325,16 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 				continue
 			}
 			data, err := readLegacyFile(filepath.Join(outbox, entry.Name()), frameBytes)
-			if err != nil {
+			if errors.Is(err, errInvalidRecord) || errors.Is(err, unix.ELOOP) {
 				continue
+			}
+			if err != nil {
+				return err
 			}
 			record, err := key.decodeRecord(data)
 			if err == nil && legacyID.MatchString(record.EventID) && legacyID.MatchString(record.SourceID) &&
 				entry.Name() == record.EventID+".json" {
-				if err = add("outbox/"+entry.Name(), record); err != nil {
+				if err = add(record); err != nil {
 					return err
 				}
 			}
@@ -345,7 +354,7 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 		}
 		if err == nil && json.Unmarshal(data, &health) == nil && legacyID.MatchString(health.ID) && health.Count > 0 &&
 			canonicalTimestamp(health.First) != "" && canonicalTimestamp(health.Last) != "" {
-			if err = add(marker.path, Record{Schema: RecordSchema, SourceID: producer, EventID: health.ID,
+			if err = add(Record{Schema: RecordSchema, SourceID: producer, EventID: health.ID,
 				SourceVersion: "1", Kind: "gap", SourceTime: health.First, Body: map[string]any{
 					"reason": marker.reason, "quality": "partial", "missing": health.Count,
 					"coverage_start": health.First, "coverage_end": health.Last,

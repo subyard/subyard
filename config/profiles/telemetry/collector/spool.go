@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,18 +63,26 @@ func (a spoolAdvance) apply(tx *sql.Tx) (bool, error) {
 	if a.payload == "" {
 		return false, nil
 	}
-	res, err = tx.Exec("INSERT INTO spool_inputs VALUES(?,?,?) ON CONFLICT DO NOTHING", a.origin, a.event, a.payload)
+	return registerInput(tx, a.origin, a.event, a.payload)
+}
+
+func registerInput(tx *sql.Tx, origin, event, input string) (bool, error) {
+	res, err := tx.Exec("INSERT INTO spool_inputs VALUES(?,?,?) ON CONFLICT DO NOTHING", origin, event, input)
 	if err != nil {
 		return false, ErrStorage
 	}
-	if count, _ := res.RowsAffected(); count == 1 {
+	count, err := res.RowsAffected()
+	if err != nil {
+		return false, ErrStorage
+	}
+	if count == 1 {
 		return false, nil
 	}
 	var payload string
-	if err := tx.QueryRow("SELECT payload FROM spool_inputs WHERE origin=? AND event=?", a.origin, a.event).Scan(&payload); err != nil {
+	if err := tx.QueryRow("SELECT payload FROM spool_inputs WHERE origin=? AND event=?", origin, event).Scan(&payload); err != nil {
 		return false, ErrStorage
 	}
-	if a.payload != payload {
+	if input != payload {
 		return false, errEventCollision
 	}
 	return true, nil
@@ -220,10 +230,7 @@ func sealSegment(spool, name string) error {
 	if err != nil || stream+".open" != name {
 		return errInvalidRecord
 	}
-	var tail [1]byte
-	if _, err = f.ReadAt(tail[:], info.Size()-1); err != nil || tail[0] != '\n' {
-		return err // A live tail can only be sealed by the next appender.
-	}
+	// Holding the inode exclusively makes any incomplete tail safe to retire.
 	dir, err := lockDirectory(spool, unix.LOCK_EX)
 	if err != nil {
 		return err
@@ -261,24 +268,6 @@ func (s *Store) drainSpool(ctx context.Context, policy Policy) error {
 		return err
 	}
 	entries, err = os.ReadDir(spool)
-	var open []*os.File
-	defer func() {
-		for _, f := range open {
-			f.Close()
-		}
-	}()
-	if err == nil {
-		for _, entry := range entries {
-			if name, ok := strings.CutSuffix(entry.Name(), ".open"); ok && streamID.MatchString(name) {
-				f, err := openSpoolFile(filepath.Join(spool, entry.Name()), os.O_RDONLY, segmentBytes)
-				if err == nil {
-					open = append(open, f)
-				} else {
-					failed = err
-				}
-			}
-		}
-	}
 	err = errors.Join(err, dir.Sync(), dir.Close())
 	if err != nil {
 		return err
@@ -299,14 +288,6 @@ func (s *Store) drainSpool(ctx context.Context, policy Policy) error {
 				// Unknown or foreign segments stay in place. Other streams
 				// continue even when this stream hits a storage error.
 				blocked[stream] = true
-			}
-		}
-	}
-	for _, f := range open {
-		stream := strings.TrimSuffix(filepath.Base(f.Name()), ".open")
-		if !blocked[stream] {
-			if err := s.drainSegment(ctx, f, stream, false, policy); err != nil {
-				failed = err
 			}
 		}
 	}
@@ -331,7 +312,7 @@ func (s *Store) drainSealed(ctx context.Context, spool, id string, policy Policy
 		return err
 	}
 	defer f.Close()
-	if err := s.drainSegment(ctx, f, id, true, policy); err != nil {
+	if err := s.drainSegment(ctx, f, id, policy); err != nil {
 		return err
 	}
 	original, err := f.Stat()
@@ -345,7 +326,7 @@ func (s *Store) drainSealed(ctx context.Context, spool, id string, policy Policy
 	return os.Remove(path)
 }
 
-func (s *Store) drainSegment(ctx context.Context, f *os.File, name string, sealed bool, policy Policy) error {
+func (s *Store) drainSegment(ctx context.Context, f *os.File, name string, policy Policy) error {
 	info, err := f.Stat()
 	if err != nil {
 		return err
@@ -353,7 +334,7 @@ func (s *Store) drainSegment(ctx context.Context, f *os.File, name string, seale
 	prefix := io.NewSectionReader(f, 0, info.Size())
 	reader := bufio.NewReaderSize(prefix, frameBytes)
 	stream, id, start, err := segmentHeader(reader)
-	if err != nil || (sealed && id != name) || (!sealed && stream != name) {
+	if err != nil || id != name {
 		return errInvalidRecord
 	}
 	offset, terminal, err := s.offset(id)
@@ -392,14 +373,12 @@ func (s *Store) drainSegment(ctx context.Context, f *os.File, name string, seale
 					if errors.Is(err, errEventCollision) {
 						reason = "spool_event_conflict"
 					}
-					err = s.captureAt(ctx, []Envelope{s.spoolGap(id, a.next, stream, reason, 1, "", "")}, policy, &a)
+					err = s.captureAt(ctx, []Envelope{s.spoolGap(id, a.next, "broker", reason, 1, "", "")}, policy, &a)
 				}
 			case !a.terminal:
 				return readErr
-			case !sealed:
-				return nil
 			case length > 0:
-				err = s.captureAt(ctx, []Envelope{s.spoolGap(id, a.next, stream, "spool_torn_tail", 1, "", "")}, policy, &a)
+				err = s.captureAt(ctx, []Envelope{s.spoolGap(id, a.next, "broker", "spool_torn_tail", 1, "", "")}, policy, &a)
 			default:
 				err = s.submit(ctx, nil, policy, false, &a)
 			}
@@ -513,7 +492,7 @@ type lossMarker struct {
 	Last     string `json:"last"`
 }
 
-func readLoss(f *os.File) (lossMarker, error) {
+func (key identityKey) readLoss(f *os.File) (lossMarker, error) {
 	data := make([]byte, markerSlot)
 	var marker lossMarker
 	for _, offset := range []int64{0, markerSlot} {
@@ -522,8 +501,13 @@ func readLoss(f *os.File) (lossMarker, error) {
 		}
 		digest, value, _ := bytes.Cut(bytes.TrimRight(data, "\x00"), []byte(" "))
 		var candidate lossMarker
-		if string(digest) == fmt.Sprintf("%x", sha256.Sum256(value)) &&
-			json.Unmarshal(value, &candidate) == nil && candidate.Revision > marker.Revision {
+		proof, _ := hex.DecodeString(string(digest))
+		verified := hmac.Equal(proof, key.digest("spool-loss/v1\x00"+string(value)))
+		checksum := sha256.Sum256(value)
+		if (verified || bytes.Equal(proof, checksum[:])) && json.Unmarshal(value, &candidate) == nil && candidate.Revision > marker.Revision {
+			if !verified {
+				candidate.Stream = "broker"
+			}
 			marker = candidate
 		}
 	}
@@ -540,7 +524,7 @@ func (s *Store) drainLoss(ctx context.Context, policy Policy) error {
 	if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return err
 	}
-	marker, err := readLoss(f)
+	marker, err := s.key.readLoss(f)
 	if err = errors.Join(err, unix.Flock(fd, unix.LOCK_UN)); err != nil {
 		return err
 	}
@@ -563,13 +547,13 @@ func (s *Store) drainLoss(ctx context.Context, policy Policy) error {
 		if err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
 			return err
 		}
-		current, err := readLoss(f)
+		current, err := s.key.readLoss(f)
 		if err != nil || current != marker {
 			return err // A new count remains available for the next drain.
 		}
 		value, _ := json.Marshal(lossMarker{Revision: marker.Revision + 1})
 		data := make([]byte, markerSlot)
-		prefix := fmt.Sprintf("%x ", sha256.Sum256(value))
+		prefix := fmt.Sprintf("%x ", s.key.digest("spool-loss/v1\x00"+string(value)))
 		copy(data[copy(data, prefix):], value)
 		if _, err = f.WriteAt(data, ((marker.Revision+1)%2)*markerSlot); err != nil {
 			return err

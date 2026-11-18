@@ -16,6 +16,7 @@ import socket
 import sys
 import stat
 import tempfile
+import time
 import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
@@ -43,7 +44,7 @@ FRAME_BYTES = 64*1024
 SEGMENT_BYTES = 256*1024
 MARKER_SLOT = 4096
 SPOOL_VERSION = b'subyard-spool/1'
-STREAM = re.compile(r'broker|h1:[0-9a-f]{64}')
+LOCK_WAIT = 0.05
 
 
 def timestamp(value):
@@ -292,11 +293,26 @@ def identity_key(directory):
     return key
 
 
+def lock_until(fd, mode, deadline):
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.005, remaining))
+
+
 @contextmanager
-def directory_lock(path, mode):
+def directory_lock(path, mode, deadline=None):
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        fcntl.flock(fd, mode)
+        if deadline is None:
+            fcntl.flock(fd, mode)
+        else:
+            lock_until(fd, mode, deadline)
         yield fd
     finally:
         os.close(fd)
@@ -334,13 +350,15 @@ class LocalConnection(http.client.HTTPConnection):
         self.sock.connect(str(self.path))
 
 
-def append_frame(spool, stream, frame):
+def append_frame(spool, stream, frame, deadline=None):
+    if deadline is None:
+        deadline = time.monotonic()+LOCK_WAIT
     target = spool/(stream+'.open')
-    while True:
+    while time.monotonic() < deadline:
         try:
             fd = os.open(target, os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
-            with directory_lock(spool, fcntl.LOCK_EX) as directory:
+            with directory_lock(spool, fcntl.LOCK_EX, deadline) as directory:
                 if target.exists() or target.is_symlink():
                     continue
                 limit = min(MAX_RECORDS, MAX_BYTES//SEGMENT_BYTES)
@@ -354,7 +372,7 @@ def append_frame(spool, stream, frame):
                 fd = os.open(spool, os.O_TMPFILE | os.O_RDWR | os.O_APPEND, 0o600)
                 try:
                     os.fchmod(fd, 0o600)
-                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     # Linux fallocate(KEEP_SIZE) reserves bytes without hiding EOF.
                     fallocate = ctypes.CDLL(None, use_errno=True).fallocate
                     if fallocate(fd, 1, ctypes.c_longlong(0), ctypes.c_longlong(SEGMENT_BYTES)):
@@ -368,7 +386,7 @@ def append_frame(spool, stream, frame):
                     os.close(fd)
                 return True
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            lock_until(fd, fcntl.LOCK_EX, deadline)
             info = checked_file(fd, SEGMENT_BYTES)
             try:
                 current = target.lstat()
@@ -383,11 +401,11 @@ def append_frame(spool, stream, frame):
             if os.pread(fd, 1, info.st_size-1) == b'\n' and info.st_size+len(frame) <= SEGMENT_BYTES:
                 write_frame(fd, frame)
                 # A previous appender may have died just after linking this inode.
-                with directory_lock(spool, fcntl.LOCK_SH) as directory:
+                with directory_lock(spool, fcntl.LOCK_SH, deadline) as directory:
                     os.fsync(directory)
                 return True
             # The sealed reader treats any bytes after the last newline as a gap.
-            with directory_lock(spool, fcntl.LOCK_EX) as directory:
+            with directory_lock(spool, fcntl.LOCK_EX, deadline) as directory:
                 sealed = spool/('.'.join(part.decode() for part in fields[1:])+'.sealed')
                 if sealed.exists() or sealed.is_symlink():
                     raise ValueError('spool segment collision')
@@ -395,6 +413,7 @@ def append_frame(spool, stream, frame):
                 os.fsync(directory)
         finally:
             os.close(fd)
+    return False
 
 
 def write_frame(fd, data):
@@ -403,18 +422,23 @@ def write_frame(fd, data):
     os.fsync(fd)
 
 
-def note_loss(directory, stream):
+def note_loss(directory, key, stream):
     path = directory/'spool-loss'
     fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         checked_file(fd, 2*MARKER_SLOT)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        def proof(data):
+            return hmac.digest(key, b'spool-loss/v1\0'+data, 'sha256').hex().encode()
+
+        lock_until(fd, fcntl.LOCK_EX, time.monotonic()+LOCK_WAIT)
         slots = []
         for offset in (0, MARKER_SLOT):
             digest, _, data = os.pread(fd, MARKER_SLOT, offset).partition(b' ')
             data = data.rstrip(b'\0')
-            if digest == hashlib.sha256(data).hexdigest().encode():
+            if hmac.compare_digest(digest, proof(data)):
                 slots.append(json.loads(data))
+            elif digest == hashlib.sha256(data).hexdigest().encode():
+                slots.append(dict(json.loads(data), stream='broker'))
         previous = max(slots, key=lambda item: item['revision'], default={'revision': 0, 'count': 0})
         now_at = timestamp(now())
         if previous['count']:
@@ -423,7 +447,7 @@ def note_loss(directory, stream):
             previous.update(id=uuid.uuid4().hex, first=now_at, stream=stream)
         previous.update(revision=previous['revision']+1, last=now_at, count=previous['count']+1)
         data = compact_json(previous)
-        slot = (hashlib.sha256(data).hexdigest().encode()+b' '+data).ljust(MARKER_SLOT, b'\0')
+        slot = (proof(data)+b' '+data).ljust(MARKER_SLOT, b'\0')
         if os.pwrite(fd, slot, (previous['revision']%2)*MARKER_SLOT) != MARKER_SLOT:
             raise OSError('short loss marker write')
         os.fsync(fd)
@@ -432,32 +456,31 @@ def note_loss(directory, stream):
 
 
 def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, event_id=None, *, broker=False):
-    stream = 'broker'
+    deadline = time.monotonic()+LOCK_WAIT
     try:
         directory = private_directory(data_dir)
-        with directory_lock(directory, fcntl.LOCK_SH):
+        with directory_lock(directory, fcntl.LOCK_SH, deadline):
             key = identity_key(directory)
-            attributes, policy = capture_policy(directory, key)
-            source_id = source_id or read_private(directory/'producer.json')['source_id']
-            if source_time is USE_CURRENT_TIME:
-                source_time = now() if not event_id else None
-            record = prepared_record(key, kind, body, source_id, event_id or str(uuid.uuid4()), source_time)
-            if not broker:
-                stream = record['body'].get('agent_run_id') or 'broker'
-            if not STREAM.fullmatch(stream):
-                raise ValueError('invalid spool stream')
-            identity = [record[field] for field in ('kind', 'source_version', 'source_time', 'body')]
-            record['input_id'] = hmac.digest(key, b'producer-input/v1\0'+compact_json(identity), 'sha256').hex()
-            record['policy_version'] = policy
-            if session_metadata(record) and not filter_session(record, attributes):
-                record.update(filtered=True, body={})
-            frame = compact_json(signed_record(key, record))+b'\n'
-            if len(frame) <= FRAME_BYTES and append_frame(private_directory(directory/'spool'), stream, frame):
-                return True
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    try:
-        note_loss(Path(data_dir), stream)
+            stream = 'broker'
+            try:
+                attributes, policy = capture_policy(directory, key)
+                source_id = source_id or read_private(directory/'producer.json')['source_id']
+                if source_time is USE_CURRENT_TIME:
+                    source_time = now() if not event_id else None
+                record = prepared_record(key, kind, body, source_id, event_id or str(uuid.uuid4()), source_time)
+                identity = [record[field] for field in ('kind', 'source_version', 'source_time', 'body')]
+                record['input_id'] = hmac.digest(key, b'producer-input/v1\0'+compact_json(identity), 'sha256').hex()
+                record['policy_version'] = policy
+                if session_metadata(record) and not filter_session(record, attributes):
+                    record.update(filtered=True, body={})
+                if not broker:
+                    stream = record['body'].get('agent_run_id') or 'broker'
+                frame = compact_json(signed_record(key, record))+b'\n'
+                if len(frame) <= FRAME_BYTES and append_frame(private_directory(directory/'spool'), stream, frame, deadline):
+                    return True
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            note_loss(directory, key, stream)
     except (OSError, ValueError, KeyError, TypeError):
         print('Telemetry coverage gap could not be saved', file=sys.stderr, flush=True)
     return False

@@ -3,6 +3,7 @@ import concurrent.futures
 import contextlib
 import fcntl
 import json
+import os
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -209,6 +210,29 @@ class LauncherTest(unittest.TestCase):
                 self.assertEqual(events[0]['kind'], 'run')
                 self.assertEqual(events[0]['body']['state'], 'starting')
                 self.assertTrue(any(row['body'].get('reason') == 'run_manifest_unavailable' for row in events))
+
+    def test_spool_lock_contention_is_bounded(self):
+        producer = '''
+import sys
+sys.path.insert(0, sys.argv[1])
+import records
+if sys.argv[3] == 'spool-loss':
+    records.MAX_RECORDS = 0
+assert not records.emit(sys.argv[2], 'gap', {})
+'''
+        for name in ('.', 'spool', 'spool/broker.open', 'spool-loss'):
+            with self.subTest(lock=name), tempfile.TemporaryDirectory(dir='/tmp') as directory:
+                root = prepare(Path(directory)/'data')
+                records.private_directory(root/'spool')
+                if name.endswith('.open'):
+                    self.assertTrue(records.emit(root, 'gap', {}))
+                lock = os.open(root/name, os.O_RDONLY)
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    subprocess.run([sys.executable, '-Bc', producer, str(Path(records.__file__).parent), root, name],
+                                   check=True, capture_output=True, timeout=3)
+                finally:
+                    os.close(lock)
 
     def test_reserved_capacity_is_charged_and_failed_placement_releases_it(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:

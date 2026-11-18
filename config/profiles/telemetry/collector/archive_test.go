@@ -47,7 +47,8 @@ func TestArchiveUpgrade(t *testing.T) {
 	for _, version := range []int{1, 2, 3, 4} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			s := fixtureStore(t)
-			legacy := "legacy"
+			const runID = "42424242-4242-4242-8242-424242424242"
+			legacy := runID
 			if version == 4 {
 				legacy = s.key.id(legacy)
 			}
@@ -96,8 +97,8 @@ os._exit(0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			manifest := fmt.Sprintf(`{"agent_run_id":"legacy","boot_id":%q,"pid":2147483647}`, strings.TrimSpace(string(boot)))
-			testkit.WriteFile(t, filepath.Join(runs, "legacy.json"), []byte(manifest), 0600)
+			manifest := fmt.Sprintf(`{"agent_run_id":%q,"boot_id":%q,"pid":2147483647}`, runID, strings.TrimSpace(string(boot)))
+			testkit.WriteFile(t, filepath.Join(runs, runID+".json"), []byte(manifest), 0600)
 			if err := os.Chmod(runs, 0500); err != nil {
 				t.Fatal(err)
 			}
@@ -105,6 +106,8 @@ os._exit(0)
 			gap := []byte(`{"schema_version":1,"source_id":"old-source","event_id":".legacy","source_version":"1","kind":"gap","body":{"reason":"source_offline"}}`)
 			testkit.WriteFile(t, filepath.Join(outbox, ".legacy.json"), gap, 0600)
 			testkit.WriteFile(t, filepath.Join(outbox, ".foreign.json"), gap, 0600)
+			unsupported := strings.NewReplacer(`"schema_version":1`, `"schema_version":2`, `".legacy"`, `".unsupported"`).Replace(string(gap))
+			testkit.WriteFile(t, filepath.Join(outbox, ".unsupported.json"), []byte(unsupported), 0600)
 			if err := os.Chmod(outbox, os.ModeSticky|0500); err != nil {
 				t.Fatal(err)
 			}
@@ -112,11 +115,14 @@ os._exit(0)
 			c := cutover{Device: st.Dev, Inode: st.Ino, Archive: "archive", Nonce: newID(), Started: spoolTime()}
 			data, _ := json.Marshal(c)
 			testkit.WriteFile(t, filepath.Join(s.dir, cutoverFile), data, 0600)
-			if version == 2 {
-				// Interrupt after committing the historical evidence and staging the old inode.
+			if version <= 2 {
+				// Interrupt after committing historical evidence, with the old inode
+				// still at the active path in v1 and already staged in v2.
 				if err := c.checkpointArchive(s.dir, path); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if version == 2 {
 				stage := filepath.Join(s.dir, pendingArchive+"-"+c.Nonce)
 				if err := privateDir(stage); err != nil {
 					t.Fatal(err)
@@ -134,8 +140,12 @@ os._exit(0)
 					t.Fatal(err)
 				}
 				stats, err := Stats(ctx, active.db)
-				if err != nil || stats["records"] != int64(2) || !active.RegisteredRun(ctx, "legacy") || active.origin == s.origin {
+				if err != nil || stats["records"] != int64(2) || !active.RegisteredRun(ctx, runID) || active.origin == s.origin {
 					t.Fatalf("active cutover rows: %v (%v)", stats, err)
+				}
+				var offsets int
+				if err := active.db.QueryRow("SELECT count(*) FROM spool_offsets").Scan(&offsets); err != nil || offsets != 0 {
+					t.Fatalf("legacy import left checkpoints: %d (%v)", offsets, err)
 				}
 				if err := active.Close(); err != nil {
 					t.Fatal(err)

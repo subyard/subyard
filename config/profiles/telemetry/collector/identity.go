@@ -113,20 +113,9 @@ func readIdentityKey(dir string) (identityKey, error) {
 	return key, err
 }
 
+// The caller holds writer.lock when creating the key.
 func loadIdentityKey(dir string) (identityKey, error) {
 	key, err := readIdentityKey(dir)
-	if !errors.Is(err, os.ErrNotExist) {
-		return key, err
-	}
-	parent, err := os.Open(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer parent.Close()
-	if err = unix.Flock(int(parent.Fd()), unix.LOCK_EX); err != nil {
-		return nil, err
-	}
-	key, err = readIdentityKey(dir)
 	if !errors.Is(err, os.ErrNotExist) {
 		return key, err
 	}
@@ -134,23 +123,8 @@ func loadIdentityKey(dir string) (identityKey, error) {
 	if _, err = rand.Read(key); err != nil {
 		return nil, err
 	}
-	f, err := os.CreateTemp(dir, ".key-*")
-	if err != nil {
+	if err = publishPrivate(filepath.Join(dir, identityKeyFile), key); err != nil {
 		return nil, err
 	}
-	defer os.Remove(f.Name())
-	if err = f.Chmod(0600); err == nil {
-		_, err = f.Write(key)
-	}
-	if err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil || closeErr != nil {
-		return nil, errors.Join(err, closeErr)
-	}
-	if err = os.Rename(f.Name(), filepath.Join(dir, identityKeyFile)); err != nil {
-		return nil, err
-	}
-	return key, parent.Sync()
+	return key, nil
 }

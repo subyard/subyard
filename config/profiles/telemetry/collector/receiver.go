@@ -361,10 +361,12 @@ func (s *Store) receiverReady() error {
 
 // Match against retained outage intervals even when the registration first
 // arrives after readiness and its native process has already exited.
+// A run that started before the outage needs an end time to establish overlap.
 func (s *Store) nativeLoss(tx *sql.Tx, run string) error {
 	rows, err := tx.Query(`SELECT r.agent_run_id,o.start,o.end FROM receiver_outages o JOIN runs r
 		ON json_extract(r.body,'$.start_time') < o.end
-		AND coalesce(json_extract(r.body,'$.end_time'),o.end)>o.start
+		AND (json_extract(r.body,'$.end_time') > o.start OR
+			(json_extract(r.body,'$.end_time') IS NULL AND json_extract(r.body,'$.start_time') >= o.start))
 		WHERE coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')
 		AND (?='' OR r.agent_run_id=?)`, run, run)
 	if err != nil {

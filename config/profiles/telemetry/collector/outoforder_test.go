@@ -148,10 +148,11 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			if err := s.publishCapturePolicy(p); err != nil {
 				t.Fatal(err)
 			}
-			first := record("gap", map[string]any{"reason": "source_offline"})
+			const runID = "recovery-run"
+			first := record("gap", map[string]any{"reason": "source_offline", "agent_run_id": runID})
 			appendPython(t, s, []Record{first})
 			dir := filepath.Join(s.dir, "spool")
-			path := filepath.Join(dir, "broker.open")
+			path := filepath.Join(dir, s.key.id(runID)+".open")
 			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -178,28 +179,30 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			if _, err := s.db.Exec("DROP TRIGGER interrupted"); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.drainSpool(ctx, p); err != nil {
-				t.Fatal(err)
-			}
-			assertCount(s, 2) // Complete frames drain even while the tail is open.
-			conflict := first
-			conflict.Body = map[string]any{"reason": "final_tail_missing"}
-			appendPython(t, s, []Record{first, conflict, record("gap", map[string]any{"reason": "source_offline"})})
 			sealed, err := filepath.Glob(filepath.Join(dir, "*.sealed"))
 			if err != nil || len(sealed) != 1 {
-				t.Fatalf("torn segment did not rotate: %v (%v)", sealed, err)
+				t.Fatalf("collector did not seal torn segment: %v (%v)", sealed, err)
 			}
 			file, err := os.Open(sealed[0])
 			if err != nil {
 				t.Fatal(err)
 			}
 			id := strings.TrimSuffix(filepath.Base(sealed[0]), ".sealed")
-			err = s.drainSegment(ctx, file, id, true, p)
+			err = s.drainSegment(ctx, file, id, p)
 			file.Close()
 			if err != nil {
 				t.Fatal(err)
 			}
 			assertCount(s, 3)
+			var recoveryGaps, attributed int
+			if err := s.db.QueryRow(`SELECT count(*),sum(agent_run_id<>'') FROM gaps
+				WHERE json_extract(body,'$.reason') IN ('spool_invalid_frame','spool_torn_tail')`).
+				Scan(&recoveryGaps, &attributed); err != nil || recoveryGaps != 2 || attributed != 0 {
+				t.Fatalf("recovery gaps=%d attributed=%d (%v)", recoveryGaps, attributed, err)
+			}
+			conflict := first
+			conflict.Body = map[string]any{"reason": "final_tail_missing", "agent_run_id": runID}
+			appendPython(t, s, []Record{first, conflict, record("gap", map[string]any{"reason": "source_offline"})})
 			if unlinked {
 				if err = os.Remove(sealed[0]); err != nil {
 					t.Fatal(err)
@@ -229,19 +232,30 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			}
 			if unlinked {
 				const producer = `
-import sys
+import hashlib, os, pathlib, sys
 sys.path.insert(0, '..')
 import records
+root = pathlib.Path(sys.argv[1])
+if sys.argv[2] == 'legacy':
+    at = records.timestamp(records.now())
+    stream = records.opaque_id(records.identity_key(root), 'forged-run')
+    data = records.compact_json(dict(revision=1, count=1, id='a'*32, stream=stream, first=at, last=at))
+    slot = (hashlib.sha256(data).hexdigest().encode()+b' '+data).ljust(records.MARKER_SLOT, b'\0')
+    with (root/'spool-loss').open('r+b') as marker:
+        os.pwrite(marker.fileno(), slot, records.MARKER_SLOT)
+    sys.exit()
 records.MAX_RECORDS = 0
 for _ in range(2):
-    assert not records.emit(sys.argv[1], 'run', {'agent_run_id':'quota-lost'})
+    assert not records.emit(root, 'run', {'agent_run_id':'quota-lost'})
 `
-				if output, err := exec.Command("python3", "-B", "-c", producer, restarted.dir).CombinedOutput(); err != nil {
-					t.Fatalf("write reserved loss marker: %v\n%s", err, output)
-				}
-				for range 2 {
-					if err := restarted.drainSpool(ctx, p); !errors.Is(err, errInvalidRecord) {
-						t.Fatalf("marker drain next to foreign stream: %v", err)
+				for _, mode := range []string{"legacy", "signed"} {
+					if output, err := exec.Command("python3", "-B", "-c", producer, restarted.dir, mode).CombinedOutput(); err != nil {
+						t.Fatalf("write reserved loss marker: %v\n%s", err, output)
+					}
+					for range 2 {
+						if err := restarted.drainSpool(ctx, p); !errors.Is(err, errInvalidRecord) {
+							t.Fatalf("marker drain next to foreign stream: %v", err)
+						}
 					}
 				}
 				var count, missing int
@@ -249,6 +263,10 @@ for _ in range(2):
 					WHERE agent_run_id=? AND json_extract(body,'$.reason')='producer_spool_capacity'`, restarted.key.id("quota-lost")).
 					Scan(&count, &missing); err != nil || count != 1 || missing != 2 {
 					t.Fatalf("marker-only recovery: gaps=%d losses=%d (%v)", count, missing, err)
+				}
+				if err := restarted.db.QueryRow(`SELECT count(*) FROM gaps WHERE agent_run_id=''
+					AND json_extract(body,'$.reason')='producer_spool_capacity'`).Scan(&count); err != nil || count != 1 {
+					t.Fatalf("unsigned marker did not recover without attribution: %d (%v)", count, err)
 				}
 			}
 		})
