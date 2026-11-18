@@ -188,6 +188,10 @@ func TestRepairRecoversFromEveryDurableIOBoundary(t *testing.T) {
 			if err != nil || len(records) != 1 || records[0].Trust.Fingerprint != newTrust.Fingerprint {
 				t.Fatalf("repair did not converge to whole new state: %#v, %v", records, err)
 			}
+			cached, err := store.cache().Read(old.HostID)
+			if err != nil || !cached.FetchedAt.Equal(snapshot.FetchedAt) {
+				t.Fatalf("repair did not publish the inventory snapshot: fetchedAt=%v err=%v", cached.FetchedAt, err)
+			}
 		})
 	}
 }
