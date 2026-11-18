@@ -135,14 +135,24 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 		return selection, nil
 	}
 	selection.targetRegistry = identity
-	if selection.activeRegistry != selection.targetRegistry {
+	registriesDiffer := selection.activeRegistry != selection.targetRegistry
+	missingHistory := !selection.state.ledger.Exists && !selection.state.checkpoint.Exists
+	if registriesDiffer || (identity != "" && missingHistory) {
 		if err := runtime.stagedSourceRefusal(ctx, selection, active); err != nil {
 			return nil, err
 		}
+	}
+	if registriesDiffer {
 		selection.refusal = "the selected release's migration registry differs from the active release's registry"
 		return selection, nil
 	}
-	if identity != "" {
+	// The installer can publish the first current link before the native
+	// transition creates protected history. Let that same engine initialize it.
+	firstPublication := request.Direction == releasetransition.DirectionActivateTarget &&
+		request.Replacement == nil && request.MigrationOwnerReplacement == nil &&
+		links.current.target == "releases/"+string(request.Target) && !links.previous.present &&
+		!selection.state.journal.Exists && missingHistory
+	if identity != "" && !firstPublication {
 		selection.refusal, selection.cause = verifyRetainedHistory(target, retained, selection.state.ledger, selection.state.checkpoint)
 	}
 	return selection, nil
@@ -153,7 +163,8 @@ func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *
 func (runtime *Runtime) stagedSourceRefusal(ctx context.Context, selection *releaseSelection, active *verifiedPublishedCandidate) error {
 	request := selection.request
 	if request.Direction != releasetransition.DirectionActivateTarget || request.Replacement != nil ||
-		request.MigrationOwnerReplacement != nil || selection.links.previous.target == "releases/"+string(request.Target) {
+		request.MigrationOwnerReplacement != nil || request.Target == active.candidate.release ||
+		selection.links.previous.target == "releases/"+string(request.Target) {
 		return nil
 	}
 	version, err := releasetransition.ReleaseIDVersion(active.candidate.release)

@@ -113,6 +113,54 @@ func TestMigrationKindRollbackRefusesMissingAuthoritativeHistory(t *testing.T) {
 	assertMigrationRollbackUnchanged(t, request, called)
 }
 
+func TestUpdateResumesFirstPublicationWithoutMigrationHistory(t *testing.T) {
+	for _, previous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("previous=%t", previous), func(t *testing.T) {
+			runtime, candidate, request, called, args := retainedVersionFixture(t)
+			request.Direction = releasetransition.DirectionActivateTarget
+			current := filepath.Join(request.RuntimeRoot, "current")
+			if err := os.Remove(current); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("releases/"+string(candidate.release), current); err != nil {
+				t.Fatal(err)
+			}
+			previousLink := filepath.Join(request.RuntimeRoot, "previous")
+			if err := os.Remove(previousLink); err != nil {
+				t.Fatal(err)
+			}
+			if previous {
+				if err := os.Symlink("releases/release-a", previousLink); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Remove(filepath.Join(request.ConfigHome, "release-transition/v2/ledger.json")); err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+			if previous {
+				assertMigrationRollbackRefused(t, request, err, "authoritative active migration history is missing")
+				if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("engine was invoked without migration history: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.Close != nil {
+				t.Cleanup(func() { _ = prepared.Close() })
+			}
+			if !prepared.Changed || prepared.Request.Target != request.Target {
+				t.Fatalf("first publication did not produce a transition plan: %+v", prepared.Request)
+			}
+			if _, err := os.Stat(called); err != nil {
+				t.Fatalf("first publication did not reach engine inspection: %v", err)
+			}
+		})
+	}
+}
+
 func TestMigrationKindRollbackRefusesExplicitVersionSelectingPrevious(t *testing.T) {
 	runtime, _, request, called, args := retainedVersionFixture(t)
 	request.Direction = releasetransition.DirectionActivateTarget
@@ -676,14 +724,27 @@ func TestPreStagedUpdatePreservesVerifiedSourceHopGuidance(t *testing.T) {
 	if err := os.Symlink("releases/"+filepath.Base(active), current); err != nil {
 		t.Fatal(err)
 	}
-	_, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
-	if err == nil || !strings.Contains(err.Error(), "source-anchor-required: installed v0.11.0") ||
-		!strings.Contains(err.Error(), "next: yard update --version "+UpdateHopVersion+" && yard update") {
-		t.Fatalf("pre-staged %s lost source hop guidance: %v", candidate.release, err)
+	checkGuidance := func(t *testing.T) {
+		t.Helper()
+		_, err := runtime.PrepareTransition(context.Background(), args, request.ConfigHome, request.Yard)
+		if err == nil || !strings.Contains(err.Error(), "source-anchor-required: installed v0.11.0") ||
+			!strings.Contains(err.Error(), "next: yard update --version "+UpdateHopVersion+" && yard update") {
+			t.Fatalf("pre-staged %s lost source hop guidance: %v", candidate.release, err)
+		}
+		if _, err := os.Lstat(called); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("a candidate transition ran before the source hop refusal: %v", err)
+		}
 	}
-	if _, err := os.Lstat(called); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("a candidate transition ran before the source hop refusal: %v", err)
-	}
+	t.Run("different registries", checkGuidance)
+	t.Run("matching registries without history", func(t *testing.T) {
+		registryPath := "config/release-transition.json"
+		testkit.WriteFile(t, filepath.Join(active, registryPath), mustReadFile(t, filepath.Join(candidate.root, registryPath)), 0o600)
+		rewriteReleaseOwnerManifest(t, publishedCandidate{root: active})
+		if err := os.Remove(filepath.Join(request.ConfigHome, "release-transition/v2/ledger.json")); err != nil {
+			t.Fatal(err)
+		}
+		checkGuidance(t)
+	})
 }
 
 func TestUnfinishedJournalCannotDelegateToIncompatiblePrevious(t *testing.T) {
