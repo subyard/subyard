@@ -17,13 +17,13 @@ func TestMaterializationUsesGitApprovalVariantForShippedSource(t *testing.T) {
 		Destination: ".sample/config.json", Format: "destination",
 	}}}
 	for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
+		values := map[string]string{"CODING_TOOL_INTEGRATIONS": "sample"}
 		for _, test := range []struct{ mode, source, want string }{
 			{"", prompt, prompt}, {"prompt", prompt, prompt}, {"off", prompt, off},
 			{"prompt", prompt, prompt}, {"off", "/override.json", "/override.json"}, {"off", "", ""},
 		} {
-			values := map[string]string{
-				"CODING_TOOL_INTEGRATIONS": "sample", "CODING_TOOL_GIT_APPROVAL": test.mode, "AGENT_sample_CONFIG": test.source,
-			}
+			values["CODING_TOOL_GIT_APPROVAL"] = test.mode
+			values["AGENT_sample_CONFIG"] = test.source
 			sources, err := SelectMaterializationSources(values, "dev", scope, definition)
 			if err != nil {
 				t.Fatal(err)

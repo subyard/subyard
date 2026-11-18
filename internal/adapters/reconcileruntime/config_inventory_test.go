@@ -141,6 +141,53 @@ func configInventoryEntry(home, kind, content string) map[string]any {
 	return entry
 }
 
+func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
+	f := newConfigInventoryFixture(t)
+	root := testkit.TempDir(t)
+	prompt := root + "/prompt.jsonc"
+	testkit.WriteFile(t, prompt, []byte("{\"approval\":\"ask\"}\n"), 0644)
+	testkit.WriteFile(t, root+"/off.jsonc", []byte("{\"approval\":\"allow\"}\n"), 0644)
+	runtime := Runtime{
+		Executor: f,
+		Yard:     domain.Context{DevUser: "dev", DevUID: os.Getuid()},
+		Integrations: []profile.IntegrationDefinition{{Name: "fixture", Root: root, Artifacts: []profile.IntegrationArtifact{{
+			ID: "config", Kind: "config", Source: "prompt.jsonc", GitApprovalOffSource: "off.jsonc",
+			Destination: "settings", Format: "raw",
+		}}}},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "AGENT_fixture_CONFIG=" + prompt, ""},
+	}
+	ctx := context.Background()
+	for _, step := range []struct{ mode, want string }{
+		{"prompt", "{\"approval\":\"ask\"}\n"},
+		{"off", "{\"approval\":\"allow\"}\n"},
+		{"prompt", "{\"approval\":\"ask\"}\n"},
+	} {
+		runtime.Environment[2] = "CODING_TOOL_GIT_APPROVAL=" + step.mode
+		files, err := runtime.guestConfigFiles()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) != 1 || files[0].destination != "/home/dev/settings" {
+			t.Fatalf("%s: unexpected destinations: %#v", step.mode, files)
+		}
+		payload, err := files[0].readSource()
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry := inventoryFileEntry(f.home, "fixture", "settings", string(payload))
+		entries := inventoryArtifacts(t, []map[string]any{entry})
+		for _, operation := range []string{"apply", "commit"} {
+			if _, err := runtime.integrationInventory(ctx, operation, entries, ""); err != nil {
+				t.Fatalf("%s %s: %v", step.mode, operation, err)
+			}
+		}
+		got, err := os.ReadFile(f.home + "/settings")
+		if err != nil || string(got) != step.want {
+			t.Fatalf("%s: installed %q, want %q, read error: %v", step.mode, got, step.want, err)
+		}
+	}
+}
+
 func TestConfigInventoryCapturesOnlyCommittedSourceEvidence(t *testing.T) {
 	f := newConfigInventoryFixture(t)
 	old := configInventoryEntry(f.home, "file", "old")
