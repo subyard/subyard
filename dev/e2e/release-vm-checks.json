@@ -15,7 +15,7 @@
     {"id": "disabled-components", "timeout_seconds": 5400,
      "command": ["bash", "dev/e2e/disabled-components-release.sh"]},
     {"id": "published-upgrade/anchor", "lease": {}, "timeout_seconds": 3600,
-     "command": ["bash", "dev/e2e/published-upgrade.sh", "anchor", "all"]},
+     "command": ["bash", "dev/e2e/published-upgrade.sh", "anchor", "claude opencode pi"]},
     {"id": "published-upgrade/0.29.0", "lease": {}, "timeout_seconds": 3600,
      "command": ["bash", "dev/e2e/published-upgrade.sh", "0.29.0", "all"]},
     {"id": "published-upgrade/0.30.0", "lease": {}, "timeout_seconds": 3600,

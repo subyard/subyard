@@ -857,9 +857,10 @@ dev/e2e/disabled-components-release.sh --slot "$slot"
 ```
 
 The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `direct`, `refusal` or
-fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0 (with agents selected
-by `all`); the v0.28.1 hop has no release check of its own (the chains pass through it, Periodic E2E
-runs it agent-free), and a later previous release distinct from both remains a direct baseline.
+fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0
+with the [catalog's selected agents](testing.md#coverage-ownership). The v0.28.1 hop has no release
+check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free. A later
+previous release distinct from both remains a direct baseline.
 Host-free `dev/verify-release-upgrades.py --only-source-anchor` checks refusal at
 v0.11.0, v0.17.3 and v0.27.0, including update and `--check`, the exact hop command,
 unchanged protected state and rejection of Incus mutations; these have no VM catalog entries.
@@ -872,8 +873,7 @@ entries are temporary first-boundary-release acceptance. Each scenario gets a fr
 ```sh
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
-  dev/agent-e2e.sh --slot "$slot" --purpose published-upgrade --vm-count 1 --vm 1 -- \
-  bash dev/e2e/published-upgrade.sh 0.28.0 all
+  bash dev/e2e/release-vm-check.sh published-upgrade/anchor --slot "$slot"
 ```
 
 The remote fixture runs a temporary loopback OpenSSH server with a synthetic key forced to the

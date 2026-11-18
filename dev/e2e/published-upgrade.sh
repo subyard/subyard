@@ -21,6 +21,8 @@ IFS=$'\t' read -r HOP_VERSION _ _ _ < <(published_hop)
 [ "$VERSION" != hop ] || VERSION="$HOP_VERSION"
 PUBLISHED_MODE=direct
 case "${2:-}" in refusal) PUBLISHED_MODE="$2" ;; esac
+# The catalog omits Codex for the v0.28.0 anchor because its anonymous GitHub REST
+# metadata request can return HTTP 403. Later releases include the fix from #62.
 published_agent_selection() {
   local selection="${1:-none}" agent
   case "$selection" in

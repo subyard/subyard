@@ -3162,7 +3162,7 @@ while True: time.sleep(1)
         self.assertEqual(published_baseline_refusals(root, catalog, previous), [])
         self.assertEqual({entry["id"]: entry["command"][2:] for entry in catalog["checks"]
                           if entry["command"][1] == "dev/e2e/published-upgrade.sh"}, {
-            "published-upgrade/anchor": ["anchor", "all"],
+            "published-upgrade/anchor": ["anchor", "claude opencode pi"],
             "published-upgrade/0.29.0": ["0.29.0", "all"],
             "published-upgrade/0.30.0": ["0.30.0", "all"],
         })
