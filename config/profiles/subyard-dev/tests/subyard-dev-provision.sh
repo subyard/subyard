@@ -208,7 +208,7 @@ for artifact in etc/systemd/system/subyard-dev-gocache-trim.service etc/systemd/
   cp "$tmp/saved-artifact" "$tmp/system/$artifact"
 done
 grep -Fxq 'Persistent=true' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
-grep -Fxq 'OnCalendar=*-*-* 00,12:00:00' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
+grep -Fxq 'OnCalendar=*-*-* 00,06,12,18:00:00' "$tmp/system/etc/systemd/system/subyard-dev-gocache-trim.timer"
 status=0
 env "${common_env[@]}" SUBYARD_GOCACHE_LIMIT=invalid bash "$HOOK" --check >"$tmp/invalid.out" 2>&1 || status=$?
 [ "$status" -eq 2 ] || fail "invalid limit accepted"

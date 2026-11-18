@@ -60,9 +60,9 @@ EOF
 cache_timer() {
   cat <<'EOF'
 [Unit]
-Description=Trim Subyard development Go build cache twice daily
+Description=Trim Subyard development Go build cache four times daily
 [Timer]
-OnCalendar=*-*-* 00,12:00:00
+OnCalendar=*-*-* 00,06,12,18:00:00
 Persistent=true
 RandomizedDelaySec=30m
 [Install]
