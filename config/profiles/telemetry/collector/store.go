@@ -23,6 +23,8 @@ import (
 
 var ErrCapacity = errors.New("telemetry capacity exceeded")
 var ErrStorage = errors.New("telemetry storage unavailable")
+var errInvalidRecord = errors.New("invalid telemetry record")
+var errEventCollision = errors.New("telemetry event identity collision")
 
 type Limits struct {
 	QueueRequests int
@@ -234,11 +236,11 @@ func (s *Store) Ingest(ctx context.Context, records []Record) error {
 	for _, r := range records {
 		clean, n, err := sanitizeRecord(r)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %v", errInvalidRecord, err)
 		}
 		body, err := json.Marshal(clean.Body)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %v", errInvalidRecord, err)
 		}
 		entries = append(entries, Envelope{Schema: ExportSchema, OriginID: "producer:" + clean.SourceID, EventID: clean.EventID, SourceID: clean.SourceID, SourceVersion: clean.SourceVersion, SourceTime: clean.SourceTime, Kind: clean.Kind, Encoding: "json", PolicyVersion: PolicyVersion, Redactions: n, Body: body})
 	}
@@ -382,13 +384,19 @@ func (s *Store) commit(batch []writeRequest) error {
 			}
 			n, _ := res.RowsAffected()
 			if n == 0 {
-				var body, proto []byte
-				var source, version, sourceTime, kind, encoding, capturePolicy string
-				if err = tx.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).Scan(&body, &proto, &source, &version, &sourceTime, &kind, &encoding, &capturePolicy); err != nil {
+				old := Envelope{EventID: e.EventID}
+				if err = tx.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).Scan((*[]byte)(&old.Body), &old.Protobuf, &old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion); err != nil {
 					return ErrStorage
 				}
-				if !bytes.Equal(body, e.Body) || !bytes.Equal(proto, e.Protobuf) || source != e.SourceID || version != e.SourceVersion || sourceTime != e.SourceTime || kind != e.Kind || encoding != e.Encoding || capturePolicy != e.PolicyVersion {
-					return errors.New("telemetry event identity collision")
+				if old.SourceID != e.SourceID || old.Kind != e.Kind || old.Encoding != e.Encoding || old.PolicyVersion != e.PolicyVersion {
+					return errEventCollision
+				}
+				if !samePayload(old, e) {
+					// A retry can encounter pre-upgrade bytes. Compare only the
+					// data that today's policy would have admitted.
+					if err = sanitizeReplayPayload(&old); err != nil || !samePayload(old, e) {
+						return errEventCollision
+					}
 				}
 				continue
 			}
@@ -401,6 +409,11 @@ func (s *Store) commit(batch []writeRequest) error {
 		return ErrStorage
 	}
 	return nil
+}
+
+func samePayload(a, b Envelope) bool {
+	return a.SourceVersion == b.SourceVersion && a.SourceTime == b.SourceTime &&
+		bytes.Equal(a.Body, b.Body) && bytes.Equal(a.Protobuf, b.Protobuf)
 }
 func (s *Store) prune() error {
 	cutoff := time.Now().Add(-s.limits.Retention).UTC().Format(timestampLayout)
@@ -581,10 +594,11 @@ func (s *Store) Replay(ctx context.Context, r io.Reader) error {
 		if err != nil {
 			return err
 		}
-		if e.Schema != ExportSchema || !validID(e.OriginID) || !validID(e.EventID) {
+		if e.Schema != ExportSchema || !validID(e.EventID) ||
+			(!validID(e.OriginID) && !(e.Encoding == "json" && e.OriginID == "producer:"+e.SourceID)) {
 			return errors.New("unsupported export identity")
 		}
-		if !validID(e.SourceID) || (e.SourceVersion != "" && !safeName.MatchString(e.SourceVersion)) {
+		if !validID(e.SourceID) {
 			return errors.New("invalid export source")
 		}
 		if e.PolicyVersion != "" && !capturePolicyVersion.MatchString(e.PolicyVersion) {
@@ -592,36 +606,13 @@ func (s *Store) Replay(ctx context.Context, r io.Reader) error {
 		}
 		capturePolicy := e.PolicyVersion
 		if e.ReceivedTime != "" {
-			received, parseErr := time.Parse(time.RFC3339Nano, e.ReceivedTime)
-			if parseErr != nil {
+			e.ReceivedTime = canonicalTimestamp(e.ReceivedTime)
+			if e.ReceivedTime == "" {
 				return errors.New("invalid export receive time")
 			}
-			e.ReceivedTime = received.UTC().Format(timestampLayout)
 		}
-		if e.Encoding == "json" {
-			body, decodeErr := decodeBody(e.Body)
-			if decodeErr != nil {
-				return decodeErr
-			}
-			clean, n, err := sanitizeRecord(Record{Schema: RecordSchema, SourceID: e.SourceID, EventID: e.EventID, SourceVersion: e.SourceVersion, SourceTime: e.SourceTime, Kind: e.Kind, Body: body})
-			if err != nil {
-				return err
-			}
-			e.Body, _ = json.Marshal(clean.Body)
-			e.SourceTime = clean.SourceTime
-			e.Redactions += n
-			e.PolicyVersion = PolicyVersion
-			e.Protobuf = nil
-		} else if !strings.HasPrefix(e.Encoding, "otlp/") {
-			return errors.New("unsupported export encoding")
-		} else {
-			if e.Kind != e.Encoding {
-				return errors.New("export kind does not match encoding")
-			}
-			e.Body = nil
-			if err = SanitizeEnvelope(&e, DefaultPolicy()); err != nil {
-				return err
-			}
+		if err = sanitizeReplayPayload(&e); err != nil {
+			return err
 		}
 		// Source provenance is a validated claim, never permission to capture.
 		// Ignore incoming import metadata and record only our trusted local policy.
@@ -632,4 +623,43 @@ func (s *Store) Replay(ctx context.Context, r io.Reader) error {
 		}
 	}
 	return scanner.Err()
+}
+
+func sanitizeReplayPayload(e *Envelope) error {
+	if e.Encoding == "json" {
+		body, decodeErr := decodeBody(e.Body)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		clean, n, err := sanitizeRecord(Record{Schema: RecordSchema, SourceID: e.SourceID, EventID: e.EventID, SourceVersion: e.SourceVersion, SourceTime: e.SourceTime, Kind: e.Kind, Body: body})
+		if err != nil {
+			return err
+		}
+		e.Body, _ = json.Marshal(clean.Body)
+		e.SourceTime = clean.SourceTime
+		e.SourceVersion = clean.SourceVersion
+		e.Redactions += n
+		e.PolicyVersion = PolicyVersion
+		e.Protobuf = nil
+	} else if !strings.HasPrefix(e.Encoding, "otlp/") {
+		return errors.New("unsupported export encoding")
+	} else {
+		if e.Kind != e.Encoding {
+			return errors.New("export kind does not match encoding")
+		}
+		var removed int64
+		e.SourceVersion, removed = sanitizeSourceVersion(e.SourceVersion)
+		e.Redactions += removed
+		if e.SourceTime != "" {
+			e.SourceTime = canonicalTimestamp(e.SourceTime)
+			if e.SourceTime == "" {
+				e.Redactions++
+			}
+		}
+		e.Body = nil
+		if err := SanitizeEnvelope(e, DefaultPolicy()); err != nil {
+			return err
+		}
+	}
+	return nil
 }

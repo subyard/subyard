@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,17 +48,22 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 				case "outbox":
 					dir := testkit.TempDir(t)
 					for i, r := range records {
+						path := filepath.Join(dir, fmt.Sprintf("%03d.json", i))
+						if i == 0 {
+							path = filepath.Join(dir, ".legacy.json")
+						}
 						data, err := json.Marshal(r)
 						if err != nil {
 							t.Fatal(err)
 						}
-						testkit.WriteFile(t, filepath.Join(dir, fmt.Sprintf("%03d.json", i)), data, 0600)
+						testkit.WriteFile(t, path, data, 0600)
 					}
+					testkit.WriteFile(t, filepath.Join(dir, ".in-progress.tmp"), nil, 0600)
 					if err := s.IngestOutbox(ctx, dir); err != nil {
 						t.Fatal(err)
 					}
-					if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
-						t.Fatalf("committed outbox not drained: %v %v", entries, err)
+					if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != ".in-progress.tmp" {
+						t.Fatalf("only the temporary file should remain: %v %v", entries, err)
 					}
 				case "replay":
 					var stream bytes.Buffer
@@ -110,5 +116,62 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestOutboxLegacyTimestampRetry(t *testing.T) {
+	ctx := context.Background()
+	store := fixtureStore(t)
+	dir := testkit.TempDir(t)
+	path := filepath.Join(dir, ".event.json")
+	r := record("gap", map[string]any{"reason": "source_offline"})
+	for _, at := range []string{"malformed legacy timestamp", "0001-01-01T00:00:00Z"} {
+		r.SourceTime = at
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, data, 0600)
+		if err := store.IngestOutbox(ctx, dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("outbox record remains after drain: %v", err)
+		}
+	}
+	var count int
+	if err := store.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 1 {
+		t.Fatalf("outbox retry count=%d, err=%v", count, err)
+	}
+}
+
+func TestOutboxContinuesPastInvalidRecords(t *testing.T) {
+	ctx := context.Background()
+	store := fixtureStore(t)
+	dir := testkit.TempDir(t)
+	bad := record("sample", map[string]any{"object_id": "legacy", "monotonic_ns": -1})
+	collision := record("gap", map[string]any{"reason": "old"})
+	if err := store.Ingest(ctx, []Record{collision}); err != nil {
+		t.Fatal(err)
+	}
+	collision.Body["reason"] = "changed"
+	for name, r := range map[string]Record{
+		".collision.json": collision,
+		".invalid.json":   bad,
+		"good.json":       record("gap", map[string]any{"reason": "source_offline"}),
+	} {
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(dir, name), data, 0600)
+	}
+	testkit.WriteFile(t, filepath.Join(dir, ".malformed.json"), []byte("{"), 0600)
+	if err := store.IngestOutbox(ctx, dir); !errors.Is(err, errInvalidRecord) {
+		t.Fatalf("expected invalid record diagnostic, got %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 3 || entries[0].Name() != ".collision.json" || entries[1].Name() != ".invalid.json" || entries[2].Name() != ".malformed.json" {
+		t.Fatalf("only invalid files should remain after draining: %v %v", entries, err)
 	}
 }

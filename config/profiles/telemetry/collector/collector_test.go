@@ -206,6 +206,11 @@ func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attrs := r.Metrics().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Gauge().DataPoints().At(0).Attributes()
+	attrs.PutInt("private integer key", 1)
+	attrs.PutDouble("private double key", 2)
+	attrs.PutBool("private boolean key", true)
+	attrs.PutInt("", 3)
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: raw}
 	if err = SanitizeEnvelope(&e, DefaultPolicy()); err != nil {
@@ -220,6 +225,9 @@ func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	attribute, ok := gauge.Attributes().Get("numeric.value")
 	if !math.IsNaN(gauge.DoubleValue()) || !ok || !math.IsNaN(attribute.Double()) {
 		t.Fatal("numeric special attribute or gauge changed")
+	}
+	if gauge.Attributes().Len() != 1 || e.Redactions != 4 {
+		t.Fatal("unsafe numeric attribute keys survived sanitization")
 	}
 	histogram := metrics.At(1).Histogram().DataPoints().At(0)
 	if !math.IsInf(histogram.ExplicitBounds().At(0), 1) || !math.IsInf(histogram.Sum(), 1) || !math.IsInf(histogram.Min(), -1) || !math.IsInf(histogram.Max(), 1) {

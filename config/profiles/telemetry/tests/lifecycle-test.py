@@ -80,6 +80,7 @@ class LifecycleTest(unittest.TestCase):
             runtime.home, runtime.agents = Path(name), []
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
+            runtime.saved_inventory = lambda: {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
             runtime.running_no_new_privs = lambda state: True
             runtime.desired = lambda: 'a'*64
@@ -350,6 +351,18 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 for unselected in runs.values():
                     self.assertNotIn(installed_binary, unselected.assets)
                 self.assertEqual(runs['source'].observe(), runs['packaged'].observe())
+                inventory_path = root/'control/assets.json'
+                saved = json.loads(inventory_path.read_text())
+                stale = {**saved, str(root/'library/records.py'): '0'*64}
+                inventory_path.write_text(json.dumps(stale))
+                for unselected in runs.values():
+                    observation = unselected.observe()
+                    self.assertEqual(observation['state'], 'stale')
+                    self.assertIn('telemetry.inventory', [item['parameter'] for item in observation['diagnostics']])
+                with self.assertRaisesRegex(ValueError, 'managed asset changed'):
+                    runs['source'].apply()
+                self.assertEqual(json.loads(inventory_path.read_text()), stale)
+                inventory_path.write_text(json.dumps(saved))
                 runs['source'].apply()
                 observed = runs['source'].observe()
                 self.assertEqual(observed['state'], 'current')

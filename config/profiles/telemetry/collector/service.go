@@ -173,12 +173,12 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		return err
 	}
 	count := 0
+	var invalid error
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".") {
+		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		count++
-		if count > 256 {
+		if count == 256 {
 			break
 		}
 		target := filepath.Join(path, entry.Name())
@@ -202,11 +202,22 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.UseNumber()
 		if err = dec.Decode(&r); err != nil {
-			return errors.New("invalid outbox record")
+			invalid = errInvalidRecord
+			continue
+		}
+		if canonicalTimestamp(r.SourceTime) == "" {
+			// Match the producer's sentinel so a retry deduplicates even
+			// after the original spool file has been removed.
+			r.SourceTime = "0001-01-01T00:00:00Z"
 		}
 		if err = s.Ingest(ctx, []Record{r}); err != nil {
+			if errors.Is(err, errInvalidRecord) || errors.Is(err, errEventCollision) {
+				invalid = err
+				continue
+			}
 			return err
 		}
+		count++
 		current, err := os.Lstat(target)
 		if err != nil {
 			return err
@@ -227,5 +238,5 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 			return err
 		}
 	}
-	return nil
+	return invalid
 }

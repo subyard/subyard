@@ -70,6 +70,9 @@ identity, samples, allocation lifecycle, attribution and gaps. The owning code
 defines each body and rejects unsupported versions. Producer event IDs survive
 retry/replay. Receive time belongs to the collector. Monotonic values identify
 their host/boot clock domain and are never compared across owners.
+The outbox uses `0001-01-01T00:00:00Z` for an invalid source timestamp, or when
+a producer supplies a stable event ID without a timestamp. This denotes
+unknown source time and keeps retries stable after the spool file has drained.
 
 Run records distinguish `agent_run_id`, agent type/version, native session ID,
 parent run, task, project/worktree, yard and owner host. Samples belong to measured

@@ -58,8 +58,28 @@ func newID() string {
 }
 
 var identityPattern = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,512}$`)
+var bodyLabelPattern = regexp.MustCompile(`^[A-Za-z0-9_.:/+@#-]{1,512}$`)
 
 func validID(s string) bool { return identityPattern.MatchString(s) }
+
+func canonicalTimestamp(value string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return ""
+	}
+	utc := parsed.UTC()
+	if utc.Year() < 0 || utc.Year() > 9999 {
+		return ""
+	}
+	return utc.Format(timestampLayout)
+}
+
+func sanitizeSourceVersion(version string) (string, int64) {
+	if version != "" && !safeName.MatchString(version) {
+		return "", 1
+	}
+	return version, 0
+}
 
 // Internal producers use a closed field vocabulary. Unknown fields cannot carry
 // command content or credentials into the durable outbox/import path.
@@ -84,18 +104,15 @@ func sanitizeRecord(r Record) (Record, int64, error) {
 	if !validID(r.SourceID) || !validID(r.EventID) || !kinds[r.Kind] || r.Body == nil {
 		return r, 0, errors.New("invalid record identity or kind")
 	}
-	parsedTime, err := time.Parse(time.RFC3339Nano, r.SourceTime)
-	if err != nil {
+	r.SourceTime = canonicalTimestamp(r.SourceTime)
+	if r.SourceTime == "" {
 		return r, 0, errors.New("invalid source time")
 	}
-	r.SourceTime = parsedTime.UTC().Format(timestampLayout)
-	if len(r.SourceVersion) > 128 {
-		return r, 0, errors.New("source version too long")
-	}
+	var removed int64
+	r.SourceVersion, removed = sanitizeSourceVersion(r.SourceVersion)
 	r.Schema = RecordSchema
 	r.SchemaVersion = 0
 	body := make(map[string]any, len(r.Body))
-	var removed int64
 	for key, value := range r.Body {
 		if !allowedBodies[key] {
 			removed++
@@ -105,13 +122,20 @@ func sanitizeRecord(r Record) (Record, int64, error) {
 		case nil, bool, float64, json.Number, int, int64, uint64:
 			body[key] = v
 		case string:
-			if len(v) > 1024 || strings.ContainsAny(v, "\x00\r\n") {
-				return r, removed, fmt.Errorf("invalid %s", key)
-			}
-			if key == "start_time" || key == "end_time" || strings.HasSuffix(key, "_at") || key == "coverage_start" || key == "coverage_end" {
-				if parsed, e := time.Parse(time.RFC3339Nano, v); e == nil {
-					v = parsed.UTC().Format(timestampLayout)
+			switch {
+			case v == "":
+				// Empty metadata needs no redaction.
+			case strings.HasSuffix(key, "_time"), strings.HasSuffix(key, "_at"), key == "coverage_start", key == "coverage_end", key == "last_seen":
+				v = canonicalTimestamp(v)
+				if v == "" {
+					removed++
+					continue
 				}
+			case key == "unit" && safeUnit.MatchString(v):
+			case bodyLabelPattern.MatchString(v):
+			default:
+				removed++
+				continue
 			}
 			body[key] = v
 		case []any:

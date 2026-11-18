@@ -275,7 +275,9 @@ class Runtime:
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
-        ready = ready and self.retained_current(self.saved_inventory())
+        saved = self.saved_inventory()
+        inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
+        ready = ready and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
         enabled = states[COLLECTOR].get('UnitFileState') == 'enabled'
@@ -290,11 +292,13 @@ class Runtime:
             # damaged input block that owner through activation readiness.
             return self.pending_agent_config(native_diagnostics)
         converged = converged and native_current is True
-        actual = hashlib.sha256(json.dumps({'files': files, 'states': states, 'native_current': converged}, sort_keys=True).encode()).hexdigest()
+        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'states': states, 'native_current': converged}, sort_keys=True).encode()).hexdigest()
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
         if not converged:
             diagnostics = []
+            if not inventory_current:
+                diagnostics.append({'parameter': 'telemetry.inventory', 'installed': 'changed', 'desired': 'current'})
             for path, (content, mode) in self.assets.items():
                 snapshot = self.asset_snapshot(path)
                 if snapshot != content:

@@ -33,26 +33,49 @@ requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_m
 vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes
 read_bytes write_bytes read_ops write_ops populated attribution_id'''.split())
 IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}\Z')
+BODY_ID = re.compile(r'[A-Za-z0-9_.:/-]{1,512}')
+LABEL = re.compile(r'[A-Za-z0-9_.:/+@#-]{1,512}')
+UNIT = re.compile(r'[\x21-\x7e]{1,160}')
+TIMESTAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})')
+UNKNOWN_SOURCE_TIME = '0001-01-01T00:00:00Z'
+USE_CURRENT_TIME = object()
 MAX_RECORDS = 4096
 MAX_BYTES = 64*1024*1024
 
 
-def clean(value):
-    if value is None or type(value) is bool:
-        return value
-    if type(value) is int:
-        if -(2**63) <= value < 2**64:
-            return value
-        raise ValueError('counter range')
-    if type(value) is float and math.isfinite(value):
-        return value
-    if isinstance(value, str) and len(value) <= 256 and all(ord(c) >= 32 and ord(c) != 127 for c in value):
-        return value
-    if isinstance(value, list) and len(value) <= 128:
-        return [clean(item) for item in value]
-    if isinstance(value, dict) and len(value) <= 128:
-        return {key: clean(item) for key, item in value.items() if key in FIELDS}
-    raise ValueError('unsupported metadata')
+def valid_timestamp(value):
+    if not isinstance(value, str) or not TIMESTAMP.fullmatch(value):
+        return False
+    try:
+        datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(datetime.timezone.utc)
+    except (ValueError, OverflowError):
+        return False
+    return True
+
+
+def clean(body):
+    if not isinstance(body, dict) or len(body) > 128:
+        raise ValueError('unsupported metadata')
+    result = {}
+    for key, value in body.items():
+        if key not in FIELDS:
+            continue
+        if isinstance(value, str) and value:
+            if key.endswith(('_time', '_at')) or key in ('coverage_start', 'coverage_end', 'last_seen'):
+                if not valid_timestamp(value):
+                    continue
+            elif not LABEL.fullmatch(value) and not (key == 'unit' and UNIT.fullmatch(value)):
+                continue
+        elif type(value) is int and not -(2**63) <= value < 2**64:
+            raise ValueError('counter range')
+        elif type(value) is float and not math.isfinite(value):
+            raise ValueError('counter range')
+        elif isinstance(value, list) and key == 'missing' and len(value) <= 128:
+            value = [item for item in value if isinstance(item, str) and item in FIELDS]
+        elif value is not None and type(value) not in (str, bool, int, float):
+            continue
+        result[key] = value
+    return result
 
 
 def private_directory(path):
@@ -144,10 +167,22 @@ def deliver(data_dir, record):
         return False
 
 
-def emit(data_dir, kind, body, source_id=None, source_time=None, event_id=None):
+def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, event_id=None):
     try:
         if kind not in KINDS:
             return False
+        body = clean(body)
+        key = 'agent_run_id' if kind == 'run' else 'object_id' if kind in ('scope', 'process', 'sample', 'allocation', 'association') else None
+        if key:
+            value = body.get(key)
+            if not isinstance(value, str) or not BODY_ID.fullmatch(value):
+                return False
+        if kind == 'sample':
+            for key, value in body.items():
+                if value is None or not (key.endswith(('_bytes', '_ns', '_ops')) or key in ('pid', 'start_ticks')):
+                    continue
+                if not re.fullmatch(r'[+-]?[0-9]+', str(value)) or not 0 <= int(value) < 2**64:
+                    return False
         directory = private_directory(data_dir)
         outbox = private_directory(directory/'outbox')
         fd = os.open(outbox/'.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -160,15 +195,27 @@ def emit(data_dir, kind, body, source_id=None, source_time=None, event_id=None):
             if not identity.exists():
                 atomic_json(identity, {'source_id': str(uuid.uuid4())})
             source_id = source_id or read_private(identity)['source_id']
+            generated_event_id = not event_id
             event_id = event_id or str(uuid.uuid4())
             if not IDENTITY.fullmatch(source_id) or not IDENTITY.fullmatch(event_id):
                 return False
             path = outbox/(event_id+'.json')
             existing = read_private(path) if path.exists() else None
+            saved_time = (existing or {}).get('source_time')
+            if source_time is USE_CURRENT_TIME:
+                source_time = saved_time
+                if source_time is None and generated_event_id:
+                    source_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            if not valid_timestamp(source_time):
+                # Stable across retries after the collector removes the spool file.
+                source_time = UNKNOWN_SOURCE_TIME
             record = {'schema': SCHEMA, 'source_id': source_id, 'event_id': event_id,
-                      'source_version': '1', 'source_time': source_time or (existing or {}).get('source_time') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      'kind': kind, 'body': clean(body)}
+                      'source_version': '1', 'source_time': source_time,
+                      'kind': kind, 'body': body}
             if existing:
+                existing['body'] = clean(existing['body'])
+                if not valid_timestamp(saved_time):
+                    existing['source_time'] = UNKNOWN_SOURCE_TIME
                 if existing != record:
                     return False
             else:

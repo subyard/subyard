@@ -118,10 +118,8 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 			if err := destination.Replay(ctx, bytes.NewReader(imported.Bytes())); err != nil {
 				t.Fatal("re-export replay not idempotent", err)
 			}
-			if !custom {
-				if err := s.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
-					t.Fatal("local default export replay not idempotent", err)
-				}
+			if err := s.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
+				t.Fatal("local export replay not idempotent", err)
 			}
 			for _, captureClaim := range []string{"PRIVATE-invalid-capture", PolicyVersion + ":" + strings.Repeat("a", 64)} {
 				collision := roundTrip
@@ -176,5 +174,86 @@ func TestCapturePolicyV1MigrationAndLegacyExport(t *testing.T) {
 	s.db.QueryRow("PRAGMA user_version").Scan(&version)
 	if version != 2 || !s.RegisteredRun(context.Background(), "legacy") {
 		t.Fatal("migration lost lifecycle data or schema version")
+	}
+}
+
+func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := fixtureStore(t)
+	r := record("gap", map[string]any{"reason": "private body text", "observed_time": "not a timestamp"})
+	r.SourceID = strings.Repeat("s", 512)
+	r.SourceVersion = "private version text"
+	if err := store.Ingest(ctx, []Record{r}); err != nil {
+		t.Fatal(err)
+	}
+	raw := ptraceotlp.NewExportRequest()
+	raw.Traces().ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
+	protobuf, err := raw.MarshalProto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input bytes.Buffer
+	encoder := json.NewEncoder(&input)
+	for _, sourceTime := range []string{"private time text", "2026-01-01T01:00:00+01:00", ""} {
+		if err := encoder.Encode(Envelope{
+			Schema: ExportSchema, OriginID: "fixture", EventID: newID(),
+			SourceID: "fixture", SourceVersion: "fixture/1", SourceTime: sourceTime,
+			Kind: "otlp/traces", Encoding: "otlp/traces", Protobuf: protobuf,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Replay(ctx, &input); err != nil {
+		t.Fatal(err)
+	}
+	var exported bytes.Buffer
+	if _, err := Export(ctx, store.db, &exported, 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(exported.Bytes(), []byte("private")) || bytes.Contains(exported.Bytes(), []byte("not a timestamp")) {
+		t.Fatal("unsafe source or body metadata survived")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(exported.Bytes()))
+	var producer Envelope
+	if err := decoder.Decode(&producer); err != nil || producer.SourceVersion != "" || producer.Redactions != 3 {
+		t.Fatalf("producer version and body were not removed: redactions=%d, err=%v", producer.Redactions, err)
+	}
+	for i, want := range []string{"", "2026-01-01T00:00:00.000000000Z", ""} {
+		var envelope Envelope
+		if err := decoder.Decode(&envelope); err != nil || envelope.SourceTime != want || envelope.SourceVersion != "fixture/1" || (envelope.Redactions == 1) != (i == 0) {
+			t.Fatalf("raw source metadata mismatch at row %d: redactions=%d, err=%v", i, envelope.Redactions, err)
+		}
+	}
+	destination := fixtureStore(t)
+	// Populate retained rows with bytes accepted before the policy tightened.
+	producer.SourceVersion = r.SourceVersion
+	producer.Body, err = json.Marshal(r.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyStore := fixtureStore(t)
+	if err := legacyStore.submit(ctx, []Envelope{producer}); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyStore.Ingest(ctx, []Record{r}); err != nil {
+		t.Fatal("legacy producer retry failed", err)
+	}
+	var legacy bytes.Buffer
+	if _, err := Export(ctx, legacyStore.db, &legacy, 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []*Store{legacyStore, destination} {
+		if err := target.Replay(ctx, bytes.NewReader(legacy.Bytes())); err != nil {
+			t.Fatal("legacy replay failed", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := destination.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
+			t.Fatal("export replay failed", err)
+		}
+	}
+	var count int
+	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 4 {
+		t.Fatalf("replay count=%d, err=%v", count, err)
 	}
 }

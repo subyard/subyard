@@ -77,39 +77,61 @@ class OutboxTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             with patch.object(records, 'deliver', return_value=False):
-                self.assertTrue(records.emit(root, 'run', {'state': 'starting'}, event_id='same'))
-                self.assertTrue(records.emit(root, 'run', {'state': 'starting'}, event_id='same'))
+                body = {'agent_run_id': 'run', 'state': 'starting'}
+                self.assertTrue(records.emit(root, 'run', body, event_id='same'))
+                self.assertTrue(records.emit(root, 'run', body, event_id='same'))
+                path = root/'outbox/same.json'
+                original = records.read_private(path)
+                path.unlink()
+                self.assertTrue(records.emit(root, 'run', body, event_id='same'))
+                self.assertEqual(records.read_private(path), original)
                 with (root/'outbox/.lock').open('rb') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
-                    self.assertFalse(records.emit(root, 'run', {'state': 'starting'}))
+                    self.assertFalse(records.emit(root, 'run', body))
 
     def test_private_durable_redacted_record_and_retry_identity(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            body = {'agent_run_id': 'run-1', 'state': 'starting', 'authorization': 'SECRET', 'argv': ['PRIVATE'], 'env': {'TOKEN': 'PRIVATE'}}
+            body = {'agent_run_id': 'run-1', 'state': 'starting', 'authorization': 'SECRET', 'argv': ['PRIVATE'], 'env': {'TOKEN': 'PRIVATE'},
+                    'reason': 'PRIVATE body text', 'observed_at': 'PRIVATE body timestamp'}
             with patch.object(records, 'deliver', return_value=False):
-                self.assertTrue(records.emit(root, 'run', body, 'source', '2026-10-24T00:00:00Z', 'event-1'))
-                self.assertTrue(records.emit(root, 'run', body, 'source', '2026-10-24T00:00:00Z', 'event-1'))
+                self.assertTrue(records.emit(root, 'run', body, 'source', 'PRIVATE timestamp', '.event-1'))
+                self.assertTrue(records.emit(root, 'run', body, 'source', 'PRIVATE timestamp', '.event-1'))
             files = list((root/'outbox').glob('*.json'))
             self.assertEqual(len(files), 1)
             value = json.loads(files[0].read_text())
             self.assertEqual(value['body'], {'agent_run_id': 'run-1', 'state': 'starting'})
+            self.assertEqual(value['source_time'], '0001-01-01T00:00:00Z')
             self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
             self.assertEqual((root/'outbox').stat().st_mode & 0o777, 0o700)
             self.assertNotIn('SECRET', files[0].read_text())
+            self.assertNotIn('PRIVATE', files[0].read_text())
             self.assertFalse(list((root/'outbox').glob('*.tmp')))
+            files[0].unlink()
+            with patch.object(records, 'deliver', return_value=False):
+                self.assertTrue(records.emit(root, 'run', body, 'source', 'PRIVATE timestamp', '.event-1'))
+            self.assertEqual(records.read_private(files[0]), value)
+
+    def test_invalid_sample_does_not_poison_outbox(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            self.assertFalse(records.emit(root, 'sample', {'object_id': 'bad\nid'}, event_id='.bad'))
+            self.assertFalse(records.emit(root, 'sample', {'object_id': 'valid', 'monotonic_ns': -1}, event_id='.bad-counter'))
+            self.assertTrue(records.emit(root, 'sample', {'object_id': 'good', 'cpu_ns': 1}, event_id='good'))
+            self.assertEqual([path.name for path in (root/'outbox').glob('*.json')], ['good.json'])
 
     def test_capacity_disk_failure_and_symlink_are_nonfatal(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
+            body = {'agent_run_id': 'run', 'state': 'starting'}
             with patch.object(records, 'atomic_json', side_effect=OSError('full')):
-                self.assertFalse(records.emit(root, 'run', {'state': 'starting'}))
+                self.assertFalse(records.emit(root, 'run', body))
             outside = root/'outside'
             outside.mkdir(mode=0o700)
             (root/'outbox/.lock').unlink()
             (root/'outbox').rmdir()
             (root/'outbox').symlink_to(outside)
-            self.assertFalse(records.emit(root, 'run', {'state': 'starting'}))
+            self.assertFalse(records.emit(root, 'run', body))
             self.assertFalse(list(outside.iterdir()))
 
 

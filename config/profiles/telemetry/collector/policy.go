@@ -132,7 +132,7 @@ func sanitizeJSON(data []byte, p Policy) ([]byte, int64, error) {
 						_, doubleValue := value["doubleValue"]
 						_, boolValue := value["boolValue"]
 						numeric := intValue || doubleValue || boolValue
-						if (!allow[name] && !numeric) || forbidden(name) {
+						if !safeName.MatchString(name) || (!allow[name] && !numeric) || forbidden(name) {
 							n++
 							continue
 						}
