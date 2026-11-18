@@ -4,7 +4,6 @@ import datetime
 import fcntl
 import http.client
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -15,35 +14,45 @@ import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
 KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
-FIELDS = set('''association_id purpose allocated_cpu allocated_memory_bytes allocated_disk_bytes reservation_semantics agent_run_id state agent agent_version session_id parent_run_id task_id project_id
-worktree_id yard_id host_id object_id object_kind parent_object_id accounting boot_id generation
-monotonic_ns cpu_ns cpu_user_ns cpu_system_ns memory_bytes memory_peak_bytes swap_bytes
-io_read_bytes io_write_bytes io_read_ops io_write_ops rss_bytes rss_peak_bytes pss_bytes observed_process_count
-quality scope_quality coverage_start coverage_end counter_reset cgroup_namespace_id
-process_namespace_id pid start_ticks exit_code signal relation source start_time end_time shared
-reason available sampled_peak_bytes owner_id slot_id resource_generation lease_epoch allocation_id
-acquire_id correlation_id reserved_cpu reserved_memory_bytes reserved_disk_bytes actual_cpu_ns
-actual_memory_bytes actual_disk_bytes cpu_count memory_limit_bytes disk_limit_bytes interval_ns
-status resource_kind device_count device_id sample_id source_event_id cursor missing stale
-boundary host_monotonic_ns runtime_generation requested reserved actual lifecycle type
-cpu memory disk resources present counter_generation final main_exited agent_exited resource_completed supported process_count
-value unit observed_time resource_id allocation_generation requested_cpu requested_memory_bytes
-selector phase final_complete acquired_at ready_at expires_at stopped_at last_seen source_time
-requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_memory_bytes
-vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes
-read_bytes write_bytes read_ops write_ops populated attribution_id'''.split())
-GAP_REASONS = set('''boot_changed_before_final correlation_generation_mismatch correlation_registration_capacity
-correlation_registration_conflict correlation_registration_invalid correlation_registration_unavailable
-cursor_retention_or_reset delegation_unavailable final_tail_missing managed_scope_unavailable observer_capacity
-process_final_counter_unavailable process_left_managed_scope producer_outbox_capacity run_manifest_capacity
-run_manifest_unavailable run_reservation_interrupted run_startup_unavailable scope_baseline_unavailable
-scope_manifest_missing scope_observation_unavailable scope_placement_unavailable scope_removed_before_final
-source_offline'''.split())
-IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}\Z')
-BODY_ID = re.compile(r'[A-Za-z0-9_.:/-]{1,512}')
-LABEL = re.compile(r'[A-Za-z0-9_.:/+@#-]{1,512}')
-UNIT = re.compile(r'[\x21-\x7e]{1,160}')
-TIMESTAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})')
+# Mirror of collector/record.go, checked by TestRecordFieldParity.
+BODY_RULES = {}
+BODY_RULE_TABLE = '''
+id agent_run_id agent_version session_id parent_run_id task_id project_id worktree_id yard_id host_id owner_id boot_id generation counter_generation resource_id slot_id correlation_id allocation_id association_id native_session_id executable_name acquire_id device_id sample_id source_event_id cursor attribution_id
+object object_id parent_object_id
+short_id purpose resource_kind boundary lifecycle type unit
+namespace cgroup_namespace_id process_namespace_id
+uint monotonic_ns cpu_ns cpu_user_ns cpu_system_ns memory_bytes memory_peak_bytes swap_bytes rss_bytes rss_peak_bytes pss_bytes io_read_bytes io_write_bytes io_read_ops io_write_ops observed_process_count pid start_ticks resource_generation lease_epoch requested_cpu reserved_cpu reserved_memory_bytes allocated_cpu allocated_memory_bytes allocated_disk_bytes sampled_peak_bytes reserved_disk_bytes actual_cpu_ns actual_memory_bytes actual_disk_bytes cpu_count memory_limit_bytes disk_limit_bytes interval_ns device_count host_monotonic_ns runtime_generation process_count allocation_generation requested_memory_bytes requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_memory_bytes vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes read_bytes write_bytes read_ops write_ops source_sequence cpu memory disk resources
+int exit_code value
+uint signal
+bool counter_reset shared final_complete resource_completed agent_exited available stale requested reserved actual present final main_exited supported populated
+time coverage_start coverage_end acquired_at ready_at expires_at stopped_at start_time end_time observed_at observed_time last_seen source_time
+missing missing
+drop status
+enum agent codex claude other
+enum state starting running not_started main_exited resources_observing resources_complete resources_unknown observed scope_left ended available provisioning held draining quarantined recovering unavailable
+enum object_kind cgroup process_tree process scope vm android
+enum accounting direct inclusive inclusive-owner-resource qemu-process-and-threads
+enum quality explicit measured observed complete partial unknown
+enum scope_quality managed partial unavailable
+enum selector 1 2 emulator
+enum reservation_semantics allocated_virtual_capacity_held
+enum relation native_session
+enum source acquire-correlation validated-grant managed_scope_membership process_tree_discovery scope_root_missing scope_root_generation_changed cgroup_missing cgroup_generation_changed native-otlp-attribute native-otlp-attribute/authenticated-header native-otlp-attribute/registered-resource-attribute
+enum phase request held allocation acquired baseline draining observed periodic pre_stop stopped quarantined lease.acquire lease.admission_rejected lease.available lease.expired lease.fence lease.held lease.release lease.renew_failed lease.stop_failed lease.stop_succeeded lease.transition
+enum reason boot_changed_before_final correlation_generation_mismatch correlation_registration_capacity correlation_registration_conflict correlation_registration_invalid correlation_registration_unavailable cursor_retention_or_reset delegation_unavailable final_tail_missing managed_scope_unavailable observer_capacity process_final_counter_unavailable process_left_managed_scope producer_outbox_capacity run_manifest_capacity run_manifest_unavailable run_reservation_interrupted run_startup_unavailable scope_baseline_unavailable scope_manifest_missing scope_observation_unavailable scope_placement_unavailable scope_removed_before_final source_offline
+'''
+for line in BODY_RULE_TABLE.strip().splitlines():
+    rule, *fields = line.split()
+    if rule == 'enum':
+        BODY_RULES[fields[0]] = (rule, fields[1:])
+    else:
+        BODY_RULES.update((field, (rule, ())) for field in fields)
+
+IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
+OBJECT_ID = re.compile(r'[A-Za-z0-9_.:-]{1,224}')
+SHORT_ID = re.compile(r'[A-Za-z0-9_.:-]{1,64}')
+NAMESPACE_ID = re.compile(r'(?:pid|cgroup):\[[0-9]{1,20}\]')
+TIMESTAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.,][0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])')
 UNKNOWN_SOURCE_TIME = '0001-01-01T00:00:00Z'
 USE_CURRENT_TIME = object()
 MAX_RECORDS = 4096
@@ -60,30 +69,44 @@ def valid_timestamp(value):
     return True
 
 
-def clean(body):
+def clean_field(key, value):
+    rule, choices = BODY_RULES.get(key, ('drop', ()))
+    if rule == 'drop':
+        return False, None
+    if value is None:
+        # Explicit nulls preserve unavailable gauges and clear old projections.
+        return True, None
+    if rule == 'missing':
+        if type(value) is list and len(value) <= 128:
+            return True, [item for item in value if isinstance(item, str) and item in BODY_RULES and item != 'status']
+        return ((type(value) is int and 0 <= value < 2**64)
+                or (isinstance(value, str) and value in ('broker_attribution', 'final_tail'))), value
+    if rule == 'bool':
+        return type(value) is bool, value
+    if rule == 'uint':
+        return type(value) is int and 0 <= value < 2**64, value
+    if rule == 'int':
+        return type(value) is int and -(2**63) <= value < 2**63, value
+    if not isinstance(value, str):
+        return False, None
+    if rule == 'enum':
+        return value in choices, value
+    if rule == 'time':
+        return valid_timestamp(value), value
+    pattern = {'id': IDENTITY, 'object': OBJECT_ID, 'short_id': SHORT_ID, 'namespace': NAMESPACE_ID}[rule]
+    return bool(pattern.fullmatch(value)), value
+
+
+def clean(body, kind=None):
     if not isinstance(body, dict) or len(body) > 128:
         raise ValueError('unsupported metadata')
     result = {}
     for key, value in body.items():
-        if key not in FIELDS:
-            continue
-        if key == 'status' or (key == 'reason' and (not isinstance(value, str) or value not in GAP_REASONS)):
-            continue
-        if isinstance(value, str) and value:
-            if key.endswith(('_time', '_at')) or key in ('coverage_start', 'coverage_end', 'last_seen'):
-                if not valid_timestamp(value):
-                    continue
-            elif not LABEL.fullmatch(value) and not (key == 'unit' and UNIT.fullmatch(value)):
-                continue
-        elif type(value) is int and not -(2**63) <= value < 2**64:
-            raise ValueError('counter range')
-        elif type(value) is float and not math.isfinite(value):
-            raise ValueError('counter range')
-        elif isinstance(value, list) and key == 'missing' and len(value) <= 128:
-            value = [item for item in value if isinstance(item, str) and item in FIELDS]
-        elif value is not None and type(value) not in (str, bool, int, float):
-            continue
-        result[key] = value
+        accepted, value = clean_field(key, value)
+        if accepted:
+            result[key] = value
+        elif kind == 'sample' and BODY_RULES.get(key, (None,))[0] == 'uint':
+            raise ValueError('invalid sample counter')
     return result
 
 
@@ -180,18 +203,10 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
     try:
         if kind not in KINDS:
             return False
-        body = clean(body)
+        body = clean(body, kind)
         key = 'agent_run_id' if kind == 'run' else 'object_id' if kind in ('scope', 'process', 'sample', 'allocation', 'association') else None
-        if key:
-            value = body.get(key)
-            if not isinstance(value, str) or not BODY_ID.fullmatch(value):
-                return False
-        if kind == 'sample':
-            for key, value in body.items():
-                if value is None or not (key.endswith(('_bytes', '_ns', '_ops')) or key in ('pid', 'start_ticks')):
-                    continue
-                if not re.fullmatch(r'[+-]?[0-9]+', str(value)) or not 0 <= int(value) < 2**64:
-                    return False
+        if key and not body.get(key):
+            return False
         directory = private_directory(data_dir)
         outbox = private_directory(directory/'outbox')
         fd = os.open(outbox/'.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -222,7 +237,7 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
                       'source_version': '1', 'source_time': source_time,
                       'kind': kind, 'body': body}
             if existing:
-                existing['body'] = clean(existing['body'])
+                existing['body'] = clean(existing['body'], kind)
                 if not valid_timestamp(saved_time):
                     existing['source_time'] = UNKNOWN_SOURCE_TIME
                 if existing != record:

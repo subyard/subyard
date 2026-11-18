@@ -29,7 +29,7 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 		}
 		records = append(records, record(recordKind, body))
 		for _, run := range runs {
-			records = append(records, record("association", map[string]any{"association_id": id + ":" + run, "object_id": id, "agent_run_id": run, "quality": "explicit", "source": "fixture-explicit", "start_time": start, "end_time": end}))
+			records = append(records, record("association", map[string]any{"association_id": id + ":" + run, "object_id": id, "agent_run_id": run, "quality": "explicit", "source": "validated-grant", "start_time": start, "end_time": end}))
 		}
 		for i, at := range []string{start, end} {
 			r := record("sample", map[string]any{"object_id": id, "cpu_ns": i * cpu, "monotonic_ns": i*10000000000 + 1, "boot_id": "boot", "counter_generation": id + ":generation", "memory_bytes": 100})
@@ -76,7 +76,7 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 			t.Fatalf("sample identity lost: %+v", entry)
 		}
 		for _, edge := range entry["associations"].([]map[string]any) {
-			if edge["agent_run_id"] == "" || edge["source"] != "fixture-explicit" || edge["quality"] != "explicit" {
+			if edge["agent_run_id"] == "" || edge["source"] != "validated-grant" || edge["quality"] != "explicit" {
 				t.Fatalf("association provenance lost: %+v", edge)
 			}
 		}

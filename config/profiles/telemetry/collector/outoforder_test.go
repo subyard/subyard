@@ -23,14 +23,14 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 		return r
 	}
 	initial := []Record{
-		makeRecord("run", initialTime, map[string]any{"agent_run_id": "unordered", "state": "starting", "agent": "fixture", "agent_version": "1.2.3", "project_id": "project", "session_id": "session", "parent_run_id": "parent"}),
+		makeRecord("run", initialTime, map[string]any{"agent_run_id": "unordered", "state": "starting", "agent": "other", "agent_version": "1.2.3", "project_id": "project", "session_id": "session", "parent_run_id": "parent"}),
 		makeRecord("allocation", initialTime, map[string]any{"object_id": "vm", "state": "held", "parent_object_id": "owner", "accounting": "qemu-process-and-threads", "allocated_cpu": 4, "allocated_memory_bytes": 4096, "allocated_disk_bytes": 8192, "acquired_at": initialTime}),
-		makeRecord("process", initialTime, map[string]any{"object_id": "process", "state": "running", "parent_object_id": "old-parent", "accounting": "old-accounting", "pid": 123}),
+		makeRecord("process", initialTime, map[string]any{"object_id": "process", "state": "running", "parent_object_id": "old-parent", "accounting": "inclusive", "pid": 123}),
 	}
 	final := []Record{
 		makeRecord("run", finalTime, map[string]any{"agent_run_id": "unordered", "state": "resources_complete", "exit_code": 7}),
 		makeRecord("allocation", finalTime, map[string]any{"object_id": "vm", "state": "ended", "stopped_at": finalTime}),
-		makeRecord("process", finalTime, map[string]any{"object_id": "process", "state": "ended", "parent_object_id": "new-parent", "accounting": "new-accounting"}),
+		makeRecord("process", finalTime, map[string]any{"object_id": "process", "state": "ended", "parent_object_id": "new-parent", "accounting": "direct"}),
 	}
 	for _, reverse := range []bool{false, true} {
 		for _, transport := range []string{"ingest", "outbox", "replay"} {
@@ -99,12 +99,12 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 						t.Errorf("source time rolled back: %s", at)
 					}
 				}
-				check("SELECT body,source_time FROM runs WHERE agent_run_id='unordered'", map[string]string{"state": "resources_complete", "agent": "fixture", "agent_version": "1.2.3", "project_id": "project", "session_id": "session", "parent_run_id": "parent", "exit_code": "7"})
+				check("SELECT body,source_time FROM runs WHERE agent_run_id='unordered'", map[string]string{"state": "resources_complete", "agent": "other", "agent_version": "1.2.3", "project_id": "project", "session_id": "session", "parent_run_id": "parent", "exit_code": "7"})
 				allocation := map[string]string{"state": "ended", "allocated_cpu": "4", "allocated_memory_bytes": "4096", "allocated_disk_bytes": "8192", "acquired_at": "2026-10-01T01:00:00.000000000Z", "stopped_at": "2026-10-01T02:00:00.000000000Z"}
 				check("SELECT body,source_time FROM allocations WHERE object_id='vm'", allocation)
 				check("SELECT body,source_time FROM objects WHERE object_id='vm'", allocation)
-				check("SELECT body,source_time FROM objects WHERE object_id='process'", map[string]string{"state": "ended", "pid": "123", "parent_object_id": "new-parent", "accounting": "new-accounting"})
-				for object, want := range map[string][2]string{"vm": {"owner", "qemu-process-and-threads"}, "process": {"new-parent", "new-accounting"}} {
+				check("SELECT body,source_time FROM objects WHERE object_id='process'", map[string]string{"state": "ended", "pid": "123", "parent_object_id": "new-parent", "accounting": "direct"})
+				for object, want := range map[string][2]string{"vm": {"owner", "qemu-process-and-threads"}, "process": {"new-parent", "direct"}} {
 					var parent, accounting string
 					if err := s.db.QueryRow("SELECT parent_object_id,accounting FROM objects WHERE object_id=?", object).Scan(&parent, &accounting); err != nil || parent != want[0] || accounting != want[1] {
 						t.Errorf("typed %s: parent=%q accounting=%q err=%v", object, parent, accounting, err)

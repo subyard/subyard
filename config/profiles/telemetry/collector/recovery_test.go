@@ -103,7 +103,7 @@ func TestReadOnlyAuthorizerAndDeadline(t *testing.T) {
 func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
 	s := fixtureStore(t)
 	ctx := context.Background()
-	r := record("run", map[string]any{"agent_run_id": "r", "agent": "fixture"})
+	r := record("run", map[string]any{"agent_run_id": "r", "agent": "other"})
 	scope := record("scope", map[string]any{"object_id": "obj", "agent_run_id": "r", "quality": "explicit", "accounting": "inclusive"})
 	scope.SourceTime = "2026-01-01T00:00:00Z"
 	a := record("sample", map[string]any{"object_id": "obj", "cpu_ns": json.Number("9223372036854775805"), "monotonic_ns": json.Number("10000000000000000000"), "boot_id": "boot", "generation": "g"})
@@ -131,7 +131,7 @@ func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
 	if fmt.Sprint(entry["cpu_ns_delta"]) != "1" {
 		t.Fatalf("precision lost: %+v", entry)
 	}
-	if result["run"].(map[string]any)["agent"] != "fixture" {
+	if result["run"].(map[string]any)["agent"] != "other" {
 		t.Fatal("lifecycle update erased run metadata")
 	}
 	var exported bytes.Buffer
@@ -149,8 +149,8 @@ func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
 	if err = s.Ingest(ctx, []Record{r}); err == nil {
 		t.Fatal("conflicting replay identity silently discarded")
 	}
-	start := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "membership", "start_time": "2026-01-01T00:00:00Z", "quality": "explicit"})
-	end := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "membership", "end_time": "2026-01-01T00:00:03Z", "quality": "explicit"})
+	start := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "managed_scope_membership", "start_time": "2026-01-01T00:00:00Z", "quality": "explicit"})
+	end := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "managed_scope_membership", "end_time": "2026-01-01T00:00:03Z", "quality": "explicit"})
 	if err = s.Ingest(ctx, []Record{end, start}); err != nil {
 		t.Fatal(err)
 	}

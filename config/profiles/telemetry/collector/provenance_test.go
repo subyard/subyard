@@ -72,7 +72,7 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 			span.SetName("custom.operation")
 			span.Attributes().PutStr("custom.safe", "safe-metadata")
 			raw, _ := r.MarshalProto()
-			e := Envelope{Kind: "otlp/traces", Encoding: "otlp/traces", SourceID: "fixture", SourceVersion: "fixture/1", Protobuf: raw}
+			e := Envelope{Kind: "otlp/traces", Encoding: "otlp/traces", SourceID: "fixture", SourceVersion: "fixture-1", Protobuf: raw}
 			if err := SanitizeEnvelope(&e, p); err != nil {
 				t.Fatal(err)
 			}
@@ -182,7 +182,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := fixtureStore(t)
 	r := record("gap", map[string]any{"reason": "/home/fixture/private-notes", "status": "fixture@example.invalid", "observed_time": "not a timestamp"})
-	r.SourceID = strings.Repeat("s", 512)
+	r.SourceID = strings.Repeat("s", 128)
 	r.SourceVersion = "private version text"
 	if err := store.Ingest(ctx, []Record{r}); err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	for _, sourceTime := range []string{"private time text", "2026-01-01T01:00:00+01:00", ""} {
 		if err := encoder.Encode(Envelope{
 			Schema: ExportSchema, OriginID: "fixture", EventID: newID(),
-			SourceID: "fixture", SourceVersion: "fixture/1", SourceTime: sourceTime,
+			SourceID: "fixture", SourceVersion: "fixture-1", SourceTime: sourceTime,
 			Kind: "otlp/traces", Encoding: "otlp/traces", Protobuf: protobuf,
 		}); err != nil {
 			t.Fatal(err)
@@ -221,7 +221,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	}
 	for i, want := range []string{"", "2026-01-01T00:00:00.000000000Z", ""} {
 		var envelope Envelope
-		if err := decoder.Decode(&envelope); err != nil || envelope.SourceTime != want || envelope.SourceVersion != "fixture/1" || (envelope.Redactions == 1) != (i == 0) {
+		if err := decoder.Decode(&envelope); err != nil || envelope.SourceTime != want || envelope.SourceVersion != "fixture-1" || (envelope.Redactions == 1) != (i == 0) {
 			t.Fatalf("raw source metadata mismatch at row %d: redactions=%d, err=%v", i, envelope.Redactions, err)
 		}
 	}
@@ -259,7 +259,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	}
 }
 
-func TestReplayLegacyOutOfRangeSourceTime(t *testing.T) {
+func TestReplayLegacyOutOfRangeTimestamps(t *testing.T) {
 	ctx := context.Background()
 	store := fixtureStore(t)
 	r := record("gap", map[string]any{"reason": "source_offline"})
@@ -269,7 +269,8 @@ func TestReplayLegacyOutOfRangeSourceTime(t *testing.T) {
 	}
 	legacy := Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
 		SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: legacyTime.UTC().Format(timestampLayout),
-		Kind: r.Kind, Encoding: "json", PolicyVersion: PolicyVersion, Body: json.RawMessage(`{"reason":"source_offline"}`)}
+		ReceivedTime: legacyTime.UTC().Format(timestampLayout),
+		Kind:         r.Kind, Encoding: "json", PolicyVersion: PolicyVersion, Body: json.RawMessage(`{"reason":"source_offline"}`)}
 	if err := store.submit(ctx, []Envelope{legacy}); err != nil {
 		t.Fatal(err)
 	}
@@ -288,8 +289,12 @@ func TestReplayLegacyOutOfRangeSourceTime(t *testing.T) {
 		}
 	}
 	var count int
-	var sourceTime string
-	if err := destination.db.QueryRow("SELECT count(*), min(source_time) FROM records").Scan(&count, &sourceTime); err != nil || count != 2 || sourceTime != unknownSourceTime {
-		t.Fatalf("replayed count=%d, source time=%s, err=%v", count, sourceTime, err)
+	var sourceTime, receivedTime string
+	var redactions int
+	if err := destination.db.QueryRow("SELECT source_time, received_time, redactions FROM records WHERE event_id=?", legacy.EventID).Scan(&sourceTime, &receivedTime, &redactions); err != nil || sourceTime != unknownSourceTime || receivedTime != unknownSourceTime || redactions != 2 {
+		t.Fatalf("source time=%s, receive time=%s, redactions=%d, err=%v", sourceTime, receivedTime, redactions, err)
+	}
+	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("replayed count=%d, err=%v", count, err)
 	}
 }

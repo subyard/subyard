@@ -489,7 +489,7 @@ func project(tx *sql.Tx, e Envelope) error {
 			source_time=max(runs.source_time,excluded.source_time)`, run, body, e.SourceTime)
 		return err
 	case "scope", "process", "allocation":
-		if !validID(object) {
+		if !objectIDPattern.MatchString(object) {
 			return errors.New("object identity missing")
 		}
 		_, err := tx.Exec(`INSERT INTO objects VALUES(?,?,?,?,?,?) ON CONFLICT(object_id) DO UPDATE SET
@@ -516,13 +516,13 @@ func project(tx *sql.Tx, e Envelope) error {
 		}
 		return err
 	case "sample":
-		if !validID(object) {
+		if !objectIDPattern.MatchString(object) {
 			return errors.New("sample object missing")
 		}
 		_, err := tx.Exec("INSERT INTO samples VALUES(?,?,?,?,?)", e.OriginID, e.EventID, object, e.SourceTime, body)
 		return err
 	case "association":
-		if !validID(object) {
+		if !objectIDPattern.MatchString(object) {
 			return errors.New("association object missing")
 		}
 		id := stringValue(b, "association_id")
@@ -614,7 +614,8 @@ func (s *Store) Replay(ctx context.Context, r io.Reader) error {
 		if e.ReceivedTime != "" {
 			e.ReceivedTime = canonicalTimestamp(e.ReceivedTime)
 			if e.ReceivedTime == "" {
-				return errors.New("invalid export receive time")
+				e.ReceivedTime = unknownSourceTime
+				e.Redactions++
 			}
 		}
 		if err = sanitizeReplayPayload(&e); err != nil {
@@ -658,9 +659,11 @@ func sanitizeReplayPayload(e *Envelope) error {
 		if e.Kind != e.Encoding {
 			return errors.New("export kind does not match encoding")
 		}
-		var removed int64
-		e.SourceVersion, removed = sanitizeSourceVersion(e.SourceVersion)
-		e.Redactions += removed
+		if e.SourceVersion != nativeSourceVersion {
+			var removed int64
+			e.SourceVersion, removed = sanitizeSourceVersion(e.SourceVersion)
+			e.Redactions += removed
+		}
 		if e.SourceTime != "" {
 			e.SourceTime = canonicalTimestamp(e.SourceTime)
 			if e.SourceTime == "" {

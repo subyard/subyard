@@ -421,6 +421,18 @@ class Resources(unittest.TestCase):
         self.assertIsNone(body['reserved_disk_bytes'])
         self.assertEqual(body['reservation_semantics'], 'allocated_virtual_capacity_held')
 
+    def test_android_allocation_outbox_drops_private_purpose_and_cpu(self):
+        config = dict(self.config, kind='android', associations={})
+        private = '/home/fixture/private-notes'
+        allocation = dict(slot_id='001', generation=2, state='held',
+                          owner=dict(purpose=private), allocated_cpu=private, requested_cpu=2)
+        event = dict(event_id=EVENT, source_time=NOW, phase='baseline', allocation=allocation)
+        self.assertTrue(resources.emit_event(self.root, config, event))
+        body = self.rows()[0]['body']
+        for field in ('purpose', 'allocated_cpu', 'reserved_cpu'):
+            self.assertNotIn(field, body)
+        self.assertEqual(body['requested_cpu'], 2)
+
     def test_cursor_not_advanced_on_failed_durable_admission(self):
         with patch.object(records, 'emit', return_value=False):
             self.assertFalse(sources.consume(self.root, self.config, self.page()))

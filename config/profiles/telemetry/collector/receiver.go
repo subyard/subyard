@@ -180,6 +180,8 @@ type signalConsumers struct {
 
 type runEvidenceKey struct{}
 
+const nativeSourceVersion = "collector-pdata/1.69.0"
+
 func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (context.Context, error) {
 	headerRun, _ := ctx.Value(runContextKey{}).(string)
 	resourceRun := ""
@@ -212,7 +214,7 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (co
 }
 func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 	submit := func(ctx context.Context, kind string, data []byte, relations []Envelope) error {
-		e := Envelope{Kind: "otlp/" + kind, Encoding: "otlp/" + kind, SourceID: "native-otlp", SourceVersion: "collector-pdata/1.69.0", Protobuf: data}
+		e := Envelope{Kind: "otlp/" + kind, Encoding: "otlp/" + kind, SourceID: "native-otlp", SourceVersion: nativeSourceVersion, Protobuf: data}
 		if err := SanitizeEnvelope(&e, p); err != nil {
 			return status.Error(codes.InvalidArgument, "invalid telemetry data")
 		}

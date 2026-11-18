@@ -32,7 +32,7 @@ func fixtureStore(t *testing.T) *Store {
 	return s
 }
 func record(kind string, body map[string]any) Record {
-	return Record{Schema: RecordSchema, SourceID: "fixture", EventID: newID(), SourceVersion: "fixture/1", SourceTime: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Body: body}
+	return Record{Schema: RecordSchema, SourceID: "fixture", EventID: newID(), SourceVersion: "fixture-1", SourceTime: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Body: body}
 }
 func TestStoreAtomicReplayAndIdenticalEvents(t *testing.T) {
 	s := fixtureStore(t)
