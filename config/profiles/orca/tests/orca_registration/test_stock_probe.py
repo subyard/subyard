@@ -179,7 +179,8 @@ class StockProbeTests(unittest.TestCase):
             start.assert_not_called()
             self.assertEqual(1, run.call_count)
             environment = run.call_args.kwargs["env"]
-            self.assertEqual({"PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"},
+            self.assertEqual({"PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                              "ORCA_ELECTRON_NO_SANDBOX"},
                              set(environment))
             self.assertNotEqual(str(Path.home()), environment["HOME"])
 
@@ -204,7 +205,7 @@ class StockProbeTests(unittest.TestCase):
             output = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
             with contextlib.redirect_stderr(output):
                 self.assertEqual(1, probe.stock_probe(arguments))
-            self.assertNotIn("ORCA_ELECTRON_NO_SANDBOX", cli.call_args.kwargs["env"])
+            self.assertEqual("1", cli.call_args.kwargs["env"]["ORCA_ELECTRON_NO_SANDBOX"])
         output.flush()
         text = output.buffer.getvalue().decode("ascii")
         lines = text.splitlines()
@@ -224,7 +225,7 @@ class StockProbeTests(unittest.TestCase):
             1, [], output=b"synthetic-private-payload")):
             with contextlib.redirect_stderr(io.StringIO()) as output:
                 self.assertEqual(1, probe.stock_probe(arguments))
-            self.assertEqual("orca-stock-probe: version: failed\n", output.getvalue())
+            self.assertEqual("orca-stock-probe: version: stock CLI exited with status 1\n", output.getvalue())
 
     def test_isolation_recovery_preserves_full_document_for_both_values(self):
         with tempfile.TemporaryDirectory() as directory:
