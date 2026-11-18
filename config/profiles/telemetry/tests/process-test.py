@@ -47,7 +47,7 @@ class ProcessTest(unittest.TestCase):
                 writer.execute('CREATE TABLE samples(object_id TEXT,source_time INTEGER,body TEXT)')
                 def sample(suffix, at, final):
                     writer.execute('INSERT INTO samples VALUES(?,?,?)',
-                                   ('run'+suffix, at, json.dumps(dict(populated=False, final=final))))
+                                   (scope_fixture.stored_id(data, 'run'+suffix), at, json.dumps(dict(populated=False, final=final))))
                     writer.commit()
                 sample(':scope', 0, False)
                 sample(':scope', 1, True)
@@ -58,7 +58,7 @@ class ProcessTest(unittest.TestCase):
                      patch.object(scope_fixture.time, 'sleep', side_effect=commit_workload) as sleep:
                     scope_fixture.wait_for_short_run_samples(data, 'run')
                 self.assertEqual(sleep.call_count, 2, 'scope final must not admit a missing workload endpoint')
-                writer.execute("DELETE FROM samples WHERE object_id='run:workload' AND source_time=1")
+                writer.execute("DELETE FROM samples WHERE object_id=? AND source_time=1", (scope_fixture.stored_id(data, "run:workload"),))
                 writer.commit()
                 with patch.object(scope_fixture.time, 'monotonic', side_effect=(0, 0, 40)), \
                      patch.object(scope_fixture.time, 'sleep') as sleep:

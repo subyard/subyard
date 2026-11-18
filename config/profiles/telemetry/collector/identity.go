@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"syscall"
 
@@ -20,39 +19,42 @@ const identityKeyFile = ".identity-key"
 
 type identityKey []byte
 
-// Keep only the opaque formats produced by the profile, collector and native
-// session exporters. Other identifiers are pseudonymized in the local store.
-const uuidPattern = `[0-9a-f]{8}-[0-9a-f]{4}-[47][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}`
+type identity func(string) string
 
-var opaqueID = regexp.MustCompile(`^(?:` + uuidPattern + `(?::(?:scope|workload))?|[0-9a-f]{32}|[0-9a-f]{64}|(?:allocation|association|id):[0-9a-f]{64}|resource-[0-9a-f]{64}|[0-9a-f]{64}:` + uuidPattern + `:[0-9a-f]{12}:[0-9]{1,20}:[0-9]{1,20})$`)
-var legacyID = regexp.MustCompile(`^[A-Za-z0-9_.:/-]{1,512}$`)
+func (key identityKey) digest(value string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = io.WriteString(mac, value)
+	return mac.Sum(nil)
+}
 
-func (key identityKey) id(value string) string {
-	if opaqueID.MatchString(value) {
+func (key identityKey) legacy(value string) string {
+	if recordPatterns["legacy_opaque"].MatchString(value) {
 		return value
 	}
+	return "id:" + hex.EncodeToString(key.digest(value))
+}
+
+func (key identityKey) id(value string) string {
 	if !legacyID.MatchString(value) {
 		return ""
 	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = io.WriteString(mac, value)
-	return "id:" + hex.EncodeToString(mac.Sum(nil))
+	// The prior producer may already have transformed the input. Either
+	// spelling has the same preimage here. Neither spelling bypasses HMAC.
+	return "h1:" + hex.EncodeToString(key.digest(key.legacy(value)))
 }
 
-// Projection relationships are derived only from already opaque references.
-func projectionID(parts ...string) string {
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "association:" + hex.EncodeToString(sum[:])
+func (key identityKey) projectionID(parts ...string) string {
+	return "association:" + hex.EncodeToString(key.digest(strings.Join(parts, "\x00")))
 }
 
-func (key identityKey) source(value string) string {
-	switch value {
-	case "native-otlp", "collector:otlp-correlation":
-		return value
-	default:
-		return key.id(value)
+func (id identity) origin(origin, source string) string {
+	if origin == "producer:"+source {
+		return "producer:" + id(source)
 	}
+	return id(origin)
 }
+
+func keepID(value string) string { return value }
 
 func readIdentityKey(dir string) (identityKey, error) {
 	path := filepath.Join(dir, identityKeyFile)
@@ -116,13 +118,4 @@ func loadIdentityKey(dir string) (identityKey, error) {
 		return nil, err
 	}
 	return key, parent.Sync()
-}
-
-func (key identityKey) origin(origin, source string) string {
-	if strings.HasPrefix(origin, "producer:") && strings.TrimPrefix(origin, "producer:") == source {
-		if source = key.source(source); source != "" {
-			return "producer:" + source
-		}
-	}
-	return key.id(origin)
 }

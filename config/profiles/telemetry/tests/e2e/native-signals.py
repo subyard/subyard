@@ -46,9 +46,14 @@ def claude_command(command, token, **kwargs):
         raise
 
 
+def stored_id(data, value):
+    import records
+    return records.opaque_id(records.identity_key(data), value)
+
+
 def wait_claude_sessions(data, expected, result, token):
     try:
-        return wait_sessions(data, 'claude', expected, stderr=result.stderr)
+        return wait_sessions(data, 'claude', {stored_id(data, value) for value in expected}, stderr=result.stderr)
     except AssertionError:
         claude_failure('claude-session-binding', result, token)
         raise
@@ -153,7 +158,8 @@ def wait_sessions(data, agent, expected, stderr=b''):
 def wait_shared_scope(data, run_id, timeout=40):
     deadline = time.monotonic()+timeout
     while time.monotonic() < deadline:
-        rows = query(data, "SELECT json_extract(body,'$.shared') FROM objects WHERE object_id=?", (run_id+':scope',))
+        rows = query(data, """SELECT json_extract(objects.body,'$.shared') FROM objects JOIN associations USING(object_id)
+                             WHERE associations.agent_run_id=? AND objects.kind='scope' AND objects.accounting='inclusive'""", (run_id,))
         if rows:
             shared = 'true' if rows[0][0] == 1 else 'false' if rows[0][0] == 0 else 'missing_or_invalid'
             if shared == 'true':
@@ -572,7 +578,7 @@ def exercise(args):
         if agent != 'codex':
             require_command_success(receipt, agent)
         runs = (wait_claude_sessions(args.data_dir, {session}, result, token) if agent == 'claude'
-                else wait_sessions(args.data_dir, agent, {session}))
+                else wait_sessions(args.data_dir, agent, {stored_id(args.data_dir, session)}))
         assert len(runs) == 1
         run = next(iter(runs))
         deadline = time.monotonic()+45
@@ -582,7 +588,7 @@ def exercise(args):
                 break
             time.sleep(0.2)
         assert allocations, agent+': actual native tool acquire did not bind its allocation'
-        assert json.loads(query(args.data_dir, 'SELECT body FROM runs WHERE agent_run_id=?', (run,))[0][0])['project_id'] == 'telemetry-fixture'
+        assert json.loads(query(args.data_dir, 'SELECT body FROM runs WHERE agent_run_id=?', (run,))[0][0])['project_id'] == stored_id(args.data_dir, 'telemetry-fixture')
         identities.append(dict(agent=agent, agent_run_id=run, session_id=session, object_ids=[row[0] for row in allocations]))
     assert identities[0]['agent_run_id'] != identities[1]['agent_run_id']
     assert set(identities[0]['object_ids']).isdisjoint(identities[1]['object_ids']), 'independent acquisitions reused one resource generation'
@@ -639,6 +645,8 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
             client.close()
         time.sleep(4)
         tool_run = (project/(name+'.run')).read_text().strip()
+        if tool_run:
+            tool_run = stored_id(data, tool_run)
         deadline = time.monotonic()+30
         while tool_run and not traces(tool_run) > counts.get(tool_run, 0) and time.monotonic() < deadline:
             time.sleep(0.5)
@@ -724,7 +732,7 @@ def main():
         app.close()
         provider.shutdown()
         provider.server_close()
-    runs = wait_sessions(args.data_dir, 'codex', threads)
+    runs = wait_sessions(args.data_dir, 'codex', {stored_id(args.data_dir, thread) for thread in threads})
     assert len(runs) == 1, 'two backend sessions must retain the one real shared backend run'
     run_id = next(iter(runs))
     wait_shared_scope(args.data_dir, run_id)

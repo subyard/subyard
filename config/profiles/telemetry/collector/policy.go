@@ -2,6 +2,7 @@ package collector
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,7 +24,7 @@ var capturePolicyVersion = regexp.MustCompile(`^subyard\.telemetry\.capture/v1(?
 func policyFingerprint(p Policy) string {
 	data, _ := json.Marshal(p)
 	// Bind the closed schema as well as the configurable subset.
-	return fmt.Sprintf("%s:%x", p.Schema, sha256.Sum256(append([]byte("otlp/closed-fields/v1\x00"), data...)))
+	return fmt.Sprintf("%s:%x", PolicyVersion, sha256.Sum256(append([]byte("otlp/closed-fields/v2\x00"), data...)))
 }
 
 type Policy struct {
@@ -107,26 +108,26 @@ var wireMessages = map[string]string{
 	"scopeLogs":            "scope:scope logRecords:*logRecord",
 	"scopeMetrics":         "scope:scope metrics:*metric",
 	"scopeSpans":           "scope:scope spans:*span",
-	"resource":             "attributes:*attribute droppedAttributesCount:u32",
-	"scope":                "name:scopeName version:version attributes:*attribute droppedAttributesCount:u32",
-	"logRecord":            "timeUnixNano:u64 observedTimeUnixNano:u64 severityNumber:severity attributes:*attribute droppedAttributesCount:u32 flags:u32 traceId:traceID spanId:spanID eventName:eventName",
-	"span":                 "traceId:traceID spanId:spanID parentSpanId:spanID name:spanName kind:spanKind startTimeUnixNano:u64 endTimeUnixNano:u64 attributes:*attribute droppedAttributesCount:u32 events:*event droppedEventsCount:u32 links:*link droppedLinksCount:u32 status:status flags:u32",
-	"event":                "timeUnixNano:u64 name:eventName attributes:*attribute droppedAttributesCount:u32",
-	"link":                 "traceId:traceID spanId:spanID attributes:*attribute droppedAttributesCount:u32 flags:u32",
-	"status":               "code:statusCode",
+	"resource":             "attributes:*attribute droppedAttributesCount:number",
+	"scope":                "name:scopeName version:version attributes:*attribute droppedAttributesCount:number",
+	"logRecord":            "timeUnixNano:number observedTimeUnixNano:number severityNumber:number attributes:*attribute droppedAttributesCount:number flags:number traceId:traceID spanId:spanID eventName:eventName",
+	"span":                 "traceId:traceID spanId:spanID parentSpanId:spanID name:spanName kind:number startTimeUnixNano:number endTimeUnixNano:number attributes:*attribute droppedAttributesCount:number events:*event droppedEventsCount:number links:*link droppedLinksCount:number status:status flags:number",
+	"event":                "timeUnixNano:number name:eventName attributes:*attribute droppedAttributesCount:number",
+	"link":                 "traceId:traceID spanId:spanID attributes:*attribute droppedAttributesCount:number flags:number",
+	"status":               "code:number",
 	"metric":               "name:metricName unit:unit metadata:*attribute gauge:gauge sum:sum histogram:histogram exponentialHistogram:exponentialHistogram summary:summary",
 	"gauge":                "dataPoints:*numberPoint",
-	"sum":                  "dataPoints:*numberPoint aggregationTemporality:temporality isMonotonic:bool",
-	"histogram":            "dataPoints:*histogramPoint aggregationTemporality:temporality",
-	"exponentialHistogram": "dataPoints:*exponentialPoint aggregationTemporality:temporality",
+	"sum":                  "dataPoints:*numberPoint aggregationTemporality:number isMonotonic:bool",
+	"histogram":            "dataPoints:*histogramPoint aggregationTemporality:number",
+	"exponentialHistogram": "dataPoints:*exponentialPoint aggregationTemporality:number",
 	"summary":              "dataPoints:*summaryPoint",
-	"numberPoint":          "attributes:*attribute startTimeUnixNano:u64 timeUnixNano:u64 flags:u32 exemplars:*exemplar asInt:i64 asDouble:double",
-	"histogramPoint":       "attributes:*attribute startTimeUnixNano:u64 timeUnixNano:u64 flags:u32 exemplars:*exemplar count:u64 sum:double min:double max:double bucketCounts:*u64 explicitBounds:*double",
-	"exponentialPoint":     "attributes:*attribute startTimeUnixNano:u64 timeUnixNano:u64 flags:u32 exemplars:*exemplar count:u64 sum:double min:double max:double scale:i32 zeroCount:u64 zeroThreshold:double positive:buckets negative:buckets",
-	"summaryPoint":         "attributes:*attribute startTimeUnixNano:u64 timeUnixNano:u64 flags:u32 count:u64 sum:double quantileValues:*quantile",
-	"exemplar":             "filteredAttributes:*attribute timeUnixNano:u64 asInt:i64 asDouble:double traceId:traceID spanId:spanID",
-	"buckets":              "offset:i32 bucketCounts:*u64",
-	"quantile":             "quantile:double value:double",
+	"numberPoint":          "attributes:*attribute startTimeUnixNano:number timeUnixNano:number flags:number exemplars:*exemplar asInt:number asDouble:number",
+	"histogramPoint":       "attributes:*attribute startTimeUnixNano:number timeUnixNano:number flags:number exemplars:*exemplar count:number sum:number min:number max:number bucketCounts:*number explicitBounds:*number",
+	"exponentialPoint":     "attributes:*attribute startTimeUnixNano:number timeUnixNano:number flags:number exemplars:*exemplar count:number sum:number min:number max:number scale:number zeroCount:number zeroThreshold:number positive:buckets negative:buckets",
+	"summaryPoint":         "attributes:*attribute startTimeUnixNano:number timeUnixNano:number flags:number count:number sum:number quantileValues:*quantile",
+	"exemplar":             "filteredAttributes:*attribute timeUnixNano:number asInt:number asDouble:number traceId:traceID spanId:spanID",
+	"buckets":              "offset:number bucketCounts:*number",
+	"quantile":             "quantile:number value:number",
 }
 
 var wireFields = func() map[string]map[string]string {
@@ -142,9 +143,11 @@ var wireFields = func() map[string]map[string]string {
 }()
 
 type wirePolicy struct {
-	key     identityKey
-	policy  Policy
-	removed int64
+	key         identityKey
+	id          identity
+	rekeyBinary bool
+	policy      Policy
+	removed     int64
 }
 
 func (p *wirePolicy) clean(rule string, value any) (any, bool) {
@@ -181,8 +184,13 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 	switch rule {
 	case "attribute":
 		return p.attribute(value)
-	case "counter", "i64", "u64", "i32", "u32", "severity", "spanKind", "statusCode", "temporality", "double":
-		return value, wireNumber(rule, value)
+	case "number":
+		// Numeric wire fields came from the typed pdata encoder.
+		return value, true
+	case "counter":
+		text, _ := value.(string)
+		n, err := strconv.ParseInt(text, 10, 64)
+		return value, err == nil && n >= 0
 	case "bool":
 		_, ok := value.(bool)
 		return value, ok
@@ -195,12 +203,12 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 	case "version":
 		return s, versionPattern.MatchString(s)
 	case "id":
-		s = p.key.id(s)
+		s = p.id(s)
 		return s, s != ""
 	case "traceID":
-		return s, traceIDPattern.MatchString(s)
+		return p.binaryID(s, 16)
 	case "spanID":
-		return s, spanIDPattern.MatchString(s)
+		return p.binaryID(s, 8)
 	case "spanName":
 		return s, slices.Contains(wireVocabulary[rule], s) && slices.Contains(p.policy.SpanNames, s)
 	case "eventName":
@@ -210,57 +218,12 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 	}
 }
 
-var traceIDPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
-var spanIDPattern = regexp.MustCompile(`^[a-f0-9]{16}$`)
-
-func wireNumber(rule string, value any) bool {
-	var text string
-	switch n := value.(type) {
-	case json.Number:
-		text = string(n)
-	case string:
-		switch rule {
-		case "counter", "i64", "u64":
-			text = n
-		case "double":
-			return n == "NaN" || n == "Infinity" || n == "-Infinity"
-		default:
-			return false
-		}
-	default:
-		return false
+func (p *wirePolicy) binaryID(value string, size int) (string, bool) {
+	if value == "" || value == strings.Repeat("0", size*2) || !p.rekeyBinary {
+		return value, true
 	}
-	switch rule {
-	case "double":
-		_, err := strconv.ParseFloat(text, 64)
-		return err == nil
-	case "i64", "i32":
-		bits := 64
-		if rule == "i32" {
-			bits = 32
-		}
-		_, err := strconv.ParseInt(text, 10, bits)
-		return signedDecimal.MatchString(text) && err == nil
-	default:
-		n, err := strconv.ParseUint(text, 10, 64)
-		if err != nil || !unsignedDecimal.MatchString(text) {
-			return false
-		}
-		switch rule {
-		case "counter":
-			return n <= 1<<63-1
-		case "u32":
-			return n <= 1<<32-1
-		case "severity":
-			return n <= 24
-		case "spanKind":
-			return n <= 5
-		case "statusCode", "temporality":
-			return n <= 2
-		default:
-			return rule == "u64"
-		}
-	}
+	sum := p.key.digest("otlp-binary-id\x00" + value)
+	return hex.EncodeToString(sum[:size]), true
 }
 
 func (p *wirePolicy) attributeRule(name string) string {
@@ -299,40 +262,57 @@ type otlpRequest interface {
 	MarshalProto() ([]byte, error)
 }
 
-func (key identityKey) sanitizeOTLP(e *Envelope, p Policy) error {
-	var input, output otlpRequest
-	switch e.Encoding {
+func otlpRequests(encoding string) (input, output otlpRequest, err error) {
+	switch encoding {
 	case "otlp/logs":
-		input, output = plogotlp.NewExportRequest(), plogotlp.NewExportRequest()
+		return plogotlp.NewExportRequest(), plogotlp.NewExportRequest(), nil
 	case "otlp/metrics":
-		input, output = pmetricotlp.NewExportRequest(), pmetricotlp.NewExportRequest()
+		return pmetricotlp.NewExportRequest(), pmetricotlp.NewExportRequest(), nil
 	case "otlp/traces":
-		input, output = ptraceotlp.NewExportRequest(), ptraceotlp.NewExportRequest()
+		return ptraceotlp.NewExportRequest(), ptraceotlp.NewExportRequest(), nil
 	default:
-		return errors.New("unsupported OTLP encoding")
+		return nil, nil, errors.New("unsupported OTLP encoding")
 	}
-	if err := input.UnmarshalProto(e.Protobuf); err != nil {
-		return err
+}
+
+func transformOTLP(encoding string, protobuf []byte, transform func(map[string]any) any) ([]byte, error) {
+	input, output, err := otlpRequests(encoding)
+	if err != nil {
+		return nil, err
+	}
+	if err := input.UnmarshalProto(protobuf); err != nil {
+		return nil, err
 	}
 	data, err := input.MarshalJSON()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	body, err := decodeBody(data)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	policy := wirePolicy{key: key, policy: p}
-	clean, _ := policy.clean(e.Encoding, body)
-	data, err = json.Marshal(clean)
+	data, err = json.Marshal(transform(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err = output.UnmarshalJSON(data); err != nil {
-		return err
+		return nil, err
 	}
-	e.Protobuf, err = output.MarshalProto()
+	return output.MarshalProto()
+}
+
+func (key identityKey) sanitizeOTLP(e *Envelope, p Policy, id identity, rekeyBinary bool) ([]Envelope, error) {
+	policy := wirePolicy{key: key, id: id, policy: p, rekeyBinary: rekeyBinary}
+	var relations []Envelope
+	protobuf, err := transformOTLP(e.Encoding, e.Protobuf, func(body map[string]any) any {
+		clean, _ := policy.clean(e.Encoding, body)
+		if e.native {
+			relations = sessionEnvelopes(clean.(map[string]any))
+		}
+		return clean
+	})
+	e.Protobuf = protobuf
 	e.PolicyVersion = policyFingerprint(p)
 	e.Redactions += policy.removed
-	return err
+	return relations, err
 }

@@ -71,7 +71,7 @@ func TestCurrentGaugesRequireLiveObjectAndSource(t *testing.T) {
 					t.Fatal(err)
 				}
 				if test.oldReceipt {
-					if _, err := s.db.Exec("UPDATE records SET received_time=? WHERE event_id=?", at(-10), gap.EventID); err != nil {
+					if _, err := s.db.Exec("UPDATE records SET received_time=? WHERE event_id=?", at(-10), s.key.id(gap.EventID)); err != nil {
 						t.Fatal(err)
 					}
 				}

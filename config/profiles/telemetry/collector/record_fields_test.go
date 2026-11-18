@@ -10,13 +10,14 @@ import (
 
 func TestRecordFieldParity(t *testing.T) {
 	const privatePath = "/home/fixture/private-notes"
+	credential := strings.Repeat("6a", 32)
 	const timestamp = "2026-01-01T00:00:00.000000000Z"
 	var inputs []map[string]any
 	for field, rule := range bodyRules {
 		// Walk every field, including IDs normally mandatory for other kinds.
-		for _, path := range []string{privatePath, "private/notes", "private notes"} {
+		for _, path := range []string{privatePath, "private/notes", "private notes", credential} {
 			r := record("gap", map[string]any{field: path})
-			clean, removed, err := (identityKey{}).record(r)
+			clean, removed, err := identity((identityKey{}).id).record(r)
 			if rule.kind == "id" && legacyID.MatchString(path) {
 				if err != nil || clean.Body[field] != (identityKey{}).id(path) {
 					t.Errorf("%s: legacy path identifier was not pseudonymized: %v", field, err)
@@ -26,7 +27,7 @@ func TestRecordFieldParity(t *testing.T) {
 			}
 			inputs = append(inputs, r.Body)
 		}
-		values := []any{nil, true, 4, -1, 1.5, "4", "identifier", timestamp,
+		values := []any{nil, true, 4, -1, 1.5, "4", "+00000000000000000000000000000004", "identifier", timestamp,
 			"9999-12-31T23:59:59-01:00", json.Number("18446744073709551615"), json.Number("18446744073709551616"),
 			strings.Repeat("a", 64), strings.Repeat("a", 65), strings.Repeat("a", 128),
 			strings.Repeat("a", 129), strings.Repeat("a", 224), strings.Repeat("a", 225)}
@@ -54,9 +55,8 @@ import sys
 sys.path.insert(0, '..')
 import records
 
-print(json.dumps(records.BODY_RULE_TABLE.strip()))
 for body in json.load(sys.stdin):
-    print(json.dumps(records.clean(body, b""), sort_keys=True, separators=(',', ':')))
+    print(json.dumps(records.clean(body, b"")[0], sort_keys=True, separators=(',', ':')))
 `
 	cmd := exec.Command("python3", "-B", "-c", producer)
 	cmd.Stdin = bytes.NewReader(data)
@@ -65,13 +65,11 @@ for body in json.load(sys.stdin):
 		t.Fatalf("producer parity probe: %v\n%s", err, output)
 	}
 	lines := bytes.Split(bytes.TrimSuffix(output, []byte("\n")), []byte("\n"))
-	var producerTable string
-	if len(lines) != len(inputs)+1 || json.Unmarshal(lines[0], &producerTable) != nil ||
-		producerTable != strings.TrimSpace(bodyRuleTable) {
-		t.Fatal("producer and collector field tables differ")
+	if len(lines) != len(inputs) {
+		t.Fatalf("producer returned %d rows for %d inputs", len(lines), len(inputs))
 	}
 	for i, input := range inputs {
-		clean, _, err := (identityKey{}).record(record("gap", input))
+		clean, _, err := identity((identityKey{}).id).record(record("gap", input))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,8 +77,11 @@ for body in json.load(sys.stdin):
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !bytes.Equal(lines[i+1], want) {
-			t.Errorf("input %v: producer %s, collector %s", input, lines[i+1], want)
+		if bytes.Contains(want, []byte(credential)) || bytes.Contains(lines[i], []byte(credential)) {
+			t.Errorf("credential persisted for input %d", i)
+		}
+		if !bytes.Equal(lines[i], want) {
+			t.Errorf("input %v: producer %s, collector %s", input, lines[i], want)
 		}
 	}
 }
@@ -96,19 +97,19 @@ func TestRecordRejectsPathMetadata(t *testing.T) {
 	} {
 		r := record("allocation", map[string]any{"object_id": "fixture"})
 		mutate(&r)
-		if _, _, err := (identityKey{}).record(r); err == nil {
+		if _, _, err := identity((identityKey{}).id).record(r); err == nil {
 			t.Errorf("accepted invalid required metadata: %+v", r)
 		}
 	}
 	r := record("allocation", map[string]any{"object_id": "fixture"})
 	r.SourceVersion, r.SourceTime = privatePath, privatePath
-	if clean, removed, err := (identityKey{}).record(r); err != nil || clean.SourceVersion != "" || clean.SourceTime != unknownSourceTime || removed != 2 {
+	if clean, removed, err := identity((identityKey{}).id).record(r); err != nil || clean.SourceVersion != "" || clean.SourceTime != unknownSourceTime || removed != 2 {
 		t.Fatalf("invalid source version was not redacted (removed=%d, err=%v)", removed, err)
 	}
 }
 
 func TestMissingFieldRedactionsCountDroppedEntries(t *testing.T) {
-	body, removed := (identityKey{}).body(map[string]any{"missing": []any{"cpu_ns", "private notes", false}})
+	body, removed := identity((identityKey{}).id).body(map[string]any{"missing": []any{"cpu_ns", "private notes", false}})
 	if got, ok := body["missing"].([]any); !ok || len(got) != 1 || got[0] != "cpu_ns" || removed != 2 {
 		t.Fatalf("missing field redaction: body=%v removed=%d", body, removed)
 	}

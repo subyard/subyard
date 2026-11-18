@@ -19,8 +19,18 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
 
-func TestPrivateFilenameNeverReachesDurableTelemetry(t *testing.T) {
-	const filename = "Acquisition-Target.pdf"
+func TestCallerTextNeverReachesDurableTelemetry(t *testing.T) {
+	for name, value := range map[string]string{
+		"filename":             "Acquisition-Target.pdf",
+		"bearer":               strings.Repeat("b6", 32),
+		"legacy_digest_shape":  "id:" + strings.Repeat("5e", 32),
+		"current_digest_shape": "h1:" + strings.Repeat("d1", 32),
+	} {
+		t.Run(name, func(t *testing.T) { assertCallerTextNeverStored(t, value) })
+	}
+}
+
+func assertCallerTextNeverStored(t *testing.T, filename string) {
 	const producer = `
 import sys
 sys.path.insert(0, '..')
@@ -45,13 +55,17 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 	if err != nil || bytes.Contains(raw, []byte(filename)) || strings.Contains(files[0], filename) {
 		t.Fatalf("the private filename reached the outbox: %v", err)
 	}
-	var spooled Record
-	if err = json.Unmarshal(raw, &spooled); err != nil || spooled.EventID != s.key.id(filename) || spooled.SourceID != spooled.EventID ||
-		spooled.Body["object_id"] != spooled.EventID {
+	spooled, err := s.key.decodeRecord(raw)
+	if err != nil || spooled.EventID != s.key.id(filename) || spooled.SourceID != spooled.EventID ||
+		spooled.Body["object_id"] != spooled.EventID || spooled.Body["task_id"] != spooled.EventID || spooled.redactions == 0 {
 		t.Fatalf("producer identities did not use the collector key: %v", err)
 	}
 	if err = s.IngestOutbox(ctx, outbox); err != nil {
 		t.Fatal(err)
+	}
+	var reported int64
+	if err := s.db.QueryRow("SELECT redactions FROM records WHERE event_id=?", spooled.EventID).Scan(&reported); err != nil || reported != spooled.redactions {
+		t.Fatalf("producer redactions were lost: %d (%v)", reported, err)
 	}
 	// A live update uses the same pseudonym as the Python producer. Register
 	// the raw legacy run ID so it can also exercise verified OTLP correlation.
@@ -92,6 +106,9 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 	scopeLogs.SetSchemaUrl(filename)
 	privateScope(scopeLogs.Scope())
 	log := scopeLogs.LogRecords().AppendEmpty()
+	traceID, spanID := pcommon.TraceID{1, 2, 3, 4}, pcommon.SpanID{5, 6, 7, 8}
+	log.SetTraceID(traceID)
+	log.SetSpanID(spanID)
 	log.SetEventName(filename)
 	log.SetSeverityText(filename)
 	log.SetSeverityNumber(plog.SeverityNumberWarn)
@@ -135,6 +152,8 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 	scopeSpans.SetSchemaUrl(filename)
 	privateScope(scopeSpans.Scope())
 	span := scopeSpans.Spans().AppendEmpty()
+	span.SetTraceID(traceID)
+	span.SetSpanID(spanID)
 	span.SetName(filename)
 	span.TraceState().FromRaw(filename)
 	span.Status().SetMessage(filename)
@@ -166,6 +185,8 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 		t.Fatal(err)
 	}
 
+	var storedTrace pcommon.TraceID
+	var storedSpan pcommon.SpanID
 	for _, signal := range []struct {
 		kind string
 		req  otlpRequest
@@ -192,6 +213,10 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 				t.Fatal("log severity schema failed")
 			}
 			assertPrivateFixtureCounters(t, log.Attributes())
+			storedTrace, storedSpan = log.TraceID(), log.SpanID()
+			if storedTrace == traceID || storedSpan == spanID {
+				t.Fatal("caller trace or span identifier was kept")
+			}
 		case pmetricotlp.ExportRequest:
 			m := request.Metrics().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
 			point := m.At(0).Gauge().DataPoints().At(0)
@@ -199,6 +224,11 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 				t.Fatal("metric data or known vocabulary was lost")
 			}
 			assertPrivateFixtureCounters(t, point.Attributes())
+		case ptraceotlp.ExportRequest:
+			span := request.Traces().ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+			if span.TraceID() != storedTrace || span.SpanID() != storedSpan {
+				t.Fatal("trace/span IDs did not join across signals")
+			}
 		}
 	}
 	var matches int
@@ -245,10 +275,10 @@ func TestMergedProjectionDropsLegacyPrivateMetadata(t *testing.T) {
 		sql  string
 		args []any
 	}{
-		{"INSERT INTO runs VALUES(?,?,?)", []any{run, legacy, at}},
-		{"INSERT INTO objects VALUES(?,?,?,?,?,?)", []any{object, "allocation", private, private, legacy, at}},
-		{"INSERT INTO allocations VALUES(?,?,?)", []any{object, legacy, at}},
-		{"INSERT INTO associations VALUES(?,?,?,?,?,?,?,?)", []any{association, object, private, "explicit", at, private, false, legacy}},
+		{"INSERT INTO runs VALUES(?,?,?)", []any{s.key.id(run), legacy, at}},
+		{"INSERT INTO objects VALUES(?,?,?,?,?,?)", []any{s.key.id(object), "allocation", s.key.id(private), private, legacy, at}},
+		{"INSERT INTO allocations VALUES(?,?,?)", []any{s.key.id(object), legacy, at}},
+		{"INSERT INTO associations VALUES(?,?,?,?,?,?,?,?)", []any{s.key.id(association), s.key.id(object), s.key.id(private), "explicit", at, private, false, legacy}},
 	} {
 		if _, err := s.db.Exec(seed.sql, seed.args...); err != nil {
 			t.Fatal(err)
@@ -281,7 +311,7 @@ func TestLegacyCounterAndIdentityDelivery(t *testing.T) {
 	const at = "2026-01-01T01:00:00Z"
 	// These use the prior v1 envelopes with a previously valid source ID and
 	// a sample whose uint counter was serialized as a decimal string.
-	const oldBody = `{"object_id":"scope/path","cpu_ns":"7"}`
+	const oldBody = `{"object_id":"scope/path","cpu_ns":"+000000000000000000000000000000000007"}`
 	old := fmt.Sprintf(`{"schema":"subyard.telemetry.export/v1","origin_id":"producer:%[1]s","event_id":"old-event","source_id":"%[1]s","source_version":"1","source_time":"%[2]s","received_time":"%[2]s","kind":"sample","encoding":"json","policy_version":"subyard.telemetry.capture/v1","body":%[3]s}`, source, at, oldBody)
 	following := fmt.Sprintf(`{"schema":"subyard.telemetry.export/v1","origin_id":"producer:%[1]s","event_id":"following","source_id":"%[1]s","source_version":"1","source_time":"%[2]s","kind":"scope","encoding":"json","policy_version":"subyard.telemetry.capture/v1","body":{"object_id":"scope/path"}}`, source, at)
 	for range 2 {
@@ -292,7 +322,7 @@ func TestLegacyCounterAndIdentityDelivery(t *testing.T) {
 	outbox := testkit.TempDir(t)
 	for _, entry := range []struct{ file, record string }{
 		{"00.json", fmt.Sprintf(`{"schema_version":1,"source_id":"%s","event_id":"old-event","source_version":"1","source_time":"%s","kind":"sample","body":%s}`, source, at, oldBody)},
-		{"01.json", fmt.Sprintf(`{"schema":"subyard.telemetry.record/v1","source_id":"%s","event_id":"new-event","source_version":"1","source_time":"%s","kind":"sample","body":{"object_id":"%s","cpu_ns":8}}`, source, at, s.key.id("scope/path"))},
+		{"01.json", fmt.Sprintf(`{"schema":"subyard.telemetry.record/v1","source_id":"%s","event_id":"new-event","source_version":"1","source_time":"%s","kind":"sample","body":{"object_id":"%s","cpu_ns":8}}`, source, at, "scope/path")},
 	} {
 		testkit.WriteFile(t, filepath.Join(outbox, entry.file), []byte(entry.record), 0600)
 	}

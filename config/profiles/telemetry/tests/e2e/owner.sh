@@ -54,7 +54,7 @@ telemetry_prepare_assets "$ROOT" "$fixture_assets"
 export SUBYARD_TELEMETRY_FIXTURE_ASSETS="$fixture_assets"
 asset="$fixture_assets/subyard-telemetry"
 mkdir "$state/source"
-cp config/profiles/telemetry/*.py "$state/source/"
+cp config/profiles/telemetry/*.py config/profiles/telemetry/record-policy.txt "$state/source/"
 cp internal/adapters/configmaterial/tomli_w.py "$state/source/"
 cp "$asset" "$state/source/subyard-telemetry"
 chmod 0755 "$state/source/subyard-telemetry"
@@ -144,7 +144,7 @@ def diagnose(data, cgroups=pathlib.Path('/sys/fs/cgroup'), proc=pathlib.Path('/p
                 item['main_identity_present'] = False
             try:
                 with contextlib.closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=.2)) as db:
-                    row = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (path.stem,)).fetchone()
+                    row = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (records.opaque_id(records.identity_key(data), path.stem),)).fetchone()
                 body = json.loads(row[0]) if row else {}
                 state = body.get('state')
                 item['run_state'] = state if state in ('starting', 'resources_observing', 'main_exited', 'resources_complete', 'resources_unknown', 'not_started') else 'other'
@@ -256,9 +256,12 @@ fi
 subyard-telemetry-run --agent other --agent-version fixture --scope-mode require --project-id telemetry-fixture -- \
   bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane memory-budget
 wait_for_finals
-python3 -B - "$asset" "$mode" <<'PY'
+python3 -B - "$asset" "$mode" "$ROOT/config/profiles/telemetry" <<'PY'
 import hashlib, json, os, pathlib, sqlite3, subprocess, sys, time
+sys.path.insert(0, sys.argv[3])
+import records
 data = pathlib.Path('/var/lib/subyard/telemetry')
+project = records.opaque_id(records.identity_key(data), 'telemetry-fixture')
 kinds = {'android'} if sys.argv[2] in ('--android', '--android-resources') else {'vm', 'android'}
 expected = {(agent, kind) for agent in ('codex', 'claude') for kind in kinds}
 output = pathlib.Path('.build/agent-telemetry/physical-examples')
@@ -271,8 +274,8 @@ with sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True) 
               json_extract(allocations.body,'$.object_kind') FROM runs
             JOIN relations USING(agent_run_id) JOIN associations USING(agent_run_id)
             JOIN allocations USING(object_id)
-            WHERE json_extract(runs.body,'$.project_id')='telemetry-fixture'
-              AND json_extract(runs.body,'$.agent') IN ('codex','claude')''').fetchall()
+            WHERE json_extract(runs.body,'$.project_id')=?
+              AND json_extract(runs.body,'$.agent') IN ('codex','claude')''', (project,)).fetchall()
         rows = [row for row in rows if row[2] in kinds]
         if expected <= {(row[1], row[2]) for row in rows} or time.monotonic() >= deadline:
             break
@@ -281,7 +284,7 @@ with sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True) 
     assert len({row[0] for row in rows}) >= len(expected), 'native examples must come from distinct managed runs'
     hashes = []
     for index, (run, _agent, _kind) in enumerate(rows, 1):
-        assert db.execute('SELECT count(*) FROM objects WHERE object_id=?', (run+':scope',)).fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM objects JOIN associations USING(object_id) WHERE associations.agent_run_id=? AND objects.kind='scope' AND objects.accounting='inclusive'", (run,)).fetchone()[0] == 1
         result = subprocess.run([sys.argv[1], 'show-run', '--data-dir', str(data), '--run', run],
                                 capture_output=True, check=True, timeout=8)
         document = json.loads(result.stdout)

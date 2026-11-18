@@ -75,7 +75,7 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 	for _, value := range selected {
 		entry := value.(map[string]any)
 		refs := entry["sample_refs"].([]any)
-		if len(refs) != 2 || refs[0].(map[string]any)["origin_id"] != "producer:"+fixtureSourceID || refs[0].(map[string]any)["event_id"] == "" {
+		if len(refs) != 2 || refs[0].(map[string]any)["origin_id"] != "producer:"+s.key.id(fixtureSourceID) || refs[0].(map[string]any)["event_id"] == "" {
 			t.Fatalf("sample identity lost: %+v", entry)
 		}
 		for _, edge := range entry["associations"].([]map[string]any) {

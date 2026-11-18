@@ -43,7 +43,7 @@ func TestRunOwnerGapsAndSessionObservations(t *testing.T) {
 	}
 	defer db.Close()
 	var retained int
-	if err = db.QueryRow("SELECT count(*) FROM relations WHERE event_id=? AND session_id=''", brokerRelation.EventID).Scan(&retained); err != nil || retained != 1 {
+	if err = db.QueryRow("SELECT count(*) FROM relations WHERE event_id=? AND session_id=''", s.key.id(brokerRelation.EventID)).Scan(&retained); err != nil || retained != 1 {
 		t.Fatal("raw broker correlation relation lost", err)
 	}
 	for _, includeChildren := range []bool{false, true} {
@@ -92,7 +92,7 @@ func TestRunOwnerGapsAndSessionObservations(t *testing.T) {
 			}
 			for i, value := range refs {
 				ref := value.(map[string]any)
-				if ref["origin_id"] != "producer:"+fixtureSourceID || ref["event_id"] != sessionIDs[1-i] || ref["source_id"] != fixtureSourceID || ref["source_version"] != "1" || ref["source"] != "native-otlp-attribute/authenticated-header" || ref["quality"] != "explicit" || ref["received_time"] == "" {
+				if ref["origin_id"] != "producer:"+s.key.id(fixtureSourceID) || ref["event_id"] != s.key.id(sessionIDs[1-i]) || ref["source_id"] != s.key.id(fixtureSourceID) || ref["source_version"] != "1" || ref["source"] != "native-otlp-attribute/authenticated-header" || ref["quality"] != "explicit" || ref["received_time"] == "" {
 					t.Fatalf("relation provenance lost: %+v", ref)
 				}
 			}

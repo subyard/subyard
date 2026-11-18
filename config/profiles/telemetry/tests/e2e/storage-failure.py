@@ -281,7 +281,7 @@ def preflight():
         hook.mkdir(mode=0o700)
         helper = hook/'broker-correlation.py'
         source = Path(__file__).resolve().parents[2]
-        for name in ('broker-correlation.py', 'records.py', 'sources.py', 'resources.py'):
+        for name in ('broker-correlation.py', 'records.py', 'record-policy.txt', 'sources.py', 'resources.py'):
             private_file(hook/name, (source/name).read_bytes())
         records_source = (hook/'records.py').read_bytes()
         (hook/'records.py').unlink()

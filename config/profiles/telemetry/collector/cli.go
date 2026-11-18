@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -43,6 +44,10 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if command == "serve" || command == "replay" {
+		policy, err := LoadPolicy(*policyFile)
+		if err != nil {
+			return err
+		}
 		limits := DefaultLimits()
 		limits.DiskBytes = *disk
 		limits.QueueBytes = *queue
@@ -54,10 +59,6 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		}
 		defer store.Close()
 		if command == "serve" {
-			policy, err := LoadPolicy(*policyFile)
-			if err != nil {
-				return err
-			}
 			return Serve(ctx, store, Options{Listen: *listen, AuthFile: *auth, Spool: *spool, Receiver: receiver, Policy: policy})
 		}
 		var reader io.Reader = os.Stdin
@@ -69,7 +70,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 			defer file.Close()
 			reader = file
 		}
-		return store.Replay(ctx, reader)
+		return store.replay(ctx, reader, policy)
 	}
 	db, err := OpenReadOnly(*dir)
 	if err != nil {
@@ -87,10 +88,17 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		if *runID == "" {
 			return errors.New("--run is required")
 		}
+		show := ShowRun
 		if *includeChildren {
-			result, err = ShowRunIncludingChildren(ctx, db, *runID)
-		} else {
-			result, err = ShowRun(ctx, db, *runID)
+			show = ShowRunIncludingChildren
+		}
+		result, err = show(ctx, db, *runID)
+		if errors.Is(err, sql.ErrNoRows) {
+			if key, keyErr := readIdentityKey(*dir); keyErr == nil {
+				if id := key.id(*runID); id != "" {
+					result, err = show(ctx, db, id)
+				}
+			}
 		}
 	case "stats":
 		result, err = Stats(ctx, db)

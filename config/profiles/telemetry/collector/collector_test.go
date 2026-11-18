@@ -133,7 +133,7 @@ func TestBoundsAndFutureSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = other.db.Exec("PRAGMA user_version=3"); err != nil {
+	if _, err = other.db.Exec("PRAGMA user_version=4"); err != nil {
 		t.Fatal(err)
 	}
 	other.Close()
@@ -153,7 +153,7 @@ func TestOTLPSanitizationPreservesMetricKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: proto}
-	if err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy()); err != nil {
+	if _, err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(e.Protobuf, []byte("fixture-private")) {
@@ -189,7 +189,7 @@ func TestTraceLinksAndPolicy(t *testing.T) {
 	}
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/traces", Protobuf: raw}
-	if err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy()); err != nil {
+	if _, err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(e.Protobuf, []byte("fixture-private")) {
@@ -220,7 +220,7 @@ func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	attrs.PutBool("gen_ai.usage.output_tokens", true)
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: raw}
-	if err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy()); err != nil {
+	if _, err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
 		t.Fatal(err)
 	}
 	clean := pmetricotlp.NewExportRequest()

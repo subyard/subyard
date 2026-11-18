@@ -3,6 +3,7 @@ package collector
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Subyard/Subyard/config/profiles/telemetry"
 )
 
 const RecordSchema = "subyard.telemetry.record/v1"
@@ -28,6 +31,9 @@ type Record struct {
 	SourceTime    string         `json:"source_time"`
 	Kind          string         `json:"kind"`
 	Body          map[string]any `json:"body"`
+
+	authenticated bool
+	redactions    int64
 }
 
 func (r *Record) UnmarshalJSON(data []byte) error {
@@ -73,9 +79,10 @@ type Envelope struct {
 	Body                json.RawMessage `json:"body,omitempty"`
 	Protobuf            []byte          `json:"protobuf,omitempty"`
 
-	// Historical keys are only consulted for deduplication in the same store.
-	legacyOriginID string
-	legacyEventID  string
+	// Only internal capture and an authenticated producer can set local.
+	local  bool
+	replay bool
+	native bool
 }
 
 func newID() string {
@@ -86,14 +93,11 @@ func newID() string {
 	return hex.EncodeToString(b[:])
 }
 
-var namespaceIDPattern = regexp.MustCompile(`^(?:pid|cgroup):\[[0-9]{1,20}\]$`)
-var timestampPattern = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.,][0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
-var versionPattern = regexp.MustCompile(`^v?[0-9]{1,6}(?:\.[0-9]{1,6}){0,3}(?:-(?:alpha|beta|rc)(?:\.[0-9]{1,6})?)?$`)
-var unsignedDecimal = regexp.MustCompile(`^[0-9]{1,20}$`)
-var signedDecimal = regexp.MustCompile(`^-?[0-9]{1,20}$`)
+var legacyID = recordPatterns["legacy_id"]
+var versionPattern = recordPatterns["version"]
 
 func canonicalTimestamp(value string) string {
-	if !timestampPattern.MatchString(value) || strings.HasPrefix(value, "0000-") {
+	if !recordPatterns["timestamp"].MatchString(value) || strings.HasPrefix(value, "0000-") {
 		return ""
 	}
 	parsed, err := time.Parse(time.RFC3339Nano, value)
@@ -114,44 +118,24 @@ func sanitizeSourceVersion(version string) string {
 	return ""
 }
 
-// Mirror of records.py, checked by TestRecordFieldParity.
-const bodyRuleTable = `
-id agent_run_id session_id parent_run_id task_id project_id worktree_id yard_id host_id owner_id boot_id generation counter_generation slot_id correlation_id allocation_id association_id native_session_id acquire_id device_id sample_id source_event_id cursor attribution_id object_id parent_object_id
-version agent_version
-enum resource_id 1 2 emulator
-enum resource_kind vm android
-namespace cgroup_namespace_id process_namespace_id
-uint monotonic_ns cpu_ns cpu_user_ns cpu_system_ns memory_bytes memory_peak_bytes swap_bytes rss_bytes rss_peak_bytes pss_bytes io_read_bytes io_write_bytes io_read_ops io_write_ops observed_process_count pid start_ticks resource_generation lease_epoch requested_cpu reserved_cpu reserved_memory_bytes allocated_cpu allocated_memory_bytes allocated_disk_bytes sampled_peak_bytes reserved_disk_bytes actual_cpu_ns actual_memory_bytes actual_disk_bytes cpu_count memory_limit_bytes disk_limit_bytes interval_ns device_count host_monotonic_ns runtime_generation process_count allocation_generation requested_memory_bytes requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_memory_bytes vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes read_bytes write_bytes read_ops write_ops source_sequence cpu memory disk resources
-int exit_code value
-uint signal
-bool counter_reset shared final_complete resource_completed agent_exited available stale requested reserved actual present final main_exited supported populated
-time coverage_start coverage_end acquired_at ready_at expires_at stopped_at start_time end_time observed_at observed_time last_seen source_time
-missing missing
-enum agent codex claude other
-enum state starting running not_started main_exited resources_observing resources_complete resources_unknown observed scope_left ended available provisioning held draining quarantined recovering unavailable
-enum object_kind cgroup process_tree process scope vm android
-enum accounting direct inclusive inclusive-owner-resource qemu-process-and-threads
-enum quality explicit measured observed complete partial unknown
-enum scope_quality managed partial unavailable
-enum selector 1 2 emulator
-enum reservation_semantics allocated_virtual_capacity_held
-enum relation native_session
-enum source explicit-object-owner acquire-correlation validated-grant managed_scope_membership process_tree_discovery scope_root_missing scope_root_generation_changed cgroup_missing cgroup_generation_changed native-otlp-attribute native-otlp-attribute/authenticated-header native-otlp-attribute/registered-resource-attribute
-enum phase request held allocation acquired baseline draining observed periodic pre_stop stopped quarantined lease.acquire lease.admission_rejected lease.available lease.expired lease.fence lease.held lease.release lease.renew_failed lease.stop_failed lease.stop_succeeded lease.transition
-enum reason boot_changed_before_final correlation_generation_mismatch correlation_registration_capacity correlation_registration_conflict correlation_registration_invalid correlation_registration_unavailable cursor_retention_or_reset delegation_unavailable final_tail_missing managed_scope_unavailable observer_capacity process_final_counter_unavailable process_left_managed_scope producer_outbox_capacity run_manifest_capacity run_manifest_unavailable run_reservation_interrupted run_startup_unavailable scope_baseline_unavailable scope_manifest_missing scope_observation_unavailable scope_placement_unavailable scope_removed_before_final source_offline
-`
+var recordPatterns, bodyRules = loadRecordPolicy()
 
 type bodyRule struct {
 	kind    string
 	choices []string
 }
 
-var bodyRules = func() map[string]bodyRule {
+func loadRecordPolicy() (map[string]*regexp.Regexp, map[string]bodyRule) {
+	patterns := map[string]*regexp.Regexp{}
 	rules := map[string]bodyRule{}
-	for line := range strings.Lines(strings.TrimSpace(bodyRuleTable)) {
+	for line := range strings.Lines(strings.TrimSpace(telemetry.RecordPolicy)) {
 		parts := strings.Fields(line)
+		if parts[0] == "pattern" {
+			patterns[parts[1]] = regexp.MustCompile("^(?:" + parts[2] + ")$")
+			continue
+		}
 		rule := bodyRule{kind: parts[0]}
-		if rule.kind == "enum" {
+		if rule.kind == "enum" || rule.kind == "names" {
 			rule.choices = parts[2:]
 			rules[parts[1]] = rule
 			continue
@@ -160,10 +144,10 @@ var bodyRules = func() map[string]bodyRule {
 			rules[field] = rule
 		}
 	}
-	return rules
-}()
+	return patterns, rules
+}
 
-func (key identityKey) field(rule bodyRule, value any) (any, bool) {
+func (id identity) field(rule bodyRule, value any) (any, bool) {
 	if rule.kind == "" {
 		return nil, false
 	}
@@ -171,6 +155,18 @@ func (key identityKey) field(rule bodyRule, value any) (any, bool) {
 		return nil, true
 	}
 	switch rule.kind {
+	case "names":
+		list, ok := value.([]any)
+		if !ok || len(list) > 128 {
+			return nil, false
+		}
+		fields := []any{}
+		for _, item := range list {
+			if name, ok := item.(string); ok && slices.Contains(rule.choices, name) {
+				fields = append(fields, name)
+			}
+		}
+		return fields, true
 	case "missing":
 		switch v := value.(type) {
 		case []any:
@@ -190,9 +186,9 @@ func (key identityKey) field(rule bodyRule, value any) (any, bool) {
 			if v == "broker_attribution" || v == "final_tail" {
 				return v, true
 			}
-			return key.field(bodyRule{kind: "uint"}, v)
+			return id.field(bodyRule{kind: "uint"}, v)
 		default:
-			return key.field(bodyRule{kind: "uint"}, v)
+			return id.field(bodyRule{kind: "uint"}, v)
 		}
 	case "bool":
 		_, ok := value.(bool)
@@ -213,15 +209,15 @@ func (key identityKey) field(rule bodyRule, value any) (any, bool) {
 		default:
 			return nil, false
 		}
-		if rule.kind == "uint" && unsignedDecimal.MatchString(number) {
-			n, err := strconv.ParseUint(number, 10, 64)
+		if !recordPatterns["decimal"].MatchString(number) {
+			return nil, false
+		}
+		if rule.kind == "uint" {
+			n, err := strconv.ParseUint(strings.TrimPrefix(number, "+"), 10, 64)
 			return n, err == nil
 		}
-		if rule.kind == "int" && signedDecimal.MatchString(number) {
-			n, err := strconv.ParseInt(number, 10, 64)
-			return n, err == nil
-		}
-		return nil, false
+		n, err := strconv.ParseInt(number, 10, 64)
+		return n, err == nil
 	}
 	s, ok := value.(string)
 	if !ok {
@@ -234,12 +230,10 @@ func (key identityKey) field(rule bodyRule, value any) (any, bool) {
 		s = canonicalTimestamp(s)
 		return s, s != ""
 	case "id":
-		s = key.id(s)
+		s = id(s)
 		return s, s != ""
 	case "version":
 		return s, versionPattern.MatchString(s)
-	case "namespace":
-		return s, namespaceIDPattern.MatchString(s)
 	default:
 		return nil, false
 	}
@@ -247,11 +241,11 @@ func (key identityKey) field(rule bodyRule, value any) (any, bool) {
 
 var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true}
 
-func (key identityKey) body(input map[string]any) (map[string]any, int64) {
+func (id identity) body(input map[string]any) (map[string]any, int64) {
 	out := make(map[string]any, len(bodyRules))
 	var removed int64
 	for name, value := range input {
-		clean, ok := key.field(bodyRules[name], value)
+		clean, ok := id.field(bodyRules[name], value)
 		if ok {
 			out[name] = clean
 		}
@@ -264,19 +258,24 @@ func (key identityKey) body(input map[string]any) (map[string]any, int64) {
 	return out, removed
 }
 
-func (key identityKey) record(r Record) (Record, int64, error) {
+func (id identity) record(r Record) (Record, int64, error) {
+	r.SourceID, r.EventID = id(r.SourceID), id(r.EventID)
+	return id.cleanRecord(r)
+}
+
+func (id identity) cleanRecord(r Record) (Record, int64, error) {
 	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
 		return Record{}, 0, errors.New("unsupported record schema")
 	}
 	clean := Record{
-		Schema: RecordSchema, SourceID: key.source(r.SourceID), EventID: key.id(r.EventID),
+		Schema: RecordSchema, SourceID: r.SourceID, EventID: r.EventID,
 		SourceVersion: sanitizeSourceVersion(r.SourceVersion), SourceTime: canonicalTimestamp(r.SourceTime),
 		Kind: r.Kind,
 	}
 	if clean.SourceID == "" || clean.EventID == "" || !kinds[clean.Kind] || r.Body == nil {
 		return Record{}, 0, errors.New("invalid record identity or kind")
 	}
-	body, removed := key.body(r.Body)
+	body, removed := id.body(r.Body)
 	if clean.SourceTime == "" {
 		clean.SourceTime = unknownSourceTime
 		removed++
@@ -295,6 +294,40 @@ func (key identityKey) record(r Record) (Record, int64, error) {
 		}
 	}
 	return clean, removed, nil
+}
+
+// decodeRecord authenticates the exact inner JSON sent by a producer. Passing
+// through already digested identifiers requires this proof, not an ID prefix.
+func (key identityKey) decodeRecord(data []byte) (Record, error) {
+	var signed struct {
+		Record    json.RawMessage `json:"record"`
+		Signature string          `json:"signature"`
+	}
+	if err := json.Unmarshal(data, &signed); err != nil {
+		return Record{}, err
+	}
+	if signed.Record == nil {
+		var r Record
+		err := json.Unmarshal(data, &r)
+		return r, err
+	}
+	signature, err := hex.DecodeString(signed.Signature)
+	if err != nil || !hmac.Equal(signature, key.digest("producer-record/v1\x00"+string(signed.Record))) {
+		return Record{}, errInvalidRecord
+	}
+	var r Record
+	if err = json.Unmarshal(signed.Record, &r); err != nil {
+		return Record{}, err
+	}
+	var count struct {
+		Redactions int64 `json:"redactions"`
+	}
+	if err = json.Unmarshal(signed.Record, &count); err != nil {
+		return Record{}, err
+	}
+	r.authenticated = true
+	r.redactions = max(0, min(count.Redactions, 1<<31))
+	return r, nil
 }
 
 func decodeBody(data []byte) (map[string]any, error) {

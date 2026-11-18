@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import fcntl
-import json
 import os
 import subprocess
 from pathlib import Path
@@ -17,6 +16,21 @@ def pending(root, event_id):
 
 
 class OutboxTest(unittest.TestCase):
+    def test_first_use_key_contention_does_not_take_the_outbox_lock(self):
+        code = 'import records,sys; sys.exit(records.emit(sys.argv[1], "gap", {}))'
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(directory, fcntl.LOCK_EX)
+                reply = subprocess.run([sys.executable, '-B', '-c', code, str(root)], timeout=2,
+                                       cwd=Path(records.__file__).parent, check=False)
+                self.assertEqual(reply.returncode, 0)
+                self.assertFalse((root/'outbox').exists())
+            finally:
+                os.close(directory)
+            self.assertTrue(records.emit(root, 'gap', {}))
+
     def test_capacity_scan_with_concurrent_consumer_preserves_admission_and_limits(self):
         for scenario in ('admit', 'count-cap', 'byte-cap', 'permission'):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -44,7 +58,7 @@ class OutboxTest(unittest.TestCase):
                 self.assertEqual(next_record.exists(), scenario == 'admit')
                 self.assertTrue(retained.exists())
                 if admitted:
-                    self.assertEqual(records.read_private(next_record)['event_id'], next_record.stem)
+                    self.assertEqual(records.read_outbox(next_record)['event_id'], next_record.stem)
                     self.assertEqual(next_record.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(len(list((root/'outbox').glob('*.json'))), 2)
                 else:
@@ -64,7 +78,7 @@ class OutboxTest(unittest.TestCase):
                 path.unlink()
             self.assertTrue(records.emit(root, 'sample', {'object_id': 'recovered', 'cpu_ns': 4}))
             self.assertFalse(marker.exists())
-            rows = [json.loads(path.read_text()) for path in (root/'outbox').glob('*.json')]
+            rows = [records.read_outbox(path) for path in (root/'outbox').glob('*.json')]
             gap = next(row for row in rows if row['kind'] == 'gap')
             self.assertEqual(gap['body']['missing'], 1)
             self.assertEqual(gap['body']['reason'], 'producer_outbox_capacity')
@@ -87,10 +101,10 @@ class OutboxTest(unittest.TestCase):
                 self.assertTrue(records.emit(root, 'run', body, event_id='same'))
                 self.assertTrue(records.emit(root, 'run', body, event_id='same'))
                 path = pending(root, 'same')
-                original = records.read_private(path)
+                original = records.read_outbox(path)
                 path.unlink()
                 self.assertTrue(records.emit(root, 'run', body, event_id='same'))
-                self.assertEqual(records.read_private(path), original)
+                self.assertEqual(records.read_outbox(path), original)
                 with (root/'outbox/.lock').open('rb') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
                     self.assertFalse(records.emit(root, 'run', body))
@@ -105,7 +119,7 @@ class OutboxTest(unittest.TestCase):
                 self.assertTrue(records.emit(root, 'run', body, 'source', 'PRIVATE timestamp', '.event-1'))
             files = list((root/'outbox').glob('*.json'))
             self.assertEqual(len(files), 1)
-            value = json.loads(files[0].read_text())
+            value = records.read_outbox(files[0])
             self.assertEqual(value['body'], {'agent_run_id': records.opaque_id(records.identity_key(root), 'run-1'), 'state': 'starting'})
             self.assertEqual(value['source_time'], '0001-01-01T00:00:00Z')
             self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
@@ -116,7 +130,7 @@ class OutboxTest(unittest.TestCase):
             files[0].unlink()
             with patch.object(records, 'deliver', return_value=False):
                 self.assertTrue(records.emit(root, 'run', body, 'source', 'PRIVATE timestamp', '.event-1'))
-            self.assertEqual(records.read_private(files[0]), value)
+            self.assertEqual(records.read_outbox(files[0]), value)
 
     def test_outbox_uses_closed_gap_reasons(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -124,15 +138,15 @@ class OutboxTest(unittest.TestCase):
             self.assertTrue(records.emit(root, 'gap', {'reason': '/home/fixture/private-notes',
                                                       'status': 'fixture@example.invalid'}, event_id='private'))
             self.assertTrue(records.emit(root, 'gap', {'reason': 'source_offline'}, event_id='known'))
-            self.assertEqual(records.read_private(pending(root, 'private'))['body'], {})
-            self.assertEqual(records.read_private(pending(root, 'known'))['body'], {'reason': 'source_offline'})
+            self.assertEqual(records.read_outbox(pending(root, 'private'))['body'], {})
+            self.assertEqual(records.read_outbox(pending(root, 'known'))['body'], {'reason': 'source_offline'})
 
     def test_invalid_sample_does_not_poison_outbox(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             self.assertFalse(records.emit(root, 'sample', {'object_id': 'bad\nid'}, event_id='.bad'))
             self.assertTrue(records.emit(root, 'sample', {'object_id': 'valid', 'monotonic_ns': -1}, event_id='.bad-counter'))
-            self.assertNotIn('monotonic_ns', records.read_private(pending(root, '.bad-counter'))['body'])
+            self.assertNotIn('monotonic_ns', records.read_outbox(pending(root, '.bad-counter'))['body'])
             self.assertTrue(records.emit(root, 'sample', {'object_id': 'good', 'cpu_ns': 1}, event_id='good'))
             self.assertEqual(set((root/'outbox').glob('*.json')), {pending(root, '.bad-counter'), pending(root, 'good')})
 

@@ -13,6 +13,14 @@ import sys
 import time
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import records
+
+
+def stored_id(data, value):
+    return records.opaque_id(records.identity_key(data), value)
+
+
 def nested_run(args):
     context = args.state/'nested-context.json'
     code = r'''import json,os,subprocess,sys
@@ -34,16 +42,16 @@ assert '/run-'+parent+'/run-'+document['child']+'/workload' in document['cgroup'
         while time.monotonic() < deadline:
             finals = {}
             for name in ('parent', 'child'):
-                samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (run[name]+':scope',))]
+                samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (stored_id(args.data_dir, run[name]+':scope'),))]
                 finals[name] = any(sample.get('final') and sample.get('populated') is False for sample in samples)
             if all(finals.values()) and not any((args.data_dir/'runs'/(run[name]+'.json')).exists() for name in ('parent', 'child')):
-                parent = db.execute('SELECT parent_object_id FROM objects WHERE object_id=?', (run['child']+':scope',)).fetchone()
-                child_run = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (run['child'],)).fetchone()
+                parent = db.execute('SELECT parent_object_id FROM objects WHERE object_id=?', (stored_id(args.data_dir, run['child']+':scope'),)).fetchone()
+                child_run = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (stored_id(args.data_dir, run['child']),)).fetchone()
                 if not parent or not child_run:
                     time.sleep(.2)
                     continue
-                assert parent and parent[0] == run['parent']+':scope'
-                assert child_run and json.loads(child_run[0])['parent_run_id'] == run['parent']
+                assert parent and parent[0] == stored_id(args.data_dir, run['parent']+':scope')
+                assert child_run and json.loads(child_run[0])['parent_run_id'] == stored_id(args.data_dir, run['parent'])
                 print(json.dumps({'schema': 'subyard.telemetry.nested-scope/v1', 'nested_placement': True,
                                   'parent_relation': True, 'parent_final': True, 'child_final': True}), flush=True)
                 return
@@ -57,7 +65,7 @@ def wait_for_short_run_samples(data_dir, run):
         while time.monotonic() < deadline:
             # The outbox commits each object's endpoints independently.
             for suffix in (':scope', ':workload'):
-                rows = db.execute('SELECT body FROM samples WHERE object_id=? ORDER BY source_time', (run+suffix,)).fetchall()
+                rows = db.execute('SELECT body FROM samples WHERE object_id=? ORDER BY source_time', (stored_id(data_dir, run+suffix),)).fetchall()
                 samples = [json.loads(row[0]) for row in rows]
                 if (not samples or samples[0].get('populated') is not False or
                         samples[0].get('final') is not False or samples[-1].get('final') is not True):
@@ -91,7 +99,7 @@ Path(sys.argv[1]).write_text(json.dumps({'agent_run_id':os.environ['SUBYARD_AGEN
     entries = [entry for key in ('selected_nonoverlapping', 'shared', 'unknown', 'excluded_overlapping_detail') for entry in document[key]]
     deltas = {}
     for suffix in (':scope', ':workload'):
-        entry = next(entry for entry in entries if entry['object']['object_id'] == run['agent_run_id']+suffix)
+        entry = next(entry for entry in entries if entry['object']['object_id'] == stored_id(args.data_dir, run['agent_run_id']+suffix))
         first, last = entry['samples'][0], entry['samples'][-1]
         assert first['populated'] is False and first['final'] is False and last['final'] is True
         assert entry['counter_coverage'] == 'observed_interval'
@@ -154,7 +162,7 @@ Path(sys.argv[1]).write_text(json.dumps({'agent_run_id':run,'child_pid':child.pi
     deadline = time.monotonic()+40
     with closing(sqlite3.connect('file:'+str(args.data_dir/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=1)) as db:
         while time.monotonic() < deadline:
-            samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (run['agent_run_id']+':scope',))]
+            samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (stored_id(args.data_dir, run['agent_run_id']+':scope'),))]
             finals = [sample for sample in samples if sample.get('final')]
             if finals:
                 assert finals[-1]['cpu_ns'] > 0

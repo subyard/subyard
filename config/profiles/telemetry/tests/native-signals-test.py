@@ -392,7 +392,8 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
         with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
             db.executescript('''CREATE TABLE runs(agent_run_id TEXT,body TEXT);
                 CREATE TABLE relations(agent_run_id TEXT,session_id TEXT);
-                CREATE TABLE objects(object_id TEXT,body TEXT);
+                CREATE TABLE objects(object_id TEXT,body TEXT,kind TEXT,accounting TEXT);
+                CREATE TABLE associations(object_id TEXT,agent_run_id TEXT);
                 INSERT INTO runs VALUES('run','{"agent":"codex"}');
                 INSERT INTO relations VALUES('run','session');''')
             db.commit()
@@ -400,7 +401,8 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
 
     def insert_scope(self, data, shared):
         with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
-            db.execute('INSERT INTO objects VALUES(?,?)', ('run:scope', json.dumps({'shared': shared})))
+            db.execute("INSERT INTO objects VALUES(?,?,'scope','inclusive')", ('scope-digest', json.dumps({'shared': shared})))
+            db.execute("INSERT INTO associations VALUES('scope-digest','run')")
             db.commit()
 
     def test_session_can_precede_scope_projection(self):

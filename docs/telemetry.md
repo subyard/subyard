@@ -337,12 +337,14 @@ An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with
 `attributes`, `span_names` and `event_names` allowlists that narrow the built-in
 vocabularies. The policy identity and redaction count accompany each record.
 
-Producer-generated opaque IDs survive delivery and replay. Other supported join
-IDs are pseudonymized with a key kept in the private telemetry data directory.
-New exports carry the pseudonyms and replay preserves those joins. Import of an
-older export uses the destination's key to normalize legacy IDs and converts
-decimal-string counters to integers. Existing untouched rows and export files
-retain their historical contents.
+Identifiers from callers are keyed digests, including IDs with the same shape as
+generated IDs, session attributes and trace or span IDs. The local producer outbox
+authenticates its prepared records to avoid mapping those digests twice. Retain
+the private `.identity-key` with the database when backing up or restoring a store.
+The writer migrates historical join and event identities on first open. It retains
+the recorded rows, non-identity metadata and observation times. Export files already
+on disk keep their historical contents. `show-run` accepts the launcher run ID or
+the stored run reference.
 
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, share 16 pre-decode admissions between OTLP and
@@ -387,11 +389,13 @@ policy identity, record identities and provenance are retained.
 
 Continue export with `--after` equal to the last exported `sequence`; each command
 is a bounded snapshot, not an endless transaction. Export sequence is local to the
-store. Replay identity is `(origin_id,event_id)` and remains stable across stores.
-Replaying the same record does not add another projection; an identity collision
-with different data is an error. Two legitimate records with identical payloads
-but different identities remain two records. The destination applies its capture
-policy before persistence. `policy_version` preserves the original validated
+store. Replay uses the source pair `(origin_id,event_id)` as input to the receiving
+store's keyed mapping. The destination preserves relationships within the imported
+history. Replaying the same input adds no projections. A matching identity with
+different data is an error. Two records with different identities remain separate
+even when their payloads match. Replay applies the destination's `--policy-file`
+or the default policy. Each replay row is subject to the queue and disk limits,
+which allow legacy data whose identifiers grow past the live request limit. `policy_version` preserves the original validated
 capture-policy claim; `import_policy_version` records the trusted local policy
 applied by replay. Imported policy metadata never authorizes additional content.
 Legacy exports without that optional import field remain supported. Provenance
@@ -399,8 +403,8 @@ already lost by an older importer cannot be reconstructed.
 
 OTLP has no universal delivery identity. If a sender retries after a successful
 commit whose acknowledgement was lost, the native delivery can appear twice.
-Source event IDs are preserved when available; this layer does not invent
-exactly-once token totals from ambiguous events.
+Stable source event IDs support idempotent retries for internal producers. Native
+OTLP observations without such an identity can repeat in token totals.
 
 ## Standalone and nested containers
 

@@ -86,7 +86,7 @@ os.chmod(state,0o700)
 (state/'marker').write_bytes(b'subyard-telemetry-incus-v1')
 os.chmod(state/'marker',0o600)
 sys.argv=['process-scope.py','--state',str(state),'--data-dir',str(data)]
-exec(compile(FIXTURE_SOURCE,'process-scope.py','exec'),{'__name__':'__main__'})
+exec(compile(FIXTURE_SOURCE,'process-scope.py','exec'),{'__name__':'__main__','__file__':'/usr/local/lib/subyard-telemetry/tests/e2e/process-scope.py'})
 if NATIVE_STAGE:
     prepared=pathlib.Path(NATIVE_STAGE)/'native'
     os.environ['SUBYARD_TELEMETRY_NATIVE_STATE']=str(prepared)
@@ -189,9 +189,9 @@ import records
 while time.monotonic()<deadline:
     final=[]
     for path in (data/'outbox').glob('*.json'):
-        record=records.read_private(path)
+        record=records.read_outbox(path)
         body=record.get('body',{})
-        if record.get('kind')=='sample' and body.get('object_id')==run['agent_run_id']+':scope' and body.get('final'):
+        if record.get('kind')=='sample' and body.get('object_id')==records.opaque_id(records.identity_key(data),run['agent_run_id']+':scope') and body.get('final'):
             final.append(body)
     if (state/'done').is_file() and not (data/'runs'/(run['agent_run_id']+'.json')).exists() and final:
         assert final[-1]['populated'] is False
@@ -362,6 +362,8 @@ def main():
     stage = Path(fixture['root'])
     files = {'source/config/profiles/telemetry/tests/e2e/native-signals.py': args.source/'config/profiles/telemetry/tests/e2e/native-signals.py',
              'source/config/profiles/telemetry/tests/e2e/failure-evidence.py': args.source/'config/profiles/telemetry/tests/e2e/failure-evidence.py',
+             'source/config/profiles/telemetry/records.py': args.source/'config/profiles/telemetry/records.py',
+             'source/config/profiles/telemetry/record-policy.txt': args.source/'config/profiles/telemetry/record-policy.txt',
              'source/config/profiles/telemetry/native.py': args.source/'config/profiles/telemetry/native.py',
              'source/internal/adapters/configmaterial/tomli_w.py': args.source/'internal/adapters/configmaterial/tomli_w.py',
              'source/config/profiles/orca/tests/e2e/codex-permissions.py': args.source/'config/profiles/orca/tests/e2e/codex-permissions.py',

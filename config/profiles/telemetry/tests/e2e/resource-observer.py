@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -71,6 +72,8 @@ def drain_outbox(data_dir):
                   for path in (data/'sources').glob('*.json')}
     if (data/'producer.json').exists():
         source_ids.add(records.read_private(data/'producer.json')['source_id'])
+    identity = records.identity_key(data)
+    source_ids = {records.opaque_id(identity, source) for source in source_ids}
     for path in list((data/'outbox').glob('*.json'))[:4096]:
         try:
             record = records.read_private(path)
@@ -134,7 +137,7 @@ def assert_records(data_dir, kind, stage):
     allocation = [row for row in read_rows(data_dir, 'allocations') if row.get('object_kind') == kind]
     require(allocation, 'SQLite has no native allocation')
     objects = {row['object_id'] for row in allocation}
-    agent_run = os.environ.get('SUBYARD_AGENT_RUN_ID')
+    agent_run = records.opaque_id(records.identity_key(Path(data_dir)), os.environ.get('SUBYARD_AGENT_RUN_ID'))
     edges = [row for row in read_rows(data_dir, 'associations') if row.get('object_id') in objects
              and agent_run and row.get('agent_run_id') == agent_run and row.get('quality') == 'explicit']
     require(edges,'native allocation lacks explicit managed-run association')
@@ -185,17 +188,19 @@ def offline_reader(data_dir, kind):
             probe['transport']['identity'] = str(key)
         path = records.private_directory(root/'sources')/'probe.json'
         records.atomic_json(path, probe)
-        require(sources.poll(root), 'isolated offline reader failed to retain state')
+        with patch.object(records, 'identity_key', return_value=records.identity_key(Path(data_dir))):
+            require(sources.poll(root), 'isolated offline reader failed to retain state')
         failed = records.read_private(path)
         require(failed['offline'] and failed['cursor'] == cursor and failed['last_seen'] == seen,
                 'offline observer changed its cursor or last successful observation')
         rows = [records.read_private(path) for path in (root/'outbox').glob('*.json')]
         require(len(rows) == 1, 'offline observer did not emit exactly one gap')
-        gap = rows[0]
+        signed = rows[0]
+        gap = signed['record']
         require(gap['kind'] == 'gap' and gap['body'].get('reason') == 'source_offline'
                 and gap['body'].get('stale') is True and gap['body'].get('start_time') == seen,
                 'offline gap lost its last-seen boundary')
-        require(records.deliver(data_dir, gap), 'offline observer gap did not commit')
+        require(records.deliver(data_dir, signed), 'offline observer gap did not commit')
         with contextlib.closing(sqlite3.connect((Path(data_dir)/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
             row = db.execute('SELECT body FROM records WHERE source_id=? AND event_id=?',
                              (gap['source_id'], gap['event_id'])).fetchone()

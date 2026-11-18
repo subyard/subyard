@@ -133,7 +133,13 @@ for mode in ('all','--resources','--android','--android-resources'):
         assert result.stdout.strip() == '/fixture/config/profiles/telemetry/tests/e2e/profile-lifecycle.py'
 print('ok: both Android-only modes skip local measurements and VM broker; only resources continuation omits profile callback; default keeps full dispatch')
 # Run the actual example selection and assertions against tiny SQLite fixtures.
-examples = owner.split('python3 -B - "$asset" "$mode" <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
+profile_dir = pathlib.Path(sys.argv[1]).resolve().parents[1]
+sys.path.insert(0, str(profile_dir))
+import records
+with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+    fixture_data = pathlib.Path(directory)
+    fixture_key = records.identity_key(fixture_data)
+examples = owner.split('python3 -B - "$asset" "$mode" "$ROOT/config/profiles/telemetry" <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
 selection = examples.split('    hashes = []', 1)[0]
 for mode, pairs, accepted in (
     ('--android', [('codex','android'),('claude','android')], True),
@@ -150,6 +156,12 @@ for mode, pairs, accepted in (
     db.executescript('CREATE TABLE runs(agent_run_id TEXT,body TEXT); CREATE TABLE relations(agent_run_id TEXT); CREATE TABLE associations(agent_run_id TEXT,object_id TEXT); CREATE TABLE allocations(object_id TEXT,body TEXT);')
     for index, (agent, kind) in enumerate(pairs):
         run, allocation = 'run-'+str(index), 'allocation-'+str(index)
+        db.execute('INSERT INTO runs VALUES(?,?)', (run, json.dumps(dict(agent=agent,project_id=records.opaque_id(fixture_key, 'telemetry-fixture')))))
+        db.execute('INSERT INTO relations VALUES(?)', (run,))
+        db.execute('INSERT INTO associations VALUES(?,?)', (run,allocation))
+        db.execute('INSERT INTO allocations VALUES(?,?)', (allocation,json.dumps(dict(object_kind=kind))))
+    for agent, kind in ((agent, kind) for agent in ('codex','claude') for kind in ('vm','android')):
+        run, allocation = 'raw-'+agent+'-'+kind, 'raw-allocation-'+agent+'-'+kind
         db.execute('INSERT INTO runs VALUES(?,?)', (run, json.dumps(dict(agent=agent,project_id='telemetry-fixture'))))
         db.execute('INSERT INTO relations VALUES(?)', (run,))
         db.execute('INSERT INTO associations VALUES(?,?)', (run,allocation))
@@ -158,7 +170,8 @@ for mode, pairs, accepted in (
     previous = os.getcwd()
     try:
         with tempfile.TemporaryDirectory(dir='/tmp') as directory, mock.patch.object(sqlite3, 'connect', return_value=db), \
-             mock.patch.object(sys, 'argv', ['examples', 'fixture', mode]), mock.patch.object(time, 'monotonic', side_effect=[0,100]):
+             mock.patch.object(sys, 'argv', ['examples', 'fixture', mode, str(profile_dir)]), mock.patch.object(time, 'monotonic', side_effect=[0,100]), \
+             mock.patch.object(records, 'identity_key', return_value=fixture_key):
             os.chdir(directory)
             try:
                 exec(compile(selection, 'owner.sh:example-selection', 'exec'), {})

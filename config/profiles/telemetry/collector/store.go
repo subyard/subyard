@@ -42,6 +42,7 @@ func DefaultLimits() Limits {
 
 type writeRequest struct {
 	entries []Envelope
+	policy  Policy
 	bytes   int64
 	result  chan error
 }
@@ -152,7 +153,7 @@ func Open(dir string, limits Limits) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	bad := func(e error) (*Store, error) { db.Close(); return fail(e) }
 	var version int
-	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version > 2 {
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version > 3 {
 		return bad(errors.New("unsupported telemetry schema"))
 	}
 	var journal string
@@ -162,23 +163,6 @@ func Open(dir string, limits Limits) (*Store, error) {
 	var syncMode int
 	if err = db.QueryRow("PRAGMA synchronous").Scan(&syncMode); err != nil || syncMode != 2 {
 		return bad(errors.New("cannot enable FULL synchronization"))
-	}
-	if version < 2 {
-		tx, e := db.Begin()
-		if e != nil {
-			return bad(e)
-		}
-		migration := `ALTER TABLE records ADD COLUMN import_policy_version TEXT NOT NULL DEFAULT ''; PRAGMA user_version=2;`
-		if version == 0 {
-			migration = schema
-		}
-		if _, e = tx.Exec(migration); e != nil {
-			tx.Rollback()
-			return bad(fmt.Errorf("telemetry migration: %w", e))
-		}
-		if e = tx.Commit(); e != nil {
-			return bad(e)
-		}
 	}
 	var pageSize int64
 	if err = db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
@@ -198,6 +182,13 @@ func Open(dir string, limits Limits) (*Store, error) {
 	if _, err = db.Exec("PRAGMA wal_autocheckpoint=128"); err != nil {
 		return bad(err)
 	}
+	key, err := loadIdentityKey(dir)
+	if err != nil {
+		return bad(err)
+	}
+	if err = migrate(db, key, version); err != nil {
+		return bad(err)
+	}
 	var origin string
 	err = db.QueryRow("SELECT value FROM metadata WHERE key='origin_id'").Scan(&origin)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -206,14 +197,6 @@ func Open(dir string, limits Limits) (*Store, error) {
 	}
 	if err != nil {
 		return bad(err)
-	}
-	key, err := loadIdentityKey(dir)
-	if err != nil {
-		return bad(err)
-	}
-	origin = key.id(origin)
-	if origin == "" {
-		return bad(errors.New("invalid telemetry origin"))
 	}
 	s := &Store{db: db, dir: dir, origin: origin, key: key, limits: limits, lock: lock, queue: make(chan writeRequest, limits.QueueRequests), done: make(chan struct{})}
 	go s.writer()
@@ -233,7 +216,7 @@ CREATE TABLE IF NOT EXISTS allocations(object_id TEXT PRIMARY KEY,body TEXT NOT 
 CREATE TABLE IF NOT EXISTS gaps(origin_id TEXT NOT NULL,event_id TEXT NOT NULL,object_id TEXT,agent_run_id TEXT,source_time TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(origin_id,event_id));
 CREATE TABLE IF NOT EXISTS relations(origin_id TEXT NOT NULL,event_id TEXT NOT NULL,agent_run_id TEXT,session_id TEXT,body TEXT NOT NULL,PRIMARY KEY(origin_id,event_id));
 CREATE VIEW IF NOT EXISTS sample_values AS SELECT origin_id,event_id,object_id,source_time,json_extract(body,'$.cpu_ns') AS cpu_ns,json_extract(body,'$.memory_bytes') AS memory_bytes,json_extract(body,'$.rss_bytes') AS rss_bytes,json_extract(body,'$.pss_bytes') AS pss_bytes,json_extract(body,'$.io_read_bytes') AS io_read_bytes,json_extract(body,'$.io_write_bytes') AS io_write_bytes,json_extract(body,'$.generation') AS generation,json_extract(body,'$.counter_generation') AS counter_generation,json_extract(body,'$.monotonic_ns') AS monotonic_ns FROM samples;
-PRAGMA user_version=2;`
+PRAGMA user_version=3;`
 
 func (s *Store) OriginID() string { return s.origin }
 func (s *Store) Limits() Limits   { return s.limits }
@@ -243,28 +226,73 @@ func (s *Store) RegisteredRun(ctx context.Context, id string) bool {
 		return false
 	}
 	var n int
-	return s.db.QueryRowContext(ctx, "SELECT 1 FROM runs WHERE agent_run_id IN (?,?) LIMIT 1", clean, id).Scan(&n) == nil
+	return s.db.QueryRowContext(ctx, "SELECT 1 FROM runs WHERE agent_run_id=? LIMIT 1", clean).Scan(&n) == nil
 }
 func (s *Store) Ingest(ctx context.Context, records []Record) error {
+	return s.ingest(ctx, records, DefaultPolicy())
+}
+
+func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) error {
 	entries := make([]Envelope, 0, len(records))
 	for _, r := range records {
-		clean, n, err := s.key.record(r)
-		if err != nil {
-			return fmt.Errorf("%w: %v", errInvalidRecord, err)
+		if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
+			return errInvalidRecord
 		}
-		body, err := json.Marshal(clean.Body)
+		body, err := json.Marshal(r.Body)
 		if err != nil {
-			return fmt.Errorf("%w: %v", errInvalidRecord, err)
+			return errInvalidRecord
 		}
-		e := Envelope{Schema: ExportSchema, OriginID: "producer:" + clean.SourceID, EventID: clean.EventID,
-			SourceID: clean.SourceID, SourceVersion: clean.SourceVersion, SourceTime: clean.SourceTime,
-			Kind: clean.Kind, Encoding: "json", PolicyVersion: PolicyVersion, Redactions: n, Body: body}
-		e.rememberLegacyKey("producer:"+r.SourceID, r.EventID)
-		entries = append(entries, e)
+		entries = append(entries, Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
+			SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: r.SourceTime,
+			Kind: r.Kind, Encoding: "json", Body: body, Redactions: r.redactions, local: r.authenticated})
 	}
-	return s.submit(ctx, entries)
+	return s.capture(ctx, entries, policy)
 }
-func (s *Store) submit(ctx context.Context, entries []Envelope) error {
+
+func (s *Store) capture(ctx context.Context, input []Envelope, p Policy) error {
+	entries := make([]Envelope, 0, len(input))
+	var replay bool
+	for _, e := range input {
+		replay = e.replay
+		if e.replay {
+			// A local export can refer to rows already in this store. Accept
+			// only a matching payload and never write its asserted identities.
+			exists, err := s.checkDuplicate(s.db, e, p)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+		}
+		id := identity(s.key.id)
+		if e.local {
+			id = keepID
+		}
+		if !e.native {
+			e.OriginID, e.SourceID, e.EventID = id.origin(e.OriginID, e.SourceID), id(e.SourceID), id(e.EventID)
+		}
+		if e.SourceID == "" || (e.replay && (e.OriginID == "" || e.EventID == "")) ||
+			(e.Encoding == "json" && e.EventID == "") {
+			return errInvalidRecord
+		}
+		claim := e.PolicyVersion
+		projected, err := s.sanitizePayload(&e, p, id, !e.local)
+		if err != nil {
+			return fmt.Errorf("%w: %v", errInvalidRecord, err)
+		}
+		if e.replay {
+			e.ImportPolicyVersion, e.PolicyVersion = e.PolicyVersion, claim
+		}
+		if e.Kind != "" {
+			entries = append(entries, e)
+		}
+		entries = append(entries, projected...)
+	}
+	return s.submit(ctx, entries, p, replay)
+}
+
+func (s *Store) submit(ctx context.Context, entries []Envelope, p Policy, replay bool) error {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -283,10 +311,10 @@ func (s *Store) submit(ctx context.Context, entries []Envelope) error {
 		}
 		size += int64(len(e.Body) + len(e.Protobuf) + 512)
 	}
-	if size > s.limits.RequestBytes {
+	if !replay && size > s.limits.RequestBytes {
 		return ErrCapacity
 	}
-	r := writeRequest{entries, size, make(chan error, 1)}
+	r := writeRequest{entries, p, size, make(chan error, 1)}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -396,22 +424,13 @@ func (s *Store) commit(batch []writeRequest) error {
 	defer tx.Rollback()
 	for _, r := range batch {
 		for _, e := range r.entries {
-			if e.legacyOriginID != "" {
-				exists, err := s.checkDuplicate(tx, e, e.legacyOriginID, e.legacyEventID)
-				if err != nil {
-					return err
-				}
-				if exists {
-					continue
-				}
-			}
 			res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion)
 			if err != nil {
 				return ErrStorage
 			}
 			n, _ := res.RowsAffected()
 			if n == 0 {
-				exists, err := s.checkDuplicate(tx, e, e.OriginID, e.EventID)
+				exists, err := s.checkDuplicate(tx, e, r.policy)
 				if err != nil {
 					return err
 				}
@@ -431,15 +450,13 @@ func (s *Store) commit(batch []writeRequest) error {
 	return nil
 }
 
-func (e *Envelope) rememberLegacyKey(origin, event string) {
-	if e.OriginID != origin || e.EventID != event {
-		e.legacyOriginID, e.legacyEventID = origin, event
-	}
+type rowQuerier interface {
+	QueryRow(string, ...any) *sql.Row
 }
 
-func (s *Store) checkDuplicate(tx *sql.Tx, e Envelope, origin, event string) (bool, error) {
-	old := Envelope{EventID: event}
-	err := tx.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version FROM records WHERE origin_id=? AND event_id=?", origin, event).
+func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error) {
+	old := Envelope{OriginID: e.OriginID, EventID: e.EventID}
+	err := db.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).
 		Scan((*[]byte)(&old.Body), &old.Protobuf, &old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -447,12 +464,21 @@ func (s *Store) checkDuplicate(tx *sql.Tx, e Envelope, origin, event string) (bo
 	if err != nil {
 		return false, ErrStorage
 	}
-	if s.key.source(old.SourceID) != e.SourceID || old.Kind != e.Kind || old.Encoding != e.Encoding || old.PolicyVersion != e.PolicyVersion {
+	if old.SourceID != e.SourceID || old.Kind != e.Kind || old.Encoding != e.Encoding || old.PolicyVersion != e.PolicyVersion {
 		return false, errEventCollision
 	}
 	if !samePayload(old, e) {
-		// Compare any retained pre-upgrade bytes under the current policy.
-		if err = s.key.sanitizeReplayPayload(&old); err != nil || !samePayload(old, e) {
+		// Retained rows may have been captured under an older policy. This
+		// comparison never writes either payload.
+		if _, err = s.sanitizePayload(&old, p, keepID, false); err != nil {
+			return false, errEventCollision
+		}
+		if e.replay && e.ImportPolicyVersion == "" {
+			if _, err = s.sanitizePayload(&e, p, keepID, false); err != nil {
+				return false, errEventCollision
+			}
+		}
+		if !samePayload(old, e) {
 			return false, errEventCollision
 		}
 	}
@@ -550,8 +576,7 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 		}
 		oldTime = canonicalTimestamp(oldTime)
 		newer := e.SourceTime >= oldTime
-		oldParent.String = key.id(oldParent.String)
-		if _, ok := key.field(bodyRules["accounting"], oldAccounting.String); !ok {
+		if _, ok := identity(keepID).field(bodyRules["accounting"], oldAccounting.String); !ok {
 			oldAccounting.String = ""
 		}
 		if newer {
@@ -591,9 +616,9 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 			if quality == "" && stringValue(b, "scope_quality") == "managed" {
 				quality = "explicit"
 			}
-			body, _ := key.body(map[string]any{"object_id": object, "agent_run_id": run, "quality": quality, "start_time": e.SourceTime, "shared": b["shared"] == true, "source": "explicit-object-owner"})
+			body, _ := identity(keepID).body(map[string]any{"object_id": object, "agent_run_id": run, "quality": quality, "start_time": e.SourceTime, "shared": b["shared"] == true, "source": "explicit-object-owner"})
 			edge, _ := json.Marshal(body)
-			_, err = tx.Exec(`INSERT INTO associations VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(association_id) DO NOTHING`, projectionID(e.OriginID, object, run), object, run, quality, e.SourceTime, "", b["shared"] == true, string(edge))
+			_, err = tx.Exec(`INSERT INTO associations VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(association_id) DO NOTHING`, key.projectionID(e.OriginID, object, run), object, run, quality, e.SourceTime, "", b["shared"] == true, string(edge))
 		}
 		return err
 	case "sample":
@@ -608,7 +633,7 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 		}
 		id := stringValue(b, "association_id")
 		if id == "" {
-			id = projectionID(e.OriginID, object, run, stringValue(b, "source"))
+			id = key.projectionID(e.OriginID, object, run, stringValue(b, "source"))
 		}
 		var oldBody, oldObject string
 		var oldRun, oldStart, oldEnd sql.NullString
@@ -619,8 +644,8 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 			return err
 		}
 		if err == nil {
-			object = firstNonempty(key.id(oldObject), object)
-			run = key.id(oldRun.String)
+			object = firstNonempty(oldObject, object)
+			run = firstNonempty(oldRun.String, run)
 		}
 		start := firstNonempty(canonicalTimestamp(oldStart.String), stringValue(b, "start_time"))
 		end := firstNonempty(stringValue(b, "end_time"), canonicalTimestamp(oldEnd.String))
@@ -677,7 +702,7 @@ func (key identityKey) mergeProjection(oldBody string, incoming map[string]any, 
 			}
 		}
 	}
-	clean, _ := key.body(merged)
+	clean, _ := identity(keepID).body(merged)
 	data, err := json.Marshal(clean)
 	return string(data), err
 }
@@ -736,24 +761,28 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 	return after, rows.Err()
 }
 func (s *Store) Replay(ctx context.Context, r io.Reader) error {
+	return s.replay(ctx, r, DefaultPolicy())
+}
+
+func (s *Store) replay(ctx context.Context, r io.Reader, p Policy) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 64*1024), int(s.limits.RequestBytes*2+65536))
+	scanner.Buffer(make([]byte, 64*1024), int(s.limits.QueueBytes*2+65536))
 	for scanner.Scan() {
 		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
 			continue
 		}
-		e, err := s.key.replayEnvelope(scanner.Bytes())
+		e, err := replayEnvelope(scanner.Bytes())
 		if err != nil {
 			return err
 		}
-		if err = s.submit(ctx, []Envelope{e}); err != nil {
+		if err = s.capture(ctx, []Envelope{e}, p); err != nil {
 			return err
 		}
 	}
 	return scanner.Err()
 }
 
-func (key identityKey) replayEnvelope(data []byte) (Envelope, error) {
+func replayEnvelope(data []byte) (Envelope, error) {
 	var input map[string]json.RawMessage
 	if err := json.Unmarshal(data, &input); err != nil {
 		return Envelope{}, err
@@ -761,14 +790,13 @@ func (key identityKey) replayEnvelope(data []byte) (Envelope, error) {
 	str := func(field string) string { return jsonString(input[field]) }
 	origin, event, source := str("origin_id"), str("event_id"), str("source_id")
 	e := Envelope{
-		Schema: ExportSchema, OriginID: key.origin(origin, source), EventID: key.id(event),
-		SourceID: key.source(source), SourceVersion: str("source_version"), SourceTime: str("source_time"),
+		Schema: ExportSchema, OriginID: origin, EventID: event, replay: true,
+		SourceID: source, SourceVersion: str("source_version"), SourceTime: str("source_time"),
 		Kind: str("kind"), Encoding: str("encoding"), ReceivedTime: canonicalTimestamp(str("received_time")),
 	}
 	if str("schema") != ExportSchema || e.OriginID == "" || e.EventID == "" || e.SourceID == "" {
 		return Envelope{}, errors.New("unsupported export identity")
 	}
-	e.rememberLegacyKey(origin, event)
 	capturePolicy := str("policy_version")
 	if capturePolicy != "" && !capturePolicyVersion.MatchString(capturePolicy) {
 		return Envelope{}, errors.New("invalid export capture policy")
@@ -784,35 +812,36 @@ func (key identityKey) replayEnvelope(data []byte) (Envelope, error) {
 	} else if err := json.Unmarshal(input["protobuf"], &e.Protobuf); err != nil {
 		return Envelope{}, errors.New("invalid export protobuf")
 	}
-	if err := key.sanitizeReplayPayload(&e); err != nil {
-		return Envelope{}, err
-	}
-	// Source provenance is a validated claim. Only the local policy controls import.
-	e.ImportPolicyVersion = e.PolicyVersion
 	e.PolicyVersion = capturePolicy
 	return e, nil
 }
 
-func (key identityKey) sanitizeReplayPayload(e *Envelope) error {
+func (s *Store) sanitizePayload(e *Envelope, p Policy, id identity, rekeyBinary bool) ([]Envelope, error) {
 	if e.Encoding == "json" {
 		body, err := decodeBody(e.Body)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		clean, n, err := key.record(Record{Schema: RecordSchema, SourceID: e.SourceID, EventID: e.EventID,
+		clean, n, err := id.cleanRecord(Record{Schema: RecordSchema, SourceID: e.SourceID, EventID: e.EventID,
 			SourceVersion: e.SourceVersion, SourceTime: e.SourceTime, Kind: e.Kind, Body: body})
 		if err != nil {
-			return err
+			return nil, err
 		}
+		// The envelope has already been mapped. Only map body identities.
+		if !filterSessionRelation(&clean, p) {
+			e.Kind = ""
+			return nil, nil
+		}
+		e.Kind = clean.Kind
 		e.Body, _ = json.Marshal(clean.Body)
 		e.SourceTime = clean.SourceTime
 		e.SourceVersion = clean.SourceVersion
 		e.Redactions += n
 		e.PolicyVersion = PolicyVersion
-		return nil
+		return nil, nil
 	}
 	if e.Kind != e.Encoding {
-		return errors.New("export kind does not match encoding")
+		return nil, errors.New("export kind does not match encoding")
 	}
 	if version := sanitizeSourceVersion(e.SourceVersion); version != e.SourceVersion {
 		e.SourceVersion = version
@@ -824,5 +853,5 @@ func (key identityKey) sanitizeReplayPayload(e *Envelope) error {
 		}
 		e.SourceTime = sourceTime
 	}
-	return key.sanitizeOTLP(e, DefaultPolicy())
+	return s.key.sanitizeOTLP(e, p, id, rekeyBinary)
 }

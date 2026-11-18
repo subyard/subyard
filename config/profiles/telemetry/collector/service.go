@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,10 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	if options.Policy.Schema == "" {
 		options.Policy = DefaultPolicy()
 	}
+	if options.Policy.Schema != PolicyVersion {
+		return errors.New("unsupported capture policy")
+	}
+	options.Policy.Attributes = slices.Clone(options.Policy.Attributes)
 	if err := validateListen(options.Listen); err != nil {
 		return err
 	}
@@ -95,23 +100,24 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 			return
 		}
 		data = bytes.TrimSpace(data)
-		var records []Record
+		items := []json.RawMessage{data}
 		if len(data) > 0 && data[0] == '[' {
-			dec := json.NewDecoder(bytes.NewReader(data))
-			dec.UseNumber()
-			err = dec.Decode(&records)
-		} else {
+			err = json.Unmarshal(data, &items)
+		}
+		records := make([]Record, 0, len(items))
+		for _, item := range items {
+			if err != nil {
+				break
+			}
 			var record Record
-			dec := json.NewDecoder(bytes.NewReader(data))
-			dec.UseNumber()
-			err = dec.Decode(&record)
-			records = []Record{record}
+			record, err = s.key.decodeRecord(item)
+			records = append(records, record)
 		}
 		if err != nil {
 			http.Error(w, "invalid record request", 400)
 			return
 		}
-		if err = s.Ingest(r.Context(), records); err != nil {
+		if err = s.ingest(r.Context(), records, options.Policy); err != nil {
 			if errors.Is(err, ErrCapacity) || errors.Is(err, ErrStorage) {
 				http.Error(w, "telemetry unavailable", 503)
 			} else {
@@ -139,7 +145,7 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
-			if err := s.IngestOutbox(ctx, spool); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.ingestOutbox(ctx, spool, options.Policy); err != nil && !errors.Is(err, context.Canceled) {
 				failures.Add(1)
 			}
 			select {
@@ -169,6 +175,10 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 }
 
 func (s *Store) IngestOutbox(ctx context.Context, path string) error {
+	return s.ingestOutbox(ctx, path, DefaultPolicy())
+}
+
+func (s *Store) ingestOutbox(ctx context.Context, path string, policy Policy) error {
 	s.outboxMu.Lock()
 	defer s.outboxMu.Unlock()
 	if s.outboxPath != path {
@@ -193,7 +203,7 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		}
 		count++
 		s.outboxAfter = name
-		if err := s.ingestOutboxFile(ctx, path, name); err != nil {
+		if err := s.ingestOutboxFile(ctx, path, name, policy); err != nil {
 			if errors.Is(err, ErrStorage) || errors.Is(err, ErrCapacity) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return err
 			}
@@ -204,7 +214,7 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 	return invalid
 }
 
-func (s *Store) ingestOutboxFile(ctx context.Context, dir, name string) error {
+func (s *Store) ingestOutboxFile(ctx context.Context, dir, name string, policy Policy) error {
 	target := filepath.Join(dir, name)
 	before, err := os.Lstat(target)
 	if err != nil {
@@ -232,13 +242,11 @@ func (s *Store) ingestOutboxFile(ctx context.Context, dir, name string) error {
 	if int64(len(data)) > s.limits.RequestBytes {
 		return errors.New("invalid outbox file")
 	}
-	var r Record
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err = dec.Decode(&r); err != nil {
+	r, err := s.key.decodeRecord(data)
+	if err != nil {
 		return errInvalidRecord
 	}
-	if err = s.Ingest(ctx, []Record{r}); err != nil {
+	if err = s.ingest(ctx, []Record{r}, policy); err != nil {
 		return err
 	}
 	current, err := os.Lstat(target)

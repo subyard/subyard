@@ -71,6 +71,7 @@ class Resources(unittest.TestCase):
             db.execute('CREATE TABLE records(event_id TEXT, source_id TEXT, origin_id TEXT, encoding TEXT)')
             db.commit()
         records.atomic_json(self.root/'producer.json',dict(source_id='fixture-source'))
+        source_id = records.opaque_id(records.identity_key(self.root), 'fixture-source')
         outbox = records.private_directory(self.root/'outbox')
         original = records.read_private
         for scenario in ('committed','deleted','foreign-source','ambiguous','permission','failed-delivery'):
@@ -84,9 +85,9 @@ class Resources(unittest.TestCase):
                             raise PermissionError(13,'private error',str(target))
                         if scenario != 'failed-delivery':
                             with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
-                                for source in (['fixture-source'] if scenario == 'committed' else
+                                for source in ([source_id] if scenario == 'committed' else
                                                ['foreign'] if scenario == 'foreign-source' else
-                                               ['fixture-source','foreign'] if scenario == 'ambiguous' else []):
+                                               [source_id,'foreign'] if scenario == 'ambiguous' else []):
                                     db.execute('INSERT INTO records VALUES(?,?,?,?)',(scenario,source,'producer:'+source,'json'))
                                 db.commit()
                             target.unlink()
@@ -97,7 +98,7 @@ class Resources(unittest.TestCase):
                         resource_observer.drain_outbox(self.root)
                         with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
                             self.assertEqual(db.execute('SELECT source_id,event_id FROM records WHERE event_id=?',(scenario,)).fetchall(),
-                                             [('fixture-source',scenario)])
+                                             [(source_id,scenario)])
                     elif scenario == 'permission':
                         with self.assertRaises(PermissionError):
                             resource_observer.drain_outbox(self.root)
@@ -125,7 +126,7 @@ class Resources(unittest.TestCase):
 
     def test_resource_samples_from_sibling_allocation_cannot_satisfy_current_run(self):
         rows = {'allocations':[dict(object_id=name,object_kind='vm',allocated_memory_bytes=123) for name in ('current','sibling')],
-                'associations':[dict(object_id='current',agent_run_id='current-run',quality='explicit')],
+                'associations':[dict(object_id='current',agent_run_id=records.opaque_id(records.identity_key(self.root), 'current-run'),quality='explicit')],
                 'samples':[dict(object_id='sibling',cpu_ns=1,memory_bytes=1,counter_generation='counter',io_read_bytes=1,io_write_bytes=1)]}
         with patch.dict(os.environ,SUBYARD_AGENT_RUN_ID='current-run'), patch.object(resource_observer,'read_rows',side_effect=lambda data,table:rows[table]):
             with self.assertRaisesRegex(resource_observer.Failure,'sample for the managed allocation'):
@@ -243,7 +244,7 @@ class Resources(unittest.TestCase):
         self.temp.cleanup()
 
     def rows(self):
-        return [records.read_private(path) for path in (self.root / 'outbox').glob('*.json')]
+        return [records.read_outbox(path) for path in (self.root / 'outbox').glob('*.json')]
 
     def page(self):
         event = dict(event_id=EVENT, timestamp=NOW, kind='lease.available', to_state='available',
@@ -422,13 +423,20 @@ class Resources(unittest.TestCase):
         self.assertEqual(body['reservation_semantics'], 'allocated_virtual_capacity_held')
 
     def test_android_allocation_outbox_drops_private_purpose_and_cpu(self):
-        config = dict(self.config, kind='android', associations={})
+        config = dict(self.config, kind='android', associations={}, source_id='resource-'+'a'*64)
         private = '/home/fixture/private-notes'
         allocation = dict(slot_id='001', generation=2, state='held',
                           owner=dict(purpose=private), allocated_cpu=private, requested_cpu=2)
         event = dict(event_id=EVENT, source_time=NOW, phase='baseline', allocation=allocation)
         self.assertTrue(resources.emit_event(self.root, config, event))
-        body = self.rows()[0]['body']
+        row = self.rows()[0]
+        body = row['body']
+        identity = records.identity_key(self.root)
+        raw_object = resources.allocation(config, allocation, 'emulator')['object_id']
+        self.assertEqual(row['source_id'], records.opaque_id(identity, config['source_id']))
+        self.assertEqual(body['object_id'], records.opaque_id(identity, raw_object))
+        self.assertNotEqual(row['source_id'], config['source_id'])
+        self.assertNotEqual(body['object_id'], raw_object)
         for field in ('purpose', 'allocated_cpu', 'reserved_cpu'):
             self.assertNotIn(field, body)
         self.assertEqual(body['requested_cpu'], 2)
@@ -605,8 +613,9 @@ class Resources(unittest.TestCase):
                         paths.append(pending)
                     committed = json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
                         f"SELECT source_id,origin_id,encoding FROM records WHERE event_id='{pending_id}'"]))
-                    self.assertEqual(committed,[dict(source_id=config['source_id'],
-                        origin_id='producer:'+config['source_id'],encoding='json')])
+                    source_id = records.opaque_id(records.identity_key(data), config['source_id'])
+                    self.assertEqual(committed,[dict(source_id=source_id,
+                        origin_id='producer:'+source_id,encoding='json')])
                     pending.unlink(missing_ok=True)
                     removed.append(pending.stem)
                 return iter(paths)
@@ -629,7 +638,7 @@ class Resources(unittest.TestCase):
             self.assertEqual(cursors,['-','-',EVENT])
             resource_observer.drain_outbox(data)
             rows=json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
-                f"SELECT count(*) AS edges,min(start_time) AS start,max(end_time) AS end FROM associations WHERE agent_run_id='{late_run}'"]))
+                f"SELECT count(*) AS edges,min(start_time) AS start,max(end_time) AS end FROM associations WHERE agent_run_id='{records.opaque_id(records.identity_key(data), late_run)}'"]))
             self.assertEqual(rows[0],dict(edges=1,start='2026-10-24T00:00:00.000000000Z',end='2026-10-24T00:00:21.000000000Z'))
             with patch.dict(os.environ,SUBYARD_AGENT_RUN_ID='unknown-agent'):
                 with self.assertRaisesRegex(resource_observer.Failure,'explicit managed-run association'):

@@ -35,7 +35,7 @@ func TestCustomCapturePolicyAndFingerprint(t *testing.T) {
 	}
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/traces", Protobuf: raw}
-	if err := (identityKey{}).sanitizeOTLP(&e, p); err != nil {
+	if _, err := (identityKey{}).sanitizeOTLP(&e, p, (identityKey{}).id, true); err != nil {
 		t.Fatal(err)
 	}
 	clean := ptraceotlp.NewExportRequest()
@@ -67,13 +67,11 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 			// A historical custom policy could authorize arbitrary text.
 			e.PolicyVersion = policyFingerprint(p)
 			if !custom {
-				if err := s.key.sanitizeOTLP(&e, p); err != nil {
+				if _, err := s.key.sanitizeOTLP(&e, p, s.key.id, true); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := s.submit(ctx, []Envelope{e}); err != nil {
-				t.Fatal(err)
-			}
+			seedRetained(t, s, e)
 			var exported bytes.Buffer
 			if _, err := Export(ctx, s.db, &exported, 0, 10); err != nil {
 				t.Fatal(err)
@@ -108,7 +106,7 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 			if err := json.Unmarshal(imported.Bytes(), &roundTrip); err != nil {
 				t.Fatal(err)
 			}
-			if roundTrip.OriginID != original.OriginID || roundTrip.EventID != original.EventID || roundTrip.PolicyVersion != original.PolicyVersion || roundTrip.ImportPolicyVersion != applied || bytes.Contains(imported.Bytes(), []byte("PRIVATE")) {
+			if roundTrip.OriginID != destination.key.id(original.OriginID) || roundTrip.EventID != destination.key.id(original.EventID) || roundTrip.PolicyVersion != original.PolicyVersion || roundTrip.ImportPolicyVersion != applied || bytes.Contains(imported.Bytes(), []byte("PRIVATE")) {
 				t.Fatal("export lost provenance/identity or trusted imported policy text")
 			}
 			if err := destination.Replay(ctx, bytes.NewReader(imported.Bytes())); err != nil {
@@ -135,7 +133,11 @@ func TestCapturePolicyV1MigrationAndLegacyExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Ingest(context.Background(), []Record{record("run", map[string]any{"agent_run_id": "legacy"})}); err != nil {
+	const at = "2026-01-01T00:00:00.000000000Z"
+	seedRetained(t, s, Envelope{OriginID: "producer:old-source", EventID: "old-run", SourceID: "old-source",
+		SourceVersion: "1", SourceTime: at, Kind: "run", Body: json.RawMessage(`{"agent_run_id":"legacy"}`),
+		Encoding: "json", PolicyVersion: PolicyVersion, ReceivedTime: at})
+	if _, err := s.db.Exec(`INSERT INTO runs VALUES('legacy','{"agent_run_id":"legacy"}',?)`, at); err != nil {
 		t.Fatal(err)
 	}
 	// Reconstruct the historical v1 records layout while preserving a real row.
@@ -168,7 +170,7 @@ func TestCapturePolicyV1MigrationAndLegacyExport(t *testing.T) {
 		t.Fatal("legacy JSONL replay failed", err)
 	}
 	s.db.QueryRow("PRAGMA user_version").Scan(&version)
-	if version != 2 || !s.RegisteredRun(context.Background(), "legacy") {
+	if version != 3 || !s.RegisteredRun(context.Background(), "legacy") {
 		t.Fatal("migration lost lifecycle data or schema version")
 	}
 }
@@ -222,6 +224,8 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	}
 	destination := fixtureStore(t)
 	// Populate retained rows with bytes accepted before the policy tightened.
+	producer.Schema = ExportSchema
+	producer.EventID = r.EventID
 	producer.SourceID = r.SourceID
 	producer.OriginID = "producer:" + r.SourceID
 	producer.SourceVersion = r.SourceVersion
@@ -230,14 +234,15 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacyStore := fixtureStore(t)
-	if err := legacyStore.submit(ctx, []Envelope{producer}); err != nil {
+	seedRetained(t, legacyStore, producer)
+	if err := migrate(legacyStore.db, legacyStore.key, 2); err != nil {
 		t.Fatal(err)
 	}
 	if err := legacyStore.Ingest(ctx, []Record{r}); err != nil {
 		t.Fatal("legacy producer retry failed", err)
 	}
 	var legacy bytes.Buffer
-	if _, err := Export(ctx, legacyStore.db, &legacy, 0, 10); err != nil {
+	if err := json.NewEncoder(&legacy).Encode(producer); err != nil {
 		t.Fatal(err)
 	}
 	for _, target := range []*Store{legacyStore, store} {
@@ -268,9 +273,7 @@ func TestReplayLegacyOutOfRangeTimestamps(t *testing.T) {
 		SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: legacyTime.UTC().Format(timestampLayout),
 		ReceivedTime: legacyTime.UTC().Format(timestampLayout),
 		Kind:         r.Kind, Encoding: "json", PolicyVersion: PolicyVersion, Body: json.RawMessage(`{"reason":"source_offline"}`)}
-	if err := store.submit(ctx, []Envelope{legacy}); err != nil {
-		t.Fatal(err)
-	}
+	seedRetained(t, store, legacy)
 	r.EventID = newID()
 	if err := store.Ingest(ctx, []Record{r}); err != nil {
 		t.Fatal(err)
@@ -288,10 +291,21 @@ func TestReplayLegacyOutOfRangeTimestamps(t *testing.T) {
 	var count int
 	var sourceTime, receivedTime string
 	var redactions int
-	if err := destination.db.QueryRow("SELECT source_time, received_time, redactions FROM records WHERE event_id=?", legacy.EventID).Scan(&sourceTime, &receivedTime, &redactions); err != nil || sourceTime != unknownSourceTime || receivedTime != unknownSourceTime || redactions != 2 {
+	if err := destination.db.QueryRow("SELECT source_time, received_time, redactions FROM records WHERE event_id=?", destination.key.id(legacy.EventID)).Scan(&sourceTime, &receivedTime, &redactions); err != nil || sourceTime != unknownSourceTime || receivedTime != unknownSourceTime || redactions != 2 {
 		t.Fatalf("source time=%s, receive time=%s, redactions=%d, err=%v", sourceTime, receivedTime, redactions, err)
 	}
 	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("replayed count=%d, err=%v", count, err)
+	}
+}
+
+func seedRetained(t *testing.T, store *Store, e Envelope) {
+	t.Helper()
+	e.OriginID = firstNonempty(e.OriginID, store.origin)
+	e.EventID = firstNonempty(e.EventID, newID())
+	e.ReceivedTime = firstNonempty(e.ReceivedTime, "2026-01-01T00:00:00.000000000Z")
+	if _, err := store.db.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf); err != nil {
+		t.Fatal(err)
 	}
 }

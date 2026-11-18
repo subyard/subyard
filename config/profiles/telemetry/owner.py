@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tarfile
 
-FILES = ('guest.py', 'native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
+FILES = ('guest.py', 'native.py', 'launcher.py', 'processes.py', 'records.py', 'record-policy.txt', 'forward.py',
          'resources.py', 'sources.py', 'broker-correlation.py')
 GUEST_SCRIPT = 'stage="$(mktemp -d /tmp/subyard-telemetry.XXXXXX)"; trap \'rm -rf -- "$stage"\' EXIT; tar -xf - -C "$stage"; python3 -B "$stage/guest.py" "$@"'
 SAFE_GUEST_FAILURE = re.compile(r'telemetry: local reconciliation failed \((?P<kind>OSError|PermissionError|FileNotFoundError|FileExistsError|NotADirectoryError|IsADirectoryError|BlockingIOError|TimeoutError|ValueError|KeyError|TimeoutExpired|CalledProcessError|SubprocessError|UnicodeDecodeError|JSONDecodeError) at (?P<location>(?:guest|native)\.py:[1-9][0-9]{0,4})\)\Z')

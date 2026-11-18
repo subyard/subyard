@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import launcher
+import records
 
 
 class LauncherTest(unittest.TestCase):
@@ -80,7 +81,7 @@ class LauncherTest(unittest.TestCase):
             launcher.records.atomic_json(outbox/'event.json',dict(private='PRIVATE_SECRET_OUTBOX'))
             with contextlib.closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
                 db.execute('CREATE TABLE runs (agent_run_id TEXT, body TEXT)')
-                db.execute('INSERT INTO runs VALUES (?,?)',('active',json.dumps(dict(state='main_exited',main_exited=True,agent_exited=True,resource_completed=False,private='PRIVATE_SECRET_DB'))))
+                db.execute('INSERT INTO runs VALUES (?,?)',(records.opaque_id(records.identity_key(data), 'active'),json.dumps(dict(state='main_exited',main_exited=True,agent_exited=True,resource_completed=False,private='PRIVATE_SECRET_DB'))))
                 db.commit()
             namespace={'__name__':'fixture'}
             with patch.object(sys,'argv',['probe',str(Path(launcher.__file__).parent),str(data)]):
@@ -116,7 +117,7 @@ class LauncherTest(unittest.TestCase):
                 (root/'runs/first.json').unlink()
                 self.assertTrue(launcher.admit_manifest(root, {**first, 'agent_run_id': 'second'}))
                 self.assertFalse(marker.exists())
-                events = [json.loads(path.read_text()) for path in (root/'outbox').glob('*.json')]
+                events = [records.read_outbox(path) for path in (root/'outbox').glob('*.json')]
                 self.assertTrue(any(event['kind']=='gap' and event['body']['reason']=='run_manifest_capacity' for event in events))
             payload = {'agent_run_id': 'third', 'metadata': 'x'*100}
             with patch.object(launcher, 'MAX_RUN_BYTES', 1):
@@ -232,7 +233,7 @@ class LauncherTest(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertEqual(launcher.observe(root, once=True), 0)
             self.assertFalse(path.exists())
-            gap = next(json.loads(item.read_text()) for item in (root/'outbox').glob('*.json'))
+            gap = next(records.read_outbox(item) for item in (root/'outbox').glob('*.json'))
             self.assertEqual(gap['body']['reason'], 'run_reservation_interrupted')
 
     def test_observer_overflow_foreign_prefix_does_not_starve_valid_run(self):
@@ -464,7 +465,7 @@ class LauncherTest(unittest.TestCase):
                 project_id=None, worktree_id=None, yard_id=None, host_id=None)
             with patch.object(launcher, 'create_scope', side_effect=ValueError('safe refusal')), patch.object(launcher, 'detached_observer'):
                 self.assertEqual(launcher.launch(args), 19)
-            events = [json.loads(path.read_text()) for path in (root/'data/outbox').glob('*.json')]
+            events = [records.read_outbox(path) for path in (root/'data/outbox').glob('*.json')]
             self.assertTrue(any(event['kind']=='run' and event['body'].get('scope_quality')=='partial' for event in events))
 
     def test_native_exec_waits_for_baseline_publication(self):
@@ -514,7 +515,7 @@ class LauncherTest(unittest.TestCase):
             value = json.loads(target.read_text())
             self.assertEqual(value['SUBYARD_TASK_ID'], 'task')
             self.assertTrue(value['SUBYARD_AGENT_RUN_ID'])
-            events = [json.loads(path.read_text()) for path in (root/'data/outbox').glob('*.json')]
+            events = [records.read_outbox(path) for path in (root/'data/outbox').glob('*.json')]
             self.assertTrue(any(event['kind'] == 'run' and event['body'].get('state') == 'starting' for event in events))
             deadline = time.monotonic()+12
             while list((root/'data/runs').glob('*.json')) and time.monotonic() < deadline:
