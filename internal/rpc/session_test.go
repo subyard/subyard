@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -658,6 +659,10 @@ func TestEventBurstWithConcurrentReaderKeepsSessionAlive(t *testing.T) {
 }
 
 func TestOperationCapacityRefusesExcessRequestsAndKeepsCancellation(t *testing.T) {
+	synctest.Test(t, testOperationCapacity)
+}
+
+func testOperationCapacity(t *testing.T) {
 	release := make(chan struct{})
 	handler := HandlerFunc(func(ctx context.Context, call Call, _ Emit) (any, error) {
 		if call.Method == MethodOperationPlan {
@@ -696,6 +701,8 @@ func TestOperationCapacityRefusesExcessRequestsAndKeepsCancellation(t *testing.T
 		responses["hold-1"].Error.Code != "cancelled" {
 		t.Fatalf("cancellation at capacity = %#v", responses)
 	}
+	// The worker releases its capacity slot after enqueueing the response.
+	synctest.Wait()
 	writeRequest(t, codec, Request{Version: 1, Type: "request", ID: "after", Method: "system.ping"})
 	if response := readResponse(t, codec); response.ID != "after" || response.Error != nil {
 		t.Fatalf("freed slot was not reused: %#v", response)
