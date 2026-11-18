@@ -53,13 +53,15 @@ cleanup() {
   set +e
   cleanup_real_project
   if [ -n "$SUDOERS" ]; then
-    case "$SUDOERS" in /etc/sudoers.d/subyard-sudo-terminal-*) rm -f -- "$SUDOERS" ;; esac
+    case "$SUDOERS" in
+      /etc/sudoers.d/subyard-sudo-terminal-*) rm -f -- "$SUDOERS" || rc=1 ;;
+    esac
   fi
   if [ -n "$FIXTURE_USER" ] && getent passwd "$FIXTURE_USER" >/dev/null 2>&1; then
-    case "$FIXTURE_USER" in sy-sudo-*) userdel -r "$FIXTURE_USER" >/dev/null 2>&1 ;; esac
+    case "$FIXTURE_USER" in sy-sudo-*) userdel -r "$FIXTURE_USER" || rc=1 ;; esac
   fi
   if [ -n "$TMP" ] && [[ "$TMP" = /tmp/subyard-sudo-terminal.* ]] && [ -d "$TMP" ]; then
-    find "$TMP" -depth -delete
+    find "$TMP" -depth -delete || rc=1
   fi
   exit "$rc"
 }
@@ -123,6 +125,8 @@ fixture_home="$TMP/home"
 stage_runtime() {
   local destination="$1"
   cp -a --no-preserve=ownership "$runtime/." "$destination"
+  # Frozen-candidate extraction can leave every directory private to its preparer.
+  find "$destination" -type d -exec chmod 0755 {} +
   (cd "$destination" && sha256sum --check --quiet --strict runtime-files.sha256) \
     || die 'staged candidate runtime is incomplete or changed'
 }
@@ -191,7 +195,9 @@ fixture_user="sy-sudo-$$"
 sudoers="/etc/sudoers.d/subyard-sudo-terminal-$token"
 getent passwd "$fixture_user" >/dev/null 2>&1 \
   && die "refusing existing fixture user $fixture_user"
-[ ! -e "$sudoers" ] && [ ! -L "$sudoers" ] || die "refusing existing sudoers fixture $sudoers"
+if [[ -e "$sudoers" || -L "$sudoers" ]]; then
+  die "refusing existing sudoers fixture $sudoers"
+fi
 FIXTURE_USER="$fixture_user"
 SUDOERS="$sudoers"
 useradd --user-group --groups incus-admin --home-dir "$fixture_home" --shell /bin/bash "$FIXTURE_USER"
@@ -215,10 +221,13 @@ run_as_fixture() {
 run_as_fixture "$fixture_repo/bin/yard-engine" _network-lock check
 
 run_prompted_pty() {
-  local output="$1" command_line="$2" input pid input_fd count=0 deadline
-  shift 2
+  local output="$1" limit="$2" command_line="$3" input pid input_fd count=0 deadline
+  shift 3
+  pty_child_rc=0
   mkfifo -m 0600 "$output.input" || return
-  run_as_fixture script --echo never -qefc "$command_line" /dev/null \
+  # Keep the writer open until script exits, with a deadline even after the final input.
+  timeout --kill-after=5s "$limit" runuser -u "$FIXTURE_USER" -- \
+    script --echo never -qefc "$command_line" /dev/null \
     <"$output.input" >"$output" 2>&1 &
   pid=$!
   exec {input_fd}>"$output.input" || return
@@ -228,34 +237,43 @@ run_prompted_pty() {
     # sudo can discard input during the delay before a retry prompt.
     until [ "$(grep -Fc '[sudo] password for' "$output" || true)" -ge "$count" ]; do
       if ! kill -0 "$pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+        kill "$pid" 2>/dev/null || true
         exec {input_fd}>&-
-        wait "$pid" || return
+        wait "$pid" || true
+        printf 'PTY ended or timed out waiting for sudo prompt %s\n' "$count" >&2
         return 1
       fi
       sleep 0.1
     done
-    printf '%s' "$input" >&"$input_fd"
+    if ! kill -0 "$pid" 2>/dev/null || ! (trap '' PIPE; printf '%s' "$input" >&"$input_fd"); then
+      kill "$pid" 2>/dev/null || true
+      exec {input_fd}>&-
+      wait "$pid" || true
+      printf 'could not deliver PTY input for sudo prompt %s\n' "$count" >&2
+      return 1
+    fi
   done
-  local rc=0
-  wait "$pid" || rc=$?
+  wait "$pid" || pty_child_rc=$?
   exec {input_fd}>&-
-  return "$rc"
+  case "$pty_child_rc" in
+    124|137)
+      printf 'PTY session exceeded its %s limit (status %s)\n' "$limit" "$pty_child_rc" >&2
+      return 1
+      ;;
+    125|126|127) return 1 ;;
+  esac
 }
 
 run_as_fixture sudo -k
 pty_output="$TMP/pty.out"
 wrong="incorrect-$token"
 printf '  [ .. ] checking wrong-password retry, success and cached credential\n'
-set +e
-run_prompted_pty "$pty_output" "sudo -k; '$TMP/run-teardown'; '$TMP/run-teardown'" \
-  "$wrong"$'\n' "$password"$'\n'
-pty_rc=$?
-set -e
-if [ "$pty_rc" -ne 0 ]; then
+if ! run_prompted_pty "$pty_output" 90s "sudo -k; '$TMP/run-teardown'; '$TMP/run-teardown'" \
+  "$wrong"$'\n' "$password"$'\n' || [ "$pty_child_rc" -ne 0 ]; then
   tr -d '\r' < "$pty_output" \
     | sed "s/$password/[redacted]/g" \
     | tail -n 120 >&2
-  die "interactive PTY command failed with status $pty_rc"
+  die "interactive PTY check failed (child status $pty_child_rc)"
 fi
 grep -Fq '[sudo] password for' "$pty_output" \
   || die 'standard sudo password prompt was not visible'
@@ -283,11 +301,9 @@ printf '  [ ok ] no-TTY invocation failed before root mutation\n'
 run_as_fixture sudo -k
 interrupt_output="$TMP/interrupt.out"
 printf '  [ .. ] checking Ctrl-C at the standard sudo prompt\n'
-set +e
-run_prompted_pty "$interrupt_output" "sudo -k; '$TMP/run-teardown'" $'\003'
-interrupt_rc=$?
-set -e
-[ "$interrupt_rc" -ne 0 ] || die 'Ctrl-C did not cancel sudo authorization'
+run_prompted_pty "$interrupt_output" 90s "sudo -k; '$TMP/run-teardown'" $'\003' \
+  || die 'could not complete the Ctrl-C PTY exchange'
+[ "$pty_child_rc" -ne 0 ] || die 'Ctrl-C did not cancel sudo authorization'
 grep -Fq '[sudo] password for' "$interrupt_output" \
   || die 'Ctrl-C fixture did not reach the sudo prompt'
 grep -Fq 'root-step=' "$interrupt_output" \
@@ -314,11 +330,12 @@ if ! incus storage show default --project default >/dev/null 2>&1; then
     || die 'could not restore the disposable VM default storage pool'
 fi
 if incus storage show "$E2E_POOL" --project default >/dev/null 2>&1; then
-  [ "$(incus storage show "$E2E_POOL" --project default \
+  if ! { [ "$(incus storage show "$E2E_POOL" --project default \
     | awk '!found && $1 == "driver:" { print $2; found=1 }')" = dir ] \
     && [ "$(incus storage get "$E2E_POOL" user.subyard.owner --project default)" = \
-      sudo-terminal-e2e-v1 ] \
-    || die "refusing unexpected existing storage pool $E2E_POOL"
+      sudo-terminal-e2e-v1 ]; }; then
+    die "refusing unexpected existing storage pool $E2E_POOL"
+  fi
 else
   incus storage create "$E2E_POOL" dir user.subyard.owner=sudo-terminal-e2e-v1 \
     --project default >/dev/null \
@@ -353,6 +370,7 @@ install -d -m 0755 "$real_repo/config/profiles/sudo-smoke"
 cat > "$real_repo/config/profiles/sudo-smoke/profile.conf" <<'EOF'
 # Empty smoke profile: the provision hook only proves lifecycle and adapter continuation.
 EOF
+chmod 0644 "$real_repo/config/profiles/sudo-smoke/profile.conf"
 cat > "$real_repo/config/profiles/sudo-smoke/provision.sh" <<'SH'
 #!/usr/bin/env bash
 # subyard-provision-check-v1
@@ -459,7 +477,7 @@ chmod 0755 "$TMP/run-real-yard"
 printf '  [ ok ] real-command names are absent and reserved for this run\n'
 
 run_real_pty() {
-  local label="$1" output="$2" command_line argument quoted rc
+  local label="$1" output="$2" command_line argument quoted
   shift 2
   command_line="$(printf '%q' "$TMP/run-real-yard")"
   for argument in "$@"; do
@@ -468,11 +486,8 @@ run_real_pty() {
   done
   run_real_as_fixture sudo -k
   printf '  [ .. ] %s\n' "$label"
-  set +e
-  run_prompted_pty "$output" "$command_line" "$password"$'\n'
-  rc=$?
-  set -e
-  if [ "$rc" -ne 0 ]; then
+  if ! run_prompted_pty "$output" 15m "$command_line" "$password"$'\n' \
+    || [ "$pty_child_rc" -ne 0 ]; then
     tr -d '\r' < "$output" \
       | sed "s/$password/[redacted]/g" \
       | tail -n 120 >&2
@@ -480,7 +495,7 @@ run_real_pty() {
       && incus info "$REAL_INSTANCE" --project "$REAL_PROJECT" >/dev/null 2>&1; then
       incus info "$REAL_INSTANCE" --project "$REAL_PROJECT" --show-log >&2 || true
     fi
-    die "$label failed with status $rc"
+    die "$label failed (child status $pty_child_rc)"
   fi
 }
 
