@@ -995,50 +995,6 @@ func resetInheritedContext(values environment) {
 	}
 }
 
-func applyYardConfig(configDir, yardName, yardFile string, values environment) error {
-	return applyYardConfigTracked(configDir, yardName, yardFile, values, nil, false)
-}
-
-func applyYardConfigTracked(
-	configDir, yardName, yardFile string,
-	values environment,
-	tracker *settingTracker,
-	syncSource bool,
-) error {
-	// A named-yard settings file selects one public profile. The profile is
-	// applied first and the named-yard settings file wins last.
-	// Probe a copy because env files are declarative but may contain defaults that
-	// depend on the existing normalized environment.
-	settings := Catalog{}
-	if tracker != nil {
-		settings = tracker.catalog
-	} else {
-		var err error
-		settings, err = LoadCatalog(filepath.Dir(configDir))
-		if err != nil {
-			return err
-		}
-	}
-	probe := make(environment, len(values))
-	for name, value := range values {
-		probe[name] = value
-	}
-	delete(probe, "YARD_TEMPLATE")
-	if err := settings.applyEnvFileValidated(yardFile, probe, ScopeYard, syncSource, nil); err != nil {
-		return err
-	}
-	if err := applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], yardFile, values, tracker); err != nil {
-		return err
-	}
-	if tracker == nil {
-		return settings.applyEnvFileValidated(yardFile, values, ScopeYard, syncSource, nil)
-	}
-	yardLayer := tracker.addLayer("yard", "scalar settings", yardFile, true, settingAny)
-	return applyEnvFileTrackedValidated(
-		yardFile, values, tracker, yardLayer, ScopeYard, syncSource,
-	)
-}
-
 func yardTemplateFile(configDir, yardName, template, yardFile string) (string, error) {
 	if !domain.SafeName(template) {
 		return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
@@ -1066,31 +1022,13 @@ func applyYardTemplateTracked(configDir, yardName, template, yardFile string, va
 		if err != nil {
 			return err
 		}
-		settings := Catalog{}
-		if tracker != nil {
-			settings = tracker.catalog
-		} else {
-			var err error
-			settings, err = LoadCatalog(filepath.Dir(configDir))
-			if err != nil {
-				return err
-			}
-		}
-		if tracker == nil {
-			if err := settings.applyEnvFileValidated(
-				templateFile, values, ScopeShipped, false, nil,
-			); err != nil {
-				return err
-			}
-		} else {
-			profileLayer := tracker.addLayer(
-				"yard", "shipped profile", templateFile, true, settingScalar,
-			)
-			if err := applyEnvFileTrackedValidated(
-				templateFile, values, tracker, profileLayer, ScopeShipped, false,
-			); err != nil {
-				return err
-			}
+		profileLayer := tracker.addLayer(
+			"yard", "shipped profile", templateFile, true, settingScalar,
+		)
+		if err := applyEnvFileTrackedValidated(
+			templateFile, values, tracker, profileLayer, ScopeShipped, false,
+		); err != nil {
+			return err
 		}
 	}
 	return nil
