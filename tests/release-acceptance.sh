@@ -3164,6 +3164,7 @@ while True: time.sleep(1)
                           if entry["command"][1] == "dev/e2e/published-upgrade.sh"}, {
             "published-upgrade/anchor": ["anchor", "all"],
             "published-upgrade/0.29.0": ["0.29.0", "all"],
+            "published-upgrade/0.30.0": ["0.30.0", "all"],
         })
         verifier = importlib.util.spec_from_file_location("upgrade_verifier", root / "dev/verify-release-upgrades.py")
         module = importlib.util.module_from_spec(verifier)
@@ -3210,9 +3211,9 @@ while True: time.sleep(1)
 
     def test_previous_release_requires_direct_row_and_all_agent_check(self):
         catalog = json.loads((root / m.CORE_VM_CATALOG).read_text())
-        self.assertEqual(published_baseline_refusals(root, catalog, "0.30.0"), [
-            "previous release 0.30.0: expected direct baseline",
-            "previous release 0.30.0: missing catalog check with all agents"])
+        self.assertEqual(published_baseline_refusals(root, catalog, "99.0.0"), [
+            "previous release 99.0.0: expected direct baseline",
+            "previous release 99.0.0: missing catalog check with all agents"])
         for previous in ("0.28.0", "0.28.1"):
             self.assertEqual(published_baseline_refusals(root, catalog, previous), [])
         catalog["checks"] = [entry for entry in catalog["checks"] if entry["id"] != "published-upgrade/0.29.0"]
@@ -3509,7 +3510,7 @@ class FullSplitRequirement(unittest.TestCase):
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 22)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 23)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):
