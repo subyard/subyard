@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -144,180 +142,85 @@ func TestNarrowPolicyControlsLiveAndReplayedSessionRelations(t *testing.T) {
 	}
 }
 
-func TestPythonOutboxUsesSelectedCapturePolicy(t *testing.T) {
-	store := fixtureStore(t)
-	outbox := filepath.Join(store.dir, "outbox")
-	p := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
-	if err := store.publishCapturePolicy(outbox, p); err != nil {
-		t.Fatal(err)
-	}
+func appendPython(t *testing.T, store *Store, input []Record) {
+	t.Helper()
 	const producer = `
-from pathlib import Path
-import sys
+import json, pathlib, sys
 sys.path.insert(0, '..')
 import records
-root = Path(sys.argv[1])
-relation = dict(session_id='synthetic-session', agent_run_id='synthetic-run',
-                relation='native_session', source='native-otlp-attribute/authenticated-header')
-assert records.emit(root, 'relation', dict(relation, session_attributes=['thread.id']), event_id='excluded')
-assert not list((root/'outbox').glob('*.json'))
-for _ in range(2):
-    assert records.emit(root, 'relation', dict(relation, session_attributes=['thread.id', 'session.id']), event_id='mixed')
-path, = (root/'outbox').glob('*.json')
-record = records.read_outbox(path)
-assert record['kind'] == 'session'
-assert record['body'] == dict(session_id=records.opaque_id(records.identity_key(root), 'synthetic-session'),
-                             session_attributes=['session.id'], source='native-otlp-attribute')
-assert record['redactions'] == 5  # Four fields or entries, plus the unknown source time.
-key = records.identity_key(root)
-record['event_id'] = records.opaque_id(key, 'previous-format')
-del record['policy_version']
-records.atomic_json(root/'outbox'/(record['event_id']+'.json'), records.signed_record(key, record), outbox=True)
+root = pathlib.Path(sys.argv[1])
+for row in json.load(sys.stdin):
+    assert records.emit(root, row['kind'], row['body'], source_id=row['source_id'],
+                        source_time=row['source_time'], event_id=row['event_id'])
 `
-	if output, err := exec.Command("python3", "-B", "-c", producer, store.dir).CombinedOutput(); err != nil {
+	raw, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", "-B", "-c", producer, store.dir)
+	cmd.Stdin = bytes.NewReader(raw)
+	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("producer: %v\n%s", err, output)
 	}
-	// Restarting the collector with a broader policy must not relabel capture.
-	defaultPolicy := DefaultPolicy()
-	if err := store.publishCapturePolicy(outbox, defaultPolicy); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.ingestOutbox(context.Background(), outbox, defaultPolicy); err != nil {
-		t.Fatal(err)
-	}
-	for event, want := range map[string]string{"mixed": policyFingerprint(p), "previous-format": PolicyVersion} {
-		var redactions int
-		var policy string
-		if err := store.db.QueryRow("SELECT redactions,policy_version FROM records WHERE kind='session' AND event_id=?",
-			store.key.id(event)).Scan(&redactions, &policy); err != nil || redactions != 5 || policy != want {
-			t.Fatalf("outbox drain lost policy/redactions for %s: %s %d (%v)", event, policy, redactions, err)
-		}
-	}
-	if entries, err := os.ReadDir(outbox); err != nil || len(entries) != 1 || entries[0].Name() != ".lock" {
-		t.Fatalf("outbox did not drain: %v (%v)", entries, err)
-	}
 }
 
-func TestPreStartupOutboxRelationDrainsAfterPolicyChange(t *testing.T) {
-	ctx := context.Background()
-	const producer = `
-from pathlib import Path
-import sys
-sys.path.insert(0, '..')
-import records
-root = Path(sys.argv[1])
-assert records.emit(root, 'relation', dict(session_id='fixture-session', agent_run_id='fixture-run',
-    relation='native_session', source='native-otlp-attribute/authenticated-header',
-    session_attributes=['session.id', 'thread.id']), event_id='first-relation')
-`
+func TestPythonSpoolKeepsCaptureAcrossPolicyChanges(t *testing.T) {
+	p := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
 	wide := DefaultPolicy()
-	narrow := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
-	for _, change := range []struct {
-		name, kind    string
-		before, after Policy
-	}{
-		{"tighten", "relation", wide, narrow},
-		{"widen", "session", narrow, wide},
-	} {
-		t.Run(change.name, func(t *testing.T) {
-			dir := testkit.TempDir(t)
-			if output, err := exec.Command("python3", "-B", "-c", producer, dir).CombinedOutput(); err != nil {
-				t.Fatalf("producer: %v\n%s", err, output)
-			}
-			store, err := Open(dir, DefaultLimits())
-			if err != nil {
+	for _, change := range []struct{ before, after Policy }{{p, wide}, {wide, p}} {
+		t.Run(policyFingerprint(change.before), func(t *testing.T) {
+			ctx := context.Background()
+			store := fixtureStore(t)
+			hexID := strings.Repeat("a", 64)
+			digestID := "h1:" + hexID
+			input := record("relation", map[string]any{"session_id": hexID, "agent_run_id": digestID,
+				"relation": "native_session", "source": "native-otlp-attribute/authenticated-header",
+				"session_attributes": []string{"session.id", "thread.id"}})
+			if err := store.publishCapturePolicy(change.before); err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { store.Close() })
-			outbox := filepath.Join(dir, "outbox")
-			path := filepath.Join(outbox, store.key.id("first-relation")+".json")
-			data, err := os.ReadFile(path)
-			if err != nil {
+			appendPython(t, store, []Record{input})
+			files, err := filepath.Glob(filepath.Join(store.dir, "spool", "*.open"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("spool: %v (%v)", files, err)
+			}
+			raw, err := os.ReadFile(files[0])
+			if err != nil || bytes.Contains(raw, []byte(hexID)) || strings.Contains(files[0], hexID) {
+				t.Fatalf("caller ID reached spool: %v", err)
+			}
+			if err := store.publishCapturePolicy(change.after); err != nil {
 				t.Fatal(err)
 			}
-			signed, err := store.key.decodeRecord(data)
-			want := policyFingerprint(DefaultPolicy())
-			if err != nil || !signed.authenticated || signed.Kind != "relation" || signed.capturePolicy != want {
-				t.Fatalf("pre-startup capture policy = %q, want %q (%v)", signed.capturePolicy, want, err)
-			}
-			// Commit as the original drain would, leaving the file for redelivery.
-			if err = store.ingest(ctx, []Record{signed}, change.before); err != nil {
+			if err := store.drainSpool(ctx, change.after); err != nil {
 				t.Fatal(err)
 			}
-			if err = store.Close(); err != nil {
+			appendPython(t, store, []Record{input}) // Same stable input after a policy change.
+			if err := store.drainSpool(ctx, change.after); err != nil {
 				t.Fatal(err)
-			}
-			restarted, err := Open(dir, DefaultLimits())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer restarted.Close()
-			if err := restarted.publishCapturePolicy(outbox, change.after); err != nil {
-				t.Fatal(err)
-			}
-			if err := restarted.ingestOutbox(ctx, outbox, change.after); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := os.Stat(path); !os.IsNotExist(err) {
-				t.Fatalf("committed relation still in the outbox: %v", err)
 			}
 			var count int
-			var kind, policy string
-			if err := restarted.db.QueryRow("SELECT count(*),min(kind),min(policy_version) FROM records").
-				Scan(&count, &kind, &policy); err != nil || count != 1 || kind != change.kind || policy != want {
-				t.Fatalf("retry changed the committed record: %d %s %s (%v)", count, kind, policy, err)
+			var kind, claim, body string
+			if err := store.db.QueryRow("SELECT count(*),min(kind),min(policy_version),min(body) FROM records").
+				Scan(&count, &kind, &claim, &body); err != nil || count != 1 || kind != "session" ||
+				claim != policyFingerprint(change.before) || strings.Contains(body, "agent_run_id") ||
+				strings.Contains(body, "thread.id") || !strings.Contains(body, store.key.id(hexID)) {
+				t.Fatalf("capture was changed by retry: count=%d kind=%q claim=%q (%v)", count, kind, claim, err)
 			}
-			signed.Body["session_id"] = restarted.key.id("different-session")
-			if err := restarted.ingest(ctx, []Record{signed}, change.after); !errors.Is(err, errEventCollision) {
-				t.Fatalf("different session must still collide: %v", err)
+			var export bytes.Buffer
+			if _, err := Export(ctx, store.db, &export, 0, 10); err != nil {
+				t.Fatal(err)
+			}
+			replay := fixtureStore(t)
+			for range 2 {
+				if err := replay.Replay(ctx, bytes.NewReader(export.Bytes())); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := replay.db.QueryRow("SELECT count(*),min(body) FROM records").Scan(&count, &body); err != nil ||
+				count != 1 || strings.Contains(body, "agent_run_id") || strings.Contains(body, "thread.id") {
+				t.Fatalf("replay reconstructed missing fields: %d %q (%v)", count, body, err)
 			}
 		})
-	}
-}
-
-func TestUnsignedOutboxRelationDrainsAfterPolicyChange(t *testing.T) {
-	ctx := context.Background()
-	dir := testkit.TempDir(t)
-	s, err := Open(dir, DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := record("relation", map[string]any{
-		"agent_run_id": "legacy-run", "correlation_id": "legacy-correlation", "source": "acquire-correlation",
-	})
-	data, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	outbox := filepath.Join(dir, "outbox")
-	path := filepath.Join(outbox, "legacy-relation.json")
-	testkit.WriteFile(t, path, data, 0600)
-	before := DefaultPolicy()
-	if err = s.ingest(ctx, []Record{r}, before); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	restarted, err := Open(dir, DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restarted.Close()
-	after := before
-	after.SpanNames = nil
-	if policyFingerprint(after) == policyFingerprint(before) {
-		t.Fatal("fixture did not change policy")
-	}
-	if err = restarted.ingestOutbox(ctx, outbox, after); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("committed legacy relation still in the outbox: %v", err)
-	}
-	r.Body["correlation_id"] = "different-correlation"
-	if err = restarted.ingest(ctx, []Record{r}, after); !errors.Is(err, errEventCollision) {
-		t.Fatalf("different legacy payload must still collide: %v", err)
 	}
 }
 
@@ -339,29 +242,11 @@ func TestSessionPolicyAcrossProducerIngestAndReplay(t *testing.T) {
 			store := fixtureStore(t)
 			switch transport {
 			case "producer":
-				outbox := filepath.Join(store.dir, "outbox")
-				if err := store.publishCapturePolicy(outbox, p); err != nil {
+				if err := store.publishCapturePolicy(p); err != nil {
 					t.Fatal(err)
 				}
-				const producer = `
-import json, pathlib, sys
-sys.path.insert(0, '..')
-import records
-root = pathlib.Path(sys.argv[1])
-for row in json.load(sys.stdin):
-    assert records.emit(root, row['kind'], row['body'], source_id=row['source_id'], event_id=row['event_id'])
-`
-				raw, err := json.Marshal(input)
-				if err != nil {
-					t.Fatal(err)
-				}
-				cmd := exec.Command("python3", "-B", "-c", producer, store.dir)
-				cmd.Stdin = bytes.NewReader(raw)
-				if output, err := cmd.CombinedOutput(); err != nil {
-					t.Fatalf("producer: %v\n%s", err, output)
-				}
-				// Drain under the default policy to prove filtering happened before publication.
-				if err := store.IngestOutbox(ctx, outbox); err != nil {
+				appendPython(t, store, input)
+				if err := store.drainSpool(ctx, DefaultPolicy()); err != nil {
 					t.Fatal(err)
 				}
 			case "ingest":
@@ -492,8 +377,8 @@ func TestLegacyAssociationIntervalsStaySeparate(t *testing.T) {
 					}
 				}
 			} else {
-				outbox := filepath.Join(destination.dir, "outbox")
-				for i, row := range rows {
+				outbox := legacyOutboxFixture(t, destination)
+				for _, row := range rows {
 					body, err := decodeBody([]byte(row.body))
 					if err != nil {
 						t.Fatal(err)
@@ -503,9 +388,9 @@ func TestLegacyAssociationIntervalsStaySeparate(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					testkit.WriteFile(t, filepath.Join(outbox, strconv.Itoa(i)+".json"), data, 0600)
+					testkit.WriteFile(t, filepath.Join(outbox, row.event+".json"), data, 0600)
 				}
-				if err := destination.IngestOutbox(ctx, outbox); err != nil {
+				if err := importLegacyFixture(t, destination, DefaultPolicy()); err != nil {
 					t.Fatal(err)
 				}
 			}

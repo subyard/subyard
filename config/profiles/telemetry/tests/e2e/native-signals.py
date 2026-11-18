@@ -214,7 +214,7 @@ context['agent_run_present']=bool(run)
 context['managed_agent_matches']=False
 if re.fullmatch('[A-Za-z0-9_.:-]{1,128}',run) and expected.get('data_dir'):
     try:
-        manifest=json.loads((pathlib.Path(expected['data_dir'])/'runs-v4'/(run+'.json')).read_text())
+        manifest=json.loads((pathlib.Path(expected['data_dir'])/'runs-v5'/(run+'.json')).read_text())
         context['managed_agent_matches']=isinstance(manifest,dict) and manifest.get('agent')==expected.get('agent') and manifest.get('agent_run_id')==run
     except (OSError,ValueError,TypeError): pass
 yard=expected.get('yard','test-yard')
@@ -460,7 +460,7 @@ def native_context_command(home, data_dir):
 run=os.environ.get('SUBYARD_AGENT_RUN_ID','')
 proof=dict(schema='subyard.telemetry.native-context/v1',agent_run_present=bool(run),managed_agent_matches=False,home_matches=os.environ.get('HOME')==sys.argv[1],data_dir_matches=os.environ.get('SUBYARD_TELEMETRY_DATA_DIR')==sys.argv[2])
 try:
-    manifest=json.loads((pathlib.Path(sys.argv[2])/'runs-v4'/(run+'.json')).read_text())
+    manifest=json.loads((pathlib.Path(sys.argv[2])/'runs-v5'/(run+'.json')).read_text())
     proof['managed_agent_matches']=manifest.get('agent')=='codex' and manifest.get('agent_run_id')==run
 except (OSError,ValueError,TypeError): pass
 time.sleep(3)

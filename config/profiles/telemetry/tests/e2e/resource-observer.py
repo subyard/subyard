@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from unittest.mock import patch
+import shutil
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -66,27 +66,40 @@ def configs(data_dir, kind):
     return selected
 
 
-def drain_outbox(data_dir):
+def wait_for_records(data, identities, timeout=15):
+    deadline = time.monotonic()+timeout
+    with contextlib.closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
+        db.execute('PRAGMA query_only=ON')
+        while identities:
+            identities = {(source, event) for source, event in identities if not db.execute(
+                "SELECT 1 FROM records WHERE origin_id='producer:'||? AND source_id=? AND event_id=? AND encoding='json'",
+                (source, source, event)).fetchone()}
+            if identities:
+                require(time.monotonic()<deadline, 'collector did not commit spooled evidence')
+                time.sleep(.05)
+
+
+def spool_frames(data):
+    for path in (data/'spool').glob('*'):
+        if path.suffix not in ('.open', '.sealed'):
+            continue
+        try:
+            with path.open('rb') as segment:
+                frames = segment.read(records.SEGMENT_BYTES).split(b'\n')[1:-1]
+        except FileNotFoundError:
+            continue  # Segment may already have been retired by the collector.
+        yield from (json.loads(frame) for frame in frames)
+
+
+def drain_spool(data_dir):
     data = Path(data_dir)
-    source_ids = {records.read_private(path)['source_id']
-                  for path in (data/'sources').glob('*.json')}
+    source_ids = {records.read_private(path)['source_id'] for path in (data/'sources').glob('*.json')}
     if (data/'producer.json').exists():
         source_ids.add(records.read_private(data/'producer.json')['source_id'])
-    identity = records.identity_key(data)
-    source_ids = {records.opaque_id(identity, source) for source in source_ids}
-    for path in list((data/'outbox').glob('*.json'))[:4096]:
-        try:
-            record = records.read_private(path)
-        except FileNotFoundError:
-            # The collector commits before unlinking; absence alone is not ACK.
-            with contextlib.closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
-                db.execute('PRAGMA query_only=ON')
-                rows = db.execute("SELECT source_id FROM records WHERE event_id=? AND encoding='json' AND origin_id='producer:'||source_id LIMIT 2",
-                                  (path.stem,)).fetchall()
-            require(len(rows) == 1 and rows[0][0] in source_ids,
-                    'removed outbox evidence lacks canonical SQLite commit')
-        else:
-            require(records.deliver(data_dir, record), 'collector did not commit retained evidence')
+    key = records.identity_key(data)
+    source_ids = {records.opaque_id(key, source) for source in source_ids}
+    wait_for_records(data, {(row['source_id'], row['event_id']) for frame in spool_frames(data)
+                            if (row := frame['record'])['source_id'] in source_ids and not row.get('filtered')})
 
 
 def capture(data_dir, kind):
@@ -109,9 +122,7 @@ def capture(data_dir, kind):
         config['cursor'] = '-'
         for _ in range(32):
             page = sources.fetch(config)
-            # Like the production reader, a refused admission (outbox lock held by
-            # the live reader or collector, or capacity pending drain) is retried;
-            # re-admission of the same events is idempotent.
+            # As in the production reader, retry if the spool refuses admission.
             admit_deadline = time.monotonic()+30
             while not sources.consume(data_dir, config, page):
                 require(time.monotonic()<admit_deadline, 'owner records were not durably admitted')
@@ -121,8 +132,8 @@ def capture(data_dir, kind):
                 break
         else:
             raise Failure('native owner journal exceeded physical assertion bound')
-    # A successful outbox admission alone does not prove SQLite commit.
-    drain_outbox(data_dir)
+    # A successful spool admission alone does not prove SQLite commit.
+    drain_spool(data_dir)
     require(count > 0, 'native owner lifecycle archive was empty')
 
 
@@ -188,19 +199,23 @@ def offline_reader(data_dir, kind):
             probe['transport']['identity'] = str(key)
         path = records.private_directory(root/'sources')/'probe.json'
         records.atomic_json(path, probe)
-        with patch.object(records, 'identity_key', return_value=records.identity_key(Path(data_dir))):
-            require(sources.poll(root), 'isolated offline reader failed to retain state')
+        for name in ('.identity-key', 'spool-policy.json', 'producer.json', 'spool-loss'):
+            shutil.copyfile(Path(data_dir)/name, root/name)
+            (root/name).chmod(0o600)
+        require(sources.poll(root), 'isolated offline reader failed to retain state')
         failed = records.read_private(path)
         require(failed['offline'] and failed['cursor'] == cursor and failed['last_seen'] == seen,
                 'offline observer changed its cursor or last successful observation')
-        rows = [records.read_private(path) for path in (root/'outbox').glob('*.json')]
+        rows = list(spool_frames(root))
         require(len(rows) == 1, 'offline observer did not emit exactly one gap')
         signed = rows[0]
         gap = signed['record']
         require(gap['kind'] == 'gap' and gap['body'].get('reason') == 'source_offline'
-                and gap['body'].get('stale') is True and gap['body'].get('start_time') == seen,
+                and gap['body'].get('stale') is True and gap['body'].get('start_time') == records.timestamp(seen),
                 'offline gap lost its last-seen boundary')
-        require(records.deliver(data_dir, signed), 'offline observer gap did not commit')
+        require(records.append_frame(Path(data_dir)/'spool', 'broker', records.compact_json(signed)+b'\n'),
+                'offline observer gap failed spool admission')
+        wait_for_records(Path(data_dir), {(gap['source_id'], gap['event_id'])})
         with contextlib.closing(sqlite3.connect((Path(data_dir)/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
             row = db.execute('SELECT body FROM records WHERE source_id=? AND event_id=?',
                              (gap['source_id'], gap['event_id'])).fetchone()

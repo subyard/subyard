@@ -136,9 +136,10 @@ print('ok: both Android-only modes skip local measurements and VM broker; only r
 profile_dir = pathlib.Path(sys.argv[1]).resolve().parents[1]
 sys.path.insert(0, str(profile_dir))
 import records
+sys.path.insert(0, str(profile_dir/'tests'))
+from spool_fixture import prepare
 with tempfile.TemporaryDirectory(dir='/tmp') as directory:
-    fixture_data = pathlib.Path(directory)
-    fixture_key = records.identity_key(fixture_data)
+    fixture_key = records.identity_key(prepare(pathlib.Path(directory)))
 examples = owner.split('python3 -B - "$asset" "$mode" "$ROOT/config/profiles/telemetry" <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
 selection = examples.split('    hashes = []', 1)[0]
 for mode, pairs, accepted in (

@@ -42,12 +42,15 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 `
 	s := fixtureStore(t)
 	ctx := context.Background()
+	if err := s.publishCapturePolicy(DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("python3", "-B", "-c", producer, s.dir, filename)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("producer: %v\n%s", err, output)
 	}
-	outbox := filepath.Join(s.dir, "outbox")
-	files, err := filepath.Glob(filepath.Join(outbox, "*.json"))
+	outbox := filepath.Join(s.dir, "spool")
+	files, err := filepath.Glob(filepath.Join(outbox, "*.open"))
 	if err != nil || len(files) != 1 {
 		t.Fatalf("outbox files=%d: %v", len(files), err)
 	}
@@ -55,12 +58,13 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 	if err != nil || bytes.Contains(raw, []byte(filename)) || strings.Contains(files[0], filename) {
 		t.Fatalf("the private filename reached the outbox: %v", err)
 	}
-	spooled, err := s.key.decodeRecord(raw)
+	_, frame, _ := bytes.Cut(raw, []byte("\n"))
+	spooled, err := s.key.decodeRecord(frame)
 	if err != nil || spooled.EventID != s.key.id(filename) || spooled.SourceID != spooled.EventID ||
 		spooled.Body["object_id"] != spooled.EventID || spooled.Body["task_id"] != spooled.EventID || spooled.redactions == 0 {
 		t.Fatalf("producer identities did not use the collector key: %v", err)
 	}
-	if err = s.IngestOutbox(ctx, outbox); err != nil {
+	if err = s.drainSpool(ctx, DefaultPolicy()); err != nil {
 		t.Fatal(err)
 	}
 	var reported int64
@@ -279,19 +283,19 @@ func TestLegacyCounterAndIdentityDelivery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	outbox := testkit.TempDir(t)
+	outbox := legacyOutboxFixture(t, s)
 	for _, entry := range []struct{ file, record string }{
-		{"00.json", fmt.Sprintf(`{"schema_version":1,"source_id":"%s","event_id":"old-event","source_version":"1","source_time":"%s","kind":"sample","body":%s}`, source, at, oldBody)},
-		{"01.json", fmt.Sprintf(`{"schema":"subyard.telemetry.record/v1","source_id":"%s","event_id":"new-event","source_version":"1","source_time":"%s","kind":"sample","body":{"object_id":"%s","cpu_ns":8}}`, source, at, "scope/path")},
+		{"old-event.json", fmt.Sprintf(`{"schema_version":1,"source_id":"%s","event_id":"old-event","source_version":"1","source_time":"%s","kind":"sample","body":%s}`, source, at, oldBody)},
+		{"new-event.json", fmt.Sprintf(`{"schema":"subyard.telemetry.record/v1","source_id":"%s","event_id":"new-event","source_version":"1","source_time":"%s","kind":"sample","body":{"object_id":"%s","cpu_ns":8}}`, source, at, "scope/path")},
 	} {
 		testkit.WriteFile(t, filepath.Join(outbox, entry.file), []byte(entry.record), 0600)
 	}
-	if err := s.IngestOutbox(ctx, outbox); err != nil {
+	if err := importLegacyFixture(t, s, DefaultPolicy()); err != nil {
 		t.Fatal(err)
 	}
 	files, err := os.ReadDir(outbox)
-	if err != nil || len(files) != 0 {
-		t.Fatalf("legacy outbox did not drain: remaining=%d, err=%v", len(files), err)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("retired outbox changed: remaining=%d, err=%v", len(files), err)
 	}
 	var count, total int
 	if err = s.db.QueryRow(`SELECT count(*),sum(json_extract(samples.body,'$.cpu_ns')) FROM samples

@@ -14,7 +14,7 @@ data=/var/lib/subyard/telemetry
 "$collector" show-run --data-dir "$data" --run RUN_ID
 ```
 
-The active database is `$data/telemetry.sqlite`. The first schema 4 upgrade
+The active database is `$data/telemetry.sqlite`. The first spool upgrade
 archives the previous store under `$data/archive`. Subsequent legacy stores are
 archived under `$data/archive-2`, `$data/archive-3`, and so on. Each archive
 keeps its old schema, identifiers, export sequences and retained telemetry.

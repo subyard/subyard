@@ -188,12 +188,13 @@ sys.path.insert(0,'/usr/local/lib/subyard-telemetry')
 import records
 while time.monotonic()<deadline:
     final=[]
-    for path in (data/'outbox').glob('*.json'):
-        record=records.read_outbox(path)
-        body=record.get('body',{})
-        if record.get('kind')=='sample' and body.get('object_id')==records.opaque_id(records.identity_key(data),run['agent_run_id']+':scope') and body.get('final'):
-            final.append(body)
-    if (state/'done').is_file() and not (data/'runs-v4'/(run['agent_run_id']+'.json')).exists() and final:
+    for path in (data/'spool').glob('*'):
+        for frame in path.read_bytes().split(b'\\n')[1:-1]:
+            record=json.loads(frame)['record']
+            body=record.get('body',{})
+            if record.get('kind')=='sample' and body.get('object_id')==records.opaque_id(records.identity_key(data),run['agent_run_id']+':scope') and body.get('final'):
+                final.append(body)
+    if (state/'done').is_file() and not (data/'runs-v5'/(run['agent_run_id']+'.json')).exists() and final:
         assert final[-1]['populated'] is False
         print(json.dumps({'retained_records':retained,'descendant_completed':True,'final_counter_durable':True}),flush=True)
         break
@@ -400,7 +401,7 @@ try:
     os.chmod(root/'result.tmp',0o600)
     os.replace(root/'result.tmp',root/'result')
     deadline=time.monotonic()+150
-    while list(pathlib.Path('/var/lib/subyard/telemetry/runs-v4').glob('*.json')):
+    while list(pathlib.Path('/var/lib/subyard/telemetry/runs-v5').glob('*.json')):
         assert time.monotonic()<deadline,'fixture scopes did not drain'
         time.sleep(.2)
 except BaseException as error:

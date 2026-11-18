@@ -26,9 +26,9 @@ optional-field semantics, rather than flattening usage into model/token/cost row
 Source and receive times, policy and source versions remain distinct.
 Export/replay preserves the original capture-policy fingerprint separately from
 the trusted local import-policy fingerprint. Imported policy claims cannot relax
-sanitization. The schema 4 writer archives schema 1–3 stores as
-`archive/telemetry.sqlite` under the data directory and creates an empty active
-store. Archive query and export retain the historical schema, identifiers, and
+sanitization. The first spool cutover archives schema 1–4 stores as
+`archive/telemetry.sqlite` under the data directory and initializes a fresh active
+store with pending legacy records and minimal run registrations. Archive query and export retain the historical schema, identifiers, and
 sequences. Active stores store a key verifier in SQLite and require the matching
 private identity key for writes.
 
@@ -48,8 +48,8 @@ ambiguous retry duplicates are not advertised as exactly-once usage totals.
 ## Internal record contract
 
 Profile-owned local producers write versioned sanitized records through the
-collector's private control endpoint or its bounded durable outbox. The collector
-owns only its outbox; it never acknowledges or deletes broker/owner journals.
+collector's bounded durable append-only spool. The collector retires its own
+committed segments. Broker and owner journals remain under their own lifecycle.
 Run snapshots reserve bounded count, total bytes and per-file space before a
 new execution scope is created. Capacity failure keeps default native execution
 with partial/unavailable coverage; explicit strict tracking refuses before exec.
@@ -73,7 +73,7 @@ identity, samples, allocation lifecycle, attribution and gaps. The owning code
 defines each body and rejects unsupported versions. Producer event IDs survive
 retry/replay. Receive time belongs to the collector. Monotonic values identify
 their host/boot clock domain and are never compared across owners.
-The outbox uses `0001-01-01T00:00:00Z` for an invalid source timestamp, or when
+The spool uses `0001-01-01T00:00:00.000000000Z` for an invalid source timestamp, or when
 a producer supplies a stable event ID without a timestamp. This denotes
 unknown source time and keeps retries stable after the spool file has drained.
 

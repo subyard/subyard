@@ -22,7 +22,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	dir := f.String("data-dir", "", "private telemetry directory")
 	listen := f.String("listen", "127.0.0.1:4318", "loopback OTLP HTTP listener")
 	auth := f.String("auth-file", "", "private bearer token file")
-	spool := f.String("spool", "", "private data-dir/outbox")
+	spool := f.String("spool", "", "private data-dir/spool")
 
 	policyFile := f.String("policy-file", "", "capture policy JSON")
 	after := f.Int64("after", 0, "exclusive export sequence cursor")
@@ -53,12 +53,12 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		limits.QueueBytes = *queue
 		limits.QueueRequests = *requests
 		limits.Retention = *retention
-		store, err := Open(*dir, limits)
+		store, err := openStore(*dir, limits, policy)
 		if err != nil {
 			return err
 		}
 		if command == "prepare" {
-			return store.Close()
+			return errors.Join(store.publishCapturePolicy(policy), store.Close())
 		}
 		defer store.Close()
 		if command == "serve" {

@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"crypto/subtle"
+	"database/sql"
 	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
@@ -302,9 +303,23 @@ func serveOTLP(ctx context.Context, s *Store, options Options, auth *localAuth) 
 			return fmt.Errorf("start OTLP: %w", err)
 		}
 	}
-	select {
-	case <-ctx.Done():
-	case err = <-host.failures:
+	if err = s.receiverReady(); err == nil {
+		heartbeat := time.NewTicker(5 * time.Second)
+		defer heartbeat.Stop()
+	healthy:
+		for {
+			select {
+			case <-ctx.Done():
+				err = s.receiverHeartbeat()
+				break healthy
+			case err = <-host.failures:
+				break healthy
+			case <-heartbeat.C:
+				if err = s.receiverHeartbeat(); err != nil {
+					break healthy
+				}
+			}
+		}
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -317,4 +332,62 @@ func serveOTLP(ctx context.Context, s *Store, options Options, auth *localAuth) 
 func (s *Store) Consumers(p Policy) (consumer.Logs, consumer.Metrics, consumer.Traces, error) {
 	c, err := makeConsumers(s, p)
 	return c.logs, c.metrics, c.traces, err
+}
+
+const receiverSchema = `
+CREATE TABLE IF NOT EXISTS receiver_outages(start TEXT PRIMARY KEY,end TEXT NOT NULL);
+`
+
+func (s *Store) receiverReady() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	at := spoolTime()
+	_, err = tx.Exec(`INSERT INTO receiver_outages SELECT value,? FROM metadata
+		WHERE key='receiver_heartbeat' AND value<? ON CONFLICT DO NOTHING`, at, at)
+	if err != nil {
+		return err
+	}
+	if err = s.nativeLoss(tx, ""); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("UPDATE metadata SET value=? WHERE key='receiver_heartbeat'", at); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Match against retained outage intervals even when the registration first
+// arrives after readiness and its native process has already exited.
+func (s *Store) nativeLoss(tx *sql.Tx, run string) error {
+	rows, err := tx.Query(`SELECT r.agent_run_id,o.start,o.end FROM receiver_outages o JOIN runs r
+		ON json_extract(r.body,'$.start_time') < o.end
+		AND coalesce(json_extract(r.body,'$.end_time'),o.end)>o.start
+		WHERE coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')
+		AND (?='' OR r.agent_run_id=?)`, run, run)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, first, last string
+		if err = rows.Scan(&id, &first, &last); err != nil {
+			return err
+		}
+		e := s.localRecord("gap", "native-receiver", id+":"+first, first,
+			map[string]any{"agent_run_id": id, "reason": "possible_native_loss", "quality": "partial",
+				"coverage_start": first, "coverage_end": last})
+		e.ReceivedTime, e.PolicyVersion = last, PolicyVersion
+		if err = s.putRecord(tx, e, DefaultPolicy()); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func (s *Store) receiverHeartbeat() error {
+	_, err := s.db.Exec("UPDATE metadata SET value=? WHERE key='receiver_heartbeat'", spoolTime())
+	return err
 }

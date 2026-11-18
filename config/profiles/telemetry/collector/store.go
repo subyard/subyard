@@ -47,6 +47,7 @@ type writeRequest struct {
 	policy  Policy
 	bytes   int64
 	result  chan error
+	advance *spoolAdvance
 }
 type Store struct {
 	db              *sql.DB
@@ -61,9 +62,6 @@ type Store struct {
 	closed          bool
 	queue           chan writeRequest
 	done            chan struct{}
-	outboxMu        sync.Mutex
-	outboxPath      string
-	outboxAfter     string
 }
 
 func privateDir(path string) error {
@@ -124,6 +122,10 @@ func checkPrivateFile(path string, mode os.FileMode) error {
 	return nil
 }
 func Open(dir string, limits Limits) (*Store, error) {
+	return openStore(dir, limits, DefaultPolicy())
+}
+
+func openStore(dir string, limits Limits, policy Policy) (*Store, error) {
 	var absoluteErr error
 	dir, absoluteErr = filepath.Abs(dir)
 	if absoluteErr != nil {
@@ -148,31 +150,22 @@ func Open(dir string, limits Limits) (*Store, error) {
 		return nil, errors.New("telemetry writer already running")
 	}
 	fail := func(e error) (*Store, error) { lock.Close(); return nil, e }
-	if err = sealArchives(dir); err != nil {
+	cutover, err := readCutover(dir)
+	if err != nil {
 		return fail(err)
 	}
-	if err = publishPendingArchive(dir); err != nil {
-		return fail(err)
+	if cutover != nil {
+		if err = cutover.publishArchive(dir); err != nil {
+			return fail(err)
+		}
 	}
-	path := filepath.Join(dir, databaseName)
-	db, version, err := openWriterDatabase(path)
+	db, version, err := openWriterDatabase(filepath.Join(dir, databaseName))
 	if err != nil {
 		return fail(err)
 	}
 	bad := func(e error) (*Store, error) { db.Close(); return fail(e) }
-	if version < storeVersion {
-		if err = fenceBeforeUpgrade(dir); err != nil {
-			return bad(err)
-		}
-	}
 	if version != 0 && version < storeVersion {
-		if err = archiveStore(dir, db); err != nil {
-			return bad(err)
-		}
-		db, version, err = openWriterDatabase(path)
-		if err != nil {
-			return fail(err)
-		}
+		return bad(errors.New("legacy telemetry requires profile cutover"))
 	}
 	key, err := storeIdentityKey(db, dir, version)
 	if err != nil {
@@ -205,11 +198,9 @@ func Open(dir string, limits Limits) (*Store, error) {
 		return bad(err)
 	}
 	if version == 0 {
-		if err = initializeStore(db, dir, key); err != nil {
+		if err = initializeStore(db, dir, key, cutover, policy); err != nil {
 			return bad(err)
 		}
-	} else if err = ensureProducerPayloadColumn(db); err != nil {
-		return bad(err)
 	}
 	var origin string
 	if err = db.QueryRow("SELECT value FROM metadata WHERE key='origin_id'").Scan(&origin); err != nil {
@@ -221,7 +212,7 @@ func Open(dir string, limits Limits) (*Store, error) {
 }
 
 const databaseName = "telemetry.sqlite"
-const storeVersion = 4
+const storeVersion = 5
 
 func openWriterDatabase(path string) (*sql.DB, int, error) {
 	if err := privateFile(path); err != nil {
@@ -240,19 +231,26 @@ func openWriterDatabase(path string) (*sql.DB, int, error) {
 	return db, version, nil
 }
 
-func initializeStore(db *sql.DB, dir string, key identityKey) error {
+func initializeStore(db *sql.DB, dir string, key identityKey, cutover *cutover, policy Policy) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(schema); err != nil {
+	if _, err = tx.Exec(schema + spoolSchema + receiverSchema); err != nil {
 		return err
 	}
 	if _, err = tx.Exec("INSERT INTO metadata(key,value) VALUES('origin_id',?),('identity_key_verifier',?)", newID(), key.verifier()); err != nil {
 		return err
 	}
-	if err = recordInterruptedRuns(tx, dir, key); err != nil {
+	since := spoolTime()
+	if cutover != nil {
+		since = cutover.Started
+		if err = cutover.importLegacy(tx, dir, key, policy); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec("INSERT INTO metadata VALUES('receiver_heartbeat',?)", since); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", storeVersion)); err != nil {
@@ -261,17 +259,8 @@ func initializeStore(db *sql.DB, dir string, key identityKey) error {
 	return tx.Commit()
 }
 
-func ensureProducerPayloadColumn(db *sql.DB) error {
-	var exists bool
-	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('records') WHERE name='producer_payload')").Scan(&exists); err != nil || exists {
-		return err
-	}
-	_, err := db.Exec("ALTER TABLE records ADD COLUMN producer_payload TEXT NOT NULL DEFAULT ''")
-	return err
-}
-
 const schema = `CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS records(sequence INTEGER PRIMARY KEY AUTOINCREMENT,origin_id TEXT NOT NULL,event_id TEXT NOT NULL,received_time TEXT NOT NULL,source_id TEXT NOT NULL,source_version TEXT NOT NULL,source_time TEXT,kind TEXT NOT NULL,encoding TEXT NOT NULL,policy_version TEXT NOT NULL,redactions INTEGER NOT NULL,body BLOB,protobuf BLOB,import_policy_version TEXT NOT NULL DEFAULT '',producer_payload TEXT NOT NULL DEFAULT '',UNIQUE(origin_id,event_id));
+CREATE TABLE IF NOT EXISTS records(sequence INTEGER PRIMARY KEY AUTOINCREMENT,origin_id TEXT NOT NULL,event_id TEXT NOT NULL,received_time TEXT NOT NULL,source_id TEXT NOT NULL,source_version TEXT NOT NULL,source_time TEXT,kind TEXT NOT NULL,encoding TEXT NOT NULL,policy_version TEXT NOT NULL,redactions INTEGER NOT NULL,body BLOB,protobuf BLOB,import_policy_version TEXT NOT NULL DEFAULT '',UNIQUE(origin_id,event_id));
 CREATE INDEX IF NOT EXISTS records_time ON records(received_time);
 CREATE TABLE IF NOT EXISTS runs(agent_run_id TEXT PRIMARY KEY,body TEXT NOT NULL,source_time TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS objects(object_id TEXT PRIMARY KEY,kind TEXT NOT NULL,parent_object_id TEXT,accounting TEXT,body TEXT NOT NULL,source_time TEXT NOT NULL);
@@ -304,22 +293,31 @@ func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) err
 		if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
 			return errInvalidRecord
 		}
-		body, err := json.Marshal(r.Body)
+		e, err := recordEnvelope(r)
 		if err != nil {
-			return errInvalidRecord
-		}
-		e := Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
-			SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: r.SourceTime,
-			Kind: r.Kind, Encoding: "json", Body: body, Redactions: r.redactions, local: r.authenticated, PolicyVersion: r.capturePolicy}
-		if r.authenticated && r.hasSessionMetadata() {
-			e.producerPayload = hex.EncodeToString(s.key.digest("producer-retry/v1\x00" + r.Kind + "\x00" + string(body)))
+			return err
 		}
 		entries = append(entries, e)
 	}
 	return s.capture(ctx, entries, policy)
 }
 
+func recordEnvelope(r Record) (Envelope, error) {
+	body, err := json.Marshal(r.Body)
+	if err != nil {
+		return Envelope{}, errInvalidRecord
+	}
+	e := Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
+		SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: r.SourceTime,
+		Kind: r.Kind, Encoding: "json", Body: body, Redactions: r.redactions, local: r.authenticated, PolicyVersion: r.capturePolicy}
+	return e, nil
+}
+
 func (s *Store) capture(ctx context.Context, input []Envelope, p Policy) error {
+	return s.captureAt(ctx, input, p, nil)
+}
+
+func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advance *spoolAdvance) error {
 	entries := make([]Envelope, 0, len(input))
 	var replay bool
 	for _, e := range input {
@@ -361,11 +359,11 @@ func (s *Store) capture(ctx context.Context, input []Envelope, p Policy) error {
 		}
 		entries = append(entries, projected...)
 	}
-	return s.submit(ctx, entries, p, replay)
+	return s.submit(ctx, entries, p, replay, advance)
 }
 
-func (s *Store) submit(ctx context.Context, entries []Envelope, p Policy, replay bool) error {
-	if len(entries) == 0 {
+func (s *Store) submit(ctx context.Context, entries []Envelope, p Policy, replay bool, advance *spoolAdvance) error {
+	if len(entries) == 0 && advance == nil {
 		return nil
 	}
 	var size int64
@@ -386,7 +384,7 @@ func (s *Store) submit(ctx context.Context, entries []Envelope, p Policy, replay
 	if !replay && size > s.limits.RequestBytes {
 		return ErrCapacity
 	}
-	r := writeRequest{entries, p, size, make(chan error, 1)}
+	r := writeRequest{entries, p, size, make(chan error, 1), advance}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -431,7 +429,7 @@ func (s *Store) writer() {
 		batch := []writeRequest{first}
 		timer := time.NewTimer(s.limits.BatchDelay)
 	collect:
-		for len(batch) < 64 {
+		for first.advance == nil && len(batch) < 64 {
 			select {
 			case r, ok := <-s.queue:
 				if !ok {
@@ -444,13 +442,17 @@ func (s *Store) writer() {
 		}
 		timer.Stop()
 		err := s.commit(batch)
-		s.mu.Lock()
 		for _, r := range batch {
+			result := err
+			if errors.Is(err, errEventCollision) && len(batch) > 1 {
+				result = s.commit([]writeRequest{r})
+			}
+			s.mu.Lock()
 			s.pendingBytes -= r.bytes
 			s.pendingRequests--
-			r.result <- err
+			r.result <- result
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
 }
 func (s *Store) diskSize() (int64, error) {
@@ -495,29 +497,52 @@ func (s *Store) commit(batch []writeRequest) error {
 	}
 	defer tx.Rollback()
 	for _, r := range batch {
-		for _, e := range r.entries {
-			res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version,producer_payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion, e.producerPayload)
+		if r.advance != nil {
+			duplicate, err := r.advance.apply(tx)
 			if err != nil {
-				return ErrStorage
+				return err
 			}
-			n, _ := res.RowsAffected()
-			if n == 0 {
-				exists, err := s.checkDuplicate(tx, e, r.policy)
-				if err != nil {
-					return err
-				}
-				if !exists {
-					return ErrStorage
-				}
+			if duplicate {
 				continue
 			}
-			if err = s.key.project(tx, e); err != nil {
-				return ErrStorage
+		}
+		for _, e := range r.entries {
+			if err = s.putRecord(tx, e, r.policy); err != nil {
+				return err
 			}
 		}
 	}
 	if err = tx.Commit(); err != nil {
 		return ErrStorage
+	}
+	return nil
+}
+
+func (s *Store) putRecord(tx *sql.Tx, e Envelope, policy Policy) error {
+	res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion)
+	if err != nil {
+		return ErrStorage
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		exists, err := s.checkDuplicate(tx, e, policy)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return ErrStorage
+		}
+		return nil
+	}
+	if err = s.key.project(tx, e); err != nil {
+		return ErrStorage
+	}
+	if e.Kind == "run" && e.local && !e.replay {
+		body, err := decodeBody(e.Body)
+		if err != nil {
+			return ErrStorage
+		}
+		return s.nativeLoss(tx, stringValue(body, "agent_run_id"))
 	}
 	return nil
 }
@@ -528,8 +553,8 @@ type rowQuerier interface {
 
 func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error) {
 	old := Envelope{OriginID: e.OriginID, EventID: e.EventID}
-	err := db.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version,producer_payload FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).
-		Scan((*[]byte)(&old.Body), &old.Protobuf, &old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion, &old.producerPayload)
+	err := db.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).
+		Scan((*[]byte)(&old.Body), &old.Protobuf, &old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -542,14 +567,6 @@ func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error
 		e.OriginID == "producer:"+e.SourceID && samePayload(old, e)
 	if old.SourceID != e.SourceID || old.Encoding != e.Encoding ||
 		(!producerRetry && !legacyRetry && (old.Kind != e.Kind || old.PolicyVersion != e.PolicyVersion)) {
-		return false, errEventCollision
-	}
-	// The same signed input may project to a different kind after a policy
-	// change. The keyed fingerprint preserves the retry without its lost fields.
-	if producerRetry && e.producerPayload != "" && old.producerPayload != "" {
-		if old.producerPayload == e.producerPayload && old.SourceVersion == e.SourceVersion && sameSourceTime(old, e) {
-			return true, nil
-		}
 		return false, errEventCollision
 	}
 	if !samePayload(old, e) {
@@ -589,6 +606,11 @@ func (s *Store) prune() error {
 	defer tx.Rollback()
 	// Lifecycle responsibility outlives high-volume samples. In particular, an
 	// expired lease or exited agent is not evidence that its resource stopped.
+	_, err = tx.Exec(`DELETE FROM spool_inputs WHERE (origin,event) IN
+		(SELECT origin_id,event_id FROM (SELECT origin_id,event_id,kind FROM records WHERE received_time<? AND (kind='sample' OR kind LIKE 'otlp/%') ORDER BY sequence LIMIT 1000) WHERE kind='sample')`, cutoff)
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec(`DELETE FROM records WHERE sequence IN (SELECT sequence FROM records WHERE received_time<? AND (kind='sample' OR kind LIKE 'otlp/%') ORDER BY sequence LIMIT 1000)`, cutoff)
 	if err != nil {
 		return err
@@ -600,10 +622,6 @@ func (s *Store) prune() error {
 	}
 	for table, key := range map[string]string{"runs": "agent_run_id", "objects": "object_id", "allocations": "object_id"} {
 		query := "DELETE FROM " + table + " WHERE NOT EXISTS(SELECT 1 FROM records r WHERE r.encoding='json' AND json_extract(r.body,'$." + key + "')=" + table + "." + key + ")"
-		if table == "runs" {
-			// Carried registrations have no corresponding historical record.
-			query += " AND agent_run_id NOT IN (SELECT i.value FROM metadata m,json_each(m.value) i WHERE m.key='upgrade_interrupted_runs')"
-		}
 		if _, err = tx.Exec(query); err != nil {
 			return err
 		}

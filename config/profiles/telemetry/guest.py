@@ -7,8 +7,10 @@ import os
 from pathlib import Path
 import pwd
 import re
+import records
 import select
 import signal
+import sqlite3
 import grp
 from types import SimpleNamespace
 import secrets
@@ -21,8 +23,8 @@ import native
 import tomli_w
 
 MARKER = b'subyard-telemetry-v1\n'
-PUBLISHING = b'telemetry-publication-v1\n'
-START_READY = b'telemetry-start-ready-v1 '
+CUTOVER = '.spool-cutover.json'
+PENDING = '.telemetry-archive.pending'
 COLLECTOR = 'subyard-telemetry.service'
 MANAGER = 'subyard-telemetry-runs.service'
 BINARY_LIMIT = 64*1024*1024
@@ -296,9 +298,9 @@ class Runtime:
                  for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
         saved = self.saved_inventory()
-        publishing = native.snapshot(self.control/'publishing') is not None
+        cutover_pending = self.selected and (self.data/CUTOVER).exists()
         inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
-        ready = ready and not publishing and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
+        ready = ready and not cutover_pending and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
         enabled = states[COLLECTOR].get('UnitFileState') == 'enabled'
@@ -314,14 +316,14 @@ class Runtime:
             return self.pending_agent_config(native_diagnostics)
         converged = converged and native_current is True
         skill_current = not self.selected or self.skill_delivery('check-registered')
-        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'publishing': publishing, 'states': states, 'native_current': converged, 'skill_current': skill_current}, sort_keys=True).encode()).hexdigest()
+        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': converged, 'skill_current': skill_current}, sort_keys=True).encode()).hexdigest()
         converged = converged and skill_current
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
         if not converged:
             diagnostics = []
-            if publishing:
-                diagnostics.append({'parameter': 'telemetry.publication', 'installed': 'pending', 'desired': 'complete'})
+            if cutover_pending:
+                diagnostics.append({'parameter': 'telemetry.cutover', 'installed': 'pending', 'desired': 'complete'})
             if not inventory_current:
                 diagnostics.append({'parameter': 'telemetry.inventory', 'installed': 'changed', 'desired': 'current'})
             for path, (content, mode) in self.assets.items():
@@ -375,49 +377,27 @@ class Runtime:
         if os.waitpid(child, 0)[1] != 0:
             raise ValueError('telemetry developer operation failed')
 
-    def quiesce_legacy_observers(self):
-        # Detached observers inherited the launcher command line. Only the
-        # observer opens this file, including contenders blocked in flock.
-        lock = self.data/'manager.lock'
+    def retire_observer_lock(self, path):
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0)
         except FileExistsError:
-            fd = os.open(lock, os.O_PATH | os.O_NOFOLLOW)
+            fd = os.open(path, os.O_PATH | os.O_NOFOLLOW)
         try:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
                     or stat.S_IMODE(info.st_mode) not in (0, 0o600)):
                 raise ValueError('foreign legacy observer lock')
-            # Block new opens before looking for observers with existing FDs.
             if stat.S_IMODE(info.st_mode) != 0:
                 with open(f'/proc/self/fd/{fd}', 'rb') as handle:
                     os.fchmod(handle.fileno(), 0)
                     os.fsync(handle.fileno())
-            if self.stop_lock_users(info):
-                from launcher import note_gap
-                note_gap(self.data, 'observer-health')
-        finally:
-            os.close(fd)
-        runs = self.data/'runs'
-        runs.mkdir(mode=0o500, exist_ok=True)
-        fd = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            info = os.fstat(fd)
-            if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) not in (0o700, 0o500):
-                raise ValueError('foreign legacy run directory')
-            os.fchmod(fd, 0o500)
-            os.fsync(fd)
+            self.stop_lock_users(info)
         finally:
             os.close(fd)
 
     def stop_lock_users(self, lock):
         script = os.fsencode(self.library/'launcher.py')
-        unknown = False
-        try:
-            processes = list(Path('/proc').iterdir())
-        except OSError:
-            return True
-        for process in processes:
+        for process in Path('/proc').iterdir():
             if not process.name.isdecimal():
                 continue
             try:
@@ -427,7 +407,6 @@ class Runtime:
             except (FileNotFoundError, ProcessLookupError):
                 continue
             except OSError:
-                unknown = True
                 continue
             try:
                 for entry in (process/'fd').iterdir():
@@ -440,7 +419,7 @@ class Runtime:
                         exited = select.poll()
                         exited.register(pidfd, select.POLLIN)
                         if not exited.poll(5000):
-                            unknown = True
+                            raise ValueError('legacy telemetry observer did not stop')
                         break
             except (FileNotFoundError, ProcessLookupError):
                 pass
@@ -448,10 +427,9 @@ class Runtime:
                 # Ptrace access to /proc/PID/fd can require a matching GID.
                 # Leave an unidentified process alone. The fence still blocks
                 # its legacy writes, even when it holds the retired lock open.
-                unknown = True
+                pass
             finally:
                 os.close(pidfd)
-        return unknown
 
     def prepare_store(self):
         account = [] if self.uid == os.getuid() else ['--reuid', str(self.uid), '--regid', str(self.gid), '--clear-groups']
@@ -459,36 +437,131 @@ class Runtime:
                         'prepare', '--data-dir', self.data], check=True, timeout=30,
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def fence_outbox(self):
-        # Old emitters require exactly 0700 both on admission and before
-        # publication. Change the mode under their existing publication lock.
+    def cutover_receipt(self):
+        receipt = self.data/CUTOVER
+        database = self.data/'telemetry.sqlite'
+        existing = native.snapshot(receipt, max_bytes=4096)
+        if existing is None:
+            legacy = any((self.data/name).exists() for name in ('outbox', 'runs', 'runs-v4', 'manager.lock'))
+            info = database.lstat() if database.exists() or database.is_symlink() else None
+            if info is not None:
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600):
+                    raise ValueError('foreign telemetry database')
+                if not legacy:
+                    with database.open('rb') as stream:
+                        stream.seek(60)
+                        legacy = 0 < int.from_bytes(stream.read(4), 'big') < 5
+            if not legacy:
+                return False
+            if (self.data/PENDING).exists() or (self.data/PENDING).is_symlink():
+                raise ValueError('legacy archive staging collision')
+            name = 'archive'
+            for number in range(2, 4098):
+                archive = self.data/name
+                if not archive.exists() and not archive.is_symlink():
+                    break
+                if archive.is_symlink() or not archive.is_dir() or archive.stat().st_uid != self.uid or stat.S_IMODE(archive.stat().st_mode) != 0o700:
+                    raise ValueError('legacy archive collision')
+                target = archive/database.name
+                if target.is_symlink() or not target.is_file() or target.stat().st_uid != self.uid or stat.S_IMODE(target.stat().st_mode) != 0o400 or target.stat().st_nlink != 1:
+                    raise ValueError('legacy archive collision')
+                db = sqlite3.connect(target.absolute().as_uri()+'?mode=ro&immutable=1', uri=True)
+                try:
+                    if not db.execute("SELECT value FROM metadata WHERE key='origin_id'").fetchone():
+                        raise ValueError('legacy archive collision')
+                except sqlite3.Error:
+                    raise ValueError('legacy archive collision') from None
+                finally:
+                    db.close()
+                name = f'archive-{number}'
+            else:
+                raise ValueError('legacy archive capacity')
+            value = dict(device=info.st_dev if info else 0, inode=info.st_ino if info else 0,
+                         archive=name, nonce=secrets.token_hex(16), started=records.timestamp(records.now()))
+        else:
+            info = receipt.lstat()
+            if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError('foreign telemetry cutover receipt')
+            value = json.loads(existing)
+        name, nonce = value['archive'], value['nonce']
+        if not re.fullmatch(r'archive(?:-[1-9][0-9]*)?', name) or not re.fullmatch(r'[0-9a-f]{32}', nonce):
+            raise ValueError('invalid telemetry cutover receipt')
+        pending = self.data/PENDING
+        if pending.exists() or pending.is_symlink():
+            raise ValueError('legacy archive staging collision')
+        for path in (self.data/name, self.data/(PENDING+'-'+nonce)):
+            if path.exists() or path.is_symlink():
+                target = path/database.name
+                if path.is_symlink() or not path.is_dir() or path.stat().st_uid != self.uid or stat.S_IMODE(path.stat().st_mode) != 0o700:
+                    raise ValueError('legacy archive collision')
+                if not target.exists() and path.name != name and not any(path.iterdir()):
+                    continue  # The receipt owns this private staging name.
+                info = target.lstat()
+                if ((info.st_dev, info.st_ino) != (value['device'], value['inode'])
+                        or target.is_symlink() or not target.is_file() or info.st_nlink != 1 or info.st_uid != self.uid
+                        or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)):
+                    raise ValueError('legacy archive collision')
+        if existing is None:
+            native.publish(receipt, records.compact_json(value), None, self.uid, self.gid)
+        return True
+
+    def retire_legacy_producers(self):
+        for name in ('runs', 'runs-v4'):
+            path = self.data/name
+            if path.is_symlink():
+                raise ValueError('foreign legacy run directory')
+            if not path.exists():
+                continue
+            with records.directory_lock(path, fcntl.LOCK_EX) as fd:
+                info = os.fstat(fd)
+                mode = stat.S_IMODE(info.st_mode)
+                if info.st_uid != self.uid or mode not in (0o700, 0o500):
+                    raise ValueError('foreign legacy run directory')
+                if mode == 0o700 or (path/'manager.lock').exists():
+                    self.retire_observer_lock(path/'manager.lock')
+                os.fchmod(fd, 0o500)
+                os.fsync(fd)
+        self.retire_observer_lock(self.data/'manager.lock')
         path = self.data/'outbox'
-        path.mkdir(mode=0o1700, exist_ok=True)
+        path.mkdir(mode=0o700, exist_ok=True)
         directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             info = os.fstat(directory)
             mode = stat.S_IMODE(info.st_mode)
-            if info.st_uid != self.uid or mode not in (0o700, 0o1700):
+            if info.st_uid != self.uid or mode not in (0o700, 0o1700, 0o1500):
                 raise ValueError('foreign producer outbox')
-            if mode == 0o1700:
-                return
-            lock = os.open('.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
-            with os.fdopen(lock, 'rb') as handle:
-                info = os.fstat(handle.fileno())
-                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
-                        or stat.S_IMODE(info.st_mode) != 0o600):
+            lock = path/'.lock'
+            if lock.exists() and not lock.is_symlink() and stat.S_IMODE(lock.lstat().st_mode) == 0:
+                info = lock.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1:
                     raise ValueError('foreign producer outbox lock')
+                if mode != 0o1500:
+                    # Resume an interruption between the two mode changes.
+                    os.fchmod(directory, 0o1500)
+                    os.fsync(directory)
+                return
+            fd = os.open('.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+            try:
+                records.checked_file(fd, 0)
                 deadline = time.monotonic()+2
                 while True:
                     try:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         break
                     except BlockingIOError:
                         if time.monotonic() >= deadline:
                             raise
                         time.sleep(0.01)
                 os.fchmod(directory, 0o1700)
+                os.fchmod(fd, 0)
+                os.fsync(fd)
+                # An already-open descriptor can still acquire flock after chmod.
+                # Removing directory write permission also fences those waiters.
+                os.fchmod(directory, 0o1500)
                 os.fsync(directory)
+            finally:
+                os.close(fd)
         finally:
             os.close(directory)
 
@@ -533,37 +606,27 @@ class Runtime:
             if before is not None and before != candidate and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
                 raise ValueError('managed asset changed')
             changed |= path in self.assets and before != candidate
+        prepared = (self.data/'spool-policy.json').exists()
+        cutover = (installed and not prepared or (self.data/CUTOVER).exists()) and self.cutover_receipt()
+        retiring = cutover and not prepared
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
-        publication = self.control/'publishing'
-        receipt = native.snapshot(publication)
-        ready = START_READY + self.desired().encode() + b'\n'
-        if receipt is not None and receipt != PUBLISHING and not re.fullmatch(START_READY+b'[0-9a-f]{64}\n', receipt):
-            raise ValueError('invalid telemetry publication receipt')
-        preparing = changed or not installed or (receipt is not None and receipt != ready)
-        launch_assets = [self.library/name for name in ('record-policy.txt', 'records.py', 'processes.py', 'launcher.py')]
-        launch_assets.append(self.commands/'subyard-telemetry-run')
-        if preparing:
-            if receipt != PUBLISHING:
-                native.publish(publication, PUBLISHING, receipt)
-            stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded']
+        stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded'
+                and (retiring or changed or not self.running_no_new_privs(fields))]
+        if retiring:
+            for path in (self.commands/'subyard-telemetry-run', self.library/'broker-correlation.py'):
+                if self.asset_snapshot(path) is not None:
+                    os.chmod(path, 0o700)
             if stop:
-                # A reboot during publication must not auto-start old units.
                 systemctl('disable', *stop)
-                systemctl('stop', *stop)
-            # Switch the launch entry point before retiring the old manifest
-            # directory and producer interface. New runs can spool while the
-            # collector is down, including when apply is interrupted.
-            for path in launch_assets:
-                self.publish_asset(path, saved)
-            self.as_developer(self.quiesce_legacy_observers)
-            self.as_developer(self.fence_outbox)
-        elif receipt is None:
-            stop = [unit for unit, fields in before_states.items() if not self.running_no_new_privs(fields)]
-            if stop:
-                systemctl('stop', *stop)
+        if stop:
+            systemctl('stop', *stop)
+        if retiring:
+            self.as_developer(self.retire_legacy_producers)
+        if self.selected and not prepared:
+            self.publish_asset(self.library/'subyard-telemetry', saved)
+            self.prepare_store()
         for path in self.assets:
-            if not preparing or path not in launch_assets:
-                self.publish_asset(path, saved)
+            self.publish_asset(path, saved)
         for path, mode in self.retained.items():
             if self.asset_snapshot(path) is not None:
                 os.chmod(path, mode)
@@ -571,10 +634,6 @@ class Runtime:
         inventory, previous = self.inventory(), native.snapshot(inventory_path)
         if inventory != previous:
             native.publish(inventory_path, inventory, previous)
-        if preparing:
-            if self.selected:
-                self.prepare_store()
-            native.publish(publication, ready, PUBLISHING)
         systemctl('daemon-reload')
         if self.selected:
             drain = self.data/'drain.json'
@@ -587,8 +646,10 @@ class Runtime:
             native.publish(self.data/'drain.json', b'{"drain":true}\n', native.snapshot(self.data/'drain.json'), self.uid, self.gid)
             systemctl('start', MANAGER)
         self.skill_delivery('apply' if self.selected else 'remove')
-        if preparing or receipt == ready:
-            publication.unlink()
+        if cutover and self.selected:
+            (self.data/CUTOVER).unlink()
+            with records.directory_lock(self.data, fcntl.LOCK_SH) as directory:
+                os.fsync(directory)
 
 
 def main():
@@ -630,8 +691,8 @@ def main():
         return
     if mode == 'resume':
         if runtime.selected and runtime.owned():
-            if native.snapshot(runtime.control/'publishing') is not None:
-                raise ValueError('telemetry publication pending')
+            if (runtime.data/CUTOVER).exists() and not (runtime.data/'spool-policy.json').exists():
+                raise ValueError('telemetry cutover pending')
             systemctl('start', COLLECTOR, MANAGER)
         return
     if mode == 'startup':

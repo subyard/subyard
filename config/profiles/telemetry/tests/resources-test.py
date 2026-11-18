@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import records
 import resources
 import sources
+from spool_fixture import prepare, spooled
 
 spec = importlib.util.spec_from_file_location('correlation', Path(__file__).resolve().parents[1] / 'broker-correlation.py')
 correlation = importlib.util.module_from_spec(spec)
@@ -65,49 +66,19 @@ class Resources(unittest.TestCase):
         for private in (str(self.root), path.name, 'never-print-this'):
             self.assertNotIn(private, stderr.getvalue())
 
-    def test_outbox_drain_requires_actual_canonical_commit_when_collector_unlinks(self):
+    def test_spool_drain_requires_actual_canonical_commit(self):
         import contextlib
         database = self.root/'telemetry.sqlite'
         with contextlib.closing(sqlite3.connect(database)) as db:
             database.chmod(0o600)
             db.execute('CREATE TABLE records(event_id TEXT, source_id TEXT, origin_id TEXT, encoding TEXT)')
+            db.executemany('INSERT INTO records VALUES(?,?,?,?)', (
+                ('foreign', 'other', 'producer:other', 'json'),
+                ('committed', 'source', 'producer:source', 'json')))
             db.commit()
-        records.atomic_json(self.root/'producer.json',dict(source_id='fixture-source'))
-        source_id = records.opaque_id(records.identity_key(self.root), 'fixture-source')
-        outbox = records.private_directory(self.root/'outbox')
-        original = records.read_private
-        for scenario in ('committed','deleted','foreign-source','ambiguous','permission','failed-delivery'):
-            with self.subTest(scenario=scenario):
-                path = outbox/(scenario+'.json')
-                records.atomic_json(path,dict(source_id='fixture-source',event_id=scenario))
-
-                def concurrent_reader(target):
-                    if target == path:
-                        if scenario == 'permission':
-                            raise PermissionError(13,'private error',str(target))
-                        if scenario != 'failed-delivery':
-                            with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
-                                for source in ([source_id] if scenario == 'committed' else
-                                               ['foreign'] if scenario == 'foreign-source' else
-                                               [source_id,'foreign'] if scenario == 'ambiguous' else []):
-                                    db.execute('INSERT INTO records VALUES(?,?,?,?)',(scenario,source,'producer:'+source,'json'))
-                                db.commit()
-                            target.unlink()
-                    return original(target)
-
-                with patch.object(records,'read_private',side_effect=concurrent_reader), patch.object(records,'deliver',return_value=False):
-                    if scenario == 'committed':
-                        resource_observer.drain_outbox(self.root)
-                        with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
-                            self.assertEqual(db.execute('SELECT source_id,event_id FROM records WHERE event_id=?',(scenario,)).fetchall(),
-                                             [(source_id,scenario)])
-                    elif scenario == 'permission':
-                        with self.assertRaises(PermissionError):
-                            resource_observer.drain_outbox(self.root)
-                    else:
-                        with self.assertRaises(resource_observer.Failure):
-                            resource_observer.drain_outbox(self.root)
-                path.unlink(missing_ok=True)
+        resource_observer.wait_for_records(self.root, {('source', 'committed')}, timeout=0)
+        with self.assertRaises(resource_observer.Failure):
+            resource_observer.wait_for_records(self.root, {('source', 'foreign')}, timeout=0)
 
     def test_observer_key_diagnostic_is_closed_and_does_not_render_payload(self):
         for field in ('transport','secret-private-field'):
@@ -236,7 +207,7 @@ class Resources(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='telemetry-resources-', dir='/tmp')
-        self.root = Path(self.temp.name)
+        self.root = prepare(Path(self.temp.name))
         self.config = dict(kind='vm', owner_id='owner', source_id='resource-fixture',
                            cursor='-', registered_at=NOW,
                            associations={'broker-run': dict(agent_run_id='agent-run', start_time=NOW,
@@ -246,7 +217,7 @@ class Resources(unittest.TestCase):
         self.temp.cleanup()
 
     def rows(self):
-        return [records.read_outbox(path) for path in (self.root / 'outbox').glob('*.json')]
+        return list({(row['source_id'], row['event_id']): row for row in spooled(self.root)}.values())
 
     def page(self):
         event = dict(event_id=EVENT, timestamp=NOW, kind='lease.available', to_state='available',
@@ -263,14 +234,8 @@ class Resources(unittest.TestCase):
             transport=dict(script='/tmp/fixture/dev/agent-e2e.sh',yard='owner'))
 
     def test_reader_lock_cannot_drop_durable_registration_and_restart_merge(self):
-        # Exercise the normal request -> held flow with an absent data root.
-        # request owns root initialization; held must not be fixture-repaired.
-        self.root = self.root/'data'
-        self.assertFalse(self.root.exists())
-        self.assertTrue(correlation.register(self.root, 'agent-run', dict(self.held(), phase='request')),
-                        'request must initialize the private data root before held')
-        self.assertEqual(f'{stat.S_IMODE(self.root.stat().st_mode):04o}', '0700',
-                         'request data root mode')
+        # Request evidence is admitted after the private spool is prepared.
+        self.assertTrue(correlation.register(self.root, 'agent-run', dict(self.held(), phase='request')))
         root = records.private_directory(self.root/'sources')
         fd = os.open(root/'.lock',os.O_CREAT|os.O_RDWR,0o600)
         os.fchmod(fd,0o600)
@@ -355,7 +320,7 @@ class Resources(unittest.TestCase):
             self.assertTrue(sources.poll(self.root))
         self.assertEqual(len([row for row in self.rows() if row['kind']=='association']),2)
 
-    def test_registration_failure_marker_recovers_after_outbox_admission(self):
+    def test_registration_failure_marker_recovers_after_spool_admission(self):
         with patch.object(records,'emit',return_value=False):
             self.assertFalse(correlation.register(self.root,'agent-run',dict(self.held(),unknown='private')))
         marker = self.root/'sources/intents/registration-health'
@@ -424,7 +389,7 @@ class Resources(unittest.TestCase):
         self.assertIsNone(body['reserved_disk_bytes'])
         self.assertEqual(body['reservation_semantics'], 'allocated_virtual_capacity_held')
 
-    def test_android_allocation_outbox_drops_private_purpose_and_cpu(self):
+    def test_android_allocation_spool_drops_private_purpose_and_cpu(self):
         config = dict(self.config, kind='android', associations={}, source_id='resource-'+'a'*64)
         private = '/home/fixture/private-notes'
         allocation = dict(slot_id='001', generation=2, state='held',
@@ -468,7 +433,7 @@ class Resources(unittest.TestCase):
         self.assertNotEqual(resources.object_id('vm', 'owner', 'slot-001', 2, 3, '1'),
                             resources.object_id('vm', 'owner', 'slot-001', 3, 4, '1'))
 
-    def test_capability_only_private_registration_not_outbox(self):
+    def test_capability_only_private_registration_not_spool(self):
         request = dict(kind='android', phase='held', owner_id='owner', correlation_id='broker-run',
                        slot_id='001', resource_generation=2,
                        transport=dict(control='/srv/cache/android/.subyard/control.sock', capability='b' * 64))
@@ -541,7 +506,7 @@ class Resources(unittest.TestCase):
             self.assertTrue(resources.emit_event(data, config, stop))
             # A delayed open sample association must not reopen the confirmed end.
             self.assertTrue(resources.emit_sample(data, config, dict(sample(10, 600), acquired_at=NOW), 'late-periodic'))
-            resource_observer.drain_outbox(data)
+            resource_observer.drain_spool(data)
             run_id = records.opaque_id(records.identity_key(data), 'agent-run')
             result = json.loads(subprocess.check_output([str(binary), 'show-run', '--data-dir', str(data), '--run', run_id]))
             self.assertEqual(len(result['selected_nonoverlapping']), 1)
@@ -602,33 +567,9 @@ class Resources(unittest.TestCase):
             def retained(config):
                 cursors.append(config['cursor'])
                 return page
-            # Force the collector's commit/unlink between directory snapshot
-            # and open, including when its background tick already removed it.
-            pending_id = records.opaque_id(records.identity_key(data), 'late-periodic-association')
-            pending = data/'outbox'/(pending_id+'.json')
-            original_glob, original_drain = Path.glob, resource_observer.drain_outbox
-            removed = []
-            def delayed_snapshot(directory, pattern):
-                paths = list(original_glob(directory, pattern))
-                if directory == pending.parent and pattern == '*.json':
-                    if pending not in paths:
-                        paths.append(pending)
-                    committed = json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
-                        f"SELECT source_id,origin_id,encoding FROM records WHERE event_id='{pending_id}'"]))
-                    source_id = records.opaque_id(records.identity_key(data), config['source_id'])
-                    self.assertEqual(committed,[dict(source_id=source_id,
-                        origin_id='producer:'+source_id,encoding='json')])
-                    pending.unlink(missing_ok=True)
-                    removed.append(pending.stem)
-                return iter(paths)
-            def drain_after_unlink(directory):
-                with patch.object(Path,'glob',delayed_snapshot):
-                    return original_drain(directory)
-            with patch.object(resource_observer,'drain_outbox',side_effect=drain_after_unlink), \
-                 patch.object(sources,'fetch',side_effect=retained), patch.dict(os.environ,SUBYARD_AGENT_RUN_ID=late_run), redirect_stdout(io.StringIO()):
+            with patch.object(sources,'fetch',side_effect=retained), patch.dict(os.environ,SUBYARD_AGENT_RUN_ID=late_run), redirect_stdout(io.StringIO()):
                 resource_observer.capture(data,'vm')
                 resource_observer.assert_records(data,'vm','final')
-            self.assertEqual(removed,[pending_id])
             self.assertEqual(cursors,['-'])
             self.assertTrue(correlation.register(data,late_run,request))
             with patch.object(sources,'fetch',side_effect=retained):
@@ -638,7 +579,7 @@ class Resources(unittest.TestCase):
             with patch.object(sources,'fetch',side_effect=retained):
                 self.assertTrue(sources.poll(data))
             self.assertEqual(cursors,['-','-',EVENT])
-            resource_observer.drain_outbox(data)
+            resource_observer.drain_spool(data)
             rows=json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
                 f"SELECT count(*) AS edges,min(start_time) AS start,max(end_time) AS end FROM associations WHERE agent_run_id='{records.opaque_id(records.identity_key(data), late_run)}'"]))
             self.assertEqual(rows[0],dict(edges=1,start='2026-10-24T00:00:00.000000000Z',end='2026-10-24T00:00:21.000000000Z'))
@@ -729,9 +670,9 @@ class Resources(unittest.TestCase):
             self.assertEqual({body['state'] for body in allocations if body['object_id'] == object_id},
                              {'draining', 'available'})
             final = next(body for body in allocations if body['object_id'] == object_id and body['state'] == 'available')
-            self.assertEqual(final['stopped_at'], stopped['timestamp'])
+            self.assertEqual(final['stopped_at'], records.timestamp(stopped['timestamp']))
             for kind, key, value in (('sample', 'phase', 'pre_stop'), ('gap', 'reason', 'final_tail_missing'),
-                                     ('association', 'end_time', stopped['timestamp'])):
+                                     ('association', 'end_time', records.timestamp(stopped['timestamp']))):
                 self.assertTrue(any(row['kind'] == kind and row['body'].get('object_id') == object_id
                                     and row['body'].get(key) == value for row in rows), (object_id, kind))
 

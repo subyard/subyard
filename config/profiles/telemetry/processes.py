@@ -305,7 +305,7 @@ class Sampler:
                              'observed_process_count': len(chosen), 'populated': populated,
                              'quality': 'complete' if self.group else 'partial', 'final': final})
         if final and saved and direct_saved:
-            if not records.emit(self.data_dir, 'run', {'agent_run_id': self.run['agent_run_id'], 'state': 'resources_complete', 'resource_completed': True,
+            if not records.emit(self.data_dir, 'run', {'agent_run_id': self.run['agent_run_id'], 'state': 'resources_complete', 'resource_completed': True, 'end_time': records.now(),
                          'quality': 'complete' if self.group else 'partial'}):
                 return False
             if self.group:

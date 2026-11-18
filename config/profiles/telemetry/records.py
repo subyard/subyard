@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""Private, bounded producer outbox. Collection failures never fail workloads."""
-from contextlib import closing
+"""Private, bounded producer spool. Collection failures never fail workloads."""
+from contextlib import contextmanager
+import ctypes
 import datetime
 import fcntl
+import hashlib
 import hmac
 import http.client
+import itertools
 import json
 import os
 from pathlib import Path
 import re
 import socket
-import sqlite3
+import sys
 import stat
 import tempfile
 import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
 POLICY_VERSION = 'subyard.telemetry.capture/v1'
-# Matches the collector's default fingerprint before it publishes settings.
-DEFAULT_CAPTURE_POLICY = POLICY_VERSION + ':71626c7f614522a2d0ffb6b15ef86fc45334322dd94e86f704a104b545b9c6db'
-STORE_VERSION = 4
 KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
 BODY_ID = {'run': 'agent_run_id', **dict.fromkeys(('scope', 'process', 'sample', 'allocation', 'association'), 'object_id')}
 BODY_RULES = {}
@@ -35,20 +35,31 @@ for line in policy_path.read_text().splitlines():
         BODY_RULES.update((field, (rule, ())) for field in fields)
 
 IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
-UNKNOWN_SOURCE_TIME = '0001-01-01T00:00:00Z'
+UNKNOWN_SOURCE_TIME = '0001-01-01T00:00:00.000000000Z'
 USE_CURRENT_TIME = object()
 MAX_RECORDS = 4096
 MAX_BYTES = 64*1024*1024
+FRAME_BYTES = 64*1024
+SEGMENT_BYTES = 256*1024
+MARKER_SLOT = 4096
+SPOOL_VERSION = b'subyard-spool/1'
+STREAM = re.compile(r'broker|h1:[0-9a-f]{64}')
 
 
-def valid_timestamp(value):
+def timestamp(value):
     if not isinstance(value, str) or not PATTERNS['timestamp'].fullmatch(value):
-        return False
+        return None
     try:
-        datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(datetime.timezone.utc)
+        utc = datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(datetime.timezone.utc)
     except (ValueError, OverflowError):
-        return False
-    return True
+        return None
+    fraction = re.match(r'[.,]([0-9]+)', value[19:])
+    digits = fraction[1].ljust(9, '0') if fraction else '000000000'
+    return utc.isoformat(timespec='seconds')[:-6]+'.'+digits+'Z'
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def legacy_identity(key, value):
@@ -93,7 +104,8 @@ def clean_field(key, field, value):
     if rule == 'enum':
         return value in choices, value
     if rule == 'time':
-        return valid_timestamp(value), value
+        value = timestamp(value)
+        return value is not None, value
     if rule == 'id':
         value = opaque_id(key, value)
         return value is not None, value
@@ -127,7 +139,7 @@ def signed_record(key, record):
     return {'record': record, 'signature': signature}
 
 
-def outbox_record(key, kind, body, source_id, event_id, source_time):
+def prepared_record(key, kind, body, source_id, event_id, source_time):
     source_id, event_id = opaque_id(key, source_id), opaque_id(key, event_id)
     if kind not in KINDS or not source_id or not event_id:
         raise ValueError('invalid record identity or kind')
@@ -135,7 +147,8 @@ def outbox_record(key, kind, body, source_id, event_id, source_time):
     required = BODY_ID.get(kind)
     if required and not body.get(required):
         raise ValueError('missing record identity')
-    if not valid_timestamp(source_time):
+    source_time = timestamp(source_time)
+    if source_time is None:
         source_time = UNKNOWN_SOURCE_TIME
         removed += 1
     return {'schema': SCHEMA, 'source_id': source_id, 'event_id': event_id, 'source_version': '1',
@@ -200,12 +213,12 @@ def filter_session(record, attributes):
     return True
 
 
-def private_directory(path, *, outbox=False):
+def private_directory(path):
     """Create/check the private leaf, never repair existing objects.
 
     Parents must already satisfy their owning contract: mkdir(parents=True) does
     not make intermediate parents private. Initialize the data root first before
-    creating sources/runs/outbox beneath it (or prepare that root in a fixture).
+    creating sources, runs or spool beneath it.
     """
     path = Path(path)
     for parent in (path, *path.parents):
@@ -213,15 +226,14 @@ def private_directory(path, *, outbox=False):
             raise ValueError('unsafe directory')
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.stat()
-    modes = (0o700, 0o1700) if outbox else (0o700,)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) not in modes:
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
         raise ValueError('private directory required')
     return path
 
 
-def atomic_json(path, value, *, outbox=False):
+def atomic_json(path, value):
     path = Path(path)
-    private_directory(path.parent, outbox=outbox)
+    private_directory(path.parent)
     if path.is_symlink():
         raise ValueError('unsafe file')
     if path.exists():
@@ -249,14 +261,22 @@ def atomic_json(path, value, *, outbox=False):
             os.unlink(temporary)
 
 
+def checked_file(fd, maximum):
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > maximum):
+        raise ValueError('private file required')
+    return info
+
+
 def open_private(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    source = os.fdopen(fd, 'rb')
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 65536:
-        source.close()
-        raise ValueError('private file required')
-    return source
+    try:
+        checked_file(fd, FRAME_BYTES)
+        return os.fdopen(fd, 'rb')
+    except (OSError, ValueError):
+        os.close(fd)
+        raise
 
 
 def read_private(path):
@@ -264,80 +284,37 @@ def read_private(path):
         return json.load(source)
 
 
-def read_outbox(path):
-    value = read_private(path)
-    return value.get('record', value)
-
-
-def store_settings(directory):
-    path = directory/'telemetry.sqlite'
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return {}
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
-        raise ValueError('private telemetry store required')
-    with closing(sqlite3.connect(path.absolute().as_uri()+'?mode=ro', uri=True, timeout=0.05)) as db:
-        version, = db.execute('PRAGMA user_version').fetchone()
-        if 0 <= version < STORE_VERSION:
-            return {}
-        if version != STORE_VERSION:
-            raise ValueError('unsupported telemetry schema')
-        settings = dict(db.execute("""SELECT key,value FROM metadata WHERE key IN
-                        ('identity_key_verifier','session_capture_attributes','session_capture_policy')"""))
-        if not settings.get('identity_key_verifier'):
-            raise ValueError('telemetry identity key verifier is unavailable')
-        return settings
-
-
-def capture_policy(directory):
-    settings = store_settings(directory)
-    selected = settings.get('session_capture_attributes')
-    if selected is None:
-        attributes = {*BODY_RULES['session_attributes'][1], 'subyard.agent_run.id', 'subyard.agent_run.evidence'}
-        return attributes, DEFAULT_CAPTURE_POLICY
-    return set(json.loads(selected)), settings.get('session_capture_policy', POLICY_VERSION)
-
-
 def identity_key(directory):
-    verifier = store_settings(directory).get('identity_key_verifier')
-    path = directory/'.identity-key'
+    with open_private(directory/'.identity-key') as source:
+        key = source.read(33)
+    if len(key) != 32:
+        raise ValueError('invalid telemetry identity key')
+    return key
+
+
+@contextmanager
+def directory_lock(path, mode):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        with open_private(path) as source:
-            key = source.read(33)
-            if len(key) != 32:
-                raise ValueError('invalid telemetry identity key')
-            if verifier is not None and not hmac.compare_digest(
-                    verifier, hmac.digest(key, b'subyard.telemetry/identity-key/v1', 'sha256').hex()):
-                raise ValueError('telemetry identity key does not match the store')
-            return key
-    except FileNotFoundError:
-        if verifier is not None:
-            raise ValueError('telemetry identity key is missing from an existing store') from None
-        # Serialize only initialization with the collector. Existing keys are
-        # read without a lock and are never replaced.
-        parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            fcntl.flock(parent, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if path.exists() or path.is_symlink():
-                return identity_key(directory)
-            if store_settings(directory).get('identity_key_verifier') is not None:
-                raise ValueError('telemetry identity key is missing from an existing store')
-            key = os.urandom(32)
-            with tempfile.NamedTemporaryFile(dir=directory, prefix='.key-', delete=False) as temporary:
-                try:
-                    os.fchmod(temporary.fileno(), 0o600)
-                    temporary.write(key)
-                    temporary.flush()
-                    os.fsync(temporary.fileno())
-                    os.replace(temporary.name, path)
-                    os.fsync(parent)
-                finally:
-                    if os.path.exists(temporary.name):
-                        os.unlink(temporary.name)
-            return key
-        finally:
-            os.close(parent)
+        fcntl.flock(fd, mode)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def capture_policy(directory, key):
+    value = read_private(directory/'spool-policy.json')
+    settings = value['settings']
+    proof = hmac.digest(key, b'spool-policy/v1\0'+compact_json(settings), 'sha256').hex()
+    verifier = hmac.digest(key, b'subyard.telemetry/identity-key/v1', 'sha256').hex()
+    attributes, policy = settings['attributes'], settings['policy_version']
+    allowed = {*BODY_RULES['session_attributes'][1], 'subyard.agent_run.id', 'subyard.agent_run.evidence'}
+    if (not hmac.compare_digest(value['signature'], proof)
+            or not hmac.compare_digest(settings['key_verifier'], verifier)
+            or type(attributes) is not list or not set(attributes) <= allowed
+            or not re.fullmatch(re.escape(POLICY_VERSION)+r':[0-9a-f]{64}', policy)):
+        raise ValueError('invalid telemetry capture policy')
+    return attributes, policy
 
 
 class LocalConnection(http.client.HTTPConnection):
@@ -357,128 +334,130 @@ class LocalConnection(http.client.HTTPConnection):
         self.sock.connect(str(self.path))
 
 
-def deliver(data_dir, record):
-    path = Path(data_dir)/'control.sock'
-    try:
-        info = path.lstat()
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            return False
-        with LocalConnection(path) as connection:
-            connection.request('POST', '/v1/records', compact_json(record), {'Content-Type': 'application/json'})
-            response = connection.getresponse()
-            response.read(1024)
-            return response.status == 200
-    except (OSError, ValueError, http.client.HTTPException):
-        return False
-
-
-def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, event_id=None):
-    try:
-        if kind not in KINDS:
-            return False
-        directory = private_directory(data_dir)
-        key = identity_key(directory)
-        outbox = private_directory(directory/'outbox', outbox=True)
-        fd = os.open(outbox/'.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'rb') as lock:
-            info = os.fstat(lock.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
-                return False
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            identity = directory/'producer.json'
-            if not identity.exists():
-                atomic_json(identity, {'source_id': str(uuid.uuid4())})
-            source_id = source_id or read_private(identity)['source_id']
-            generated_event_id = not event_id
-            event_id = event_id or str(uuid.uuid4())
-            encoded_event = opaque_id(key, event_id)
-            if encoded_event is None:
-                return False
-            path = outbox/(encoded_event+'.json')
-            existing = None
-            candidates = [path]
-            # Pending files from either old producer spelling can still drain.
-            candidates.append(outbox/(legacy_identity(key, event_id)+'.json'))
-            if len(event_id) <= 224 and '/' not in event_id:
-                candidates.append(outbox/(event_id+'.json'))
-            for candidate in candidates:
-                try:
-                    existing = read_private(candidate)
-                    if 'record' in existing:
-                        if signed_record(key, existing['record']) != existing:
-                            return False
-                        existing, authenticated = existing['record'], True
-                    else:
-                        authenticated = False
-                    break
-                except FileNotFoundError:
+def append_frame(spool, stream, frame):
+    target = spool/(stream+'.open')
+    while True:
+        try:
+            fd = os.open(target, os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            with directory_lock(spool, fcntl.LOCK_EX) as directory:
+                if target.exists() or target.is_symlink():
                     continue
+                limit = min(MAX_RECORDS, MAX_BYTES//SEGMENT_BYTES)
+                with os.scandir(directory) as entries:
+                    names = [entry.name for entry in itertools.islice(entries, limit)]
+                if len(names) >= limit:
+                    return False
+                sealed = max((name for name in names if re.fullmatch(
+                    re.escape(stream)+r'\.[0-9a-f]{32}\.[0-9]{16}\.sealed', name)), default='')
+                generation, number = (sealed.split('.')[1:3] if sealed else (uuid.uuid4().hex, '0'))
+                fd = os.open(spool, os.O_TMPFILE | os.O_RDWR | os.O_APPEND, 0o600)
+                try:
+                    os.fchmod(fd, 0o600)
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                    # Linux fallocate(KEEP_SIZE) reserves bytes without hiding EOF.
+                    fallocate = ctypes.CDLL(None, use_errno=True).fallocate
+                    if fallocate(fd, 1, ctypes.c_longlong(0), ctypes.c_longlong(SEGMENT_BYTES)):
+                        raise OSError(ctypes.get_errno(), 'spool segment allocation failed')
+                    header = b' '.join((SPOOL_VERSION, stream.encode(), generation.encode(),
+                                        f'{int(number)+1:016d}'.encode()))+b'\n'
+                    write_frame(fd, header+frame)
+                    os.link(f'/proc/self/fd/{fd}', target.name, dst_dir_fd=directory)
+                    os.fsync(directory)
+                finally:
+                    os.close(fd)
+                return True
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            info = checked_file(fd, SEGMENT_BYTES)
+            try:
+                current = target.lstat()
+            except FileNotFoundError:
+                continue
+            if not os.path.samestat(info, current):
+                continue
+            fields = os.pread(fd, 160, 0).split(b'\n', 1)[0].split(b' ')
+            if (len(fields) != 4 or fields[:2] != [SPOOL_VERSION, stream.encode()]
+                    or not re.fullmatch(rb'[0-9a-f]{32}', fields[2]) or not re.fullmatch(rb'[0-9]{16}', fields[3])):
+                raise ValueError('unsupported spool segment')
+            if os.pread(fd, 1, info.st_size-1) == b'\n' and info.st_size+len(frame) <= SEGMENT_BYTES:
+                write_frame(fd, frame)
+                # A previous appender may have died just after linking this inode.
+                with directory_lock(spool, fcntl.LOCK_SH) as directory:
+                    os.fsync(directory)
+                return True
+            # The sealed reader treats any bytes after the last newline as a gap.
+            with directory_lock(spool, fcntl.LOCK_EX) as directory:
+                sealed = spool/('.'.join(part.decode() for part in fields[1:])+'.sealed')
+                if sealed.exists() or sealed.is_symlink():
+                    raise ValueError('spool segment collision')
+                os.rename(target, sealed)
+                os.fsync(directory)
+        finally:
+            os.close(fd)
+
+
+def write_frame(fd, data):
+    if os.write(fd, data) != len(data):
+        raise OSError('short spool write')
+    os.fsync(fd)
+
+
+def note_loss(directory, stream):
+    path = directory/'spool-loss'
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        checked_file(fd, 2*MARKER_SLOT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        slots = []
+        for offset in (0, MARKER_SLOT):
+            digest, _, data = os.pread(fd, MARKER_SLOT, offset).partition(b' ')
+            data = data.rstrip(b'\0')
+            if digest == hashlib.sha256(data).hexdigest().encode():
+                slots.append(json.loads(data))
+        previous = max(slots, key=lambda item: item['revision'], default={'revision': 0, 'count': 0})
+        now_at = timestamp(now())
+        if previous['count']:
+            previous['stream'] = previous['stream'] if previous['stream'] == stream else 'broker'
+        else:
+            previous.update(id=uuid.uuid4().hex, first=now_at, stream=stream)
+        previous.update(revision=previous['revision']+1, last=now_at, count=previous['count']+1)
+        data = compact_json(previous)
+        slot = (hashlib.sha256(data).hexdigest().encode()+b' '+data).ljust(MARKER_SLOT, b'\0')
+        if os.pwrite(fd, slot, (previous['revision']%2)*MARKER_SLOT) != MARKER_SLOT:
+            raise OSError('short loss marker write')
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, event_id=None, *, broker=False):
+    stream = 'broker'
+    try:
+        directory = private_directory(data_dir)
+        with directory_lock(directory, fcntl.LOCK_SH):
+            key = identity_key(directory)
+            attributes, policy = capture_policy(directory, key)
+            source_id = source_id or read_private(directory/'producer.json')['source_id']
             if source_time is USE_CURRENT_TIME:
-                source_time = (existing or {}).get('source_time')
-                if source_time is None and generated_event_id:
-                    source_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
-            record = outbox_record(key, kind, body, source_id, event_id, source_time)
-            attributes = ()
-            if session_metadata(record):
-                attributes, policy = capture_policy(directory)
-                if not filter_session(record, attributes):
-                    return True
-                record['policy_version'] = policy
-            if existing is not None:
-                if existing.get('schema') != SCHEMA and not (
-                        not existing.get('schema') and existing.get('schema_version') == 1):
-                    return False
-                old = dict(existing, body=existing['body'].copy()) if authenticated else outbox_record(
-                    key, existing['kind'], existing['body'], existing['source_id'],
-                    existing['event_id'], existing.get('source_time'))
-                if session_metadata(old) and not filter_session(old, attributes):
-                    return False
-                metadata = ('redactions', 'policy_version')
-                if {k: v for k, v in old.items() if k not in metadata} != {
-                        k: v for k, v in record.items() if k not in metadata}:
-                    return False
-                record = existing if authenticated else record
-            else:
-                entries = []
-                for pending in outbox.glob('*.json'):
-                    if pending.is_symlink():
-                        continue
-                    try:
-                        entries.append(pending.stat().st_size)
-                    except FileNotFoundError:
-                        # The collector may commit and remove an older record.
-                        continue
-                health_path = directory/'producer-health.json'
-                health = read_private(health_path) if health_path.exists() else None
-                gap = None
-                if health:
-                    gap = outbox_record(key, 'gap', {
-                        'reason': 'producer_outbox_capacity', 'quality': 'partial', 'missing': health['count'],
-                        'coverage_start': health['first_time'], 'coverage_end': health['last_time'],
-                    }, source_id, health['event_id'], health['first_time'])
-                required = len(compact_json(signed_record(key, record)))+1
-                if gap:
-                    required += len(compact_json(signed_record(key, gap)))+1
-                if len(entries)+1+bool(gap) > MAX_RECORDS or sum(entries)+required >= MAX_BYTES:
-                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                    health = {'event_id': health['event_id'] if gap else str(uuid.uuid4()),
-                              'first_time': gap['source_time'] if gap else now, 'last_time': now,
-                              'count': min(2**63-1, (gap['body'].get('missing') or 0)+1) if gap else 1}
-                    atomic_json(health_path, health)
-                    return False
-                if gap:
-                    atomic_json(outbox/(gap['event_id']+'.json'), signed_record(key, gap), outbox=True)
-                    health_path.unlink()
-                    parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                    try:
-                        os.fsync(parent_fd)
-                    finally:
-                        os.close(parent_fd)
-                atomic_json(path, signed_record(key, record), outbox=True)
-        # Only initial run registration needs a committed acknowledgement before
-        # native SDK startup. Broker and sampling paths stop at the durable outbox.
-        if kind == 'run' and record['body'].get('state') == 'starting' and record['body'].get('agent'):
-            deliver(directory, signed_record(key, record))
-        return True
-    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
-        return False
+                source_time = now() if not event_id else None
+            record = prepared_record(key, kind, body, source_id, event_id or str(uuid.uuid4()), source_time)
+            if not broker:
+                stream = record['body'].get('agent_run_id') or 'broker'
+            if not STREAM.fullmatch(stream):
+                raise ValueError('invalid spool stream')
+            identity = [record[field] for field in ('kind', 'source_version', 'source_time', 'body')]
+            record['input_id'] = hmac.digest(key, b'producer-input/v1\0'+compact_json(identity), 'sha256').hex()
+            record['policy_version'] = policy
+            if session_metadata(record) and not filter_session(record, attributes):
+                record.update(filtered=True, body={})
+            frame = compact_json(signed_record(key, record))+b'\n'
+            if len(frame) <= FRAME_BYTES and append_frame(private_directory(directory/'spool'), stream, frame):
+                return True
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        note_loss(Path(data_dir), stream)
+    except (OSError, ValueError, KeyError, TypeError):
+        print('Telemetry coverage gap could not be saved', file=sys.stderr, flush=True)
+    return False

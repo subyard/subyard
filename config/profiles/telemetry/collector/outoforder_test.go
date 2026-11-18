@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -33,7 +35,7 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 		makeRecord("process", finalTime, map[string]any{"object_id": "process", "state": "ended", "parent_object_id": "new-parent", "accounting": "direct"}),
 	}
 	for _, reverse := range []bool{false, true} {
-		for _, transport := range []string{"ingest", "outbox", "replay"} {
+		for _, transport := range []string{"ingest", "spool", "replay"} {
 			t.Run(fmt.Sprintf("%s/final_first=%t", transport, reverse), func(t *testing.T) {
 				s := fixtureStore(t)
 				records := append(append([]Record{}, initial...), final...)
@@ -45,25 +47,14 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 					if err := s.Ingest(ctx, records); err != nil {
 						t.Fatal(err)
 					}
-				case "outbox":
-					dir := testkit.TempDir(t)
-					for i, r := range records {
-						path := filepath.Join(dir, fmt.Sprintf("%03d.json", i))
-						if i == 0 {
-							path = filepath.Join(dir, ".legacy.json")
-						}
-						data, err := json.Marshal(r)
-						if err != nil {
-							t.Fatal(err)
-						}
-						testkit.WriteFile(t, path, data, 0600)
-					}
-					testkit.WriteFile(t, filepath.Join(dir, ".in-progress.tmp"), nil, 0600)
-					if err := s.IngestOutbox(ctx, dir); err != nil {
+				case "spool":
+					p := DefaultPolicy()
+					if err := s.publishCapturePolicy(p); err != nil {
 						t.Fatal(err)
 					}
-					if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != ".in-progress.tmp" {
-						t.Fatalf("only the temporary file should remain: %v %v", entries, err)
+					appendPython(t, s, records)
+					if err := s.drainSpool(ctx, p); err != nil {
+						t.Fatal(err)
 					}
 				case "replay":
 					var stream bytes.Buffer
@@ -119,26 +110,16 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 	}
 }
 
-func TestOutboxLegacyTimestampRetry(t *testing.T) {
+func TestLegacyTimestampRetry(t *testing.T) {
 	for _, original := range []string{"malformed legacy timestamp", "2026-01-01T00:00:00Z"} {
 		t.Run(original, func(t *testing.T) {
 			ctx := context.Background()
 			store := fixtureStore(t)
-			dir := testkit.TempDir(t)
-			path := filepath.Join(dir, ".event.json")
 			r := record("gap", map[string]any{"reason": "source_offline"})
 			for _, at := range []string{original, unknownSourceTime} {
 				r.SourceTime = at
-				data, err := json.Marshal(r)
-				if err != nil {
+				if err := store.Ingest(ctx, []Record{r}); err != nil {
 					t.Fatal(err)
-				}
-				testkit.WriteFile(t, path, data, 0600)
-				if err := store.IngestOutbox(ctx, dir); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := os.Stat(path); !os.IsNotExist(err) {
-					t.Fatalf("outbox record remains after drain: %v", err)
 				}
 			}
 			var count int
@@ -158,73 +139,118 @@ func TestOutboxLegacyTimestampRetry(t *testing.T) {
 	}
 }
 
-func TestOutboxContinuesPastInvalidRecords(t *testing.T) {
-	ctx := context.Background()
-	store := fixtureStore(t)
-	dir := testkit.TempDir(t)
-	bad := record("sample", map[string]any{"monotonic_ns": -1})
-	collision := record("gap", map[string]any{"reason": "source_offline"})
-	if err := store.Ingest(ctx, []Record{collision}); err != nil {
-		t.Fatal(err)
-	}
-	collision.Body["reason"] = "final_tail_missing"
-	for name, r := range map[string]Record{
-		".collision.json": collision,
-		".invalid.json":   bad,
-		"good.json":       record("gap", map[string]any{"reason": "source_offline"}),
-	} {
-		data, err := json.Marshal(r)
-		if err != nil {
-			t.Fatal(err)
-		}
-		testkit.WriteFile(t, filepath.Join(dir, name), data, 0600)
-	}
-	unsafe, err := json.Marshal(record("gap", map[string]any{"reason": "source_offline"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(dir, ".bad-mode.json"), unsafe, 0644)
-	if err := os.Mkdir(filepath.Join(dir, ".directory.json"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, filepath.Join(dir, ".large.json"), make([]byte, store.limits.RequestBytes+1), 0600)
-	testkit.WriteFile(t, filepath.Join(dir, ".malformed.json"), []byte("{"), 0600)
-	if err := store.IngestOutbox(ctx, dir); !errors.Is(err, errInvalidRecord) {
-		t.Fatalf("expected invalid record diagnostic, got %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "good.json")); !os.IsNotExist(err) {
-		t.Fatalf("valid file did not drain: %v", err)
-	}
-	for _, name := range []string{".bad-mode.json", ".collision.json", ".directory.json", ".invalid.json", ".large.json", ".malformed.json"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Fatalf("refused file %s was not retained: %v", name, err)
-		}
-	}
-}
-
-func TestOutboxBoundsInvalidFileAttemptsAndResumes(t *testing.T) {
-	ctx := context.Background()
-	store := fixtureStore(t)
-	dir := testkit.TempDir(t)
-	for i := range 257 {
-		testkit.WriteFile(t, filepath.Join(dir, fmt.Sprintf("%03d.json", i)), []byte("{"), 0600)
-	}
-	data, err := json.Marshal(record("gap", map[string]any{"reason": "source_offline"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	good := filepath.Join(dir, "good.json")
-	testkit.WriteFile(t, good, data, 0600)
-	if err := store.IngestOutbox(ctx, dir); !errors.Is(err, errInvalidRecord) {
-		t.Fatalf("expected invalid record diagnostic, got %v", err)
-	}
-	if _, err := os.Stat(good); err != nil {
-		t.Fatalf("first poll exceeded its budget: %v", err)
-	}
-	if err := store.IngestOutbox(ctx, dir); !errors.Is(err, errInvalidRecord) {
-		t.Fatalf("expected remaining invalid record diagnostic, got %v", err)
-	}
-	if _, err := os.Stat(good); !os.IsNotExist(err) {
-		t.Fatalf("second poll did not drain valid file: %v", err)
+func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
+	for _, unlinked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unlinked=%t", unlinked), func(t *testing.T) {
+			ctx := context.Background()
+			s := fixtureStore(t)
+			p := DefaultPolicy()
+			if err := s.publishCapturePolicy(p); err != nil {
+				t.Fatal(err)
+			}
+			first := record("gap", map[string]any{"reason": "source_offline"})
+			appendPython(t, s, []Record{first})
+			dir := filepath.Join(s.dir, "spool")
+			path := filepath.Join(dir, "broker.open")
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = f.WriteString("{malformed}\n{torn"); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+			if _, err = s.db.Exec(`CREATE TRIGGER interrupted BEFORE UPDATE ON spool_offsets
+				BEGIN SELECT raise(ABORT,'before spool commit'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.drainSpool(ctx, p); !errors.Is(err, ErrStorage) {
+				t.Fatalf("interrupted drain: %v", err)
+			}
+			assertCount := func(db *Store, count int) {
+				t.Helper()
+				var n int
+				if err := db.db.QueryRow("SELECT count(*) FROM records").Scan(&n); err != nil || n != count {
+					t.Fatalf("records = %d, want %d (%v)", n, count, err)
+				}
+			}
+			assertCount(s, 0)
+			if _, err := s.db.Exec("DROP TRIGGER interrupted"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.drainSpool(ctx, p); err != nil {
+				t.Fatal(err)
+			}
+			assertCount(s, 2) // Complete frames drain even while the tail is open.
+			conflict := first
+			conflict.Body = map[string]any{"reason": "final_tail_missing"}
+			appendPython(t, s, []Record{first, conflict, record("gap", map[string]any{"reason": "source_offline"})})
+			sealed, err := filepath.Glob(filepath.Join(dir, "*.sealed"))
+			if err != nil || len(sealed) != 1 {
+				t.Fatalf("torn segment did not rotate: %v (%v)", sealed, err)
+			}
+			file, err := os.Open(sealed[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := strings.TrimSuffix(filepath.Base(sealed[0]), ".sealed")
+			err = s.drainSegment(ctx, file, id, true, p)
+			file.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCount(s, 3)
+			if unlinked {
+				if err = os.Remove(sealed[0]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			foreign := filepath.Join(dir, s.key.id("foreign")+".open")
+			testkit.WriteFile(t, foreign, []byte("subyard-spool/99 fixture\n"), 0600)
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := Open(s.dir, DefaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restarted.Close()
+			if err = restarted.drainSpool(ctx, p); !errors.Is(err, errInvalidRecord) {
+				t.Fatalf("unknown version was not reported: %v", err)
+			}
+			assertCount(restarted, 5)
+			entries, err := os.ReadDir(dir)
+			if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(foreign) {
+				t.Fatalf("only foreign spool evidence should remain: %v (%v)", entries, err)
+			}
+			var checkpoints int
+			if err := restarted.db.QueryRow("SELECT count(*) FROM spool_offsets").Scan(&checkpoints); err != nil || checkpoints != 0 {
+				t.Fatalf("retired offsets remain: %d (%v)", checkpoints, err)
+			}
+			if unlinked {
+				const producer = `
+import sys
+sys.path.insert(0, '..')
+import records
+records.MAX_RECORDS = 0
+for _ in range(2):
+    assert not records.emit(sys.argv[1], 'run', {'agent_run_id':'quota-lost'})
+`
+				if output, err := exec.Command("python3", "-B", "-c", producer, restarted.dir).CombinedOutput(); err != nil {
+					t.Fatalf("write reserved loss marker: %v\n%s", err, output)
+				}
+				for range 2 {
+					if err := restarted.drainSpool(ctx, p); !errors.Is(err, errInvalidRecord) {
+						t.Fatalf("marker drain next to foreign stream: %v", err)
+					}
+				}
+				var count, missing int
+				if err := restarted.db.QueryRow(`SELECT count(*),sum(json_extract(body,'$.missing')) FROM gaps
+					WHERE agent_run_id=? AND json_extract(body,'$.reason')='producer_spool_capacity'`, restarted.key.id("quota-lost")).
+					Scan(&count, &missing); err != nil || count != 1 || missing != 2 {
+					t.Fatalf("marker-only recovery: gaps=%d losses=%d (%v)", count, missing, err)
+				}
+			}
+		})
 	}
 }

@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-import fcntl
-import grp
 import json
 import hashlib
 import importlib.util
@@ -9,9 +7,10 @@ from contextlib import ExitStack, closing, redirect_stderr
 import os
 from pathlib import Path
 import select
-import shlex
 import shutil
 import signal
+import socket
+import time
 import sqlite3
 import stat
 import subprocess
@@ -30,275 +29,219 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
-    def test_upgrade_resumes_after_each_publication(self):
+    def test_installed_cutover_preserves_workloads_and_resumes(self):
         profile = Path(guest.__file__).parent
-        legacy_observer = b'''
-import fcntl, os, pathlib, sys
-if len(sys.argv) > 2:
-    print(os.getpid(), os.getgid(), flush=True)
-with (pathlib.Path(sys.argv[1])/'manager.lock').open('rb') as lock:
-    print('opened', flush=True)
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    print('locked', flush=True)
-    sys.stdin.read()
-'''
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            workspace = Path(name)
-            workspace.chmod(0o711)
-            source = workspace/'source'
-            shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin'))
+        with tempfile.TemporaryDirectory(dir='/tmp') as name, ExitStack() as children:
+            root = Path(name)
+            root.chmod(0o711)
+            source = root/'source'
+            shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
             binary = source/'subyard-telemetry'
             subprocess.run(['go', 'build', '-o', binary, './config/profiles/telemetry/cmd/telemetry'],
                            cwd=profile.parents[2], check=True, timeout=90)
-
-            for step in ('stopped', 'fenced', 'asset', 'archived', 'started'):
-                with self.subTest(step=step), tempfile.TemporaryDirectory(dir=workspace) as case, ExitStack() as children:
-                    root = Path(case)
-                    root.chmod(0o711)
-                    account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
-                    runtime = guest.Runtime(source, 'dev', True, [], root/'control', root/'data',
-                                            root/'library', root/'units', root/'bin', account)
-                    control, data = runtime.control, runtime.data
-                    for directory in (control, data, runtime.home, runtime.library, runtime.units, runtime.commands):
-                        directory.mkdir(mode=0o700 if directory == data else 0o755)
-                    os.chown(data, runtime.uid, runtime.gid)
-                    (control/'marker').write_bytes(guest.MARKER)
-                    installed_launcher = runtime.library/'launcher.py'
-                    for path, (_, mode) in runtime.assets.items():
-                        if path.name != 'record-policy.txt':
-                            path.write_bytes(legacy_observer if path == installed_launcher else b'previous '+path.name.encode())
-                            path.chmod(mode)
-                    (control/'assets.json').write_text(json.dumps({
-                        str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in runtime.assets if path.exists()}))
-
-                    def developer(*command):
-                        if os.getuid() != runtime.uid:
-                            return ['/usr/bin/setpriv', '--reuid', str(runtime.uid), '--regid', str(runtime.gid), '--clear-groups', *command]
-                        return command
-
-                    def child(*command, credentials=True):
-                        process = children.enter_context(subprocess.Popen(developer(*command) if credentials else command,
-                                                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE))
-                        children.callback(lambda: process.kill() if process.poll() is None else None)
-                        return process
-
-                    # Use real SQLite and flock state. Only systemd operations
-                    # are substituted so the fixture runs without a system manager.
-                    initialization = '''
-from contextlib import closing
-import json, os, pathlib, sqlite3, sys
-root = pathlib.Path(sys.argv[1])
-(root/'runs').mkdir(mode=0o700)
-(root/'runs/legacy-run.json').write_text(json.dumps({'agent_run_id': 'legacy-run'}))
-(root/'runs/legacy-run.json').chmod(0o600)
-(root/'runs/health').write_text(json.dumps(dict(event_id='legacy-coverage', count=3,
-    first_time='2026-01-01T01:00:00+00:00', last_time='2026-01-01T02:00:00+00:00')))
-(root/'runs/health').chmod(0o600)
-(root/'manager.lock').touch(mode=0o600)
-(root/'outbox').mkdir(mode=0o700)
-path = root/'telemetry.sqlite'
-with closing(sqlite3.connect(path)) as db:
-    db.executescript("""
-create table metadata(key text primary key, value text);
-insert into metadata values('origin_id', 'released');
-create table runs(agent_run_id text, body text, source_time text);
-insert into runs values('legacy-run', '{"state":"starting"}', '');
-create table associations(object_id text, body text, start_time text, end_time text, shared integer, quality text, agent_run_id text);
-create table objects(object_id text, parent_object_id text, accounting text, body text, kind text);
-create table records(origin_id text, event_id text, kind text);
-insert into records values('released', 'last-measurement', 'sample');
-create table samples(object_id text);
-create table relations(agent_run_id text, session_id text, origin_id text, event_id text, body text);
-create table gaps(agent_run_id text, object_id text, source_time text, body text);
-pragma user_version=2;
-""")
-os.chmod(path, 0o600)
-'''
-                    subprocess.run(developer(sys.executable, '-Bc', initialization, data), check=True, timeout=5)
-                    children.callback((data/'runs').chmod, 0o700)
-                    workload = child(sys.executable, '-Bc', 'import sys; sys.stdin.read()')
-                    observer = child(sys.executable, '-B', installed_launcher, data)
-                    self.assertTrue(select.select([observer.stdout], [], [], 5)[0])
-                    self.assertEqual(observer.stdout.readline(), b'opened\n')
-                    self.assertEqual(observer.stdout.readline(), b'locked\n')
-                    waiting = child(sys.executable, '-B', installed_launcher, data)
-                    self.assertTrue(select.select([waiting.stdout], [], [], 5)[0])
-                    self.assertEqual(waiting.stdout.readline(), b'opened\n')
-                    alternate = None
-                    other_groups = sorted(set(os.getgroups()) - {runtime.gid})
-                    if step == 'fenced' and (os.getuid() == 0 or other_groups):
-                        command = (sys.executable, '-B', str(installed_launcher), str(data), 'alternate-gid')
-                        if os.getuid() == 0:
-                            alternate_gid = runtime.gid+1
-                            command = ('/usr/bin/setpriv', '--reuid', str(runtime.uid), '--regid', str(alternate_gid), '--clear-groups', *command)
-                        else:
-                            alternate_gid = other_groups[0]
-                            command = ('sg', grp.getgrgid(alternate_gid).gr_name, '-c', 'exec '+shlex.join(command))
-                        alternate = child(*command, credentials=False)
-                        self.assertTrue(select.select([alternate.stdout], [], [], 5)[0])
-                        pid, gid = map(int, alternate.stdout.readline().split())
-                        self.assertEqual(gid, alternate_gid)
-                        self.assertEqual(alternate.stdout.readline(), b'opened\n')
-                        denied = '''
-from pathlib import Path
-import sys
-try:
-    for fd in (Path('/proc')/sys.argv[1]/'fd').iterdir():
-        fd.stat()
-except PermissionError:
-    pass
-else:
-    raise AssertionError('alternate GID did not deny FD discovery')
-'''
-                        subprocess.run(developer(sys.executable, '-Bc', denied, str(pid)), check=True, timeout=5)
-
-                    state_path = root/'services.json'
-                    units = (guest.COLLECTOR, guest.MANAGER)
-                    state_path.write_text(json.dumps({unit: dict(LoadState='loaded', ActiveState='active', UnitFileState='enabled')
-                                                      for unit in units}))
-                    runtime.manager = lambda unit: json.loads(state_path.read_text())[unit]
-                    runtime.running_no_new_privs = lambda fields: True
-                    runtime.skill_delivery = lambda mode: True
-                    stops = []
-
-                    def cut(boundary):
-                        if interrupted and step == boundary:
-                            os.kill(os.getpid(), signal.SIGKILL)
-
-                    def systemctl(operation, *arguments):
-                        if operation == 'daemon-reload':
-                            return
-                        states = json.loads(state_path.read_text())
-                        for unit in arguments:
-                            if unit == '--now':
-                                continue
-                            if operation in ('enable', 'disable'):
-                                states[unit]['UnitFileState'] = operation + 'd'
-                            if operation == 'stop':
-                                stops.append(unit)
-                                states[unit]['ActiveState'] = 'inactive'
-                            if operation == 'enable' and '--now' in arguments:
-                                states[unit]['ActiveState'] = 'active'
-                        state_path.write_text(json.dumps(states))
-                        if operation == 'enable':
-                            cut('started')
-
-                    def after(operation, boundary):
-                        def run(*args, **kwargs):
-                            operation(*args, **kwargs)
-                            cut(boundary)
-                        return run
-
-                    def publication(path, *args, **kwargs):
-                        publish(path, *args, **kwargs)
-                        if path == runtime.library/'native.py':
-                            cut('asset')
-
-                    publish = guest.native.publish
-                    runtime.prepare_store = after(runtime.prepare_store, 'archived')
-                    as_developer = runtime.as_developer
-
-                    def developer_step(operation):
-                        as_developer(operation)
-                        cut('stopped' if operation == runtime.quiesce_legacy_observers else 'fenced')
-
-                    runtime.as_developer = developer_step
-
-                    with patch.object(guest, 'systemctl', side_effect=systemctl), \
-                         patch.object(guest.native, 'reconcile', return_value=True), \
-                         patch.object(guest.native, 'publish', side_effect=publication):
-                        interrupted = True
-                        pid = os.fork()
-                        if pid == 0:
-                            try:
-                                runtime.apply()
-                            finally:
-                                os._exit(1)
-                        _, status = os.waitpid(pid, 0)
-                        self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
-                        self.assertEqual(runtime.observe()['state'], 'stale')
-                        self.assertEqual(observer.wait(timeout=5), -signal.SIGKILL)
-                        self.assertEqual(waiting.wait(timeout=5), -signal.SIGKILL)
-                        self.assertIsNone(workload.poll())
-                        archive = data/'archive/telemetry.sqlite'
-                        outbox = data/'outbox'
-                        self.assertEqual(stat.S_IMODE(outbox.stat().st_mode), 0o700 if step == 'stopped' else 0o1700)
-                        self.assertEqual(archive.exists(), step in ('archived', 'started'))
-                        for unit in units:
-                            self.assertEqual(runtime.manager(unit)['ActiveState'], 'active' if step == 'started' else 'inactive')
-                        if step == 'fenced':
-                            if alternate is not None:
-                                self.assertIsNone(alternate.poll())
-                                self.assertTrue((data/'runs-v4/observer-health').exists())
-                            command = runtime.commands/'subyard-telemetry-run'
-                            with (outbox/'.lock').open('rb') as lock:
-                                fcntl.flock(lock, fcntl.LOCK_EX)
-                                launched = subprocess.run(developer(command, '--data-dir', data, '--agent', 'other',
-                                    '--scope-mode', 'partial', '--', '/bin/sh', '-c', 'printf "launched"'),
-                                    capture_output=True, check=True, timeout=5)
-                                self.assertEqual(launched.stdout, b'launched')
-                                self.assertEqual(records.read_private(data/'runs-v4/startup-health')['count'], 1)
-                        interrupted = False
-                        runtime.apply()
-                        self.assertEqual(runtime.observe()['state'], 'current')
-                        self.assertEqual(stops, [] if step == 'started' else list(units))
-                    self.assertIsNone(workload.poll())
-                    self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o400)
-                    with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
-                        self.assertEqual(db.execute('PRAGMA user_version').fetchone(), (4,))
-                        self.assertEqual(db.execute('SELECT count(*) FROM records').fetchone(), (0,))
-                    with closing(sqlite3.connect(archive.as_uri()+'?mode=ro', uri=True)) as db:
-                        self.assertEqual(db.execute('SELECT event_id FROM records').fetchone(), ('last-measurement',))
-                    self.assertTrue((data/'runs/legacy-run.json').exists())
-                    subprocess.run(developer(sys.executable, '-Bc', '''
-import os, sys
-sys.path.insert(0, sys.argv[1])
-import fcntl, launcher, records
-root = records.private_directory(launcher.Path(sys.argv[2])/launcher.RUNS)
-with os.fdopen(os.open(root/'manager.lock', os.O_CREAT | os.O_RDWR, 0o600), 'rb') as lock:
+            account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
+            runtime = guest.Runtime(source, 'dev', True, [], root/'control', root/'data',
+                                    root/'library', root/'units', root/'bin', account)
+            control, data = runtime.control, runtime.data
+            for directory in (control, data, runtime.home, runtime.library, runtime.units, runtime.commands):
+                directory.mkdir(mode=0o700 if directory == data else 0o755)
+            os.chown(data, runtime.uid, runtime.gid)
+            (control/'marker').write_bytes(guest.MARKER)
+            launcher = runtime.library/'launcher.py'
+            old_observer = b'''
+import fcntl, os, pathlib, sys
+with (pathlib.Path(sys.argv[1])/'manager.lock').open('rb') as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
-    launcher.observe(sys.argv[2], once=True)
-''', runtime.library, data), check=True, timeout=10)
-                    self.assertFalse(list((data/'runs-v4').glob('*.json')))
-                    gaps = [record['body'] for path in outbox.glob('*.json')
-                            if (record := records.read_outbox(path))['kind'] == 'gap']
-                    legacy = next(gap for gap in gaps if gap['reason'] == 'run_manifest_capacity')
-                    self.assertEqual((legacy['missing'], legacy['coverage_start'], legacy['coverage_end']),
-                                     (3, '2026-01-01T01:00:00+00:00', '2026-01-01T02:00:00+00:00'))
-                    if step == 'fenced':
-                        self.assertTrue(any(gap['reason'] == 'run_startup_unavailable' for gap in gaps))
+    print('locked', flush=True)
+    sys.stdin.read()
+'''
+            for path, (_, mode) in runtime.assets.items():
+                path.write_bytes(old_observer if path == launcher else b'previous '+path.name.encode())
+                path.chmod(mode)
+            (control/'assets.json').write_text(json.dumps({
+                str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in runtime.assets}))
 
-    def test_running_legacy_producer_cannot_publish_after_upgrade(self):
-        # Keep the pre-upgrade lock open across publication, as a producer that
-        # passed its first directory check just before the upgrade could do.
-        code = """
+            def dev(*command):
+                if os.getuid() != runtime.uid:
+                    return ['/usr/bin/setpriv', '--reuid', str(runtime.uid), '--regid', str(runtime.gid), '--clear-groups', *command]
+                return command
+
+            def child(*command):
+                process = children.enter_context(subprocess.Popen(dev(*command), stdin=subprocess.PIPE, stdout=subprocess.PIPE))
+                children.callback(lambda: process.kill() if process.poll() is None else None)
+                return process
+
+            subprocess.run(dev(binary, 'prepare', '--data-dir', data), check=True, timeout=10)
+            initialization = '''
+import contextlib, json, os, pathlib, sqlite3, sys
+root = pathlib.Path(sys.argv[1])
+(root/'spool-policy.json').unlink()
+(root/'runs').mkdir(mode=0o700)
+(root/'outbox').mkdir(mode=0o700)
+(root/'outbox/.lock').touch(mode=0o600)
+(root/'manager.lock').touch(mode=0o600)
+with contextlib.closing(sqlite3.connect(root/'telemetry.sqlite')) as db:
+    db.execute("PRAGMA user_version=4")
+    db.execute("INSERT INTO runs VALUES('legacy-run','{}','')")
+    db.commit()
+for path, value in (
+    ('runs/legacy-run.json', dict(agent_run_id='legacy-run', pid=2147483647,
+        boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip())),
+    ('runs/health', dict(event_id='legacy-coverage', count=3,
+         first_time='2026-01-01T01:00:00Z', last_time='2026-01-01T02:00:00Z')),
+    ('producer-health.json', dict(event_id='producer-coverage', count=2,
+         first_time='2026-01-02T01:00:00Z', last_time='2026-01-02T02:00:00Z')),
+    ('outbox/.valid.json', dict(schema_version=1, event_id='.valid', source_id='old-producer',
+         source_version='1', kind='gap', body=dict(reason='source_offline'))),
+    ('outbox/.foreign.json', dict(schema_version=1, event_id='wrong-name', source_id='old-producer',
+         source_version='1', kind='gap', body=dict(reason='source_offline'))),
+):
+    target = root/path
+    target.write_text(json.dumps(value))
+    target.chmod(0o600)
+'''
+            subprocess.run(dev(sys.executable, '-Bc', initialization, data), check=True, timeout=5)
+            children.callback(lambda: runtime.as_developer(lambda: ((data/'runs').chmod(0o700), (data/'outbox').chmod(0o700))))
+            observer = child(sys.executable, '-B', launcher, data)
+            self.assertTrue(select.select([observer.stdout], [], [], 5)[0])
+            self.assertEqual(observer.stdout.readline(), b'locked\n')
+            serializer = '''
 import fcntl, os, pathlib, stat, sys
-outbox = pathlib.Path(sys.argv[1])
+outbox = pathlib.Path(sys.argv[1])/'outbox'
 with (outbox/'.lock').open('r+b') as lock:
     assert stat.S_IMODE(outbox.stat().st_mode) == 0o700
-    print('ready', flush=True)
+    print('loaded', flush=True)
     sys.stdin.read()
     fcntl.flock(lock, fcntl.LOCK_EX)
-    if stat.S_IMODE(outbox.stat().st_mode) == 0o700:
-        (outbox/'late.json').write_text('{"agent_run_id":"raw-legacy-run"}')
-"""
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            data = Path(name)
-            self.assertTrue(records.emit(data, 'gap', {}, event_id='pending'))
-            outbox = data/'outbox'
-            pending = list(outbox.glob('*.json'))
-            with subprocess.Popen([sys.executable, '-B', '-c', code, str(outbox)],
-                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE) as old:
-                self.assertEqual(old.stdout.readline().strip(), b'ready')
-                runtime = object.__new__(guest.Runtime)
-                runtime.data, runtime.uid, runtime.gid = data, os.getuid(), os.getgid()
-                runtime.as_developer(runtime.fence_outbox)
-                old.communicate(timeout=3)
-                self.assertEqual(old.returncode, 0)
-            self.assertCountEqual(outbox.glob('*.json'), pending)
-            self.assertTrue(records.emit(data, 'run', {'agent_run_id': 'new-run'}, event_id='new'))
-            self.assertEqual(len(list(outbox.glob('*.json'))), 2)
+    try:
+        mode = stat.S_IMODE(outbox.stat().st_mode)
+        if mode in ((0o700,) if sys.argv[2]=='released' else (0o700,0o1700)):
+            (outbox/(sys.argv[2]+'.json')).write_text('late')
+        if sys.argv[2]=='predecessor':
+            # This appender passed its lock and directory checks before cutover.
+            (outbox/'late-open-fd.json').touch()
+    except PermissionError:
+        pass
+'''
+            writers = [child(sys.executable, '-Bc', serializer, data, mode) for mode in ('released', 'predecessor')]
+            for writer in writers:
+                self.assertTrue(select.select([writer.stdout], [], [], 5)[0])
+                self.assertEqual(writer.stdout.readline(), b'loaded\n')
+            with socket.socket() as port:
+                port.bind(('127.0.0.1', 0))
+                address = '127.0.0.1:'+str(port.getsockname()[1])
+            descendant = '''
+import os, sys, time, urllib.error, urllib.request
+if os.fork():
+    os._exit(0)
+print('descendant', flush=True)
+sys.stdin.read()
+token = open(sys.argv[1]).read().strip()
+req = urllib.request.Request('http://'+sys.argv[2]+'/v1/logs', b'{}',
+    headers={'Content-Type':'application/json','Authorization':'Bearer '+token, 'x-subyard-agent-run-id':'legacy-run'})
+for _ in range(60):
+    try:
+        with urllib.request.urlopen(req, timeout=.5) as response:
+            print(response.status, flush=True)
+        break
+    except OSError:
+        time.sleep(.1)
+'''
+            workload = child(sys.executable, '-Bc', descendant, data/'auth.token', address)
+            self.assertTrue(select.select([workload.stdout], [], [], 5)[0])
+            self.assertEqual(workload.stdout.readline(), b'descendant\n')
+            self.assertEqual(workload.wait(timeout=5), 0)
+            active = {guest.COLLECTOR: True, guest.MANAGER: True}
+            enabled = dict(active)
+            invoked = []
+            collector = None
+
+            def systemctl(action, *args):
+                nonlocal collector
+                invoked.append(action)
+                for unit in (unit for unit in args if unit in active):
+                    if action in ('stop', 'enable', 'disable'):
+                        if action != 'stop':
+                            enabled[unit] = action == 'enable'
+                        if action == 'stop' or '--now' in args:
+                            active[unit] = action == 'enable'
+                    if action == 'enable' and unit == guest.COLLECTOR and collector is None:
+                        collector = child(runtime.library/'subyard-telemetry', 'serve', '--data-dir', data,
+                                          '--listen', address, '--auth-file', data/'auth.token')
+                return ''
+
+            runtime.manager = lambda unit: dict(LoadState='loaded', ActiveState='active' if active[unit] else 'inactive',
+                                                UnitFileState='enabled' if enabled[unit] else 'disabled')
+            runtime.running_no_new_privs = lambda _state: True
+            runtime.skill_delivery = lambda _action: True
+            prepare = runtime.prepare_store
+
+            def interrupt_after_prepare():
+                prepare()
+                raise RuntimeError('fixture interrupted after store preparation')
+
+            with patch.object(guest, 'systemctl', side_effect=systemctl), patch.object(guest.native, 'reconcile', return_value=True):
+                for path in ('archive', guest.PENDING):
+                    collision = data/path
+                    collision.mkdir(mode=0o700)
+                    (collision/'foreign').touch()
+                    with self.assertRaisesRegex(ValueError, 'archive.*collision'):
+                        runtime.apply()
+                    self.assertTrue((collision/'foreign').exists())
+                    self.assertEqual(invoked, [])
+                    (collision/'foreign').unlink()
+                    collision.rmdir()
+                with patch.object(runtime, 'prepare_store', side_effect=interrupt_after_prepare):
+                    with self.assertRaisesRegex(RuntimeError, 'after store preparation'):
+                        runtime.apply()
+                self.assertEqual(observer.wait(timeout=5), -signal.SIGKILL)
+                self.assertTrue((data/guest.CUTOVER).exists())
+                self.assertEqual(stat.S_IMODE((data/'outbox/.lock').stat().st_mode), 0)
+                for writer in writers:
+                    writer.communicate(timeout=5)
+                    self.assertEqual(writer.returncode, 0)
+                self.assertCountEqual([p.name for p in (data/'outbox').glob('*.json')], ['.valid.json', '.foreign.json'])
+                # A registration and exit both reach durable spool before OTLP is ready.
+                code = '''
+import sys, types
+sys.path.insert(0, sys.argv[1])
+import launcher
+launcher.MAX_RUNS = 0
+args = types.SimpleNamespace(command=['/bin/true'], data_dir=sys.argv[2], agent='other',
+    agent_version='1', scope_mode='partial', task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
+assert launcher.launch(args) == 0
+'''
+                offline = subprocess.run(dev(sys.executable, '-Bc', code, source, data), capture_output=True, check=True, timeout=10)
+                offline_id = offline.stderr.decode().split('agent_run_id=')[1].strip()
+                runtime.apply()
+                self.assertEqual(runtime.observe()['state'], 'current')
+                self.assertFalse((data/guest.CUTOVER).exists())
+            workload.stdin.close()
+            self.assertTrue(select.select([workload.stdout], [], [], 10)[0])
+            self.assertEqual(workload.stdout.readline(), b'200\n')
+            deadline = time.monotonic()+10
+            with closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
+                while True:
+                    reason = "json_extract(body,'$.reason')"
+                    count, = db.execute(f"SELECT count(*) FROM gaps WHERE {reason}='possible_native_loss' AND agent_run_id=?",
+                                        (records.opaque_id(records.identity_key(data), offline_id),)).fetchone()
+                    if count:
+                        break
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(.05)
+                self.assertEqual(count, 1)
+                health = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
+                    f"SELECT {reason},json_extract(body,'$.missing'),json_extract(body,'$.coverage_start'),"
+                    "json_extract(body,'$.coverage_end') FROM gaps")}
+                self.assertEqual(health['run_manifest_capacity'], (3, '2026-01-01T01:00:00.000000000Z', '2026-01-01T02:00:00.000000000Z'))
+                self.assertEqual(health['producer_outbox_capacity'][0], 2)
+                self.assertIn('source_offline', health)
+            archive = data/'archive/telemetry.sqlite'
+            self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o400)
+            with closing(sqlite3.connect(archive.as_uri()+'?mode=ro', uri=True)) as db:
+                self.assertEqual(db.execute("SELECT json_extract(body,'$.reason') FROM gaps").fetchall(),
+                                 [('interrupted_by_upgrade',)])
 
     def test_missing_managed_document_waits_before_first_telemetry_install(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -327,7 +270,7 @@ with (outbox/'.lock').open('r+b') as lock:
             runtime.assets, runtime.retained = {asset: (b'current collector', 0o755)}, {}
             runtime.selected, runtime.agents = True, ['claude']
             runtime.managed_agents = {'claude'}
-            runtime.home, runtime.control = root, root/'control'
+            runtime.home, runtime.control, runtime.data = root, root/'control', root/'data'
             runtime.library = root/'library'
             runtime.endpoint, runtime.uid, runtime.gid = 'http://127.0.0.1:14318', os.getuid(), os.getgid()
             runtime.owned = lambda: True
@@ -357,7 +300,7 @@ with (outbox/'.lock').open('r+b') as lock:
             runtime.retained = {}
             runtime.selected = True
             runtime.home, runtime.agents = Path(name), []
-            runtime.control = Path(name)
+            runtime.control = runtime.data = Path(name)
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
             runtime.saved_inventory = lambda: {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}

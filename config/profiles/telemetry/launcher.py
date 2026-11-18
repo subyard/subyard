@@ -21,13 +21,8 @@ import processes
 import records
 
 
-RUNS = 'runs-v4'
+RUNS = 'runs-v5'
 DEFAULT_DATA_DIR = '/var/lib/subyard/telemetry'
-GAP_MARKERS = (
-    ('health', 'run_manifest_capacity'),
-    ('startup-health', 'run_startup_unavailable'),
-    ('observer-health', 'scope_observation_unavailable'),
-)
 MAX_RUNS = 4096
 MAX_RUN_BYTES = 16*1024*1024
 MAX_RUN_PAYLOAD = 16384
@@ -52,47 +47,8 @@ def manifest_lock(root):
         yield
 
 
-def increment_health(path):
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    try:
-        health = records.read_private(path)
-    except FileNotFoundError:
-        health = dict(event_id=str(uuid.uuid4()), first_time=now, count=0)
-    health.update(last_time=now, count=min(2**63-1, health['count']+1))
-    records.atomic_json(path, health)
-
-
-def publish_health(data_dir, path, reason, retire=True):
-    try:
-        health = records.read_private(path)
-    except FileNotFoundError:
-        return True
-    if not records.emit(data_dir, 'gap', dict(reason=reason, quality='partial',
-            missing=health['count'], coverage_start=health['first_time'], coverage_end=health['last_time']),
-            event_id=health['event_id'], source_time=health['first_time']):
-        return False
-    if retire:
-        path.unlink()
-    return True
-
-
-def note_gap(data_dir, marker):
-    try:
-        root = records.private_directory(records.private_directory(data_dir)/RUNS)
-        with manifest_lock(root):
-            increment_health(root/marker)
-            fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-    except (OSError, ValueError, KeyError, TypeError):
-        print('Telemetry coverage gap could not be saved', file=sys.stderr, flush=True)
-
-
 def admit_manifest(data_dir, run, reserve=False):
     """Reserve a complete bounded snapshot before any managed group is created."""
-    root = None
     try:
         directory = records.private_directory(data_dir)
         root = records.private_directory(directory/RUNS)
@@ -104,18 +60,15 @@ def admit_manifest(data_dir, run, reserve=False):
             value.update(manifest_state='reserved', launcher_pid=os.getpid(),
                          launcher_start_ticks=processes.start_ticks(os.getpid()))
         size = len((json.dumps(value, sort_keys=True, separators=(',', ':'))+'\n').encode())
-        health = root/'health'
         with manifest_lock(root):
             path = root/(identity+'.json')
             if size > MAX_RUN_PAYLOAD or path.exists() or path.is_symlink():
-                increment_health(health)
                 return False
             count = total = 0
             deadline = time.monotonic()+.1
             with os.scandir(root) as entries:
                 for scanned, item in enumerate(entries, 1):
                     if scanned > MAX_RUNS+16 or time.monotonic() > deadline:
-                        increment_health(health)
                         return False
                     if not item.name.endswith('.json'):
                         continue
@@ -130,16 +83,10 @@ def admit_manifest(data_dir, run, reserve=False):
                     total += MAX_RUN_PAYLOAD if entry.get('manifest_state') == 'reserved' else length
                     count += 1
                     if count >= MAX_RUNS or total+(MAX_RUN_PAYLOAD if reserve else size) > MAX_RUN_BYTES:
-                        increment_health(health)
                         return False
             if count+1 > MAX_RUNS or (MAX_RUN_PAYLOAD if reserve else size)+total > MAX_RUN_BYTES:
-                increment_health(health)
                 return False
             records.atomic_json(path, value)
-            try:
-                publish_health(data_dir, health, 'run_manifest_capacity')
-            except (OSError, ValueError, KeyError):
-                pass  # The admitted snapshot remains durable if health replay fails.
         return True
     except (OSError, ValueError, KeyError, TypeError):
         return False
@@ -363,7 +310,6 @@ def observe(data_dir, once=False, interval=5, standalone_lock=None):
     source_thread = None
     scan = None
     deferred = []
-    legacy_health_pending = True
     while True:
         pending = []
         total = 0
@@ -399,28 +345,15 @@ def observe(data_dir, once=False, interval=5, standalone_lock=None):
                 pending.append((path, run))
             except (OSError, ValueError):
                 continue
-        if legacy_health_pending:
-            # The frozen marker keeps its original coverage interval and event
-            # identity. Restarts can safely retry the same event.
+        if standalone_lock is not None:
             try:
-                legacy = Path(data_dir)/'runs'
-                info = legacy.lstat()
-                if stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o500 and info.st_uid == os.getuid():
-                    legacy_health_pending = not publish_health(data_dir, legacy/'health', 'run_manifest_capacity', retire=False)
-            except FileNotFoundError:
-                legacy_health_pending = False
-            except (OSError, ValueError, KeyError, TypeError):
+                with manifest_lock(root):
+                    if not any(root.glob('*.json')):
+                        # Release before a new admission can race the idle exit.
+                        fcntl.flock(standalone_lock, fcntl.LOCK_UN)
+                        return 0
+            except (OSError, ValueError):
                 pass
-        try:
-            with manifest_lock(root):
-                for marker, reason in GAP_MARKERS:
-                    publish_health(data_dir, root/marker, reason)
-                if standalone_lock is not None and not any(root.glob('*.json')):
-                    # Release before a new admission can race the idle exit.
-                    fcntl.flock(standalone_lock, fcntl.LOCK_UN)
-                    return 0
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
         if not pending and not batch and scan is None and (Path(data_dir)/'drain.json').exists():
             try:
                 delegation = records.read_private(Path(data_dir)/'delegation.json')
@@ -549,11 +482,17 @@ def launch(args):
                 run['agent_version'] = match[0].decode('ascii')
         except (OSError, subprocess.SubprocessError):
             pass
-    tracked = admit_manifest(data_dir, run, reserve=True)
+    run['start_time'] = records.now()
+    registered = records.emit(data_dir, 'run', {**run, 'state': 'starting'})
+    if not registered and args.scope_mode == 'require':
+        return 2
+    tracked = registered and admit_manifest(data_dir, run, reserve=True)
     if not tracked:
         print('Telemetry tracking unavailable; reason=run_manifest_admission', file=sys.stderr)
-        records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'run_manifest_unavailable', 'quality': 'partial'})
+        if registered:
+            records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'run_manifest_unavailable', 'quality': 'partial'})
         if args.scope_mode == 'require':
+            records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'not_started', 'end_time': records.now()})
             return 2
     group = None
     try:
@@ -564,12 +503,10 @@ def launch(args):
     except (OSError, ValueError, KeyError) as error:
         if args.scope_mode == 'require':
             discard_reservation(data_dir, run)
+            records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'not_started', 'end_time': records.now()})
             print('Managed telemetry scope unavailable; native command was not started; '+scope_failure(error), file=sys.stderr)
             return 2
         records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'managed_scope_unavailable', 'quality': 'partial'})
-    record = {**run, 'state': 'starting', 'scope_quality': 'managed' if group else 'partial'}
-    if not records.emit(data_dir, 'run', record):
-        note_gap(data_dir, 'startup-health')
     print('agent_run_id='+run['agent_run_id'], file=sys.stderr, flush=True)
     if group:
         try:
@@ -589,6 +526,7 @@ def launch(args):
                 group.parent.rmdir()
             except OSError:
                 pass
+        records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'not_started', 'end_time': records.now()})
         return 127
     try:
         identity = processes.process(pid)
@@ -600,7 +538,7 @@ def launch(args):
                     raise ValueError('scope placement failed')
         except (OSError, ValueError) as error:
             if args.scope_mode == 'require':
-                records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'not_started', 'scope_quality': 'unavailable'})
+                records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'not_started', 'scope_quality': 'unavailable', 'end_time': records.now()})
                 os.close(write_fd)
                 write_fd = -1
                 os.waitpid(pid, 0)
@@ -616,7 +554,6 @@ def launch(args):
             run.pop('cgroup', None)
             run.pop('cgroup_identity', None)
             records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'scope_placement_unavailable', 'quality': 'partial'})
-            records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'starting', 'scope_quality': 'partial'})
         try:
             if tracked:
                 finish_manifest(data_dir, run)
@@ -637,13 +574,17 @@ def launch(args):
             tracked = False
             group = None
             refused = args.scope_mode == 'require'
-            records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'not_started' if refused else 'starting', 'scope_quality': 'unavailable' if refused else 'partial'})
             if refused:
+                records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'not_started',
+                             'scope_quality': 'unavailable', 'end_time': records.now()})
                 return 2
             try:
                 pid, write_fd = gated_child(command, env)
             except OSError:
                 return 127
+        if registered:
+            records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'running',
+                         'scope_quality': 'managed' if group else 'partial'})
         os.write(write_fd, b'1')
     except (OSError, ValueError, KeyError):
         if write_fd >= 0:
@@ -666,7 +607,7 @@ def launch(args):
         try:
             start_standalone_observer(data_dir)
         except OSError:
-            note_gap(data_dir, 'observer-health')
+            records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'scope_observation_unavailable', 'quality': 'partial'})
     previous = {}
     def forward(signum, frame):
         try:
@@ -681,7 +622,9 @@ def launch(args):
         for signum, handler in previous.items():
             signal.signal(signum, handler)
     code = os.waitstatus_to_exitcode(status)
-    records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'main_exited', 'main_exited': True, 'agent_exited': True, 'exit_code': code})
+    if registered:
+        records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'main_exited', 'main_exited': True,
+                     'agent_exited': True, 'exit_code': code, **({'end_time': records.now()} if not tracked else {})})
     return code if code >= 0 else 128-code
 
 

@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import processes
+from spool_fixture import prepare
 spec = importlib.util.spec_from_file_location('process_scope', Path(__file__).parent/'e2e/process-scope.py')
 scope_fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scope_fixture)
@@ -42,7 +43,7 @@ def cg(path, cpu, populated):
 class ProcessTest(unittest.TestCase):
     def test_short_run_waits_for_both_objects_baseline_and_final_samples(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            data = Path(name)
+            data = prepare(Path(name))
             database = data/'telemetry.sqlite'
             with closing(sqlite3.connect(database)) as writer:
                 database.chmod(0o600)

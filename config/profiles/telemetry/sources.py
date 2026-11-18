@@ -29,7 +29,7 @@ def registration_gap(data_dir, reason):
         return True
     try:
         # One content-free recovery marker outside the intent quota. A full
-        # analytics outbox must not turn registration rejection into quiet loss.
+        # analytics spool must not turn registration rejection into quiet loss.
         root = records.private_directory(Path(data_dir)/'sources/intents')
         records.atomic_json(root/'registration-health', dict(reason=reason,
             source_time=datetime.datetime.now(datetime.timezone.utc).isoformat(), event_id='registration-'+uuid.uuid4().hex))
@@ -210,10 +210,6 @@ def merge_intents(data_dir, root):
                         registration_gap(data_dir, 'observer_capacity')
                         continue
                     min(completed, key=lambda item: item[1].get('registered_at', ''))[0].unlink()
-                if not (Path(data_dir)/'producer.json').exists():
-                    public = {key: request.get(key) for key in ('owner_id', 'yard_id', 'project_id', 'correlation_id')}
-                    public.update(agent_run_id=intent['agent_run_id'], source='acquire-correlation', quality='explicit')
-                    records.emit(data_dir, 'relation', public, source_time=intent['registered_at'], event_id=intent_path.stem+'-relation')
                 producer = records.read_private(Path(data_dir)/'producer.json')['source_id']
                 source = 'resource-'+hashlib.sha256((producer+':'+request['kind']+':'+request['owner_id']).encode()).hexdigest()
                 config = dict(source_id=source, kind=request['kind'], owner_id=request['owner_id'], cursor='-',

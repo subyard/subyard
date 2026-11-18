@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import launcher
 import records
+from spool_fixture import prepare, spooled
 
 
 class LauncherTest(unittest.TestCase):
@@ -55,9 +56,9 @@ class LauncherTest(unittest.TestCase):
         code = owner.split("<<'PY_FINALS_DIAGNOSTIC'",1)[1].split('\n',1)[1].split('\nPY_FINALS_DIAGNOSTIC',1)[0]
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            data = launcher.records.private_directory(root/'data')
-            runs = launcher.records.private_directory(data/'runs-v4')
-            outbox = launcher.records.private_directory(data/'outbox')
+            data = prepare(root/'data')
+            runs = launcher.records.private_directory(data/'runs-v5')
+            spool = launcher.records.private_directory(data/'spool')
             cgroups, proc = root/'cgroups', root/'proc'
             group = cgroups/'run-active'
             (group/'workload').mkdir(parents=True)
@@ -78,7 +79,7 @@ class LauncherTest(unittest.TestCase):
             launcher.records.atomic_json(runs/'reserved.json',dict(agent_run_id='reserved',manifest_state='reserved',launcher_pid=44,launcher_start_ticks=123))
             launcher.records.atomic_json(runs/'invalid.json',dict(private='PRIVATE_SECRET_INVALID'))
             (runs/'invalid.json').chmod(0o644)
-            launcher.records.atomic_json(outbox/'event.json',dict(private='PRIVATE_SECRET_OUTBOX'))
+            launcher.records.atomic_json(spool/'broker.open',dict(private='PRIVATE_SECRET_SPOOL'))
             database = data/'telemetry.sqlite'
             with contextlib.closing(sqlite3.connect(database)) as db:
                 database.chmod(0o600)
@@ -93,7 +94,7 @@ class LauncherTest(unittest.TestCase):
             self.assertNotIn('PRIVATE_SECRET',encoded)
             self.assertNotIn(str(root),encoded)
             self.assertLess(len(encoded),8192)
-            self.assertEqual(document['outbox_count'],1)
+            self.assertEqual(document['spool_count'],1)
             active=next(item for item in document['runs'] if item.get('scope')=='identified')
             self.assertTrue(active['populated'])
             self.assertFalse(active['main_identity_present'])
@@ -104,7 +105,7 @@ class LauncherTest(unittest.TestCase):
             self.assertEqual(reserved['main_process']['comm_class'],'other')
             self.assertTrue(any(item['manifest']=='invalid' for item in document['runs']))
             self.assertTrue((runs/'active.json').exists())
-            self.assertTrue((outbox/'event.json').exists())
+            self.assertTrue((spool/'broker.open').exists())
 
     def test_manifest_admission_is_bounded_private_and_recovers(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -113,20 +114,14 @@ class LauncherTest(unittest.TestCase):
             with patch.object(launcher, 'MAX_RUNS', 1):
                 self.assertTrue(launcher.admit_manifest(root, first))
                 self.assertFalse(launcher.admit_manifest(root, {**first, 'agent_run_id': 'second'}))
-                marker = root/'runs-v4/health'
-                self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
-                self.assertLess(marker.stat().st_size, 1024)
-                (root/'runs-v4/first.json').unlink()
+                (root/'runs-v5/first.json').unlink()
                 self.assertTrue(launcher.admit_manifest(root, {**first, 'agent_run_id': 'second'}))
-                self.assertFalse(marker.exists())
-                events = [records.read_outbox(path) for path in (root/'outbox').glob('*.json')]
-                self.assertTrue(any(event['kind']=='gap' and event['body']['reason']=='run_manifest_capacity' for event in events))
             payload = {'agent_run_id': 'third', 'metadata': 'x'*100}
             with patch.object(launcher, 'MAX_RUN_BYTES', 1):
                 self.assertFalse(launcher.admit_manifest(root, payload))
             with patch.object(launcher, 'MAX_RUN_PAYLOAD', 10):
                 self.assertFalse(launcher.admit_manifest(root, payload))
-            self.assertEqual(len(list((root/'runs-v4').glob('*.json'))), 1)
+            self.assertEqual(len(list((root/'runs-v5').glob('*.json'))), 1)
 
     def test_concurrent_manifest_admission_never_exceeds_count(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -134,12 +129,12 @@ class LauncherTest(unittest.TestCase):
             with patch.object(launcher, 'MAX_RUNS', 1), concurrent.futures.ThreadPoolExecutor(2) as pool:
                 results = list(pool.map(lambda run: launcher.admit_manifest(root, {'agent_run_id': run}), ('one', 'two')))
             self.assertEqual(sorted(results), [False, True])
-            self.assertEqual(len(list((root/'runs-v4').glob('*.json'))), 1)
+            self.assertEqual(len(list((root/'runs-v5').glob('*.json'))), 1)
 
     def test_manifest_admission_preserves_foreign_and_permission_guards(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            runs = launcher.records.private_directory(root/'runs-v4')
+            runs = launcher.records.private_directory(root/'runs-v5')
             foreign = root/'foreign'
             foreign.write_text('do not overwrite')
             (runs/'foreign.json').symlink_to(foreign)
@@ -154,7 +149,7 @@ class LauncherTest(unittest.TestCase):
     def test_observer_recovers_preexisting_overflow_in_bounded_batches(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            runs = launcher.records.private_directory(root/'runs-v4')
+            runs = launcher.records.private_directory(root/'runs-v5')
             for number in range(3):
                 launcher.records.atomic_json(runs/(str(number)+'.json'), {'agent_run_id':str(number), 'boot_id':launcher.boot_id()})
             sampler = types.SimpleNamespace(poll=lambda: True)
@@ -168,7 +163,7 @@ class LauncherTest(unittest.TestCase):
     def test_observer_byte_budget_retains_later_manifest_while_first_stays_active(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            directory = launcher.records.private_directory(root/'runs-v4')
+            directory = launcher.records.private_directory(root/'runs-v5')
             for run in ('one', 'two'):
                 launcher.records.atomic_json(directory/(run+'.json'), {'agent_run_id':run, 'boot_id':launcher.boot_id()})
             first, second = list(directory.glob('*.json'))
@@ -193,20 +188,27 @@ class LauncherTest(unittest.TestCase):
             self.assertIn(second.stem, sampled)
             self.assertLessEqual(len(ticks), 2)
 
-    def test_manifest_capacity_keeps_default_native_success_and_strict_refusal(self):
+    def test_manifest_contention_keeps_default_native_success_and_strict_refusal(self):
         for mode in ('auto', 'partial', 'require'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir='/tmp') as name:
                 root = Path(name)
+                prepare(root/'data')
                 target = root/'executed'
                 args = types.SimpleNamespace(command=[sys.executable, '-c', 'from pathlib import Path; Path('+repr(str(target))+').touch(); raise SystemExit(19)'],
                     data_dir=str(root/'data'), agent='other', agent_version='fixture', scope_mode=mode,
                     task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
-                with patch.object(launcher, 'MAX_RUN_BYTES', 0), patch.object(launcher, 'create_scope') as create:
+                manifest = records.private_directory(root/'data'/launcher.RUNS)
+                with (manifest/'.lock').open('wb') as lock, patch.object(launcher, 'create_scope') as create:
+                    (manifest/'.lock').chmod(0o600)
+                    fcntl.flock(lock, fcntl.LOCK_EX)
                     self.assertEqual(launcher.launch(args), 2 if mode == 'require' else 19)
                 create.assert_not_called()
                 self.assertEqual(target.exists(), mode != 'require')
-                self.assertFalse(list((root/'data/runs-v4').glob('*.json')))
-                self.assertTrue((root/'data/runs-v4/health').exists())
+                self.assertFalse(list((root/'data/runs-v5').glob('*.json')))
+                events = list(spooled(root/'data'))
+                self.assertEqual(events[0]['kind'], 'run')
+                self.assertEqual(events[0]['body']['state'], 'starting')
+                self.assertTrue(any(row['body'].get('reason') == 'run_manifest_unavailable' for row in events))
 
     def test_reserved_capacity_is_charged_and_failed_placement_releases_it(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -219,28 +221,29 @@ class LauncherTest(unittest.TestCase):
                 self.assertTrue(launcher.admit_manifest(root, {**run,'agent_run_id':'two'}))
             args = types.SimpleNamespace(command=['/bin/true'], data_dir=str(root), agent='other', agent_version='fixture', scope_mode='require',
                 task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
-            before = set((root/'runs-v4').glob('*.json'))
+            before = set((root/'runs-v5').glob('*.json'))
             with patch.object(launcher, 'create_scope', side_effect=ValueError('safe caller delegation unavailable')):
                 self.assertEqual(launcher.launch(args), 2)
-            self.assertEqual(set((root/'runs-v4').glob('*.json')), before)
+            self.assertEqual(set((root/'runs-v5').glob('*.json')), before)
 
     def test_observer_recovers_stale_reservation_only_after_durable_gap(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
+            prepare(root)
             self.assertTrue(launcher.admit_manifest(root, {'agent_run_id':'stale','boot_id':'old-boot'}, reserve=True))
-            path = root/'runs-v4/stale.json'
+            path = root/'runs-v5/stale.json'
             with patch.object(launcher.records, 'emit', return_value=False):
                 self.assertEqual(launcher.observe(root, once=True), 0)
             self.assertTrue(path.exists())
             self.assertEqual(launcher.observe(root, once=True), 0)
             self.assertFalse(path.exists())
-            gap = next(records.read_outbox(item) for item in (root/'outbox').glob('*.json'))
+            gap = next(spooled(root))
             self.assertEqual(gap['body']['reason'], 'run_reservation_interrupted')
 
     def test_observer_overflow_foreign_prefix_does_not_starve_valid_run(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            directory = launcher.records.private_directory(root/'runs-v4')
+            directory = launcher.records.private_directory(root/'runs-v5')
             # scandir's actual order supplies the retained unsafe prefix and then
             # the valid snapshot; no filesystem ordering assumption is needed.
             for number in range(3):
@@ -266,6 +269,7 @@ class LauncherTest(unittest.TestCase):
                 root = Path(name)
                 workload = root/'scope/workload'
                 workload.mkdir(parents=True)
+                prepare(root/'data')
                 target = root/'executed'
                 code = 'from pathlib import Path; p=Path('+repr(str(target))+'); p.write_text((p.read_text() if p.exists() else "")+"once"); raise SystemExit(19)'
                 args = types.SimpleNamespace(command=[sys.executable,'-c',code], data_dir=str(root/'data'),
@@ -273,7 +277,7 @@ class LauncherTest(unittest.TestCase):
                     project_id=None, worktree_id=None, yard_id=None, host_id=None)
                 original_write, original_remove = launcher.records.atomic_json, Path.rmdir
                 def write(path, value):
-                    if path.parent.name == 'runs-v4' and path.suffix == '.json' and 'manifest_state' not in value:
+                    if path.parent.name == 'runs-v5' and path.suffix == '.json' and 'manifest_state' not in value:
                         raise OSError(28, 'simulated snapshot fsync failure')
                     return original_write(path, value)
                 def remove(path):
@@ -286,18 +290,18 @@ class LauncherTest(unittest.TestCase):
                     self.assertEqual(launcher.launch(args), 2 if mode == 'require' else 19)
                 self.assertEqual(target.read_text() if target.exists() else '', '' if mode == 'require' else 'once')
                 self.assertFalse(workload.parent.exists())
-                self.assertFalse(list((root/'data/runs-v4').glob('*.json')))
+                self.assertFalse(list((root/'data/runs-v5').glob('*.json')))
 
     def test_manifest_busy_lock_is_finite_and_preserves_owner_snapshot(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             self.assertTrue(launcher.admit_manifest(root, {'agent_run_id':'old'}))
-            with (root/'runs-v4/.lock').open('rb') as lock:
+            with (root/'runs-v5/.lock').open('rb') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 started = time.monotonic()
                 self.assertFalse(launcher.admit_manifest(root, {'agent_run_id':'new'}))
                 self.assertLess(time.monotonic()-started, .5)
-            self.assertEqual(len(list((root/'runs-v4').glob('*.json'))), 1)
+            self.assertEqual(len(list((root/'runs-v5').glob('*.json'))), 1)
 
     def test_manager_identity_does_not_require_namespace_permission(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -362,9 +366,9 @@ class LauncherTest(unittest.TestCase):
             (workload/'cgroup.procs').write_text('123')
             (delegated/'memory.max').write_text('4096')
             (delegated/'pids.max').write_text('32')
-            launcher.records.private_directory(root/'runs-v4')
+            launcher.records.private_directory(root/'runs-v5')
             info = parent.stat()
-            launcher.records.atomic_json(root/'runs-v4/parent.json', {'cgroup':str(parent), 'boot_id':'boot',
+            launcher.records.atomic_json(root/'runs-v5/parent.json', {'cgroup':str(parent), 'boot_id':'boot',
                 'cgroup_identity':[info.st_dev,info.st_ino]})
             run = {'agent_run_id':'child','parent_run_id':'parent','boot_id':'boot'}
             self.assertEqual(launcher.scope_parent(root,run,cgroups/'manager',proc,cgroups),parent)
@@ -384,8 +388,8 @@ class LauncherTest(unittest.TestCase):
                 group.mkdir(parents=True)
                 parent_info, group_info = delegated.stat(), group.stat()
                 data = root/'data'
-                launcher.records.private_directory(data/'runs-v4')
-                manifest = data/'runs-v4/run.json'
+                launcher.records.private_directory(data/'runs-v5')
+                manifest = data/'runs-v5/run.json'
                 run = {'agent_run_id': 'run', 'boot_id': launcher.boot_id(), 'scope_root': str(delegated),
                        'scope_root_identity': [parent_info.st_dev, parent_info.st_ino], 'cgroup': str(group),
                        'cgroup_identity': [group_info.st_dev, group_info.st_ino]}
@@ -446,9 +450,9 @@ class LauncherTest(unittest.TestCase):
             (delegated/'cgroup.subtree_control').write_text('cpu memory io')
             (delegated/'workload').mkdir()
             (proc/'self/cgroup').write_text('0::/fixture/workload')
-            launcher.records.private_directory(root/'runs-v4')
+            launcher.records.private_directory(root/'runs-v5')
             info = delegated.stat()
-            launcher.records.atomic_json(root/'runs-v4/parent.json', {'cgroup': str(delegated), 'boot_id': 'boot',
+            launcher.records.atomic_json(root/'runs-v5/parent.json', {'cgroup': str(delegated), 'boot_id': 'boot',
                 'cgroup_identity': [info.st_dev, info.st_ino]})
             run['parent_run_id'] = 'parent'
             self.assertEqual(launcher.scope_parent(root, run, manager, proc, cgroups), delegated)
@@ -461,12 +465,13 @@ class LauncherTest(unittest.TestCase):
     def test_auto_scope_refusal_preserves_native_success_and_reports_partial(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
+            prepare(root/'data')
             args = types.SimpleNamespace(command=[sys.executable, '-c', 'raise SystemExit(19)'], data_dir=str(root/'data'),
                 agent='other', agent_version='fixture', scope_mode='auto', task_id=None,
                 project_id=None, worktree_id=None, yard_id=None, host_id=None)
             with patch.object(launcher, 'create_scope', side_effect=ValueError('safe refusal')):
                 self.assertEqual(launcher.launch(args), 19)
-            events = [records.read_outbox(path) for path in (root/'data/outbox').glob('*.json')]
+            events = list(spooled(root/'data'))
             self.assertTrue(any(event['kind']=='run' and event['body'].get('scope_quality')=='partial' for event in events))
 
     def test_native_exec_waits_for_baseline_publication(self):
@@ -477,6 +482,7 @@ class LauncherTest(unittest.TestCase):
             baseline = root/'baseline-durable'
             target = root/'executed'
             code = 'from pathlib import Path; assert Path('+repr(str(baseline))+').read_bytes()==b"durable"; Path('+repr(str(target))+').touch()'
+            prepare(root/'data')
             args = types.SimpleNamespace(command=[sys.executable, '-c', code], data_dir=str(root/'data'),
                 agent='other', agent_version='fixture', scope_mode='require', task_id=None,
                 project_id=None, worktree_id=None, yard_id=None, host_id=None)
@@ -491,6 +497,7 @@ class LauncherTest(unittest.TestCase):
             workload = root/'scope/workload'
             workload.mkdir(parents=True)
             target = root/'executed'
+            prepare(root/'data')
             args = types.SimpleNamespace(command=[sys.executable, '-c', 'from pathlib import Path; Path('+repr(str(target))+').touch()'],
                 data_dir=str(root/'data'), agent='other', agent_version='fixture', scope_mode='require',
                 task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
@@ -511,9 +518,9 @@ class LauncherTest(unittest.TestCase):
             code = '''
 import json, os, sys, time
 from pathlib import Path
-outbox = Path(os.environ['SUBYARD_TELEMETRY_DATA_DIR'])/'outbox'
+spool = Path(os.environ['SUBYARD_TELEMETRY_DATA_DIR'])/'spool'
 deadline = time.monotonic()+5
-while not any(json.loads(path.read_bytes())['record']['kind'] == 'process' for path in outbox.glob('*.json')):
+while not any(json.loads(frame)['record']['kind'] == 'process' for path in spool.glob('*.open') for frame in path.read_bytes().split(b'\\n')[1:-1]):
     if time.monotonic() >= deadline:
         raise RuntimeError('standalone observer did not sample the workload')
     time.sleep(.05)
@@ -523,14 +530,15 @@ raise SystemExit(23)
             command = [sys.executable, '-B', str(Path(launcher.__file__)), 'run', '--data-dir', str(root/'data'),
                        '--agent', 'other', '--scope-mode', 'partial', '--task-id', 'task', '--', sys.executable, '-c',
                        code, str(target)]
+            prepare(root/'data')
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             self.assertEqual(result.returncode, 23, result.stderr)
             value = json.loads(target.read_text())
             self.assertEqual(value['SUBYARD_TASK_ID'], 'task')
             self.assertTrue(value['SUBYARD_AGENT_RUN_ID'])
-            events = [records.read_outbox(path) for path in (root/'data/outbox').glob('*.json')]
+            events = list(spooled(root/'data'))
             self.assertTrue(any(event['kind'] == 'run' and event['body'].get('state') == 'starting' for event in events))
-            manifest = root/'data/runs-v4'/(value['SUBYARD_AGENT_RUN_ID']+'.json')
+            manifest = root/'data/runs-v5'/(value['SUBYARD_AGENT_RUN_ID']+'.json')
             deadline = time.monotonic()+5
             while manifest.exists() and time.monotonic() < deadline:
                 time.sleep(.05)

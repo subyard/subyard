@@ -1,11 +1,9 @@
 package collector
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -13,12 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 func Serve(ctx context.Context, s *Store, options Options) error {
@@ -39,11 +33,11 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	if err != nil {
 		return err
 	}
-	spool := filepath.Join(s.dir, "outbox")
+	spool := filepath.Join(s.dir, "spool")
 	if options.Spool != "" && filepath.Clean(options.Spool) != spool {
-		return errors.New("spool must be the data directory outbox")
+		return errors.New("spool must be the data directory spool")
 	}
-	if err = s.publishCapturePolicy(spool, options.Policy); err != nil {
+	if err = s.publishCapturePolicy(options.Policy); err != nil {
 		return err
 	}
 	socket := filepath.Join(s.dir, "control.sock")
@@ -84,50 +78,7 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "origin_id": s.origin, "outbox_failures": failures.Load()})
-	})
-	mux.HandleFunc("POST /v1/records", func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case admission <- struct{}{}:
-			defer func() { <-admission }()
-		default:
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "telemetry capacity exceeded", http.StatusServiceUnavailable)
-			return
-		}
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.limits.RequestBytes))
-		if err != nil {
-			http.Error(w, "record request too large", 413)
-			return
-		}
-		data = bytes.TrimSpace(data)
-		items := []json.RawMessage{data}
-		if len(data) > 0 && data[0] == '[' {
-			err = json.Unmarshal(data, &items)
-		}
-		records := make([]Record, 0, len(items))
-		for _, item := range items {
-			if err != nil {
-				break
-			}
-			var record Record
-			record, err = s.key.decodeRecord(item)
-			records = append(records, record)
-		}
-		if err != nil {
-			http.Error(w, "invalid record request", 400)
-			return
-		}
-		if err = s.ingest(r.Context(), records, options.Policy); err != nil {
-			if errors.Is(err, ErrCapacity) || errors.Is(err, ErrStorage) {
-				http.Error(w, "telemetry unavailable", 503)
-			} else {
-				http.Error(w, "invalid record", 400)
-			}
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("{\"ok\":true}\n"))
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "origin_id": s.origin, "spool_failures": failures.Load()})
 	})
 	control := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
 	controlErrors := make(chan error, 1)
@@ -142,11 +93,17 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 		defer c()
 		control.Shutdown(shutdown)
 	}()
+	drained := make(chan struct{})
+	defer func() {
+		cancel()
+		<-drained
+	}()
 	go func() {
+		defer close(drained)
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
-			if err := s.ingestOutbox(ctx, spool, options.Policy); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.drainSpool(ctx, options.Policy); err != nil && !errors.Is(err, context.Canceled) {
 				failures.Add(1)
 			}
 			select {
@@ -173,171 +130,4 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 		cancel()
 		return <-finished
 	}
-}
-
-func lockOutbox(spool string) (*os.File, error) {
-	const fencedMode = os.ModeSticky | 0700
-	if err := os.Mkdir(spool, fencedMode); err == nil {
-		if err = os.Chmod(spool, fencedMode); err != nil {
-			return nil, err
-		}
-	} else if !os.IsExist(err) {
-		return nil, err
-	}
-	dir, err := os.OpenFile(spool, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	defer dir.Close()
-	info, err := dir.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Geteuid() {
-		return nil, errors.New("producer outbox has another owner")
-	}
-	if info.Mode() != os.ModeDir|0700 && info.Mode() != os.ModeDir|fencedMode {
-		return nil, errors.New("invalid producer outbox mode")
-	}
-	// Producers hold the same lock from policy lookup through outbox publication.
-	path := filepath.Join(spool, ".lock")
-	if err := privateFile(path); err != nil {
-		return nil, err
-	}
-	lock, err := os.OpenFile(path, os.O_RDWR|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return nil, err
-	}
-	fail := func(err error) (*os.File, error) { lock.Close(); return nil, err }
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		err = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, unix.EWOULDBLOCK) || time.Now().After(deadline) {
-			return fail(err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	// Legacy serializers check for exactly 0700, including before writing.
-	// Keep the same outbox and its queued records for the current collector.
-	if info.Mode() == os.ModeDir|0700 {
-		if err = dir.Chmod(fencedMode); err != nil {
-			return fail(err)
-		}
-		if err = dir.Sync(); err != nil {
-			return fail(err)
-		}
-	}
-	return lock, nil
-}
-
-func (s *Store) publishCapturePolicy(spool string, policy Policy) error {
-	lock, err := lockOutbox(spool)
-	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	names := append(slices.Clone(sessionAttributeNames), "subyard.agent_run.id", "subyard.agent_run.evidence")
-	names = slices.DeleteFunc(names, func(name string) bool { return !slices.Contains(policy.Attributes, name) })
-	data, err := json.Marshal(names)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec("INSERT INTO metadata(key,value) VALUES('session_capture_attributes',?),('session_capture_policy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(data), policyFingerprint(policy))
-	return err
-}
-
-func (s *Store) IngestOutbox(ctx context.Context, path string) error {
-	return s.ingestOutbox(ctx, path, DefaultPolicy())
-}
-
-func (s *Store) ingestOutbox(ctx context.Context, path string, policy Policy) error {
-	s.outboxMu.Lock()
-	defer s.outboxMu.Unlock()
-	if s.outboxPath != path {
-		s.outboxPath, s.outboxAfter = path, ""
-	}
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return err
-	}
-	count := 0
-	var invalid error
-	for _, entry := range entries {
-		name := entry.Name()
-		if name <= s.outboxAfter || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		if count == 256 {
-			return invalid
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		count++
-		s.outboxAfter = name
-		if err := s.ingestOutboxFile(ctx, path, name, policy); err != nil {
-			if errors.Is(err, ErrStorage) || errors.Is(err, ErrCapacity) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			invalid = err
-		}
-	}
-	s.outboxAfter = ""
-	return invalid
-}
-
-func (s *Store) ingestOutboxFile(ctx context.Context, dir, name string, policy Policy) error {
-	target := filepath.Join(dir, name)
-	before, err := os.Lstat(target)
-	if err != nil {
-		return err
-	}
-	if !before.Mode().IsRegular() || before.Mode().Perm() != 0600 || before.Size() > s.limits.RequestBytes {
-		return errors.New("invalid outbox file")
-	}
-	f, err := os.OpenFile(target, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(before, info) || info.Mode().Perm() != 0600 || info.Size() > s.limits.RequestBytes {
-		return errors.New("invalid outbox file")
-	}
-	data, err := io.ReadAll(io.LimitReader(f, s.limits.RequestBytes+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(data)) > s.limits.RequestBytes {
-		return errors.New("invalid outbox file")
-	}
-	r, err := s.key.decodeRecord(data)
-	if err != nil {
-		return errInvalidRecord
-	}
-	if err = s.ingest(ctx, []Record{r}, policy); err != nil {
-		return err
-	}
-	current, err := os.Lstat(target)
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(info, current) {
-		return errors.New("outbox changed during commit")
-	}
-	if err = os.Remove(target); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }

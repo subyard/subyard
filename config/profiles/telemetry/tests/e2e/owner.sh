@@ -113,20 +113,20 @@ def diagnose(data, cgroups=pathlib.Path('/sys/fs/cgroup'), proc=pathlib.Path('/p
             ('ssh', ('ssh',)), ('shell', ('bash', 'sh', 'dash')), ('python', ('python', 'python3')),
             ('incus', ('incus',)), ('yard', ('yard', 'yard-engine')), ('sleep', ('sleep',))) if name in names), 'other')
         return dict(pid=pid, start_ticks=int(fields[19]), state=fields[0] if fields[0] in 'RSDZTWXIPt' else 'other', comm_class=kind)
-    result = dict(schema='subyard.telemetry.finals-diagnostic/v1', runs=[], outbox_count=0,
-                  outbox_bytes=0, runs_truncated=False, outbox_truncated=False)
-    for index, path in enumerate((data/'outbox').glob('*.json')):
+    result = dict(schema='subyard.telemetry.finals-diagnostic/v1', runs=[], spool_count=0,
+                  spool_bytes=0, runs_truncated=False, spool_truncated=False)
+    for index, path in enumerate((data/'spool').glob('*')):
         if index >= 4096:
-            result['outbox_truncated'] = True
+            result['spool_truncated'] = True
             break
-        result['outbox_count'] += 1
+        result['spool_count'] += 1
         try:
             info = path.lstat()
             if stat.S_ISREG(info.st_mode):
-                result['outbox_bytes'] += info.st_size
+                result['spool_bytes'] += info.st_size
         except FileNotFoundError:
             pass
-    for index, path in enumerate((data/'runs-v4').glob('*.json')):
+    for index, path in enumerate((data/'runs-v5').glob('*.json')):
         if index >= 16:
             result['runs_truncated'] = True
             break
@@ -193,7 +193,7 @@ PY_FINALS_DIAGNOSTIC
 wait_for_finals() {
   # The fixture controller must outlive the outside observer's durable final.
   local original=0
-  timeout 45 bash -c 'while compgen -G "/var/lib/subyard/telemetry/runs-v4/*.json" >/dev/null || compgen -G "/var/lib/subyard/telemetry/outbox/*.json" >/dev/null; do sleep 0.2; done' || original=$?
+  timeout 45 bash -c 'while compgen -G "/var/lib/subyard/telemetry/runs-v5/*.json" >/dev/null || compgen -G "/var/lib/subyard/telemetry/spool/*" >/dev/null; do sleep 0.2; done' || original=$?
   printf '{"schema":"subyard.telemetry.fixture-stage/v1","stage":"finals-wait","exit_code":%s}\n' "$original" >&2
   if [ "$original" != 0 ]; then finals_diagnostic || true; fi
   return "$original"

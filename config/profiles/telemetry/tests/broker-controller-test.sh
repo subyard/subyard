@@ -35,7 +35,10 @@ from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 sys.path.insert(0, sys.argv[2])
+sys.path.insert(0, str(Path(sys.argv[2])/'tests'))
 import sources
+from spool_fixture import prepare
+prepare(root)
 sources.merge_intents(root, root/'sources')
 config = json.loads(next((root / 'sources').glob('*.json')).read_text())
 binding = config['associations']['12345678']

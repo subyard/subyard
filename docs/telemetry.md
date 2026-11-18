@@ -160,32 +160,27 @@ held in an indefinite WAL reader transaction.
 
 ### Pre-upgrade archive
 
-The profile upgrade stops the collector, the run manager, and identified legacy detached
-observers while agent workloads keep running. An unreadable observer is recorded as a
-coverage gap. The upgrade installs the new launcher before fencing the outbox, so
-new runs can queue their registration or save a gap marker while the collector is down.
-It seals the schema 1–3 database read-only before moving it to
-`/var/lib/subyard/telemetry/archive/telemetry.sqlite` and initializes an empty
-schema 4 database at `/var/lib/subyard/telemetry/telemetry.sqlite` before
-starting the updated services. An interrupted upgrade resumes on retry. A
-disabled collector upgrades its store the next time it is enabled. For a
-standalone installation, stop the legacy observer before opening a schema 4
-writer. The writer fences the outbox before archiving or initializing the store,
-including when the first command is a replay. If another
-legacy database is restored at the active path, the writer saves it in a new
-directory such as `archive-2` and starts another empty active store. For a
-standalone store the paths are relative to its `--data-dir`. Each archive keeps
-all telemetry that was still retained at upgrade time, including run and session
-metadata, resource measurements, and native OTLP signals. It keeps the old
-schema, identifiers, capture rules and sequence numbers. Archives are retained
-indefinitely.
+On the first upgrade to spool delivery, the profile checks for archive
+collisions, gates legacy launch and broker entry, then stops the collector,
+run manager and identified detached legacy observers. Agent workloads keep
+running. A released launcher already in memory may miss a launch or final
+sample as it crosses this cutover.
 
-Runs still under observation at the stop keep their recorded samples.
-`show-run` marks them as `interrupted_by_upgrade` and reports a missing final
-run sample. The new store carries a registration for each legacy manifest whose
-agent process is still alive, so native OTLP can continue under the same run ID.
-The new run manager observes new runs and reports any pending legacy manifest
-capacity gap. Queued records are retained for sanitized delivery to the active store.
+A private receipt lets the installer resume after interruption. It retires
+the old producer path in place, checkpoints the schema 1–4 database and
+publishes it read-only at `/var/lib/subyard/telemetry/archive/telemetry.sqlite`
+(or the next numbered archive if the path is already occupied by a sealed
+store). The new active schema 5 store imports verified pending records and
+legacy health markers. A disabled collector finishes the store transition
+when enabled. Fresh installs and compatible spool upgrades skip legacy
+quiesce.
+
+Unfinished historical runs get an ordinary `interrupted_by_upgrade` gap with
+`missing=final_tail` in the archive. The gap appears in `show-run`, export and
+replay. The new store carries minimal registrations for unfinished current-boot
+legacy scopes, including those whose main process has exited, so descendants
+can continue exporting native OTLP. The archive retains historical rows and
+sequence numbers and each store has its own export cursor.
 
 ```sh
 "$collector" stats --data-dir "$data/archive"
@@ -366,7 +361,7 @@ Likewise direct workload and inclusive parent scopes must not be added together.
 
 ## Capture policy and delivery
 
-Durable telemetry is rebuilt from closed field schemas at the producer outbox,
+Durable telemetry is rebuilt from closed field schemas at the producer spool,
 collector ingest and replay. SQLite projections merge inputs that have already
 been sanitized. Allocation
 purpose, log bodies, severity text, arbitrary attributes and free-form names are
@@ -377,38 +372,36 @@ OTLP integer value, including the decimal representation used by OTLP JSON.
 
 An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with
 `attributes`, `span_names` and `event_names` allowlists that narrow the built-in
-vocabularies. On startup, `serve` publishes its selected session allowlist and
-policy fingerprint together. Local producers apply the allowlist before writing
-session metadata to the outbox, including while the collector is stopped.
-Producers use the default allowlist until the first collector startup and sign
-the capture policy claim and redaction count with each session-bearing record.
+vocabularies. On startup, `serve` publishes its selected session allowlist,
+policy fingerprint and key verifier together in a private snapshot. Producers
+verify the snapshot and apply the selected allowlist before they append, including
+while the collector is stopped. Missing or invalid settings refuse capture.
+Each producer frame signs its capture policy claim and redaction count.
 The collector keeps that claim if its policy changes before drain.
 Older signed records without a fingerprint retain the capture schema version.
 
 Identifiers from callers are keyed digests, including IDs with the same shape as
-generated IDs, session attributes and trace or span IDs. The local producer outbox
-authenticates its prepared records to avoid mapping those digests twice. Retain
+generated IDs, session attributes and trace or span IDs. The local spool
+authenticates prepared records to avoid mapping those digests twice. Retain
 the private `.identity-key` with the database when backing up or restoring a store.
 The writer refuses to open an established store with a missing or mismatched
-key, and local producers refuse to spool into it. Read-only SQL and export work
-without the key. `show-run` accepts the stored run reference and can resolve
+key. Local producers also refuse capture with a missing or mismatched key.
+Read-only SQL and export work without the key. `show-run` accepts the stored run reference and can resolve
 a launcher run ID in the active store when its key is available.
 
-The outbox fence prevents loaded pre-upgrade producers from publishing at the
-old capture boundary. An old launcher may lose its exit record when its
-workload eventually exits.
-
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
-bound OTLP payloads to 2 MiB, share 16 pre-decode admissions between OTLP and
-private record ingress, and limit queued sanitized data to 16 MiB/128 requests,
+bound OTLP payloads to 2 MiB, allow 16 concurrent OTLP requests before decode,
+and limit queued sanitized data to 16 MiB/128 requests,
 active database, WAL and shared-memory capacity to 1 GiB and sample/OTLP
 retention to seven days. Each legacy archive uses additional disk space outside
 that ceiling. Lifecycle, session and attribution records remain under the hard
-disk bound so an old run's
-outstanding resource responsibility does not disappear during owner downtime.
-The producer outbox is
-also bounded to 4096 files/64 MiB. Run snapshots have separate limits of 4096
-files, 16 MiB total and 16 KiB per snapshot, including reserved space, with a
+disk bound so an old run's outstanding resource responsibility does not disappear during owner downtime.
+The producer spool is bounded to 4096 files and 64 MiB using fixed allocations
+and 64 KiB frames. It keeps records ordered within each keyed run stream and
+within the broker stream. SQLite commits the records, projections and byte
+position together. The collector retires sealed segments after the committed
+end. A malformed frame or a sealed torn tail produces a content-free gap.
+Run snapshots have separate limits of 4096 files, 16 MiB total and 16 KiB per snapshot, including reserved space, with a
 100 ms admission deadline. Older overflowing directories are consumed in bounded
 batches; capacity and interrupted reservations produce content-free coverage gaps.
 Private observer registration intents have a
@@ -416,8 +409,8 @@ separate 128-file/1 MiB bound and a 100 ms admission-lock deadline; observer
 configurations are capped at 32 transports and 128 correlations per transport.
 Capacity failures produce content-free diagnostics and remain nonfatal to
 agent commands and broker operations. Producers retain a small content-free overflow
-marker outside that quota and emit an explicit gap after recovery. A filesystem
-that rejects even the marker cannot guarantee a durable loss count; producer
+marker outside that quota. The collector consumes it even if the producer never
+writes again. A filesystem that rejects even the marker cannot guarantee a durable loss count; producer
 failure remains nonfatal to the native workload. Inspect `serve --help` and the owning producer constants before
 changing bounds. Accepted data can expire under the configured retention policy;
 export it first when a longer history is required.
@@ -426,8 +419,10 @@ An OTLP success acknowledges a completed SQLite commit. A storage/capacity failu
 is retryable and never acknowledges an unsaved request. Admission is atomic per
 request; there is no misleading partial-success count. Collector failure does not
 make agent commands or broker lifecycle operations wait indefinitely. If the
-bounded local producer outbox also fills, collection reports a gap rather than
-blocking execution or using unbounded memory.
+bounded local spool fills, collection records a capacity gap where the reserved
+marker can be written. A run overlapping receiver downtime can carry a
+`possible_native_loss` gap. Native bytes the receiver never saw cannot be
+recovered by the spool.
 
 ## Export and replay
 
@@ -445,7 +440,7 @@ Continue export with `--after` equal to the last exported `sequence`; each comma
 is a bounded snapshot, not an endless transaction. Continue a pre-upgrade export
 against the archive and start a new cursor at zero for the active store. Replay
 uses the source pair `(origin_id,event_id)` as input to the receiving
-store's keyed mapping. A schema 4 export made with the source key available
+store's keyed mapping. An active-store export made with the source key available
 carries a proof the originating store can verify. Verified same-store replay
 reuses stored identifiers so a restored sample can rejoin its retained object
 and run. The destination preserves relationships within the imported history.

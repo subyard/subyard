@@ -18,7 +18,7 @@ def register(data_dir, agent_run, request):
             return sources.store_intent(data_dir, agent_run, request)
         public = {key: request.get(key) for key in ('owner_id', 'yard_id', 'project_id', 'correlation_id')}
         public.update(agent_run_id=agent_run, source='acquire-correlation', quality='explicit')
-        admitted = records.emit(data_dir, 'relation', public)
+        admitted = records.emit(data_dir, 'relation', public, broker=True)
         return admitted
     except (ValueError, TypeError):
         sources.registration_gap(data_dir, 'correlation_registration_invalid')

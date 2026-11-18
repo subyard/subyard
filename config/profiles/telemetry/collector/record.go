@@ -35,6 +35,8 @@ type Record struct {
 	authenticated bool
 	redactions    int64
 	capturePolicy string
+	inputID       string
+	filtered      bool
 }
 
 func (r *Record) UnmarshalJSON(data []byte) error {
@@ -82,10 +84,9 @@ type Envelope struct {
 	Protobuf            []byte          `json:"protobuf,omitempty"`
 
 	// Only internal capture and an authenticated producer can set local.
-	local           bool
-	replay          bool
-	native          bool
-	producerPayload string
+	local  bool
+	replay bool
+	native bool
 }
 
 func newID() string {
@@ -329,11 +330,14 @@ func (key identityKey) decodeRecord(data []byte) (Record, error) {
 	var count struct {
 		Redactions    int64  `json:"redactions"`
 		PolicyVersion string `json:"policy_version"`
+		InputID       string `json:"input_id"`
+		Filtered      bool   `json:"filtered"`
 	}
 	if err = json.Unmarshal(signed.Record, &count); err != nil {
 		return Record{}, err
 	}
 	r.authenticated = true
+	r.inputID, r.filtered = count.InputID, count.Filtered
 	r.redactions = max(0, min(count.Redactions, 1<<31))
 	// Older signed outbox entries did not identify the producer's allowlist.
 	r.capturePolicy = PolicyVersion

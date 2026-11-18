@@ -44,7 +44,7 @@ assert '/run-'+parent+'/run-'+document['child']+'/workload' in document['cgroup'
             for name in ('parent', 'child'):
                 samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (stored_id(args.data_dir, run[name]+':scope'),))]
                 finals[name] = any(sample.get('final') and sample.get('populated') is False for sample in samples)
-            if all(finals.values()) and not any((args.data_dir/'runs-v4'/(run[name]+'.json')).exists() for name in ('parent', 'child')):
+            if all(finals.values()) and not any((args.data_dir/'runs-v5'/(run[name]+'.json')).exists() for name in ('parent', 'child')):
                 parent = db.execute('SELECT parent_object_id FROM objects WHERE object_id=?', (stored_id(args.data_dir, run['child']+':scope'),)).fetchone()
                 child_run = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (stored_id(args.data_dir, run['child']),)).fetchone()
                 if not parent or not child_run:
@@ -168,7 +168,7 @@ Path(sys.argv[1]).write_text(json.dumps({'agent_run_id':run,'child_pid':child.pi
                 assert finals[-1]['cpu_ns'] > 0
                 assert finals[-1]['populated'] is False
                 assert finals[-1]['memory_peak_bytes'] >= 8*1024*1024
-                assert not list((args.data_dir/'runs-v4').glob(run['agent_run_id']+'.json'))
+                assert not list((args.data_dir/'runs-v5').glob(run['agent_run_id']+'.json'))
                 print('ok: pre-exec managed placement; child survived main; final cumulative counters durable')
                 return
             time.sleep(0.2)
