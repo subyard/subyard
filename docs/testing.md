@@ -21,7 +21,7 @@ Test selection still follows the skill's risk-based policy.
 
 `make lint` runs golangci-lint, actionlint (including ShellCheck on workflow `run:` blocks),
 offline zizmor over `.github/workflows`, and Ruff's `F` rules over every tracked Python file.
-`make verify` and CI's verify job include this gate. The pinned official Linux amd64/arm64
+`make verify` and CI's `verify-go` job include this gate. The pinned official Linux amd64/arm64
 tools are downloaded with SHA-256 verification and cached in `.build/tools`.
 Run `bash dev/lint-workflows.sh` or `bash dev/lint-python.sh` for a focused check;
 workflow linting requires ShellCheck on PATH.
@@ -33,6 +33,12 @@ and head updates. GitHub evaluates the checks for the current PR revision, using
 commit when available. Core CI also runs on pushes to `master` and `release/**` for post-merge
 and standalone release validation. A PR sourced from a release branch can receive both events.
 Periodic E2E probes on `ci-probe/**` use their own push trigger.
+
+The `verify` check requires success from `verify-go`, `verify-shell` and `verify-profiles`.
+Each job builds its own runtime. The Go and shell jobs use `./tests/run.sh --go` or
+`./tests/run.sh --shell` to select their checks. The profiles job runs profile permission
+checks before its build and runs the full profile suites including the installer prerequisite.
+Local and Release verification use the full `make verify` entrypoint.
 
 ## Veranda and dependency audits
 
@@ -676,14 +682,15 @@ for other checks, and points to the complete log.
 SIGINT and SIGTERM exit with 130 and 143 respectively; the active check and run are recorded as
 failed with that status, rather than passed with partial output.
 Log names are relative to that summary's directory. Each completed check has a
-`check` row; the final `run` row reports the whole invocation. A missing final row
-means the run did not finish reporting; absent checks have not passed. Durations
-use Bash's elapsed seconds and may be zero for short checks. Separate invocations
-never overwrite each other's results. Local logs stay until explicitly removed.
-On failure, CI and Release upload the core logs and summaries plus the complete
-`make verify` console output as `ci-host-free-<attempt>` or `release-host-free-<attempt>`
-artifacts, retained for seven days. Read the summary first and open only the relevant
-log when a check fails.
+`check` row, and the final `run` row reports the whole invocation with suite `all`, `go` or
+`shell`. A missing final row means the run did not finish reporting. Absent checks have no
+result. Durations use Bash's elapsed seconds and may be zero for short checks. Separate
+invocations never overwrite each other's results. Local logs stay until explicitly removed.
+On failure, CI uploads each affected job's verification console output and any core logs
+and summaries as `ci-host-free-<go|shell|profiles>-<attempt>`. Release uploads its full
+`make verify` output, core logs and summaries as `release-host-free-<attempt>`. Both retain
+these artifacts for seven days. Read the summary first and open only the relevant log when
+a check fails.
 
 Host-free shell fixtures use a 30-second Incus agent deadline with margin for slow
 CI scheduling instead of real VM boot deadlines. Tests of the deadline itself explicitly

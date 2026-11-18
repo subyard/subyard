@@ -88,25 +88,20 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
     [ -f "$ROOT/$runner" ] \
       || fail "$(basename "$workflow") references a missing native ARM64 runner: $runner"
   done
-  grep -Fq 'make verify' "$workflow" \
-    || fail "$(basename "$workflow") must verify core and shipped profiles"
-  grep -Fq 'bash dev/shellcheck.sh' "$workflow" \
-    || fail "$(basename "$workflow") must invoke the shared ShellCheck runner"
-  grep -Fq 'run: make cli-docs-check' "$workflow" \
-    && grep -Fq 'bash dev/test-profiles.sh --e2e --list' "$workflow" \
-    || fail "$(basename "$workflow") must check CLI docs and shipped profile E2E inventory"
-  grep -Fq '.build/test-runs/' "$workflow" \
-    && grep -Fq 'make verify 2>&1 | tee .build/ci-logs/verify.log' "$workflow" \
-    && grep -Fq 'if: failure()' "$workflow" \
-    || fail "$(basename "$workflow") must preserve failed host-free diagnostics"
-  grep -Fq "bash $RUNNER" "$workflow" \
-    || fail "$(basename "$workflow") must invoke the shared runner"
   ! grep -Fq 'scripts/install-key-tools.sh' "$workflow" \
     || fail "$(basename "$workflow") bypasses the prepared-context runner"
 done
 grep -Fxq '    needs: [host-free-verify, native-engine-arm64]' "$RELEASE_WORKFLOW" \
   || fail 'Release publication must require host-free and native ARM64 engine checks'
 
+grep -Fq 'bash dev/shellcheck.sh' "$RELEASE_WORKFLOW" \
+  && grep -Fq 'run: make cli-docs-check' "$RELEASE_WORKFLOW" \
+  && grep -Fq 'bash dev/test-profiles.sh --e2e --list' "$RELEASE_WORKFLOW" \
+  && grep -Fq '.build/test-runs/' "$RELEASE_WORKFLOW" \
+  && grep -Fq 'make verify 2>&1 | tee .build/ci-logs/verify.log' "$RELEASE_WORKFLOW" \
+  && grep -Fq 'if: failure()' "$RELEASE_WORKFLOW" \
+  && grep -Fq "bash $RUNNER" "$RELEASE_WORKFLOW" \
+  || fail 'Release must run full verification and preserve its failure diagnostics'
 verify_recipe="$(awk '/^verify:/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$ROOT/Makefile")"
 [[ "$verify_recipe" == *'./tests/run.sh'* && "$verify_recipe" == *'bash dev/test-profiles.sh'* ]] \
   || fail 'shared verification gate must include core and profile checks'
@@ -153,17 +148,45 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import importlib.util
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
 import tempfile
+from itertools import product
+from pathlib import Path
 root = Path(sys.argv[1])
 
 # Source-level contract for the repository's block-style workflow/job/step layout;
 # actionlint validates YAML separately. Cache settings never make an input ref safe.
 def workflow_jobs(text):
     return re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:|\Z)", text.split("\njobs:\n", 1)[1])
+
+ci = dict(workflow_jobs((root / ".github/workflows/ci.yml").read_text()))
+for lane, command, extra in (
+    ("go", "./tests/run.sh --go", ("make lint 2>&1 | tee .build/ci-logs/lint.log", "run: make cli-docs-check", ".build/test-runs/")),
+    ("shell", "./tests/run.sh --shell", ("run: bash dev/shellcheck.sh", "bash tests/real-host/adapter-contracts.sh", ".build/test-runs/")),
+    ("profiles", "}", ("run: bash dev/test-profiles.sh --e2e --list",
+                       "bash dev/test-profiles.sh --permissions-only &&\n"
+                       "              make build VERSION=0.29.0-test &&\n"
+                       "              bash dev/test-profiles.sh --after-permissions")),
+):
+    job = ci[f"verify-{lane}"]
+    for contract in (*extra, "runs-on: ubuntu-24.04", "set -o pipefail", "if: failure()",
+                     f"{command} 2>&1 | tee .build/ci-logs/verify-{lane}.log",
+                     "name: ci-host-free-" + lane + "-${{ github.run_attempt }}"):
+        assert contract in job, f"verify-{lane} lacks {contract}"
+
+gate = ci["verify"]
+assert "    needs: [verify-go, verify-shell, verify-profiles]\n" in gate
+assert "    if: always()" in gate.splitlines() and "        if: always()" in gate.splitlines()
+for name in ("go", "shell", "profiles"):
+    assert "          " + name.upper() + "_RESULT: ${{ needs.verify-" + name + ".result }}\n" in gate
+assert "        if: cancelled()\n        run: exit 1\n" in gate
+gate_script = re.search(r"(?ms)^        run: \|\n((?:^          [^\n]*\n)+)", gate)[1]
+for results in product(("success", "failure", "cancelled", "skipped"), repeat=3):
+    env = dict(os.environ, **dict(zip(("GO_RESULT", "SHELL_RESULT", "PROFILES_RESULT"), results)))
+    rc = subprocess.run(["bash", "-e", "-c", gate_script], env=env, stdout=subprocess.DEVNULL, check=False).returncode
+    assert (rc == 0) == (results == ("success",) * 3), (results, rc)
 
 def workflow_steps(job):
     for step in re.split(r"(?m)^      - ", job)[1:]:
