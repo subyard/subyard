@@ -131,7 +131,7 @@ func (observation persistObservation) projection() map[string]string {
 	return result
 }
 
-func (observation persistObservation) facts() []integrationFact {
+func (observation persistObservation) facts(item integrationWorkItem) []integrationFact {
 	var facts []integrationFact
 	for _, entry := range observation.Entries {
 		if len(entry.Ops) == 0 {
@@ -139,7 +139,14 @@ func (observation persistObservation) facts() []integrationFact {
 		}
 		desired, _ := json.Marshal(persistStep{entry.Ops, entry.Source, entry.Target, entry.Selected, entry.Existing, entry.ExistingCount})
 		observed, _ := json.Marshal(entry)
-		facts = append(facts, integrationFact{Key: "persist:" + strings.Join(entry.Ops, "+") + ":" + entry.Source,
+		var scope integrationWorkItem
+		if entry.Persist != "deferred" {
+			scope = item.withOwner(entry.owner)
+			if scope.owner != "" {
+				scope = scope.atDestination(entry.Source)
+			}
+		}
+		facts = append(facts, integrationFact{item: scope, Key: "persist:" + strings.Join(entry.Ops, "+") + ":" + entry.Source,
 			Desired: string(desired), Observed: string(observed)})
 	}
 	return facts
@@ -258,6 +265,10 @@ func (runtime Runtime) observePersist(ctx context.Context, entries []integration
 	mappings, err := runtime.persistMappings(entries)
 	if err != nil || len(mappings) == 0 {
 		return persistObservation{}, item.refusal(err)
+	}
+	owner := mappings[0].Integration
+	if !slices.ContainsFunc(mappings, func(mapping PersistMapping) bool { return mapping.Integration != owner }) {
+		item = item.withOwner(owner)
 	}
 	output, err := runtime.runPersist(ctx, "observe", mappings, nil, item)
 	var observation persistObservation
@@ -480,7 +491,7 @@ func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, 
 			causes = append(causes, finding.refusal(fmt.Errorf("%w: persist transfer state changed after planning", domain.ErrPlanStale)))
 			continue
 		default:
-			message = fmt.Sprintf("persist transfer in yard %s refused (%s) at %q; data was preserved. Inspect the pending transfers, then repeat", yard, conflict.Reason, conflict.Path)
+			message = "unrecognized persist transfer refusal; data was preserved. Inspect the pending transfers, then repeat"
 			retry = status
 		}
 		causes = append(causes, finding.refusal(integrationOwnershipError{pendingConfiguration: true, message: message, retry: retry}))

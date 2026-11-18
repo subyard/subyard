@@ -133,9 +133,6 @@ type integrationWorkItem struct {
 }
 
 func (runtime Runtime) integrationItem(step, owner string) integrationWorkItem {
-	if len(owner) > 63 || !domain.SafeName(owner) {
-		owner = ""
-	}
 	yard := runtime.Yard.YardName
 	if len(yard) > 63 || !domain.SafeName(yard) {
 		yard = ""
@@ -144,7 +141,15 @@ func (runtime Runtime) integrationItem(step, owner string) integrationWorkItem {
 	if runtime.PersistFinishOnly {
 		retry = "run yard migrate"
 	}
-	return integrationWorkItem{step: step, owner: owner, yard: yard, retry: retry}
+	return (integrationWorkItem{step: step, yard: yard, retry: retry}).withOwner(owner)
+}
+
+func (item integrationWorkItem) withOwner(owner string) integrationWorkItem {
+	item.owner = ""
+	if len(owner) <= 63 && domain.SafeName(owner) {
+		item.owner = owner
+	}
+	return item
 }
 
 func (runtime Runtime) integrationRead(phase, step, owner string) integrationWorkItem {
@@ -232,12 +237,41 @@ func (item integrationWorkItem) failure(cause error, detail string) error {
 	return &integrationLifecycleError{cause: cause, message: message + detail, retry: item.retry}
 }
 
+// Inventory fact keys identify artifacts, but only the matched declarations
+// supply public names and paths. Deferred paths had no independent observation.
+func (runtime Runtime) bindInventoryFacts(facts []integrationFact, desired, retired []integrationArtifact, projection map[string]string, item integrationWorkItem) {
+	items := make(map[string]integrationWorkItem, len(desired)+len(retired))
+	bind := func(entry integrationArtifact, owner string) {
+		if projection[entry.Path] == "deferred" {
+			return
+		}
+		key := entry.Path
+		if key == "" {
+			key = entry.ID
+		}
+		items[entry.Kind+":"+key] = item.withOwner(owner).atDestination(entry.Path)
+	}
+	for _, entry := range retired {
+		if owner := runtime.knownIntegrationID(entry.ID); owner != "" {
+			bind(entry, owner)
+		}
+	}
+	for _, entry := range desired {
+		bind(entry, entry.ID)
+	}
+	for i := range facts {
+		facts[i].item = items[facts[i].Key]
+	}
+}
+
 func (runtime Runtime) integrationVerificationRefusals(plan IntegrationPlan, readErr, driftCause error) error {
 	findings := []error{readErr}
-	for _, item := range plan.drift {
-		findings = append(findings, item.failure(driftCause, ": "+lifecycleReasons["convergence-failed"]))
+	for _, fact := range plan.facts {
+		if !fact.AtDesired && fact.item.step != "" {
+			findings = append(findings, fact.item.failure(driftCause, ": "+lifecycleReasons["convergence-failed"]))
+		}
 	}
-	if plan.Changed && len(plan.drift) == 0 {
+	if plan.Changed && len(findings) == 1 {
 		findings = append(findings, runtime.integrationDiagnostic(driftCause, profile.IntegrationDefinition{}, "verify", "convergence-failed"))
 	}
 	return collectIntegrationRefusals(findings...)

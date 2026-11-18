@@ -102,7 +102,6 @@ type IntegrationPlan struct {
 	Scope               string   `json:"-"`
 	facts               []integrationFact
 	persist             persistObservation
-	drift               []integrationWorkItem
 	sources             string
 
 	// ownershipReleases lists structured documents whose retirement releases
@@ -133,6 +132,7 @@ type integrationProfileRoute struct {
 }
 
 type integrationFact struct {
+	item      integrationWorkItem
 	Key       string `json:"key"`
 	Desired   string `json:"desired"`
 	Observed  string `json:"observed"`
@@ -446,24 +446,28 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 		return nil, err
 	}
 	entries := []integrationArtifact{}
+	var refusals []error
 	for _, file := range files {
-		item := runtime.integrationRead(phase, "config source", file.integration)
+		item := runtime.integrationRead(phase, "config source", file.integration).atDestination(file.destination)
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return nil, item.refusal(err)
+			refusals = append(refusals, item.refusal(err))
+			continue
 		}
 		entry := integrationArtifact{ID: file.integration, Kind: "file", Path: file.destination, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
 		entry.SourceDigest, err = file.legacySourceHash()
 		if err != nil {
-			return nil, item.refusal(err)
+			refusals = append(refusals, item.refusal(err))
+			continue
 		}
 		if file.ownedFormat == "" && entry.SourceDigest == "" {
 			entry.SourceDigest, err = runtime.legacyIntegrationConfigDigest(file)
 			if err != nil {
-				return nil, item.refusal(err)
+				refusals = append(refusals, item.refusal(err))
+				continue
 			}
 		}
 		if file.ownedFormat != "" {
@@ -477,11 +481,13 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 	for _, link := range strings.Fields(runtime.environmentValue("INTEGRATION_HOST_LINKS")) {
 		parts := strings.Split(link, ":")
 		if len(parts) < 2 || len(parts) > 3 || !filepath.IsAbs(parts[1]) {
-			return nil, errors.New("invalid integration link")
+			refusals = append(refusals, errors.New("invalid integration link"))
+			continue
 		}
 		relative, err := safeGuestRelativePath(parts[0])
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
 		id := ""
 		for _, candidate := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
@@ -491,29 +497,31 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 			}
 		}
 		if id == "" {
-			return nil, errors.New("integration link has no selected owner")
+			refusals = append(refusals, errors.New("integration link has no selected owner"))
+			continue
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "link", Path: "/home/" + runtime.devUser() + "/" + relative, Target: parts[1], FileTarget: len(parts) == 3 && parts[2] == "file", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(parts[1])))})
 	}
 	packages, err := runtime.integrationPackageArtifacts(phase, reader)
-	if err != nil {
-		return nil, err
-	}
+	refusals = append(refusals, err)
 	entries = append(entries, packages...)
 
 	dispatcher, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "config", "projects-changed.sh"))
-	if err != nil {
-		return nil, err
-	}
+	refusals = append(refusals, err)
 	hooks := []string{}
 	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		hook := runtime.environmentValue("AGENT_" + id + "_PROJECTS_CHANGED")
 		if hook != "" {
 			if !safeCommand(hook) {
-				return nil, errors.New("invalid integration project hook")
+				item := runtime.integrationRead(phase, "project hook declaration", id)
+				refusals = append(refusals, item.refusal(errors.New("invalid integration project hook")))
+				continue
 			}
 			hooks = append(hooks, hook)
 		}
+	}
+	if err := collectIntegrationRefusals(refusals...); err != nil {
+		return nil, err
 	}
 	for _, file := range []struct {
 		path    string
@@ -535,13 +543,16 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 	if err != nil {
 		return nil, err
 	}
+	var refusals []error
+packages:
 	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		inputs := []string{id, runtime.devUser(), runtime.environmentValue("CODING_TOOL_INTEGRATIONS")}
 		for _, definition := range definitions {
 			if definition.Name == id {
 				binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
 				if err != nil {
-					return nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
+					refusals = append(refusals, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable"))
+					continue packages
 				}
 				inputs = append(inputs, binding)
 			}
@@ -550,7 +561,9 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 		if provision != "" {
 			payload, err := (guestConfigFile{readAsset: reader}).readSourceAsset(config.MaterializedAsset{Source: provision})
 			if err != nil {
-				return nil, err
+				item := runtime.integrationRead(phase, "package source", id)
+				refusals = append(refusals, item.refusal(err))
+				continue
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
 			// Preserve both installed mode identities across the default change.
@@ -562,7 +575,7 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
 	}
 
-	return entries, nil
+	return entries, domain.CollectRefusals(refusals...)
 }
 
 type configDiagnosticCapture struct {
@@ -576,6 +589,7 @@ type configDiagnosticCaptureFile struct {
 }
 
 type integrationInventoryCapture struct {
+	item          integrationWorkItem
 	config        *configDiagnosticCapture
 	baseline      *IntegrationDiagnosticEvidence
 	verifySources func() error
@@ -596,13 +610,26 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		uid = 1000
 	}
 	legacy := []string{}
+	pathOwners := map[string][]string{}
+	addOwner := func(path, owner string) {
+		if !slices.Contains(pathOwners[path], owner) {
+			pathOwners[path] = append(pathOwners[path], owner)
+		}
+	}
+	for _, entry := range entries {
+		if entry.Path != "" {
+			addOwner(entry.Path, entry.ID)
+		}
+	}
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return integrationObservation{}, err
 	}
 	for _, definition := range definitions {
 		for _, artifact := range definition.Artifacts {
-			legacy = append(legacy, home+"/"+artifact.Destination)
+			path := home + "/" + artifact.Destination
+			legacy = append(legacy, path)
+			addOwner(path, definition.Name)
 		}
 	}
 	// Explicit operator links have no integration ownership and are preserved.
@@ -620,6 +647,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			path := home + "/" + parts[0]
 			if !explicit[path] {
 				legacy = append(legacy, path)
+				addOwner(path, id)
 			}
 		}
 	}
@@ -701,12 +729,17 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		if len(conflicts) == 0 {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
+		item := capture.item
+		if item.step == "" {
+			item = runtime.integrationItem("apply inventory "+mode, "")
+			if mode == "observe" || mode == "observe-applied" {
+				item = runtime.integrationRead("inspect", "inventory", "")
+			}
+		}
 		for _, conflict := range conflicts {
+			owners := pathOwners[conflict.Path]
 			cause := func() error {
-				knownPath := slices.Contains(legacy, conflict.Path)
-				for _, entry := range entries {
-					knownPath = knownPath || entry.Path == conflict.Path
-				}
+				knownPath := len(owners) != 0
 				switch conflict.Reason {
 				case "artifact evidence unavailable":
 					if knownPath {
@@ -751,6 +784,9 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 				}
 				return ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 			}()
+			if len(owners) == 1 && domain.SafeName(owners[0]) {
+				cause = item.withOwner(owners[0]).atDestination(conflict.Path).refusal(cause)
+			}
 			causes = append(causes, cause)
 		}
 		return integrationObservation{Initial: report.Initial, Retired: report.Retired}, domain.CollectRefusals(causes...)
@@ -814,7 +850,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		persist, persistErr = runtime.observePersist(ctx, entries, phase)
 		causes = append(causes, persistErr)
 		runtime.persistProjection = persist.projection()
-		observed, inventoryErr = runtime.integrationInventory(ctx, "observe", entries, "")
+		inventoryItem := runtime.integrationRead(phase, "inventory", "")
+		observed, inventoryErr = runtime.integrationInventory(ctx, "observe", entries, "", integrationInventoryCapture{item: inventoryItem})
+		runtime.bindInventoryFacts(observed.Facts, entries, observed.Retired, runtime.persistProjection, inventoryItem)
 		causes = append(causes, runtime.integrationRead(phase, "", "").refusal(inventoryErr))
 		if inventoryErr == nil {
 			persist = persist.retireUnrecordedLinks(observed.Retired)
@@ -824,23 +862,15 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	plan := IntegrationPlan{persist: persist, Changed: inventoryErr == nil && observed.Changed}
 	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsWithSourceReader(phase, reader)
 	causes = append(causes, runtime.integrationRead(phase, "source binding", "").refusal(err))
-	plan.facts = append(slices.Clone(observed.Facts), persist.facts()...)
-	record := func(item integrationWorkItem, converged bool, err error) {
-		if err != nil {
-			causes = append(causes, item.refusal(err))
-		} else if !converged {
-			plan.Changed = true
-			plan.drift = append(plan.drift, item)
-		}
+	plan.facts = slices.Clone(observed.Facts)
+	record := func(item integrationWorkItem, fact integrationFact) {
+		fact.item = item
+		plan.facts = append(plan.facts, fact)
+		plan.Changed = plan.Changed || !fact.AtDesired
 	}
-	for _, entry := range persist.Entries {
-		if len(entry.Ops) != 0 && entry.Persist != "deferred" {
-			item := runtime.integrationRead(phase, "persist", entry.owner)
-			if entry.owner != "" {
-				item = item.atDestination(entry.Source)
-			}
-			record(item, false, nil)
-		}
+	for _, fact := range persist.facts(runtime.integrationRead(phase, "persist", "")) {
+		plan.facts = append(plan.facts, fact)
+		plan.Changed = plan.Changed || fact.item.step != ""
 	}
 
 	var fingerprints []string
@@ -854,10 +884,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			if err := runtime.releasedInstalledDocument(file.destination, observation); err != nil {
 				return err
 			}
-			record(item, observation.Converged, nil)
 			fingerprints = append(fingerprints, observation.Fingerprint)
 			digest := fmt.Sprintf("%x", sha256.Sum256(payload))
-			plan.facts = append(plan.facts, integrationFact{Key: "structured:" + file.destination, Desired: digest, Observed: observation.Fingerprint, AtDesired: observation.Converged})
+			record(item, integrationFact{Key: "structured:" + file.destination, Desired: digest, Observed: observation.Fingerprint, AtDesired: observation.Converged})
 			if mode == configmaterial.ModeAssessAdopt && observation.Adoptable {
 				observed.Adopted = append(observed.Adopted, integrationArtifact{
 					ID: file.integration, Kind: "structured", Path: file.destination,
@@ -877,9 +906,8 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	}
 	retiredErr := runtime.observeRetiredIntegrationConfigs(ctx, phase, observed.Retired,
 		func(item integrationWorkItem, entry integrationArtifact, observation configmaterial.Observation) {
-			record(item, observation.Converged, nil)
 			fingerprints = append(fingerprints, observation.Fingerprint)
-			plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
+			record(item, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 			if observation.Release != "" {
 				notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
 				plan.Warnings = append(plan.Warnings, notice)
@@ -892,37 +920,37 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	causes = append(causes, err)
 	for _, command := range commands {
 		ready, err := runtime.guestCheck(ctx, []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command.command})
-		record(command.item, ready, err)
 		if err != nil {
+			causes = append(causes, command.item.refusal(err))
 			continue
 		}
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+		record(command.item, integrationFact{Key: "command:" + command.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
 	checks, err := runtime.provisionAgentChecks(phase)
 	causes = append(causes, err)
 	for _, check := range checks {
 		ready, err := runtime.guestCheck(ctx, []string{check.command})
-		record(check.item, ready, err)
 		if err != nil {
+			causes = append(causes, check.item.refusal(err))
 			continue
 		}
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+		record(check.item, integrationFact{Key: "check:" + check.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
 	hooks := runtime.integrationRead(phase, "project hooks", "")
 	ready, err := runtime.projectHooksConverged(ctx)
-	record(hooks, ready, err)
+	causes = append(causes, hooks.refusal(err))
 	if err == nil {
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+		record(hooks, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
 	services := runtime.integrationRead(phase, "services", "")
 	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
-	record(services, !servicesChanged, err)
+	causes = append(causes, services.refusal(err))
 	if err == nil {
 		fingerprints = append(fingerprints, serviceFingerprint)
-		plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
+		record(services, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
 	}
 	// Passive installed admission may ignore redundant labels. Apply must
 	// still finish hooks, commit and verification before capturing settings.
@@ -1106,7 +1134,7 @@ func (runtime Runtime) observeRetiredIntegrationConfigs(ctx context.Context, pha
 		if entry.Kind != "structured" {
 			continue
 		}
-		item := runtime.integrationRead(phase, "retired structured config", runtime.knownIntegrationID(entry.ID))
+		item := runtime.integrationRead(phase, "retired structured config", runtime.knownIntegrationID(entry.ID)).atDestination(entry.Path)
 		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
 		if err != nil {
 			causes = append(causes, item.refusal(err))
@@ -1555,7 +1583,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	// state, which the next successful init retires.
 	for _, entry := range observed.Retired {
 		if entry.Kind == "structured" {
-			item := runtime.integrationItem("apply retire structured config", runtime.knownIntegrationID(entry.ID))
+			item := runtime.integrationItem("apply retire structured config", runtime.knownIntegrationID(entry.ID)).atDestination(entry.Path)
 			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
 				return item.refusal(err)
 			}

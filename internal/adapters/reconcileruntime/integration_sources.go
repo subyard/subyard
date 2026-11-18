@@ -7,6 +7,7 @@ import (
 	"slices"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
@@ -58,15 +59,20 @@ func (runtime Runtime) integrationSourceBindingsWithSourceReader(phase string, r
 		return "", nil, nil
 	}
 	sources := map[string]string{}
+	var refusals []error
 	for _, definition := range definitions {
 		if definition.Retired {
 			continue
 		}
 		binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
 		if err != nil {
-			return "", nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
+			refusals = append(refusals, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable"))
+			continue
 		}
 		sources[definition.Name] = binding
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return "", nil, err
 	}
 	payload, _ := json.Marshal(sources)
 	return fmt.Sprintf("%x", sha256.Sum256(payload)), sources, nil

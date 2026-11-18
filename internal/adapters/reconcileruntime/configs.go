@@ -145,19 +145,23 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 		return payload, err
 	}
 	packageSources, err := runtime.artifactPackageSources()
-	if err != nil {
-		return nil, err
-	}
+	refusals := []error{err}
+	packageAssets := make([]config.MaterializedAsset, 0, len(packageSources))
 	packageIdentities := map[string]string{}
 	for _, source := range packageSources {
-		if _, err := reader(source); err != nil {
-			return nil, err
+		packageAssets = append(packageAssets, source.asset)
+		_, err := reader(source.asset)
+		if err == nil {
+			var identity string
+			identity, err = materializedSourceIdentity(source.asset.Source)
+			if err == nil {
+				packageIdentities[source.asset.Source] = identity
+			}
 		}
-		identity, err := materializedSourceIdentity(source.Source)
-		if err != nil {
-			return nil, err
+		if runtime.applyingIntegrations {
+			err = runtime.integrationItem("apply configs", source.owner).refusal(err)
 		}
-		packageIdentities[source.Source] = identity
+		refusals = append(refusals, err)
 	}
 	for index := range files {
 		files[index].readAsset = reader
@@ -174,7 +178,6 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 		return nil, errors.New("prepared config file bound")
 	}
 	bytes := 0
-	var refusals []error
 	for _, file := range files {
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
@@ -200,7 +203,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 		}
 		entries = append(entries, entry)
 	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
+	if err := collectIntegrationRefusals(refusals...); err != nil {
 		return nil, err
 	}
 
@@ -208,7 +211,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	for destination, payload := range payloads {
 		bindings[destination] = fmt.Sprintf("%x", sha256.Sum256(payload))
 	}
-	for _, source := range packageSources {
+	for _, source := range packageAssets {
 		bindings["package:"+runtime.bindingPath(source.Source)] = fmt.Sprintf("%x", sha256.Sum256(sources[configSourceKey{source.Source, false}].payload))
 	}
 	type sourceBinding struct {
@@ -229,7 +232,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	if err != nil {
 		return nil, err
 	}
-	return &PreparedConfigs{previewSkillCutover: !runtime.legacyPreviewInstructions, files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
+	return &PreparedConfigs{previewSkillCutover: !runtime.legacyPreviewInstructions, files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageAssets, packageIdentities: packageIdentities}, nil
 }
 
 func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
@@ -577,8 +580,8 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 				repair = "yard -Y " + runtime.Yard.YardName + " config apply"
 			}
 			return integrationOwnershipError{
-				message: "unowned invalid configuration preserved",
-				retry:   "run " + preserve + "; then run " + repair,
+				message: "unowned invalid configuration preserved. Move it aside first, then run " + repair,
+				retry:   "run " + preserve,
 			}
 		}
 		return errors.New("structured configuration apply failed")
@@ -684,14 +687,20 @@ func firstError(primary, fallback error) error {
 	return fallback
 }
 
+type artifactPackageSource struct {
+	asset config.MaterializedAsset
+	owner string
+}
+
 // Artifact declarations enter the existing captured-source grammar. This adds no
 // recipe fields and leaves descriptorless source/fingerprint bytes unchanged.
-func (runtime Runtime) artifactPackageSources() ([]config.MaterializedAsset, error) {
+func (runtime Runtime) artifactPackageSources() ([]artifactPackageSource, error) {
 	definitions, err := runtime.integrationDefinitions()
 	if err != nil {
 		return nil, err
 	}
-	var sources []config.MaterializedAsset
+	var sources []artifactPackageSource
+	var refusals []error
 	for _, definition := range definitions {
 		if len(definition.Artifacts) == 0 {
 			continue
@@ -703,12 +712,16 @@ func (runtime Runtime) artifactPackageSources() ([]config.MaterializedAsset, err
 		for _, source := range paths {
 			path, err := definition.ArtifactSourcePath(source)
 			if err != nil {
-				return nil, err
+				if runtime.applyingIntegrations {
+					err = runtime.integrationItem("apply configs", definition.Name).refusal(err)
+				}
+				refusals = append(refusals, err)
+				continue
 			}
-			sources = append(sources, config.MaterializedAsset{Source: path})
+			sources = append(sources, artifactPackageSource{config.MaterializedAsset{Source: path}, definition.Name})
 		}
 	}
-	return sources, nil
+	return sources, domain.CollectRefusals(refusals...)
 }
 
 // Unrecognized or ambiguous markers are user content, never removal authority.

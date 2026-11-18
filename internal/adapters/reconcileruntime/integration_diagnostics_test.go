@@ -12,9 +12,11 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -303,6 +305,14 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 				point = "verify"
 				fixture.verifiedReads++
 			}
+			if point == "verify" && (fixture.cut == "verify inventory drift" || fixture.cut == "verify inventory drift with check") {
+				payload, _ := json.Marshal(integrationObservation{Fingerprint: strings.Repeat("a", 64), Changed: true,
+					Facts: []integrationFact{{Key: "file:/home/dev/.codex/AGENTS.md", Desired: "present", Observed: "missing"}}})
+				return ports.InstanceExecResult{Stdout: payload}, nil
+			}
+			if point == "inventory apply" && fixture.cut == "inventory conflict" {
+				return ports.InstanceExecResult{ExitCode: 2, Stderr: []byte(`{"reason":"owned artifact drift","path":"/home/dev/.codex/AGENTS.md","detail":"private-native-stderr"}`)}, nil
+			}
 			if fixture.cut == "retire structured config" && args[4] == "observe" {
 				payload, _ := json.Marshal(integrationObservation{Fingerprint: strings.Repeat("a", 64), Changed: true,
 					Retired: []integrationArtifact{{ID: "sample", Kind: "structured", Format: "json", Path: "/home/dev/settings.json"}}})
@@ -310,6 +320,9 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 			}
 		case integrationPersistProgram:
 			if args[4] == "observe" {
+				if fixture.applyStarted && fixture.cut == "persist observe" {
+					return ports.InstanceExecResult{}, errors.New("private-native-error")
+				}
 				observed := persistObservation{Fingerprint: strings.Repeat("b", 64)}
 				if !fixture.persistApplied || fixture.cut == "persist verify drift" || fixture.cut == "persist capture drift" && fixture.verifiedReads != 0 {
 					observed.Entries = []persistEntry{{Integration: "sample", Source: "/home/dev/.memory", Ops: []string{"finish"}}}
@@ -385,7 +398,7 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 			return ports.InstanceExecResult{ExitCode: 1, Stderr: []byte("subyard-integration-conflict:ccusage\nprivate-native-stderr")}, &ports.GuestExitError{Code: 1}
 		}
 	}
-	if point == fixture.cut || point == "verify check" && fixture.cut == "verify check init" {
+	if point == fixture.cut || point == "verify check" && (fixture.cut == "verify check init" || fixture.cut == "verify inventory drift with check") {
 		return ports.InstanceExecResult{Stdout: []byte("private-native-stdout"), Stderr: []byte("private-native-stderr")}, errors.New("private-native-error")
 	}
 	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
@@ -394,10 +407,14 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 	for _, test := range []struct{ cut, message string }{
 		{"persist", "integration sample apply persist failed"},
+		{"persist observe", "integration sample apply observe persist failed"},
 		{"inventory apply", "integration apply inventory apply failed"},
+		{"inventory conflict", "integration codex apply inventory apply: integration ownership conflict in yard sample"},
 		{"inventory commit", "integration apply inventory commit failed"},
 		{"inventory capture-settings", "integration apply inventory capture settings failed"},
 		{"configs", "integration codex apply configs failed"},
+		{"config package source", "integration codex apply configs failed"},
+		{"plain config sources", "integration codex apply observe config source failed"},
 		{"script", "integration sample apply script failed"},
 		{"script init", "integration sample apply script failed"},
 		{"hooks run", "integration apply hooks run failed"},
@@ -411,6 +428,8 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 		{"verify check init", "integration second apply verify package check failed"},
 		{"capture check exit", "integration second apply verify package check failed"},
 		{"capture check transport", "integration second apply verify package check failed"},
+		{"verify inventory drift", "integration codex apply verify inventory failed"},
+		{"verify inventory drift with check", "integration codex apply verify inventory failed"},
 		{"verify independent refusals", "integration second apply verify package check failed"},
 		{"structured observe", "integration codex apply observe structured config failed"},
 		{"structured verify", "integration codex apply verify structured config: integration ownership conflict in yard sample"},
@@ -437,9 +456,9 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 				Yard:         domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
 				Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: root}}}
 			switch test.cut {
-			case "persist", "persist approval", "persist verify drift", "persist capture drift":
+			case "persist", "persist observe", "persist approval", "persist verify drift", "persist capture drift":
 				runtime.Environment = []string{"AGENT_sample_PERSIST=.memory:/mnt/host/agent-sessions/sample/memory"}
-			case "verify command", "verify check", "verify command exit", "verify check exit", "verify independent refusals", "verify check init", "capture check exit", "capture check transport":
+			case "verify command", "verify check", "verify command exit", "verify check exit", "verify independent refusals", "verify check init", "capture check exit", "capture check transport", "verify inventory drift with check":
 				secondRoot := filepath.Join(root, "second")
 				if err := os.Mkdir(secondRoot, 0700); err != nil {
 					t.Fatal(err)
@@ -455,11 +474,30 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 				runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex",
 					"AGENT_codex_CONFIG=" + filepath.Join(root, "config/agents/codex/config"), "AGENT_codex_CONFIG_DEST=.codex/settings.json"}
 				bindInstructionTestPackage(t, &runtime, root, "codex")
-			case "configs":
-				path := filepath.Join(root, "instructions.md")
+			}
+			switch test.cut {
+			case "configs", "config package source", "plain config sources", "inventory conflict", "verify inventory drift", "verify inventory drift with check":
+				path := filepath.Join(root, "codex-instructions.md")
 				testkit.WriteFile(t, path, []byte("instructions\n"), 0600)
-				runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + path}
+				selected := runtime.environmentDefault("CODING_TOOL_INTEGRATIONS", "")
+				if test.cut == "plain config sources" {
+					claude := filepath.Join(root, "claude-instructions.md")
+					testkit.WriteFile(t, claude, []byte("instructions\n"), 0600)
+					runtime.Environment = append(runtime.Environment, "HOST_CLAUDE_MD="+claude)
+					bindInstructionTestPackage(t, &runtime, root, "claude")
+					selected = "claude"
+				}
+				runtime.Environment = append(runtime.Environment, "CODING_TOOL_INTEGRATIONS="+strings.TrimSpace(selected+" codex"), "HOST_CODEX_AGENTS_MD="+path)
 				bindInstructionTestPackage(t, &runtime, root, "codex")
+				runtime.SourceReader = func(asset config.MaterializedAsset) ([]byte, error) {
+					switch {
+					case test.cut == "plain config sources" && executor.applyStarted && strings.HasSuffix(asset.Source, "-instructions.md"):
+						return nil, errors.New("private-native-error")
+					case test.cut == "config package source" && executor.pending && strings.HasSuffix(asset.Source, "/codex/integration.json"):
+						return nil, errors.New("private-native-error")
+					}
+					return asset.ReadSource()
+				}
 			case "script", "script init", "hooks capture":
 				provision := filepath.Join(root, "provision.sh")
 				testkit.WriteFile(t, provision, []byte("#!/bin/sh\nexit 0\n"), 0700)
@@ -531,6 +569,19 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 				}
 				return
 			}
+			if test.cut == "plain config sources" || test.cut == "verify inventory drift with check" {
+				other := "integration claude apply observe config source failed"
+				if test.cut == "verify inventory drift with check" {
+					other = "integration second apply verify package check failed"
+				}
+				var findings *domain.Refusals
+				if !errors.As(err, &findings) || len(findings.Unwrap()) != 2 ||
+					!strings.Contains(err.Error(), test.message) || !strings.Contains(err.Error(), other) ||
+					strings.Contains(err.Error()+output.String(), "private-native") {
+					t.Fatalf("expected two public findings: %v", err)
+				}
+				return
+			}
 			var public interface{ ActivationDiagnostic() (string, string) }
 			if !errors.As(err, &public) {
 				t.Fatalf("missing public diagnostic: %v", err)
@@ -539,8 +590,18 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 			wantMessage, wantRetry := test.message+" in yard sample", "run yard migrate"
 			switch test.cut {
 			case "structured apply":
-				wantMessage = "integration codex apply configs: " + test.message
-				wantRetry = "run " + runtime.preserveInvalidConfigCommand("/home/dev/.codex/settings.json") + "; then run yard -Y sample config apply"
+				wantMessage = "integration codex apply configs: " + test.message + ". Move it aside first, then run yard -Y sample config apply"
+				wantRetry = "run " + runtime.preserveInvalidConfigCommand("/home/dev/.codex/settings.json")
+				if err := (releasetransition.Blocker{Code: releasetransition.CodeVerificationFailed, Message: message, Retry: retry}).Validate(); err != nil {
+					t.Fatalf("release protocol rejected the recovery: %v", err)
+				}
+			case "inventory conflict":
+				wantMessage = test.message + `: owned artifact drift at "/home/dev/.codex/AGENTS.md"; managed artifacts were preserved`
+				wantRetry = "'incus' 'exec' '' '--project' '' '--' 'mv' '--no-clobber' '--' '/home/dev/.codex/AGENTS.md' '/home/dev/.codex/AGENTS.md.subyard-preserved'"
+			case "retire structured config":
+				wantMessage += ` at "/home/dev/settings.json"`
+			case "verify inventory drift":
+				wantMessage += ` at "/home/dev/.codex/AGENTS.md": native lifecycle did not converge`
 			case "structured verify":
 				wantMessage = test.message + ` at "/home/dev/.codex/settings.json": invalid current JSON; file preserved. Compare with the integration's shipped legacy templates before retrying`
 				wantRetry = "'incus' 'exec' '' '--project' '' '--' 'sha256sum' '--' '/home/dev/.codex/settings.json'"

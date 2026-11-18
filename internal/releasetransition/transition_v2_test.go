@@ -3227,7 +3227,7 @@ func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
 		fmt.Errorf("second: %w", v2PublicActivationError{"yard default: profile unavailable", "run yard -Y default config status"}),
 	)
 	message, retry := publicActivationDiagnostic(cause, "fallback", "run yard update --check")
-	if message != "yard default: profile unavailable; yard work: profile unavailable" || retry != "run yard -Y default config status, then run yard -Y work config status" || strings.Contains(message, "private observation") {
+	if message != "yard default: profile unavailable; yard work: profile unavailable; Additional recovery: run yard -Y work config status" || retry != "run yard -Y default config status" || strings.Contains(message, "private observation") {
 		t.Fatalf("diagnostic %q / %q", message, retry)
 	}
 }
@@ -3246,6 +3246,11 @@ func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
 		{"multiline", v2PublicActivationError{"unsafe\nmessage", "run yard update"}, "", ""},
 		{"oversized", v2PublicActivationError{strings.Repeat("x", maxDiagnosticText+1), "run yard update"}, "", ""},
 		{"unsafe action", v2PublicActivationError{"known message", "inspect; mutate"}, "", ""},
+		{"preserve invalid config", v2PublicActivationError{
+			"unowned invalid configuration preserved. Move it aside first, then run yard -Y demo config apply",
+			"run incus exec demo -- mv --backup=numbered -- /home/dev/settings.json /home/dev/settings.json.subyard-invalid",
+		}, "unowned invalid configuration preserved. Move it aside first, then run yard -Y demo config apply",
+			"run incus exec demo -- mv --backup=numbered -- /home/dev/settings.json /home/dev/settings.json.subyard-invalid"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			transition, _, _ := v2TransitionFixture(t, nil)
@@ -4503,7 +4508,7 @@ func TestV2FreshOwnerWarningPreservesAssessmentWithoutWriting(t *testing.T) {
 func TestPublicActivationDiagnosticPreservesWrappedFallbackAndSafeActions(t *testing.T) {
 	cause := fmt.Errorf("private wrapper: %w", domain.CollectRefusals(errors.New("private transport"), v2PublicActivationError{"route unavailable", "run yard update --check"}))
 	message, retry := publicActivationDiagnostic(cause, "installation cannot be inspected", "inspect installation ownership")
-	if message != "installation cannot be inspected; route unavailable" || retry != "inspect installation ownership, then run yard update --check" || validateSafeAction(retry) != nil {
+	if message != "installation cannot be inspected; route unavailable; Additional recovery: run yard update --check" || retry != "inspect installation ownership" || validateSafeAction(retry) != nil {
 		t.Fatalf("%q / %q", message, retry)
 	}
 	message, retry = publicActivationDiagnostic(domain.CollectRefusals(errors.New("private one"), errors.New("private two")), "installation unavailable", "inspect installation ownership")

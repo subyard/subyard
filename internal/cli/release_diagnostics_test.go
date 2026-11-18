@@ -42,8 +42,8 @@ func TestReleaseDiagnosticsPreservePublicWrapperOverRawRefusals(t *testing.T) {
 			retry := "run yard -Y work config status"
 			if multiple {
 				cause = domain.CollectRefusals(cause, wrapped("default"))
-				message = "yard default: cannot inspect materialized config for release activation; " + message
-				retry = "run yard -Y default config status, then " + retry
+				message = "yard default: cannot inspect materialized config for release activation; " + message + "; Additional recovery: " + retry
+				retry = "run yard -Y default config status"
 			}
 			transition, err := releasetransition.NewV2Transition(releasetransition.V2Options{
 				ConfigHome: testkit.TempDir(t), Releases: releasetransition.ReleasePair{From: "release-a", Target: "release-a"},

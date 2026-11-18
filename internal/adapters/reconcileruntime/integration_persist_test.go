@@ -374,7 +374,7 @@ func TestPersistDeselectAfterTheExchangeRemovesOnlyOwnLink(t *testing.T) {
 		f := newPersistFixture(t)
 		f.interrupt(persistCuts["exchanged"])
 		f.mappings[0].Selected = false
-		facts := (persistObservation{Entries: []persistEntry{{Source: f.source, Target: f.target, Ops: []string{"finish"}}}}).facts()
+		facts := (persistObservation{Entries: []persistEntry{{Source: f.source, Target: f.target, Ops: []string{"finish"}}}}).facts(integrationWorkItem{})
 		if _, text, _ := persistStepText(facts[0]); !strings.Contains(text, "then remove the link; the data remains in "+f.target) {
 			t.Fatal("deselect finish step does not disclose the link removal", text)
 		}
@@ -990,8 +990,11 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 	}, "entries": []map[string]any{{"source": "/home/dev/.claude-memory", "persist": "deferred"}}})
 	err := runtime.persistRefusal(stderr, nil, integrationWorkItem{})
 	text := err.Error()
+	if strings.Contains(text, "a future reason") {
+		t.Fatal("unknown guest reason reached public diagnostics")
+	}
 	for _, want := range []string{"projects.subyard-transfer.json", "not a complete Subyard record", "'disable' 'claude'", "release activation does not start", "init", "Permission denied",
-		"'namei' '-l' '--' '/home/dev/.claude/projects/p'", "'findmnt'", "AGENT_claude_PERSIST", "a future reason", "'integration' 'status'",
+		"'namei' '-l' '--' '/home/dev/.claude/projects/p'", "'findmnt'", "AGENT_claude_PERSIST", "unrecognized persist transfer refusal", "'integration' 'status'",
 		"the target refused \"/mnt/host/agent-sessions/claude/projects/p1/x\"", "'namei' '-l' '--' '/mnt/host/agent-sessions/claude/projects/p1/'"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("refusal omitted %q: %s", want, text)
@@ -1214,14 +1217,14 @@ func TestPersistDisableRemovesTheUnrecordedLinkOfAnInterruptedAdoption(t *testin
 		t.Fatal("disable plan", ops)
 	}
 	disclosed := false
-	for _, fact := range planned.facts() {
+	for _, fact := range planned.facts(integrationWorkItem{}) {
 		if source, text, _ := persistStepText(fact); source == memory &&
 			strings.Contains(text, "remove the link "+memory+" to "+memoryTarget) && strings.Contains(text, "the data remains in "+memoryTarget) {
 			disclosed = true
 		}
 	}
 	if !disclosed {
-		t.Fatal("disable plan does not disclose the link removal", planned.facts())
+		t.Fatal("disable plan does not disclose the link removal", planned.facts(integrationWorkItem{}))
 	}
 	// A link the inventory records is retired by the inventory, not here.
 	recorded := observation.retireUnrecordedLinks([]integrationArtifact{{Kind: "link", Path: memory}})
@@ -1324,7 +1327,7 @@ func TestPersistInitInspectionBindsARetireOnlyPlan(t *testing.T) {
 	full := func() (IntegrationPlan, error) {
 		// The full plan applies the inventory narrowing: nothing records the link.
 		persist := f.observation().retireUnrecordedLinks(nil)
-		return IntegrationPlan{Changed: persist.changed(), persist: persist, facts: persist.facts()}, nil
+		return IntegrationPlan{Changed: persist.changed(), persist: persist, facts: persist.facts(integrationWorkItem{})}, nil
 	}
 	plan, inspected, err := persistInspectionPlan(f.observation(), nil, full)
 	if err != nil || !inspected {

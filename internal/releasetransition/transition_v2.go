@@ -4173,7 +4173,7 @@ func publicActivationDiagnostic(err error, message, retry string) (string, strin
 				continue
 			}
 			messages = append(messages, text)
-			if action != "" {
+			if validateSafeAction(action) == nil {
 				actions = append(actions, action)
 			}
 		}
@@ -4182,6 +4182,12 @@ func publicActivationDiagnostic(err error, message, retry string) (string, strin
 			messages = slices.Compact(messages)
 			slices.Sort(actions)
 			actions = slices.Compact(actions)
+			if len(actions) != 0 {
+				retry = actions[0]
+				for _, action := range actions[1:] {
+					messages = append(messages, "Additional recovery: "+action)
+				}
+			}
 			kept := []string{}
 			for index, text := range messages {
 				candidate := strings.Join(append(slices.Clone(kept), text), "; ")
@@ -4199,9 +4205,6 @@ func publicActivationDiagnostic(err error, message, retry string) (string, strin
 				kept = append(kept, fmt.Sprintf("and %d more findings; full details: stderr of yard update --check --json", len(messages)-len(kept)))
 			}
 			message = strings.Join(kept, "; ")
-			if combined := strings.Join(actions, ", then "); validateSafeAction(combined) == nil {
-				retry = combined
-			}
 			return message, retry
 		}
 	}
