@@ -106,7 +106,7 @@ for config in commands.registry incus.project.env subyard.env host.env agents.en
 done
 install -m 0755 "$engine" "$fixture_repo/yard"
 install -m 0644 "$ROOT/scripts/lib-power.sh" "$fixture_repo/scripts/lib-power.sh"
-for library in runtime.sh engine-context.sh ui.sh download.sh host.sh; do
+for library in runtime.sh engine-context.sh ui.sh download.sh host.sh teardown-plan.py; do
   install -m 0644 "$ROOT/scripts/lib/$library" "$fixture_repo/scripts/lib/$library"
 done
 
@@ -159,7 +159,11 @@ chmod 0755 "$TMP/run-teardown"
 
 if [ "${1:-}" = --check-fixture ]; then
   "$TMP/run-teardown" config show CODING_TOOL_INTEGRATIONS >/dev/null
-  printf 'ok: sparse sudo fixture configuration loads\n'
+  # Exercise the staged guard used by native teardown planning without Incus or sudo.
+  printf '{"Path":"%s"}\n' "$fixture_home" \
+    | python3 -B "$fixture_repo/scripts/lib/teardown-plan.py" capture-artifact \
+    | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["Binding"] else 1)'
+  printf 'ok: sparse sudo fixture configuration loads and its teardown guard captures an artifact\n'
   exit 0
 fi
 
