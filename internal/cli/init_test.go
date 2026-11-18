@@ -1328,6 +1328,40 @@ func TestNativeInitRefusesBubblewrapOptOutWithCodexBeforeChanges(t *testing.T) {
 	}
 }
 
+func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
+	const conflict = "Bubblewrap AppArmor: modified policy loader"
+	root, environment, _ := nativeFixture(t)
+	dir := filepath.Join(root, "state", "yards", "default")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(dir, "config.env")
+	const content = "CODING_TOOL_INTEGRATIONS=codex\nBWRAP_APPARMOR=off\n"
+	writeCLIFile(t, settings, content, 0600)
+	incus := &testkit.Incus{
+		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
+		ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}}},
+	}
+	var stdout, stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
+		Environment: environment, WorkingDir: root, Stdout: &stdout, Stderr: &stderr, Incus: incus, Executor: incus})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code == 0 ||
+		strings.Count(stderr.String(), "BWRAP_APPARMOR=off requires deselecting Codex") != 1 ||
+		!strings.Contains(stderr.String(), conflict) {
+		t.Fatalf("expected both refusals once: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if len(incus.ExecCalls) != 1 || incus.ExecCalls[0].Request.Command[5] != "observe" ||
+		len(incus.ConfigUpdates) != 0 || len(incus.PowerUpdates) != 0 {
+		t.Fatal("expected only a read-only guest service observation")
+	}
+	if got, err := os.ReadFile(settings); err != nil || string(got) != content {
+		t.Fatalf("init changed the refused settings: %v", err)
+	}
+}
+
 func TestNativeInitOwnsPlanResumeAndFinalization(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	platform := newInitPlatformFixture()

@@ -15,11 +15,13 @@ import (
 //go:embed bwrap_policy.sh
 var bubblewrapPolicy string
 
+var errBubblewrapSelection = errors.New("BWRAP_APPARMOR=off requires deselecting Codex; keep BWRAP_APPARMOR=on or remove codex from CODING_TOOL_INTEGRATIONS")
+
 // ValidateBubblewrapSelection rejects a selection incompatible with Codex's
 // provisioning check before setup can change the yard.
 func ValidateBubblewrapSelection(setting, selection string) error {
 	if setting == "off" && slices.Contains(strings.Fields(selection), "codex") {
-		return errors.New("BWRAP_APPARMOR=off requires deselecting Codex; keep BWRAP_APPARMOR=on or remove codex from CODING_TOOL_INTEGRATIONS")
+		return errBubblewrapSelection
 	}
 	return nil
 }

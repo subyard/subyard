@@ -118,8 +118,8 @@ record_verified=0
 check_record() {
   if ! { [ -f "$record" ] && root_path "$record" 644 &&
     [ "$(wc -l < "$record")" = 2 ] &&
-    sed -n '1p' "$record" | grep -Eq '^[a-f0-9]{64}  unpriv_bwrap$' &&
-    sed -n '2p' "$record" | grep -Eq '^[a-f0-9]{64}  bwrap$'; }; then
+    sed -n '1p' "$record" | grep -E '^[a-f0-9]{64}  unpriv_bwrap$' >/dev/null &&
+    sed -n '2p' "$record" | grep -E '^[a-f0-9]{64}  bwrap$' >/dev/null; }; then
     problem "the ownership record $record is missing or invalid"
     return 1
   fi
@@ -132,7 +132,8 @@ check_loader() {
     # Keep previously shipped loaders verifiable for repair and opt-out.
     case "$(sha256sum < "$policy/load")" in
       '67af6296afdba16d3511438b80184e5deefe1dfc9bab2d632def0b268a3b1e30  -' | \
-      '3a3bfed285a93bd59669f466e65c4ff61802a519820783a45502be7072d77d72  -') return 0 ;;
+      '3a3bfed285a93bd59669f466e65c4ff61802a519820783a45502be7072d77d72  -' | \
+      'ca44357a350eb3d4bb0e9f1746eba3fa2a75918cd26b9986aedd28f359772a0d  -') return 0 ;;
       *) return 1 ;;
     esac
 }

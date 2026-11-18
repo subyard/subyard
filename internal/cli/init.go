@@ -570,8 +570,12 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 		}
 	}
 	if mode != initConfigs {
-		if err := reconcileruntime.ValidateBubblewrapSelection(loaded.Environment["BWRAP_APPARMOR"], loaded.Environment["CODING_TOOL_INTEGRATIONS"]); err != nil {
-			return nil, err
+		if selectionErr := reconcileruntime.ValidateBubblewrapSelection(loaded.Environment["BWRAP_APPARMOR"], loaded.Environment["CODING_TOOL_INTEGRATIONS"]); selectionErr != nil {
+			_, provisionErr := cli.initPlatform(loaded, nil).CheckStage(ctx, ports.ReconcileStageProvision)
+			if errors.Is(provisionErr, selectionErr) {
+				return nil, provisionErr
+			}
+			return nil, domain.CollectRefusals(selectionErr, provisionErr)
 		}
 	}
 	var platform ports.InitPlatform

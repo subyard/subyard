@@ -553,6 +553,25 @@ func TestPrepareLegacyIntegrationAdoptionSkipsUnavailableIncus(t *testing.T) {
 	}
 }
 
+func TestIntegrationPlanReportsServiceConflictWithoutSubstrate(t *testing.T) {
+	const conflict = "Bubblewrap AppArmor: modified policy loader"
+	incus := &testkit.Incus{
+		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
+		ExecSteps: []testkit.IncusExecStep{
+			{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing /srv/agents")},
+			{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}},
+		},
+	}
+	runtime := Runtime{Incus: incus, Executor: incus}
+	_, err := runtime.IntegrationPlan(context.Background())
+	if !errors.Is(err, errIntegrationSubstrateUnavailable) || !strings.Contains(err.Error(), conflict) {
+		t.Fatalf("expected substrate and service refusals, got %v", err)
+	}
+	if len(incus.ExecCalls) != 2 || incus.ExecCalls[1].Request.Command[5] != "observe" {
+		t.Fatalf("expected substrate probe and read-only service observation, got %d guest calls", len(incus.ExecCalls))
+	}
+}
+
 func TestIntegrationConfigAdoptionReadsShippedHistoricalTemplates(t *testing.T) {
 	for _, kind := range []string{"absent", "regular", "regular-json", "symlink-directory", "symlink-template"} {
 		t.Run(kind, func(t *testing.T) {

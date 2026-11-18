@@ -411,9 +411,6 @@ func (runtime Runtime) integrationPrecondition(ctx context.Context) (ports.Insta
 	if runtime.Executor == nil {
 		return ports.InstanceInfo{}, errors.New("Incus executor is required")
 	}
-	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
-		return ports.InstanceInfo{}, firstError(err, errIntegrationSubstrateUnavailable)
-	}
 	return state.Instance, nil
 }
 
@@ -781,6 +778,9 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			refusal = domain.CollectRefusals(refusal, serviceErr)
 		}
 	}()
+	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
+		return IntegrationPlan{}, integrationObservation{}, firstError(err, errIntegrationSubstrateUnavailable)
+	}
 	entries, err := runtime.integrationArtifactsWithSourceReader(phase, reader)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
