@@ -259,9 +259,13 @@ prepare_native_clients() {
 }
 
 reboot_owner() {
-  local before after state command rc down=0 ready=0
+  local before after state command rc down=0 verified_boot=''
   printf 'amnezia_acceptance_stage=owner-host-reboot\n'
-  before="$(guest 1 cat /proc/sys/kernel/random/boot_id </dev/null)"
+  before="$(guest 1 cat /proc/sys/kernel/random/boot_id </dev/null)" || {
+    rc=$?
+    owner_boot_evidence || true
+    return "$rc"
+  }
   timeout --foreground 20 ssh -F "$CLIENT_CONFIG" -T \
     -o ConnectTimeout=3 -o ConnectionAttempts=1 \
     e2e-vm-1 -- sudo -n systemctl reboot </dev/null >/dev/null 2>&1 || true
@@ -271,25 +275,34 @@ reboot_owner() {
       </dev/null >/dev/null 2>&1; then down=1; break; fi
     sleep 1
   done
-  [ "$down" = 1 ] || die 'owner host did not go down for reboot'
+  if [ "$down" = 0 ]; then
+    owner_boot_evidence || true
+    die 'owner host did not go down for reboot'
+  fi
   # SSH can answer before systemd has finished booting. Keep the candidate already
   # staged on persistent /var/tmp and only poll read-only boot state here.
-  command="$(quote_ssh_command sh -c 'cat /proc/sys/kernel/random/boot_id && exec systemctl is-system-running')"
+  command="$(quote_ssh_command sh -c 'printf "BootID="; cat /proc/sys/kernel/random/boot_id && exec systemctl is-system-running')"
   for _ in $(seq 1 180); do
     rc=0
     state="$(timeout --foreground 6 ssh -F "$CLIENT_CONFIG" -T \
       -o ConnectTimeout=3 -o ConnectionAttempts=1 e2e-vm-1 -- \
       "$command" </dev/null 2>/dev/null)" || rc=$?
     after="${state%%$'\n'*}"
-    if [[ "$state" = *$'\n'* ]] && [ -n "$after" ] && [ "$after" != "$before" ]; then
+    if [[ "$after" = BootID=?* ]] && [ "${after#BootID=}" != "$before" ]; then
+      # Start the reconciliation deadline at the first sight of the new boot.
+      # A queued unit can keep systemd in "starting" past that deadline.
+      if [ "$after" != "$verified_boot" ]; then
+        (verify_boot_result) || { rc=$?; owner_boot_evidence || true; return "$rc"; }
+        verified_boot="$after"
+      fi
       case "${state#*$'\n'}:$rc" in
-        running:0|degraded:1) ready=1; break ;;
+        running:0|degraded:1) return 0 ;;
       esac
     fi
     sleep 1
   done
-  [ "$ready" = 1 ] || { owner_boot_evidence; die 'owner host did not return with a new boot ID and ready systemd'; }
-  (verify_boot_result) || { rc=$?; owner_boot_evidence; return "$rc"; }
+  owner_boot_evidence || true
+  die 'owner host did not return with a new boot ID and ready systemd'
 }
 
 # Print bounded owner boot evidence after a failed reboot check. Send the probe inline

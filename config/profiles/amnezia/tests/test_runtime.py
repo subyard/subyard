@@ -113,6 +113,7 @@ exec /usr/bin/timeout 95 sh "$PROBE"
             ('future', ['2000000 success 0 active running 1'], 1, 2),
             ('transport', [running], 1, 255),
             ('queued-deadline', ['0 success 0 inactive dead 0'], 10, 2),
+            ('network-online-delayed', ['0 success 0 inactive dead 0'], 10, 2),
             ('stalled-clock', ['1000000 success 75 activating auto-restart 1'], 300, 2))
         for scenario, frames, step, expected in cases:
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
@@ -132,13 +133,25 @@ ssh() {
   case "$*" in
     *'systemctl reboot'*) return 0 ;;
     *'-- true') return 255 ;;
-    *boot_id*is-system-running*) printf 'new-boot\nrunning\n' ;;
+    *boot_id*is-system-running*)
+      if [ "$scenario" = network-online-delayed ] && [ "$clock" -lt 60 ]; then
+        printf 'BootID=new-boot\nstarting\n'
+        return 1
+      fi
+      printf 'BootID=new-boot\nrunning\n' ;;
     *systemctl*show*)
       [ "$scenario" != transport ] || return 255
       sample=$(cat "$fixture/samples"); sample=$((sample + 1))
       printf '%s\n' "$sample" > "$fixture/samples"
       frame=$(sed -n "${sample}p" "$fixture/frames")
       [ -n "$frame" ] || frame=$(tail -n 1 "$fixture/frames")
+      if [ "$scenario" = network-online-delayed ]; then
+        if [ "$clock" -lt 60 ]; then
+          frame="0 success 0 inactive dead $clock"
+        else
+          frame="60000000 success 0 inactive dead $clock"
+        fi
+      fi
       builtin read -r started result status active sub uptime <<<"$frame"
       printf '%s\n' LoadState=loaded "ExecMainStartTimestampMonotonic=$started" \
         "Result=$result" "ExecMainStatus=$status" "ActiveState=$active" "SubState=$sub" "BootUptimeSeconds=$uptime" ;;
@@ -160,8 +173,10 @@ timeout() {
                 self.assertEqual(b'after-wait' in observed.stdout, expected == 0)
                 if expected == 0:
                     self.assertGreaterEqual(int((directory / 'samples').read_text()), len(frames))
-                if scenario in ('queued-deadline', 'stalled-clock'):
+                if scenario in ('queued-deadline', 'network-online-delayed', 'stalled-clock'):
                     self.assertIn(b'deadline', observed.stderr)
+                if scenario == 'network-online-delayed':
+                    self.assertEqual((directory / 'samples').read_text(), '3\n')
 
     def test_owner_reboot_retains_worktree_and_captures_unready_boot(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
@@ -177,36 +192,45 @@ prepare_guest() { printf 'unexpected worktree transfer\n' >&2; return 19; }
 verify_boot_result() {
   [ "${GUEST_DIRS[1]:-}" = "$fixture" ] || return 98
   if [ "$scenario" = transient ]; then
-    [ "$(cat "$fixture/samples")" = 5 ] || return 97
+    [ "$(cat "$fixture/samples")" = 2 ] || return 97
   fi
   [ "$scenario" != verification-failed ] || return 23
 }
-seq() { printf '1\n2\n3\n4\n5\n'; }
+seq() {
+  if [ "$2" = 180 ]; then
+    command seq 1 5
+  else
+    command seq "$@"
+  fi
+}
 sleep() { :; }
 quote_ssh_command() { printf '%q ' "$@"; }
-guest() { printf 'old-boot\n'; }
+guest() {
+  [ "$scenario" != initial-read-failed ] || return 42
+  printf 'old-boot\n'
+}
 ssh() {
   case "$*" in
-    *'systemctl reboot'*) return 0 ;;
-    *'-- true') [ "$scenario" = stayed-up ] ;;
+    *'systemctl reboot'*) printf 'reboot\n' >> "$fixture/ssh-calls" ;;
+    *'-- true') printf 'down-check\n' >> "$fixture/ssh-calls"; [ "$scenario" = stayed-up ] ;;
     *boot_id*is-system-running*)
       case "$scenario" in
         missing) return 255 ;;
-        unready) printf 'new-boot\nstarting\n'; return 1 ;;
+        unready) printf 'BootID=new-boot\nstarting\n'; return 1 ;;
         transient)
           sample=$(cat "$fixture/samples"); sample=$((sample + 1))
           printf '%s\n' "$sample" > "$fixture/samples"
           case "$sample" in
-            1) printf 'old-boot\nrunning\n' ;;
-            2) printf 'new-boot\nstarting\n'; return 1 ;;
-            3) printf 'new-boot\nrunning\n'; return 255 ;;
+            1) printf 'BootID=old-boot\nrunning\n' ;;
+            2) printf 'BootID=new-boot\n'; return 255 ;;
+            3) printf 'BootID=new-boot\nrunning\n'; return 255 ;;
             4) printf 'running\n' ;;
-            5) printf 'new-boot\ndegraded\n'; return 1 ;;
+            5) printf 'BootID=new-boot\ndegraded\n'; return 1 ;;
             *) return 96 ;;
           esac ;;
-        *) printf 'new-boot\nrunning\n' ;;
+        *) printf 'BootID=new-boot\nrunning\n' ;;
       esac ;;
-    *boot_id*) [ "$scenario" != missing ] || return 255; printf 'new-boot\n' ;;
+    *boot_id*) [ "$scenario" != missing ] || return 255; printf 'BootID=new-boot\n' ;;
     *)
       printf 'diagnostic-call\n' >&2
       printf 'peer 192.0.2.1\n'
@@ -223,6 +247,7 @@ timeout() {
 }
 '''
         for scenario, expected in (('returned', 0), ('transient', 0), ('missing', 2), ('unready', 2),
+                                   ('initial-read-failed', 42),
                                    ('stayed-up', 2), ('verification-failed', 23)):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
                 (Path(temporary) / 'samples').write_text('0\n')
@@ -231,7 +256,15 @@ timeout() {
                 evidence = observed.stderr
                 self.assertNotIn(b'unexpected worktree transfer', evidence)
                 self.assertEqual(observed.returncode, expected, evidence[:1024].decode())
-                if scenario in ('missing', 'unready', 'verification-failed'):
+                if scenario == 'transient':
+                    self.assertEqual((Path(temporary) / 'samples').read_text(), '5\n')
+                if scenario == 'initial-read-failed':
+                    self.assertFalse((Path(temporary) / 'ssh-calls').exists())
+                if scenario == 'stayed-up':
+                    self.assertEqual((Path(temporary) / 'ssh-calls').read_text().splitlines(),
+                                     ['reboot'] + ['down-check'] * 60)
+                    self.assertIn(b'owner host did not go down for reboot', evidence)
+                if expected != 0:
                     self.assertEqual(evidence.count(b'diagnostic-call'), 3)
                     self.assertEqual(evidence.count(b'amnezia_owner_boot_evidence_attempt='), 3)
                     self.assertIn(b'peer IPV4', evidence)
