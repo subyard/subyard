@@ -86,7 +86,8 @@ class LintTools(unittest.TestCase):
         lines += [f"# producer {pipe} head -1", f"echo 'producer {pipe} head -1'",
                   f'echo "producer {pipe} grep -q term"', f"producer {pipe} grep -e '-q'",
                   f"producer {pipe} grep -e-q", f"producer {pipe} grep -- -q",
-                  "cat <<'TEXT'", f"producer {pipe} head -1", "TEXT"]
+                  "cat <<'TEXT'", f"producer {pipe} head -1", "TEXT",
+                  'printf "%s" "bash -se" <<TEXT', f"producer {pipe} head -1", "TEXT"]
         self.write("probe.sh", "\n".join(["set -o pipefail", *lines, ""]))
         result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
                                 capture_output=True, text=True)
@@ -104,12 +105,31 @@ class LintTools(unittest.TestCase):
       TEXT
       producer {pipe} grep -e term -q
   - run: 'producer {pipe} {{ head -c 8; }}'
+  - run: "producer {pipe} head -1"
+  - run: "echo first\\nproducer \\x7c head -1" # Escapes belong to YAML.
+  - run: "echo \\"producer {pipe} head -1\\""
+  - run: producer {pipe} head -1
 """)
         result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
         self.assertEqual([line.partition(": ")[0] for line in result.stderr.splitlines()],
-                         [".github/workflows/test.yml:7", ".github/workflows/test.yml:8"])
+                         [".github/workflows/test.yml:7", ".github/workflows/test.yml:8",
+                          ".github/workflows/test.yml:9", ".github/workflows/test.yml:10",
+                          ".github/workflows/test.yml:12"])
+
+    def test_shell_lint_checks_orca_bash_heredoc(self):
+        path = "config/profiles/orca/tests/e2e/managed-agents.sh"
+        fixture = (source / path).read_text()
+        current = "grep -aFx >/dev/null -- --dangerously-skip-permissions"
+        self.assertEqual(fixture.count(current), 1)
+        line = fixture.count("\n", 0, fixture.index(current)) + 1
+        self.write(path, fixture.replace(current, "grep -Fxq -- --dangerously-skip-permissions"))
+        result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual([finding.partition(": ")[0] for finding in result.stderr.splitlines()],
+                         [f"{path}:{line}"])
 
     def audit(self, payload, exit_code, entries=()):
         report = self.root / "payload"

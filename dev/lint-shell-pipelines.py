@@ -47,7 +47,21 @@ SHELL_TOKEN = re.compile(
 )
 DOUBLE_TOKEN = re.compile(r'\\[\s\S]|\$\((?!\()|"')
 SHELL_COMMAND = re.compile(r"(?:^|[\s;&|()])(?:[\w./-]*/)?(?:ba|da|k|z)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*\s*$")
+BASH_STDIN = re.compile(
+    r"(?:^|[\s;&|()])(?:[\w./-]*/)?bash(?:\s+-[a-bd-zA-Z]+|\s+(?:pipefail|errexit|nounset))*"
+    r"(?:\s+(?:--|-[a-bd-zA-Z]*s[a-bd-zA-Z]*)(?:\s+[^;&|<>()]*)?)?\s*$"
+)
 WORKFLOW_RUN = re.compile(r"^( *)(?:- )?run:\s*(\S.*)$")
+YAML_DOUBLE_QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
+YAML_ESCAPE = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)")
+YAML_ESCAPES = dict(zip('0abtnvfre "/\\N_LP', '\0\a\b\t\n\v\f\r\x1b "/\\\x85\xa0\u2028\u2029'))
+
+
+def yaml_escape(match):
+    escape = match[1]
+    if len(escape) > 1:
+        return chr(int(escape[1:], 16))
+    return YAML_ESCAPES.get(escape, match[0])
 
 
 def shell_fragments(source, start=0, limit=None, substitution=False):
@@ -55,6 +69,7 @@ def shell_fragments(source, start=0, limit=None, substitution=False):
         limit = len(source)
     fragments, masked, heredocs = [], [], []
     cursor, depth = start, 0
+    line_start, mask_start = start, 0
     while match := SHELL_TOKEN.search(source, cursor, limit):
         token = match[0]
         cursor = match.end()
@@ -66,20 +81,31 @@ def shell_fragments(source, start=0, limit=None, substitution=False):
             continue
         if match.lastgroup == "heredoc":
             delimiter = token.removeprefix("<<")
-            heredocs.append((delimiter.removeprefix("-").strip().strip("'\"\\"), delimiter.startswith("-")))
+            prefix = list(source[line_start:match.start()])
+            for first, last, fill in masked[mask_start:]:
+                prefix[first - line_start:last - line_start] = fill * (last - first)
+            executable = BASH_STDIN.search("".join(prefix)) is not None
+            heredocs.append((delimiter.removeprefix("-").strip().strip("'\"\\"),
+                             delimiter.startswith("-"), executable))
             continue
         if match.lastgroup == "newline":
-            for delimiter, strip_tabs in heredocs:
+            for delimiter, strip_tabs, executable in heredocs:
+                body_start = cursor
                 while cursor < limit:
+                    line_offset = cursor
                     end = source.find("\n", cursor, limit)
                     end = limit if end == -1 else end
                     line = source[cursor:end]
                     cursor = min(end + 1, limit)
                     if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        if executable:
+                            _, children = shell_fragments(source, body_start, line_offset)
+                            fragments.extend(children)
                         break
             heredocs.clear()
             if cursor > match.end():
                 masked.append((match.end(), cursor, " "))
+            line_start, mask_start = cursor, len(masked)
             continue
         if match.lastgroup == "double":
             while inner := DOUBLE_TOKEN.search(source, cursor, limit):
@@ -96,8 +122,8 @@ def shell_fragments(source, start=0, limit=None, substitution=False):
             cursor = min(end + 1, limit)
         quoted_command = False
         if match.lastgroup in {"single", "double"} and source[cursor - 1] == token[0]:
-            line_start = max(start, source.rfind("\n", start, match.start()) + 1)
-            quoted_command = SHELL_COMMAND.search(source[line_start:match.start()]) is not None
+            quote_line_start = max(start, source.rfind("\n", start, match.start()) + 1)
+            quoted_command = SHELL_COMMAND.search(source[quote_line_start:match.start()]) is not None
         if match.lastgroup == "backtick" or quoted_command:
             _, children = shell_fragments(source, match.start() + 1, cursor - 1)
             fragments.extend(children)
@@ -162,10 +188,12 @@ def workflow_shell(source):
                 command = match[2]
                 if len(command) > 1 and command[0] == command[-1] == "'":
                     command = command[1:-1].replace("''", "'")
+                elif quoted := YAML_DOUBLE_QUOTED.match(command):
+                    command = YAML_ESCAPE.sub(yaml_escape, quoted[1])
                 lines[index] = command + "\n"
                 continue
         lines[index] = "\n"
-    return "".join(lines)
+    return lines
 
 
 def main():
@@ -182,8 +210,11 @@ def main():
                 continue
 
         source = path.read_text()
+        line_numbers = None
         if path.suffix in {".yml", ".yaml"}:
-            source = workflow_shell(source)
+            lines = workflow_shell(source)
+            line_numbers = [number for number, line in enumerate(lines, 1) for _ in range(line.count("\n"))]
+            source = "".join(lines)
         _, fragments = shell_fragments(source)
         findings = set()
         for offset, code in fragments:
@@ -205,6 +236,8 @@ def main():
                 if start != -1 and start <= position - line_start < start + len(fragment):
                     continue
             line_number = source.count("\n", 0, position) + 1
+            if line_numbers is not None:
+                line_number = line_numbers[line_number - 1]
             print(f"{name}:{line_number}: {consumer} can close pipeline input early under pipefail", file=sys.stderr)
             failed = True
     return int(failed)

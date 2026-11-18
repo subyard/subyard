@@ -23,6 +23,15 @@ ROOT = Path(__file__).resolve().parents[5]
 E2E = ROOT / 'config/profiles/android/tests/e2e'
 capture_helper = (E2E / 'android-failure-capture.sh').read_text()
 
+# Long records must drain at producer speed even when redaction is expensive.
+producer = ('import sys\nprint("x" * 65535)\n'
+            'for _ in range(512): print("a:" * 32767 + "a")\n'
+            'sys.exit(23)')
+result = subprocess.run(['bash', '-c', capture_helper + '\nandroid_capture_evidence "$@"',
+                         '_', sys.executable, '-c', producer],
+                        capture_output=True, text=True, timeout=10)
+assert result.returncode == 0 and result.stderr == 'x' * 65535 + '\n\ncapture_exit=23\n', result.stderr[-100:]
+
 
 # Run the actual manifest validator against semantic output variations, not SDK
 # substitutes. Native compilation/signing remains the allocated VM's contract.
