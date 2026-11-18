@@ -176,19 +176,26 @@ same explicit yard-scope repair.
 
 ### Passwordless sudo inside the yard
 
-`DEV_SUDO` defaults to `0`. Set it to `1` to grant the yard's developer account passwordless
-sudo inside the guest. `yard init` applies the effective setting to the guest and removes the
-managed grant when the effective value is `0`.
+`DEV_SUDO` defaults to `1`. The yard's developer account can run commands as guest root without
+a password. Set `DEV_SUDO=0` at shared, host or yard scope, or for one command, and run `yard init`
+to remove the managed grant. Hermes and Amnezia yard presets explicitly set `DEV_SUDO=0`.
+Removing the grant leaves the developer's Docker group access, which can still provide
+root-equivalent access inside the guest.
 
-Use shared scope to set a common value. With a connected private configuration repository, publish it with:
+After an upgrade, an existing yard that inherits the shipped default gets the grant on its next
+`yard init`. Release activation leaves the guest sudoers file alone. `yard config show DEV_SUDO`
+shows the desired value. `yard config status` does not inspect guest sudoers, so it can report a
+clean yard while the grant still awaits `yard init`.
+
+To disable the grant across owner hosts, publish a shared override in the connected private
+configuration repository:
 
 ```sh
-yard config set DEV_SUDO 1 --scope shared --git
+yard config set DEV_SUDO 0 --scope shared --git
 ```
 
 Run `yard config sync pull` on the other owner hosts, then run `yard init` for each yard where
-you want to apply the change. Existing host, yard and command overrides follow the scalar precedence
-above. Set `DEV_SUDO=0` at yard scope for a yard that should opt out of a shared grant.
+you want to apply the change. Host, yard and command values follow the scalar precedence above.
 Restrict write access to the configuration repository to trusted operators.
 
 Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject

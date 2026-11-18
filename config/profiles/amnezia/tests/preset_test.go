@@ -59,7 +59,7 @@ func TestAmneziaDedicatedPreset(t *testing.T) {
 				}
 				return
 			}
-			if loaded.Integrations.AllowsCodingTools || len(loaded.Integrations.Effective) != 0 || loaded.Context.YardKind != domain.YardVM {
+			if loaded.Integrations.AllowsCodingTools || len(loaded.Integrations.Effective) != 0 || loaded.Context.YardKind != domain.YardVM || loaded.Context.DevSudo {
 				t.Fatal("VPN role lost its isolation")
 			}
 			if loaded.Environment["LIMITS_CPU"] != "2" || loaded.Environment["LIMITS_MEMORY"] != "2GiB" || loaded.Environment["VM_FREE_PAGE_REPORTING"] != "1" || loaded.Environment["VM_CPU_WEIGHT"] != "1000" {

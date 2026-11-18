@@ -256,13 +256,17 @@ func load(
 		if values[definition.Name] == "" {
 			values[definition.Name] = definition.Default
 		}
+		if catalog[definition.Name].HasDefault {
+			tracker.record(defaultLayer, definition.Name, definition.Default, "built-in resolver default", 0, "")
+			continue
+		}
 		tracker.record(defaultLayer, definition.Name, values[definition.Name], integrationDefaultSources[definition.Owner], 0, "profile default")
 	}
 	// Edge D3: source files apply in precedence order; the first refused file,
 	// at its first refused line, stops the load.
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		path := filepath.Join(configDir, name)
-		if err := applyOptionalTracked(path, values, tracker, defaultLayer); err != nil {
+		if err := applyOptionalShippedDefaults(path, values, tracker, defaultLayer); err != nil {
 			return domain.Context{}, nil, err
 		}
 	}
@@ -1034,17 +1038,6 @@ func applyYardTemplateTracked(configDir, yardName, template, yardFile string, va
 	return nil
 }
 
-func applyEnvFileTracked(
-	path string,
-	values environment,
-	tracker *settingTracker,
-	layer settingLayerID,
-) error {
-	return applyEnvFileObserved(path, values, func(name, value string, line int) {
-		tracker.record(layer, name, value, path, line, "")
-	}, tracker.prospectiveReader())
-}
-
 type observedAssignment struct {
 	name        string
 	value       string
@@ -1276,7 +1269,7 @@ func normalizeLegacyEnvironment(values environment) error {
 	return domain.CollectRefusals(conflicts...)
 }
 
-func applyOptionalTracked(
+func applyOptionalShippedDefaults(
 	path string,
 	values environment,
 	tracker *settingTracker,
@@ -1288,7 +1281,11 @@ func applyOptionalTracked(
 		}
 		return err
 	}
-	return applyEnvFileTracked(path, values, tracker, layer)
+	// Skip old shipped assignments for defaults now owned by the core catalog.
+	policy := discardPolicy{retired: func(name string) bool { return catalog[name].HasDefault }}
+	return applyEnvFileObservedRetired(path, values, func(name, value string, line int) {
+		tracker.record(layer, name, value, path, line, "")
+	}, policy, nil, tracker.prospectiveReader())
 }
 
 func pathPresent(path string) bool {
