@@ -242,6 +242,13 @@ prepare)
   # The fixture platform runs before NetworkManager exists, so it writes no guard.
   bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
   watchdog_start
+  # Let the administrator list alone control the uplink before the released guard replaces it.
+  if [ -f /run/udev/rules.d/90-netplan.rules ]; then
+    printf 'SUBSYSTEM=="net", ENV{INTERFACE}=="%s", ENV{NM_UNMANAGED}=""\n' "$UP" \
+      | sudo -n tee /etc/udev/rules.d/91-subyard-e2e-uplink.rules >/dev/null
+    sudo -n udevadm control --reload
+    sudo -n udevadm trigger --action=change --settle "/sys/class/net/$UP"
+  fi
   install_network_manager
   uplink_admins 'NetworkManager install'
   sudo -n nmcli connection add type ethernet ifname "$UP" con-name e2e-uplink autoconnect yes \
