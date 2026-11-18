@@ -572,6 +572,9 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 		if detail := configmaterial.ContributionConflict(result, err); detail != "" {
 			return errors.New(detail)
 		}
+		if detail := configmaterial.WriteRefusal(result, err); detail != "" {
+			return fmt.Errorf("%q: %s", file.destination, detail)
+		}
 		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
 			preserve := runtime.preserveInvalidConfigCommand(file.destination)
 			repair := "yard config apply"

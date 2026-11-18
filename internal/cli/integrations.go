@@ -138,6 +138,11 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 	if err = cli.requireRunningIntegrationYard(ctx, prepared.Loaded); err != nil {
 		return err
 	}
+	if prepared.repairModes {
+		if err = cli.repairStructuredConfigModes(ctx, prepared.Loaded); err != nil {
+			return err
+		}
+	}
 	loaded, err := cli.persistentIntegrationContext(prepared.Loaded)
 	if err != nil {
 		return err
@@ -251,6 +256,9 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 		}
 		defer unlock()
 		if err = cli.requireRunningIntegrationYard(ctx, loaded); err != nil {
+			return result, err
+		}
+		if err = cli.repairStructuredConfigModes(ctx, loaded); err != nil {
 			return result, err
 		}
 		if err = integrationSourceGuard(loaded); err != nil {

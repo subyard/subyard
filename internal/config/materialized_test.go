@@ -79,6 +79,19 @@ func TestMaterializedAssetsRejectInvalidIdentityAndDestination(t *testing.T) {
 	}
 }
 
+func TestRawAssetCannotClaimNativeConfigWithDisabledTemplate(t *testing.T) {
+	definition := profile.IntegrationDefinition{Name: "sample", Root: t.TempDir(), Artifacts: []profile.IntegrationArtifact{
+		{ID: "config", Kind: "config", Source: "config.toml", Destination: ".sample/config.toml", Format: "destination"},
+		{ID: "rules", Kind: "config", Source: "rules", Destination: ".sample/rules", Format: "raw"},
+	}}
+	values := map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "AGENT_sample_CONFIG": "", "AGENT_sample_RULES_DEST": ".sample/config.toml"}
+	for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
+		if _, err := SelectMaterializationSources(values, "dev", scope, definition); err == nil {
+			t.Fatalf("%s: raw artifact claimed a structured native destination", scope)
+		}
+	}
+}
+
 func TestMaterializedAssetReadRejectsSymlinkConfig(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "source")

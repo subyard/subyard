@@ -62,7 +62,13 @@ if [ "$mode" != --held-diagnostic ] && [ "$mode" != --resources ] && [ "$mode" !
   python3 -B config/profiles/telemetry/tests/e2e/storage-failure.py --binary "$asset" --evidence "$state/storage-failure"
 fi
 # Native signal homes are separate below; no real authorization is read.
-sudo -n python3 -B "$state/source/guest.py" apply 1 dev ''
+native_agents=''
+agent_documents="$ROOT/config/profiles/telemetry/tests/e2e/agent-documents.py"
+if [ "$mode" = --local ] || [ "$mode" = --native-only ]; then
+  native_agents='claude codex'
+  sudo -n python3 -B "$agent_documents" seed "$state/source"
+fi
+sudo -n python3 -B "$state/source/guest.py" apply 1 dev "$native_agents"
 timeout 30 bash -c 'until test -S /var/lib/subyard/telemetry/control.sock && test -f /var/lib/subyard/telemetry/delegation.json; do sleep 0.2; done'
 python3 -B - /var/lib/subyard/telemetry http://127.0.0.1:14318 <<'PY_UNITS'
 import json, pathlib, sqlite3, sys, time, urllib.error, urllib.request
@@ -226,18 +232,17 @@ if [ "$mode" != --resources ] && [ "$mode" != --native-only ] && [ "$android_onl
   python3 -B config/profiles/telemetry/tests/e2e/process-scope.py --state "$state" --data-dir /var/lib/subyard/telemetry
 fi
 python3 -B config/profiles/telemetry/tests/e2e/native-signals.py --state "$state" --data-dir /var/lib/subyard/telemetry --source "$ROOT"
-if [ "$mode" = --native-only ]; then
+if [ "$mode" = --native-only ] || [ "$mode" = --local ]; then
+  sudo -n python3 -B "$agent_documents" retire "$state/source"
   wait_for_finals
-  sudo -n python3 -B "$state/source/guest.py" apply 0 dev ''
+  sudo -n python3 -B "$state/source/guest.py" apply 0 dev "$native_agents"
+  sudo -n python3 -B "$agent_documents" disabled "$state/source"
   test -f /var/lib/subyard/telemetry/telemetry.sqlite
-  printf 'ok: telemetry native signals and command diagnostic only\n'
-  exit
-fi
-if [ "$mode" = --local ]; then
-  wait_for_finals
-  sudo -n python3 -B "$state/source/guest.py" apply 0 dev ''
-  test -f /var/lib/subyard/telemetry/telemetry.sqlite
-  printf 'ok: telemetry local storage, OTLP units, stack overhead, process scopes and native signals\n'
+  if [ "$mode" = --local ]; then
+    printf 'ok: telemetry local storage, OTLP units, stack overhead, process scopes and native signals\n'
+  else
+    printf 'ok: telemetry native signals and command diagnostic only\n'
+  fi
   exit
 fi
 export SUBYARD_E2E_RESOURCE_OBSERVER="$ROOT/config/profiles/telemetry/tests/e2e/resource-observer.py"

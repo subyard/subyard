@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -89,11 +88,11 @@ func SelectMaterializationSources(values map[string]string, developer string, sc
 			}
 		}
 	}
-	destinations := make([]string, 0, len(result))
+	destinations := make([]MaterializedAsset, 0, len(result))
 	for _, source := range result {
-		destinations = append(destinations, source.Asset.Destination)
+		destinations = append(destinations, source.Asset)
 	}
-	if err := validateManagedDestinations(destinations, values["INTEGRATION_HOST_LINKS"], filepath.Join("/home", developer)); err != nil {
+	if err := validateMaterializedDestinations(destinations, values, developer, definitions); err != nil {
 		return nil, err
 	}
 	return result, nil

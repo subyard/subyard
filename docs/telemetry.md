@@ -35,9 +35,12 @@ settings through the agent config materializer. Both agent configuration formats
 `0600` while they contain telemetry settings. Current writers tighten permissions before
 returning a template refusal or changing document contents. Readiness checks are read-only.
 An agent template that specifies a different value for the same field is refused with the
-field path. If an editor saves during publication, reconciliation can refuse. When it needs
-to preserve a second version, it leaves a `.subyard-config-recovery.*` file beside the agent
-configuration. Treat that file as sensitive.
+field path. Refresh also refuses when a user deletes an owned exporter field. Disabling leaves
+that deletion in place. Each structured replacement retains the displaced inode in a private
+`.subyard-config-recovery.*` file beside the configuration, so an editor with the old file
+open can still save its changes. A publication refusal names the retained file when one exists.
+Treat recovery files as sensitive. The writer refuses a TOML rewrite if its parser would truncate
+a time literal with more than six fractional digits.
 
 Rolling back to v0.28–v0.30 carries a known risk. A retained template writer can
 change agent config permissions to `0644` while the file still contains the collector

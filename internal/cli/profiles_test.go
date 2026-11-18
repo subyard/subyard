@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -23,6 +24,7 @@ type profileRuntimeFixture struct {
 	recordFail bool
 	applied    []string
 	recorded   []string
+	check      func() error
 }
 type profileRuntimeSelection struct {
 	fixture  *profileRuntimeFixture
@@ -30,6 +32,9 @@ type profileRuntimeSelection struct {
 }
 
 func (runtime profileRuntimeSelection) ProfileServiceConverged(context.Context, string) (bool, error) {
+	if runtime.fixture.check != nil {
+		return false, runtime.fixture.check()
+	}
 	return runtime.fixture.installed == runtime.selected, nil
 }
 func (runtime profileRuntimeSelection) ApplyProfileService(_ context.Context, name string, _ []ports.TeardownArtifact) error {
@@ -145,6 +150,51 @@ func prepareScopedProfile(t *testing.T, cli *CLI, arguments ...string) (*prepare
 	}
 	definition, _ := cli.manifest.Lookup("profile")
 	return admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments, ExplicitYard: true, InteractiveSetup: true})
+}
+
+func TestScopedProfileMutationRepairsBeforeConvergenceRefusal(t *testing.T) {
+	cli, incus, runtime, _, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
+	for _, format := range []string{"json", "toml"} {
+		root := filepath.Join(cli.options.RepositoryRoot, "config", "agents", format)
+		writeProfileTestFile(t, filepath.Join(root, "integration.json"), fmt.Appendf(nil, `{"schema_version":2,"provision":"provision.sh","command":"sample","check":"sample-check","artifacts":[{"id":"config","kind":"config","source":"settings.%s","destination":".sample/settings.%s","format":"destination"}]}`, format, format), 0600)
+		writeProfileTestFile(t, filepath.Join(root, "provision.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+		writeProfileTestFile(t, filepath.Join(root, "settings."+format), nil, 0600)
+	}
+	loaded, err := cli.loadContext("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Catalog, err = config.LoadCatalog(cli.options.RepositoryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli.options.Executor = incus
+	fixtureConflict := errors.New("conflicting configuration template")
+	definition, _ := cli.manifest.Lookup("profile")
+	for _, verb := range []string{"enable", "disable"} {
+		t.Run(verb, func(t *testing.T) {
+			incus.ConfigModeRepairs = nil
+			runtime.check = func() error {
+				var paths []string
+				for _, call := range incus.ConfigModeRepairs {
+					command := call.Request.Command
+					if len(command) < 7 || command[4] != configmaterial.ModeRepair {
+						t.Fatalf("unexpected guest request before profile check: %#v", command[:min(3, len(command))])
+					}
+					paths = append(paths, command[6])
+				}
+				if !slices.Equal(paths, []string{"/home/dev/.sample/settings.json", "/home/dev/.sample/settings.toml"}) {
+					t.Fatalf("convergence check ran before permissions were repaired: %v", paths)
+				}
+				return fixtureConflict
+			}
+			_, err := admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition,
+				Arguments: []string{verb, "fixture"}, ExplicitYard: true, RepairModes: true})
+			if !errors.Is(err, fixtureConflict) || len(runtime.applied) != 0 {
+				t.Fatalf("expected refusal before profile apply: %v, applied=%v", err, runtime.applied)
+			}
+		})
+	}
 }
 
 func TestScopedProfileEnableDisablePreservesNeighborsAndSkipsInit(t *testing.T) {

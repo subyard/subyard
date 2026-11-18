@@ -2,6 +2,7 @@ package configmaterial
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -24,6 +25,7 @@ import (
 const (
 	ModeObserve = "observe"
 	ModeApply   = "apply"
+	ModeRepair  = "repair-mode"
 	// ModeApplyInstalled applies for an installed-view repair: it refuses a
 	// document whose ownership a retirement released, whatever its content.
 	ModeApplyInstalled = "apply-installed"
@@ -98,6 +100,42 @@ func ContributionConflict(result ports.InstanceExecResult, err error) string {
 		return ""
 	}
 	return "configuration contribution conflicts at " + detail
+}
+
+var publicationRefusal = regexp.MustCompile(`^config materialization: (concurrent destination change|invalid destination path|configuration publication failed|configuration permissions could not be tightened to 0600|TOML time precision exceeds the writer's supported precision)(; preserved file \.subyard-config-recovery\.[0-9a-f]{24})?\n?$`)
+
+// WriteRefusal admits only fixed writer messages and its generated recovery name.
+func WriteRefusal(result ports.InstanceExecResult, err error) string {
+	var completed *ports.GuestExitError
+	if result.ExitCode != 2 || err != nil && (!errors.As(err, &completed) || completed.Code != 2) {
+		return ""
+	}
+	match := publicationRefusal.FindSubmatch(result.Stderr)
+	if match == nil {
+		return ""
+	}
+	return string(match[1]) + string(match[2])
+}
+
+// RepairModes tightens each destination independently without reading content.
+func RepairModes(ctx context.Context, executor ports.InstanceExecutor, yard domain.Context, destinations []string) error {
+	var refusals []error
+	for _, path := range destinations {
+		request, err := Request("json", ModeRepair, yard.DevUser, path, yard.DevUID, nil)
+		if err != nil {
+			refusals = append(refusals, fmt.Errorf("repair permissions for %q: %w", path, err))
+			continue
+		}
+		result, err := executor.Exec(ctx, yard.IncusProject, yard.YardInstanceName, request)
+		if err != nil || result.ExitCode != 0 {
+			if detail := WriteRefusal(result, err); detail != "" {
+				refusals = append(refusals, fmt.Errorf("repair permissions for %q: %s", path, detail))
+			} else {
+				refusals = append(refusals, fmt.Errorf("repair permissions for %q failed", path))
+			}
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }
 
 func ParseObservation(payload []byte) (Observation, error) {
@@ -337,7 +375,7 @@ func jsonRequest(
 }
 
 func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome string, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
-	if mode != ModeObserve && mode != ModeApply && mode != ModeApplyInstalled && mode != ModeAssessAdopt && mode != ModeAssessRetire && mode != ModeRetire {
+	if mode != ModeObserve && mode != ModeApply && mode != ModeApplyInstalled && mode != ModeAssessAdopt && mode != ModeAssessRetire && mode != ModeRetire && mode != ModeRepair {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization mode")
 	}
 	if !domain.SafeName(developer) || uid <= 0 {
@@ -351,7 +389,7 @@ func materializationRequest(format, mode, developer, destination string, uid int
 		cleanDestination != destination {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization destination")
 	}
-	if mode == ModeAssessRetire || mode == ModeRetire {
+	if mode == ModeAssessRetire || mode == ModeRetire || mode == ModeRepair {
 		payload = []byte(`{}`)
 		if format == "toml" {
 			payload = nil

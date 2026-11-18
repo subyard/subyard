@@ -393,6 +393,13 @@ def main():
     if os.getuid() != 0:
         raise ValueError('guest root required')
     mode, selected, user, agents, *bindings = sys.argv[1:]
+    if mode == 'repair-modes':
+        account = pwd.getpwnam(user)
+        if account.pw_uid == 0:
+            raise ValueError('developer account required')
+        native.repair_modes(Path(account.pw_dir), Path('/var/lib/subyard/telemetry-control/native.json'),
+                            agents.split() if selected == '1' else [], account.pw_uid)
+        return
     if mode in ('identity-observe','identity-apply'):
         import authority
         source=bindings[-1]
@@ -425,13 +432,10 @@ def main():
     if mode == 'startup':
         print(json.dumps(runtime.startup()))
         return
-    try:
+    if mode in ('apply', 'refresh'):
+        runtime.repair_native_modes()
+    if mode != 'apply':
         observation = runtime.observe()
-    finally:
-        # Refresh compares the pre-repair observation to its binding. Mutating
-        # entry points still tighten permissions before returning any refusal.
-        if mode in ('apply', 'refresh'):
-            runtime.repair_native_modes()
     if mode == 'observe':
         print(json.dumps(observation))
         return
@@ -441,7 +445,10 @@ def main():
         elif observation['state'] not in ('current', 'absent'):
             raise ValueError('telemetry drift')
         return
-    if mode not in ('apply', 'refresh') or (mode == 'refresh' and bindings != [observation['actual'], observation['desired']]):
+    if mode == 'refresh' and len(bindings) == 2 and bindings[1] == observation['desired'] and observation['state'] in ('current', 'absent'):
+        print(json.dumps(observation))
+        return
+    if mode not in ('apply', 'refresh') or mode == 'refresh' and bindings != [observation['actual'], observation['desired']]:
         raise ValueError('telemetry observation changed')
     runtime.apply()
     verified = runtime.observe()
@@ -473,6 +480,8 @@ if __name__ == '__main__':
                 print('telemetry-agent-config-invalid-v1 '+failure.agent, file=sys.stderr)
             elif isinstance(failure, native.materializer.ContributionConflict):
                 print('telemetry-config-contribution-conflict-v1 '+str(failure), file=sys.stderr)
+            elif isinstance(failure, native.materializer.PublicationRefusal) and failure.recovery:
+                print('telemetry-agent-config-recovery-v1 '+agent+' '+failure.recovery, file=sys.stderr)
             elif agent:
                 print('telemetry-agent-config-unavailable-v1 '+agent, file=sys.stderr)
         if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):

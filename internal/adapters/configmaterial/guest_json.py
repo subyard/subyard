@@ -115,6 +115,17 @@ def parse_document(payload, file_format=None):
     return tomllib.loads(payload, parse_float=Decimal)
 
 
+def check_toml_time_precision(payload):
+    # tomllib truncates fractions to microseconds. A marker inside a comment
+    # or string is valid TOML, but a marker in a time literal is not.
+    marked = re.sub(rb"([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}[0-9]+)", rb"\1!", payload)
+    if marked != payload:
+        try:
+            parse_document(marked, "toml")
+        except ValueError:
+            raise MaterializationError("TOML time precision exceeds the writer's supported precision") from None
+
+
 def lookup(root, parts):
     value = root
     for part in parts:
@@ -553,88 +564,115 @@ def atomic_write(path, payload, uid, mode, gid=None, publish=None):
         os.close(directory_descriptor)
 
 
-def exchange_destination(directory, source, destination):
-    # Linux renameat2(RENAME_EXCHANGE) retains the inode displaced at publication.
+def rename_destination(directory, source, destination, flags):
     rename = ctypes.CDLL(None, use_errno=True).renameat2
-    if rename(directory, os.fsencode(source), directory, os.fsencode(destination), 2):
+    if rename(directory, os.fsencode(source), directory, os.fsencode(destination), flags):
         code = ctypes.get_errno()
         raise OSError(code, os.strerror(code))
 
 
+def exchange_destination(directory, source, destination):
+    rename_destination(directory, source, destination, 2)  # RENAME_EXCHANGE
+
+
+class PublicationRefusal(MaterializationError):
+    def __init__(self, reason, recovery=None):
+        self.recovery = recovery
+        super().__init__(reason + ("; preserved file " + recovery if recovery else ""))
+
+
 def replace_destination(destination, allowed_home, uid, original, payload, create, private=False, gid=None):
     directory_mode = 0o700 if private else 0o755
-    validate_destination_parent(destination, allowed_home, uid, create, gid, directory_mode)
+    recovery = None
 
     def publish(directory, temporary, name):
+        nonlocal recovery
         parent = os.stat(os.path.dirname(destination), follow_symlinks=False)
         if (not os.path.samestat(parent, os.fstat(directory)) or
                 read_destination(name, private, dir_fd=directory) != original):
             raise MaterializationError("concurrent destination change")
         if original is None:
             try:
-                os.link(temporary, name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+                rename_destination(directory, temporary, name, 1)  # RENAME_NOREPLACE
             except FileExistsError:
                 raise MaterializationError("concurrent destination change") from None
-            os.unlink(temporary, dir_fd=directory)
             return
 
-        recovery = ".subyard-config-recovery." + secrets.token_hex(12)
-        os.rename(temporary, recovery, src_dir_fd=directory, dst_dir_fd=directory)
+        candidate = ".subyard-config-recovery." + secrets.token_hex(12)
+        os.rename(temporary, candidate, src_dir_fd=directory, dst_dir_fd=directory)
         try:
-            exchange_destination(directory, recovery, name)
+            exchange_destination(directory, candidate, name)
         except OSError:
-            os.unlink(recovery, dir_fd=directory)
+            os.unlink(candidate, dir_fd=directory)
             raise
+        recovery = candidate
 
-        def matches(path, content):
-            try:
-                return read_destination(path, private, dir_fd=directory) == content
-            except (OSError, MaterializationError):
-                return False
-
-        if matches(recovery, original):
-            os.unlink(recovery, dir_fd=directory)
-            return
-        # A save raced publication. Restore it and keep any second save that
-        # raced the restoration under the recovery name.
         try:
-            exchange_destination(directory, recovery, name)
-        except OSError:
-            pass
-        else:
-            if matches(recovery, payload):
-                os.unlink(recovery, dir_fd=directory)
-                repair_mode_at(directory, name, uid)
-                os.fsync(directory)
+            try:
+                unchanged = read_destination(recovery, private, dir_fd=directory) == original
+            except (OSError, MaterializationError):
+                unchanged = False
+            if not unchanged:
+                # Restore the first save. Both inodes must keep a name because
+                # an editor can still be writing through an open descriptor.
+                try:
+                    exchange_destination(directory, recovery, name)
+                except OSError:
+                    pass
                 raise MaterializationError("concurrent destination change")
-        repair_mode_at(directory, name, uid)
-        repair_mode_at(directory, recovery, uid)
-        os.fsync(directory)
-        raise MaterializationError("concurrent destination change; preserved file " + recovery)
+        finally:
+            try:
+                repair_mode_at(directory, recovery, uid)
+            finally:
+                os.fsync(directory)
 
     # A mode-only repair uses fchmod so it never publishes stale bytes.
-    atomic_write(destination, payload, uid, 0o600, gid, publish)
-    if read_destination(destination, private) != payload:
-        raise MaterializationError("destination verification failed")
+    try:
+        validate_destination_parent(destination, allowed_home, uid, create, gid, directory_mode)
+        if original is None or payload != original:
+            atomic_write(destination, payload, uid, 0o600, gid, publish)
+        if read_destination(destination, private) != payload:
+            raise MaterializationError("concurrent destination change")
+    except (OSError, MaterializationError) as error:
+        reason = str(error) if isinstance(error, MaterializationError) else "configuration publication failed"
+        raise PublicationRefusal(reason, recovery) from None
+    finally:
+        try:
+            repair_document_mode(destination, allowed_home, uid)
+        except (OSError, MaterializationError):
+            raise PublicationRefusal("configuration permissions could not be tightened to 0600", recovery) from None
 
 
 def repair_mode_at(directory, name, uid):
-    try:
-        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-    except FileNotFoundError:
-        return
-    except OSError as error:
-        if error.errno == errno.ELOOP:
-            return  # Ordinary destination validation handles symlinks.
-        raise
-    try:
-        info = os.fstat(descriptor)
-        if (stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == uid and
-                stat.S_IMODE(info.st_mode) != 0o600):
-            os.fchmod(descriptor, 0o600)
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    for _ in range(3):
+        try:
+            descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            if error.errno == errno.ELOOP:
+                return  # Ordinary destination validation handles symlinks.
+            raise
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode):
+                return
+            if stat.S_IMODE(info.st_mode) != 0o600 and info.st_nlink == 1 and info.st_uid == uid:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if os.path.samestat(info, current):
+                if stat.S_IMODE(current.st_mode) == 0o600:
+                    return
+                if current.st_nlink != 1 or current.st_uid != uid:
+                    break
+        except FileNotFoundError:
+            return
+        except OSError:
+            break
+        finally:
+            os.close(descriptor)
+    raise MaterializationError("configuration permissions could not be tightened to 0600")
 
 
 def repair_document_mode(destination, home, uid):
@@ -642,13 +680,18 @@ def repair_document_mode(destination, home, uid):
                                 action=lambda directory: repair_mode_at(directory, os.path.basename(destination), uid))
 
 
-def document_mode_drift(destination, original):
-    return original is not None and stat.S_IMODE(os.lstat(destination).st_mode) != 0o600
+def document_mode_drift(destination):
+    try:
+        return stat.S_IMODE(os.lstat(destination).st_mode) != 0o600
+    except FileNotFoundError:
+        return False
 
 
 def document_payload(current, previous, original, file_format=None, writer=None, private=False):
     if original is not None and json_equal(current, previous, file_format):
         return original
+    if (file_format or FORMAT) == "toml" and original is not None and previous is not None:
+        check_toml_time_precision(original)
     try:
         if (file_format or FORMAT) == "toml":
             # The Go materializer prepends the isolated writer namespace for TOML.
@@ -834,7 +877,7 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
     parent = validate_destination_parent(destination, home, uid, False)
     current, original = read_current(destination, allow_invalid=True, file_format=file_format,
                                      private=True) if parent else ({}, None)
-    mode_drift = document_mode_drift(destination, original)
+    mode_drift = document_mode_drift(destination)
     repair_mode = partial(repair_document_mode, destination, home, uid) if mode_drift else None
     blank = original is not None and not original.strip()
     previous = current
@@ -850,12 +893,15 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
                 raise ValueError()
         except ValueError:
             raise MaterializationError("invalid contribution template") from None
+        if file_format == "toml":
+            check_toml_time_precision(template_payload)
         check_contribution(template, {section: wanted}, file_format)
         template_owned = baseline is not None and baseline.get("phase") == "applied"
 
     if current is None and not blank and not (enabled and (owned or template_owned)):
         raise InvalidContributionDestination("invalid contribution destination")
     current = current or {}
+    reconstruct = original is None or blank or previous is None
     group = current.get(section, {})
     if not enabled and (section not in current or not isinstance(group, dict)):
         # A missing or replaced section contains no owned fields.
@@ -863,7 +909,7 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
     if enabled:
         check_contribution_sections(current, {section: wanted})
 
-    if check and not mode_drift and enabled and reference is not None and template_owned and not current and owned.keys() == wanted.keys() and all(
+    if check and not mode_drift and enabled and reference is not None and template_owned and reconstruct and owned.keys() == wanted.keys() and all(
             json_equal(value, owned[key]["managed"], file_format) for key, value in wanted.items()):
         # The template owner can reconstruct both inputs in its ordinary pass.
         return owned, owned, None, register
@@ -883,6 +929,8 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
         found = key in group
         old = owned.get(key, {"present": found, "value": group.get(key), "managed": value})
         allowed = [old["managed"], *old.get("previous", [])]
+        if key in owned and not found and not reconstruct and not old.get("pending_missing"):
+            raise MaterializationError("native exporter ownership conflict")
         if found and not (old["present"] and json_equal(group[key], old["value"], file_format)) and not any(
                 json_equal(group[key], candidate, file_format) for candidate in allowed):
             raise MaterializationError("native exporter ownership conflict")
@@ -895,6 +943,8 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
         if had_empty_section:
             final[key]["empty_section"] = True
         intent[key] = {**final[key], "previous": previous_values}
+        if not found and (key not in owned or old.get("pending_missing")):
+            intent[key]["pending_missing"] = True
         group[key] = value
 
     for key, old in owned.items():
@@ -975,7 +1025,7 @@ def printable_paths(paths):
     return paths
 
 
-def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution, mode_drift):
+def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution):
     if baseline is None or baseline["schema"] != 2:
         raise MaterializationError("retirement ownership evidence unavailable")
     marker = read_release_marker(release_path, baseline)
@@ -1032,14 +1082,15 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
             atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
             replace_destination(destination, allowed_home, uid, original, payload, False,
                                 private=bool(contribution))
-            mode_drift = False
         atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline, True)) + b"\n", STATE_UID, 0o600)
         baseline["phase"] = "retired"
         atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
         phase = "retired"
-    if mode == "retire" and mode_drift:
+    if mode == "retire":
         repair_document_mode(destination, allowed_home, uid)
-        mode_drift = False
+    mode_drift = document_mode_drift(destination)
+    if mode == "retire" and mode_drift:
+        raise MaterializationError("configuration permissions could not be tightened to 0600")
     report = {"converged": phase == "retired" and not mode_drift,
               "fingerprint": fingerprint(current, {}, baseline["projection_digest"],
                                          "release-" + release if release else phase,
@@ -1056,7 +1107,7 @@ def main():
     if len(sys.argv) != 8:
         fail("invalid request")
     mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest = sys.argv[1:]
-    if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire"):
+    if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire", "repair-mode"):
         fail("invalid request")
     # An installed-view repair applies like apply, but never takes back ownership
     # that a retirement released; only a deliberate enable does.
@@ -1070,6 +1121,8 @@ def main():
         fail("invalid request")
     if not read_only:
         repair_document_mode(destination, allowed_home, uid)
+    if mode == "repair-mode":
+        return
     try:
         payload = sys.stdin.buffer.read()
         if hashlib.sha256(payload).hexdigest() != payload_digest:
@@ -1079,6 +1132,8 @@ def main():
         fail("invalid desired " + FORMAT.upper())
     if not isinstance(desired, dict):
         fail("desired configuration root must be an object")
+    if FORMAT == "toml":
+        check_toml_time_precision(payload)
     wanted_owned = sorted(ownership(desired), key=lambda item: (item["path"], item["kind"]))
     key = asset_key(developer, destination)
     baseline_path, receipt_path, lock_path, release_path = (key + suffix for suffix in (".json", ".ownership", ".lock", ".release"))
@@ -1160,7 +1215,7 @@ def main():
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         allow_invalid = mode in ("observe", "apply") or mode == "assess-adopt" and bool(contribution)
         current, original = read_current(destination, allow_invalid=allow_invalid, private=bool(contribution)) if parent_exists else ({}, None)
-        mode_drift = document_mode_drift(destination, original)
+        mode_drift = document_mode_drift(destination)
         previous = current
         if current is None:
             if evidence is None and not contribution:
@@ -1172,7 +1227,7 @@ def main():
                 return
             current = {}
         if mode in ("assess-retire", "retire"):
-            retire(mode, evidence, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution, mode_drift)
+            retire(mode, evidence, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution)
             return
 
         check_contribution_sections(current, contribution)
@@ -1224,7 +1279,7 @@ def main():
         if baseline is not None and baseline.get("phase") == "retiring":
             raise MaterializationError("materialization retirement pending")
         current = copy.deepcopy(current)
-        if contribution and (original is None or not current):
+        if contribution and (original is None or previous is None or not original.strip()):
             overlay(current, contribution)
         if baseline is not None and baseline.get("phase") != "retired":
             wanted_keys = {(entry["path"], entry["kind"]) for entry in wanted_owned}

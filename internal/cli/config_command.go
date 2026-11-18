@@ -1107,6 +1107,10 @@ func (cli *CLI) applyConfig(
 	assumeYes bool,
 	selector configTargetSelector,
 ) int {
+	if err := cli.repairConfigTargetModes(ctx, targets); err != nil {
+		cli.errorf("config apply: %v", err)
+		return 1
+	}
 	execution, err := cli.prepareConfigApply(ctx, targets, selector)
 	if err != nil {
 		cli.errorf("config apply: %v", err)
@@ -1126,6 +1130,47 @@ func (cli *CLI) applyConfig(
 	}
 	defer prepared.Close()
 	return cli.runPreparedCommand(ctx, prepared, assumeYes)
+}
+
+func (cli *CLI) repairConfigTargetModes(ctx context.Context, targets []configTarget) error {
+	var refusals []error
+	for _, target := range targets {
+		if err := cli.repairStructuredConfigModes(ctx, target.Loaded); err != nil {
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", target.Name, err))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
+func (cli *CLI) repairStructuredConfigModes(ctx context.Context, loaded config.Loaded) error {
+	yard := loaded.Context
+	if yard.AccessKind != domain.AccessLocal {
+		return nil
+	}
+	paths := config.StructuredConfigDestinations(loaded.Environment, yard.DevUser, loaded.Catalog.Integrations()...)
+	if len(paths) == 0 {
+		return nil
+	}
+	incus, executor := cli.statusPorts()
+	info, err := incus.Instance(ctx, yard.IncusProject, yard.YardInstanceName)
+	if errors.Is(err, ports.ErrInstanceNotFound) || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := domain.NativeTargetOwnership(yard, info.Config); err != nil {
+		return err
+	}
+	if !strings.EqualFold(info.Status, "running") || info.Config["user.subyard.managed"] != "true" {
+		return nil
+	}
+	unlock, err := cli.admitOwnerWrite(ctx, loaded)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return configmaterial.RepairModes(ctx, executor, yard, paths)
 }
 
 type dispatcherConfigApplier struct {

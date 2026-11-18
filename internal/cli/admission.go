@@ -11,6 +11,8 @@ import (
 
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/rpc"
@@ -271,6 +273,9 @@ func (cli *CLI) admitReleaseGate(
 	request := gateRequest{yard: yard, handler: admission.handler, name: admission.name, arguments: arguments,
 		definition: resourceDefinition, profileResource: admission.handler == ""}
 	admitted, outcome, gateInspection, refusal, scoped, gateErr := cli.admitGate(ctx, request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+		if err := cli.repairModesBeforeReleaseInspection(ctx, yard, admission.handler, arguments); err != nil {
+			return nil, nil, err
+		}
 		return cli.inspectCommandMutationGate(ctx, yard, admission.handler, arguments)
 	})
 	if gateErr != nil {
@@ -299,6 +304,52 @@ func (cli *CLI) admitReleaseGate(
 	}
 	cli.writeMutationGateRefusal(outcome, gateInspection)
 	return 1, true
+}
+
+// Installed readiness can refuse before a command's own preparation. A local
+// writer can already narrow permissions on its selected managed instance.
+func (cli *CLI) repairModesBeforeReleaseInspection(ctx context.Context, yard, handler string, arguments []string) error {
+	var profileID string
+	var allLocal bool
+	switch handler {
+	case "@config":
+		apply, all := configApplyInvocation(arguments)
+		if !apply {
+			return nil
+		}
+		allLocal = all
+	case "@profile":
+		request, err := parseProfileArguments(arguments)
+		if err != nil || (request.verb != "enable" && request.verb != "disable") {
+			return nil
+		}
+		profileID = request.id
+	case "@integration":
+		request, err := parseIntegrationArguments(arguments)
+		if err != nil || request.verb != "disable" {
+			return nil
+		}
+	case "@init":
+		if _, err := parseInitArguments(arguments); err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	if _, available, err := cli.mutationGateReleaseOptions(); err != nil || !available {
+		return err
+	}
+	loaded, err := cli.resolveContextWithYardSettings(yard, "")
+	if err != nil || loaded.Context.AccessKind != domain.AccessLocal {
+		return nil // Command preparation reports unresolved or remote targets.
+	}
+	if profileID != "" && !slices.ContainsFunc(loaded.Catalog.Profiles(), func(definition profile.Definition) bool {
+		return definition.Name == profileID && definition.OwnerService != ""
+	}) {
+		return nil
+	}
+	targets, _ := cli.localConfigTargets(loaded, allLocal) // Preparation owns target-load diagnostics.
+	return cli.repairConfigTargetModes(ctx, targets)
 }
 
 // writeMutationGateRefusal renders a host-wide refusal as text: the release

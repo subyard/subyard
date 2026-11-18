@@ -57,6 +57,23 @@ class NativeTest(unittest.TestCase):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(path.read_bytes(), before)
 
+    def test_mode_repair_rechecks_current_inode_after_earlier_secure_observation(self):
+        path = native.agent_path(self.root, 'claude')
+        path.parent.mkdir(mode=0o700)
+        native.publish(path, b'{}', None)
+        stat_file = os.fstat
+
+        def widen_after_fstat(descriptor):
+            observed = stat_file(descriptor)
+            if mock.call_count == 1:
+                os.fchmod(descriptor, 0o644)
+            return observed
+
+        with patch.object(os, 'fstat', side_effect=widen_after_fstat) as mock:
+            native.materializer.repair_document_mode(str(path), str(self.root), os.getuid())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.read_bytes(), b'{}')
+
     def test_template_and_exporters_converge_in_both_orders_and_repair_damage(self):
         for agent, payload in [('claude', b'{"unrelated":true}'), ('codex', b'unrelated = true\n')]:
             for profile_first in (False, True):
@@ -254,7 +271,7 @@ class NativeTest(unittest.TestCase):
                 native.reconcile(root, state, agents, 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
             self.assertEqual({path: path.read_bytes() for path in before}, before)
 
-    def test_missing_and_prior_typed_native_values_require_reconciliation(self):
+    def test_prior_typed_native_values_require_reconciliation(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             (root/'.codex').mkdir(mode=0o700)
@@ -263,22 +280,43 @@ class NativeTest(unittest.TestCase):
             path.chmod(0o600)
             state = root/'native.json'
             native.reconcile(root, state, ['codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-            for change in ('missing', 'prior integer'):
-                with self.subTest(change=change):
-                    value = tomllib.loads(path.read_text())
-                    if change == 'missing':
-                        value['otel'].pop('metrics_exporter')
-                    else:
-                        value['otel']['log_user_prompt'] = 0
-                    path.write_text(tomli_w.dumps(value))
-                    self.assertFalse(native.reconcile(root, state, ['codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid(), check=True))
-                    native.reconcile(root, state, ['codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-                    self.assertIs(tomllib.loads(path.read_text())['otel']['log_user_prompt'], False)
-                    self.assertTrue(native.reconcile(root, state, ['codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid(), check=True))
+            value = tomllib.loads(path.read_text())
+            value['otel']['log_user_prompt'] = 0
+            path.write_text(tomli_w.dumps(value))
+            self.assertFalse(native.reconcile(root, state, ['codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid(), check=True))
+            native.reconcile(root, state, ['codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+            self.assertIs(tomllib.loads(path.read_text())['otel']['log_user_prompt'], False)
+            self.assertTrue(native.reconcile(root, state, ['codex'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid(), check=True))
             native.reconcile(root, state, [], '', '', tomli_w, os.getuid(), os.getgid())
             restored = tomllib.loads(path.read_text())['otel']['log_user_prompt']
             self.assertIs(type(restored), int)
             self.assertEqual(restored, 0)
+
+    def test_deleted_exporter_value_stays_deleted_through_refresh_and_disable(self):
+        for agent, section, field, prior, encode, decode in (
+            ('claude', 'env', 'OTEL_LOGS_EXPORTER', 'console', json.dumps, json.loads),
+            ('codex', 'otel', 'log_user_prompt', True, tomli_w.dumps, tomllib.loads),
+        ):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                path, state = native.agent_path(root, agent), root/'native.json'
+                path.parent.mkdir(mode=0o700)
+                path.write_text(encode({'unrelated': True, section: {field: prior}}))
+                args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                native.reconcile(*args)
+                edited = decode(path.read_text())
+                del edited[section][field]
+                path.write_text(encode(edited))
+                path.chmod(0o644)
+                before, receipt = path.read_bytes(), state.read_bytes()
+                for check in (True, False):
+                    with self.assertRaisesRegex(ValueError, 'ownership conflict'):
+                        native.reconcile(*args, check=check)
+                    self.assertEqual(path.read_bytes(), before)
+                    self.assertEqual(state.read_bytes(), receipt)
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o644 if check else 0o600)
+                native.reconcile(*args[:2], [], *args[3:])
+                self.assertEqual(decode(path.read_text()), {'unrelated': True})
 
     def test_managed_boolean_rejects_numeric_foreign_edit(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -437,40 +475,74 @@ class NativeTest(unittest.TestCase):
                 self.assertTrue(json.loads(result.stdout)['converged'])
 
     def test_concurrent_edit_during_publication_is_preserved(self):
-        for agent, edit in [('claude', b'{"unrelated":"editor"}'), ('codex', b'unrelated = "editor"\n')]:
+        for agent, encode, decode in [('claude', json.dumps, json.loads), ('codex', tomli_w.dumps, tomllib.loads)]:
             with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
                 root = Path(name)
                 path, state = native.agent_path(root, agent), root/'native.json'
-                path.parent.mkdir(mode=0o700)
-                native.publish(path, b'{}' if agent == 'claude' else b'', None)
                 args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                native.reconcile(*args)
+                args = (*args[:4], 'y'*64, *args[5:])
+                edited = decode(path.read_text())
+                edited['unrelated'] = 'editor'
+                edit = encode(edited).encode()
+                editor = root/'editor-save'
                 fsync = os.fsync
 
                 def editor_after_fsync(fd):
                     fsync(fd)
                     staged = Path(os.readlink(f'/proc/self/fd/{fd}'))
                     if staged.parent == path.parent and staged.name.startswith('.subyard-config.'):
-                        path.write_bytes(edit)
+                        editor.write_bytes(edit)
+                        editor.chmod(0o644)
+                        editor.replace(path)
 
                 with patch.object(os, 'fsync', side_effect=editor_after_fsync):
                     with self.assertRaisesRegex(ValueError, 'concurrent destination change'):
                         native.reconcile(*args)
                 self.assertEqual(path.read_bytes(), edit)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                 exchange = native.materializer.exchange_destination
 
                 # The second exchange restores the editor's save.
                 def save_at_exchange(*arguments):
                     if swap.call_count == 1:
                         path.write_bytes(edit + b'\n')
+                        path.chmod(0o644)
+                    if swap.call_count == 2:
+                        path.write_bytes(edit + b'\n\n')
+                        path.chmod(0o644)
                     exchange(*arguments)
 
                 with patch.object(native.materializer, 'exchange_destination', side_effect=save_at_exchange) as swap:
-                    with self.assertRaisesRegex(ValueError, 'concurrent destination change'):
+                    with self.assertRaises(native.AgentConfigRefusals) as refused:
                         native.reconcile(*args)
+                saved_agent, failure = refused.exception.failures[0]
+                self.assertEqual(saved_agent, agent)
+                self.assertIn('concurrent destination change', str(failure))
+                preserved = path.parent/failure.recovery
                 self.assertEqual(path.read_bytes(), edit + b'\n')
-                self.assertFalse(list(path.parent.glob('.subyard-config-recovery.*')))
+                self.assertEqual(preserved.read_bytes(), edit + b'\n\n')
+                for document in (path, preserved):
+                    self.assertEqual(document.stat().st_mode & 0o777, 0o600)
+
+                read = native.materializer.read_destination
+                with path.open('r+b') as open_editor:
+                    inode = path.stat().st_ino
+
+                    def save_after_comparison(name, *arguments, **keywords):
+                        contents = read(name, *arguments, **keywords)
+                        if name.startswith('.subyard-config-recovery.'):
+                            open_editor.seek(0)
+                            open_editor.write(edit + b'\n\n\n')
+                            open_editor.flush()
+                        return contents
+
+                    with patch.object(native.materializer, 'read_destination', side_effect=save_after_comparison):
+                        native.reconcile(*args)
+                    old_inode = next(saved for saved in path.parent.glob('.subyard-config-recovery.*') if saved.stat().st_ino == inode)
+                    self.assertEqual(old_inode.read_bytes(), edit + b'\n\n\n')
+                    self.assertEqual(old_inode.stat().st_mode & 0o777, 0o600)
                 native.reconcile(*args)
-                decode = json.loads if agent == 'claude' else tomllib.loads
                 self.assertEqual(decode(path.read_text())['unrelated'], 'editor')
 
     def test_claude_strict_parse_and_precise_round_trip(self):

@@ -23,6 +23,11 @@ def run(arguments, **kwargs):
     if result.returncode:
         refusals, retry = [], None
         for line in result.stderr[-65536:].decode(errors='replace').splitlines()[-32:]:
+            recovery = re.fullmatch(r'telemetry-agent-config-recovery-v1 (claude|codex) (\.subyard-config-recovery\.[0-9a-f]{24})', line)
+            if recovery:
+                agent, name = recovery.groups()
+                directory = '/home/'+os.environ['DEV_USER']+'/.'+agent
+                refusals.append('agent configuration edit preserved at '+directory+'/'+name)
             if line.startswith('telemetry-config-contribution-conflict-v1 '):
                 detail = line.removeprefix('telemetry-config-contribution-conflict-v1 ')
                 if len(detail.encode()) <= 480 and detail.isprintable():
@@ -144,8 +149,10 @@ def main():
             except (OSError, ValueError):
                 if selected:
                     refusals.append('managed agent source missing, unsafe or unreadable: '+source_path)
-    if refusals:
+    if refusals and operation not in ('apply', 'refresh'):
         raise Refusal(refusals)
+    if refusals:
+        operation, bindings, binary, templates = 'repair-modes', [], None, {}
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode='w') as archive:
         for name in FILES:
@@ -165,6 +172,8 @@ def main():
     startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
     output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
                   GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
+    if refusals:
+        raise Refusal(refusals)
     if operation == 'check':
         if output == 'telemetry-drift':
             return 1

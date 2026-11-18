@@ -214,6 +214,19 @@ func TestConfigApplyReadFailureDoesNotClaimUnownedPreservation(t *testing.T) {
 	}
 }
 
+func TestStructuredConfigApplyReportsValidatedRecoveryFilename(t *testing.T) {
+	const name = ".subyard-config-recovery.1234567890abcdef12345678"
+	for _, extra := range []string{"", "\nprivate output"} {
+		fake := runningIncus(1)
+		fake.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: concurrent destination change; preserved file " + name + "\n" + extra)}}}
+		runtime := Runtime{Executor: fake, Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
+		err := runtime.applyGuestConfig(context.Background(), guestConfigFile{destination: "/home/dev/settings.json", ownedFormat: "json"}, []byte(`{"managed":true}`))
+		if err == nil || strings.Contains(err.Error(), name) != (extra == "") || strings.Contains(err.Error(), "private output") {
+			t.Fatalf("invalid recovery diagnostic: %v", err)
+		}
+	}
+}
+
 func TestPrepareConfigsReportsEveryInvalidSourceBeforeMutation(t *testing.T) {
 	root := testkit.TempDir(t)
 	incus := runningIncus(0)

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/ports"
@@ -135,7 +136,7 @@ func TestEmptyDocumentWithContributionReportsBooleanDrift(t *testing.T) {
 			}
 			key := strings.TrimSuffix(h.baselinePath(t), ".json")
 			testkit.WriteFile(t, key+".contribution", reference, 0o600)
-			testkit.WriteFile(t, h.destination, template, 0o600)
+			testkit.WriteFile(t, h.destination, nil, 0o600)
 			if h.observe(t, template).Converged {
 				t.Fatal("empty document reported current with an active contribution")
 			}
@@ -297,6 +298,28 @@ func TestTOMLMaterializationRejectsInvalidInputsWithoutOverwrite(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestTOMLMaterializationPreservesTimePrecision(t *testing.T) {
+	h := newGuestHarness(t)
+	h.format = "toml"
+	for _, literal := range []string{"12:34:56.123456789", "2026-11-18T12:34:56.123456789Z", "2026-11-18 12:34:56.123456789+01:00"} {
+		original := "unrelated = " + literal + "\n"
+		testkit.WriteFile(t, h.destination, []byte(original), 0644)
+		if stderr, err := h.run([]byte("managed = true\n"), ModeApply); err == nil || !strings.Contains(stderr, "TOML time precision") {
+			t.Fatalf("rewrite accepted precision loss: %v %s", err, stderr)
+		}
+		payload, err := os.ReadFile(h.destination)
+		if err != nil || string(payload) != original {
+			t.Fatalf("existing time literal changed: %q %v", payload, err)
+		}
+		info, err := os.Stat(h.destination)
+		if err != nil || info.Mode().Perm() != 0600 {
+			t.Fatalf("refused rewrite did not repair permissions: %v %v", info, err)
+		}
+	}
+	h.writeDestination(t, "unrelated = '12:34:56.123456789' # 12:34:56.123456789\n")
+	h.apply(t, []byte("managed = true\n"))
 }
 
 func TestDesiredDigestIsSemanticAndRequiresObject(t *testing.T) {
@@ -1665,8 +1688,8 @@ func TestStaleReleaseRecordDoesNotChangeOrdinaryRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, 0o600, gid, publish)"
-	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
+	needle := "            atomic_write(destination, payload, uid, 0o600, gid, publish)"
+	request.Command[3] = strings.Replace(request.Command[3], needle, "            raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
 	if err := command.Run(); err == nil {
@@ -1691,8 +1714,8 @@ func TestInterruptedRetirementStillRefusesChangedOwnedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, 0o600, gid, publish)"
-	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
+	needle := "            atomic_write(destination, payload, uid, 0o600, gid, publish)"
+	request.Command[3] = strings.Replace(request.Command[3], needle, "            raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
 	if err := command.Run(); err == nil {
@@ -1732,10 +1755,10 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			needle := "    atomic_write(destination, payload, uid, 0o600, gid, publish)"
-			injected := "    raise MaterializationError(\"synthetic interruption\")\n" + needle
+			needle := "            atomic_write(destination, payload, uid, 0o600, gid, publish)"
+			injected := "            raise MaterializationError(\"synthetic interruption\")\n" + needle
 			if stage == "after" {
-				injected = needle + "\n    raise MaterializationError(\"synthetic interruption\")"
+				injected = needle + "\n            raise MaterializationError(\"synthetic interruption\")"
 			}
 			if stage == "released-baseline" {
 				needle = "        baseline[\"phase\"] = \"retired\""
@@ -1774,6 +1797,56 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 				t.Fatalf("retry changed runtime fields: %#v", got)
 			}
 		})
+	}
+}
+
+func TestRetirementChecksFreshModeOnForeignDocument(t *testing.T) {
+	h := newGuestHarness(t)
+	h.apply(t, []byte(`{"managed":true}`))
+	h.observeMode(t, nil, ModeRetire)
+	request, err := h.request(nil, ModeRetire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Command[7] = fmt.Sprint(os.Getuid() + 1)
+	needle := "    if mode == \"retire\":\n        repair_document_mode(destination, allowed_home, uid)"
+	request.Command[3] = strings.Replace(request.Command[3], needle,
+		"    if mode == \"retire\":\n        os.chmod(destination, 0o644)\n        repair_document_mode(destination, allowed_home, uid)", 1)
+	command := exec.Command(request.Command[0], request.Command[1:]...)
+	command.Stdin = bytes.NewReader(request.Stdin)
+	output, err := command.CombinedOutput()
+	if err == nil || !bytes.Contains(output, []byte("configuration permissions could not be tightened to 0600")) {
+		t.Fatalf("retire misreported successful permission repair: %v %s", err, output)
+	}
+	if h.observeMode(t, nil, ModeAssessRetire).Converged {
+		t.Fatal("retirement assessment missed the remaining mode drift")
+	}
+	if !h.observeMode(t, nil, ModeRetire).Converged {
+		t.Fatal("retirement did not converge after an authorized repair")
+	}
+}
+
+func TestInterruptedFirstCreationCanRetry(t *testing.T) {
+	h := newGuestHarness(t)
+	payload := []byte(`{"managed":true}`)
+	request, err := h.request(payload, ModeApply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	needle := "                rename_destination(directory, temporary, name, 1)  # RENAME_NOREPLACE"
+	request.Command[3] = strings.Replace(request.Command[3], needle, needle+"\n                os._exit(57)", 1)
+	command := exec.Command(request.Command[0], request.Command[1:]...)
+	command.Stdin = bytes.NewReader(request.Stdin)
+	if err := command.Run(); command.ProcessState == nil || command.ProcessState.ExitCode() != 57 {
+		t.Fatalf("creation interruption did not occur: %v", err)
+	}
+	info, err := os.Stat(h.destination)
+	if err != nil || info.Sys().(*syscall.Stat_t).Nlink != 1 || info.Mode().Perm() != 0600 {
+		t.Fatalf("interrupted creation left invalid metadata: %v %v", info, err)
+	}
+	h.apply(t, payload)
+	if !h.observe(t, payload).Converged {
+		t.Fatal("interrupted creation did not converge on retry")
 	}
 }
 

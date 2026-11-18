@@ -183,7 +183,7 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
             else:
                 next_state['agents'].pop(agent, None)
             if edit is not None:
-                edits.append(edit)
+                edits.append((agent, edit))
             if register is not None:
                 references.append(register)
         except materializer.InvalidContributionDestination:
@@ -207,7 +207,12 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
     for register in references:
         register()
     publish(state, intent, original)
-    for edit in edits:
-        edit()
+    for agent, edit in edits:
+        try:
+            edit()
+        except materializer.PublicationRefusal as error:
+            if not error.recovery:
+                raise
+            raise AgentConfigRefusals([(agent, error)]) from None
     publish(state, final, intent)
     return True
