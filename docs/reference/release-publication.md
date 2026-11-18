@@ -488,8 +488,9 @@ are planning inputs, not passing evidence. `--slots` and `--types` identify the 
 they do not reserve capacity or change controller dispatch. A compact `CAPACITY` line on stderr
 summarizes these selections, numeric headroom, observation time/age and prerequisites; stdout remains
 the JSON report. Missing observation time stays unknown, independent of file read time or mtime.
-Missing telemetry and legacy reservations leave headroom unknown. Observed unavailable selected
-slots or exhausted headroom report planning `insufficient` and exit 1 before packaging or local checks.
+Missing telemetry and legacy reservations leave headroom unknown. Closed broker admission, an observed
+slot shortage with no selected slot available, or exhausted headroom reports planning `insufficient`
+and exits 1 before packaging or local checks.
 Positive headroom does not prove the selected types fit: compare it with their actual resource contract
 and preserve the reported reserves. Run this worktree preflight before `prepare` and the local gates
 to avoid an obviously unsuitable attempt. The supplied snapshot is advisory; current native broker

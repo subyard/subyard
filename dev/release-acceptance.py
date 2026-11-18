@@ -89,21 +89,27 @@ def retry_path(output, receipt, name, attempt):
     return output / "retries" / evidence_hash([receipt["candidate_bundle_sha256"], name, attempt])
 
 
+def queue_local_request(schedule, name, identity, rerun, *, recover=False):
+    previous = schedule.get(name, {})
+    recovering = recover and previous.get("state") == "running"
+    entry = schedule[name] = {"id": identity, "state": "running" if recovering else "queued",
+                              "slot": previous["slot"] if recovering else None, "rerun": rerun}
+    if "prior_hosted_attempt" in previous:
+        entry["prior_hosted_attempt"] = previous["prior_hosted_attempt"]
+    return entry
+
+
 def request_retry(output, name, attempt):
     with retry_lock(output):
         receipt = json.loads((output / "receipt.json").read_text())
         result = receipt["checks"].get(name, {})
-        path = retry_path(output, receipt, name, attempt)
-        if not path.exists():
+        schedule = receipt.setdefault("local_schedule", {})
+        if schedule.get(name, {}).get("id") != attempt:
             if (receipt.get("superseded") or not is_live(name) or result.get("status") not in ("failed", "interrupted")
                 or result.get("original_attempt", {}).get("id") != attempt):
                 raise ValueError("retry requires the current failed or interrupted live check and its original attempt ID")
-            path.parent.mkdir(mode=0o700, exist_ok=True)
-            path.parent.chmod(0o700)
-            with private_file(path, "a") as stream:
-                os.fsync(stream.fileno())
-        sync_directory(path.parent)
-        sync_directory(output)
+            queue_local_request(schedule, name, attempt, True)
+            write_receipt(output, receipt)
     print(f"RETRY REQUESTED {name} attempt={attempt}", flush=True)
     return 0
 
@@ -545,6 +551,34 @@ def transfer_target_open(name, result):
     return result["status"] == "pending" or optional_vm_not_run(name, result)
 
 
+def hosted_target_open(receipt, name):
+    result = receipt["checks"][name]
+    if transfer_target_open(name, result):
+        return True
+    entry = receipt.get("local_schedule", {}).get(name, {})
+    state = entry.get("state")
+    # A spent local allowance does not use up the separate hosted execution.
+    reason = entry.get("reason")
+    return (
+        state in ("queued", "exhausted") and local_broker_refusal(result)
+        or state in ("running", "exhausted") and result["status"] == "running"
+        or state == "exhausted" and reason in ("broker-no-progress", "interrupted-reservation")
+        and result == {"status": "incomplete", "reason": reason}
+    )
+
+
+def record_hosted_result(receipt, name, result):
+    receipt["checks"][name] = result
+    if name in receipt.get("local_schedule", {}):
+        receipt["local_schedule"][name]["state"] = "done"
+
+
+def report_hosted_result(output, name, result):
+    metadata = result["ci_hosted"]
+    event(output, "ci-hosted-counted", check=name, **metadata)
+    print(f"CI-HOSTED {name} run={metadata['run_id']} job={metadata['job_id']}", flush=True)
+
+
 def validate_optional_vm_history(output, names):
     if not names:
         return
@@ -631,10 +665,10 @@ def update_result(receipt):
     receipt["reproducible_result"] = (
         "failed" if "failed" in states else
         "passed" if all(state in ("passed", "not-applicable") for state in states) else "incomplete")
-    if receipt["reproducible_result"] == "passed" and any(
+    if receipt["reproducible_result"] == "passed" and (open_local_requests(receipt) or any(
         receipt["checks"].get(name, {}).get("status") != "not-applicable"
         and not optional_vm_unrequired(name, receipt["checks"].get(name, {}), required)
-        for name in receipt.get("operator_exclusions", [])):
+        for name in receipt.get("operator_exclusions", []))):
         receipt["reproducible_result"] = "incomplete"
     receipt["result"] = receipt["reproducible_result"]
     if receipt["result"] == "passed" and any(
@@ -645,7 +679,34 @@ def update_result(receipt):
         receipt["result"] = "incomplete"
 
 
+def open_local_requests(receipt):
+    return {name for name, entry in receipt.get("local_schedule", {}).items()
+            if entry["state"] in ("queued", "running")
+            or entry["state"] == "exhausted" and receipt["checks"][name]["status"] == "passed"}
+
+
+def merge_retry_submissions(output, receipt):
+    # A submission queues an identity. The collector initializes its allowance on discovery.
+    try:
+        saved = json.loads((output / "receipt.json").read_text())
+    except FileNotFoundError:
+        return
+    if saved.get("candidate_bundle_sha256") != receipt.get("candidate_bundle_sha256"):
+        return
+    for name, entry in saved.get("local_schedule", {}).items():
+        if entry["state"] == "queued" and "remaining" not in entry:
+            schedule = receipt.setdefault("local_schedule", {})
+            if schedule.get(name, {}).get("id") != entry["id"]:
+                schedule[name] = entry
+
+
 def save(output, receipt):
+    with retry_lock(output):
+        merge_retry_submissions(output, receipt)
+        write_receipt(output, receipt)
+
+
+def write_receipt(output, receipt):
     update_result(receipt)
     receipt["updated_at"] = datetime.now(timezone.utc).isoformat()
     temporary = output / "receipt.json.next"
@@ -1039,7 +1100,7 @@ def prepare(output, version, prepared=None):
     else:
         receipt["checks"]["package"] = execute("package", ["bash", "dev/package-engine.sh", "--output-dir", str(release), "--version", version], root, output, clean_environment())
     receipt["checks"]["package"]["execution_environment"] = receipt["environment"]
-    save(output, receipt)
+    write_receipt(output, receipt)
     if receipt["checks"]["package"]["status"] != "passed":
         raise ValueError("packaging failed; see the package log recorded in receipt.json")
     arch = {"x86_64": "amd64", "aarch64": "arm64"}.get(platform.machine())
@@ -1054,7 +1115,7 @@ def prepare(output, version, prepared=None):
            *(".subyard-acceptance/release/" + name for name in receipt["release_files"]))
     receipt["candidate_bundle_sha256"] = digest(transport)
     transport.chmod(0o600)
-    save(output, receipt)
+    write_receipt(output, receipt)
     print(f"PREPARED {output / 'receipt.json'}", flush=True)
 
 
@@ -1248,14 +1309,17 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
               "broker": public_broker_status(broker_status)}
     broker = report["broker"]
     observed_slots = {int(slot["id"].split("-")[1]): slot for slot in broker.get("slots", [])}
-    selected_slots = [observed_slots.get(slot, {"id": f"slot-{slot}", "state": "unknown"}) for slot in slots]
+    selected_slots = [observed_slots.get(slot, {"id": f"slot-{slot}", "state": "unknown"})
+                      for slot in slots or DEFAULT_SLOTS]
     headroom = broker.get("headroom", {})
     physical = any(check["physical"] and check["selected"] and check["status"] not in ("passed", "not-applicable")
                    for check in report["checks"])
     shortages = []
     if physical:
-        shortages = [slot["id"] + ": " + slot["state"] for slot in selected_slots
-                     if slot["state"] not in ("available", "unknown")]
+        if broker.get("admission_closed"):
+            shortages.append("broker admission closed")
+        elif all(slot["state"] != "available" for slot in selected_slots):
+            shortages += [slot["id"] + ": " + slot["state"] for slot in selected_slots if slot["state"] != "unknown"]
         shortages += [kind + " headroom exhausted" for kind in ("memory", "disk") if headroom.get(kind + "_bytes") == 0]
     report["capacity_summary"] = {
         "selected_slots": selected_slots, "selected_types": list(dict.fromkeys(types)),
@@ -1294,9 +1358,11 @@ def public_broker_status(path):
         value = json.loads(path.read_text())
         if value.get("schema_version") != 1 or value.get("status") != "ok":
             raise ValueError("invalid status")
-        slots = value.get("pool", {}).get("slots", [])
+        pool = value.get("pool", {})
+        slots = pool.get("slots", [])
         result = {"status": "observed", "observed_at": None, "age_seconds": None,
-                  "freshness": "unknown; supplied file snapshot", "slots": []}
+                  "freshness": "unknown; supplied file snapshot", "slots": [],
+                  "admission_closed": pool.get("admission_closed") is True}
         observed_at = value.get("observed_at")
         if isinstance(observed_at, str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})", observed_at):
             try:
@@ -1309,10 +1375,9 @@ def public_broker_status(path):
                     result["freshness"] = "unknown; observation timestamp is in the future"
             except (ValueError, OverflowError):
                 pass
-        states = {"available", "unavailable", "held", "provisioning", "draining", "quarantined"}
         for slot in slots[:999]:
             identifier = slot.get("slot_id", "")
-            if re.fullmatch(r"slot-[0-9]{1,3}", identifier) and slot.get("state") in states:
+            if re.fullmatch(r"slot-[0-9]{1,3}", identifier) and slot.get("state") in SLOT_STATES:
                 public_slot = {"id": identifier, "state": slot["state"]}
                 kind = (slot.get("environment") or {}).get("type")
                 if kind in ("subyard-pair", "android-test"):
@@ -1403,16 +1468,25 @@ def broker_slots(env):
         value = json.loads(response)
         if value["schema_version"] == 1 and value["status"] == "ok":
             pool = value["pool"]
-            return {int(slot["slot_id"][5:]): "admission-closed" if pool.get("admission_closed") else slot["state"]
+            closed = pool.get("admission_closed") is True
+            return {int(slot["slot_id"][5:]): "admission-closed" if closed else slot["state"]
                     for slot in pool["slots"]
-                    if re.fullmatch(r"slot-[0-9]{1,3}", slot["slot_id"]) and (pool.get("admission_closed") or slot["state"] in SLOT_STATES)}
+                    if re.fullmatch(r"slot-[0-9]{1,3}", slot["slot_id"]) and (closed or slot["state"] in SLOT_STATES)}
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         pass
     return {}
 
 
-def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, begin, execute_lane, record, exhaust, save_receipt):
+def local_broker_refusal(result):
+    return (result["status"] == "blocked" and result.get("termination") == "exit"
+            and result.get("reason", "").startswith(("capacity_", "slot_")))
+
+
+def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, begin, execute_lane, record, exhaust,
+                  save_receipt, start_hosted, finish_hosted):
     active, idle_since, last_states = {}, {}, {}
+    hosted_future = None
+    cancel_hosted = threading.Event()
 
     def complete(future):
         name, _ = active.pop(future)
@@ -1421,15 +1495,14 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
             record(name, None)
             return
         entry = schedule[name]
-        refusal = (result["status"] == "blocked" and result.get("termination") == "exit"
-                   and result.get("reason", "").startswith(("capacity_", "slot_")))
+        refusal = local_broker_refusal(result)
         record(name, result, dict(entry, state="queued" if refusal else "done"))
         if result.get("capture_status") == "failed":
             raise OSError("live check capture failed")
         if refusal:
             work.append((name, time.monotonic() + entry["interval"]))
 
-    with ThreadPoolExecutor(max_workers=len(slots)) as pool:
+    with ThreadPoolExecutor(max_workers=len(slots) + bool(start_hosted)) as pool:
         try:
             while not STOP.is_set():
                 for future in list(active):
@@ -1440,9 +1513,19 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
                 # Probe outside the lock so a status timeout cannot delay a submission.
                 with retry_lock(output):
                     refresh({name for name, _ in active.values()})
-                    ready = [item for item in work if prerequisite(item[0]) is None]
+                    ready = {name for name, _ in work if prerequisite(name) is None}
+                    # Give ready local retries a chance to replace earlier failures before fallback.
+                    if not ready and not active and hosted_future is not None and hosted_future.done():
+                        finish_hosted(hosted_future.result())
+                        hosted_future = None
+                        continue
                 if not ready and not active:
-                    break
+                    if hosted_future is None and start_hosted:
+                        hosted_future = start_hosted(pool, cancel_hosted)
+                        if hosted_future is not None:
+                            start_hosted = None
+                    if hosted_future is None:
+                        break
                 busy = {slot for _, slot in active.values()}
                 states = broker_slots(env) if ready and len(busy) < len(slots) else {}
                 last_states.update(states)
@@ -1452,10 +1535,15 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
                     refresh({name for name, _ in active.values()})
                     for item in work[:]:
                         name, earliest = item
-                        if STOP.is_set() or prerequisite(name) is not None:
-                            idle_since.pop(name, None)
-                            continue
                         entry = schedule[name]
+                        key = (name, entry["id"])
+                        if STOP.is_set() or prerequisite(name) is not None:
+                            idle_since.pop(key, None)
+                            continue
+                        if name not in ready:
+                            # A new request needs a broker observation before spending a round.
+                            wake = now
+                            continue
                         last = entry.get("slot")
                         offset = slots.index(last) + 1 if last in slots else 0
                         choices = slots[offset:] + slots[:offset]
@@ -1471,13 +1559,13 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
                             busy.add(slot)
                             work.remove(item)
                         elif entry["remaining"] and not active:
-                            due = idle_since.setdefault(name, started) + entry["interval"]
+                            due = idle_since.setdefault(key, started) + entry["interval"]
                             if slot is None and now >= due:
                                 entry["remaining"] -= 1
-                                idle_since[name] = now
+                                idle_since[key] = now
                                 if entry["remaining"]:
                                     save_receipt()
-                            wake = min(wake, earliest if slot is not None else idle_since[name] + entry["interval"])
+                            wake = min(wake, earliest if slot is not None else idle_since[key] + entry["interval"])
                         elif earliest > now:
                             wake = min(wake, earliest)
                         if not entry["remaining"]:
@@ -1490,10 +1578,15 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
                             work.remove(item)
                 if active:
                     idle_since.clear()
-                    wait(active, timeout=max(0, wake - time.monotonic()), return_when=FIRST_COMPLETED)
-                elif work:
+                waiting = list(active)
+                if hosted_future is not None and not hosted_future.done():
+                    waiting.append(hosted_future)
+                if waiting:
+                    wait(waiting, timeout=max(0, wake - time.monotonic()), return_when=FIRST_COMPLETED)
+                elif work and (ready or hosted_future is None):
                     STOP.wait(max(0, wake - time.monotonic()))
         finally:
+            cancel_hosted.set()
             # Capture failure and stop both leave running controllers responsible for cleanup.
             # Try every sibling even when one result cannot be persisted.
             for future in as_completed(active):
@@ -1525,33 +1618,39 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                         key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
     env = clean_environment()
     capacity_wait = env.pop("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
-    schedule = receipt.get("local_schedule", {})
+    schedule = receipt.setdefault("local_schedule", {}) if not hosted_job else {}
     work, withheld = [], set(hosted)
 
-    def retries():
-        return {name: attempt for name in live_order
-                if (result := receipt["checks"][name])["status"] in ("failed", "interrupted")
-                and (attempt := result.get("original_attempt", {}).get("id"))
-                and schedule.get(name, {}).get("id") != attempt
-                and retry_path(output, receipt, name, attempt).is_file()} if output.joinpath("retries").is_dir() else {}
+    def migrate_retries():
+        if output.joinpath("retries").is_dir():
+            for name in live_order:
+                result = receipt["checks"][name]
+                attempt = result.get("original_attempt", {}).get("id")
+                entry = schedule.get(name, {})
+                if entry.get("rerun") and entry["state"] != "done":
+                    continue
+                if (result["status"] in ("failed", "interrupted") and attempt
+                    and entry.get("id") != attempt and retry_path(output, receipt, name, attempt).is_file()):
+                    queue_local_request(schedule, name, attempt, True)
 
-    def enqueue(names, fresh):
+    def queued_requests():
+        return {name for name in live_order if schedule.get(name, {}).get("state") in ("queued", "running")}
+
+    def enqueue(names, fresh=()):
         queued = {name for name, _ in work}
         for name in live_order:
-            if name not in names or (name in queued and name not in fresh):
+            if name not in names:
                 continue
             entry = schedule.get(name)
             if name in fresh or entry is None and receipt["checks"][name]["status"] != "passed":
+                entry = queue_local_request(schedule, name, uuid.uuid4().hex, name in fresh, recover=True)
+            if entry and "remaining" not in entry:
                 limit = re.fullmatch(r"([0-9]{1,6})([sm])", capacity_wait)
                 if not limit:
                     raise ValueError("SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s")
                 seconds = int(limit[1]) * (60 if limit[2] == "m" else 1)
-                recovering = entry and entry["state"] == "running"
-                entry = schedule[name] = {"id": fresh.get(name) or uuid.uuid4().hex,
-                    "state": "running" if recovering else "queued", "remaining": max(1, seconds // SLOT_POLL_SECONDS),
-                    "interval": min(seconds, SLOT_POLL_SECONDS), "slot": entry["slot"] if recovering else None,
-                    "rerun": name in fresh}
-                receipt["local_schedule"] = schedule
+                entry.update(remaining=max(1, seconds // SLOT_POLL_SECONDS), interval=min(seconds, SLOT_POLL_SECONDS))
+                entry.setdefault("slot", None)
             if entry and entry["state"] in ("queued", "running"):
                 if receipt["checks"][name]["status"] == "passed" and not entry["rerun"]:
                     entry["state"] = "done"
@@ -1562,39 +1661,40 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
         names |= selected_requirements(receipt, names)
         return with_requirements(receipt, names), names - excluded
 
-    late = {} if hosted_job else retries()
-    resumed = {name for name, entry in schedule.items()
-               if entry["state"] in ("queued", "running") and entry["rerun"]
-               and retry_path(output, receipt, name, entry["id"]).is_file()} if not hosted_job else set()
-    requested, selected = request(direct | late.keys() | resumed)
-    if not hosted_job:
-        enqueue(selected, {**dict.fromkeys(direct if rerun else ()), **late})
-    live = ([name for name in live_order if name in selected
-             and (rerun and name in direct or receipt["checks"][name]["status"] != "passed")]
-            if hosted_job else [name for name, _ in work])
-    if hosted_job and (len(slots) != 1 or len(live) > 1):
-        raise ValueError("a hosted job requires one slot and at most one pending live check")
-    if not only and live and excluded.intersection(preflights):
-        raise ValueError("profile preflights are required before live checks and cannot be excluded")
-    pending = [name for name in order if checks[name] and name in selected
-               and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
-               and (name in live if is_live(name) else
-                    rerun and name in direct or receipt["checks"][name]["status"] != "passed")]
     def persist_requests(names):
         for name in names:
             if optional_vm_not_run(name, receipt["checks"][name]):
                 receipt["checks"][name] = {"status": "pending"}
-        save(output, receipt)
+        write_receipt(output, receipt)
 
-    receipt["operator_exclusions"] = sorted(excluded)
-    persist_requests(requested)
+    with retry_lock(output):
+        if not hosted_job:
+            merge_retry_submissions(output, receipt)
+            migrate_retries()
+        requested, selected = request(direct | queued_requests())
+        if not hosted_job:
+            enqueue(selected, direct if rerun else ())
+        live = ([name for name in live_order if name in selected
+                 and (rerun and name in direct or receipt["checks"][name]["status"] != "passed")]
+                if hosted_job else [name for name, _ in work])
+        if hosted_job and (len(slots) != 1 or len(live) > 1):
+            raise ValueError("a hosted job requires one slot and at most one pending live check")
+        if not only and live and excluded.intersection(preflights):
+            raise ValueError("profile preflights are required before live checks and cannot be excluded")
+        receipt["operator_exclusions"] = sorted(excluded)
+        persist_requests(requested)
+
+    exhausted = {name for name in selected if schedule.get(name, {}).get("state") == "exhausted"}
+    pending = [name for name in order if checks[name] and name in selected
+               and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
+               and (name in live or name in exhausted if is_live(name) else
+                    rerun and name in direct or receipt["checks"][name]["status"] != "passed")]
     try:
         invocation = Invocation(output, receipt, selected, pending, excluded, requested)
     except OSError:
         print("release-acceptance: invocation capture failed before dispatch", file=sys.stderr)
         raise
     failure_reason = "not-dispatched"
-    phase_failed = False
     reservations = {}
     try:
         event(output, "run-start", invocation_id=invocation.id, checks=pending, slots=slots, exclusions=sorted(excluded))
@@ -1614,10 +1714,13 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                     invocation.cancel_start(name)
                 return False
             if entry is not None:
-                reservations[name] = schedule[name], receipt["checks"][name], attempted
+                previous = receipt["checks"][name]
+                reservations[name] = schedule[name], previous, attempted
+                if previous.get("execution") == "ci-hosted":
+                    entry["prior_hosted_attempt"] = previous["original_attempt"]["id"]
                 schedule[name] = entry
             receipt["checks"][name] = {"status": "running", "command": command_identity(checks[name], root)}
-            save(output, receipt)
+            (write_receipt if entry is not None else save)(output, receipt)
             return True
 
         def execute_lane(name, slot=None):
@@ -1629,7 +1732,6 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             return execute(name, checks[name], root, output, check_env, slot) if slot else execute(name, checks[name], root, output, check_env)
 
         def record(name, result, entry=None):
-            nonlocal phase_failed
             reservation = reservations.pop(name, None)
             if result is None:
                 # The worker confirmed that it never launched. Restore the reserved round and evidence.
@@ -1648,13 +1750,12 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             invocation.record(name, result)
             save(output, receipt)
             invocation.write()
-            phase_failed |= result["status"] == "failed"
             return result
 
         def attempt(name, slot=None):
             return record(name, execute_lane(name, slot)) if begin(name) else None
 
-        for name in [item for item in pending if item not in live and item not in preflights]:
+        for name in [item for item in pending if not is_live(item) and item not in preflights]:
             if STOP.is_set():
                 break
             result = attempt(name)
@@ -1692,18 +1793,18 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                 return "hosted-pending"
             for required in receipt.get("requirements", {}).get(name, ()):
                 if (required in withheld or required in excluded or receipt["checks"][required]["status"] != "passed"
-                    or schedule.get(required, {}).get("state") in ("queued", "running")):
+                    or schedule.get(required, {}).get("state") in ("queued", "running", "exhausted")):
                     return "split-prerequisite-stop"
             return None
 
         def refresh(running):
-            fresh = retries()
+            merge_retry_submissions(output, receipt)
+            scheduled = {name for name, _ in work if "remaining" in schedule[name]}
+            fresh = queued_requests() - running - scheduled - excluded
             if not fresh:
                 return
-            wanted, names = request(set(fresh))
-            enqueue(names - running, fresh)
-            if not (names & fresh.keys()):
-                return
+            wanted, names = request(fresh)
+            enqueue(names - running)
             selected.update(names)
             requested.update(wanted)
             invocation.selected = invocation.document["selected"] = sorted(selected)
@@ -1711,16 +1812,55 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             invocation.pending.update(name for name, _ in work)
             persist_requests(wanted)
 
+        def exhausted_result(name):
+            result = receipt["checks"][name]
+            return result if result["status"] == "blocked" else {"status": "incomplete", "reason": schedule[name]["reason"]}
+
         def exhaust(name, diagnostic):
             result = receipt["checks"][name]
             reason = result.get("reason") if result["status"] == "blocked" else (
                 "interrupted-reservation" if schedule[name]["state"] == "running" else "broker-no-progress")
             schedule[name].update(state="exhausted", reason=reason, broker=diagnostic)
-            if result["status"] != "blocked":
-                result = receipt["checks"][name] = {"status": "incomplete", "reason": reason}
             print(f"INCOMPLETE: {name} {reason} last_slot={schedule[name]['slot']} ({diagnostic})", flush=True)
-            invocation.record(name, result)
-            save(output, receipt)
+            invocation.record(name, exhausted_result(name))
+            write_receipt(output, receipt)
+            invocation.write()
+
+        source_changed = False
+
+        def phase_failed():
+            return source_changed or any(receipt["checks"][name]["status"] == "failed" for name in invocation.attempted)
+
+        def start_hosted(pool, cancelled):
+            nonlocal source_changed
+            if not withheld.intersection(selected):
+                return None
+            source_changed = source_fingerprint(root) != receipt["source_fingerprint"]
+            return pool.submit(collect_hosted, phase_failed(), root, copy.deepcopy(receipt), cancelled)
+
+        def finish_hosted(collected):
+            for name, result in collected.items():
+                record_hosted_result(receipt, name, result)
+                if name in selected:
+                    invocation.record(name, result)
+            work[:] = [item for item in work if item[0] not in collected]
+            if not phase_failed():
+                # Each queued owner can reopen a historically failed hosted split once.
+                fallback = set()
+                for owner, _ in work:
+                    entry = schedule[owner]
+                    for name in receipt.get("requirements", {}).get(owner, ()):
+                        if (name in withheld and name in selected and name not in entry.get("fallback", ())
+                            and receipt["checks"][name]["status"] in ("failed", "interrupted")):
+                            entry.setdefault("fallback", []).append(name)
+                            if schedule.get(name, {}).get("state") == "done":
+                                fallback.add(name)
+                withheld.clear()
+                enqueue(fallback, fallback)
+                invocation.pending.update(fallback)
+            write_receipt(output, receipt)
+            for name, result in collected.items():
+                report_hosted_result(output, name, result)
             invocation.write()
 
         env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
@@ -1739,24 +1879,11 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                     attempt(name, slots[0])
         else:
             env["SUBYARD_P0_WAIT_SECONDS"] = "0"
-            def dispatch():
-                dispatch_live(output, slots or DEFAULT_SLOTS, env, schedule, work, refresh, prerequisite,
-                              begin, execute_lane, record, exhaust, lambda: save(output, receipt))
-
-            dispatch()
-            if collect_hosted and not STOP.is_set() and withheld.intersection(selected):
-                if not phase_failed and source_fingerprint(root) != receipt["source_fingerprint"]:
-                    phase_failed = True
-                collected = collect_hosted(phase_failed)
-                receipt["checks"].update(collected)
-                for name, _ in work[:]:
-                    if name in collected and collected[name]["status"] == "passed" and not schedule[name]["rerun"]:
-                        schedule[name]["state"] = "done"
-                        invocation.record(name, collected[name])
-                        work[:] = [item for item in work if item[0] != name]
-                if not phase_failed:
-                    withheld.clear()
-                    dispatch()
+            for name in exhausted:
+                invocation.record(name, exhausted_result(name))
+            dispatch_live(output, slots or DEFAULT_SLOTS, env, schedule, work, refresh, prerequisite,
+                          begin, execute_lane, record, exhaust, lambda: write_receipt(output, receipt),
+                          start_hosted if collect_hosted and withheld else None, finish_hosted)
             for name, _ in work:
                 if reason := prerequisite(name):
                     invocation.not_started_reasons[name] = reason

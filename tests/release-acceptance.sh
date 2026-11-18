@@ -1312,13 +1312,13 @@ exit "$COLLECTOR_EXIT"
                         result.update(status=crash, exit_code=23 if crash == "failed" else -15,
                                       termination="exit" if crash == "failed" else "signal")
                     return result
-                save, count = m.save, []
+                write, count = m.write_receipt, []
                 def save_until_terminal(output, receipt):
                     count.append(True)
                     if crash == "aggregate" and len(count) == 3:
                         raise OSError("aggregate commit failed")
-                    save(output, receipt)
-                with patch.object(m, "execute", side_effect=execute), patch.object(m, "save", side_effect=save_until_terminal), \
+                    write(output, receipt)
+                with patch.object(m, "execute", side_effect=execute), patch.object(m, "write_receipt", side_effect=save_until_terminal), \
                      patch.object(m, "execution_environment", return_value=before["environment"]):
                     if crash in ("execute", "aggregate"):
                         with self.assertRaises(OSError):
@@ -2180,12 +2180,24 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             local_summary = inspect(only=["verify"])["capacity_summary"]
             self.assertEqual(local_summary["planning"], "not-required")
             self.assertEqual(local_summary["shortages"], [])
-            status.write_text(json.dumps(value))
-            with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
-                 patch.object(m, "execute", side_effect=AssertionError("execution")), \
-                 patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status),
-                                          "--slots", "slot-1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
-                self.assertEqual(m.main(), 1)
+            for states, closed, flags, expected in (
+                (["held"], False, [], ["slot-1: held"]),
+                (["held", "available"], False, [], []),
+                (["held", "available"], False, ["--slots", "slot-1"], ["slot-1: held"]),
+                (["available"], True, [], ["broker admission closed"]),
+                ([], True, [], ["broker admission closed"]),
+                (["recovering"], False, [], ["slot-1: recovering"]),
+            ):
+                with self.subTest(states=states, closed=closed, flags=flags):
+                    value["pool"] = {"admission_closed": closed, "slots": [
+                        {"slot_id": f"slot-{number}", "state": state} for number, state in enumerate(states, 1)]}
+                    status.write_text(json.dumps(value))
+                    argv = ["acceptance", "preflight", "--broker-status", str(status), "--with-vms", *flags]
+                    with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
+                         patch.object(m, "execute", side_effect=AssertionError("execution")), \
+                         patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()) as printed:
+                        self.assertEqual(m.main(), int(bool(expected)))
+                    self.assertEqual(json.loads(printed.getvalue())["capacity_summary"]["shortages"], expected)
             self.assertEqual(before, set(checkout.rglob("*")))
 
     def test_live_duration_order_preserves_local_gates_priorities_and_unknown_order(self):
@@ -2959,7 +2971,7 @@ while True: time.sleep(1)
                 with patch.object(m, "load_bound", return_value=(output, receipt)), \
                      patch.object(m, "commands", return_value=checks), \
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
-                     patch.object(m, "save", wraps=m.save) as saved, \
+                     patch.object(m, "write_receipt", wraps=m.write_receipt) as saved, \
                      patch.object(m, "execute", side_effect=execute):
                     try:
                         if case == "stopped":
@@ -3037,15 +3049,15 @@ while True: time.sleep(1)
             receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
                        "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                        "checks": {"verify": {"status": "pending"}}}
-            save, saves = m.save, []
+            write, saves = m.write_receipt, []
             def fail_after_initial(output, receipt):
                 saves.append(True)
                 if len(saves) > 1:
                     raise OSError("receipt capture unavailable")
-                save(output, receipt)
+                write(output, receipt)
             with patch.object(m, "load_bound", return_value=(output, receipt)), \
                  patch.object(m, "commands", return_value={"verify": ["true"]}), \
-                 patch.object(m, "save", side_effect=fail_after_initial):
+                 patch.object(m, "write_receipt", side_effect=fail_after_initial):
                 with self.assertRaises(OSError):
                     m.run_checks(output, [], [], False)
             sidecar = json.loads(next((output / "runs").glob("*.json")).read_text())

@@ -732,7 +732,8 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
                                          deferral_authorization_reference, identity, root, receipt)
     if set(accepted) & set(deferred_profiles):
         raise ValueError("a profile check cannot have both failure acceptance and deferral")
-    if ((receipt["reproducible_result"] != "passed" and not accepted and not deferred_profiles) or receipt.get("superseded") or receipt.get("preparation") != identity
+    if ((receipt["reproducible_result"] != "passed" and not accepted and not deferred_profiles) or a.open_local_requests(receipt)
+        or receipt.get("superseded") or receipt.get("preparation") != identity
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
         raise ValueError("complete passing acceptance of this exact candidate is required")
@@ -1405,13 +1406,12 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
     """Reserve hosted work until the local phase finishes, then collect or fall back."""
     output = directory / "acceptance"
 
-    def collect_hosted(failed):
+    def collect_hosted(failed, root, receipt, cancelled):
         if failed:
             print("CI-HOSTED-SKIP all: a local check failed; collecting finished jobs", flush=True)
         elif wait_seconds:
-            wait_ci_hosted(github, directory, identity, wait_seconds)
-        collect_ci(github, directory, identity)
-        return json.loads((output / "receipt.json").read_text())["checks"]
+            wait_ci_hosted(github, directory, identity, wait_seconds, cancelled=cancelled)
+        return collect_ci(github, directory, identity, snapshot=(root, receipt), cancelled=cancelled)
 
     with a.acceptance_lock(output) as guard:
         return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous,
@@ -1421,7 +1421,7 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
 DISCOVERY_SECONDS = 600
 
 
-def wait_ci_hosted(github, directory, identity, seconds):
+def wait_ci_hosted(github, directory, identity, seconds, *, cancelled=None):
     path = directory / "ci-hosted.json"
     if not path.exists() or seconds == 0:
         return
@@ -1430,7 +1430,8 @@ def wait_ci_hosted(github, directory, identity, seconds):
         raise ValueError("retained hosted request candidate changed")
     started = time.monotonic()
     deadline, last_report = started + seconds, 0
-    while not a.STOP.is_set():
+    wake = cancelled if cancelled is not None else a.STOP
+    while not (a.STOP.is_set() or wake.is_set()):
         try:
             run = discover(github, "release-vm.yml", state["request"])
         except (ValueError, OSError) as error:
@@ -1448,14 +1449,15 @@ def wait_ci_hosted(github, directory, identity, seconds):
         if time.monotonic() - last_report >= 60:
             print(f"WAIT CI-HOSTED request={state['request']} status={run.get('status') if run else 'not-discovered'} remaining={int(remaining)}s", flush=True)
             last_report = time.monotonic()
-        a.STOP.wait(min(20, remaining))
+        wake.wait(min(20, remaining))
 
 
-def collect_ci(github, directory, identity):
+def collect_ci(github, directory, identity, *, snapshot=None, cancelled=None):
     """Bounded read of finished successful jobs; every refusal leaves local work open."""
     output, state_path = directory / "acceptance", directory / "ci-hosted.json"
+    collected = {}
     if not state_path.exists():
-        return
+        return collected
     state = json.loads(state_path.read_text())
     if state.get("identity_sha256") != identity_hash(identity):
         raise ValueError("retained hosted request candidate changed")
@@ -1472,21 +1474,21 @@ def collect_ci(github, directory, identity):
     except (ValueError, OSError) as error:
         for name in state["checks"]:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
-        return
+        return collected
     if not run:
         for name in state["checks"]:
             print(f"CI-HOSTED-SKIP {name}: dispatch not discovered", flush=True)
-        return
-    root, receipt = a.load_bound(output)
+        return collected
+    root, receipt = a.load_bound(output) if snapshot is None else snapshot
     commands = a.commands(root, identity["version"], receipt["profiles"])
     unavailable_artifacts = set()
     for name in state["checks"]:
-        if a.STOP.is_set():
-            return
+        if a.STOP.is_set() or (cancelled is not None and cancelled.is_set()):
+            break
         if name not in a.CI_HOSTED_CHECKS or name not in commands:
             print(f"CI-HOSTED-SKIP {name}: unknown check", flush=True)
             continue
-        if not a.transfer_target_open(name, receipt["checks"][name]):
+        if not a.hosted_target_open(receipt, name):
             continue
         try:
             matches = [job for job in jobs if job.get("name") == name and job.get("status") == "completed" and job.get("conclusion") == "success"]
@@ -1546,6 +1548,8 @@ def collect_ci(github, directory, identity):
                 or selected.get("selected_status") != "passed" or selected.get("receipt_sha256") != a.digest(cached / "receipt.json")):
                 raise ValueError("foreign candidate or incomplete hosted selection")
             record, manifest = a.original_attempt(cached, incoming, name, result)
+            if record["id"] == receipt.get("local_schedule", {}).get(name, {}).get("prior_hosted_attempt"):
+                raise ValueError("hosted attempt predates the local rerun")
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
@@ -1559,12 +1563,14 @@ def collect_ci(github, directory, identity):
             log = "ci-hosted-" + record["id"] + ".log"
             shutil.copyfile(cached / result["log"], output / log)
             result["log"] = log
-            receipt["checks"][name] = result
-            a.save(output, receipt)
-            a.event(output, "ci-hosted-counted", check=name, **metadata)
-            print(f"CI-HOSTED {name} run={run_id} job={job['id']}", flush=True)
+            if snapshot is None:
+                a.record_hosted_result(receipt, name, result)
+                a.save(output, receipt)
+                a.report_hosted_result(output, name, result)
+            collected[name] = result
         except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
+    return collected
 
 
 def earlier_candidates(state_dir, directory, identity):

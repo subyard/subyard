@@ -32,6 +32,7 @@ class Clock:
         self.now = 0
         self.stop_at = float("inf")
         self.running = []
+        self.events = []
         self.crash = False
         self.stop_before_launch = False
 
@@ -40,6 +41,10 @@ class Clock:
 
     def elapse(self, seconds):
         self.now += seconds
+        for at, callback in self.events[:]:
+            if at <= self.now:
+                self.events.remove((at, callback))
+                callback()
         for at, future, result in self.running[:]:
             if at <= self.now:
                 future.set_result(result)
@@ -57,12 +62,12 @@ class Clock:
             self.elapse(max(0, at - self.now))
             yield future
 
-    def submit(self, execute, name, slot):
+    def submit(self, execute, *args):
         if self.crash:
             raise SystemExit("after reservation, before spawn")
         if self.stop_before_launch:
             self.stop_at = self.now
-        outcome = execute(name, slot)
+        outcome = execute(*args)
         duration, result = (0, None) if outcome is None else outcome
         future = Future()
         self.running.append((self.now + duration, future, result))
@@ -288,6 +293,61 @@ with a.acceptance_lock(output) as guard:
         self.assertEqual([name for _, name, _ in calls], [preflight, preflight, lane])
         last = read()["local_schedule"][lane]
         self.assertEqual((last["id"], last["state"], last["remaining"]), (ATTEMPT["id"], "done", 0))
+
+    def test_ordinary_run_resumes_queued_selection_by_identity(self):
+        lane = "vm:lane"
+        for prior in (PASSED, {"status": "pending"}):
+            with self.subTest(prior=prior):
+                clock, output, calls, read, run = self.fixture([lane], outcomes={lane: prior},
+                    states=lambda now: {2: "held" if now == 0 else "available"})
+                clock.stop_at = 1
+                self.assertEqual(run(only=[lane], rerun=prior == PASSED), 1)
+                first = read()["local_schedule"][lane]
+                self.assertEqual((first["state"], first["remaining"]), ("queued", 2))
+                self.assertEqual(read()["checks"][lane], prior)
+                self.assertEqual(read()["result"], "incomplete")
+                self.assertEqual(calls, [])
+                self.assertFalse((output / "retries").exists())
+
+                clock.stop_at = float("inf")
+                self.assertEqual(run(with_vms=False), 0)
+                self.assertEqual(calls, [(1, lane, 2)])
+                self.assertEqual(read()["local_schedule"][lane]["id"], first["id"])
+
+    def test_hosted_wait_and_same_phase_retry_use_latest_local_outcomes(self):
+        lane, sibling, hosted = "vm:lane", "vm:sibling", "vm:hosted"
+        for retry_during in ("sibling", "hosted start", "hosted wait"):
+            with self.subTest(retry_during=retry_during):
+                during_sibling = retry_during == "sibling"
+                def controller(name, slot, now):
+                    if name == sibling:
+                        return 8, PASSED
+                    return 0, FAILED if during_sibling and name == lane and now == 0 else PASSED
+
+                outcomes = {} if during_sibling else {lane: dict(FAILED, original_attempt=ATTEMPT), sibling: PASSED}
+                clock, output, calls, read, run = self.fixture([lane, sibling, hosted], outcomes=outcomes,
+                    states=lambda _: {2: "available", 4: "available"}, controller=controller, capacity="0s")
+                def submit_retry():
+                    a.request_retry(output, lane, ATTEMPT["id"])
+
+                late_at = 0 if retry_during == "hosted start" else 4
+                if late_at:
+                    clock.events.append((late_at, submit_retry))
+                hosted_calls = []
+
+                def collect(failed, *_):
+                    hosted_calls.append((clock.now, failed))
+                    if not late_at:
+                        submit_retry()
+                    return 20, {}  # The hosted lane falls back to local execution.
+
+                self.assertEqual(run(only=[lane, sibling, hosted] if during_sibling else [hosted],
+                                     hosted=[hosted], collect_hosted=collect), 0)
+                self.assertEqual(hosted_calls, [(8 if during_sibling else 0, False)])
+                initial = [(0, lane, 2), (0, sibling, 4)] if during_sibling else []
+                self.assertEqual(calls, [*initial, (late_at, lane, 2), (28 if during_sibling else 20, hosted, 2)])
+                self.assertEqual(read()["local_schedule"][lane]["id"], ATTEMPT["id"])
+                self.assertFalse((output / "retries").exists())
 
     def test_stop_or_capture_failure_drains_and_records_siblings(self):
         for mode in ("stop", "capture"):

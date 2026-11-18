@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 import zlib
@@ -2852,9 +2853,70 @@ class HostedChecks(unittest.TestCase):
         self.assertEqual(result["execution"], "ci-hosted")
         m.publish_remote(self.github, self.prepared, m.attestation(self.output, self.identity), self.root)
 
+    def test_local_exhaustion_preserves_pending_hosted_evidence(self):
+        name = "profile:sample"
+        self.run["status"] = self.job["status"] = "in_progress"
+        _, receipt = m.a.load_bound(self.output)
+        with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m.a, "broker_slots", return_value={1: "held"}), \
+             patch.object(m.a, "execute", side_effect=AssertionError("unexpected local launch")), \
+             patch.dict(os.environ, {"SUBYARD_E2E_CAPACITY_WAIT": "0s"}):
+            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [name], False, [], 0), 1)
+            _, first = m.a.load_bound(self.output)
+            self.assertEqual(first["checks"][name], {"status": "pending"})
+            request = first["local_schedule"][name]
+            self.assertEqual((request["state"], request["remaining"]), ("exhausted", 0))
+
+            self.run["status"] = self.job["status"] = "completed"
+            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0), 0)
+        _, last = m.a.load_bound(self.output)
+        self.assertEqual(last["local_schedule"][name], dict(request, state="done"))
+        self.assertEqual(last["checks"][name]["execution"], "ci-hosted")
+        m.validate_attestation(m.attestation(self.output, self.identity), self.identity, self.root)
+
+    def test_queued_explicit_rerun_prevents_attesting_prior_pass(self):
+        name = "profile:sample"
+        prior, _ = self.collect()
+        _, receipt = m.a.load_bound(self.output)
+        stop = threading.Event()
+
+        def held(_):
+            stop.set()
+            return {1: "held"}
+
+        with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m.a, "STOP", stop), patch.object(m.a, "broker_slots", side_effect=held), \
+             patch.object(m.a, "execute", side_effect=AssertionError("unexpected local launch")):
+            self.assertEqual(m.a.run_checks(self.output, [1], [name], True), 1)
+        _, queued = m.a.load_bound(self.output)
+        self.assertEqual(queued["local_schedule"][name]["state"], "queued")
+        self.assertEqual(queued["checks"][name], prior)
+        with self.assertRaisesRegex(ValueError, "complete passing acceptance"):
+            m.attestation(self.output, self.identity)
+
+        with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m.a, "execute", wraps=m.a.execute) as launch:
+            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], False, [], 0), 0)
+        self.assertEqual([call.args[0] for call in launch.call_args_list], [name])
+        _, finished = m.a.load_bound(self.output)
+        self.assertEqual(finished["local_schedule"][name]["id"], queued["local_schedule"][name]["id"])
+        self.assertNotEqual(finished["checks"][name]["original_attempt"], prior["original_attempt"])
+
+        execute = m.a.execute
+        def refuse(*args, **kwargs):
+            return dict(execute(*args, **kwargs), status="blocked", exit_code=4, reason="capacity_memory")
+
+        with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m.a, "execute", side_effect=refuse), \
+             patch.dict(os.environ, {"SUBYARD_E2E_CAPACITY_WAIT": "0s"}):
+            self.assertEqual(m.a.run_checks(self.output, [1], [name], True), 1)
+        result, report = self.collect()
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("hosted attempt predates the local rerun", report)
+
     def test_accept_keeps_one_local_plan_across_hosted_fallback_and_repeated_accept(self):
         local, split, full = "vm:local", "vm:split", "vm:full"
-        for state in ("refused", "failed", "hosted-pass"):
+        for state in ("refused", "failed", "hosted-pass", "recorded-split-failure", "fallback-failure", "late-retry"):
             with self.subTest(local=state), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 directory = Path(temporary)
                 output = directory / "acceptance"
@@ -2865,51 +2927,86 @@ class HostedChecks(unittest.TestCase):
                            "requirements": {full: [split]},
                            "checks": {name: {"status": "pending"} for name in checks}}
                 receipt["checks"]["verify"] = {"status": "passed", "log": "prior-verify.log"}
-                if state != "hosted-pass":
-                    receipt["checks"][split] = {"status": "failed"}  # A legacy failure only.
+                recorded_split = state in ("recorded-split-failure", "fallback-failure")
+                if state in ("failed", "refused"):
+                    receipt["checks"][split] = {"status": "failed"}  # Legacy failure.
+                attempt = {"id": "a" * 32, "sha256": "b" * 64}
+                failure = {"status": "failed", "exit_code": 23}
+                if recorded_split or state == "late-retry":
+                    receipt["checks"][full if recorded_split else local] = dict(failure, original_attempt=attempt)
                 m.a.save(output, receipt)
                 (directory / "ci-hosted.json").touch()
                 calls = []
+                priming = recorded_split
+                retry_started = threading.Event()
                 refusal = {"status": "blocked", "exit_code": 4, "termination": "exit", "reason": "capacity_memory"}
 
                 def execute(name, *args, **kwargs):
                     calls.append(name)
+                    if name == split and (priming or state == "fallback-failure"):
+                        return dict(failure)
                     if name == local:
-                        return {"status": "failed", "exit_code": 23} if state == "failed" else dict(refusal)
+                        if state == "late-retry":
+                            retry_started.set()
+                        else:
+                            return dict(failure if state == "failed" else refusal)
                     return {"status": "passed", "exit_code": 0}
 
-                def collect(*args):
+                def wait_hosted(*args, **kwargs):
+                    calls.append("wait")
+                    if state == "late-retry":
+                        m.a.request_retry(output, local, attempt["id"])
+                        self.assertTrue(retry_started.wait(5), "local retry did not launch during the hosted wait")
+
+                def collect(*args, **kwargs):
                     calls.append("collect")
                     if state == "hosted-pass":
-                        current = json.loads((output / "receipt.json").read_text())
-                        current["checks"][split] = {"status": "passed", "execution": "ci-hosted"}
-                        m.a.save(output, current)
+                        return {split: {"status": "passed", "execution": "ci-hosted", "ci_hosted": {"run_id": 456, "job_id": 789}}}
+                    return {}
 
                 with patch.object(m.a, "CI_HOSTED_CHECKS", [split]), \
-                     patch.object(m, "wait_ci_hosted", side_effect=lambda *args: calls.append("wait")), \
+                     patch.object(m, "wait_ci_hosted", side_effect=wait_hosted), \
                      patch.object(m, "collect_ci", side_effect=collect), \
                      patch.object(m.a, "load_bound", side_effect=lambda out: (out, json.loads((out / "receipt.json").read_text()))), \
                      patch.object(m.a, "commands", return_value=checks), \
                      patch.object(m.a, "execution_environment", return_value={}), \
                      patch.object(m.a, "source_fingerprint", return_value="a" * 64), \
-                     patch.object(m.a, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}), \
+                     patch.object(m.a, "completed_attempt", return_value=attempt), \
+                     patch.object(m.a, "SLOT_POLL_SECONDS", 1), \
                      patch.object(m.a, "execute", side_effect=execute), \
                      patch.dict(os.environ, {"SUBYARD_E2E_CAPACITY_WAIT": "0s"}):
-                    self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], [], True, [], 60), 1)
+                    if recorded_split:
+                        self.assertEqual(m.a.run_checks(output, [1], [split], False), 1)
+                        recorded = json.loads((output / "receipt.json").read_text())["local_schedule"][split]
+                        self.assertEqual(recorded["state"], "done")
+                        self.assertEqual(calls, [split])
+                        calls.clear()
+                        priming = False
+                        m.a.request_retry(output, full, attempt["id"])
+                    only = [full] if state == "late-retry" else []
+                    code = 0 if state == "late-retry" else 1
+                    self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], only, True, [], 60), code)
                     first = json.loads((output / "receipt.json").read_text())
                     expected = {"failed": [local, "collect"], "refused": [local, "wait", "collect", split, full],
-                                "hosted-pass": [local, "wait", "collect", full]}
+                                "hosted-pass": [local, "wait", "collect", full],
+                                "recorded-split-failure": [local, "wait", "collect", split, full],
+                                "fallback-failure": [local, "wait", "collect", split],
+                                "late-retry": ["wait", local, "collect", split, full]}
                     self.assertEqual(calls, expected[state])
                     calls.clear()
-                    self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], [], True, [], 60), 1)
+                    self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], only, True, [], 60), code)
                     last = json.loads((output / "receipt.json").read_text())
 
-                self.assertEqual(calls, ["wait", "collect", split, full] if state == "failed" else [])
+                self.assertEqual(calls, {"failed": ["wait", "collect", split, full],
+                                         "fallback-failure": ["wait", "collect"]}.get(state, []))
                 self.assertEqual(first["local_schedule"][local], last["local_schedule"][local])
-                self.assertEqual(last["local_schedule"][local]["state"], "done" if state == "failed" else "exhausted")
+                self.assertEqual(last["local_schedule"][local]["state"], "done" if state in ("failed", "late-retry") else "exhausted")
                 self.assertEqual(last["checks"]["verify"], receipt["checks"]["verify"])
-                self.assertEqual(last["checks"][full]["status"], "passed")
-                self.assertEqual(len(list((output / "runs").glob("*.json"))), 2)
+                if state == "fallback-failure":
+                    self.assertEqual(first["local_schedule"][split], last["local_schedule"][split])
+                else:
+                    self.assertEqual(last["checks"][full]["status"], "passed")
+                self.assertEqual(len(list((output / "runs").glob("*.json"))), 3 if recorded_split else 2)
 
     def test_wait_is_bounded_and_zero_override_collects_without_wait(self):
         with patch.object(m, "discover") as discover:
