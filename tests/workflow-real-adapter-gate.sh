@@ -163,7 +163,7 @@ def workflow_jobs(text):
 
 ci = dict(workflow_jobs((root / ".github/workflows/ci.yml").read_text()))
 for lane, command, extra in (
-    ("go", "./tests/run.sh --go", ("run: make lint", "run: make cli-docs-check", ".build/test-runs/")),
+    ("go", "./tests/run.sh --go", ("make lint 2>&1 | tee .build/ci-logs/lint.log", "run: make cli-docs-check", ".build/test-runs/")),
     ("shell", "./tests/run.sh --shell", ("run: bash dev/shellcheck.sh", "bash tests/real-host/adapter-contracts.sh", ".build/test-runs/")),
     ("profiles", "}", ("run: bash dev/test-profiles.sh --e2e --list",
                        "bash dev/test-profiles.sh --permissions-only &&\n"

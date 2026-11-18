@@ -95,7 +95,10 @@ jobs:
           fi
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
       - name: Lint
-        run: make lint
+        run: |
+          set -o pipefail
+          mkdir -p .build/ci-logs
+          make lint 2>&1 | tee .build/ci-logs/lint.log
       - name: Go verification
         run: |
           set -o pipefail
@@ -126,7 +129,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
       - name: Install system test tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh
@@ -165,7 +168,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache-dependency-path: go.sum
+          cache: false
       - name: Install system test tools
         run: |
           sudo apt-get update -qq && sudo apt-get install -y binutils curl gcc jq openssh-server ripgrep shellcheck zsh

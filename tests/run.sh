@@ -150,7 +150,9 @@ if [ "$selection" != shell ]; then
   run_check go-vet go -C "$ROOT" vet ./cmd/... ./internal/...
 fi
 run_check build make -C "$ROOT" build VERSION="${SUBYARD_TEST_BUILD_VERSION:-0.29.0-test}"
-run_check build-layout check_build_layout
+if [ "$selection" != shell ]; then
+  run_check build-layout check_build_layout
+fi
 if [ "$selection" != shell ]; then
   run_check go-race check_go_race
   run_check go-fuzz go -C "$ROOT" test ./internal/command -run '^$' -fuzz '^FuzzParseDoesNotPanic$' -fuzztime=1000x
@@ -164,6 +166,10 @@ for suite in unit contract integration; do
   printf 'SUITE %s\n' "$suite"
   while IFS= read -r test_name; do
     case "$test_name" in '' | '# '*) continue ;; esac
+    # Split CI runs this prerequisite in the profiles job before testing the recipe.
+    if [ "$selection" = shell ] && [ "$test_name" = install-incus-data-home.sh ]; then
+      continue
+    fi
     run_check "tests/$test_name" bash "$ROOT/tests/$test_name"
   done < "$ROOT/tests/suites/$suite.list"
 done
