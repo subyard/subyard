@@ -320,20 +320,37 @@ def run_process(command, env, timeout, input_text=None, interrupt_checkpoint=Non
             # First publication may create the protected namespace itself.
             # Observe its nearest existing ancestor without creating any state.
             directory = journal.parent
+            missing = []
             while not directory.is_dir():
+                missing.append(directory)
                 directory = directory.parent
-            require(libc.inotify_add_watch(watch, os.fsencode(directory), 0x00000100 | 0x00000080) >= 0,
-                    "cannot watch the owned recovery journal directory")
+            while True:
+                require(libc.inotify_add_watch(watch, os.fsencode(directory), 0x00000100 | 0x00000080) >= 0,
+                        "cannot watch the owned recovery journal directory")
+                # A child created before registration may already contain the journal.
+                if not missing or not missing[-1].is_dir():
+                    break
+                directory = missing.pop()
         watch_directory()
 
         def read_observed_journal():
-            watch_directory()
             try:
-                return json.loads(journal.read_text())
+                current = json.loads(journal.read_text())
             except FileNotFoundError:
                 # An unrelated rename or a new parent directory is not journal
                 # publication. Resume the owned writer and keep observing.
                 return None
+            except (OSError, ValueError):
+                raise RuntimeError("cannot read the owned recovery journal") from None
+            require(isinstance(current, dict) and isinstance(current.get("checkpoint"), str)
+                    and isinstance(current.get("transaction"), str), "invalid owned recovery journal")
+            return current
+
+        def write_marker(current, **extra):
+            with os.fdopen(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as output:
+                os.fchmod(output.fileno(), 0o600)
+                output.write(json.dumps({"transaction": current["transaction"],
+                                         "checkpoint": checkpoint, **extra}) + "\n")
     child = subprocess.Popen(command, env=env,
                              stdin=subprocess.DEVNULL if input_text is None else subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -347,35 +364,35 @@ def run_process(command, env, timeout, input_text=None, interrupt_checkpoint=Non
             predecessor = interrupt_checkpoint[3] if len(interrupt_checkpoint) > 3 else None
             deadline = time.monotonic() + timeout
             observed = False
+            # The initial watch is already armed. Read once before waiting for events.
+            readable = None
             while child.poll() is None and time.monotonic() < deadline:
-                readable, _, _ = select.select([watch], [], [], 0.02)
-                if not readable:
-                    continue
-                os.read(watch, 65536)
-                try:
-                    os.killpg(child.pid, signal.SIGSTOP)
-                except ProcessLookupError:
-                    break
-                current = read_observed_journal()
-                if current is None:
+                if readable is None or readable:
+                    try:
+                        os.killpg(child.pid, signal.SIGSTOP)
+                    except ProcessLookupError:
+                        break
+                    if readable:
+                        watch_directory()
+                    current = read_observed_journal()
+                    if (current is not None and current["checkpoint"] == checkpoint
+                            and current["transaction"] != predecessor):
+                        write_marker(current)
+                        os.killpg(child.pid, signal.SIGKILL)
+                        observed = True
+                        break
                     os.killpg(child.pid, signal.SIGCONT)
-                    continue
-                if current["checkpoint"] == checkpoint and current["transaction"] != predecessor:
-                    marker.write_text(json.dumps({"transaction": current["transaction"],
-                                                  "checkpoint": checkpoint}) + "\n")
-                    marker.chmod(0o600)
-                    os.killpg(child.pid, signal.SIGKILL)
-                    observed = True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
-                os.killpg(child.pid, signal.SIGCONT)
+                readable, _, _ = select.select([watch], [], [], min(0.02, remaining))
+                if readable:
+                    os.read(watch, 65536)
             if not observed and allow_failed_checkpoint and child.poll() is not None:
                 current = read_observed_journal() or {}
                 if (child.returncode != 0 and current.get("checkpoint") == checkpoint
                         and current.get("transaction") != predecessor):
-                    marker.write_text(json.dumps({"transaction": current["transaction"],
-                                                  "checkpoint": checkpoint,
-                                                  "nativeFailureExit": child.returncode}) + "\n")
-                    marker.chmod(0o600)
+                    write_marker(current, nativeFailureExit=child.returncode)
                     observed = True
             require(observed, "released migration owner did not reach its checkpoint")
         stdout, stderr = child.communicate(input=input_text, timeout=timeout)
