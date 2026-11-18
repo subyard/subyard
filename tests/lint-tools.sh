@@ -97,6 +97,27 @@ class LintTools(unittest.TestCase):
         self.assertEqual([line.partition(": ")[0] for line in result.stderr.splitlines()],
                          offending)
 
+    def test_shell_lint_handles_long_unclosed_backtick(self):
+        self.write("probe.sh", "set -o pipefail\necho `" + "\\" * 100_000 + "\n")
+        result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_backtick_tokens_preserve_escape_precedence(self):
+        program = r"""
+import runpy
+
+token = runpy.run_path("dev/lint-shell-pipelines.py")["SHELL_TOKEN"]
+for source, expected in [
+    (r"`a\`b`c", r"`a\`b`"),
+    (r"`a\`b\`c", r"`a\`b\`"),
+    (r"`a\\`b`c", r"`a\\`"),
+    ("`a\\\nb`c", "`a\\\nb`"),
+]:
+    assert token.match(source)[0] == expected, repr(source)
+"""
+        subprocess.run(["python3", "-c", program], cwd=self.root, check=True)
+
     def test_shell_lint_checks_workflow_run_blocks(self):
         pipe = "|"
         self.write(".github/workflows/test.yml", f"""steps:

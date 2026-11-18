@@ -40,9 +40,11 @@ GREP_OPTION_VALUES = {
 
 # Keep original offsets while hiding shell data. Literal sh -c programs and
 # command substitutions are scanned as their own shell fragments.
+# Backticks prefer consuming escapes, but an escaped backtick can close the
+# token if the escape-first scan finds no closer.
 SHELL_TOKEN = re.compile(
     r"""(?P<comment>(?<![^\s;|&()<>])\#[^\n]*)|(?P<single>'[^']*')|(?P<double>")"""
-    r"""|(?P<substitution>\$\((?!\())|(?P<backtick>`(?:\\.|[^`])*`)|(?P<escape>\\[\s\S])"""
+    r"""|(?P<substitution>\$\((?!\())|(?P<backtick>`(?:[^`\\]|\\(?:[^\n]|(?=\n)))*\\?`)|(?P<escape>\\[\s\S])"""
     r"""|(?P<heredoc>(?<!<)<<-?[ \t]*['"\\]?[A-Za-z_][\w-]*['"]?)|(?P<paren>[()])|(?P<newline>\n)"""
 )
 DOUBLE_TOKEN = re.compile(r'\\[\s\S]|\$\((?!\()|"')
