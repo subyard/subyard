@@ -22,98 +22,6 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
-    def setUp(self):
-        root = self.enterContext(tempfile.TemporaryDirectory(dir='/tmp'))
-        self.enterContext(patch.object(guest.native.materializer, 'STATE_ROOT', str(Path(root)/'materialization')))
-        self.enterContext(patch.object(guest.native.materializer, 'STATE_UID', os.getuid()))
-
-    def test_first_enable_detects_template_conflict_before_creating_token(self):
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            root = Path(name)
-            runtime = object.__new__(guest.Runtime)
-            runtime.selected, runtime.agents = True, ['codex']
-            runtime.home, runtime.control, runtime.data = root, root/'control', root/'data'
-            runtime.assets, runtime.retained = {}, {}
-            runtime.owned = lambda: False
-            runtime.endpoint = 'http://localhost:14318'
-            runtime.uid, runtime.gid = os.getuid(), os.getgid()
-            runtime.templates = {'codex': b'[otel]\nlog_user_prompt = true\n'
-                                 b'[otel.exporter.otlp-http.headers]\nAuthorization = "Bearer '+b'a'*64+b'"\n'}
-            for operation in (runtime.observe, runtime.apply):
-                with self.assertRaisesRegex(guest.native.materializer.ContributionConflict, '/otel/log_user_prompt') as error:
-                    operation()
-                self.assertIn('/otel/exporter/otlp-http/headers/Authorization', str(error.exception))
-                self.assertNotIn('Bearer', str(error.exception))
-                self.assertFalse(runtime.control.exists())
-                self.assertFalse(runtime.data.exists())
-                self.assertFalse(guest.native.agent_path(root, 'codex').exists())
-
-            # A matching-looking fixed bearer must also fail on its own.
-            runtime.templates['codex'] = runtime.templates['codex'].split(b'true\n', 1)[1]
-            for operation in (runtime.observe, runtime.apply):
-                with self.assertRaisesRegex(guest.native.materializer.ContributionConflict, '/otel/exporter/otlp-http/headers/Authorization'):
-                    operation()
-                self.assertFalse(runtime.control.exists())
-                self.assertFalse(runtime.data.exists())
-
-            runtime.agents, runtime.templates = ['claude'], {}
-            path = guest.native.agent_path(root, 'claude')
-            path.parent.mkdir(mode=0o700)
-            original = b'{"unrelated":"' + b'x'*(4*1024*1024-22) + b'"}'
-            guest.native.publish(path, original, None)
-            for operation in (runtime.observe, runtime.apply):
-                with self.assertRaisesRegex(ValueError, 'destination exceeds size bound'):
-                    operation()
-                self.assertFalse(runtime.control.exists())
-                self.assertFalse(runtime.data.exists())
-                self.assertTrue(path.read_bytes() == original)
-
-            # Each agent document and its resulting output fit. Their combined
-            # prior values must also fit the shared receipt before installation.
-            runtime.agents = ['claude', 'codex']
-            prior = b'x'*(2*1024*1024)
-            path.write_bytes(b'{"env":{"OTEL_LOGS_EXPORTER":"' + prior + b'"}}')
-            codex = guest.native.agent_path(root, 'codex')
-            codex.parent.mkdir()
-            codex.write_bytes(b'[otel]\nlog_user_prompt = "' + prior + b'"\n')
-            for operation in (runtime.observe, runtime.apply):
-                with self.assertRaisesRegex(ValueError, 'native ownership exceeds size bound'):
-                    operation()
-                self.assertFalse(runtime.control.exists())
-                self.assertFalse(runtime.data.exists())
-
-    def test_disable_does_not_require_missing_owned_agent_documents_or_valid_templates(self):
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            root = Path(name)
-            runtime = object.__new__(guest.Runtime)
-            runtime.selected, runtime.agents = False, ['claude', 'codex']
-            runtime.home, runtime.control, runtime.data = root, root/'control', root/'data'
-            runtime.control.mkdir(mode=0o700)
-            runtime.data.mkdir(mode=0o700)
-            runtime.assets, runtime.retained = {}, {}
-            runtime.owned = lambda: True
-            runtime.saved_inventory = lambda: {}
-            runtime.manager = lambda unit: {'ActiveState': 'inactive', 'UnitFileState': 'disabled'}
-            runtime.desired = lambda: 'a'*64
-            runtime.endpoint = 'http://localhost:14318'
-            runtime.uid, runtime.gid = os.getuid(), os.getgid()
-            token = 'a'*64
-            token_path = runtime.data/'auth.token'
-            guest.native.publish(token_path, token.encode(), None)
-            guest.native.publish(runtime.control/'assets.json', b'{}', None)
-            state = runtime.control/'native.json'
-            guest.native.reconcile(root, state, runtime.agents, runtime.endpoint, token, guest.tomli_w, runtime.uid, runtime.gid)
-            paths = [guest.native.agent_path(root, agent) for agent in runtime.agents]
-            for path in paths:
-                path.unlink()
-            runtime.templates = {agent: b'[broken' for agent in runtime.agents}
-            self.assertEqual(runtime.observe()['state'], 'stale')
-            with patch.object(guest, 'systemctl', return_value=''):
-                runtime.apply()
-            self.assertEqual(runtime.observe()['state'], 'current')
-            self.assertEqual(json.loads(state.read_bytes())['agents'], {})
-            self.assertTrue(all(not path.exists() for path in paths))
-
     def test_runtime_diagnostics_name_changed_asset_without_contents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             path = Path(name)/'collector.py'
@@ -123,8 +31,8 @@ class LifecycleTest(unittest.TestCase):
             runtime.retained = {}
             runtime.selected = True
             runtime.home, runtime.agents = Path(name), []
-            runtime.control, runtime.data = Path(name)/'control', Path(name)/'data'
-            runtime.uid, runtime.gid, runtime.endpoint = os.getuid(), os.getgid(), ''
+            runtime.data = Path(name)
+            runtime.reconcile_native = lambda check: True
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
@@ -273,10 +181,9 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             for path in Path(guest.__file__).parent.glob('*.py'):
                 shutil.copyfile(path, source/path.name)
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
-            shutil.copyfile(Path(guest.native.materializer.__file__), source/'guest_json.py')
             # Match the compiled collector's observed 25 MiB size, not a tiny stub.
             (source/'subyard-telemetry').write_bytes(b'\x7fELF'+b'\0'*(25_333_922-4))
-            for directory in ('home', 'units', 'bin'):
+            for directory in ('home', 'units', 'bin', 'etc'):
                 (root/directory).mkdir()
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             states, calls = {}, []
@@ -312,7 +219,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
-                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
+                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
                 for command in runtime.starts.values():
                     self.assertEqual(command.split()[:2],['/usr/bin/setpriv','--no-new-privs'])
                     actual=subprocess.check_output(command.split()[:2]+[sys.executable,'-c',
@@ -320,35 +227,6 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     self.assertEqual(actual.strip(),b'1')
                 self.assertEqual(runtime.observe()['state'], 'stale')
                 runtime.apply()
-                subprocess.run([sys.executable, '-BI', '-c',
-                                'import sys; sys.path.insert(0, sys.argv[1]); import native',
-                                str(runtime.library)], check=True)
-                codex = guest.native.agent_path(runtime.home, 'codex')
-                before = codex.read_bytes()
-                runtime.templates['codex'] = b'[otel]\nlog_user_prompt = true\n'
-                for mode in ('direct', 'apply', 'refresh'):
-                    codex.chmod(0o644)
-                    with self.assertRaises(guest.native.materializer.ContributionConflict):
-                        if mode == 'direct':
-                            runtime.apply()
-                        else:
-                            arguments = ['guest.py', mode, '1', 'dev', 'codex']
-                            if mode == 'refresh':
-                                arguments.extend(['before', 'after'])
-                            with patch.object(guest, 'Runtime', return_value=runtime), \
-                                 patch.object(runtime, 'owned', return_value=True), \
-                                 patch.object(guest, 'os', wraps=os) as guest_os, patch.object(sys, 'argv', arguments):
-                                guest_os.getuid.return_value = 0
-                                guest.main()
-                    self.assertEqual(codex.stat().st_mode & 0o777, 0o644)
-                    self.assertEqual(codex.read_bytes(), before)
-                runtime.templates.clear()
-                asset = runtime.library/'guest_json.py'
-                saved = runtime.saved_inventory()
-                del saved[str(asset)]
-                (runtime.control/'assets.json').write_text(json.dumps(saved))
-                runtime.apply()
-                self.assertEqual(runtime.saved_inventory()[str(asset)], hashlib.sha256(asset.read_bytes()).hexdigest())
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'],'current runtime must satisfy the generic activation digest contract')
@@ -422,7 +300,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 (bare/'subyard-telemetry').unlink()
                 installed_binary = root/'library/subyard-telemetry'
                 kept = installed_binary.read_bytes()
-                runs = {name: guest.Runtime(path, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
+                runs = {name: guest.Runtime(path, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
                         for name, path in (('source', bare), ('packaged', source))}
                 for unselected in runs.values():
                     self.assertNotIn(installed_binary, unselected.assets)
@@ -438,9 +316,9 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(states[guest.MANAGER]['ActiveState'], 'active')
                 self.assertFalse(any(call[0] == 'stop' and guest.MANAGER in call for call in calls))
                 self.assertTrue((root/'bin/subyard-telemetry-run').read_text().startswith('#!/bin/sh\n'))
-                self.assertNotIn('analytics', (root/'home/.codex/config.toml').read_text())
+                self.assertFalse((root/'home/.codex').exists())
+                self.assertFalse((root/'etc/codex/managed_config.toml').exists())
                 token=(root/'data/auth.token').read_bytes()
-                native_receipt=(root/'control/native.json').read_bytes()
                 target=dict(user='next',uid=runtime.uid,gid=runtime.gid,home=str(runtime.home),group='next')
                 recipe=runtime.identity_observe(target,'a'*64)
                 runtime.identity_apply(recipe,'quiesce')
@@ -458,7 +336,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(states[guest.COLLECTOR]['ActiveState'],'inactive')
                 self.assertEqual(states[guest.MANAGER]['ActiveState'],'active')
                 self.assertEqual((root/'data/auth.token').read_bytes(),token)
-                self.assertEqual((root/'control/native.json').read_bytes(),native_receipt)
+                self.assertFalse((root/'control/native.json').exists())
                 self.assertEqual(marker.read_bytes(),b'history')
                 runtime=runtime.identity_runtime(target)
                 # The binary exception must not relax configuration admission.
@@ -473,7 +351,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 with (source/'subyard-telemetry').open('wb') as output:
                     output.truncate(guest.BINARY_LIMIT+1)
                 with self.assertRaisesRegex(ValueError, 'unsafe native file'):
-                    guest.Runtime(source, 'dev', True, [], root/'control', root/'data', root/'library', root/'units', root/'bin')
+                    guest.Runtime(source, 'dev', True, [], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
 
     def test_unselected_guest_needs_only_the_collector_path(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -483,11 +361,10 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             for path in Path(guest.__file__).parent.glob('*.py'):
                 shutil.copyfile(path, source/path.name)
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
-            shutil.copyfile(Path(guest.native.materializer.__file__), source/'guest_json.py')
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             def runtime(selected, origin=source):
                 return guest.Runtime(origin, 'dev', selected, [], root/'control', root/'data', root/'library',
-                                     root/'units', root/'bin')
+                                     root/'units', root/'bin', etc=root/'etc')
             with patch.object(guest.pwd, 'getpwnam', return_value=account):
                 with self.assertRaisesRegex(ValueError, 'missing profile asset'):
                     runtime(True)

@@ -1,78 +1,54 @@
 #!/usr/bin/env python3
-"""Exercise both installed agent documents on the disposable local stage."""
-import hashlib
+"""Check the guest policy lifecycle and preserve the developer's home documents."""
 import json
 import os
 from pathlib import Path
 import pwd
 import stat
-import subprocess
 import sys
 import tomllib
 
 
 def main():
-    phase, stage = sys.argv[1:]
+    phase, = sys.argv[1:]
     assert os.getuid() == 0 and Path('/run/subyard-e2e-lease.json').is_file()
     account = pwd.getpwnam('dev')
     home = Path(account.pw_dir)
-    staged = Path(stage)
-    installed = Path('/usr/local/lib/subyard-telemetry')
-    state = '/var/lib/subyard/config-materialization'
-    for name, relative, file_format, section, field, prior, active, initial, template, conflict in (
-        ('claude', '.claude/settings.json', 'json', 'env', 'OTEL_LOGS_EXPORTER', 'console', 'otlp',
-         b'{"fixture_unrelated":true,"env":{"OTEL_LOGS_EXPORTER":"console"}}', b'{"fixture_template":true}',
-         b'{"env":{"OTEL_LOGS_EXPORTER":"console"}}'),
-        ('codex', '.codex/config.toml', 'toml', 'otel', 'log_user_prompt', True, False,
-         b'fixture_unrelated = true\n[otel]\nlog_user_prompt = true\n', b'fixture_template = true\n',
-         b'[otel]\nlog_user_prompt = true\n'),
+    for relative, policy, initial, parse, section in (
+        ('.claude/settings.json', '/etc/claude-code/managed-settings.d/60-subyard-telemetry.json',
+         b'{"env":{"OTEL_LOGS_EXPORTER":"console"}}\n', json.loads, 'env'),
+        ('.codex/config.toml', '/etc/codex/managed_config.toml',
+         b'[otel]\nlog_user_prompt = true\n', lambda data: tomllib.loads(data.decode()), 'otel'),
     ):
-        path = home/relative
+        document, managed = home/relative, Path(policy)
         if phase == 'seed':
-            path.parent.mkdir(mode=0o700, exist_ok=True)
-            assert not path.parent.is_symlink() and not path.is_symlink()
-            if path.exists():
-                info = path.stat()
-                assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == account.pw_uid, name
-            os.chown(path.parent, account.pw_uid, account.pw_gid)
-            path.write_bytes(initial)
-            os.chown(path, account.pw_uid, account.pw_gid)
-            path.chmod(0o644)
+            assert not managed.exists() and not managed.is_symlink()
+            document.parent.mkdir(mode=0o700, exist_ok=True)
+            assert not document.parent.is_symlink() and not document.is_symlink()
+            if document.exists():
+                info = document.stat()
+                assert stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_uid == account.pw_uid
+            os.chown(document.parent, account.pw_uid, account.pw_gid)
+            document.write_bytes(initial)
+            os.chown(document, account.pw_uid, account.pw_gid)
+            document.chmod(0o400)
             continue
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600, name
-        content = path.read_text()
-        document = (json.loads if file_format == 'json' else tomllib.loads)(content)
-        assert document['fixture_unrelated'] is True, name
+        assert document.read_bytes() == initial
+        assert stat.S_IMODE(document.stat().st_mode) == 0o400
         if phase == 'disabled':
-            assert document == {'fixture_unrelated': True, section: {field: prior}}, name
-            continue
-        assert phase == 'retire' and document[section][field] == active, name
-        assert 'Bearer ' in content, name
-        for asset in ('guest_json.py', 'native.py', 'tomli_w.py'):
-            assert (installed/asset).read_bytes() == (staged/asset).read_bytes(), asset
-        program = (installed/'guest_json.py').read_text().replace('@STATE_ROOT@', state).replace('@STATE_UID@', '0').replace('@FORMAT@', file_format)
-        if file_format == 'toml':
-            program = '_toml_writer = {}\nexec('+repr((installed/'tomli_w.py').read_text())+', _toml_writer)\n'+program
-
-        def materialize(mode, payload):
-            digest = hashlib.sha256(payload).hexdigest()
-            return subprocess.run([sys.executable, '-B', '-c', program, mode, 'dev', str(path),
-                                   str(account.pw_uid), digest, str(home), digest], input=payload, capture_output=True)
-
-        path.chmod(0o644)
-        refused = materialize('apply', conflict)
-        assert refused.returncode == 2 and b'configuration contribution conflicts at' in refused.stderr, name
-        assert path.read_text() == content and stat.S_IMODE(path.stat().st_mode) == 0o600, name
-        assert materialize('apply', template).returncode == 0, name
-        for before in (0o644, 0o400):
-            path.chmod(before)
-            retired = materialize('retire', b'{}' if file_format == 'json' else b'')
-            assert retired.returncode == 0 and json.loads(retired.stdout)['converged'], name
-            assert stat.S_IMODE(path.stat().st_mode) == 0o600, name
-            content = path.read_text()
-            assert 'fixture_template' not in content and 'Bearer ' in content, name
+            assert not managed.exists()
+        else:
+            assert phase == 'enabled'
+            info = managed.stat()
+            assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0, account.pw_gid, 0o640)
+            fields = parse(managed.read_bytes())[section]
+            if section == 'env':
+                assert fields['OTEL_LOGS_EXPORTER'] == 'otlp'
+            else:
+                assert fields['log_user_prompt'] is False
+                assert {'exporter', 'metrics_exporter', 'trace_exporter'} <= fields.keys()
     if phase == 'disabled':
-        print('ok: installed Claude and Codex configuration permissions, template retirement and exporter restoration')
+        print('ok: managed policies removed and Claude and Codex home documents preserved')
 
 
 if __name__ == '__main__':

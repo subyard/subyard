@@ -2,7 +2,6 @@
 """Exact generic release observations use the declared owning transport."""
 import json
 import io
-from itertools import combinations
 import os
 import shutil
 from contextlib import redirect_stderr, redirect_stdout
@@ -28,8 +27,7 @@ class OwnerTest(unittest.TestCase):
             (root/'scripts/lib').mkdir(parents=True)
             shutil.copyfile(repository/'scripts/lib/engine-context.sh',root/'scripts/lib/engine-context.sh')
             (root/'internal/adapters/configmaterial').mkdir(parents=True)
-            for name in ('tomli_w.py', 'guest_json.py'):
-                shutil.copyfile(repository/'internal/adapters/configmaterial'/name, root/'internal/adapters/configmaterial'/name)
+            shutil.copyfile(repository/'internal/adapters/configmaterial/tomli_w.py',root/'internal/adapters/configmaterial/tomli_w.py')
             (profile/'bin').mkdir()
             (profile/'bin/subyard-telemetry').write_bytes(b'synthetic native asset')
             (profile/'bin/subyard-telemetry').chmod(0o755)
@@ -43,15 +41,6 @@ if os.environ.get('TELEMETRY_FIXTURE_TRANSPORT_FAIL')=='1': sys.exit(1)
 if args[0]=='list': assert args[-2:]==['-c','ns']; print(args[1]+'-neighbour,STOPPED'); print(args[1]+',RUNNING'); sys.exit()
 assert args[0]=='exec'
 arguments=args[args.index('subyard')+1:]
-if os.environ.get('TELEMETRY_FIXTURE_PENDING')=='1':
-    print('contribution-publication-pending-v1 '+json.dumps(dict(destination='/home/dev/.codex/config.toml',
-          journal='/var/lib/subyard/telemetry-control/native.intent', prior={'/otel/log_user_prompt': {'present':True,'value':True}})),
-          file=sys.stderr)
-    sys.exit(2)
-if os.environ.get('TELEMETRY_FIXTURE_REPAIR_FAIL')=='1':
-    assert arguments[0]=='check-publication'
-    print('telemetry-agent-config-unavailable-v1 claude', file=sys.stderr)
-    sys.exit(2)
 with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') as temporary:
     stage=pathlib.Path(temporary)
     with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
@@ -61,26 +50,24 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
     if arguments[0]=='startup':
         assert not (stage/'subyard-telemetry').exists()
         assert '--env' in args and 'SUBYARD_STARTUP_REMAINING_MS=1234' in args
-    if arguments[0]=='check-publication': sys.exit()
     sys.path.insert(0,str(stage))
     import guest
     if os.environ.get('TELEMETRY_FIXTURE_BAD_OUTPUT')=='1': print('unexpected-check-output')
     marker=pathlib.Path(os.environ['TELEMETRY_FIXTURE_MARKER'])
     class Runtime:
-        def __init__(self,source,user,selected,agents): self.selected=selected
+        def __init__(self,source,user,selected,agents):
+            self.selected=selected
+            if os.environ.get('TELEMETRY_FIXTURE_TEMPLATE')=='1':
+                assert (source/'claude.template').read_bytes()==b'{}'
+                assert not (source/'codex.template').exists()
         def observe(self):
-            assert sorted(p.name for p in stage.glob('*.template'))==os.environ.get('TELEMETRY_FIXTURE_TEMPLATES','').split()
             if os.environ.get('TELEMETRY_FIXTURE_STATE')=='unsafe': raise ValueError('foreign control state')
             observation=dict(state='current' if marker.exists() else ('stale' if self.selected else 'absent'),actual='',desired='')
             if os.environ.get('TELEMETRY_FIXTURE_DIAGNOSTICS')=='1':
                 observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
             return observation
         def startup(self): return {'state':'ready' if marker.exists() else 'drift'}
-        def apply(self):
-            marker.write_text(str(int(self.selected)))
-    guest.native.pending_publications=lambda *args: {}
-    Runtime.home=stage
-    Runtime.control=stage
+        def apply(self): marker.write_text(str(int(self.selected)))
     guest.Runtime=Runtime
     guest.os.getuid=lambda:0
     guest.sys.argv=['guest.py',*arguments]
@@ -127,29 +114,16 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             result = invoke('--check', CODING_TOOL_INTEGRATIONS='claude codex',
                             AGENT_claude_CONFIG=str(managed_source), AGENT_codex_CONFIG='',
                             AGENT_claude_CONFIG_DEST='.claude/settings.json', AGENT_codex_CONFIG_DEST='.codex/config.toml',
-                            TELEMETRY_FIXTURE_TEMPLATES='claude.template')
+                            TELEMETRY_FIXTURE_TEMPLATE='1')
             self.assertEqual(result.returncode, 0, result.stderr)
             missing_source = root/'missing-managed.json'
             result = invoke('--check', CODING_TOOL_INTEGRATIONS='claude', AGENT_claude_CONFIG=str(missing_source),
                             AGENT_claude_CONFIG_DEST='.claude/settings.json', YARD_NAME='secondary', SUBYARD_YARD='caller-yard')
             self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn(str(missing_source).encode(), result.stderr)
-            self.assertIn(b'managed agent source missing, unsafe or unreadable', result.stderr)
+            self.assertIn(b'missing, unsafe or unreadable telemetry template for claude', result.stderr)
             prefix = 'subyard-profile-observation-refusal-v1 '
             refusal = next(json.loads(line[len(prefix):]) for line in result.stderr.decode().splitlines() if line.startswith(prefix))
             self.assertEqual(refusal['retry'], 'run yard -Y secondary config paths')
-            pending = invoke('--remove', TELEMETRY_FIXTURE_PENDING='1')
-            self.assertEqual(pending.returncode, 2, pending.stderr)
-            marker = 'contribution-publication-pending-v1 '
-            refusal = next(json.loads(line[len(marker):]) for line in pending.stderr.decode().splitlines() if line.startswith(marker))
-            self.assertEqual(refusal['destination'], '/home/dev/.codex/config.toml')
-            self.assertEqual(refusal['journal'], '/var/lib/subyard/telemetry-control/native.intent')
-            self.assertTrue(refusal['prior']['/otel/log_user_prompt']['value'])
-            result = invoke('--yes', CODING_TOOL_INTEGRATIONS='claude', AGENT_claude_CONFIG=str(missing_source),
-                            AGENT_claude_CONFIG_DEST='.claude/settings.json', TELEMETRY_FIXTURE_REPAIR_FAIL='1')
-            self.assertEqual(result.returncode, 2, result.stderr)
-            self.assertIn(b'managed agent source missing, unsafe or unreadable', result.stderr)
-            self.assertIn(b'agent configuration unavailable: claude', result.stderr)
             self.assertEqual((root/'applied').read_text(),'1')
             # A guest that init never provisioned is not entered for removal,
             # pause or resume.
@@ -173,8 +147,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         (root/'scripts/lib').mkdir(parents=True)
         shutil.copyfile(repository/'scripts/lib/engine-context.sh', root/'scripts/lib/engine-context.sh')
         (root/'internal/adapters/configmaterial').mkdir(parents=True)
-        for name in ('tomli_w.py', 'guest_json.py'):
-            shutil.copyfile(repository/'internal/adapters/configmaterial'/name, root/'internal/adapters/configmaterial'/name)
+        shutil.copyfile(repository/'internal/adapters/configmaterial/tomli_w.py', root/'internal/adapters/configmaterial/tomli_w.py')
         commands = root/'commands'
         commands.mkdir()
         (commands/'incus').write_text("""#!/usr/bin/env python3
@@ -184,9 +157,6 @@ if args[0]=='list': assert args[-2:]==['-c','ns']; print(args[1]+'-neighbour,STO
 with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
     members=sorted(member.name for member in archive)
 with open(os.environ['TELEMETRY_FIXTURE_EXEC'],'a') as log: log.write(json.dumps(members)+'\\n')
-if args[args.index('subyard')+1] == 'check-publication':
-    assert 'subyard-telemetry' not in members
-    sys.exit()
 print(json.dumps({'state':'absent','actual':'','desired':''}))
 """)
         (commands/'incus').chmod(0o755)
@@ -251,7 +221,7 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 ('both symlinked', both_symlinked, 'telemetry',
                  [f'unsafe native telemetry source: symlinked collector {packaged}, {built}']),
                 ('every refusal', lambda: None, 'telemetry',
-                 [missing, 'standard native destination required: AGENT_codex_CONFIG_DEST must be .codex/config.toml']),
+                 [missing, 'missing, unsafe or unreadable telemetry template for codex']),
             )
             for case, arrange, selected, refusals in cases:
                 with self.subTest(case=case):
@@ -261,11 +231,10 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                     arrange()
                     overrides = dict(ENVIRONMENT_PROFILES=selected)
                     if case == 'every refusal':
-                        overrides.update(CODING_TOOL_INTEGRATIONS='codex', AGENT_codex_CONFIG_DEST='.config/other.toml')
+                        overrides.update(CODING_TOOL_INTEGRATIONS='codex', AGENT_codex_CONFIG=str(root/'missing.toml'))
                     result, archives = observe(**overrides)
                     self.assertEqual(result.returncode, 2)
-                    self.assertEqual(len(archives), 1)
-                    self.assertNotIn('subyard-telemetry', archives[0])
+                    self.assertEqual(archives, [], 'a refusal must precede the guest transport')
                     self.assertIn('telemetry: refused: '+'; '.join(refusals)+'\n', result.stderr)
 
     def test_failed_guest_forwards_only_closed_public_diagnostic(self):
@@ -284,15 +253,13 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 self.assertEqual(stderr.getvalue(), expected)
                 self.assertNotIn('PRIVATE', stderr.getvalue())
 
-    def test_invalid_unmanaged_document_has_native_preservation_command(self):
-        from unittest.mock import patch
+    def test_policy_refusal_reports_the_system_path(self):
         owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
-        env = {'DEV_USER': 'dev', 'YARD_INSTANCE_NAME': 'sample', 'INCUS_PROJECT': 'project'}
-        with patch.dict(os.environ, env), self.assertRaises(owner['Refusal']) as caught:
-            owner['run']([sys.executable, '-c', "import sys; print('telemetry-agent-config-invalid-v1 claude', file=sys.stderr); sys.exit(2)"])
-        self.assertIn('/home/dev/.claude/settings.json', str(caught.exception))
-        self.assertIn('run incus exec sample --project project -- mv --backup=numbered --', caught.exception.retry)
-        self.assertNotIn('config apply', caught.exception.retry)
+        path = '/etc/codex/managed_config.toml'
+        with self.assertRaisesRegex(owner['Refusal'], path):
+            owner['run']([sys.executable, '-c',
+                          "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)",
+                          'telemetry-native-refusal-v1 unsafe or foreign telemetry policy '+path])
 
     def test_all_exact_absent_release_observations_are_declared(self):
         from unittest.mock import patch
@@ -308,7 +275,7 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
             verifier['write_observation_incus'](root, control, unexpected)
             commands = provider['read_only_commands'](Path(__file__).resolve().parents[1])
             self.assertEqual(len(commands), 4)
-            # Published owners with the binding keep their exact old ABI.
+            # Retained owners with the older optional binding keep their exact ABI.
             legacy = root/'legacy'
             legacy.mkdir()
             (legacy/'owner.py').write_text('GUEST_SCRIPT = '+repr(owner['GUEST_SCRIPT'])+'\nmanaged = "managed="\n')
@@ -318,29 +285,19 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 result = subprocess.run([str(root/'incus'), *arguments], input=b'fixture', capture_output=True, timeout=2)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), json.loads(response))
-            # Exercise the real owner argument builder, not just the fixture's
-            # own vectors. Sources may independently be managed or unmanaged.
-            config = root/'agent-config'
-            config.write_text('fixture source')
-            calls = []
             def transport(arguments, **kwargs):
                 if arguments[1] == 'list':
                     return 'yard,RUNNING'
-                calls.append(arguments)
-                return '{"state":"absent","actual":"","desired":""}'
+                captured = subprocess.run([str(root/'incus'), *arguments[1:]], input=b'fixture',
+                                          capture_output=True, check=True, timeout=2)
+                return captured.stdout.decode()
+
             for agents in ('', 'claude', 'codex', 'claude codex'):
-                names = agents.split()
-                for count in range(len(names)+1):
-                    for managed in combinations(names, count):
-                        env = dict(INCUS_PROJECT='subyard', YARD_INSTANCE_NAME='yard', DEV_USER='dev',
-                                   ENVIRONMENT_PROFILES='', CODING_TOOL_INTEGRATIONS=agents)
-                        env.update({'AGENT_'+agent+'_CONFIG': str(config) for agent in managed})
-                        env.update({'AGENT_claude_CONFIG_DEST': '.claude/settings.json', 'AGENT_codex_CONFIG_DEST': '.codex/config.toml'})
-                        with patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', ['owner.py','--runtime','observe']), \
-                                patch.dict(owner['main'].__globals__, run=transport), redirect_stdout(io.StringIO()):
-                            self.assertEqual(owner['main'](), 0)
-                        result = subprocess.run([str(root/'incus'), *calls[-1][1:]], input=b'fixture', capture_output=True, timeout=2)
-                        self.assertEqual(result.returncode, 0, result.stderr)
+                env = dict(INCUS_PROJECT='subyard', YARD_INSTANCE_NAME='yard', DEV_USER='dev',
+                           ENVIRONMENT_PROFILES='', CODING_TOOL_INTEGRATIONS=agents)
+                with patch.dict(os.environ, env, clear=True), patch.object(sys, 'argv', ['owner.py','--runtime','observe']), \
+                        patch.dict(owner['main'].__globals__, run=transport), redirect_stdout(io.StringIO()):
+                    self.assertEqual(owner['main'](), 0)
             self.assertFalse(unexpected.exists())
 
 

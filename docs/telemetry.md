@@ -30,28 +30,29 @@ checks the running processes as well as unit files. Foreign unit overrides are
 refused; interrupted startup changes can be retried without terminating agent
 workloads.
 
-The telemetry owner records existing native exporter fields before applying its own
-settings through the agent config materializer. Both agent configuration formats use mode
-`0600` while they contain telemetry settings. Writers tighten permissions on documents with
-completed ownership during reconciliation. Readiness checks are read-only.
-An agent template that specifies a different value for the same field is refused with the
-field path. Refresh also refuses when a user deletes an owned exporter field. Disabling leaves
-that deletion in place. Each structured replacement retains the displaced inode as
-`document` inside a private `.subyard-config-recovery.*` directory beside the configuration, so an editor with the old file
-open can still save its changes. A publication refusal names the retained file when one exists.
-Treat recovery files as sensitive. The writer refuses a TOML rewrite if its parser would truncate
-a time literal with more than six fractional digits.
+Telemetry writes whole policy files for selected coding-tool integrations. Both are
+`0640`, owned by root and readable by the developer's primary group.
 
-After an interrupted publication, telemetry and template commands report the same
-pending-publication diagnostic with prior field values and redacted authorization credentials.
-The document and journal are left in place for
-[manual resolution](configuration.md#resolve-an-interrupted-configuration-write).
+- Claude reads an `env` block from `/etc/claude-code/managed-settings.d/60-subyard-telemetry.json`.
+- Codex reads logs, metrics and traces exporter endpoints, protocols and headers from
+  `/etc/codex/managed_config.toml`. Codex merges this layer recursively.
 
-Rolling back to v0.28–v0.30 carries a known risk. A retained template writer can
-change agent config permissions to `0644` while the file still contains the collector
-credential, and retained telemetry may report it current. Disabling telemetry under a
-retained writer can also leave the collector authorization header in place or lose prior
-Codex headers when the exporter was edited.
+The policy overrides user values in the fields it defines while telemetry is enabled.
+Telemetry refuses a foreign file at either managed path and reports fields where a
+configured Subyard template disagrees with the policy. It compares the two inputs
+without reading the home document.
+
+The one-time upgrade from v0.30 restores recorded prior values where telemetry settings
+are unchanged, preserves later edits and removes leaves containing the collector token.
+It then removes the old receipt. The collector token stays the same. Subsequent telemetry
+updates and disable operations leave home documents alone.
+
+Rolling back to v0.28–v0.30 leaves both system policy files behind if they were installed.
+Those releases can also reintroduce the collector token into home documents, where an
+older template writer can publish it with mode `0644`. Process environment settings such
+as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
+local drop-ins when server-managed settings apply.
+
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection
 should begin. No running agent is killed to reload exporter settings.
@@ -62,8 +63,7 @@ Disable collection through the same profile family:
 yard -Y default profile disable telemetry --yes
 ```
 
-Disabling restores only unchanged owned native settings and retains the database. A missing
-agent document stays absent and its telemetry ownership is released.
+Disabling removes the owned policy files and retains the database.
 The run manager drains existing observations without terminating agent workloads.
 
 ## Managed runs

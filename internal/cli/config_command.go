@@ -1276,7 +1276,7 @@ func (cli *CLI) assessConfigTarget(
 			User:    uint32(target.Loaded.Context.DevUID), Group: uint32(target.Loaded.Context.DevUID),
 		}
 		if asset.OwnedFormat != "" {
-			request, err = configmaterial.RequestWithContributions(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index], target.Loaded.Catalog.Profiles())
+			request, err = configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
 			if err != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 				continue
@@ -1290,13 +1290,7 @@ func (cli *CLI) assessConfigTarget(
 		observed := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
 		if asset.OwnedFormat != "" {
 			if err != nil || result.ExitCode != 0 {
-				detail := "structured configuration observation failed"
-				if conflict := configmaterial.ContributionConflict(result, err); conflict != "" {
-					detail = conflict
-				} else if refusal := configmaterial.WriteRefusal(result, err, asset.Destination); refusal != "" {
-					detail = fmt.Sprintf("%q: %s", asset.Destination, refusal)
-				}
-				failures = append(failures, fmt.Errorf("%s: %s", asset.Name, detail))
+				failures = append(failures, fmt.Errorf("%s: structured configuration observation failed", asset.Name))
 				continue
 			}
 			observation, err := configmaterial.ParseObservation(result.Stdout)

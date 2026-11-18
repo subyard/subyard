@@ -2549,7 +2549,8 @@ pending init; see [yard-scoped runtime failures](#yard-scoped-runtime-failures).
 and profiles with host owner or infrastructure services cannot declare it.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
 bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
-`ownership_absent`. States are `absent`, `deferred`, `current` and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
+`ownership_absent`. States are `absent`, `deferred`, `current` and `stale`. Installed states
+carry lowercase SHA-256 fingerprints. Observe must not mutate state.
 A `stale` observation may add one `consequence`: a short sentence of at most 200 bytes from a
 plain-text alphabet, such as a service restart that apply performs. Update, migrate and `yard init`
 plans disclose it before their single confirmation; release plans name the yards once per distinct
@@ -2561,16 +2562,6 @@ Hooks run in activation-ID order before integration project hooks; update and ro
 Release activation reconciles the approved owners in one pass. Stale runtimes can provide
 validated configuration diagnostics when config status requests them.
 
-A shipped profile can submit a contribution to the guest config materializer. The
-materializer strictly parses, compares, validates and replaces documents under the same
-destination lock for contributions and agent templates. The profile supplies desired fields
-and retains prior values in its protected receipt. A protected per-document
-reference lets the template writer detect overlapping values and reconstruct an active
-contribution when it repairs a damaged document. Structured agent documents use mode
-`0600` for template and contribution writes, including before registration and after
-handoff from a retained writer. Observation treats a mode mismatch as drift.
-On opt-out, the materializer restores or removes unchanged contributed fields and preserves
-later edits, including edits within a contributed table. Conflict output identifies field paths.
 Unpublished `.subyard-config.*` files left by an interrupted materializer are outside its explicit
 artifact inventory. Later observation and replacement ignore them, including similarly named
 symlinks, without reading or deleting unrelated directory entries.

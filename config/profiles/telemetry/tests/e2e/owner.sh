@@ -55,7 +55,7 @@ export SUBYARD_TELEMETRY_FIXTURE_ASSETS="$fixture_assets"
 asset="$fixture_assets/subyard-telemetry"
 mkdir "$state/source"
 cp config/profiles/telemetry/*.py "$state/source/"
-cp internal/adapters/configmaterial/{tomli_w,guest_json}.py "$state/source/"
+cp internal/adapters/configmaterial/tomli_w.py "$state/source/"
 cp "$asset" "$state/source/subyard-telemetry"
 chmod 0755 "$state/source/subyard-telemetry"
 if [ "$mode" != --held-diagnostic ] && [ "$mode" != --resources ] && [ "$mode" != --native-only ] && [ "$android_only" = 0 ]; then
@@ -63,12 +63,17 @@ if [ "$mode" != --held-diagnostic ] && [ "$mode" != --resources ] && [ "$mode" !
 fi
 # Native signal homes are separate below; no real authorization is read.
 native_agents=''
+native_policy=()
 agent_documents="$ROOT/config/profiles/telemetry/tests/e2e/agent-documents.py"
 if [ "$mode" = --local ] || [ "$mode" = --native-only ]; then
   native_agents='claude codex'
-  sudo -n python3 -B "$agent_documents" seed "$state/source"
+  native_policy=(--system-policy)
+  sudo -n python3 -B "$agent_documents" seed
 fi
 sudo -n python3 -B "$state/source/guest.py" apply 1 dev "$native_agents"
+if [ -n "$native_agents" ]; then
+  sudo -n python3 -B "$agent_documents" enabled
+fi
 timeout 30 bash -c 'until test -S /var/lib/subyard/telemetry/control.sock && test -f /var/lib/subyard/telemetry/delegation.json; do sleep 0.2; done'
 python3 -B - /var/lib/subyard/telemetry http://127.0.0.1:14318 <<'PY_UNITS'
 import json, pathlib, sqlite3, sys, time, urllib.error, urllib.request
@@ -231,12 +236,11 @@ if [ "$mode" != --resources ] && [ "$mode" != --native-only ] && [ "$android_onl
   python3 -B config/profiles/telemetry/tests/e2e/measure.py --stack --assets "$fixture_assets" --output "$state/overhead" --idle 60 --load 90
   python3 -B config/profiles/telemetry/tests/e2e/process-scope.py --state "$state" --data-dir /var/lib/subyard/telemetry
 fi
-python3 -B config/profiles/telemetry/tests/e2e/native-signals.py --state "$state" --data-dir /var/lib/subyard/telemetry --source "$ROOT"
+python3 -B config/profiles/telemetry/tests/e2e/native-signals.py --state "$state" --data-dir /var/lib/subyard/telemetry --source "$ROOT" "${native_policy[@]}"
 if [ "$mode" = --native-only ] || [ "$mode" = --local ]; then
-  sudo -n python3 -B "$agent_documents" retire "$state/source"
   wait_for_finals
   sudo -n python3 -B "$state/source/guest.py" apply 0 dev "$native_agents"
-  sudo -n python3 -B "$agent_documents" disabled "$state/source"
+  sudo -n python3 -B "$agent_documents" disabled
   test -f /var/lib/subyard/telemetry/telemetry.sqlite
   if [ "$mode" = --local ]; then
     printf 'ok: telemetry local storage, OTLP units, stack overhead, process scopes and native signals\n'

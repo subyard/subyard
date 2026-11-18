@@ -1155,7 +1155,7 @@ func (runtime Runtime) legacyIntegrationConfigDigest(file guestConfigFile) (stri
 }
 
 func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mode, path string, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
-	request, err := runtime.configMaterializationRequest(format, mode, path, payload, legacyTemplates...)
+	request, err := configmaterial.Request(format, mode, runtime.devUser(), path, runtime.Yard.DevUID, payload, legacyTemplates...)
 	if err != nil {
 		return configmaterial.Observation{}, err
 	}
@@ -1163,12 +1163,6 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 	if err != nil || result.ExitCode != 0 {
 		var completed *ports.GuestExitError
 		detail := ""
-		if conflict := configmaterial.ContributionConflict(result, err); conflict != "" {
-			return configmaterial.Observation{}, fmt.Errorf("%s: %s", path, conflict)
-		}
-		if refusal := configmaterial.WriteRefusal(result, err, path); refusal != "" {
-			return configmaterial.Observation{}, fmt.Errorf("%s: %s", path, refusal)
-		}
 		switch strings.TrimSpace(string(result.Stderr)) {
 		case "config materialization: adoption ownership evidence unavailable":
 			detail = "no protected baseline or exact recognized legacy template"

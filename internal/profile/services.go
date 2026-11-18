@@ -11,8 +11,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/Subyard/Subyard/internal/domain"
 )
 
 // ReadinessTimeout bounds read-only profile readiness observation.
@@ -47,7 +45,7 @@ func ValidServiceReadinessReason(reason string) bool {
 
 type serviceReadinessBuffer []byte
 
-const serviceReadinessLimit = 64 << 10
+const serviceReadinessLimit = 128
 
 func (buffer *serviceReadinessBuffer) Write(data []byte) (int, error) {
 	*buffer = append(*buffer, data[:min(len(data), serviceReadinessLimit-len(*buffer))]...)
@@ -144,13 +142,6 @@ func RunServices(ctx context.Context, root string, arguments []string, environme
 			if action == "--check" {
 				var exit *exec.ExitError
 				if errors.As(err, &exit) && exit.ExitCode() > 0 {
-					if exit.ExitCode() == 2 {
-						for _, line := range bytes.Split(diagnostic, []byte{'\n'}) {
-							if len(domain.ConfigPublicationRefusals(line, "")) == 1 {
-								fmt.Fprintln(stderr, string(line))
-							}
-						}
-					}
 					return &ServiceCheckError{Owner: definition.Name, NativeExit: exit.ExitCode(), Reason: diagnostic.reason(), cause: err}
 				}
 				return errors.New("profile service check unavailable")

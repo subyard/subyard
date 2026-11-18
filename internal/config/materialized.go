@@ -4,10 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 
@@ -99,49 +97,14 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			assets = append(assets, MaterializedAsset{Name: agent + "." + artifact.ID, Setting: setting, Source: source, Destination: clean, OwnedFormat: format})
 		}
 	}
-	if err := validateMaterializedDestinations(assets, values, developer, definitions); err != nil {
-		return nil, err
-	}
-	return assets, nil
-}
-
-func validateMaterializedDestinations(assets []MaterializedAsset, values map[string]string, developer string, definitions []profile.IntegrationDefinition) error {
 	destinations := make([]string, 0, len(assets))
 	for _, asset := range assets {
 		destinations = append(destinations, asset.Destination)
 	}
-	for _, reserved := range StructuredConfigDestinations(values, developer, definitions...) {
-		if !slices.ContainsFunc(assets, func(asset MaterializedAsset) bool {
-			return asset.OwnedFormat != "" && asset.Destination == reserved
-		}) {
-			destinations = append(destinations, reserved)
-		}
+	if err := validateManagedDestinations(destinations, values["INTEGRATION_HOST_LINKS"], filepath.Join("/home", developer)); err != nil {
+		return nil, err
 	}
-	return validateManagedDestinations(destinations, values["INTEGRATION_HOST_LINKS"], filepath.Join("/home", developer))
-}
-
-// StructuredConfigDestinations includes declared native destinations even when
-// a template source is disabled. Another owner can still contribute there.
-func StructuredConfigDestinations(values map[string]string, developer string, definitions ...profile.IntegrationDefinition) []string {
-	if !domain.SafeName(developer) {
-		return nil
-	}
-	destinations := map[string]bool{}
-	for _, definition := range definitions {
-		for _, artifact := range definition.Artifacts {
-			if artifact.Kind != "config" || artifact.Format == "raw" {
-				continue
-			}
-			setting := "AGENT_" + definition.Name + "_" + strings.ToUpper(artifact.ID) + "_DEST"
-			for _, destination := range []string{artifact.Destination, values[setting]} {
-				clean, err := artifactDestination(developer, destination)
-				if err == nil && (artifact.Format != "destination" || ownedDestinationFormat(clean) != "") {
-					destinations[clean] = true
-				}
-			}
-		}
-	}
-	return slices.Sorted(maps.Keys(destinations))
+	return assets, nil
 }
 
 // validateManagedDestinations keeps files and managed links from replacing each

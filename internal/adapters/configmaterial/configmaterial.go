@@ -19,7 +19,6 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
-	"github.com/Subyard/Subyard/internal/profile"
 )
 
 const (
@@ -87,40 +86,6 @@ func UnownedInvalidDestination(stderr []byte, format string) bool {
 	return bytes.HasPrefix(stderr, []byte("config materialization: unowned-invalid-destination-v1 "+strings.ToUpper(format)+";"))
 }
 
-// ContributionConflict returns the guest's bounded, field-only refusal.
-func ContributionConflict(result ports.InstanceExecResult, err error) string {
-	var completed *ports.GuestExitError
-	if result.ExitCode != 2 || err != nil && (!errors.As(err, &completed) || completed.Code != 2) {
-		return ""
-	}
-	line := strings.TrimSuffix(string(result.Stderr), "\n")
-	detail, ok := strings.CutPrefix(line, "config materialization: configuration contribution conflicts at ")
-	if !ok || detail == "" || len(detail) > 480 || strings.ContainsFunc(detail, unicode.IsControl) {
-		return ""
-	}
-	return "configuration contribution conflicts at " + detail
-}
-
-var publicationRefusal = regexp.MustCompile(`^config materialization: (concurrent destination change|invalid destination path|configuration publication failed|configuration permissions could not be tightened to 0600|TOML time precision exceeds the writer's supported precision)(; preserved file \.subyard-config-recovery\.[0-9a-f]{24}(?:/document)?)?\n?$`)
-
-// WriteRefusal admits only fixed writer messages and its generated recovery name.
-func WriteRefusal(result ports.InstanceExecResult, err error, destination string) string {
-	var completed *ports.GuestExitError
-	if result.ExitCode != 2 || err != nil && (!errors.As(err, &completed) || completed.Code != 2) {
-		return ""
-	}
-	if output, ok := bytes.CutPrefix(result.Stderr, []byte("config materialization: ")); ok {
-		if pending := domain.ConfigPublicationRefusals(output, destination); len(pending) == 1 {
-			return pending[0].Error()
-		}
-	}
-	match := publicationRefusal.FindSubmatch(result.Stderr)
-	if match == nil {
-		return ""
-	}
-	return string(match[1]) + string(match[2])
-}
-
 func ParseObservation(payload []byte) (Observation, error) {
 	return ParseJSONObservation(payload)
 }
@@ -145,31 +110,6 @@ func Request(format, mode, developer, destination string, uid int, payload []byt
 	}
 	return materializationRequest(format, mode, developer, destination, uid, payload,
 		guestStateRoot, 0, "/home/"+developer, legacyTemplates...)
-}
-
-// RequestWithContributions includes shipped legacy receipt locations for the document.
-func RequestWithContributions(format, mode, developer, destination string, uid int, payload []byte, profiles []profile.Definition, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
-	request, err := Request(format, mode, developer, destination, uid, payload, legacyTemplates...)
-	if err != nil {
-		return request, err
-	}
-	relative := strings.TrimPrefix(destination, "/home/"+developer+"/")
-	var entries []profile.ConfigContribution
-	for _, definition := range profiles {
-		for _, entry := range definition.ConfigContributions {
-			if entry.Destination == relative {
-				entries = append(entries, entry)
-			}
-		}
-	}
-	if len(entries) != 0 {
-		payload, err := json.Marshal(entries)
-		if err != nil {
-			return ports.InstanceExecRequest{}, err
-		}
-		request.Command[3] = "LEGACY_CONTRIBUTIONS = " + string(payload) + "\n" + request.Command[3]
-	}
-	return request, nil
 }
 
 func DesiredDigest(payload []byte) (string, error) {

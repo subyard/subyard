@@ -367,7 +367,7 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 		}
 		request := ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}}
 		if file.ownedFormat != "" {
-			request, err = runtime.configMaterializationRequest(file.ownedFormat, configmaterial.ModeObserve, file.destination, payload)
+			request, err = configmaterial.Request(file.ownedFormat, configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
 			if err != nil {
 				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 				continue
@@ -390,15 +390,7 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 		observation := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
 		if file.ownedFormat != "" {
 			if execErr != nil || result.ExitCode != 0 {
-				detail := configmaterial.ContributionConflict(result, execErr)
-				if detail == "" {
-					if refusal := configmaterial.WriteRefusal(result, execErr, file.destination); refusal != "" {
-						detail = fmt.Sprintf("%q: %s", file.destination, refusal)
-					} else {
-						detail = "structured configuration unavailable"
-					}
-				}
-				refusals = append(refusals, fmt.Errorf("observe %s: %s", file.label, detail))
+				refusals = append(refusals, fmt.Errorf("observe %s: structured configuration unavailable", file.label))
 				continue
 			}
 			observed, err := configmaterial.ParseObservation(result.Stdout)
@@ -566,19 +558,13 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 		// An installed-view repair never takes back released ownership.
 		mode = configmaterial.ModeApplyInstalled
 	}
-	request, err := runtime.configMaterializationRequest(file.ownedFormat, mode, file.destination, payload)
+	request, err := configmaterial.Request(file.ownedFormat, mode, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
 	if err != nil {
 		return err
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err != nil || result.ExitCode != 0 {
 		var completed *ports.GuestExitError
-		if detail := configmaterial.ContributionConflict(result, err); detail != "" {
-			return errors.New(detail)
-		}
-		if detail := configmaterial.WriteRefusal(result, err, file.destination); detail != "" {
-			return fmt.Errorf("%q: %s", file.destination, detail)
-		}
 		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
 			preserve := runtime.preserveInvalidConfigCommand(file.destination)
 			repair := "yard config apply"
@@ -590,14 +576,6 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 		return errors.New("structured configuration apply failed")
 	}
 	return nil
-}
-
-func (runtime Runtime) configMaterializationRequest(format, mode, destination string, payload []byte, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
-	profiles, err := runtime.profileDefinitions()
-	if err != nil {
-		return ports.InstanceExecRequest{}, err
-	}
-	return configmaterial.RequestWithContributions(format, mode, runtime.devUser(), destination, runtime.Yard.DevUID, payload, profiles, legacyTemplates...)
 }
 
 func (runtime Runtime) writeGuestFile(ctx context.Context, destination string, payload []byte) error {

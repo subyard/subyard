@@ -115,9 +115,6 @@ func (runtime Runtime) profileRuntimeObservationFailure(definition profile.Defin
 			failure.message, failure.retry = record.Message, record.Retry
 		}
 	}
-	if pending := domain.CollectRefusals(domain.ConfigPublicationRefusals(stderr, "")...); pending != nil {
-		failure.message = pending.Error() + "\n" + failure.message
-	}
 	return failure
 }
 

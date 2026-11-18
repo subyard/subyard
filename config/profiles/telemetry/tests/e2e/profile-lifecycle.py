@@ -364,7 +364,6 @@ def main():
              'source/config/profiles/telemetry/tests/e2e/failure-evidence.py': args.source/'config/profiles/telemetry/tests/e2e/failure-evidence.py',
              'source/config/profiles/telemetry/native.py': args.source/'config/profiles/telemetry/native.py',
              'source/internal/adapters/configmaterial/tomli_w.py': args.source/'internal/adapters/configmaterial/tomli_w.py',
-             'source/internal/adapters/configmaterial/guest_json.py': args.source/'internal/adapters/configmaterial/guest_json.py',
              'source/config/profiles/orca/tests/e2e/codex-permissions.py': args.source/'config/profiles/orca/tests/e2e/codex-permissions.py',
              'native/bin/codex': (args.native_state/'bin/codex').resolve(), 'native/bin/claude': args.native_state/'bin/claude'}
     guest('import pathlib,sys\nfor name in sys.argv[1:]: pathlib.Path(name).parent.mkdir(parents=True,exist_ok=True,mode=0o700)\n',

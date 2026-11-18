@@ -21,36 +21,16 @@ def run(arguments, **kwargs):
     result = subprocess.run(arguments, stdin=subprocess.DEVNULL if 'input' not in kwargs else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, **kwargs)
     if result.returncode:
-        refusals, retry = [], None
         for line in result.stderr[-65536:].decode(errors='replace').splitlines()[-32:]:
-            recovery = re.fullmatch(r'telemetry-agent-config-recovery-v1 (claude|codex) (\.subyard-config-recovery\.[0-9a-f]{24}(?:/document)?)', line)
-            if recovery:
-                agent, name = recovery.groups()
-                directory = '/home/'+os.environ['DEV_USER']+'/.'+agent
-                refusals.append('agent configuration edit preserved at '+directory+'/'+name)
-            if line.startswith('telemetry-config-contribution-conflict-v1 '):
-                detail = line.removeprefix('telemetry-config-contribution-conflict-v1 ')
-                if len(detail.encode()) <= 480 and detail.isprintable():
-                    refusals.append(detail)
-            if line in ('telemetry-agent-config-unavailable-v1 claude', 'telemetry-agent-config-unavailable-v1 codex'):
-                refusals.append('agent configuration unavailable: '+line.rsplit(' ', 1)[1])
-            if line.startswith('contribution-publication-pending-v1 ') and line.isprintable():
-                print(line, file=sys.stderr)
-                refusals.append('unresolved configuration publication')
-            if line in ('telemetry-agent-config-invalid-v1 claude', 'telemetry-agent-config-invalid-v1 codex'):
-                agent = line.rsplit(' ', 1)[1]
-                path = '/home/'+os.environ['DEV_USER']+('/.claude/settings.json' if agent == 'claude' else '/.codex/config.toml')
-                command = ['incus', 'exec', os.environ['YARD_INSTANCE_NAME'], '--project', os.environ['INCUS_PROJECT'], '--', 'mv', '--backup=numbered', '--', path, path+'.subyard-invalid']
-                refusals.append('invalid unmanaged agent configuration '+path)
-                if retry is None:
-                    retry = 'run '+shlex.join(command)
+            if line.startswith('telemetry-native-refusal-v1 '):
+                detail = line.removeprefix('telemetry-native-refusal-v1 ')
+                if detail and len(detail.encode()) <= 480 and detail.isprintable():
+                    raise Refusal([detail])
             match = SAFE_GUEST_FAILURE.fullmatch(line)
             if match:
                 print(line, file=sys.stderr)
                 print('subyard-profile-observation-diagnostic-v1 '+match['kind']+' '+match['location'], file=sys.stderr)
                 break
-        if refusals:
-            raise Refusal(refusals, retry)
         raise ValueError('telemetry owner transport failed')
     return result.stdout.decode().strip()
 
@@ -132,17 +112,16 @@ def main():
     binary, refusals = collector_binary(source, selected and operation != 'startup')
     agents = ' '.join(name for name in ('claude', 'codex') if name in os.environ.get('CODING_TOOL_INTEGRATIONS', '').split())
     templates = {}
-    for agent in agents.split():
-        source_path = os.environ.get('AGENT_'+agent+'_CONFIG', '').strip()
-        destination = os.environ.get('AGENT_'+agent+'_CONFIG_DEST')
-        expected = '.claude/settings.json' if agent == 'claude' else '.codex/config.toml'
-        if selected and (destination or source_path) and destination != expected:
-            refusals.append(f'standard native destination required: AGENT_{agent}_CONFIG_DEST must be {expected}')
-        if source_path and destination == expected and operation in ('observe', 'refresh', 'check', 'apply'):
+    if selected and operation in ('observe', 'refresh', 'check', 'apply'):
+        for agent in agents.split():
+            path = os.environ.get('AGENT_'+agent+'_CONFIG', '').strip()
+            if not path:
+                continue
             try:
-                if source_path.startswith('/proc/self/fd/'):
-                    source_path = source_path.replace('/proc/self/', f'/proc/{os.getppid()}/', 1)
-                with os.fdopen(os.open(source_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), 'rb') as template:
+                # A retained release may anchor the source directory by descriptor.
+                if path.startswith('/proc/self/fd/'):
+                    path = path.replace('/proc/self/', f'/proc/{os.getppid()}/', 1)
+                with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), 'rb') as template:
                     if not stat.S_ISREG(os.fstat(template.fileno()).st_mode):
                         raise ValueError('not regular')
                     content = template.read(4*1024*1024+1)
@@ -150,10 +129,9 @@ def main():
                         raise ValueError('size bound')
                 templates[agent] = content
             except (OSError, ValueError):
-                if selected:
-                    refusals.append('managed agent source missing, unsafe or unreadable: '+source_path)
+                refusals.append('missing, unsafe or unreadable telemetry template for '+agent)
     if refusals:
-        operation, bindings, binary, templates = 'check-publication', [], None, {}
+        raise Refusal(refusals)
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode='w') as archive:
         for name in FILES:
@@ -161,8 +139,7 @@ def main():
         # Only a selected run installs the collector; an unselected one keeps its path only.
         if binary is not None:
             archive.add(binary, arcname='subyard-telemetry', recursive=False)
-        for name in ('tomli_w.py', 'guest_json.py'):
-            archive.add(source.parents[2]/'internal/adapters/configmaterial'/name, arcname=name, recursive=False)
+        archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
         for agent, content in templates.items():
             entry = tarfile.TarInfo(agent+'.template')
             entry.size, entry.mode = len(content), 0o600
@@ -171,16 +148,8 @@ def main():
             archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     remaining = os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')
     startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
-    try:
-        output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
-                      GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        if not refusals:
-            raise
-        detail = str(error) if isinstance(error, Refusal) else 'agent configuration publication check failed'
-        raise Refusal([*refusals, detail]) from None
-    if refusals:
-        raise Refusal(refusals)
+    output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
+                  GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
     if operation == 'check':
         if output == 'telemetry-drift':
             return 1

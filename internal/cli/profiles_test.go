@@ -23,7 +23,6 @@ type profileRuntimeFixture struct {
 	recordFail bool
 	applied    []string
 	recorded   []string
-	check      func() error
 }
 type profileRuntimeSelection struct {
 	fixture  *profileRuntimeFixture
@@ -31,9 +30,6 @@ type profileRuntimeSelection struct {
 }
 
 func (runtime profileRuntimeSelection) ProfileServiceConverged(context.Context, string) (bool, error) {
-	if runtime.fixture.check != nil {
-		return false, runtime.fixture.check()
-	}
 	return runtime.fixture.installed == runtime.selected, nil
 }
 func (runtime profileRuntimeSelection) ApplyProfileService(_ context.Context, name string, _ []ports.TeardownArtifact) error {

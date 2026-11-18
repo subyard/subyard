@@ -316,7 +316,6 @@ func (declaration Definition) Clone() Definition {
 	copy := (Metadata{data: declaration.metadataData()}).definition()
 	copy.Root = declaration.Root
 	copy.validationInputs = slices.Clone(declaration.validationInputs)
-	copy.ConfigContributions = slices.Clone(declaration.ConfigContributions)
 	return copy
 }
 
