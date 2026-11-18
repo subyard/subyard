@@ -185,6 +185,37 @@ class TestAcceptance(unittest.TestCase):
                                                 run_lane, record, list, 0))
             self.assertIn("slot-4=quarantined", printed.getvalue())
 
+    def test_timed_exact_slot_refusal_requeues_mandatory_smoke(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            self.slots.return_value = {2: "available", 4: "available"}
+            results = []
+            def execute(name, slot):
+                command = ["true"] if slot == 4 else ["bash", "-c",
+                    "printf '%s\\n' 'p0-acceptance: timed out waiting for slot-002: state=draining reason=draining'; exit 4"]
+                return m.execute(name, command, output, output, m.clean_environment(), slot)
+            def record(name, result):
+                results.append((result["slot"], result["status"], result.get("reason")))
+                return result
+            self.assertFalse(m.dispatch_live(["p0-release-smoke"], (2, 4), {}, lambda _: True, execute, record, list, 1))
+            self.assertEqual(results, [(2, "blocked", "slot_draining"), (4, "passed", None)])
+
+    def test_initial_idle_wait_does_not_spend_capacity_retry_budget(self):
+        calls, probes = [], []
+        def status(env):
+            probes.append(True)
+            return {2: "held" if len(probes) == 1 else "available"}
+        def execute(name, slot):
+            calls.append((name, slot))
+            if len(calls) == 1:
+                time.sleep(0.3)
+                return {"status": "blocked", "termination": "exit", "reason": "capacity_disk"}
+            return {"status": "passed"}
+        self.slots.side_effect = status
+        self.assertFalse(m.dispatch_live(["lane"], (2,), {}, lambda _: True, execute,
+                                         lambda name, result: result, list, 0.2))
+        self.assertEqual(calls, [("lane", 2), ("lane", 2)])
+
     def test_dispatch_tries_runnable_work_after_slow_or_contended_acquire(self):
         for slots, expected in (((2,), [("large", 2), ("small", 2)]),
                                 ((2, 4), [("large", 2), ("large", 4)])):
@@ -1566,6 +1597,21 @@ exit "$COLLECTOR_EXIT"
             declaration.write_text(json.dumps(review))
             with self.assertRaises(ValueError):
                 m.transfer_evidence(second, first, name, declaration)
+            original_files = set(second.iterdir())
+            log.write_bytes(original_log + b"agent-e2e: retryable capacity refusal for slot-001: resource=memory; retry after resources become available\n")
+            review["standalone"]["log"]["sha256"] = m.digest(log)
+            declaration.write_text(json.dumps(review))
+            with self.assertRaisesRegex(ValueError, "lease-acquire-refused"):
+                m.transfer_evidence(second, first, name, declaration)
+            self.assertEqual((second / "receipt.json").read_bytes(), before)
+            self.assertEqual(set(second.iterdir()), original_files)
+            request = declaration.with_name("batch.json")
+            request.write_text(json.dumps({"schema_version": 1, "target": review["target"], "checks": [
+                {"check": name, "source": str(first), "attempt": None,
+                 "review": {"path": str(declaration), "sha256": m.digest(declaration)}}]}))
+            with self.assertRaisesRegex(ValueError, "lease-acquire-refused"):
+                m.transfer_batch(second, request, plan=True)
+            self.assertEqual((second / "receipt.json").read_bytes(), before)
             log.write_bytes(original_log)
             review["standalone"]["log"]["sha256"] = m.digest(log)
             declaration.write_text(json.dumps(review))
@@ -2244,6 +2290,16 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             value["resources"]["memory"]["available_bytes"] = 1000
             value["pool"]["slots"][0]["state"] = "held"
             self.assertEqual(inspect()["capacity_summary"]["shortages"], ["slot-001: held"])
+            value["pool"]["slots"] += [{"slot_id": "slot-002", "state": "available"},
+                                       {"slot_id": "slot-003", "state": "available"},
+                                       {"slot_id": "slot-004", "state": "recovering"}]
+            status.write_text(json.dumps(value))
+            with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                summary = m.preflight(only=["p0-release-smoke"], broker_status=status, slots=m.DEFAULT_SLOTS)["capacity_summary"]
+            self.assertEqual(summary["planning"], "unknown")
+            self.assertEqual(summary["shortages"], [])
+            self.assertEqual(summary["selected_slots"][-1], {"id": "slot-004", "state": "recovering"})
             local_summary = inspect(only=["verify"])["capacity_summary"]
             self.assertEqual(local_summary["planning"], "not-required")
             self.assertEqual(local_summary["shortages"], [])
@@ -2432,24 +2488,25 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual(events[-1]["status"], "interrupted")
             log = output / "refusal.log"
             log.write_text("agent-e2e: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\nE2E lease: slot=slot-1\nproduct failure\n")
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertEqual(m.lane_status(log, {"exit_code": 4})[:2], ("failed", "lease-cleanup-unconfirmed"))
             # The installed standalone client prints the same typed refusal under its own name.
             script.write_text("#!/bin/bash\nprintf 'subyard-test-vms: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\\n'\nexit 4\n")
             result = m.execute("profile:sample/three", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_disk"))
             log.write_text("other-tool: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\n")
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertEqual(m.lane_status(log, {"exit_code": 4})[:2], ("failed", None))
             # A later acquire of a multi-lease lane blocks on capacity only after a clean release.
             lease = "E2E lease: yard=hermes project=hermes run=0123abcd purpose=p slot=slot-001 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
             start = "E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n"
             refusal = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
-            for released, expected in (("0", "memory"), ("1", None)):
+            for released, expected in (("0", ("blocked", "capacity_memory")),
+                                       ("1", ("failed", "lease-cleanup-unconfirmed"))):
                 log.write_text(lease + start + f"E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code={released}\n" + refusal)
-                self.assertEqual(m.capacity_reason(log), expected, released)
+                self.assertEqual(m.lane_status(log, {"exit_code": 4})[:2], expected, released)
             log.write_text(lease + refusal)
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertEqual(m.lane_status(log, {"exit_code": 4})[:2], ("failed", "lease-cleanup-unconfirmed"))
             log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertEqual(m.lane_status(log, {"exit_code": 4})[:2], ("failed", "lease-cleanup-unconfirmed"))
             script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
             result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
@@ -2489,14 +2546,16 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             clean = lease + release
             refusal = "agent-e2e: retryable capacity refusal for slot-001: resource=memory; retry after resources become available\n"
             for tail, reason in ((refusal, "lease-acquire-refused"), (refusal + clean, "lease-acquire-refused"),
-                                 (lease, "lease-cleanup-unconfirmed")):
+                                 (lease, "lease-cleanup-unconfirmed"),
+                                 *[("subyard-test-vms: " + prefix + "acquire cleanup remains unconfirmed: slot=slot-001 run=sample\n",
+                                    "lease-cleanup-unconfirmed") for prefix in ("", "interrupted ")]):
                 with self.subTest(tail=tail):
                     command = ["bash", "-c", "printf '%s' " + shlex.quote(clean + tail)]
                     result = m.execute(name, command, frozen, output, m.clean_environment(), 1)
                     self.assertEqual((result["status"], result["exit_code"], result.pop("reason")), ("failed", 0, reason))
                     # Model an immutable PASS recorded before the stricter check.
                     result.update(status="passed", command=m.command_identity(commands[name], frozen),
-                                  execution_environment=receipt["environment"])
+                                  execution_environment=receipt["environment"], cleanup_status="recorded")
                     result["original_attempt"] = m.completed_attempt(output, frozen, receipt, name, result)
                     receipt["checks"][name] = result
                     m.save(output, receipt)
@@ -2528,9 +2587,16 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             receipt["checks"][name] = failed
             sibling = "profile:sample/two"
             run_live(output, frozen, receipt, sibling)
+            with self.assertRaisesRegex(ValueError, "fresh execution required before importing"):
+                m.import_evidence(output, earlier, [name])
+            self.assertEqual(m.load_bound(output)[1]["checks"][name], failed)
             with m.acceptance_lock(output):
                 self.assertEqual(m.request_retry(output, name, attempt), 0)
                 self.assertEqual(m.request_retry(output, name, attempt), 0)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                report = m.preflight(output, only=[sibling], slots=(1,))
+            self.assertTrue(next(check for check in report["checks"] if check["id"] == name)["selected"])
+            self.assertEqual(report["capacity_summary"]["planning"], "unknown")
             with self.assertRaisesRegex(ValueError, "fresh execution required before importing"):
                 m.import_evidence(output, earlier, [name])
             execute = m.execute
@@ -2990,7 +3056,8 @@ while True: time.sleep(1)
                 self.assertEqual(attempt["exit_code"], code)
                 self.assertEqual(attempt["termination"], "exit")
                 self.assertEqual(attempt["failure_class"], "unknown")
-                self.assertNotIn("reason", attempt)
+                reason = "lease-cleanup-unconfirmed" if lease in text or guest in text else None
+                self.assertEqual(attempt.get("reason"), reason)
                 self.assertEqual(persisted["result"], "failed")
                 self.assertEqual(persisted["checks"][following]["status"], "passed")
                 events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
@@ -2998,7 +3065,7 @@ while True: time.sleep(1)
                 results = [item for item in events if item["event"] == "check-result"]
                 self.assertEqual([(item["status"], item["exit_code"], item.get("failure_class")) for item in results],
                                  [("failed", code, "unknown"), ("passed", 0, None)])
-                self.assertNotIn("reason", results[0])
+                self.assertEqual(results[0].get("reason"), reason)
                 self.assertEqual(events[-1]["status"], "failed")
 
     def test_interrupted_attempt_saved_and_untyped_blocked_worker_continues(self):

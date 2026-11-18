@@ -1635,6 +1635,53 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "requested retries require fresh execution.*profile:sample"):
             m.attestation(self.output, self.identity, [path])
 
+    def test_publication_refuses_retry_acknowledged_during_workflow_selection(self):
+        path, files, _ = self.operator_failure()
+        state_dir = self.directory / "publication"
+        candidate = state_dir / self.identity["candidate_id"]
+        candidate.mkdir(parents=True)
+        shutil.copytree(self.prepared, candidate / "prepared")
+        output = candidate / "acceptance"
+        shutil.copytree(self.output, output)
+        root, receipt = m.a.load_bound(output)
+        name = "profile:sample"
+        log = output / "failure.log"
+        log.write_bytes(files["log"].read_bytes())
+        result = {"status": "failed", "exit_code": 1, "command": json.loads(path.read_text())["command"],
+                  "log": log.name, "log_sha256": m.a.digest(log)}
+        result["original_attempt"] = m.a.completed_attempt(output, root, receipt, name, result)
+        receipt["checks"][name] = result
+        m.a.save(output, receipt)
+        attempt = result["original_attempt"]["id"]
+        def select(*args):
+            self.assertEqual(m.a.request_retry(output, name, attempt), 0)
+            return "master", []
+        argv = ["release-publication", "--state-dir", str(state_dir), "publish", "--candidate",
+                self.identity["candidate_id"], "--operator-acceptance", str(path)]
+        with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=self.github), \
+             patch.object(m, "select_workflow_ref", side_effect=select), \
+             patch.object(m, "dispatch", side_effect=AssertionError("dispatched with an unrun retry")), \
+             self.assertRaisesRegex(ValueError, "requested retries require fresh execution.*profile:sample"):
+            m.main()
+        self.assertEqual(m.a.pending_retries(output, receipt), {name: attempt})
+        self.assertFalse((candidate / "publication.json").exists())
+        self.assertIsNone(self.github.release)
+        # A fresh attempt consumes the earlier retry. Once publication records
+        # intent, a new submission cannot be acknowledged before dispatch.
+        result["original_attempt"] = m.a.completed_attempt(output, root, receipt, name, result)
+        m.a.save(output, receipt)
+        def dispatch(*args):
+            self.assertTrue((candidate / "publication.json").is_file())
+            with self.assertRaisesRegex(ValueError, "publication intent already recorded"):
+                m.a.request_retry(output, name, result["original_attempt"]["id"])
+            raise RuntimeError("fixture stopped before dispatch")
+        with patch.object(sys, "argv", argv), patch.object(m, "GitHub", return_value=self.github), \
+             patch.object(m, "select_workflow_ref", return_value=("master", [])), \
+             patch.object(m, "dispatch", side_effect=dispatch), \
+             self.assertRaisesRegex(RuntimeError, "fixture stopped before dispatch"):
+            m.main()
+        self.assertEqual(m.a.pending_retries(output, receipt), {})
+
     def test_operator_declaration_unknown_core_wrong_candidate_version_command_and_tamper_refuse(self):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
@@ -1672,7 +1719,8 @@ class Contracts(unittest.TestCase):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
         originals = {role: file.read_bytes() for role, file in files.items()}
-        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release"):
+        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release",
+                       "second-lease", "unconfirmed"):
             for role, content in originals.items():
                 files[role].write_bytes(content)
             if change in ("nonterminal", "pass", "signal"):
@@ -1688,7 +1736,15 @@ class Contracts(unittest.TestCase):
                     data["argv"][8] = "SUBYARD_E2E_CANDIDATE_SHA256=" + "f" * 64
                 m.write_json(files[role], data)
             else:
-                content = originals["log"].decode().replace("exit_code=0 vm=2", "exit_code=1 vm=2") if change == "cleanup" else originals["log"].decode().replace("E2E lease released:", "missing release:")
+                content = originals["log"].decode()
+                if change == "cleanup":
+                    content = content.replace("exit_code=0 vm=2", "exit_code=1 vm=2")
+                elif change == "release":
+                    content = content.replace("E2E lease released:", "missing release:")
+                elif change == "second-lease":
+                    content += content.splitlines(keepends=True)[0].replace("run=fixture", "run=second")
+                else:
+                    content += "subyard-test-vms: acquire cleanup remains unconfirmed: slot=slot-002 run=second\n"
                 files["log"].write_text(content)
             declaration["artifacts"] = {role: {"path": str(file), "sha256": m.a.digest(file)} for role, file in files.items()}
             m.write_json(path, declaration)
