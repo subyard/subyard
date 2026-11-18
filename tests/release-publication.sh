@@ -1669,7 +1669,7 @@ class Contracts(unittest.TestCase):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
         originals = {role: file.read_bytes() for role, file in files.items()}
-        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release"):
+        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release", "outstanding lease"):
             for role, content in originals.items():
                 files[role].write_bytes(content)
             if change in ("nonterminal", "pass", "signal"):
@@ -1685,11 +1685,19 @@ class Contracts(unittest.TestCase):
                     data["argv"][8] = "SUBYARD_E2E_CANDIDATE_SHA256=" + "f" * 64
                 m.write_json(files[role], data)
             else:
-                content = originals["log"].decode().replace("exit_code=0 vm=2", "exit_code=1 vm=2") if change == "cleanup" else originals["log"].decode().replace("E2E lease released:", "missing release:")
+                content = originals["log"].decode()
+                if change == "cleanup":
+                    content = content.replace("exit_code=0 vm=2", "exit_code=1 vm=2")
+                elif change == "release":
+                    content = content.replace("E2E lease released:", "missing release:")
+                else:
+                    second_grant = content.splitlines(keepends=True)[0].replace("run=fixture", "run=other")
+                    content = second_grant + content
                 files["log"].write_text(content)
             declaration["artifacts"] = {role: {"path": str(file), "sha256": m.a.digest(file)} for role, file in files.items()}
             m.write_json(path, declaration)
-            with self.subTest(change=change), self.assertRaises(ValueError):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "cleanup or release unconfirmed"
+                    if change == "outstanding lease" else "."):
                 m.attestation(self.output, self.identity, [path])
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):

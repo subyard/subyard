@@ -47,9 +47,16 @@ def slot_list(value):
     return slots
 
 
+class SlotSelection(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest) is not None:
+            parser.error("--slots can only be given once; use a comma-separated list")
+        setattr(namespace, self.dest, values)
+
+
 def add_slot_arguments(parser):
     group = parser.add_mutually_exclusive_group()
-    group.add_argument("--slots", type=slot_list, metavar="slot-N[,slot-N...]",
+    group.add_argument("--slots", type=slot_list, action=SlotSelection, metavar="slot-N[,slot-N...]",
                        help="use exactly these slots; default: slots 1–4")
     group.add_argument("--slot-count", type=int, choices=DEFAULT_SLOTS,
                        help="use slots 1 through N")
@@ -88,7 +95,12 @@ def request_local_retry(output, name):
     try:
         with retry_socket(output) as channel:
             channel.sendall(name.encode())
-            queued = channel.recv(32) == b"queued"
+            queued = False
+            if channel.recv(32) == b"ready":
+                channel.sendall(b"queue")
+                # After authorizing admission, wait for its recorded outcome.
+                channel.settimeout(None)
+                queued = channel.recv(32) == b"queued"
     except OSError:
         queued = False
     if not queued:
@@ -680,11 +692,22 @@ class Invocation:
         self.write()
         print(f"INVOCATION id={self.id} result={self.path}", flush=True)
 
-    def start(self, name):
+    def queue_retry(self, name):
+        self.attempted.discard(name)
+        self.mark_pending(name)
+        self.not_started_reasons[name] = "retry-queued"
+        self.receipt["checks"][name] = {"status": "pending"}
+        save(self.output, self.receipt)
+        self.write()
+
+    def mark_pending(self, name):
         if name in self.reused:
             self.reused.remove(name)
         self.pending.add(name)
         self.outcomes.pop(name, None)
+
+    def start(self, name):
+        self.mark_pending(name)
         self.attempted.add(name)
         try:
             self.write()
@@ -751,7 +774,7 @@ class Invocation:
               f"result={self.path}", flush=True)
 
 
-def execute(name, command, root, output, env, slot=None):
+def execute(name, command, root, output, env, slot=None, observe_lease=None):
     log = output / (name.replace(":", "-").replace("/", "-") + "-" + uuid.uuid4().hex[:8] + ".log")
     argv = command + (["--slot", str(slot)] if slot else [])
     print(f"RUN {name}" + (f" slot={slot}" if slot else ""), flush=True)
@@ -778,14 +801,14 @@ def execute(name, command, root, output, env, slot=None):
                     event(output, "heartbeat", check=name, slot=slot,
                           duration_seconds=round(time.monotonic() - start, 2))
                     next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
-                offset = phase_events(output, name, log, offset, markers, phases=phases)
+                offset = phase_events(output, name, log, offset, markers, phases=phases, observe_lease=observe_lease)
             if STOP.is_set() and not interrupted:
                 interrupted = True
                 cleanup_status = interrupt_group(process)
             code = process.poll() if cleanup_status == "unconfirmed" else process.wait()
             stream.flush()
             os.fsync(stream.fileno())
-        phase_events(output, name, log, offset, markers, final=True, phases=phases)
+        phase_events(output, name, log, offset, markers, final=True, phases=phases, observe_lease=observe_lease)
     except (OSError, subprocess.SubprocessError):
         capture_error = True
         if process is not None:
@@ -844,7 +867,12 @@ def execute(name, command, root, output, env, slot=None):
     return result
 
 
-def phase_events(output, name, log, offset, seen, final=False, phases=None):
+PHASE_MARKER = re.compile(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n")
+ENVIRONMENT_MARKER = re.compile(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n")
+RELEASE_TIMING = re.compile(rb"E2E_RELEASE state=(start|end) duration_seconds=([0-9]{1,9}) budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n")
+
+
+def phase_events(output, name, log, offset, seen, final=False, phases=None, observe_lease=None):
     offset, discard = offset if isinstance(offset, tuple) else (offset, False)
     with log.open("rb") as stream:
         stream.seek(offset)
@@ -868,7 +896,12 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
                     seen.add(key)
                     event(output, "phase", check=name, phase=marker[2].decode(),
                           state={b" .. ": "started", b" ok ": "passed", b"fail": "failed"}[marker[1]])
-            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
+            if observe_lease:
+                lease = lease_marker(line)
+                if lease and (lease[0] == "refusal" or lease not in seen):
+                    seen.add(lease)
+                    observe_lease(lease[0])
+            stage = PHASE_MARKER.fullmatch(line)
             if (stage and int(stage[4]) <= 255
                 and (stage[2] != b"start" or (stage[3] == b"0" and stage[4] == b"0"))
                 and bool(stage[5]) == (stage[1] in (b"transport", b"guest", b"guest-cleanup"))):
@@ -889,7 +922,7 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
             if budget and phases is not None and bool(budget[4]) == (budget[1] == b"guest-cleanup"):
                 key = budget[1].decode() + ("/vm" + budget[4].decode() if budget[4] else "")
                 phases.setdefault("budgets", {})[key] = {"budget_seconds": int(budget[2]), "grace_seconds": int(budget[3])}
-            release = re.fullmatch(rb"E2E_RELEASE state=(start|end) duration_seconds=([0-9]{1,9}) budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n", line)
+            release = RELEASE_TIMING.fullmatch(line)
             if release and int(release[3]) <= 255 and (release[1] != b"start" or (release[2] == b"0" and release[3] == b"0")):
                 event(output, "lease-release", check=name, state=release[1].decode(), duration_seconds=int(release[2]),
                       budget_seconds=180, grace_seconds=5, exit_code=int(release[3]))
@@ -897,7 +930,7 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
                     phases.setdefault("budgets", {})["lease-release"] = {"budget_seconds":180, "grace_seconds":5}
                     if release[1] == b"end":
                         phases.setdefault("cleanup", {})["lease-release"] = {"exit_code":int(release[3]), "duration_seconds":int(release[2])}
-            environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
+            environment = ENVIRONMENT_MARKER.fullmatch(line)
             if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
                 key = ("environment", environment[1].decode(), int(environment[2]), environment[3].decode())
                 if key not in seen:
@@ -911,68 +944,116 @@ class LeaseLedger(NamedTuple):
     granted: bool
     refusal: str | None
     sha256: str
+    environments: set
+    guest_cleanup: list
+    controller_cleanup: list
+
+
+def lease_marker(line):
+    if line.startswith(b"E2E lease:") and line.endswith(b"\n"):
+        slot, run = (re.search(rb" " + key + rb"=(\S+)", line) for key in (b"slot", b"run"))
+        if slot and run:
+            return "grant", run[1], slot[1]
+    elif line.startswith(b"E2E lease "):
+        controller = re.fullmatch(rb"E2E lease released: slot=(\S+) run=(\S+)\n", line)
+        if controller:
+            return "release", controller[2], controller[1]
+        client = re.fullmatch(rb"E2E lease (released: handle=(\S+) slot=(\S+) reason=\S+|had already ended: handle=(\S+) slot=(\S+))\n", line)
+        if client:
+            return "release", client[2] or client[4], client[3] or client[5]
+    elif line.startswith((b"agent-e2e: ", b"subyard-test-vms: ")):
+        message = line.split(b": ", 1)[1]
+        capacity = re.fullmatch(rb"retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", message)
+        if capacity:
+            return "refusal", capacity[1].decode()
+        if re.match(rb"(?:requested E2E slot .* is unavailable:|timed out waiting for slot-|lease acquire failed \(invalid_request: invalid_slot\)$)", message):
+            return "refusal", "slot"
+    return None
 
 
 def lease_ledger(log, expected_sha256=None):
-    """Account for every grant, counting a release and its named confirmation once."""
+    """Bind every lease closure to its handle and collect cleanup evidence."""
     checksum = hashlib.sha256()
-    held = []
+    held, closed = {}, set()
+    environments, guest_cleanup, controller_cleanup = set(), [], []
     granted = allocating = uncertain = False
-    released = None
+    legacy_handoffs = 0
+    legacy_release = False
     refusal = None
     with log.open("rb") as stream:
         for line in stream:
             checksum.update(line)
+            follows_release = legacy_release
+            legacy_release = False
+            if legacy_handoffs and line.startswith(b"E2E_RELEASE"):
+                timing = RELEASE_TIMING.fullmatch(line)
+                legacy_release = bool(timing and timing[1] == b"end" and timing[3] == b"0")
             if not line.startswith((b"E2E", b"agent-e2e: ", b"subyard-test-vms: ")):
                 continue
-            named = re.fullmatch(rb"E2E lease released: (?:slot=(\S+) run=(\S+)|handle=(\S+) slot=(\S+) reason=\S+)\n", line)
-            release = re.fullmatch(rb"E2E_RELEASE state=end duration_seconds=[0-9]{1,9} budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n", line)
-            grant = line.startswith(b"E2E lease:")
-            allocation = line.startswith(b"E2E_PHASE phase=allocation state=start ")
-            guest = line.startswith(b"E2E_PHASE phase=guest state=start ")
-            if (release or grant or allocation or guest) and released is not None:
-                if released and held:
-                    held.pop(0)
-                released = None
-            if named:
-                slot, run = (named[1], named[2]) if named[1] else (named[4], named[3])
-                if released is not False and (slot, run) in held:
-                    held.remove((slot, run))
-                released = None
-                allocating = False
-            elif release:
-                released = release[1] == b"0"
-                uncertain |= not held and not released
-            elif grant:
-                slot, run = (re.search(rb" " + key + rb"=(\S+)", line) for key in (b"slot", b"run"))
-                held.append((slot[1], run[1]) if slot and run else None)
-                granted |= bool(slot and run and line.endswith(b"\n"))
+            marker = lease_marker(line)
+            if marker and marker[0] == "release":
+                _, handle, slot = marker
+                if held.get(handle) == slot:
+                    del held[handle]
+                    closed.add(handle)
+                elif handle not in held and handle not in closed:
+                    if legacy_handoffs and follows_release:
+                        # Older clients named the handle only after the release timing line.
+                        legacy_handoffs -= 1
+                    closed.add(handle)
+            elif line.startswith(b"E2E lease:"):
+                if marker:
+                    _, handle, slot = marker
+                    uncertain |= handle in closed or held.setdefault(handle, slot) != slot
+                    granted = True
+                    environment = ENVIRONMENT_MARKER.fullmatch(line)
+                    if environment:
+                        environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
+                else:
+                    uncertain = True
                 allocating, refusal = False, None
-            elif allocation:
-                allocating, refusal = True, None
-            elif line.startswith(b"E2E_PHASE phase=allocation state=end "):
-                uncertain |= allocating and line.endswith(b" exit_code=0\n")
-                allocating = False
-            elif line.startswith(b"E2E_PHASE phase=cleanup/release state=end ") and line.endswith(b" exit_code=0\n"):
-                allocating = False
-            elif guest:
-                uncertain |= not held
-                refusal = None
+            elif marker and marker[0] == "refusal":
+                refusal, allocating = marker[1], False
+            elif line.startswith(b"E2E_PHASE"):
+                stage = PHASE_MARKER.fullmatch(line)
+                if not stage:
+                    continue
+                phase, state = stage.group(1, 2)
+                if phase == b"allocation":
+                    if state == b"start":
+                        allocating, refusal = True, None
+                    else:
+                        uncertain |= allocating and int(stage[4]) == 0
+                        allocating = False
+                elif phase == b"guest" and state == b"start":
+                    uncertain |= not held
+                    refusal = None
+                elif phase == b"guest-cleanup" and state == b"end":
+                    guest_cleanup.append((int(stage[5]) if stage[5] else None, int(stage[4])))
+                elif phase == b"cleanup/release" and state == b"end":
+                    controller_cleanup.append(int(stage[4]))
             elif line.startswith((b"agent-e2e: ", b"subyard-test-vms: ")):
                 message = line.split(b": ", 1)[1]
-                capacity = re.fullmatch(rb"retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", message)
-                if capacity:
-                    refusal, allocating = capacity[1].decode(), False
-                elif re.match(rb"(?:requested E2E slot .* is unavailable:|timed out waiting for slot-|lease acquire failed \(invalid_request: invalid_slot\)$)", message):
-                    refusal, allocating = "slot", False
-                elif message.startswith((b"lease acquire unknown-outcome ", b"lease acquire handoff is unknown",
-                                         b"acquire cleanup remains unconfirmed")):
+                handoff = re.fullmatch(rb"lease acquire handoff is unknown; cleanup required(?: slot=(\S+) run=(\S+))?\n", message)
+                unconfirmed = re.fullmatch(rb"(?:(?:interrupted )?acquire cleanup remains unconfirmed:|release (?:failed|rejected) for) slot=(\S+) run=(\S+)(?: \([^\r\n]+\))?\n", message)
+                if handoff:
+                    if handoff[1]:
+                        uncertain |= handoff[2] in closed or held.setdefault(handoff[2], handoff[1]) != handoff[1]
+                    else:
+                        legacy_handoffs += 1
+                    allocating, refusal = False, None
+                elif unconfirmed:
+                    slot, handle = unconfirmed.groups()
+                    if handle not in closed:
+                        uncertain |= held.setdefault(handle, slot) != slot
+                elif message.startswith((b"lease acquire unknown-outcome ", b"acquire cleanup remains unconfirmed",
+                                         b"interrupted acquire cleanup remains unconfirmed")):
                     uncertain = True
     sha256 = checksum.hexdigest()
     if expected_sha256 is not None and sha256 != expected_sha256:
         raise ValueError("attempt log changed")
-    safe = len(held) <= int(bool(released)) and not (allocating or uncertain)
-    return LeaseLedger(safe, granted, refusal if safe else None, sha256)
+    safe = not (held or allocating or uncertain or legacy_handoffs)
+    return LeaseLedger(safe, granted, refusal if safe else None, sha256, environments, guest_cleanup, controller_cleanup)
 
 
 class UnprovenLease(ValueError):
@@ -1446,9 +1527,22 @@ def print_acceptance_summary(output, receipt):
     print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
 
 
-def run_live(output, live, eligible, slots, start, execute_check, record):
+def run_live(output, live, eligible, slots, start, execute_check, record, queue_retry):
     pending, free, active = list(live), set(slots or DEFAULT_SLOTS), {}
-    refused, unsafe, capacity_retries, reported = {}, set(), set(), set()
+    deferred, unsafe, slot_refused, reported = {}, set(), set(), set()
+    availability, availability_lock = 0, threading.Lock()
+
+    def execute_attempt(name, slot, observed):
+        def observe_lease(kind):
+            nonlocal availability, observed
+            with availability_lock:
+                if kind != "refusal":
+                    availability += 1
+                # Defer a refusal against the availability observed at its marker.
+                observed = availability
+
+        return execute_check(name, slot, observe_lease), observed
+
     with retry_socket(output, listen=True) as listener, ThreadPoolExecutor(max_workers=len(free)) as pool:
         while not STOP.is_set():
             try:
@@ -1457,49 +1551,63 @@ def run_live(output, live, eligible, slots, start, execute_check, record):
                 channel = None
             if channel:
                 with channel:
+                    authorized = False
                     try:
                         channel.settimeout(0.1)
                         name = channel.recv(4096).decode()
                         if (free or active) and name in eligible and name not in pending and name not in unsafe \
                             and all(name != running for _, running in active.values()):
-                            pending.insert(0, name)
-                            refused.pop(name, None)
-                            capacity_retries.discard(name)
-                            channel.sendall(b"queued")
+                            channel.sendall(b"ready")
+                            authorized = channel.recv(32) == b"queue"
                         else:
                             channel.sendall(b"refused")
                     except (OSError, UnicodeError):
                         pass
+                    if authorized:
+                        queue_retry(name)
+                        pending.insert(0, name)
+                        deferred.pop(name, None)
+                        try:
+                            channel.sendall(b"queued")
+                        except OSError:
+                            pass
+            with availability_lock:
+                current = availability
             for slot in sorted(free):
-                name = next((item for item in pending if slot not in refused.get(item, ())), None)
+                name = next((item for item in pending
+                             if all(deferred.get(item, {}).get(key) != current for key in (None, slot))), None)
                 if name is not None and start(name):
                     pending.remove(name)
                     free.remove(slot)
-                    active[pool.submit(execute_check, name, slot)] = slot, name
+                    active[pool.submit(execute_attempt, name, slot, current)] = slot, name
             if not active:
                 break
             done, _ = wait(active, timeout=0.2, return_when=FIRST_COMPLETED)
             for future in done:
                 slot, name = active.pop(future)
-                result = future.result()
+                result, observed = future.result()
                 record(name, result)
+                slot_refused.discard(name)
                 if not slot_continues_after(result):
                     unsafe.add(name)
                     print(f"SLOT-CLEANUP-UNCONFIRMED slot=slot-{slot} check={name} log={result.get('log')}", flush=True)
                     continue
                 free.add(slot)
                 if result.get("reason") == "slot-unavailable":
-                    refused.setdefault(name, set()).add(slot)
+                    deferred.setdefault(name, {})[slot] = observed
+                    slot_refused.add(name)
                     pending.append(name)
                     if slots and slot not in reported:
                         reported.add(slot)
                         print(f"SLOT-UNAVAILABLE slot=slot-{slot} check={name} log={result['log']}", flush=True)
-                elif result.get("reason") in ("capacity_memory", "capacity_disk") and name not in capacity_retries:
-                    capacity_retries.add(name)
+                elif result.get("reason") in ("capacity_memory", "capacity_disk"):
+                    deferred.setdefault(name, {})[None] = observed
                     pending.append(name)
+                else:
+                    deferred.pop(name, None)
         for future, (_, name) in active.items():
-            record(name, future.result())
-    return bool(reported)
+            record(name, future.result()[0])
+    return bool(slots and slot_refused)
 
 
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=()):
@@ -1572,10 +1680,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             save(output, receipt)  # Invalidate a previous PASS before any child can start.
             return True
 
-        def execute_check(name, slot=None):
+        def execute_check(name, slot=None, observe_lease=None):
             check_env = dict(env, SUBYARD_E2E_LOCAL_EVIDENCE=str(output)) if name in preflights else env
             args = (name, checks[name], root, output, check_env)
-            return execute(*args, slot) if slot else execute(*args)
+            return execute(*args, slot, observe_lease) if slot else execute(*args)
 
         def record(name, result):
             result["execution_environment"] = measured_environment
@@ -1641,7 +1749,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                    SUBYARD_E2E_CONTROLLER_WORKSPACE=str(ROOT))
         if live:
             eligible = {name for name in selected if is_live(name) and checks[name]}
-            if run_live(output, live, eligible, slots, start, execute_check, record):
+            if run_live(output, live, eligible, slots, start, execute_check, record, invocation.queue_retry):
                 failure_reason = "slot-unavailable"
         if source_fingerprint(root) != receipt["source_fingerprint"]:
             receipt["checks"]["verify"]["status"] = "failed"

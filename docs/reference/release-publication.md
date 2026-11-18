@@ -512,10 +512,10 @@ A repeated `run` executes checks without a validated PASS. Use `--only profile:N
 `--only p0-release-smoke` for a remaining independent check. Add `--rerun` to repeat a passed check
 when the collector is idle. During an active local VM run, queue one exact selected lane with
 `python3 dev/release-acceptance.py retry --output DIR --check CHECK`. For `release.sh accept`,
-use the candidate's `acceptance` directory as DIR. The collector acknowledges a retry once it is
-queued. Requests for lanes outside the active local selection, already queued or running lanes, and
-lanes with unconfirmed cleanup in that run are refused. Sibling attempts and counted results
-remain in place.
+use the candidate's `acceptance` directory as DIR. The collector acknowledges a retry after saving
+it as pending in the receipt and invocation. The collector refuses requests for lanes outside the
+active local selection, lanes already queued or running, and lanes with unconfirmed cleanup in
+that run. Sibling attempts and counted results remain in place.
 After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
 the same frozen candidate with `run --output DIR --slots slot-N --only CHECK`. Passing local checks remain
 bound to that identity and are retained; capacity alone does not require another `prepare`.
@@ -536,15 +536,16 @@ remain exempt for fresh targeted jobs, whose explicit selections remain unchange
 every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
 periodic-only lane as an unknown check. After an attempt with confirmed lease cleanup, or a refusal
 that acquired no lease, the slot can take more work. A typed slot refusal lets another selected
-slot try that check. The collector queues one retry for a typed memory or disk refusal behind waiting work.
+slot try that check. Memory and disk refusals defer the lane across the pool. Deferred work follows
+waiting work and becomes eligible again when a lease is granted or released.
 A refusal can follow an earlier lease if that lease was released. Each attempt retains its log and
 immutable record. A slot with unconfirmed cleanup stays out of dispatch for the rest of the run.
 
-The collector accounts for each grant and release in the attempt log. Two grants and one release
-leave cleanup unconfirmed even if the controller exits zero. Reuse and evidence import validate
-the same log against its recorded hash. A historical live PASS without confirmed cleanup is
-incomplete and reruns when selected locally. A newer local failure remains authoritative over any
-previously available hosted PASS.
+The collector requires named release evidence for each handle granted in the attempt log.
+A broker response that a handle already ended also closes that handle. Reuse, evidence import and
+operator acceptance validate the same log against its recorded hash. A historical live PASS
+without confirmed cleanup is incomplete and reruns when selected locally. A newer local failure
+remains authoritative over any previously available hosted PASS.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
 attempt and include the controllers' source and environment evidence. The run checks its platform
@@ -594,10 +595,10 @@ projects only this bounded grammar into phase events, without copying fixture ou
 cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
-Exit 124 is a timeout; known signal exits retain the signal number. Any lease or guest-start
-marker rules out capacity classification for the entire attempt, even if a typed refusal follows it.
-Exit 4 then remains a failed check with its native exit. A typed refusal before any such marker is
-environment failure; otherwise cause stays unknown unless the fixture emits the bounded
+Exit 124 is a timeout and known signal exits retain the signal number. Exit 4 with a typed capacity
+refusal records an environment failure when all earlier lease handles are confirmed closed and
+no acquisition or cleanup remains unconfirmed. Other exit 4 results remain failed with their native
+exit. Cause stays unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
 budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub

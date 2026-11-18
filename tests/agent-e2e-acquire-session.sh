@@ -181,7 +181,7 @@ full_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"su
   late_frame_case grant-guard-gone "$full_grant" 0 drained
 ) 2> "$TMP/grant-guard-gone.cleanup" || rc=$?
 [ "$rc" = 2 ] && [ -e "$TMP/grant-guard-gone/parent-saw-eof" ] && [ -e "$TMP/grant-guard-gone/release-attempted" ] &&
-  grep -Fqx 'agent-e2e: lease acquire handoff is unknown; cleanup required' "$TMP/grant-guard-gone/stderr" ||
+  grep -Fqx 'agent-e2e: lease acquire handoff is unknown; cleanup required slot=slot-001 run=abcdef13' "$TMP/grant-guard-gone/stderr" ||
   { cat "$TMP/grant-guard-gone/stderr" >&2; fail "grant after guard exit rc=$rc was accepted as handed off"; }
 
 # A guard that exits without a terminal frame stays unknown and names its cause.

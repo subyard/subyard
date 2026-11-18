@@ -912,6 +912,9 @@ acquire_lease() {
       || die_acquire_unknown invalid-envelope
     code="$(jq -r '.code // empty' <<<"$response")"
     if parse_lease_grant "$response"; then
+      printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s type=%s vms=%s base=%s\n' \
+        "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" \
+        "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
       elapsed=$((SECONDS - started))
       if [ "$WAIT_SECONDS" -gt 0 ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
         printf '%s: deadline elapsed before the lease grant arrived; releasing %s without guest access\n' "$E2E_PROGRAM" \
@@ -932,11 +935,8 @@ acquire_lease() {
       write_client_config
       if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ]; then
         start_lease_keeper
-        finish_acquire_session || die "lease acquire handoff is unknown; cleanup required"
+        finish_acquire_session || die "lease acquire handoff is unknown; cleanup required slot=$LEASE_SLOT run=$LEASE_RUN"
       fi
-      printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s' \
-        "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" >&2
-      printf ' type=%s vms=%s base=%s\n' "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
       return 0
     fi
     if [ -n "$LEASE_ACQUIRE_PID" ]; then

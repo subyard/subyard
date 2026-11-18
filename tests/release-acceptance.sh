@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
 root = Path(sys.argv[1])
@@ -1298,13 +1298,13 @@ exit "$COLLECTOR_EXIT"
                 _, before = m.load_bound(first)
                 old_reference = before["checks"][name]["original_attempt"]
                 terminal_execute = m.execute
-                def execute(check, command, root, output, env, slot=None):
+                def execute(check, command, root, output, env, slot=None, observe_lease=None):
                     persisted = json.loads((output / "receipt.json").read_text())["checks"][check]
                     self.assertEqual(persisted["status"], "running")
                     self.assertNotIn("original_attempt", persisted)
                     if crash == "execute":
                         raise OSError("controller crashed")
-                    result = terminal_execute(check, command, root, output, env, slot)
+                    result = terminal_execute(check, command, root, output, env, slot, observe_lease)
                     if crash in ("failed", "interrupted"):
                         result.update(status=crash, exit_code=23 if crash == "failed" else -15,
                                       termination="exit" if crash == "failed" else "signal")
@@ -1998,7 +1998,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                            "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                            "checks": {name: {"status": "pending"} for name in ("verify", "profile:sample")}}
                 observed = {}
-                def execute(name, command, root, output, environment, slot=None):
+                def execute(name, command, root, output, environment, slot=None, observe_lease=None):
                     observed[name] = dict(environment)
                     return {"status": "passed", "exit_code": 0}
                 with patch.object(m, "load_bound", return_value=(root, receipt)), \
@@ -2245,7 +2245,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             active = set()
             lock = threading.Lock()
             release_slow = threading.Event()
-            def execute(name, command, root, output, env, slot=None):
+            def execute(name, command, root, output, env, slot=None, observe_lease=None):
                 with lock:
                     self.assertNotIn(slot, active if slot else set())
                     if slot:
@@ -2310,7 +2310,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                        'checks':{name:{'status':'pending'} for name in checks}}
             m.update_result(receipt)  # save is patched; the stop summary reads the initial result.
             executed = []
-            def execute(name, command, root, output, env, slot=None):
+            def execute(name, command, root, output, env, slot=None, observe_lease=None):
                 self.assertIsNone(slot, 'local failure reached VM allocation')
                 executed.append(name)
                 return {'status':'failed', 'exit_code':23}
@@ -2357,19 +2357,15 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertIsNone(m.lease_ledger(log).refusal)
             # A later acquire of a multi-lease lane blocks on capacity only after a clean release.
             lease = "E2E lease: yard=hermes project=hermes run=0123abcd purpose=p slot=slot-001 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
-            start = "E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+            release = "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+            named = "E2E lease released: slot=slot-001 run=0123abcd\n"
             refusal = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
-            for released, expected in (("0", "memory"), ("1", None)):
-                log.write_text(lease + start + f"E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code={released}\n" + refusal)
-                self.assertEqual(m.lease_ledger(log).refusal, expected, released)
-            log.write_text(lease + refusal)
-            self.assertIsNone(m.lease_ledger(log).refusal)
-            # Two overlapping leases with one released still hold a lease at the refusal.
-            log.write_text(lease + lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal)
-            self.assertIsNone(m.lease_ledger(log).refusal)
-            log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
-            self.assertIsNone(m.lease_ledger(log).refusal)
-            script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
+            for text in (lease + refusal, lease + release + refusal,
+                         lease.replace("0123abcd", "abcdef01") + lease + release + named + refusal,
+                         lease + release + named + refusal + lease.replace("0123abcd", "abcdef01")):
+                log.write_text(text)
+                self.assertIsNone(m.lease_ledger(log).refusal)
+            script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + release + named + refusal) + "\nexit 4\n")
             result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
 
@@ -2388,9 +2384,51 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual((result["status"], result["exit_code"]), ("failed", 1))
             self.assertEqual(result["cleanup"]["lease-release"], {"exit_code": 0, "duration_seconds": 2})
             self.assertTrue(m.slot_continues_after(result))
-            script.write_text(script.read_text().replace("duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0", "duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=1"))
+            failed_release = script.read_text().replace("duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0",
+                                                        "duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=1")
+            script.write_text(failed_release.replace("lease released: handle=0123abcd slot=slot-001 reason=explicit",
+                                                     "release failed for handle=0123abcd slot=slot-001"))
             result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertFalse(m.slot_continues_after(result))
+            script.write_text(failed_release.replace("lease released: handle=0123abcd slot=slot-001 reason=explicit",
+                                                     "lease had already ended: handle=0123abcd slot=slot-001"))
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual(result["exit_code"], 1)
+            self.assertTrue(m.slot_continues_after(result))
+
+    def test_interleaved_release_needs_a_confirmation_for_each_handle(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            first, second = directory / "first", directory / "second"
+            source, receipt = prepare_fixture(checkout, first)
+            prepare_fixture(checkout, second)
+            name = "profile:sample/one"
+            grant, named, cleanup = LEASE_PASS.splitlines(keepends=True)
+            first_grant = grant.replace("run=sample", "run=first")
+            first_release = named.replace("run=sample", "run=first")
+            timing = "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+            guest = "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
+            interleaved = first_grant + grant + timing + guest + named + cleanup
+            result = m.execute(name, ["bash", "-c", "printf '%s' " + shlex.quote(interleaved)],
+                               source, first, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"], result["reason"]),
+                             ("failed", 0, "lease-cleanup-unproven"))
+            self.assertFalse(m.slot_continues_after(result))
+            command = m.commands(source, "test", receipt["profiles"])[name]
+            historical = {**result, "status": "passed", "cleanup_status": "recorded",
+                          "command": m.command_identity(command, source)}
+            historical.pop("reason")
+            receipt["checks"][name] = historical
+            m.save(first, receipt)
+            _, loaded = m.load_bound(first)
+            self.assertEqual(loaded["checks"][name], {"status": "incomplete", "reason": "lease-cleanup-unproven"})
+            with self.assertRaisesRegex(ValueError, "passing command-bound"):
+                m.import_evidence(second, first, [name])
+            log = first / result["log"]
+            for extra in (named, first_release.replace("slot-001", "slot-002"), first_release):
+                log.write_text(interleaved + extra)
+                self.assertEqual(m.lease_ledger(log).safe, extra == first_release)
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2683,7 +2721,7 @@ while True: time.sleep(1)
                 ("fixture/unfinished", "start", 0, 0)])
             self.assertNotIn("do-not-export", json.dumps(events))
 
-    def test_prelease_capacity_refusal_retries_once_and_later_continues_same_candidate(self):
+    def test_capacity_refusal_retries_after_lease_activity_and_can_continue_same_candidate(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         for resource in ("memory", "disk"):
@@ -2705,7 +2743,7 @@ while True: time.sleep(1)
                 calls, original = [], {}
                 execute = m.execute
                 def observe(name, *args):
-                    calls.append((name, args[-1]))
+                    calls.append((name, args[4]))
                     self.assertEqual(args[3]["SUBYARD_E2E_CAPACITY_WAIT"], m.LIVE_CAPACITY_WAIT)
                     result = execute(name, *args)
                     original[name] = copy.deepcopy(result)
@@ -2760,7 +2798,7 @@ while True: time.sleep(1)
                 following_done = threading.Event()
                 calls = []
                 execute = m.execute
-                def observe(name, command, root, output, env, slot=None):
+                def observe(name, command, root, output, env, slot=None, observe_lease=None):
                     calls.append((name, slot))
                     if name == blocked:
                         if marker.exists():
@@ -2771,7 +2809,7 @@ while True: time.sleep(1)
                     if name == slow:
                         started.set()
                         self.assertTrue(following_done.wait(3))
-                    result = execute(name, command, root, output, env, slot)
+                    result = execute(name, command, root, output, env, slot, observe_lease)
                     if name == following:
                         following_done.set()
                     if name == slow:
@@ -2804,9 +2842,22 @@ while True: time.sleep(1)
         typed = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
         lease = "E2E lease: slot=slot-1 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
         guest = "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
-        for text, code in (("", 4), (typed.replace("memory", "cpu"), 4), (typed, 23),
-                           (typed + lease, 4), (typed + guest, 4), (lease + typed, 4),
-                           (guest + typed, 4), (typed + lease + typed, 4), (typed + guest + typed, 4)):
+        legacy_handoff = ("E2E_PHASE phase=allocation state=start duration_seconds=0 exit_code=0\n"
+                          "agent-e2e: lease acquire handoff is unknown; cleanup required\n")
+        grant, named, cleanup = LEASE_PASS.splitlines(keepends=True)
+        handoff = legacy_handoff.replace("agent-e2e:", grant + "agent-e2e:").replace(
+            "cleanup required\n", "cleanup required slot=slot-001 run=sample\n")
+        timing = "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+        for text, code, reusable in (
+            ("", 4, True), (typed.replace("memory", "cpu"), 4, True), (typed, 23, True),
+            (typed + lease, 4, False), (typed + guest, 4, False), (lease + typed, 4, False),
+            (guest + typed, 4, False), (typed + lease + typed, 4, False), (typed + guest + typed, 4, False),
+            (legacy_handoff + timing + named + cleanup, 2, True),
+            (legacy_handoff + named + cleanup, 2, False),
+            (handoff + timing + named + cleanup, 2, True),
+            (handoff + timing + named.replace("run=sample", "run=other") + cleanup, 2, False),
+            ("agent-e2e: release failed for slot=slot-001 run=sample\n" + cleanup, 2, False),
+        ):
             with self.subTest(text=text, code=code), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
                 output = Path(temporary)
                 blocked, following = "profile:sample/one", "profile:sample/two"
@@ -2827,7 +2878,6 @@ while True: time.sleep(1)
                 self.assertEqual(attempt["failure_class"], "unknown")
                 self.assertNotIn("reason", attempt)
                 self.assertEqual(persisted["result"], "failed")
-                reusable = lease not in text and guest not in text
                 self.assertEqual(persisted["checks"][following]["status"], "passed" if reusable else "pending")
                 events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
                 self.assertEqual([item["check"] for item in events if item["event"] == "check-start"],
@@ -2849,7 +2899,7 @@ while True: time.sleep(1)
                        "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                        "checks": {name: {"status": "passed" if name == "verify" else "pending"} for name in names}}
             calls = []
-            def execute(name, command, root, output, env, slot=None):
+            def execute(name, command, root, output, env, slot=None, observe_lease=None):
                 calls.append(name)
                 return {"status": "blocked", "exit_code": 4, "duration_seconds": 1.2, "cleanup_status": "unconfirmed"}
             with patch.object(m, "load_bound", return_value=(output / "source", receipt)), \
@@ -3278,7 +3328,7 @@ while True: time.sleep(1)
                            "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                            "checks": {item: {"status": "passed" if item == "verify" else "pending"} for item in names}}
                 calls = []
-                def execute(check, command, root, output, env, slot=None):
+                def execute(check, command, root, output, env, slot=None, observe_lease=None):
                     calls.append(check)
                     return dict(failure) if check == "vm:one" else {"status": "passed", "exit_code": 0, "duration_seconds": 1}
                 with patch.object(m, "load_bound", return_value=(output / "source", receipt)), \
@@ -3307,7 +3357,8 @@ while True: time.sleep(1)
         self.assertEqual(m.DEFAULT_SLOTS, (1, 2, 3, 4))
         self.assertEqual(m.selected_slots(parser.parse_args(["--slot-count", "2"])), (1, 2))
         self.assertEqual(m.selected_slots(parser.parse_args(["--slots", "slot-002,slot-4"])), (2, 4))
-        for flags in (["--slots", "2"], ["--slots", "slot-2,slot-002"], ["--slot-count", "2", "--slots", "slot-2"]):
+        for flags in (["--slots", "2"], ["--slots", "slot-2,slot-002"], ["--slot-count", "2", "--slots", "slot-2"],
+                      ["--slots", "slot-2", "--slots", "slot-4"]):
             with self.subTest(flags=flags), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                 parser.parse_args(flags)
 
@@ -3315,40 +3366,126 @@ while True: time.sleep(1)
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output = Path(temporary)
             retry, sibling, following = ("vm:" + name for name in ("retry", "sibling", "following"))
-            running, allow_sibling, following_done = (threading.Event() for _ in range(3))
+            running, allow_sibling, recovered = (threading.Event() for _ in range(3))
             recorded, started = [], []
-            def execute(name, slot):
+            def execute(name, slot, observe_lease):
                 started.append((name, slot))
                 if name == sibling:
                     running.set()
                     self.assertTrue(allow_sibling.wait(5))
                 if (name, slot) == (retry, 2) and started.count((retry, 2)) == 1:
+                    observe_lease("refusal")
                     return {"reason": "slot-unavailable", "log": "refusal.log"}
+                observe_lease("grant")
+                observe_lease("release")
                 return {"status": "passed"}
 
             def record(name, result):
                 recorded.append(name)
-                if name == following:
-                    following_done.set()
+                if name == retry and result.get("status") == "passed":
+                    recovered.set()
 
             with m.ThreadPoolExecutor(max_workers=1) as pool, redirect_stdout(io.StringIO()) as report:
                 scheduled = pool.submit(m.run_live, output, [retry, sibling, following], {retry, sibling, following},
-                                        [2, 4], lambda name: True, execute, record)
+                                        [2, 4], lambda name: True, execute, record, lambda name: None)
                 try:
                     self.assertTrue(running.wait(5))
-                    self.assertTrue(following_done.wait(5))
+                    self.assertTrue(recovered.wait(5), "the recovered slot stayed idle with a lane waiting")
+                    self.assertEqual(started.count((retry, 2)), 2)
                     with self.assertRaisesRegex(ValueError, "did not acknowledge"):
                         m.request_local_retry(output, "vm:outside-selection")
                     self.assertEqual(m.request_local_retry(output, following), 0)
                 finally:
                     allow_sibling.set()
-                self.assertTrue(scheduled.result(timeout=5))
+                self.assertFalse(scheduled.result(timeout=5))
             self.assertIn("SLOT-UNAVAILABLE slot=slot-2", report.getvalue())
             self.assertIn((following, 2), started)
             self.assertEqual(recorded.count(following), 2)
             self.assertEqual(recorded.count(sibling), 1)
             with self.assertRaisesRegex(ValueError, "did not acknowledge"):
                 m.request_local_retry(output, following)
+
+    def test_acknowledged_retry_remains_pending_when_the_last_slot_cannot_be_reused(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            retry, sibling = "vm:retry", "vm:sibling"
+            checks = {name: ["true"] for name in ("verify", retry, sibling)}
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "checks": {"verify": {"status": "passed"}, retry: {"status": "passed"}, sibling: {"status": "pending"}}}
+            running, finish = threading.Event(), threading.Event()
+            calls = []
+
+            def execute(name, *args):
+                calls.append(name)
+                if name == retry:
+                    return {"status": "passed", "exit_code": 0}
+                running.set()
+                self.assertTrue(finish.wait(5))
+                return {"status": "failed", "exit_code": 2, "cleanup_status": "unconfirmed"}
+
+            def assert_queued():
+                run = json.loads(next((output / "runs").glob("*.json")).read_text())
+                self.assertNotIn(retry, run["reused"])
+                self.assertEqual(run["not_started"], [{"check": retry, "reason": "retry-queued"}])
+                persisted = json.loads((output / "receipt.json").read_text())
+                self.assertEqual(persisted["checks"][retry], {"status": "pending"})
+
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                 patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}), \
+                 patch.object(m, "execute", side_effect=execute), m.ThreadPoolExecutor(max_workers=1) as pool:
+                scheduled = pool.submit(m.run_checks, output, [1], [], False, with_vms=True)
+                try:
+                    self.assertTrue(running.wait(5))
+                    self.assertEqual(m.request_local_retry(output, retry), 0)
+                    assert_queued()
+                finally:
+                    finish.set()
+                self.assertEqual(scheduled.result(timeout=5), 1)
+                assert_queued()
+                self.assertEqual(calls, [sibling])
+                self.assertEqual(m.run_checks(output, [1], [retry], False), 1)
+                self.assertEqual(calls, [sibling, retry])
+
+    def test_retry_timed_out_before_admission_never_dispatches(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            retry, sibling = "vm:retry", "vm:sibling"
+            recording, finish = threading.Event(), threading.Event()
+            executed, queued = [], []
+
+            def execute(name, slot, observe_lease):
+                executed.append(name)
+                return {"status": "passed"}
+
+            def record(name, result):
+                if name == sibling:
+                    recording.set()
+                    self.assertTrue(finish.wait(5))
+
+            retry_socket = m.retry_socket
+
+            @contextmanager
+            def short_client_timeout(output, listen=False):
+                with retry_socket(output, listen) as channel:
+                    if not listen:
+                        channel.settimeout(0.05)
+                    yield channel
+
+            with patch.object(m, "retry_socket", short_client_timeout), m.ThreadPoolExecutor(max_workers=1) as pool:
+                scheduled = pool.submit(m.run_live, output, [sibling], {retry, sibling}, [1],
+                                        lambda name: True, execute, record, queued.append)
+                try:
+                    self.assertTrue(recording.wait(5))
+                    with self.assertRaisesRegex(ValueError, "did not acknowledge"):
+                        m.request_local_retry(output, retry)
+                finally:
+                    finish.set()
+                self.assertFalse(scheduled.result(timeout=5))
+            self.assertEqual(executed, [sibling])
+            self.assertEqual(queued, [])
 
 
 def split_catalog_checkout(directory):

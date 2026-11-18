@@ -630,23 +630,13 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        environments, cleanup, release_codes, released = set(), {}, [], False
-        with files["log"].open("rb") as stream:
-            for line in stream:
-                environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
-                if environment:
-                    environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
-                stage = re.fullmatch(rb"E2E_PHASE phase=(guest-cleanup|cleanup/release) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
-                if stage:
-                    if stage[1] == b"guest-cleanup":
-                        vm = int(stage[3]) if stage[3] else None
-                        if vm in cleanup:
-                            raise ValueError("operator acceptance cleanup evidence is ambiguous")
-                        cleanup[vm] = int(stage[2])
-                    else:
-                        release_codes.append(int(stage[2]))
-                released |= bool(re.fullmatch(rb"E2E lease released: slot=[^\r\n ]+ run=[^\r\n ]+\n", line))
-        if not environments or release_codes != [0] or cleanup != {vm: 0 for vm in range(1, max(count for _, count, _ in environments) + 1)} or not released:
+        ledger = a.lease_ledger(files["log"], hashes["log"])
+        environments = ledger.environments
+        cleanup = dict(ledger.guest_cleanup)
+        if len(cleanup) != len(ledger.guest_cleanup):
+            raise ValueError("operator acceptance cleanup evidence is ambiguous")
+        if (not ledger.granted or not ledger.safe or not environments or ledger.controller_cleanup != [0]
+            or cleanup != {vm: 0 for vm in range(1, max(count for _, count, _ in environments) + 1)}):
             raise ValueError("operator acceptance original cleanup or release unconfirmed")
         for original_result in (original["checks"][name], receipt["checks"][name]):
             if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
