@@ -144,7 +144,7 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	defer prepared.setGateSubject(configAuthoringSubject(prepared.Loaded.Context.YardName, requests))
 	if len(requests) > 1 {
 		if !requests[0].git {
-			if err := configScalarBatchSyntaxRefusal(prepared.Loaded, requests); err != nil {
+			if err := configLocalScalarBatchRefusal(prepared.Loaded, requests); err != nil {
 				return configUsage(err)
 			}
 			return prepared.prepareLocalConfigScalars(ctx, requests)
@@ -220,7 +220,11 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 	if request.sourceGuard != nil && slices.Contains([]string{"CODING_TOOL_INTEGRATIONS", "ENVIRONMENT_PROFILES"}, request.name) {
 		prospectiveRequest.action = "selection-repair"
 	}
-	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired)
+	var batch []configAuthoringRequest
+	if len(requests) > 1 {
+		batch = requests
+	}
+	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired, batch...)
 	if err != nil {
 		return err
 	}

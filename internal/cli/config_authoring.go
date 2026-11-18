@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -190,7 +191,7 @@ func configScalarSyntaxRefusals(loaded config.Loaded, definition config.SettingD
 
 // configScalarStateRefusals checks one value against the configuration state
 // it must be consistent with: the current state for a single write, or the
-// combined target state for several Git assignments.
+// combined target state for a batch.
 func configScalarStateRefusals(state config.Loaded, request configAuthoringRequest) []error {
 	var refusals []error
 	if request.action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
@@ -198,14 +199,48 @@ func configScalarStateRefusals(state config.Loaded, request configAuthoringReque
 		if _, err := state.Catalog.ResolveIntegrationSelection(state.Environment, requested); err != nil {
 			refusals = append(refusals, err)
 		}
-		if request.scope == config.ScopeYard && !state.Integrations.AllowsCodingTools && len(requested) != 0 {
-			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools))
-		}
+		refusals = append(refusals, configScalarIntegrationRoleRefusal(state, request))
 	}
 	if request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
 		refusals = append(refusals, config.ValidateYardTemplateIntegrations(state, request.value))
 	}
 	return refusals
+}
+
+func configScalarIntegrationRoleRefusal(state config.Loaded, request configAuthoringRequest) error {
+	if request.scope == config.ScopeYard && !state.Integrations.AllowsCodingTools && strings.TrimSpace(request.value) != "" {
+		return domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools)
+	}
+	return nil
+}
+
+func configLocalScalarBatchRefusal(loaded config.Loaded, requests []configAuthoringRequest) error {
+	syntax := configScalarBatchSyntaxRefusal(loaded, requests)
+	if syntax == nil {
+		return nil
+	}
+	// Without a draft, the current role is usable if the batch leaves the
+	// template alone. Integration metadata changes can still affect resolution.
+	if slices.ContainsFunc(requests, func(request configAuthoringRequest) bool {
+		return request.name == "YARD_TEMPLATE"
+	}) {
+		return syntax
+	}
+	metadataChanges := slices.ContainsFunc(requests, func(request configAuthoringRequest) bool {
+		return strings.HasPrefix(request.name, "AGENT_")
+	})
+	refusals := []error{syntax}
+	for _, request := range requests {
+		if request.name != "CODING_TOOL_INTEGRATIONS" {
+			continue
+		}
+		if metadataChanges {
+			refusals = append(refusals, configScalarIntegrationRoleRefusal(loaded, request))
+		} else {
+			refusals = append(refusals, configScalarStateRefusals(loaded, request)...)
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }
 
 // configScalarBatchSyntaxRefusal checks each assignment and rejects duplicate

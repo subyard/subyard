@@ -994,6 +994,45 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 	assertFile()
 }
 
+func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
+	for _, test := range []struct {
+		name, yardConfig, scope, integration, port string
+		code                                       int
+		refusals                                   []string
+	}{
+		{"masked integration", "CODING_TOOL_INTEGRATIONS=codex\n", "host", "missing-one", "2390", 1,
+			[]string{"unknown integration"}},
+		{"role and invalid port", "YARD_TEMPLATE=no-tools\n", "yard", "codex", "invalid", 2,
+			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "SSH_PORT (scalar settings): invalid port value"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			withSyntheticYardTemplate(t, root, environment)
+			yardPath := filepath.Join(configHome, "yards", "default", "config.env")
+			writeConfigCommandFile(t, yardPath, test.yardConfig)
+			var stderr bytes.Buffer
+			arguments := []string{"config", "set", "CODING_TOOL_INTEGRATIONS", test.integration, "SSH_PORT", test.port, "--scope", test.scope, "--yes"}
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != test.code {
+				t.Errorf("exit = %d, want %d: %s", code, test.code, &stderr)
+			}
+			for _, refusal := range test.refusals {
+				if !strings.Contains(stderr.String(), refusal) {
+					t.Errorf("missing %q: %s", refusal, &stderr)
+				}
+			}
+			for path, want := range map[string]string{filepath.Join(configHome, "config.env"): "", yardPath: test.yardConfig} {
+				if content, err := os.ReadFile(path); err != nil || string(content) != want {
+					t.Errorf("rejected batch changed settings at %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestConfigSetReportsEveryRefusalAndFixedRootDiagnostics(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "tv", "config.env"), "YARD_TEMPLATE=test-vms\n")

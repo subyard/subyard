@@ -22,14 +22,15 @@ type configProspective struct {
 	cli             *CLI
 	loaded          config.Loaded
 	request         configAuthoringRequest
+	batch           []configAuthoringRequest
 	path, draft     string
 	binding         string
 	semantics       string
 	directoryInputs map[string]bool
 }
 
-func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot) (*configProspective, error) {
-	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path}
+func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot, batch ...configAuthoringRequest) (*configProspective, error) {
+	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path, batch: batch}
 	if desired.Exists {
 		file, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
 		if err != nil {
@@ -219,6 +220,14 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 			continue
+		}
+		// A higher-priority layer can mask an invalid requested selection.
+		for _, request := range plan.batch {
+			if request.name == "CODING_TOOL_INTEGRATIONS" {
+				if err := domain.CollectRefusals(configScalarStateRefusals(loaded, request)...); err != nil {
+					refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+				}
+			}
 		}
 		if draft && plan.request.action == "selection-repair" {
 			before, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
