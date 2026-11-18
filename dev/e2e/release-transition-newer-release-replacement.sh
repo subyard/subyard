@@ -83,16 +83,19 @@ cleanup_newer_release() {
 }
 
 fetch_source_assets() {
-  local name
+  local name publisher_sha
   install -d -m 0700 "$SOURCE_ASSETS"
   for name in "$SOURCE_BUNDLE" "$SOURCE_BUNDLE.sha256" "$SOURCE_BUNDLE.manifest.json" \
-    "$SOURCE_BUNDLE.provenance.json" subyard-install-runtime-release.sh subyard-install-runtime-release.sh.sha256 subyard-install.sh; do
+    "$SOURCE_BUNDLE.provenance.json" subyard-install-runtime-release.sh subyard-install.sh; do
     curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$SOURCE_ASSETS/$name" \
       "https://github.com/Subyard/Subyard/releases/download/v$SOURCE_VERSION/$name"
   done
   [ "$(sha256sum "$SOURCE_ASSETS/$SOURCE_BUNDLE" | awk '{print $1}')" = "$SOURCE_AMD64_SHA256" ] \
     && [ "$(sha256sum "$SOURCE_ASSETS/subyard-install.sh" | awk '{print $1}')" = "$SOURCE_INSTALLER_SHA256" ] \
     || die 'published source differs from its immutable pin'
+  publisher_sha="$(sed -nE "s/^publisher_sha='([0-9a-f]{64})'$/\1/p" "$SOURCE_ASSETS/subyard-install.sh")"
+  [ "$(sha256sum "$SOURCE_ASSETS/subyard-install-runtime-release.sh" | awk '{print $1}')" = "$publisher_sha" ] \
+    || die 'published runtime installer differs from the authenticated bootstrap digest'
 }
 
 stage() { # version: sets LAUNCHER to the published release's own launcher
