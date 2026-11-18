@@ -239,43 +239,89 @@ class TestAcceptance(unittest.TestCase):
             return result
 
         self.slots.side_effect = status
-        with patch.object(m, "time", wraps=time) as clock, redirect_stdout(io.StringIO()) as printed:
+        with patch.object(m, "time", wraps=time) as clock:
             clock.monotonic.side_effect = lambda: now
             self.assertFalse(m.dispatch_live(["sibling", "retry"], (2, 4), {},
                 lambda _: True, execute, record, list, limit))
-        if snapshots[0] == "held":
-            self.assertNotIn("slot-4=draining persisted", printed.getvalue())
         self.assertEqual([slot for name, slot in calls if name == "retry"], [4, 4])
 
-    def test_slot_flapping_does_not_extend_capacity_wait(self):
-        now, polls = 100, 0
+    def test_recovered_slot_keeps_collector_alive_until_retry(self):
+        for recovery in (6, 8):
+            with self.subTest(recovery=recovery):
+                self.check_recovered_slot_retry(recovery)
+
+    def check_recovered_slot_retry(self, recovery):
+        now = 0
         calls = []
 
         def status(env):
-            nonlocal polls
-            polls += 1
-            self.assertLessEqual(now, 108, "slot flapping extended the capacity wait")
-            return {2: "available" if polls % 2 else "held"}
+            # The third exact acquire races with a drain. The slot recovers
+            # before the retry's eight-second backoff ends.
+            return {2: "draining" if now < recovery and len(calls) == 3 else "available"}
 
         def advance(seconds):
             nonlocal now
             now += seconds
+            self.assertLessEqual(now, 14)
 
         def execute(name, slot):
             calls.append(now)
-            return {"status": "blocked", "termination": "exit", "reason": "capacity_memory"}
+            if len(calls) <= 3:
+                return {"status": "blocked", "termination": "exit", "reason": "slot_draining"}
+            return {"status": "passed"}
 
         self.slots.side_effect = status
         with (patch.object(m, "time", wraps=time) as clock,
               patch.object(m, "SLOT_POLL_SECONDS", 2),
+              patch.object(m.STOP, "wait", side_effect=advance)):
+            clock.monotonic.side_effect = lambda: now
+            self.assertFalse(m.dispatch_live(["lane"], (2,), {}, lambda _: True, execute,
+                                             lambda name, result: result, list, 8))
+        self.assertEqual(calls, [0, 2, 6, 14])
+
+    def test_expiry_reports_current_unknown_and_latest_refusal_once(self):
+        now = 0
+        calls = []
+
+        def advance(seconds):
+            nonlocal now
+            now += seconds
+            self.assertLessEqual(now, 5)
+
+        def execute(name, slot):
+            calls.append(slot)
+            reason = "capacity_memory" if slot == 2 else "capacity_disk"
+            return {"status": "blocked", "termination": "exit", "reason": reason}
+
+        self.slots.side_effect = lambda env: ({2: "available", 4: "available"} if len(calls) < 2 else {})
+        with (patch.object(m, "time", wraps=time) as clock,
               patch.object(m.STOP, "wait", side_effect=advance),
               redirect_stdout(io.StringIO()) as printed):
             clock.monotonic.side_effect = lambda: now
-            self.assertTrue(m.dispatch_live(["lane"], (2,), {}, lambda _: True, execute,
-                                            lambda name, result: result, list, 8))
-        self.assertEqual(now, 108)
-        self.assertEqual(calls, [100, 102])
-        self.assertIn("lane@slot-2=capacity_memory", printed.getvalue())
+            self.assertTrue(m.dispatch_live(["lane"], (2, 4), {}, lambda _: True, execute,
+                                            lambda name, result: result, list, 5))
+        self.assertEqual(calls, [2, 4])
+        self.assertEqual(printed.getvalue(), "INCOMPLETE: no broker progress for lane@slot-4=capacity_disk "
+                         "(slot-2=unknown (last known: available), slot-4=unknown (last known: available))\n")
+
+    def test_successful_sibling_completion_renews_wait_for_capacity_retry(self):
+        calls = []
+        now = 0
+
+        def execute(name, slot):
+            nonlocal now
+            calls.append(name)
+            if len(calls) == 1:
+                return {"status": "blocked", "termination": "exit", "reason": "capacity_memory"}
+            if name == "small":
+                now = 3.25
+            return {"status": "passed"}
+
+        with patch.object(m, "time", wraps=time) as clock:
+            clock.monotonic.side_effect = lambda: now
+            self.assertFalse(m.dispatch_live(["large", "small"], (2,), {}, lambda _: True, execute,
+                                             lambda name, result: result, list, 3))
+        self.assertEqual(calls, ["large", "small", "large"])
 
     def test_initial_idle_wait_does_not_spend_capacity_retry_budget(self):
         calls, probes = [], []
@@ -312,7 +358,7 @@ class TestAcceptance(unittest.TestCase):
                 self.assertEqual(calls[:2], expected)
                 self.assertEqual(expired, len(slots) == 1)
 
-    def test_persistent_slot_refusal_is_reported_during_sibling_progress(self):
+    def test_held_slot_does_not_report_expiry_during_sibling_progress(self):
         self.slots.return_value = {2: "available", 4: "held"}
         calls = []
         def execute(name, slot):
@@ -323,7 +369,7 @@ class TestAcceptance(unittest.TestCase):
             self.assertFalse(m.dispatch_live(["one", "two", "three"], (2, 4), {},
                 lambda _: True, execute, lambda name, result: result, list, 0.03))
         self.assertEqual(calls, [(name, 2) for name in ("one", "two", "three")])
-        self.assertIn("slot-4=held persisted while checks queued", printed.getvalue())
+        self.assertEqual(printed.getvalue(), "")
 
     def test_shellcheck_command_preserves_historical_receipts(self):
         self.assertEqual(m.commands(root, "test", {})["shellcheck"], ["bash", "dev/shellcheck.sh"])
@@ -3725,7 +3771,13 @@ class FullSplitRequirement(unittest.TestCase):
                     self.assertEqual(receipt["checks"]["vm:p0-split"]["status"], "pending")
                     self.assertEqual(receipt["operator_exclusions"], ["vm:p0-split"])
 
-    def test_requested_full_retry_waits_for_running_split(self):
+    def test_requested_full_retry_respects_split_result(self):
+        for queued in (False, True):
+            for split_passes in (False, True):
+                with self.subTest(queued=queued, split_passes=split_passes):
+                    self.check_full_retry(queued, split_passes)
+
+    def check_full_retry(self, queued, split_passes):
         attempt = {"id": "a" * 32, "sha256": "b" * 64}
         owner, split = "vm:p0-full", "vm:p0-split"
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -3734,7 +3786,7 @@ class FullSplitRequirement(unittest.TestCase):
             receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
                        "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                        "requirements": {owner: [split]},
-                       "checks": {owner: {"status": "failed", "original_attempt": attempt}, split: {"status": "pending"}}}
+                       "checks": {owner: {"status": "failed", "original_attempt": attempt}, split: {"status": "passed" if queued else "pending"}}}
             observed = threading.Event()
             calls = []
             pending_retries = m.pending_retries
@@ -3746,8 +3798,11 @@ class FullSplitRequirement(unittest.TestCase):
             def execute(name, *args):
                 calls.append(name)
                 if name == split:
-                    self.assertEqual(m.request_retry(output, owner, attempt["id"]), 0)
-                    self.assertTrue(observed.wait(3))
+                    if not queued:
+                        self.assertEqual(m.request_retry(output, owner, attempt["id"]), 0)
+                        self.assertTrue(observed.wait(3))
+                    if not split_passes:
+                        return {"status": "failed", "exit_code": 1}
                 return {"status": "passed", "exit_code": 0}
             with patch.object(m, "load_bound", return_value=(output, receipt)), \
                  patch.object(m, "commands", return_value=checks), \
@@ -3755,8 +3810,12 @@ class FullSplitRequirement(unittest.TestCase):
                  patch.object(m, "completed_attempt", return_value=attempt), \
                  patch.object(m, "pending_retries", side_effect=requests), \
                  patch.object(m, "execute", side_effect=execute):
-                self.assertEqual(m.run_checks(output, [1], [split], False), 0)
-            self.assertEqual(calls, [split, owner])
+                if queued:
+                    m.save(output, receipt)
+                    self.assertEqual(m.request_retry(output, owner, attempt["id"]), 0)
+                self.assertEqual(m.run_checks(output, [1], [split], queued, first=[split]), 0 if split_passes else 1)
+            self.assertEqual(calls, [split, owner] if split_passes else [split])
+            self.assertEqual(pending_retries(output, receipt), {} if split_passes else {owner: attempt["id"]})
 
     def test_imported_full_requires_split_checks(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

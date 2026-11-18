@@ -1415,104 +1415,78 @@ def broker_slots(env):
     return {}
 
 
-class LiveSlot:
-    def __init__(self):
-        self.state = "unknown"
-        self.since = None
-        self.reported = False
-        self.recoveries = 0
-        self.retries = {}
-
-    def observe(self, state, now):
-        if state == self.state and self.since is not None:
-            return
-        if state == "available" and self.state not in ("available", "unknown"):
-            self.recoveries += 1
-        self.state, self.since, self.reported = state, now, False
-
-    def ready(self, name, now, deadline):
-        retry = self.retries.get(name)
-        if retry is None:
-            return True
-        retry_at, _, _, recovery = retry
-        return now >= retry_at and (now < deadline or
-                                    (recovery is not None and recovery < self.recoveries))
-
-
-def dispatch_live(work, slots, env, begin, execute_lane, record, refresh, wait_seconds):
-    active, deadlines = {}, {}
-    observations = {slot: LiveSlot() for slot in slots}
+def dispatch_live(work, slots, env, begin, execute_lane, record, refresh, wait_seconds,
+                  eligible=lambda name: True):
+    active, retries, last_refusals = {}, {}, {}
+    last_states = {}
+    deadline = time.monotonic() + wait_seconds
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
         try:
             while True:
                 for future in [future for future in active if future.done()]:
                     name, slot = active.pop(future)
                     result = record(name, future.result())
+                    now = time.monotonic()
+                    deadline = now + wait_seconds
                     reason = result.get("reason", "")
                     if (result["status"] == "blocked" and result.get("termination") == "exit"
                         and reason.startswith(("capacity_", "slot_"))):
-                        now = time.monotonic()
-                        # The first controller can do work before refusing a later acquire.
-                        deadline = deadlines.setdefault(name, now + wait_seconds)
-                        observed = observations[slot]
-                        previous = observed.retries.get(name)
-                        delay = min(15, 2 * previous[1]) if previous else SLOT_POLL_SECONDS
-                        recovery = None
+                        _, previous_delay = retries.get((name, slot), (0, SLOT_POLL_SECONDS / 2))
+                        # Back off beyond the idle window if admission keeps refusing.
+                        delay = min(2 * previous_delay, wait_seconds + SLOT_POLL_SECONDS)
+                        retries[name, slot] = (now + delay, delay)
+                        last_refusals[name] = (slot, reason)
                         if reason.startswith("slot_"):
-                            observed.observe(reason.removeprefix("slot_"), now)
-                            # A real slot recovery earns a retry even if its backoff crosses
-                            # the deadline. Further refusals after expiry cannot renew it.
-                            if now < deadline:
-                                recovery = observed.recoveries
-                        observed.retries[name] = (now + delay, delay, reason, recovery)
+                            last_states[slot] = reason.removeprefix("slot_")
                         work.append(name)
                     else:
-                        deadlines.pop(name, None)
-                        for observed in observations.values():
-                            observed.retries.pop(name, None)
+                        last_refusals.pop(name, None)
+                        for other in slots:
+                            retries.pop((name, other), None)
                 if not STOP.is_set():
                     running = {name for name, _ in active.values()}
                     work.extend(name for name in refresh() if name not in work and name not in running)
+                    work[:] = [name for name in work if eligible(name)]
                     busy = {slot for _, slot in active.values()}
                     idle = [slot for slot in slots if slot not in busy]
                     if work and idle:
                         states = broker_slots(env)
                         now = time.monotonic()
+                        if any(states.get(slot) == "available" and last_states.get(slot) not in (None, "available")
+                               for slot in idle):
+                            deadline = now + wait_seconds
+                        last_states.update({slot: states[slot] for slot in idle if slot in states})
                         for slot in idle:
-                            observed = observations[slot]
-                            observed.observe(states.get(slot, observed.state), now)
                             if states.get(slot) != "available":
-                                if (observed.state != "available" and now - observed.since >= wait_seconds
-                                    and not observed.reported):
-                                    print(f"BROKER WAIT: slot-{slot}={observed.state} persisted while checks queued", flush=True)
-                                    observed.reported = True
                                 continue
-                            name = next((name for name in work
-                                         if observed.ready(name, now, deadlines.get(name, now))), None)
-                            if name is not None and begin(name):
-                                # Starting a lane ends its initial idle wait. A retry keeps
-                                # the deadline from the first refusal until the lane completes.
-                                if all(name not in other.retries for other in observations.values()):
-                                    deadlines.pop(name, None)
-                                work.remove(name)
-                                active[pool.submit(execute_lane, name, slot)] = (name, slot)
-                    elif not work:
-                        for observed in observations.values():
-                            observed.since = None
+                            for name in work:
+                                retry = retries.get((name, slot))
+                                if retry and (now < retry[0] or (not active and retry[0] > deadline)):
+                                    continue
+                                if begin(name):
+                                    work.remove(name)
+                                    active[pool.submit(execute_lane, name, slot)] = (name, slot)
+                                    deadline = time.monotonic() + wait_seconds
+                                    break
                 if active:
                     wait(active, timeout=SLOT_POLL_SECONDS, return_when=FIRST_COMPLETED)
                 elif STOP.is_set() or not work:
                     return False
                 else:
                     now = time.monotonic()
-                    deadline = max(deadlines.setdefault(name, now + wait_seconds) for name in work)
                     if now >= deadline:
-                        state = ", ".join(f"slot-{slot}={observed.state}" for slot, observed in observations.items())
-                        refusals = ", ".join(f"{name}@slot-{slot}={observed.retries[name][2]}"
-                                             for name in work for slot, observed in observations.items()
-                                             if name in observed.retries)
-                        print(f"INCOMPLETE: no broker progress for {', '.join(work)} ({state})"
-                              + (f"; last refusals: {refusals}" if refusals else ""), flush=True)
+                        current = ", ".join(
+                            f"slot-{slot}={states[slot]}" if slot in states else
+                            f"slot-{slot}=unknown (last known: {last_states[slot]})" if slot in last_states else
+                            f"slot-{slot}=unknown" for slot in slots)
+                        reasons = []
+                        for name in work:
+                            if name in last_refusals:
+                                slot, reason = last_refusals[name]
+                                reasons.append(f"{name}@slot-{slot}={reason}")
+                            else:
+                                reasons.append(name)
+                        print(f"INCOMPLETE: no broker progress for {', '.join(reasons)} ({current})", flush=True)
                         return True
                     STOP.wait(min(SLOT_POLL_SECONDS, deadline - now))
         except Exception:
@@ -1586,17 +1560,24 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             event(output, "check-reuse", invocation_id=invocation.id, check=name,
                   origin=origin, reason="validated-applicable-pass")
 
+        def requirements_passed(name):
+            return all(receipt["checks"][required]["status"] == "passed"
+                       for required in selected_requirements(receipt, {name}))
+
         def begin(name):
             # Register only immediately before execute: a stopped queue retains no old PASS.
             if STOP.is_set():
                 return False
-            invocation.start(name)
-            if STOP.is_set():
-                invocation.cancel_start(name)
-                return False
             with retry_lock(output):
+                retry = pending_retries(output, receipt).get(name)
+                if retry and not requirements_passed(name):
+                    return False
+                invocation.start(name)
+                if STOP.is_set():
+                    invocation.cancel_start(name)
+                    return False
                 running = {"status": "running", "command": command_identity(checks[name], root)}
-                if retry := pending_retries(output, receipt).get(name):
+                if retry:
                     running["retry_requested"] = retry
                 receipt["checks"][name] = running
                 save(output, receipt)  # Invalidate a previous PASS before any child can start.
@@ -1687,11 +1668,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                 raise ValueError("SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s")
             seconds = int(limit[1]) * (60 if limit[2] == "m" else 1)
 
-            def requirements_passed(name):
-                return all(receipt["checks"][required]["status"] == "passed"
-                           for required in selected_requirements(receipt, {name}))
+            retrying = set()
 
             def refresh():
+                nonlocal retrying
                 retrying = pending_retries(output, receipt).keys() - excluded
                 required = selected_requirements(receipt, retrying) - excluded
                 added = (retrying | required) - selected
@@ -1707,8 +1687,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                             and receipt["checks"][name]["status"] != "passed")):
                         yield name
 
-            work = [name for name in live if name not in retries or requirements_passed(name)]
-            if dispatch_live(work, slots, env, begin, execute_lane, record, refresh, seconds):
+            def eligible(name):
+                return name not in retrying or requirements_passed(name)
+
+            if dispatch_live(live.copy(), slots, env, begin, execute_lane, record, refresh, seconds, eligible):
                 failure_reason = "broker-no-progress"
         if source_fingerprint(root) != receipt["source_fingerprint"]:
             receipt["checks"]["verify"]["status"] = "failed"
