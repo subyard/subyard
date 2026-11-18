@@ -270,7 +270,11 @@ prepare)
   grep -q '^\[device-subyard\]' "$guard" && grep -q '^unmanaged-devices=' "$guard" || die 'the published init wrote no released guard'
   [ ! -e /etc/systemd/system/subyard-power-reconcile.service ] || die 'the published partial init installed the boot reconciler'
   settle
-  [ "$(device_state "$UP")" != unmanaged ] || die 'the released guard did not let NetworkManager take the uplink'
+  if [ "$(device_state "$UP")" = unmanaged ]; then
+    unmanaged="$(udevadm info --query=property --path="/sys/class/net/$UP" | grep '^NM_UNMANAGED=')" || unmanaged='NM_UNMANAGED is unset or unavailable'
+    evidence "udev $UP: $unmanaged"
+    die 'the released guard did not let NetworkManager take the uplink'
+  fi
   case ",$(effective_unmanaged)," in *",interface-name:$UP,"*) die 'the released guard kept the administrator list' ;; esac
   for bridge in docker0 virbr0; do [ "$(device_state "$bridge")" = unmanaged ] || die "released guard: $bridge is managed"; done
   pass "published $OLD_VERSION partial init: the released guard let NetworkManager take $UP; no boot reconciler"
