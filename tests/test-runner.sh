@@ -216,6 +216,8 @@ import time
 
 runner = Path(sys.argv[1])
 root = Path(sys.argv[2])
+signal.signal(signal.SIGINT, signal.default_int_handler)
+
 def interrupted_case(name, sig, expected_status):
     case = root / name
     case.mkdir()
@@ -476,6 +478,7 @@ for index in range(5):
 {script}PY
 """)
 
+signal.signal(signal.SIGINT, signal.default_int_handler)
 with (tmp / "profile-interrupt.out").open("wb") as log:
     with subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
                           stdout=log, stderr=log, start_new_session=True) as process:
