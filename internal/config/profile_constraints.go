@@ -72,17 +72,25 @@ func namedRefusal(code domain.ConfigRefusalCode, validate func(string) (domain.C
 // validateProfileConstraints returns every role and profile placement refusal;
 // prior lists refusals found earlier in the same load.
 func validateProfileConstraints(configDir, yard string, values environment, prior ...error) error {
-	refusals := slices.Clone(prior)
-	if required := values["REQUIRED_YARD_KIND"]; required != "" && values["YARD_KIND"] != required {
+	return domain.CollectRefusals(append(slices.Clone(prior), refusalCauses(checkProfileConstraints(configDir, yard, values, func(...string) bool { return true }, true))...)...)
+}
+
+func checkProfileConstraints(configDir, yard string, values environment, available func(...string) bool, profilesAvailable bool) error {
+	var refusals []error
+	if required := values["REQUIRED_YARD_KIND"]; available("REQUIRED_YARD_KIND", "YARD_KIND") && required != "" && values["YARD_KIND"] != required {
 		refusals = append(refusals, namedRefusal(domain.ConfigRoleRequiresYardKind, domain.ConfigYardKindName, required))
 	}
 	exclusive := values["EXCLUSIVE_ENVIRONMENT_PROFILE"]
-	if exclusive != "" && yard == "default" {
+	if available("EXCLUSIVE_ENVIRONMENT_PROFILE") && exclusive != "" && yard == "default" {
 		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigExclusiveRequiresNamedYard))
 	}
-	noHostAccess := values["ALLOWS_HOST_ACCESS"] == "false"
-	for _, profile := range strings.Fields(values["ENVIRONMENT_PROFILES"]) {
-		if exclusive != "" && profile != exclusive {
+	noHostAccess := available("ALLOWS_HOST_ACCESS") && values["ALLOWS_HOST_ACCESS"] == "false"
+	var profiles []string
+	if profilesAvailable {
+		profiles = strings.Fields(values["ENVIRONMENT_PROFILES"])
+	}
+	for _, profile := range profiles {
+		if available("EXCLUSIVE_ENVIRONMENT_PROFILE") && exclusive != "" && profile != exclusive {
 			refusals = append(refusals, namedRefusal(domain.ConfigRolePermitsOnlyProfile, domain.ConfigProfileName, exclusive))
 		}
 		declaration, err := profileDeclaration(configDir, profile)
@@ -90,7 +98,7 @@ func validateProfileConstraints(configDir, yard string, values environment, prio
 			refusals = append(refusals, err)
 			continue
 		}
-		if declaration.scope == "dedicated" && exclusive != profile {
+		if declaration.scope == "dedicated" && available("EXCLUSIVE_ENVIRONMENT_PROFILE") && exclusive != profile {
 			refusals = append(refusals, namedRefusal(domain.ConfigProfileRequiresDedicatedPreset, domain.ConfigProfileName, profile))
 		}
 		if declaration.requiresHostAccess && noHostAccess {
@@ -102,22 +110,24 @@ func validateProfileConstraints(configDir, yard string, values environment, prio
 			"HOST_MOUNTS", "HOST_LINKS", "HOST_CLAUDE_MD", "HOST_CODEX_AGENTS_MD",
 			"HOST_OPENCODE_AGENTS_MD", "YARD_CAPABILITIES",
 		} {
-			if strings.TrimSpace(values[name]) != "" {
+			if available(name) && strings.TrimSpace(values[name]) != "" {
 				refusals = append(refusals, namedRefusal(domain.ConfigRoleForbidsSetting, domain.ConfigSettingName, name))
 			}
 		}
 		for _, name := range []string{"FORWARD_SSH_AGENT", "NESTED_E2E_VMS"} {
-			if value := values[name]; value != "" && value != "0" {
+			if value := values[name]; available(name) && value != "" && value != "0" {
 				refusals = append(refusals, namedRefusal(domain.ConfigRoleRequiresDisabled, domain.ConfigSettingName, name))
 			}
 		}
 	}
-	if values["VM_FREE_PAGE_REPORTING"] == "1" || values["VM_PIN_IPV4"] == "1" || values["SRV_VOLUME_TYPE"] == "block" || values["VM_CPU_WEIGHT"] != "" {
-		if values["YARD_KIND"] != "vm" {
-			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigVMFeaturesRequireVM))
-		}
+	vmFeatures := (available("VM_FREE_PAGE_REPORTING") && values["VM_FREE_PAGE_REPORTING"] == "1") ||
+		(available("VM_PIN_IPV4") && values["VM_PIN_IPV4"] == "1") ||
+		(available("SRV_VOLUME_TYPE") && values["SRV_VOLUME_TYPE"] == "block") ||
+		(available("VM_CPU_WEIGHT") && values["VM_CPU_WEIGHT"] != "")
+	if vmFeatures && available("YARD_KIND") && values["YARD_KIND"] != "vm" {
+		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigVMFeaturesRequireVM))
 	}
-	if values["SRV_VOLUME_TYPE"] == "block" && values["SRV_VOLUME_SIZE"] == "" {
+	if available("SRV_VOLUME_TYPE", "SRV_VOLUME_SIZE") && values["SRV_VOLUME_TYPE"] == "block" && values["SRV_VOLUME_SIZE"] == "" {
 		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigBlockStorageRequiresSize))
 	}
 	return domain.CollectRefusals(refusals...)

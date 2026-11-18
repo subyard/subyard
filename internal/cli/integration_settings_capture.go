@@ -14,16 +14,14 @@ import (
 )
 
 type integrationSettingsCapture struct {
-	loaded   config.Loaded
-	prepared ports.PreparedSettingsCapture
+	loaded          config.Loaded
+	prepared        ports.PreparedSettingsCapture
+	identityChanged bool
 }
 
-func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded config.Loaded, request configAuthoringRequest, prospective *configProspective) ([]integrationSettingsCapture, error) {
-	if !loaded.Catalog.IntegrationInitSetting(request.name) {
-		return nil, nil
-	}
+func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded config.Loaded, prospective *configProspective, requests ...configAuthoringRequest) ([]integrationSettingsCapture, error) {
 	names := []string{loaded.Context.YardName}
-	if request.scope != config.ScopeYard {
+	if requests[0].scope != config.ScopeYard {
 		var err error
 		names, err = config.YardNames(loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome)
 		if err != nil {
@@ -56,17 +54,26 @@ func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded c
 			failures = append(failures, fmt.Errorf("yard %s: %w", name, err))
 			continue
 		}
-		if before.Context.AccessKind != domain.AccessLocal || before.Environment[request.name] == after.Environment[request.name] {
+		if before.Context.AccessKind != domain.AccessLocal {
 			continue
 		}
-		if strings.HasPrefix(request.name, "AGENT_") {
-			affected := false
-			for _, id := range before.Integrations.Effective {
-				affected = affected || strings.HasPrefix(request.name, "AGENT_"+id+"_")
-			}
-			if !affected {
+		var changed []string
+		identityChanged := false
+		for _, request := range requests {
+			setting := request.name
+			if !loaded.Catalog.IntegrationInitSetting(setting) || before.Environment[setting] == after.Environment[setting] {
 				continue
 			}
+			if strings.HasPrefix(setting, "AGENT_") && !slices.ContainsFunc(before.Integrations.Effective, func(id string) bool {
+				return strings.HasPrefix(setting, "AGENT_"+id+"_")
+			}) {
+				continue
+			}
+			changed = append(changed, setting)
+			identityChanged = identityChanged || setting == "DEV_USER" || setting == "DEV_UID"
+		}
+		if len(changed) == 0 {
+			continue
 		}
 		platform, ok := cli.initPlatform(before, nil).(interface {
 			PrepareAppliedIntegrationSettings(context.Context) (ports.PreparedSettingsCapture, error)
@@ -87,10 +94,10 @@ func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded c
 			continue
 		}
 		if !strings.EqualFold(instance.Status, "running") {
-			failures = append(failures, fmt.Errorf("yard %s: applied integration settings cannot be verified while stopped; start the yard before editing %s", name, request.name))
+			failures = append(failures, fmt.Errorf("yard %s: applied integration settings cannot be verified while stopped; start the yard before editing %s", name, strings.Join(changed, ", ")))
 			continue
 		}
-		if request.name == "DEV_USER" || request.name == "DEV_UID" {
+		if identityChanged {
 			if _, _, err := config.ReadAppliedIdentityHint(before.Context.Paths.ConfigHome, name); err != nil {
 				failures = append(failures, fmt.Errorf("yard %s: %w", name, err))
 				continue
@@ -107,9 +114,9 @@ func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded c
 			failures = append(failures, fmt.Errorf("yard %s: %w", name, err))
 			continue
 		}
-		captures = append(captures, integrationSettingsCapture{loaded: before, prepared: capture})
+		captures = append(captures, integrationSettingsCapture{loaded: before, prepared: capture, identityChanged: identityChanged})
 	}
-	return captures, errors.Join(failures...)
+	return captures, domain.CollectRefusals(failures...)
 }
 
 func lockIntegrationSettingsCaptures(ctx context.Context, loaded config.Loaded, yardLocked bool, captures []integrationSettingsCapture) (func(), error) {

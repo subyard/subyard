@@ -26,6 +26,7 @@ type configProspective struct {
 	binding         string
 	semantics       string
 	directoryInputs map[string]bool
+	checkBatch      func(locked bool) error
 }
 
 func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot) (*configProspective, error) {
@@ -67,6 +68,11 @@ func (plan *configProspective) close() {
 func (plan *configProspective) check() error { return plan.checkLocked(false) }
 
 func (plan *configProspective) checkLocked(locked bool) error {
+	if plan.checkBatch != nil {
+		if err := plan.checkBatch(locked); err != nil {
+			return fmt.Errorf("%w: %w", domain.ErrPlanStale, configProspectiveError{plan.loaded.Context.Paths.ConfigHome, err})
+		}
+	}
 	binding, semantics, err := plan.inspect(true, locked)
 	if err != nil {
 		return fmt.Errorf("%w: prospective configuration can no longer be validated: %w", domain.ErrPlanStale, err)
@@ -122,6 +128,22 @@ func (cli *CLI) reportConfigNext(err error) {
 	}
 }
 
+func (cli *CLI) configProspectiveEnvironment(loaded config.Loaded) map[string]string {
+	paths := loaded.Context.Paths
+	environment := make(map[string]string)
+	for name, value := range cli.baseEnv {
+		if _, setting := loaded.Catalog.LookupSetting(name); setting || loaded.Catalog.IsLegacySetting(name) {
+			continue
+		}
+		environment[name] = value
+	}
+	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
+	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
+	environment["SUBYARD_HOME"] = paths.DataHome
+	delete(environment, "SUBYARD_YARD")
+	return environment
+}
+
 func (plan *configProspective) inspect(draft, locked bool) (binding, semantics string, result error) {
 	defer func() {
 		if result != nil {
@@ -137,17 +159,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 			return "", "", err
 		}
 	}
-	environment := make(map[string]string)
-	for name, value := range plan.cli.baseEnv {
-		if _, setting := plan.loaded.Catalog.LookupSetting(name); setting || plan.loaded.Catalog.IsLegacySetting(name) {
-			continue
-		}
-		environment[name] = value
-	}
-	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
-	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
-	environment["SUBYARD_HOME"] = paths.DataHome
-	delete(environment, "SUBYARD_YARD")
+	environment := plan.cli.configProspectiveEnvironment(plan.loaded)
 	var overrides map[string]string
 	if draft {
 		overrides = map[string]string{plan.path: plan.draft}

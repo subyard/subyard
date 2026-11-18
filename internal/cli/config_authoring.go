@@ -34,6 +34,9 @@ type configAuthoringRequest struct {
 // scopes may only remove a profile-only setting, which the loader ignores,
 // never assign it.
 func configAuthoringDefinition(catalog config.Catalog, action string, scope config.SettingScope, name string, syncable bool) (config.SettingDefinition, error) {
+	if action == "set" && catalog.RetiredSetting(name) {
+		return config.SettingDefinition{}, configPublicRefusal("setting is retired and can no longer be set")
+	}
 	if !config.IsProfileOnlySetting(name) || scope == config.ScopeShipped {
 		return catalog.ValidateSettingName(scope, name, syncable)
 	}
@@ -64,6 +67,11 @@ func (cli *CLI) runConfigAuthoring(
 	}
 	home := loaded.Context.Paths.ConfigHome
 	if len(requests) > 1 {
+		if !requests[0].git {
+			return cli.runPreparedConfigMutation(ctx, loaded, append([]string{action}, arguments...), requests[0].assumeYes, func(prepared *preparedCommand) error {
+				return prepared.prepareConfigScalar(ctx, action, arguments, true)
+			})
+		}
 		if err := cli.configGitScalarsRefusal(loaded, requests); err != nil {
 			cli.reportConfigRefusal("config "+action, home, err)
 			return 2
@@ -157,35 +165,35 @@ func sameConfigAuthoringSnapshot(left, right config.PersistentFileSnapshot) bool
 // configScalarAuthoringRefusal reports every independent refusal of one typed
 // scalar write before planning.
 func configScalarAuthoringRefusal(loaded config.Loaded, definition config.SettingDefinition, request configAuthoringRequest) error {
-	refusals, writable := configScalarSyntaxRefusals(loaded, definition, request)
+	syntax, writable := configScalarSyntaxRefusal(loaded.Catalog, definition, request)
+	refusals := []error{syntax}
 	if writable {
+		if request.action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
+			refusals = append(refusals, loaded.Catalog.CheckSelectableIntegrations(strings.Fields(request.value)))
+		}
 		refusals = append(refusals, configScalarStateRefusals(loaded, request)...)
 	}
 	return domain.CollectRefusals(refusals...)
 }
 
-// configScalarSyntaxRefusals checks one value on its own. A setting that
+// configScalarSyntaxRefusal checks one value on its own. A setting that
 // cannot be written this way is not writable, so state checks do not apply.
-func configScalarSyntaxRefusals(loaded config.Loaded, definition config.SettingDefinition, request configAuthoringRequest) ([]error, bool) {
+func configScalarSyntaxRefusal(catalog config.Catalog, definition config.SettingDefinition, request configAuthoringRequest) (error, bool) {
 	if request.git && (!definition.Syncable || definition.Sensitive) {
-		return []error{configPublicRefusal(request.name + " cannot be saved in Git")}, false
+		return configPublicRefusal(request.name + " cannot be saved in Git"), false
 	}
 	if definition.Kind != config.SettingScalar {
-		return []error{configPublicRefusal(request.name + " is a file setting; use config import or config edit")}, false
+		return configPublicRefusal(request.name + " is a file setting; use config import or config edit"), false
 	}
-	var refusals []error
 	if request.action == "set" {
-		refusals = append(refusals, loaded.Catalog.ValidateSetting(request.scope, request.name, request.value, request.git))
-		if request.name == "CODING_TOOL_INTEGRATIONS" {
-			refusals = append(refusals, loaded.Catalog.CheckSelectableIntegrations(strings.Fields(request.value)))
-		}
+		return catalog.ValidateSetting(request.scope, request.name, request.value, request.git), true
 	}
-	return refusals, true
+	return nil, true
 }
 
 // configScalarStateRefusals checks one value against the configuration state
 // it must be consistent with: the current state for a single write, or the
-// combined target state for several Git assignments.
+// combined target state for a batch.
 func configScalarStateRefusals(state config.Loaded, request configAuthoringRequest) []error {
 	var refusals []error
 	if request.action == "set" && request.name == "CODING_TOOL_INTEGRATIONS" {
@@ -193,9 +201,7 @@ func configScalarStateRefusals(state config.Loaded, request configAuthoringReque
 		if _, err := state.Catalog.ResolveIntegrationSelection(state.Environment, requested); err != nil {
 			refusals = append(refusals, err)
 		}
-		if request.scope == config.ScopeYard && !state.Integrations.AllowsCodingTools && len(requested) != 0 {
-			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools))
-		}
+		refusals = append(refusals, configScalarIntegrationRoleRefusal(state, request))
 	}
 	if request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
 		refusals = append(refusals, config.ValidateYardTemplateIntegrations(state, request.value))
@@ -203,11 +209,14 @@ func configScalarStateRefusals(state config.Loaded, request configAuthoringReque
 	return refusals
 }
 
-// configGitScalarsRefusal validates several Git scalar assignments. Each value
-// is checked on its own and each canonical setting may appear once. Checks
-// that relate settings use the combined target state, loaded through the
-// normal resolver with every assignment applied to the Git settings layer;
-// that state exists only when every assignment is individually valid.
+func configScalarIntegrationRoleRefusal(state config.Loaded, request configAuthoringRequest) error {
+	if request.scope == config.ScopeYard && !state.Integrations.AllowsCodingTools && strings.TrimSpace(request.value) != "" {
+		return domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools)
+	}
+	return nil
+}
+
+// Git assignments are also checked against their combined resolver state.
 func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configAuthoringRequest) error {
 	var refusals []error
 	seen := make(map[string]string, len(requests))
@@ -221,11 +230,14 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 			refusals = append(refusals, configPublicRefusal(prior+" and "+request.name+" assign the same setting"))
 		}
 		seen[definition.Name] = request.name
-		syntax, _ := configScalarSyntaxRefusals(loaded, definition, request)
-		refusals = append(refusals, syntax...)
+		syntax, writable := configScalarSyntaxRefusal(loaded.Catalog, definition, request)
+		refusals = append(refusals, syntax)
+		if writable && definition.Name == "CODING_TOOL_INTEGRATIONS" {
+			refusals = append(refusals, loaded.Catalog.CheckSelectableIntegrations(strings.Fields(request.value)))
+		}
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil {
-		return err
+		return configUsage(err)
 	}
 	target, err := cli.configGitScalarsTarget(loaded, requests)
 	if err != nil {
@@ -313,7 +325,7 @@ func parseConfigAuthoringRequest(
 }
 
 // parseConfigAuthoringRequests accepts one setting, or several SETTING VALUE
-// pairs for config set --git, which share one commit and push.
+// pairs for config set in the same scope and storage layer.
 func parseConfigAuthoringRequests(
 	action string,
 	arguments []string,
@@ -353,12 +365,9 @@ func parseConfigAuthoringRequests(
 	default:
 		return nil, fmt.Errorf("unsupported scope %q", request.scope)
 	}
-	if action == "set" && (len(positional) == 0 || len(positional)%2 != 0) {
-		return nil, errors.New("expects SETTING VALUE pairs")
-	}
-	if action == "set" && len(positional) > 2 {
-		if !request.git {
-			return nil, errors.New("several SETTING VALUE pairs require --git")
+	if action == "set" {
+		if len(positional) == 0 || len(positional)%2 != 0 {
+			return nil, errors.New("expects SETTING VALUE pairs")
 		}
 		requests := make([]configAuthoringRequest, 0, len(positional)/2)
 		for index := 0; index < len(positional); index += 2 {
@@ -369,16 +378,13 @@ func parseConfigAuthoringRequests(
 		return requests, nil
 	}
 	expected := 1
-	if action == "set" || action == "import" {
+	if action == "import" {
 		expected = 2
 	}
 	if len(positional) != expected {
 		return nil, fmt.Errorf("expects %d positional argument(s)", expected)
 	}
 	request.name = positional[0]
-	if action == "set" {
-		request.value = positional[1]
-	}
 	if action == "import" {
 		request.inputPath = positional[1]
 	}

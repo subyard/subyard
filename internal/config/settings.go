@@ -84,6 +84,7 @@ type settingAssignment struct {
 }
 
 type settingTracker struct {
+	batch                 *localBatch
 	catalog               Catalog
 	fileOverrides         map[string]string
 	prospectiveFiles      *ProspectiveFiles
@@ -343,6 +344,9 @@ func (tracker *settingTracker) prospectiveReader() func(string) ([]byte, error) 
 	return tracker.prospectiveFiles.readFile
 }
 func (tracker *settingTracker) fileExists(path string) (bool, error) {
+	if tracker.batch != nil && path == tracker.batch.path && path != "" {
+		return true, nil
+	}
 	if snapshot, handled, err := tracker.prospectiveFiles.snapshot(path); handled || err != nil {
 		return snapshot.Exists, err
 	}
@@ -370,6 +374,9 @@ func (tracker *settingTracker) pathPresent(path string) bool {
 
 func (tracker *settingTracker) findYardFile(candidates []string, name string) (string, error) {
 	for _, candidate := range candidates {
+		if tracker.batch != nil && candidate == tracker.batch.path {
+			return candidate, nil
+		}
 		if snapshot, handled, err := tracker.prospectiveFiles.snapshot(candidate); handled || err != nil {
 			if err != nil {
 				return "", err

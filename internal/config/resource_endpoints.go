@@ -68,8 +68,10 @@ func applySavedResourceEndpoints(
 			true, settingScalar,
 			definition.Proxy.AdvertiseHostSetting, definition.Proxy.HostPortSetting,
 		)
-		if values[definition.Proxy.AdvertiseHostSetting] != "" &&
-			values[definition.Proxy.HostPortSetting] != "" {
+		hostSetting, portSetting := definition.Proxy.AdvertiseHostSetting, definition.Proxy.HostPortSetting
+		needsHost := tracker.inputsAvailable(hostSetting) && values[hostSetting] == ""
+		needsPort := tracker.inputsAvailable(portSetting) && values[portSetting] == ""
+		if !needsHost && !needsPort {
 			continue
 		}
 		host, port, exists, err := resourceendpoint.ReadSaved(
@@ -79,21 +81,21 @@ func applySavedResourceEndpoints(
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("read saved endpoint for %s: %w", identity, err))
 			// Only a port the saved endpoint would provide stays unchecked.
-			unread[definition.Proxy.HostPortSetting] = values[definition.Proxy.HostPortSetting] == ""
+			unread[portSetting] = needsPort
 			continue
 		}
 		if !exists {
 			continue
 		}
 		detail := savedResourceEndpointDetail + identity
-		if values[definition.Proxy.AdvertiseHostSetting] == "" {
-			values[definition.Proxy.AdvertiseHostSetting] = host
-			tracker.record(layer, definition.Proxy.AdvertiseHostSetting, host, "", 0, detail)
+		if needsHost {
+			values[hostSetting] = host
+			tracker.record(layer, hostSetting, host, "", 0, detail)
 		}
-		if values[definition.Proxy.HostPortSetting] == "" {
+		if needsPort {
 			portValue := strconv.Itoa(port)
-			values[definition.Proxy.HostPortSetting] = portValue
-			tracker.record(layer, definition.Proxy.HostPortSetting, portValue, "", 0, detail)
+			values[portSetting] = portValue
+			tracker.record(layer, portSetting, portValue, "", 0, detail)
 		}
 	}
 	return func(name string) bool { return unread[name] }, domain.CollectRefusals(refusals...)
