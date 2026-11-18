@@ -264,9 +264,10 @@ class Runtime:
         if not installed and any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
             raise ValueError('unmanaged collector assets')
         if not installed:
-            if self.selected and self.agents:
-                token = self.token() if native.snapshot(self.data/'auth.token') is not None else None
-                self.reconcile_native(token, check=True)
+            token = self.token() if self.selected and self.agents and native.snapshot(self.data/'auth.token') is not None else None
+            native_current = self.reconcile_native(token, check=True)
+            if not self.selected and not native_current:
+                raise ValueError('native configuration cleanup pending without collector installation')
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
                 result['diagnostics'] = [{'parameter': 'telemetry.runtime', 'installed': 'absent', 'desired': 'present'}]
@@ -323,12 +324,15 @@ class Runtime:
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
     def repair_native_modes(self):
-        native.repair_modes(self.home, self.control/'native.json', self.agents, self.uid)
+        native.repair_modes(self.home, self.control/'native.json', self.agents, self.uid,
+                            developer=getattr(self, 'user', None))
 
     def apply(self):
         self.repair_native_modes()
         installed = self.owned()
         if not self.selected and not installed:
+            if not self.reconcile_native('', check=True):
+                self.reconcile_native('')
             return
         token_path = self.data/'auth.token'
         if self.selected and self.agents:
@@ -398,7 +402,7 @@ def main():
         if account.pw_uid == 0:
             raise ValueError('developer account required')
         native.repair_modes(Path(account.pw_dir), Path('/var/lib/subyard/telemetry-control/native.json'),
-                            agents.split(), account.pw_uid)
+                            agents.split(), account.pw_uid, developer=user)
         return
     if mode in ('identity-observe','identity-apply'):
         import authority
@@ -480,6 +484,8 @@ if __name__ == '__main__':
                 print('telemetry-agent-config-invalid-v1 '+failure.agent, file=sys.stderr)
             elif isinstance(failure, native.materializer.ContributionConflict):
                 print('telemetry-config-contribution-conflict-v1 '+str(failure), file=sys.stderr)
+            elif isinstance(failure, native.materializer.PendingContributionPublication):
+                print('telemetry-agent-config-publication-pending-v1 '+Path(failure.destination).parent.name[1:], file=sys.stderr)
             elif isinstance(failure, native.materializer.PublicationRefusal) and failure.recovery:
                 print('telemetry-agent-config-recovery-v1 '+agent+' '+failure.recovery, file=sys.stderr)
             elif agent:

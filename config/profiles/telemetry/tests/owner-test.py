@@ -43,6 +43,9 @@ if os.environ.get('TELEMETRY_FIXTURE_TRANSPORT_FAIL')=='1': sys.exit(1)
 if args[0]=='list': assert args[-2:]==['-c','ns']; print(args[1]+'-neighbour,STOPPED'); print(args[1]+',RUNNING'); sys.exit()
 assert args[0]=='exec'
 arguments=args[args.index('subyard')+1:]
+if os.environ.get('TELEMETRY_FIXTURE_PENDING')=='1':
+    print('telemetry-agent-config-publication-pending-v1 codex', file=sys.stderr)
+    sys.exit(2)
 if os.environ.get('TELEMETRY_FIXTURE_REPAIR_FAIL')=='1':
     assert arguments[0]=='repair-modes'
     print('telemetry-agent-config-unavailable-v1 claude', file=sys.stderr)
@@ -131,6 +134,11 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             prefix = 'subyard-profile-observation-refusal-v1 '
             refusal = next(json.loads(line[len(prefix):]) for line in result.stderr.decode().splitlines() if line.startswith(prefix))
             self.assertEqual(refusal['retry'], 'run yard -Y secondary config paths')
+            pending = invoke('--remove', TELEMETRY_FIXTURE_PENDING='1')
+            self.assertEqual(pending.returncode, 2, pending.stderr)
+            refusal = next(json.loads(line[len(prefix):]) for line in pending.stderr.decode().splitlines() if line.startswith(prefix))
+            self.assertIn('/home/dev/.codex/config.toml', refusal['message'])
+            self.assertIn('publication journal or ownership receipt', refusal['message'])
             result = invoke('--yes', CODING_TOOL_INTEGRATIONS='claude', AGENT_claude_CONFIG=str(missing_source),
                             AGENT_claude_CONFIG_DEST='.claude/settings.json', TELEMETRY_FIXTURE_REPAIR_FAIL='1')
             self.assertEqual(result.returncode, 2, result.stderr)

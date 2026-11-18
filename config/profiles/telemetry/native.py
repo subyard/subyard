@@ -7,6 +7,7 @@ import stat
 import tempfile
 from contextlib import ExitStack
 from decimal import Decimal
+from pathlib import Path
 
 import guest_json as materializer
 
@@ -136,67 +137,75 @@ def sync_directory(path):
         os.close(directory)
 
 
-def save_intent(journal, state_before, agent, path, owned, retired, projection, staged):
-    record = {'schema': 1, 'agent': agent, 'destination': str(path),
-              'receipt': hashlib.sha256(state_before or b'').hexdigest(),
-              'inode': [staged.st_dev, staged.st_ino], 'owned': owned,
-              'retired': retired, 'projection': projection}
-    publish(journal, receipt(record), snapshot(journal))
-    # The control directory itself may have been created on this first apply.
-    sync_directory(journal.parent.parent)
+def intent_for(agent, path, owned, document, original, completed):
+    return {'schema': 2, 'agent': agent, 'destination': str(path), 'document': document,
+            'receipt': hashlib.sha256(original or b'').hexdigest(),
+            'completed': hashlib.sha256(completed).hexdigest(), 'owned': owned}
+
+
+def verify_publication(intent, path, home, uid):
+    def matches(directory):
+        before = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        content = materializer.read_destination(path.name, private=True, dir_fd=directory)
+        after = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+        return (before.st_uid == uid and os.path.samestat(before, after) and
+                before.st_ctime_ns == after.st_ctime_ns and content is not None and
+                os.path.samestat(os.stat(path.parent, follow_symlinks=False), os.fstat(directory)) and
+                hashlib.sha256(content).hexdigest() == intent['document'])
+
+    try:
+        if (intent.get('schema') == 2 and intent['destination'] == str(path) and
+                materializer.validate_destination_parent(str(path), str(home), uid, False, action=matches)):
+            return
+    except (OSError, ValueError, KeyError):
+        pass
+    raise materializer.PendingContributionPublication(path)
+
+
+def clear_intent(journal, intent, path, home, uid):
+    verify_publication(intent, path, home, uid)
+    journal.unlink()
+    sync_directory(journal.parent)
 
 
 def recover_intent(journal, state, original, baseline, home, uid, developer, check):
-    pending = snapshot(journal)
-    if pending is None:
-        return original, baseline
-    materializer.validate_regular(journal, os.getuid(), 0o600)
-    intent = json.loads(pending, parse_float=Decimal, parse_constant=Decimal)
-    if not isinstance(intent, dict) or intent.get('schema') != 1 or intent.get('agent') not in ('claude', 'codex'):
-        raise ValueError('invalid native publication intent')
-    agent = intent['agent']
+    try:
+        intent = materializer.read_publication_intent(journal)
+        if intent is None:
+            return original, baseline, None
+        agent = intent.get('agent')
+        if agent not in ('claude', 'codex'):
+            raise ValueError('invalid publication agent')
+    except (OSError, ValueError):
+        raise AgentConfigRefusals([(agent, materializer.PendingContributionPublication(agent_path(home, agent)))
+                                   for agent in ('claude', 'codex')]) from None
+
     path = agent_path(home, agent)
-    if intent['destination'] != str(path) or intent['receipt'] != hashlib.sha256(original or b'').hexdigest():
-        return original, baseline
-    owned = materializer.published_contribution(intent['owned'])
-    retired = materializer.published_contribution(intent['retired'])
-    file_format = 'json' if agent == 'claude' else 'toml'
-    section = 'env' if agent == 'claude' else 'otel'
-    entries = materializer.contribution_entries(section, owned.keys() | retired.keys())
     asset = materializer.asset_key(developer, str(path))
-    with materializer.asset_lock(asset+'.lock', check, allow_missing=True):
-        if not materializer.validate_destination_parent(str(path), str(home), uid, False):
-            return original, baseline
-        try:
-            before = path.lstat()
-            current, _ = materializer.read_current(path, allow_invalid=True, file_format=file_format, private=True)
-            after = path.lstat()
-        except FileNotFoundError:
-            return original, baseline
-        if current is None or not os.path.samestat(before, after) or after.st_uid != uid:
-            return original, baseline
-        # A surviving staged inode witnesses publication despite in-place edits.
-        # An editor can also atomically save unrelated changes after publication.
-        # A changed, matching owned projection witnesses that case.
-        group = current.get(section)
-        matching_inode = [after.st_dev, after.st_ino] == intent['inode'] and isinstance(group, dict) and any(
-            key in group and materializer.json_equal(group[key], record['managed'], file_format)
-            for key, record in owned.items())
-        matching_projection = (intent['projection'] and
-                               materializer.projection_digest(current, entries, file_format) == intent['projection'])
-        if not matching_inode and not matching_projection:
-            return original, baseline
-        agents = baseline['agents'].copy()
-        if owned:
-            agents[agent] = owned
-        else:
-            agents.pop(agent, None)
-        recovered = {**baseline, 'agents': agents}
-        if not check:
+    with materializer.asset_lock(asset+'.lock', check, allow_missing=True, create=False):
+        verify_publication(intent, path, home, uid)
+        actual = hashlib.sha256(original or b'').hexdigest()
+        if actual == intent.get('completed'):
+            recovered = baseline
+        elif actual == intent.get('receipt'):
+            owned = materializer.published_contribution(intent.get('owned'), path)
+            agents = baseline['agents'].copy()
+            if owned:
+                agents[agent] = owned
+            else:
+                agents.pop(agent, None)
+            recovered = {**baseline, 'agents': agents}
             completed = receipt(recovered)
-            publish(state, completed, original)
-            original = completed
-        return original, recovered
+            if hashlib.sha256(completed).hexdigest() != intent.get('completed'):
+                raise materializer.PendingContributionPublication(path)
+            if not check:
+                publish(state, completed, original)
+                original = completed
+        else:
+            raise materializer.PendingContributionPublication(path)
+        if not check:
+            clear_intent(journal, intent, path, home, uid)
+        return original, recovered, agent
 
 
 def receipt_lock(state, read_only):
@@ -205,11 +214,24 @@ def receipt_lock(state, read_only):
     return materializer.asset_lock(path, read_only, allow_missing=True)
 
 
-def repair_modes(home, state, agents, uid):
-    if agents:
-        with receipt_lock(state, True):
-            _, baseline = read_baseline(state)
-            repair_receipted_modes(home, baseline, agents, uid)
+def check_legacy_receipts(home, baseline):
+    failures = []
+    for agent, owned in sorted(baseline['agents'].items()):
+        try:
+            materializer.published_contribution(owned, agent_path(home, agent))
+        except materializer.PendingContributionPublication as error:
+            failures.append((agent, error))
+    raise_refusals(failures)
+
+
+def repair_modes(home, state, agents, uid, developer=None):
+    with receipt_lock(state, True):
+        original, baseline = read_baseline(state)
+        check_legacy_receipts(home, baseline)
+        journal = Path(materializer.publication_journal(state))
+        _, _, pending = recover_intent(journal, state, original, baseline, home, uid,
+                                       developer or home.name, check=True)
+        repair_receipted_modes(home, baseline, set(agents)-{pending}, uid)
 
 
 def repair_receipted_modes(home, baseline, agents, uid):
@@ -218,7 +240,7 @@ def repair_receipted_modes(home, baseline, agents, uid):
         if agent not in agents:
             continue
         try:
-            if materializer.published_contribution(baseline['agents'].get(agent, {})):
+            if baseline['agents'].get(agent):
                 materializer.repair_document_mode(str(agent_path(home, agent)), str(home), uid)
         except (OSError, ValueError) as error:
             failures.append((agent, error))
@@ -241,15 +263,14 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
 
 def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, check, templates, developer, locks):
     original, baseline = read_baseline(state)
-    journal = state.with_suffix('.intent')
+    check_legacy_receipts(home, baseline)
+    journal = Path(materializer.publication_journal(state))
+    original, baseline, pending = recover_intent(journal, state, original, baseline, home, uid, developer, check)
     if not check:
         repair_receipted_modes(home, baseline, agents, uid)
         if token is None:
             raise ValueError('collector token required')
-    original, recovered = recover_intent(journal, state, original, baseline, home, uid, developer, check)
-    if not check and recovered is not baseline:
-        repair_receipted_modes(home, recovered, agents, uid)
-    baseline, recovered_receipt = recovered, recovered is not baseline
+    expected = original
     next_state = {**baseline, 'agents': baseline['agents'].copy()}
     publications = []
     failures = []
@@ -261,23 +282,21 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
             continue
         path = agent_path(home, agent)
         try:
-            owned = materializer.published_contribution(baseline['agents'].get(agent, {}))
-            if not enabled and not owned:
-                next_state['agents'].pop(agent)
-                publications.append((agent, None, None, receipt(next_state)))
-                continue
+            owned = baseline['agents'].get(agent, {})
             entry = {'receipt': str(state), 'path': '/agents/'+agent, 'section': section}
             want = desired(agent, endpoint, token) if enabled else None
-            final, edit, register = materializer.prepare_contribution(
+            final, edit, register, document = materializer.prepare_contribution(
                 locks, str(path), str(home), uid, file_format, developer, entry, owned, want,
-                templates.get(agent), check=check, writer=writer.dumps, gid=gid,
-                save_intent=lambda final, retired, projection, staged, agent=agent, path=path:
-                    save_intent(journal, original, agent, path, final, retired, projection, staged))
-            if enabled:
+                templates.get(agent), check=check, writer=writer.dumps, gid=gid)
+            if final:
                 next_state['agents'][agent] = final
             else:
                 next_state['agents'].pop(agent, None)
-            publications.append((agent, edit, register, receipt(next_state)))
+            completed = receipt(next_state)
+            intent = intent_for(agent, path, final, document, expected, completed) if document is not None else None
+            journal_payload = receipt(intent) if intent is not None else None
+            publications.append((agent, path, edit, register, completed, intent, journal_payload))
+            expected = completed
         except materializer.InvalidContributionDestination:
             failures.append((agent, AgentConfigRefusal(agent, path)))
         except (OSError, ValueError, KeyError) as error:
@@ -285,23 +304,27 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
     raise_refusals(failures)
 
     if check:
-        return (not recovered_receipt and all(edit is None and register is None for _, edit, register, _ in publications)
+        return (pending is None and all(edit is None and register is None for _, _, edit, register, *_ in publications)
                 and receipt(baseline) == receipt(next_state))
-    for agent, edit, register, final in publications:
+    for agent, path, edit, register, final, intent, journal_payload in publications:
         if register is not None:
             register()
-        try:
-            if edit is not None:
-                edit()
-        except materializer.PublicationRefusal as error:
-            if not error.recovery:
-                raise
-            raise AgentConfigRefusals([(agent, error)]) from None
+        if edit is not None:
+            def save_intent():
+                publish(journal, journal_payload, None)
+                # The control directory itself may have been created on this first apply.
+                sync_directory(journal.parent.parent)
+
+            try:
+                edit(before_publish=save_intent if intent is not None else None)
+            except materializer.PublicationRefusal as error:
+                if not error.recovery:
+                    raise
+                raise AgentConfigRefusals([(agent, error)]) from None
         publish(state, final, original)
         original = final
+        if intent is not None:
+            clear_intent(journal, intent, path, home, uid)
         if edit is not None and agent in agents:
             repair_receipted_modes(home, next_state, [agent], uid)
-    if journal.exists():
-        journal.unlink()
-        sync_directory(journal.parent)
     return True

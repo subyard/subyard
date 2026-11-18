@@ -34,6 +34,11 @@ def run(arguments, **kwargs):
                     refusals.append(detail)
             if line in ('telemetry-agent-config-unavailable-v1 claude', 'telemetry-agent-config-unavailable-v1 codex'):
                 refusals.append('agent configuration unavailable: '+line.rsplit(' ', 1)[1])
+            pending = re.fullmatch(r'telemetry-agent-config-publication-pending-v1 (claude|codex)', line)
+            if pending:
+                path = '/home/'+os.environ['DEV_USER']+('/.claude/settings.json' if pending[1] == 'claude' else '/.codex/config.toml')
+                refusals.append('unresolved configuration publication for '+path+
+                                ' (check the document and its publication journal or ownership receipt before retrying)')
             if line in ('telemetry-agent-config-invalid-v1 claude', 'telemetry-agent-config-invalid-v1 codex'):
                 agent = line.rsplit(' ', 1)[1]
                 path = '/home/'+os.environ['DEV_USER']+('/.claude/settings.json' if agent == 'claude' else '/.codex/config.toml')

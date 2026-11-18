@@ -392,7 +392,11 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 			if execErr != nil || result.ExitCode != 0 {
 				detail := configmaterial.ContributionConflict(result, execErr)
 				if detail == "" {
-					detail = "structured configuration unavailable"
+					if refusal := configmaterial.WriteRefusal(result, execErr, file.destination); refusal != "" {
+						detail = fmt.Sprintf("%q: %s", file.destination, refusal)
+					} else {
+						detail = "structured configuration unavailable"
+					}
 				}
 				refusals = append(refusals, fmt.Errorf("observe %s: %s", file.label, detail))
 				continue
@@ -572,7 +576,7 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 		if detail := configmaterial.ContributionConflict(result, err); detail != "" {
 			return errors.New(detail)
 		}
-		if detail := configmaterial.WriteRefusal(result, err); detail != "" {
+		if detail := configmaterial.WriteRefusal(result, err, file.destination); detail != "" {
 			return fmt.Errorf("%q: %s", file.destination, detail)
 		}
 		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {

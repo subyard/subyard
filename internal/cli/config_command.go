@@ -1321,7 +1321,7 @@ func (cli *CLI) assessConfigTarget(
 			User:    uint32(target.Loaded.Context.DevUID), Group: uint32(target.Loaded.Context.DevUID),
 		}
 		if asset.OwnedFormat != "" {
-			request, err = configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
+			request, err = configmaterial.RequestWithContributions(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index], target.Loaded.Catalog.Profiles())
 			if err != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 				continue
@@ -1338,6 +1338,8 @@ func (cli *CLI) assessConfigTarget(
 				detail := "structured configuration observation failed"
 				if conflict := configmaterial.ContributionConflict(result, err); conflict != "" {
 					detail = conflict
+				} else if refusal := configmaterial.WriteRefusal(result, err, asset.Destination); refusal != "" {
+					detail = fmt.Sprintf("%q: %s", asset.Destination, refusal)
 				}
 				failures = append(failures, fmt.Errorf("%s: %s", asset.Name, detail))
 				continue

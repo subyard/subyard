@@ -1166,7 +1166,7 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		if conflict := configmaterial.ContributionConflict(result, err); conflict != "" {
 			return configmaterial.Observation{}, fmt.Errorf("%s: %s", path, conflict)
 		}
-		if refusal := configmaterial.WriteRefusal(result, err); refusal != "" {
+		if refusal := configmaterial.WriteRefusal(result, err, path); refusal != "" {
 			return configmaterial.Observation{}, fmt.Errorf("%s: %s", path, refusal)
 		}
 		switch strings.TrimSpace(string(result.Stderr)) {

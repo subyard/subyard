@@ -116,6 +116,26 @@ func TestMaterializationChecksAndRepairsRegisteredContribution(t *testing.T) {
 	if !jsonEqual(snapshotMaterialization(t, h.root), before) {
 		t.Fatal("a refused contribution conflict changed materialization state")
 	}
+	journal, err := json.Marshal(map[string]string{"destination": h.destination})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalPath := strings.TrimSuffix(state, ".json") + ".intent"
+	testkit.WriteFile(t, journalPath, journal, 0o600)
+	for _, mode := range []string{ModeObserve, ModeApply, ModeAssessRetire, ModeRetire, ModeRepair} {
+		stderr, err := h.run(template, mode)
+		result := ports.InstanceExecResult{ExitCode: 2, Stderr: []byte(stderr)}
+		if err == nil || !strings.Contains(WriteRefusal(result, nil, h.destination), "check the document") {
+			t.Fatalf("%s did not report a typed publication refusal: %v %q", mode, err, stderr)
+		}
+		if WriteRefusal(result, nil, h.destination+".other") != "" {
+			t.Fatalf("%s accepted a refusal naming a different document", mode)
+		}
+	}
+	saved, err := os.ReadFile(journalPath)
+	if err != nil || !bytes.Equal(saved, journal) || !jsonEqual(snapshotMaterialization(t, h.root), before) {
+		t.Fatal("a refused contribution publication changed materialization state")
+	}
 }
 
 func TestEmptyDocumentWithContributionReportsBooleanDrift(t *testing.T) {

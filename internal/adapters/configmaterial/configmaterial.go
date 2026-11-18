@@ -106,10 +106,14 @@ func ContributionConflict(result ports.InstanceExecResult, err error) string {
 var publicationRefusal = regexp.MustCompile(`^config materialization: (concurrent destination change|invalid destination path|configuration publication failed|configuration permissions could not be tightened to 0600|TOML time precision exceeds the writer's supported precision)(; preserved file \.subyard-config-recovery\.[0-9a-f]{24}(?:/document)?)?\n?$`)
 
 // WriteRefusal admits only fixed writer messages and its generated recovery name.
-func WriteRefusal(result ports.InstanceExecResult, err error) string {
+func WriteRefusal(result ports.InstanceExecResult, err error, destination string) string {
 	var completed *ports.GuestExitError
 	if result.ExitCode != 2 || err != nil && (!errors.As(err, &completed) || completed.Code != 2) {
 		return ""
+	}
+	const pending = "check the document and its publication journal or ownership receipt before retrying"
+	if strings.TrimSuffix(string(result.Stderr), "\n") == "config materialization: contribution-publication-pending-v1 "+destination+" ("+pending+")" {
+		return "unresolved configuration publication (" + pending + ")"
 	}
 	match := publicationRefusal.FindSubmatch(result.Stderr)
 	if match == nil {
@@ -129,7 +133,7 @@ func RepairModes(ctx context.Context, executor ports.InstanceExecutor, yard doma
 		}
 		result, err := executor.Exec(ctx, yard.IncusProject, yard.YardInstanceName, request)
 		if err != nil || result.ExitCode != 0 {
-			if detail := WriteRefusal(result, err); detail != "" {
+			if detail := WriteRefusal(result, err, path); detail != "" {
 				refusals = append(refusals, fmt.Errorf("repair permissions for %q: %s", path, detail))
 			} else {
 				refusals = append(refusals, fmt.Errorf("repair permissions for %q failed", path))

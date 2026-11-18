@@ -42,6 +42,12 @@ open can still save its changes. A publication refusal names the retained file w
 Treat recovery files as sensitive. The writer refuses a TOML rewrite if its parser would truncate
 a time literal with more than six fractional digits.
 
+After an interrupted publication, telemetry finishes the receipt only if the live document
+matches the full staged output byte for byte. Template updates and retirement wait for telemetry
+to finish that recovery. A changed or missing document, or an interrupted v0.30 publication,
+requires an operator to check the named document and its journal or ownership receipt.
+Commands preserve that evidence and leave the document's contents and mode as found.
+
 Rolling back to v0.28–v0.30 carries a known risk. A retained template writer can
 change agent config permissions to `0644` while the file still contains the collector
 credential, and retained telemetry may report it current. Disabling telemetry under a
