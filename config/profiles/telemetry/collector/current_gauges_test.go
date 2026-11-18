@@ -88,7 +88,7 @@ func TestCurrentGaugesRequireLiveObjectAndSource(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			result, err := ShowRun(ctx, s.db, "run")
+			result, err := ShowRun(ctx, s.db, s.key.id("run"))
 			if err != nil {
 				t.Fatal(err)
 			}

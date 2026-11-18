@@ -51,9 +51,9 @@ func TestRunOwnerGapsAndSessionObservations(t *testing.T) {
 			var result map[string]any
 			var err error
 			if includeChildren {
-				result, err = ShowRunIncludingChildren(ctx, db, "parent")
+				result, err = ShowRunIncludingChildren(ctx, db, s.key.id("parent"))
 			} else {
-				result, err = ShowRun(ctx, db, "parent")
+				result, err = ShowRun(ctx, db, s.key.id("parent"))
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -69,7 +69,7 @@ func TestRunOwnerGapsAndSessionObservations(t *testing.T) {
 			for _, value := range gaps {
 				gap := value.(map[string]any)
 				owner := stringValue(gap, "owner_id")
-				if owner != "parent-owner" && !(includeChildren && owner == "child-owner") || gap["quality"] != "unknown" || gap["stale"] != true {
+				if owner != s.key.id("parent-owner") && !(includeChildren && owner == s.key.id("child-owner")) || gap["quality"] != "unknown" || gap["stale"] != true {
 					t.Fatalf("incorrect owner gap evidence: %+v", gap)
 				}
 			}
@@ -79,11 +79,11 @@ func TestRunOwnerGapsAndSessionObservations(t *testing.T) {
 			}
 			var parent map[string]any
 			for _, session := range sessions {
-				if session["session_id"] == "native-session" {
+				if session["session_id"] == s.key.id("native-session") {
 					parent = session
 				}
 			}
-			if parent == nil || parent["agent_run_id"] != "parent" || parent["first_observed_source_time"] != "2026-10-24T01:00:00.000000000Z" || parent["last_observed_source_time"] != "2026-10-24T02:00:00.000000000Z" || parent["observation_semantics"] != "recorded_observation_points_not_session_lifetime" {
+			if parent == nil || parent["agent_run_id"] != s.key.id("parent") || parent["first_observed_source_time"] != "2026-10-24T01:00:00.000000000Z" || parent["last_observed_source_time"] != "2026-10-24T02:00:00.000000000Z" || parent["observation_semantics"] != "recorded_observation_points_not_session_lifetime" {
 				t.Fatalf("observation bounds or semantics incorrect: %+v", parent)
 			}
 			refs := parent["relation_refs"].([]any)
@@ -92,7 +92,7 @@ func TestRunOwnerGapsAndSessionObservations(t *testing.T) {
 			}
 			for i, value := range refs {
 				ref := value.(map[string]any)
-				if ref["origin_id"] != "producer:fixture" || ref["event_id"] != sessionIDs[1-i] || ref["source_id"] != "fixture" || ref["source_version"] != "fixture-1" || ref["source"] != "native-otlp-attribute/authenticated-header" || ref["quality"] != "explicit" || ref["received_time"] == "" {
+				if ref["origin_id"] != "producer:"+fixtureSourceID || ref["event_id"] != sessionIDs[1-i] || ref["source_id"] != fixtureSourceID || ref["source_version"] != "1" || ref["source"] != "native-otlp-attribute/authenticated-header" || ref["quality"] != "explicit" || ref["received_time"] == "" {
 					t.Fatalf("relation provenance lost: %+v", ref)
 				}
 			}

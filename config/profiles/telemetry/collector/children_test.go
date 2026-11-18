@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -51,18 +52,20 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	direct, err := ShowRun(ctx, db, "parent")
+	direct, err := ShowRun(ctx, db, s.key.id("parent"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	inclusive, err := ShowRunIncludingChildren(ctx, db, "parent")
+	inclusive, err := ShowRunIncludingChildren(ctx, db, s.key.id("parent"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if direct["attribution_mode"] != "direct_run" || len(direct["included_runs"].([]string)) != 1 || len(direct["selected_nonoverlapping"].([]any)) != 1 {
 		t.Fatalf("direct view changed: %+v", direct)
 	}
-	if inclusive["hierarchy_source"] != "run.parent_run_id" || inclusive["attribution_mode"] != "including_child_runs" || fmt.Sprint(inclusive["included_runs"]) != "[child grandchild parent sibling]" {
+	wantRuns := []string{s.key.id("child"), s.key.id("grandchild"), s.key.id("parent"), s.key.id("sibling")}
+	slices.Sort(wantRuns)
+	if inclusive["hierarchy_source"] != "run.parent_run_id" || inclusive["attribution_mode"] != "including_child_runs" || !slices.Equal(inclusive["included_runs"].([]string), wantRuns) {
 		t.Fatalf("explicit hierarchy evidence missing: %+v", inclusive)
 	}
 	selected := inclusive["selected_nonoverlapping"].([]any)
@@ -72,7 +75,7 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 	for _, value := range selected {
 		entry := value.(map[string]any)
 		refs := entry["sample_refs"].([]any)
-		if len(refs) != 2 || refs[0].(map[string]any)["origin_id"] != "producer:fixture" || refs[0].(map[string]any)["event_id"] == "" {
+		if len(refs) != 2 || refs[0].(map[string]any)["origin_id"] != "producer:"+fixtureSourceID || refs[0].(map[string]any)["event_id"] == "" {
 			t.Fatalf("sample identity lost: %+v", entry)
 		}
 		for _, edge := range entry["associations"].([]map[string]any) {
@@ -82,7 +85,7 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 		}
 	}
 	shared := inclusive["shared"].([]any)[0].(map[string]any)
-	if shared["object"].(map[string]any)["object_id"] != "shared-backend" || len(shared["samples"].([]any)) != 2 || len(shared["associations"].([]map[string]any)) != 2 || shared["quality"] != "shared" {
+	if shared["object"].(map[string]any)["object_id"] != s.key.id("shared-backend") || len(shared["samples"].([]any)) != 2 || len(shared["associations"].([]map[string]any)) != 2 || shared["quality"] != "shared" {
 		t.Fatalf("shared backend duplicated or reattributed: %+v", shared)
 	}
 	metric := func(result map[string]any, category, key string) any {
@@ -114,7 +117,7 @@ func TestRunHierarchyCycleAndWindow(t *testing.T) {
 			if err := s.Ingest(context.Background(), records); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ShowRunIncludingChildren(context.Background(), s.db, "root"); err == nil || !strings.Contains(err.Error(), want) {
+			if _, err := ShowRunIncludingChildren(context.Background(), s.db, s.key.id("root")); err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("expected finite %s diagnostic, got %v", want, err)
 			}
 		})

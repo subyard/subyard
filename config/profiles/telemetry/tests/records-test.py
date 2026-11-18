@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import fcntl
 import json
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +12,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import records
 
 
+def pending(root, event_id):
+    return root/'outbox'/(records.opaque_id(records.identity_key(root), event_id)+'.json')
+
+
 class OutboxTest(unittest.TestCase):
     def test_capacity_scan_with_concurrent_consumer_preserves_admission_and_limits(self):
         for scenario in ('admit', 'count-cap', 'byte-cap', 'permission'):
@@ -17,8 +23,8 @@ class OutboxTest(unittest.TestCase):
                 root = Path(name)
                 for event in ('consumed', 'retained'):
                     self.assertTrue(records.emit(root, 'gap', {'reason': 'synthetic'}, source_id='fixture', event_id=event))
-                consumed = root/'outbox/consumed.json'
-                retained = root/'outbox/retained.json'
+                consumed = pending(root, 'consumed')
+                retained = pending(root, 'retained')
                 original = Path.stat
 
                 def consumer_removes_before_stat(path, *args, **kwargs):
@@ -34,11 +40,11 @@ class OutboxTest(unittest.TestCase):
                      patch.object(records, 'MAX_RECORDS', maximum_records), patch.object(records, 'MAX_BYTES', maximum_bytes):
                     admitted = records.emit(root, 'gap', {'reason': 'new'}, source_id='fixture', event_id='next')
                 self.assertEqual(admitted, scenario == 'admit')
-                next_record = root/'outbox/next.json'
+                next_record = pending(root, 'next')
                 self.assertEqual(next_record.exists(), scenario == 'admit')
                 self.assertTrue(retained.exists())
                 if admitted:
-                    self.assertEqual(records.read_private(next_record)['event_id'], 'next')
+                    self.assertEqual(records.read_private(next_record)['event_id'], next_record.stem)
                     self.assertEqual(next_record.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(len(list((root/'outbox').glob('*.json'))), 2)
                 else:
@@ -80,7 +86,7 @@ class OutboxTest(unittest.TestCase):
                 body = {'agent_run_id': 'run', 'state': 'starting'}
                 self.assertTrue(records.emit(root, 'run', body, event_id='same'))
                 self.assertTrue(records.emit(root, 'run', body, event_id='same'))
-                path = root/'outbox/same.json'
+                path = pending(root, 'same')
                 original = records.read_private(path)
                 path.unlink()
                 self.assertTrue(records.emit(root, 'run', body, event_id='same'))
@@ -100,7 +106,7 @@ class OutboxTest(unittest.TestCase):
             files = list((root/'outbox').glob('*.json'))
             self.assertEqual(len(files), 1)
             value = json.loads(files[0].read_text())
-            self.assertEqual(value['body'], {'agent_run_id': 'run-1', 'state': 'starting'})
+            self.assertEqual(value['body'], {'agent_run_id': records.opaque_id(records.identity_key(root), 'run-1'), 'state': 'starting'})
             self.assertEqual(value['source_time'], '0001-01-01T00:00:00Z')
             self.assertEqual(files[0].stat().st_mode & 0o777, 0o600)
             self.assertEqual((root/'outbox').stat().st_mode & 0o777, 0o700)
@@ -118,16 +124,29 @@ class OutboxTest(unittest.TestCase):
             self.assertTrue(records.emit(root, 'gap', {'reason': '/home/fixture/private-notes',
                                                       'status': 'fixture@example.invalid'}, event_id='private'))
             self.assertTrue(records.emit(root, 'gap', {'reason': 'source_offline'}, event_id='known'))
-            self.assertEqual(records.read_private(root/'outbox/private.json')['body'], {})
-            self.assertEqual(records.read_private(root/'outbox/known.json')['body'], {'reason': 'source_offline'})
+            self.assertEqual(records.read_private(pending(root, 'private'))['body'], {})
+            self.assertEqual(records.read_private(pending(root, 'known'))['body'], {'reason': 'source_offline'})
 
     def test_invalid_sample_does_not_poison_outbox(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             self.assertFalse(records.emit(root, 'sample', {'object_id': 'bad\nid'}, event_id='.bad'))
-            self.assertFalse(records.emit(root, 'sample', {'object_id': 'valid', 'monotonic_ns': -1}, event_id='.bad-counter'))
+            self.assertTrue(records.emit(root, 'sample', {'object_id': 'valid', 'monotonic_ns': -1}, event_id='.bad-counter'))
+            self.assertNotIn('monotonic_ns', records.read_private(pending(root, '.bad-counter'))['body'])
             self.assertTrue(records.emit(root, 'sample', {'object_id': 'good', 'cpu_ns': 1}, event_id='good'))
-            self.assertEqual([path.name for path in (root/'outbox').glob('*.json')], ['good.json'])
+            self.assertEqual(set((root/'outbox').glob('*.json')), {pending(root, '.bad-counter'), pending(root, 'good')})
+
+    def test_legacy_fifo_retry_does_not_block_other_producers(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            outbox = records.private_directory(root/'outbox')
+            fifo = outbox/'stable.json'
+            os.mkfifo(fifo, 0o600)
+            retry = "import records, sys; sys.exit(records.emit(sys.argv[1], 'gap', {}, event_id='stable'))"
+            subprocess.run([sys.executable, '-B', '-c', retry, name], cwd=Path(records.__file__).parent,
+                           check=True, timeout=5)
+            self.assertTrue(records.emit(root, 'gap', {}, event_id='following'))
+            self.assertTrue(pending(root, 'following').exists())
 
     def test_capacity_disk_failure_and_symlink_are_nonfatal(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:

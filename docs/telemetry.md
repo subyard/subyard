@@ -325,17 +325,24 @@ Likewise direct workload and inclusive parent scopes must not be added together.
 
 ## Capture policy and delivery
 
-The default policy excludes log bodies, prompt/response/tool content, arbitrary
-span/event/status text, command lines, environment and authentication data before
-any SQLite or spool write. Safe identifiers, schema URLs, timestamps, trace/span
-IDs, links and complete supported metric structures survive within that policy.
-The attribute key allowlist applies to all value types. The exact policy identity
-and redaction count accompany every record.
+Durable telemetry is rebuilt from closed field schemas at the producer outbox,
+collector ingest and replay, and after merging SQLite projections. Allocation
+purpose, log bodies, severity text, arbitrary attributes and free-form names are
+excluded. The OTLP schema retains severity numbers, timestamps, binary trace
+and span IDs, links and numeric metric data. Known metric names, units and other
+labels use fixed vocabularies. Token counter attributes require a nonnegative
+OTLP integer value, including the decimal representation used by OTLP JSON.
 
-An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with explicit
-`attributes`, `span_names` and `event_names` allowlists. Sensitive attribute names
-cannot be enabled through that allowlist. Review allowed metadata values as well
-as keys: naming a field does not make its contents nonsensitive.
+An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with
+`attributes`, `span_names` and `event_names` allowlists that narrow the built-in
+vocabularies. The policy identity and redaction count accompany each record.
+
+Producer-generated opaque IDs survive delivery and replay. Other supported join
+IDs are pseudonymized with a key kept in the private telemetry data directory.
+New exports carry the pseudonyms and replay preserves those joins. Import of an
+older export uses the destination's key to normalize legacy IDs and converts
+decimal-string counters to integers. Existing untouched rows and export files
+retain their historical contents.
 
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, share 16 pre-decode admissions between OTLP and

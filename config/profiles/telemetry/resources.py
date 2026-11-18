@@ -43,7 +43,7 @@ def allocation(config, resource, selector=None):
     body = base(config, resource, selector)
     owner = resource.get('owner', resource.get('context')) or {}
     body.update(state=resource.get('state', resource.get('to_state')), correlation_id=owner.get('run'),
-                yard_id=owner.get('yard'), project_id=owner.get('project'), purpose=owner.get('purpose'),
+                yard_id=owner.get('yard'), project_id=owner.get('project'),
                 acquired_at=nullable_time(resource.get('acquired_at')), ready_at=nullable_time(resource.get('ready_at')),
                 expires_at=nullable_time(resource.get('expires_at')))
     environment = resource.get('environment') or {}

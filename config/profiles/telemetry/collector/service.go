@@ -238,10 +238,6 @@ func (s *Store) ingestOutboxFile(ctx context.Context, dir, name string) error {
 	if err = dec.Decode(&r); err != nil {
 		return errInvalidRecord
 	}
-	if canonicalTimestamp(r.SourceTime) == "" {
-		// Match the producer's sentinel for legacy spool files.
-		r.SourceTime = unknownSourceTime
-	}
 	if err = s.Ingest(ctx, []Record{r}); err != nil {
 		return err
 	}

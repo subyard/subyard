@@ -69,7 +69,7 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 					var stream bytes.Buffer
 					for _, r := range records {
 						body, _ := json.Marshal(r.Body)
-						e := Envelope{Schema: ExportSchema, OriginID: "producer:fixture", EventID: r.EventID, SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: r.SourceTime, Kind: r.Kind, Encoding: "json", Body: body}
+						e := Envelope{Schema: ExportSchema, OriginID: "producer:" + fixtureSourceID, EventID: r.EventID, SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: r.SourceTime, Kind: r.Kind, Encoding: "json", Body: body}
 						if err := json.NewEncoder(&stream).Encode(e); err != nil {
 							t.Fatal(err)
 						}
@@ -80,10 +80,10 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 						}
 					}
 				}
-				check := func(query string, expected map[string]string) {
+				check := func(query, id string, expected map[string]string) {
 					t.Helper()
 					var raw, at string
-					if err := s.db.QueryRow(query).Scan(&raw, &at); err != nil {
+					if err := s.db.QueryRow(query, s.key.id(id)).Scan(&raw, &at); err != nil {
 						t.Fatal(err)
 					}
 					body, err := decodeBody([]byte(raw))
@@ -99,14 +99,14 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 						t.Errorf("source time rolled back: %s", at)
 					}
 				}
-				check("SELECT body,source_time FROM runs WHERE agent_run_id='unordered'", map[string]string{"state": "resources_complete", "agent": "other", "agent_version": "1.2.3", "project_id": "project", "session_id": "session", "parent_run_id": "parent", "exit_code": "7"})
+				check("SELECT body,source_time FROM runs WHERE agent_run_id=?", "unordered", map[string]string{"state": "resources_complete", "agent": "other", "agent_version": "1.2.3", "project_id": s.key.id("project"), "session_id": s.key.id("session"), "parent_run_id": s.key.id("parent"), "exit_code": "7"})
 				allocation := map[string]string{"state": "ended", "allocated_cpu": "4", "allocated_memory_bytes": "4096", "allocated_disk_bytes": "8192", "acquired_at": "2026-10-01T01:00:00.000000000Z", "stopped_at": "2026-10-01T02:00:00.000000000Z"}
-				check("SELECT body,source_time FROM allocations WHERE object_id='vm'", allocation)
-				check("SELECT body,source_time FROM objects WHERE object_id='vm'", allocation)
-				check("SELECT body,source_time FROM objects WHERE object_id='process'", map[string]string{"state": "ended", "pid": "123", "parent_object_id": "new-parent", "accounting": "direct"})
+				check("SELECT body,source_time FROM allocations WHERE object_id=?", "vm", allocation)
+				check("SELECT body,source_time FROM objects WHERE object_id=?", "vm", allocation)
+				check("SELECT body,source_time FROM objects WHERE object_id=?", "process", map[string]string{"state": "ended", "pid": "123", "parent_object_id": s.key.id("new-parent"), "accounting": "direct"})
 				for object, want := range map[string][2]string{"vm": {"owner", "qemu-process-and-threads"}, "process": {"new-parent", "direct"}} {
 					var parent, accounting string
-					if err := s.db.QueryRow("SELECT parent_object_id,accounting FROM objects WHERE object_id=?", object).Scan(&parent, &accounting); err != nil || parent != want[0] || accounting != want[1] {
+					if err := s.db.QueryRow("SELECT parent_object_id,accounting FROM objects WHERE object_id=?", s.key.id(object)).Scan(&parent, &accounting); err != nil || parent != s.key.id(want[0]) || accounting != want[1] {
 						t.Errorf("typed %s: parent=%q accounting=%q err=%v", object, parent, accounting, err)
 					}
 				}
@@ -162,7 +162,7 @@ func TestOutboxContinuesPastInvalidRecords(t *testing.T) {
 	ctx := context.Background()
 	store := fixtureStore(t)
 	dir := testkit.TempDir(t)
-	bad := record("sample", map[string]any{"object_id": "legacy", "monotonic_ns": -1})
+	bad := record("sample", map[string]any{"monotonic_ns": -1})
 	collision := record("gap", map[string]any{"reason": "source_offline"})
 	if err := store.Ingest(ctx, []Record{collision}); err != nil {
 		t.Fatal(err)

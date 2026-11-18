@@ -73,7 +73,7 @@ func (a *localAuth) Authenticate(ctx context.Context, sources map[string][]strin
 		return ctx, errors.New("invalid run context")
 	}
 	if len(runs) == 1 {
-		if !validID(runs[0]) {
+		if !legacyID.MatchString(runs[0]) {
 			return ctx, errors.New("invalid run context")
 		}
 		ctx = context.WithValue(ctx, runContextKey{}, runs[0])
@@ -186,12 +186,12 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (co
 	headerRun, _ := ctx.Value(runContextKey{}).(string)
 	resourceRun := ""
 	if value, ok := attributes.Get("subyard.agent_run.id"); ok {
-		if value.Type() != pcommon.ValueTypeStr || !validID(value.Str()) {
+		if value.Type() != pcommon.ValueTypeStr || !legacyID.MatchString(value.Str()) {
 			return ctx, status.Error(codes.InvalidArgument, "invalid resource run context")
 		}
 		resourceRun = value.Str()
 	}
-	if headerRun != "" && resourceRun != "" && headerRun != resourceRun {
+	if headerRun != "" && resourceRun != "" && s.key.id(headerRun) != s.key.id(resourceRun) {
 		return ctx, status.Error(codes.InvalidArgument, "conflicting resource and header run context")
 	}
 	run := headerRun
@@ -205,6 +205,7 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (co
 		if !s.RegisteredRun(ctx, run) {
 			return ctx, status.Error(codes.Unavailable, "run registration pending")
 		}
+		run = s.key.id(run)
 		attributes.PutStr("subyard.agent_run.id", run)
 		attributes.PutStr("subyard.agent_run.evidence", evidence)
 		ctx = context.WithValue(ctx, runContextKey{}, run)
@@ -213,9 +214,10 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (co
 	return ctx, nil
 }
 func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
+	capture := wirePolicy{key: s.key, policy: p}
 	submit := func(ctx context.Context, kind string, data []byte, relations []Envelope) error {
 		e := Envelope{Kind: "otlp/" + kind, Encoding: "otlp/" + kind, SourceID: "native-otlp", SourceVersion: nativeSourceVersion, Protobuf: data}
-		if err := SanitizeEnvelope(&e, p); err != nil {
+		if err := s.key.sanitizeOTLP(&e, p); err != nil {
 			return status.Error(codes.InvalidArgument, "invalid telemetry data")
 		}
 		entries := append([]Envelope{e}, relations...)
@@ -237,12 +239,12 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 				return contextErr
 			}
 			sessions := map[string]bool{}
-			sessionAttributes(resource.Resource().Attributes(), sessions, p)
+			capture.sessionAttributes(resource.Resource().Attributes(), sessions)
 			for j := 0; j < resource.ScopeLogs().Len(); j++ {
 				scope := resource.ScopeLogs().At(j)
-				sessionAttributes(scope.Scope().Attributes(), sessions, p)
+				capture.sessionAttributes(scope.Scope().Attributes(), sessions)
 				for k := 0; k < scope.LogRecords().Len(); k++ {
-					sessionAttributes(scope.LogRecords().At(k).Attributes(), sessions, p)
+					capture.sessionAttributes(scope.LogRecords().At(k).Attributes(), sessions)
 				}
 			}
 			relations = append(relations, sessionEnvelopes(resourceCtx, sessions)...)
@@ -265,12 +267,12 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 				return contextErr
 			}
 			sessions := map[string]bool{}
-			sessionAttributes(resource.Resource().Attributes(), sessions, p)
+			capture.sessionAttributes(resource.Resource().Attributes(), sessions)
 			for j := 0; j < resource.ScopeMetrics().Len(); j++ {
 				scope := resource.ScopeMetrics().At(j)
-				sessionAttributes(scope.Scope().Attributes(), sessions, p)
+				capture.sessionAttributes(scope.Scope().Attributes(), sessions)
 				for k := 0; k < scope.Metrics().Len(); k++ {
-					metricSessions(scope.Metrics().At(k), sessions, p)
+					capture.metricSessions(scope.Metrics().At(k), sessions)
 				}
 			}
 			relations = append(relations, sessionEnvelopes(resourceCtx, sessions)...)
@@ -293,12 +295,12 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 				return contextErr
 			}
 			sessions := map[string]bool{}
-			sessionAttributes(resource.Resource().Attributes(), sessions, p)
+			capture.sessionAttributes(resource.Resource().Attributes(), sessions)
 			for j := 0; j < resource.ScopeSpans().Len(); j++ {
 				scope := resource.ScopeSpans().At(j)
-				sessionAttributes(scope.Scope().Attributes(), sessions, p)
+				capture.sessionAttributes(scope.Scope().Attributes(), sessions)
 				for k := 0; k < scope.Spans().Len(); k++ {
-					sessionAttributes(scope.Spans().At(k).Attributes(), sessions, p)
+					capture.sessionAttributes(scope.Spans().At(k).Attributes(), sessions)
 				}
 			}
 			relations = append(relations, sessionEnvelopes(resourceCtx, sessions)...)

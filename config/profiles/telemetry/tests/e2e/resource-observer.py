@@ -198,7 +198,7 @@ def offline_reader(data_dir, kind):
         require(records.deliver(data_dir, gap), 'offline observer gap did not commit')
         with contextlib.closing(sqlite3.connect((Path(data_dir)/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
             row = db.execute('SELECT body FROM records WHERE source_id=? AND event_id=?',
-                             (probe['source_id'], gap['event_id'])).fetchone()
+                             (gap['source_id'], gap['event_id'])).fetchone()
             stored = json.loads(row[0]) if row else {}
             require(stored.get('reason') == 'source_offline' and stored.get('stale') is True
                     and datetime.datetime.fromisoformat(stored['start_time']) == datetime.datetime.fromisoformat(seen),

@@ -9,44 +9,44 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
-func sessionAttributes(attributes pcommon.Map, sessions map[string]bool, p Policy) {
-	for _, key := range []string{"session.id", "session_id", "conversation.id", "conversation_id", "thread.id"} {
-		if value, ok := attributes.Get(key); ok && value.Type() == pcommon.ValueTypeStr && validID(value.Str()) {
-			for _, allowed := range p.Attributes {
-				if allowed == key {
-					sessions[value.Str()] = true
-					break
-				}
+var sessionAttributeNames = []string{"session.id", "session_id", "conversation.id", "conversation_id", "thread.id"}
+
+func (p wirePolicy) sessionAttributes(attributes pcommon.Map, sessions map[string]bool) {
+	for _, name := range sessionAttributeNames {
+		if value, ok := attributes.Get(name); ok && value.Type() == pcommon.ValueTypeStr {
+			if clean, keep := p.clean(p.attributeRule(name), value.Str()); keep {
+				sessions[clean.(string)] = true
 			}
 		}
 	}
 }
-func metricSessions(metric pmetric.Metric, sessions map[string]bool, policy Policy) {
+
+func (p wirePolicy) metricSessions(metric pmetric.Metric, sessions map[string]bool) {
 	switch metric.Type() {
 	case pmetric.MetricTypeGauge:
-		p := metric.Gauge().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
+		points := metric.Gauge().DataPoints()
+		for i := 0; i < points.Len(); i++ {
+			p.sessionAttributes(points.At(i).Attributes(), sessions)
 		}
 	case pmetric.MetricTypeSum:
-		p := metric.Sum().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
+		points := metric.Sum().DataPoints()
+		for i := 0; i < points.Len(); i++ {
+			p.sessionAttributes(points.At(i).Attributes(), sessions)
 		}
 	case pmetric.MetricTypeHistogram:
-		p := metric.Histogram().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
+		points := metric.Histogram().DataPoints()
+		for i := 0; i < points.Len(); i++ {
+			p.sessionAttributes(points.At(i).Attributes(), sessions)
 		}
 	case pmetric.MetricTypeExponentialHistogram:
-		p := metric.ExponentialHistogram().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
+		points := metric.ExponentialHistogram().DataPoints()
+		for i := 0; i < points.Len(); i++ {
+			p.sessionAttributes(points.At(i).Attributes(), sessions)
 		}
 	case pmetric.MetricTypeSummary:
-		p := metric.Summary().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
+		points := metric.Summary().DataPoints()
+		for i := 0; i < points.Len(); i++ {
+			p.sessionAttributes(points.At(i).Attributes(), sessions)
 		}
 	}
 }

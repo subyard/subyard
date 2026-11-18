@@ -48,17 +48,19 @@ func TestVerifiedResourceContextsAcrossSignals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wanted := map[string]string{}
+	for _, label := range []string{"a", "b"} {
+		for _, signal := range []string{"logs", "metrics", "traces"} {
+			wanted[s.key.id("session-"+label+"-"+signal)] = s.key.id("run-" + label)
+		}
+	}
 	count := 0
 	for rows.Next() {
 		var run, session, body string
 		if err = rows.Scan(&run, &session, &body); err != nil {
 			t.Fatal(err)
 		}
-		wanted := "run-a"
-		if session[8] == 'b' {
-			wanted = "run-b"
-		}
-		if run != wanted {
+		if wanted[session] != run {
 			t.Fatalf("cross-resource session binding: %s -> %s", run, session)
 		}
 		parsed, err := decodeBody([]byte(body))
@@ -137,7 +139,7 @@ func TestRetentionKeepsHeldOfflineResponsibility(t *testing.T) {
 	if samples != 0 {
 		t.Fatal("old high-volume samples not pruned")
 	}
-	result, err := ShowRun(ctx, s.db, "old-run")
+	result, err := ShowRun(ctx, s.db, s.key.id("old-run"))
 	if err != nil {
 		t.Fatal(err)
 	}

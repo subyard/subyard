@@ -119,7 +119,7 @@ func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
 	if err := s.Ingest(ctx, []Record{update}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := ShowRun(ctx, s.db, "r")
+	result, err := ShowRun(ctx, s.db, s.key.id("r"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
 	}
 	var count int
 	var from, to string
-	if err = s.db.QueryRow("SELECT count(*),start_time,end_time FROM associations WHERE object_id='proc'").Scan(&count, &from, &to); err != nil || count != 1 || from == "" || to == "" {
+	if err = s.db.QueryRow("SELECT count(*),start_time,end_time FROM associations WHERE object_id=?", s.key.id("proc")).Scan(&count, &from, &to); err != nil || count != 1 || from == "" || to == "" {
 		t.Fatalf("end/start closure %d %q %q %v", count, from, to, err)
 	}
 }

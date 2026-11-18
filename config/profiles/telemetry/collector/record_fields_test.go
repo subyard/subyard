@@ -16,8 +16,12 @@ func TestRecordFieldParity(t *testing.T) {
 		// Walk every field, including IDs normally mandatory for other kinds.
 		for _, path := range []string{privatePath, "private/notes", "private notes"} {
 			r := record("gap", map[string]any{field: path})
-			clean, removed, err := sanitizeRecord(r)
-			if err != nil || len(clean.Body) != 0 || removed != 1 {
+			clean, removed, err := (identityKey{}).record(r)
+			if rule.kind == "id" && legacyID.MatchString(path) {
+				if err != nil || clean.Body[field] != (identityKey{}).id(path) {
+					t.Errorf("%s: legacy path identifier was not pseudonymized: %v", field, err)
+				}
+			} else if err != nil || len(clean.Body) != 0 || removed != 1 {
 				t.Errorf("%s: path was not redacted (removed=%d, err=%v)", field, removed, err)
 			}
 			inputs = append(inputs, r.Body)
@@ -52,7 +56,7 @@ import records
 
 print(json.dumps(records.BODY_RULE_TABLE.strip()))
 for body in json.load(sys.stdin):
-    print(json.dumps(records.clean(body), sort_keys=True, separators=(',', ':')))
+    print(json.dumps(records.clean(body, b""), sort_keys=True, separators=(',', ':')))
 `
 	cmd := exec.Command("python3", "-B", "-c", producer)
 	cmd.Stdin = bytes.NewReader(data)
@@ -67,7 +71,7 @@ for body in json.load(sys.stdin):
 		t.Fatal("producer and collector field tables differ")
 	}
 	for i, input := range inputs {
-		clean, _, err := sanitizeRecord(record("gap", input))
+		clean, _, err := (identityKey{}).record(record("gap", input))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -85,21 +89,27 @@ func TestRecordRejectsPathMetadata(t *testing.T) {
 	const privatePath = "/home/fixture/private-notes"
 	for _, mutate := range []func(*Record){
 		func(r *Record) { r.Schema = privatePath },
-		func(r *Record) { r.SourceID = privatePath },
-		func(r *Record) { r.EventID = privatePath },
-		func(r *Record) { r.SourceTime = privatePath },
+		func(r *Record) { r.SourceID = "wrong source" },
+		func(r *Record) { r.EventID = "wrong event" },
 		func(r *Record) { r.Kind = privatePath },
-		func(r *Record) { r.Body["object_id"] = privatePath },
+		func(r *Record) { r.Body["object_id"] = "wrong object" },
 	} {
 		r := record("allocation", map[string]any{"object_id": "fixture"})
 		mutate(&r)
-		if _, _, err := sanitizeRecord(r); err == nil {
+		if _, _, err := (identityKey{}).record(r); err == nil {
 			t.Errorf("accepted invalid required metadata: %+v", r)
 		}
 	}
 	r := record("allocation", map[string]any{"object_id": "fixture"})
-	r.SourceVersion = privatePath
-	if clean, removed, err := sanitizeRecord(r); err != nil || clean.SourceVersion != "" || removed != 1 {
+	r.SourceVersion, r.SourceTime = privatePath, privatePath
+	if clean, removed, err := (identityKey{}).record(r); err != nil || clean.SourceVersion != "" || clean.SourceTime != unknownSourceTime || removed != 2 {
 		t.Fatalf("invalid source version was not redacted (removed=%d, err=%v)", removed, err)
+	}
+}
+
+func TestMissingFieldRedactionsCountDroppedEntries(t *testing.T) {
+	body, removed := (identityKey{}).body(map[string]any{"missing": []any{"cpu_ns", "private notes", false}})
+	if got, ok := body["missing"].([]any); !ok || len(got) != 1 || got[0] != "cpu_ns" || removed != 2 {
+		t.Fatalf("missing field redaction: body=%v removed=%d", body, removed)
 	}
 }

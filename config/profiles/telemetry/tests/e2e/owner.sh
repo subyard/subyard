@@ -68,7 +68,7 @@ python3 -B - /var/lib/subyard/telemetry http://127.0.0.1:14318 <<'PY_UNITS'
 import json, pathlib, sqlite3, sys, time, urllib.error, urllib.request
 data = pathlib.Path(sys.argv[1])
 metrics = [dict(name=name, unit=unit, gauge=dict(dataPoints=[dict(asInt='1')]))
-           for name, unit in (('fixture.unit.percent', '%'), ('fixture.unit.tokens', '{token}'))]
+           for name, unit in (('claude_code.session.count', '%'), ('codex.turn.token_usage', '{token}'))]
 request = urllib.request.Request(sys.argv[2]+'/v1/metrics',
     data=json.dumps(dict(resourceMetrics=[dict(scopeMetrics=[dict(metrics=metrics)])])).encode(),
     headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+(data/'auth.token').read_text().strip()})
@@ -86,7 +86,7 @@ while True:
 with sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2) as db:
     db.execute('PRAGMA query_only=ON')
     row = db.execute("SELECT protobuf FROM records WHERE encoding='otlp/metrics' ORDER BY sequence DESC LIMIT 1").fetchone()
-assert row and all(value in row[0] for value in (b'fixture.unit.percent', b'fixture.unit.tokens', b'%', b'{token}'))
+assert row and all(value in row[0] for value in (b'claude_code.session.count', b'codex.turn.token_usage', b'%', b'{token}'))
 print(json.dumps(dict(schema='subyard.telemetry.unit-acceptance/v1', percent_retained=True,
                       token_retained=True, sqlite_commit=True)), flush=True)
 PY_UNITS

@@ -16,7 +16,7 @@ import (
 func TestCustomCapturePolicyAndFingerprint(t *testing.T) {
 	p := DefaultPolicy()
 	p.Attributes = append(p.Attributes, "custom.safe")
-	p.SpanNames, p.EventNames = []string{"fixture.operation"}, []string{"fixture.event"}
+	p.SpanNames, p.EventNames = []string{"codex.turn", "fixture.operation"}, []string{"codex.api_request"}
 	path := filepath.Join(testkit.TempDir(t), "policy.json")
 	data, _ := json.Marshal(p)
 	testkit.WriteFile(t, path, data, 0600)
@@ -29,22 +29,13 @@ func TestCustomCapturePolicyAndFingerprint(t *testing.T) {
 	if policyFingerprint(changed) == policyFingerprint(p) {
 		t.Fatal("different capture policy retained fingerprint")
 	}
-	for _, key := range []string{"Authorization", "api_key", "tool.arguments", "input.messages", "lease.capability", "secret", "argv", "http.request.header"} {
-		bad := p
-		bad.Attributes = []string{key}
-		data, _ = json.Marshal(bad)
-		testkit.WriteFile(t, path, data, 0600)
-		if _, err := LoadPolicy(path); err == nil {
-			t.Errorf("sensitive policy key accepted: %s", key)
-		}
-	}
 	r := ptraceotlp.NewExportRequest()
-	if err := r.UnmarshalJSON([]byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"fixture.operation","attributes":[{"key":"custom.safe","value":{"stringValue":"safe-metadata"}},{"key":"Authorization","value":{"stringValue":"PRIVATE"}}],"events":[{"name":"fixture.event"}]}]}]}]}`)); err != nil {
+	if err := r.UnmarshalJSON([]byte(`{"resourceSpans":[{"scopeSpans":[{"spans":[{"name":"codex.turn","attributes":[{"key":"gen_ai.usage.input_tokens","value":{"intValue":"7"}},{"key":"custom.safe","value":{"stringValue":"safe-metadata"}},{"key":"Authorization","value":{"stringValue":"PRIVATE"}}],"events":[{"name":"codex.api_request"}]}]}]}]}`)); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/traces", Protobuf: raw}
-	if err := SanitizeEnvelope(&e, p); err != nil {
+	if err := (identityKey{}).sanitizeOTLP(&e, p); err != nil {
 		t.Fatal(err)
 	}
 	clean := ptraceotlp.NewExportRequest()
@@ -52,7 +43,7 @@ func TestCustomCapturePolicyAndFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 	span := clean.Traces().ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
-	if span.Name() != "fixture.operation" || span.Events().At(0).Name() != "fixture.event" || span.Attributes().Len() != 1 || bytes.Contains(e.Protobuf, []byte("PRIVATE")) || e.PolicyVersion != policyFingerprint(p) {
+	if span.Name() != "codex.turn" || span.Events().At(0).Name() != "codex.api_request" || span.Attributes().Len() != 1 || bytes.Contains(e.Protobuf, []byte("PRIVATE")) || e.PolicyVersion != policyFingerprint(p) {
 		t.Fatal("custom safe capture or mandatory sensitive-key exclusion failed")
 	}
 }
@@ -72,9 +63,13 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 			span.SetName("custom.operation")
 			span.Attributes().PutStr("custom.safe", "safe-metadata")
 			raw, _ := r.MarshalProto()
-			e := Envelope{Kind: "otlp/traces", Encoding: "otlp/traces", SourceID: "fixture", SourceVersion: "fixture-1", Protobuf: raw}
-			if err := SanitizeEnvelope(&e, p); err != nil {
-				t.Fatal(err)
+			e := Envelope{Kind: "otlp/traces", Encoding: "otlp/traces", SourceID: "native-otlp", SourceVersion: "1", Protobuf: raw}
+			// A historical custom policy could authorize arbitrary text.
+			e.PolicyVersion = policyFingerprint(p)
+			if !custom {
+				if err := s.key.sanitizeOTLP(&e, p); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := s.submit(ctx, []Envelope{e}); err != nil {
 				t.Fatal(err)
@@ -182,7 +177,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := fixtureStore(t)
 	r := record("gap", map[string]any{"reason": "/home/fixture/private-notes", "status": "fixture@example.invalid", "observed_time": "not a timestamp"})
-	r.SourceID = strings.Repeat("s", 128)
+	r.SourceID = strings.Repeat("s", 129)
 	r.SourceVersion = "private version text"
 	if err := store.Ingest(ctx, []Record{r}); err != nil {
 		t.Fatal(err)
@@ -198,7 +193,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	for _, sourceTime := range []string{"private time text", "2026-01-01T01:00:00+01:00", ""} {
 		if err := encoder.Encode(Envelope{
 			Schema: ExportSchema, OriginID: "fixture", EventID: newID(),
-			SourceID: "fixture", SourceVersion: "fixture-1", SourceTime: sourceTime,
+			SourceID: "fixture", SourceVersion: "1", SourceTime: sourceTime,
 			Kind: "otlp/traces", Encoding: "otlp/traces", Protobuf: protobuf,
 		}); err != nil {
 			t.Fatal(err)
@@ -221,12 +216,14 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	}
 	for i, want := range []string{"", "2026-01-01T00:00:00.000000000Z", ""} {
 		var envelope Envelope
-		if err := decoder.Decode(&envelope); err != nil || envelope.SourceTime != want || envelope.SourceVersion != "fixture-1" || (envelope.Redactions == 1) != (i == 0) {
+		if err := decoder.Decode(&envelope); err != nil || envelope.SourceTime != want || envelope.SourceVersion != "1" || (envelope.Redactions == 1) != (i == 0) {
 			t.Fatalf("raw source metadata mismatch at row %d: redactions=%d, err=%v", i, envelope.Redactions, err)
 		}
 	}
 	destination := fixtureStore(t)
 	// Populate retained rows with bytes accepted before the policy tightened.
+	producer.SourceID = r.SourceID
+	producer.OriginID = "producer:" + r.SourceID
 	producer.SourceVersion = r.SourceVersion
 	producer.Body, err = json.Marshal(r.Body)
 	if err != nil {
@@ -243,7 +240,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	if _, err := Export(ctx, legacyStore.db, &legacy, 0, 10); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []*Store{legacyStore, destination} {
+	for _, target := range []*Store{legacyStore, store} {
 		if err := target.Replay(ctx, bytes.NewReader(legacy.Bytes())); err != nil {
 			t.Fatal("legacy replay failed", err)
 		}

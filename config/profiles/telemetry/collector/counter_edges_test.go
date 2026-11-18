@@ -67,7 +67,7 @@ func TestLateOldGenerationDoesNotContaminateReplacement(t *testing.T) {
 		}
 	}
 	for _, store := range []*Store{s, destination} {
-		result, err := ShowRun(ctx, store.db, "run")
+		result, err := ShowRun(ctx, store.db, s.key.id("run"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,7 +78,7 @@ func TestLateOldGenerationDoesNotContaminateReplacement(t *testing.T) {
 		for _, value := range entries {
 			entry := value.(map[string]any)
 			object := entry["object"].(map[string]any)
-			if object["object_id"] == "owner:slot:g2" && (object["state"] != "held" || fmt.Sprint(entry["cpu_ns_delta"]) != "200" || len(entry["samples"].([]any)) != 2) {
+			if object["object_id"] == s.key.id("owner:slot:g2") && (object["state"] != "held" || fmt.Sprint(entry["cpu_ns_delta"]) != "200" || len(entry["samples"].([]any)) != 2) {
 				t.Fatalf("late old generation contaminated replacement: %+v", entry)
 			}
 		}
