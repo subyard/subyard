@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -17,6 +18,14 @@ import (
 // replacement. Actual active links are checked by the source admission adapter.
 // It does not authorize source repair or identify other unfinished history.
 var ErrSourceRecoveryHistory = errors.New("source repair requires completed history or an original activation-only reconciling journal")
+
+var (
+	ErrSourcePendingPublication = errors.New("protected release publication is pending")
+	ErrSourcePendingArchive     = errors.New("protected archive publication is pending")
+	ErrSourceHistoricalAnchor   = errors.New("terminal ledger evidence has no authenticated historical anchor")
+	ErrSourceTerminalLedger     = errors.New("terminal ledger trace could not be verified")
+	ErrSourceTerminalEvidence   = errors.New("terminal checkpoint evidence could not be verified")
+)
 
 // SourceMetadata is read-only admission evidence, never a release authorization
 // or a claim that the original owner's operational resources remain ready.
@@ -128,7 +137,7 @@ func (store *POSIXV2Store) inspectSourceMetadata(registry RegistryV2, digest Fin
 	}
 	if graph != nil {
 		if len(graph.pending) != 0 {
-			return proof, errors.New("finish the pending protected archive publication before source repair")
+			return proof, ErrSourcePendingArchive
 		}
 		terminals, err := store.readLifecycleArchive()
 		if err != nil {
@@ -275,7 +284,7 @@ func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registr
 		// Noncanonical completed domains require an authenticated historical anchor.
 		edges, err = sourceHistoricalLedgerEdges(journal, registry, state)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrSourceTerminalLedger, err)
 		}
 	}
 	last := Fingerprint("")
@@ -288,25 +297,25 @@ func (store *POSIXV2Store) sourceTerminalBindings(journal JournalRecord, registr
 	for _, step := range journal.Steps {
 		edge, known := edges[step.Migration]
 		if !known || !advanced[step.Migration] || step.Checkpoint != StepVerified || step.Evidence == nil {
-			return errors.New("source repair requires supported terminal migration evidence")
+			return ErrSourceTerminalEvidence
 		}
 		if step.ID == edge.migration.ID+".ledger" {
 			if step.Evidence.Recovery != "" {
-				return errors.New("terminal ledger evidence cannot carry a recovery payload")
+				return fmt.Errorf("%w: terminal ledger evidence cannot carry a recovery payload", ErrSourceTerminalLedger)
 			}
 			initialAbsent := !edge.from.Exists && step.Expected == absentProtectedSnapshot().Fingerprint
 			if step.Resource != "ledger."+edge.migration.Domain || step.Decision != DecisionTransform || step.Desired != edge.after || (!initialAbsent && step.Expected != edge.before) || (last != "" && last != step.Expected) {
-				return errors.New("terminal ledger evidence does not bind the original registry prefix")
+				return fmt.Errorf("%w: terminal ledger evidence does not bind the original registry prefix", ErrSourceTerminalLedger)
 			}
 			last = step.Desired
 
 		}
 		if err := store.terminalStepArtifacts(journal, step, edge.migration); err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrSourceTerminalEvidence, err)
 		}
 	}
 	if projection != "" && last != "" && last != projection {
-		return errors.New("terminal ledger evidence differs from the authoritative projection")
+		return fmt.Errorf("%w: terminal ledger evidence differs from the authoritative projection", ErrSourceTerminalLedger)
 	}
 	return nil
 }
@@ -350,32 +359,43 @@ func (store *POSIXV2Store) terminalStepArtifacts(journal JournalRecord, step Jou
 }
 
 func sourceHistoricalLedgerEdges(journal JournalRecord, registry RegistryV2, state MigrationLedgerSnapshot) (map[string]sourceLedgerEdge, error) {
-	last := Fingerprint("")
+	var last JournalStep
 	for _, step := range journal.Steps {
 		if step.ID == step.Migration+".ledger" {
-			last = step.Desired
+			last = step
 		}
 	}
-	if last == "" {
+	if last.ID == "" {
 		return ledgerTrace(registry, state.Ledger, journal.Steps)
 	}
-	ledger := state.Ledger
-	_, terminal, err := MarshalLedgerV2(ledger, registry)
+	_, terminal, err := MarshalLedgerV2(state.Ledger, registry)
 	if err != nil {
 		return nil, err
 	}
-	if terminal != last {
-		// ReadMigrationLedger already verified the checkpoint's binding to these
-		// exact projection bytes. A journal's claimed terminal is not an anchor.
-		if !state.Checkpointed || !state.ProjectionSnapshot.Exists || state.ProjectionSnapshot.Fingerprint != last {
-			return nil, errors.New("terminal ledger evidence has no authenticated historical anchor")
-		}
-		ledger, err = historicalProjectionLedger(registry, compatibilityProjectionRevision{state.ProjectionSnapshot})
-		if err != nil {
-			return nil, err
+	if terminal == last.Desired {
+		return ledgerTrace(registry, state.Ledger, journal.Steps)
+	}
+	// ReadMigrationLedger verified the checkpoint's binding to the projection.
+	// That projection can be any cut of the retained trace.
+	if !state.Checkpointed || !state.ProjectionSnapshot.Exists {
+		return nil, ErrSourceHistoricalAnchor
+	}
+	ledger, err := historicalProjectionLedger(registry, compatibilityProjectionRevision{state.ProjectionSnapshot})
+	if err != nil {
+		return nil, err
+	}
+	edges, err := ledgerTrace(registry, ledger, journal.Steps)
+	if err != nil {
+		return nil, err
+	}
+	// Both views have exact per-domain prefixes in the same registry. The
+	// replay may end earlier than the authoritative checkpoint in any domain.
+	for name, endpoint := range ledgerFromAuthority(edges[last.Migration].witness.After()).Domains {
+		if endpoint.Epoch > state.Ledger.Domains[name].Epoch {
+			return nil, errors.New("terminal ledger evidence extends beyond validated migration history")
 		}
 	}
-	return ledgerTrace(registry, ledger, journal.Steps)
+	return edges, nil
 }
 
 // Older ordinary publication can replace a completed journal without archiving
@@ -644,7 +664,7 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 					}
 					continue
 				}
-				return errors.New("finish the pending protected publication with its sealed owner before source repair")
+				return ErrSourcePendingPublication
 			}
 			if entry.IsDir() {
 				if !sourceMetadataDirectory(child) {
@@ -681,7 +701,7 @@ func (store *POSIXV2Store) sourceMetadataInventoryWithMigrationOwner(exclude boo
 				canonical, marshalErr := MarshalEvidence(evidence)
 				expected, nameErr := checkpointEvidenceName(evidence.Transaction, evidence.Step, evidence.Checkpoint)
 				if err != nil || marshalErr != nil || nameErr != nil || !bytes.Equal(canonical, snapshot.Payload) || string(evidence.Transaction) != child[3] || expected != name {
-					return errors.New("source admission contains unbound checkpoint evidence")
+					return ErrSourceTerminalEvidence
 				}
 			}
 			if err := unix.Fstatat(fd, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {

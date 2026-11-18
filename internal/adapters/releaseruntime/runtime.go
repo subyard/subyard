@@ -50,6 +50,8 @@ type Config struct {
 	// ConfigurationState supplies configuration state that update --check
 	// reports beside its inspection, such as ignored operator assignments.
 	ConfigurationState func() []config.ConfigurationState
+	// UpdateCheckAdvice supplies caller-specific advice for the human-readable check.
+	UpdateCheckAdvice func(context.Context, *releasetransition.Inspection) (message, retry string)
 }
 
 type Prepared struct {
@@ -1591,11 +1593,19 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 		return Prepared{
 			Action: "update.check", Changed: false, Consequences: nil,
 			ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
-			run: func(context.Context) error {
+			run: func(ctx context.Context) error {
+				report := inspection
+				if !parsed.json && runtime.config.UpdateCheckAdvice != nil {
+					if message, retry := runtime.config.UpdateCheckAdvice(ctx, &report); retry != "" {
+						outcome := *report.Outcome
+						outcome.Message, outcome.Retry = message, retry
+						report.Outcome = &outcome
+					}
+				}
 				return runtime.writeInspection(parsed, struct {
 					releasetransition.Inspection
 					Configuration []config.ConfigurationState `json:"configuration,omitempty"`
-				}{inspection, runtime.configurationState()})
+				}{report, runtime.configurationState()})
 			},
 		}, nil
 	}

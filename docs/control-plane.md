@@ -1512,8 +1512,9 @@ inherits the owner barrier and is admitted on its own. After `config sync` publi
 consumer refresh is decided again on the state after publication: on a ready release it runs the
 ordinary child; otherwise it runs in process only as a repair of those consumers, when each is open
 or limited to repair only by drift and the installed source is bound, with release history checked
-after the refresh; anything else is refused with `yard -Y NAME config apply` for each consumer. An
-init succeeds when its own yard converged and reports the other yards' findings. The default yard's
+after the refresh. A refusal names the failed checks and one recovery step. A subsequent sync with
+`--apply` can refresh outstanding materialized configuration even when the source is already
+published. An init succeeds when its own yard converged and reports the other yards' findings. The default yard's
 own invalid configuration underlies every yard, so then every yard admits only its repair commands.
 An invalid configuration of another yard is that yard's finding; host power and host key tools serve
 the yards that load. `yard status` states the release once, as `release active and complete; yard

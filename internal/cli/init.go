@@ -1213,6 +1213,9 @@ func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) ([]
 	// its own yard converged in a clean completed release.
 	if gate, ok := cli.yardScopedGate(outcome, inspection); ok {
 		if state := gate.state(yard); !state.repairOnly() && !state.pending {
+			if len(gate.materializedDriftYards()) != 0 {
+				_, gate.sourceRefusal = cli.repairSources(ctx)
+			}
 			return gate.otherYardFindings(yard), nil
 		}
 	}

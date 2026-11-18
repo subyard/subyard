@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
@@ -54,9 +55,11 @@ func (execution *configSyncExecution) refreshCheckoutPermissions(checkout string
 	return nil
 }
 
+func (execution *configSyncExecution) publicationSteps() []domain.OperationStep {
+	return append(domain.CloneOperationSteps(execution.metadata), execution.current.OperationSteps(execution.approved)...)
+}
 func (execution *configSyncExecution) steps() []domain.OperationStep {
-	steps := append(domain.CloneOperationSteps(execution.metadata), execution.current.OperationSteps(execution.approved)...)
-	return append(steps, execution.consumers.steps()...)
+	return append(execution.publicationSteps(), execution.consumers.steps()...)
 }
 func (execution *configSyncExecution) changed() bool {
 	for _, step := range execution.steps() {
@@ -106,7 +109,7 @@ func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution
 		copyCLI := *cli
 		copyCLI.options.Stdout, copyCLI.options.Stderr = output, output
 		applied := fresh
-		if execution.changed() {
+		if slices.ContainsFunc(execution.publicationSteps(), func(step domain.OperationStep) bool { return step.Decision != domain.StepSkip }) {
 			applied, err = execution.run(ctx, &copyCLI, domain.AdapterRequest{OperationID: prepared.Plan.OperationID})
 			if err != nil {
 				return domain.AdapterResult{}, configPreparedStale(err)

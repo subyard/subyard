@@ -89,6 +89,33 @@ func (err sourceAdmissionError) Error() string {
 }
 func (err sourceAdmissionError) Unwrap() error { return err.cause }
 
+// SourceAdmissionPredicate reports only fixed diagnostics from source proof.
+func SourceAdmissionPredicate(err error) string {
+	for _, predicate := range []error{
+		releasetransition.ErrSourcePendingPublication, releasetransition.ErrSourcePendingArchive,
+		releasetransition.ErrSourceHistoricalAnchor, releasetransition.ErrSourceTerminalLedger,
+		releasetransition.ErrSourceTerminalEvidence, releasetransition.ErrProtectedStoreStale,
+	} {
+		if errors.Is(err, predicate) {
+			return predicate.Error()
+		}
+	}
+	var failed sourceAdmissionError
+	if errors.As(err, &failed) {
+		switch failed.phase {
+		case "links":
+			return "active or previous release links failed verification against protected history"
+		case "assets":
+			return "active release artifact or sealed assets failed verification"
+		case "catalog":
+			return "installed release registry or catalog failed verification"
+		case "resource declarations", "V2 history", "journal consistency", "legacy history", "capability":
+			return "installed release source proof failed " + failed.phase + " verification"
+		}
+	}
+	return "installed release source proof is unavailable"
+}
+
 // InspectSourceAdmission validates protected history through the production Go owner.
 func (runtime *Runtime) InspectSourceAdmission(ctx context.Context, root, configHome string) (SourceAdmission, error) {
 	return runtime.inspectGoSourceAdmission(ctx, root, configHome)
@@ -187,6 +214,7 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 		return proof, errors.New("verified current runtime is required")
 	}
 	store, err := releasetransition.NewPOSIXV2Store(configHome)
+	phase = "V2 history"
 	if err != nil {
 		return proof, err
 	}
@@ -206,6 +234,7 @@ func (runtime *Runtime) inspectGoSourceAdmission(ctx context.Context, root, conf
 			return proof, err
 		}
 		journal = &value
+		phase = "links"
 		if value.Goal.Target != actual.Active {
 			return proof, errors.New("protected journal does not name the active runtime")
 		}

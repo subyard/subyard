@@ -1,19 +1,158 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
+
+func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
+	fixture := newConfigApplyRepairFixture(t, true)
+	options := fixture.cli.options
+	root, home := options.RepositoryRoot, fixture.cli.env["SUBYARD_CONFIG_HOME"]
+	options.Environment = slices.DeleteFunc(slices.Clone(options.Environment), func(value string) bool {
+		return strings.HasPrefix(value, "HOST_BASE=") || strings.HasPrefix(value, "RESTRICTED_DISK_PATHS=")
+	})
+	writeCLIFile(t, filepath.Join(home, "yards/named/config.env"), fmt.Sprintf("SSH_PORT=2223\nHOST_BASE=%s/host-named\nRESTRICTED_DISK_PATHS=%s/host-named\n", root, root), 0o600)
+	active, err := filepath.EvalSymlinks(filepath.Join(fixture.cli.env["YARD_RUNTIME_ROOT"], "current"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(active, "config", "release-transition.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(active, "config"), os.DirFS(filepath.Join(root, "config"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(filepath.Join(active, "config/agents/codex"), os.DirFS(filepath.Join(repositoryRoot(t), "config/agents/codex"))); err != nil {
+		t.Fatal(err)
+	}
+	commands := filepath.Join(active, "config", "commands.registry")
+	shipped := mustReadConfigFixture(t, filepath.Join(repositoryRoot(t), "config", "commands.registry"))
+	for line := range strings.SplitSeq(string(shipped), "\n") {
+		if strings.HasPrefix(line, "config|") {
+			testkit.WriteFile(t, commands, append(mustReadConfigFixture(t, commands), []byte(line+"\n")...), 0o600)
+		}
+	}
+	var manifest []byte
+	if err := fs.WalkDir(os.DirFS(active), ".", func(path string, entry fs.DirEntry, err error) error {
+		if err == nil && entry.Type().IsRegular() && path != "runtime-files.sha256" {
+			manifest = fmt.Appendf(manifest, "%x  ./%s\n", sha256.Sum256(mustReadConfigFixture(t, filepath.Join(active, path))), path)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(active, "runtime-files.sha256"), manifest, 0o600)
+	asset := "codex/rules/repo.rules"
+	published := filepath.Join(home, config.GitSettingsRelativePath, "overrides/host/agents", asset)
+	engine := string(mustReadConfigFixture(t, filepath.Join(active, "bin", "yard-engine")))
+	engine = strings.ReplaceAll(engine, fmt.Sprintf("[ -e %q ]", fixture.readyMarker), fmt.Sprintf("[ -e %q ] || ! grep -qs updated %q", fixture.readyMarker, published))
+	engine = strings.Replace(engine, `"consequences":["repair release activation"]},"outcome"`, `"consequences":["repair release activation"]},"decisions":[
+{"resource":"activation.materialized-config","scope":"activation","decision":"canonicalize","result":"drift"},
+{"resource":"activation.materialized-config","scope":"yard-attribution","decision":"preserve","result":"drift default"},
+{"resource":"activation.materialized-config","scope":"yard-attribution","decision":"preserve","result":"drift named"}],"outcome"`, 1)
+	sealCurrentEngine(t, fixture, engine)
+	options.RepositoryRoot = active
+	fake := options.Incus.(*testkit.Incus)
+	applier := &recordingConfigApplier{}
+	options.Config = applier
+	run := func(want int, args ...string) string {
+		t.Helper()
+		var output bytes.Buffer
+		options.Arguments, options.Stdout, options.Stderr = args, &output, &output
+		cli, err := New(options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := cli.Run(context.Background()); code != want {
+			t.Fatalf("%v exited %d, want %d\n%s", args, code, want, output.String())
+		}
+		return output.String()
+	}
+	remote, publisher := configBareSourceRepository(t, "owner-a", "")
+	assetPath := filepath.Join(publisher, "hosts/owner-a/overrides/agents", asset)
+	writeConfigCommandFile(t, assetPath, "original\n")
+	commitConfigSource(t, publisher, "initial asset")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	run(0, "config", "sync", "connect", remote, "--host-id", "owner-a", "--yes")
+	writeConfigCommandFile(t, assetPath, "updated\n")
+	commitConfigSource(t, publisher, "updated asset")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	observe := func(converged bool, passes int) {
+		t.Helper()
+		fake.ExecSteps = nil
+		for range passes {
+			for _, yard := range []string{"default", "named"} {
+				loaded := loadConfigCommandContext(t, active, options.Environment, yard)
+				if converged {
+					appendHashSteps(t, fake, loaded)
+				} else {
+					appendMismatchedHashSteps(t, fake, loaded, "0")
+				}
+			}
+		}
+	}
+	history, err := fixture.cli.readReleaseHistory()
+	if err != nil || history == nil {
+		t.Fatalf("read release history: %v", err)
+	}
+	pending := filepath.Join(home, "release-transition/v2/.journal.json.pending")
+	writeCLIFile(t, pending, "pending-fixture\n", 0o600)
+	observe(false, 2)
+	refusal := "protected release publication is pending"
+	output := run(1, "config", "sync", "pull", "--apply", "--yes")
+	if !strings.Contains(output, refusal+"; next: yard update") ||
+		string(mustReadConfigFixture(t, published)) != "updated\n" || len(applier.yards) != 0 {
+		t.Fatalf("published pull refusal or effects: %s, %v", output, applier.yards)
+	}
+	for _, args := range [][]string{{"config", "apply"}, {"init"}, {"status"}, {"update", "--check", "--offline"}} {
+		want := 1
+		if args[0] == "status" || args[0] == "update" {
+			want = 0
+		}
+		if output := run(want, args...); !strings.Contains(output, refusal) || !strings.Contains(output, "yard update") || strings.Contains(output, ".journal.json.pending") {
+			t.Fatalf("%v gave inconsistent advice: %s", args, output)
+		}
+	}
+	if err := os.Remove(pending); err != nil {
+		t.Fatal(err)
+	}
+	if output := run(0, "update", "--check", "--offline"); !strings.Contains(output, "yard -Y default config apply") {
+		t.Fatalf("update check omitted admissible repair: %s", output)
+	}
+	if output := run(0, "update", "--check", "--json", "--offline"); !strings.Contains(output, `"retry":"run yard update"`) {
+		t.Fatalf("update JSON changed its retry: %s", output)
+	}
+	if output := run(0, "-Y", "named", "status"); !strings.Contains(output, "next: yard -Y named config apply") {
+		t.Fatalf("status omitted admissible repair: %s", output)
+	}
+	observe(true, 1)
+	verified := slices.Clone(fake.ExecSteps)
+	observe(false, 3)
+	fake.ExecSteps = append(fake.ExecSteps, verified...)
+	if output := run(0, "config", "sync", "pull", "--apply", "--yes"); !strings.Contains(output, "already converged") ||
+		!slices.Equal(applier.yards, []string{"default", "named"}) || len(fake.ExecSteps) != 0 {
+		t.Fatalf("retry did not converge exactly both consumers: %s, %v", output, applier.yards)
+	}
+	after, err := fixture.cli.readReleaseHistory()
+	if err != nil || after == nil || *after != *history {
+		t.Fatalf("consumer refresh changed release history: %v", err)
+	}
+}
 
 type sampleRepairPlatformFixture struct {
 	*initPlatformFixture

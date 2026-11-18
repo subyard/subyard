@@ -49,10 +49,11 @@ func (consumers *configSyncConsumers) targets(plan configsync.Plan) ([]configTar
 }
 func (prepared *preparedCommand) prepareConfigSyncConsumers(ctx context.Context, execution *configSyncExecution) error {
 	all, names := configSyncConsumerScope(execution.approved)
-	if !all && len(names) == 0 {
+	retry := len(execution.approved.Changes) == 0
+	if !all && len(names) == 0 && !retry {
 		return nil
 	}
-	consumers := &configSyncConsumers{all: all, names: names, conditional: execution.approved.NeedsApply()}
+	consumers := &configSyncConsumers{all: all || retry, names: names, conditional: execution.approved.NeedsApply()}
 	targets, err := consumers.targets(execution.approved)
 	if err != nil {
 		return err
@@ -63,6 +64,19 @@ func (prepared *preparedCommand) prepareConfigSyncConsumers(ctx context.Context,
 	native, err := prepared.CLI.prepareConfigApply(ctx, targets, func() ([]configTarget, error) { return consumers.targets(execution.current) })
 	if err != nil {
 		return err
+	}
+	if retry {
+		// Publication may have completed independently of its consumers. Bind
+		// the remaining drift from the freshly validated published candidate.
+		native.approved = slices.DeleteFunc(native.approved, func(item configTargetAssessment) bool { return !item.Changed })
+		if len(native.approved) == 0 {
+			return nil
+		}
+		native.current = slices.Clone(native.approved)
+		for _, item := range native.approved {
+			consumers.names[item.Target.Name] = true
+		}
+		consumers.all = false
 	}
 	consumers.execution = native
 	consumers.approvedSteps = native.steps()

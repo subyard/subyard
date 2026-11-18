@@ -1140,7 +1140,7 @@ func TestRepairNeedsTheInstalledReleaseTooling(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "runs only with the installed release's own tooling") ||
+		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "running tooling does not match the sealed completed release; next: yard update") ||
 			harness.effects() != 0 {
 			t.Fatalf("%v outside the installed runtime: code=%d effects=%d\n%s%s", arguments, code, harness.effects(), stdout.String(), stderr.String())
 		}
@@ -1499,12 +1499,12 @@ func TestConfigSyncConsumerRefreshIsAConsumerRepair(t *testing.T) {
 		t.Fatalf("drifted consumer: inProcess=%t err=%v", inProcess, err)
 	}
 	if _, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default", "named"}); err == nil ||
-		!strings.Contains(err.Error(), "next: yard -Y default config apply, yard -Y named config apply") {
+		!strings.Contains(err.Error(), "yard named has failed activation; next: yard -Y named init") {
 		t.Fatalf("failed consumer: %v", err)
 	}
 	program.sourceBinding = nil // the real proof refuses this fixture CLI
 	if _, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default"}); err == nil ||
-		!strings.Contains(err.Error(), "installed release's own tooling") {
+		!strings.Contains(err.Error(), "running tooling does not match the sealed completed release; next: yard update") {
 		t.Fatalf("consumer refresh with other tooling: %v", err)
 	}
 	testkit.WriteFile(t, harness.inspect, harness.ready, 0o600)
