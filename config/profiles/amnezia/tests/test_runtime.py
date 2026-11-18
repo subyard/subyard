@@ -123,8 +123,7 @@ exec /usr/bin/timeout 95 sh "$PROBE"
 fixture=$1 scenario=$2 step=$3 clock=0
 CLIENT_CONFIG=fixture-config bundle=fixture-bundle bundle_hash=fixture-hash
 die() { printf '%s\n' "$*" >&2; exit 2; }
-cleanup_guest() { :; }
-prepare_guest() { :; }
+owner_boot_evidence() { :; }
 sleep() { clock=$((clock + step)); }
 read() { printf -v uptime '%s.00' "$clock"; }
 quote_ssh_command() { printf '%q ' "$@"; }
@@ -133,7 +132,7 @@ ssh() {
   case "$*" in
     *'systemctl reboot'*) return 0 ;;
     *'-- true') return 255 ;;
-    *boot_id*) printf 'new-boot\n' ;;
+    *boot_id*is-system-running*) printf 'new-boot\nrunning\n' ;;
     *systemctl*show*)
       [ "$scenario" != transport ] || return 255
       sample=$(cat "$fixture/samples"); sample=$((sample + 1))
@@ -164,17 +163,25 @@ timeout() {
                 if scenario in ('queued-deadline', 'stalled-clock'):
                     self.assertIn(b'deadline', observed.stderr)
 
-    def test_owner_boot_evidence_is_bounded_masked_and_only_captures_missing_owner(self):
+    def test_owner_reboot_retains_worktree_and_captures_unready_boot(self):
         source = (PROFILE / 'tests/e2e/acceptance.sh').read_text()
         functions = '\n'.join(re.search(r'^' + name + r'\(\) \{\n.*?^\}', source, re.M | re.S)[0]
                               for name in ('reboot_owner', 'owner_boot_evidence'))
         script = r'''set -euo pipefail
-scenario=$1
+scenario=$1 fixture=$2
 CLIENT_CONFIG=fixture-config bundle=fixture-bundle bundle_hash=fixture-hash
+declare -A GUEST_DIRS=([1]="$fixture")
 die() { printf '%s\n' "$*" >&2; exit 2; }
-cleanup_guest() { :; }
-prepare_guest() { [ "$scenario" != staging-failed ] || return 19; }
-verify_boot_result() { [ "$scenario" != verification-failed ] || return 23; }
+cleanup_guest() { unset 'GUEST_DIRS[1]'; }
+prepare_guest() { printf 'unexpected worktree transfer\n' >&2; return 19; }
+verify_boot_result() {
+  [ "${GUEST_DIRS[1]:-}" = "$fixture" ] || return 98
+  if [ "$scenario" = transient ]; then
+    [ "$(cat "$fixture/samples")" = 5 ] || return 97
+  fi
+  [ "$scenario" != verification-failed ] || return 23
+}
+seq() { printf '1\n2\n3\n4\n5\n'; }
 sleep() { :; }
 quote_ssh_command() { printf '%q ' "$@"; }
 guest() { printf 'old-boot\n'; }
@@ -182,6 +189,23 @@ ssh() {
   case "$*" in
     *'systemctl reboot'*) return 0 ;;
     *'-- true') [ "$scenario" = stayed-up ] ;;
+    *boot_id*is-system-running*)
+      case "$scenario" in
+        missing) return 255 ;;
+        unready) printf 'new-boot\nstarting\n'; return 1 ;;
+        transient)
+          sample=$(cat "$fixture/samples"); sample=$((sample + 1))
+          printf '%s\n' "$sample" > "$fixture/samples"
+          case "$sample" in
+            1) printf 'old-boot\nrunning\n' ;;
+            2) printf 'new-boot\nstarting\n'; return 1 ;;
+            3) printf 'new-boot\nrunning\n'; return 255 ;;
+            4) printf 'running\n' ;;
+            5) printf 'new-boot\ndegraded\n'; return 1 ;;
+            *) return 96 ;;
+          esac ;;
+        *) printf 'new-boot\nrunning\n' ;;
+      esac ;;
     *boot_id*) [ "$scenario" != missing ] || return 255; printf 'new-boot\n' ;;
     *)
       printf 'diagnostic-call\n' >&2
@@ -198,14 +222,16 @@ timeout() {
   "$@"
 }
 '''
-        for scenario, expected in (('returned', 0), ('missing', 2), ('stayed-up', 2),
-                                   ('staging-failed', 19), ('verification-failed', 23)):
-            with self.subTest(scenario=scenario):
-                observed = subprocess.run(['bash', '-c', script+functions+'\nreboot_owner\n', '_', scenario],
+        for scenario, expected in (('returned', 0), ('transient', 0), ('missing', 2), ('unready', 2),
+                                   ('stayed-up', 2), ('verification-failed', 23)):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(dir='/tmp') as temporary:
+                (Path(temporary) / 'samples').write_text('0\n')
+                observed = subprocess.run(['bash', '-c', script+functions+'\nreboot_owner\n', '_', scenario, temporary],
                                           capture_output=True, timeout=5)
-                self.assertEqual(observed.returncode, expected, observed.stderr.decode())
                 evidence = observed.stderr
-                if scenario == 'missing':
+                self.assertNotIn(b'unexpected worktree transfer', evidence)
+                self.assertEqual(observed.returncode, expected, evidence[:1024].decode())
+                if scenario in ('missing', 'unready', 'verification-failed'):
                     self.assertEqual(evidence.count(b'diagnostic-call'), 3)
                     self.assertEqual(evidence.count(b'amnezia_owner_boot_evidence_attempt='), 3)
                     self.assertIn(b'peer IPV4', evidence)
