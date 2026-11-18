@@ -89,7 +89,7 @@ class Scheduler(unittest.TestCase):
             calls.append((clock.now, name, slot))
             if slot and kwargs.get("local_slot"):
                 self.assertEqual(env["SUBYARD_P0_WAIT_SECONDS"], "0")
-                entry = read()["local_schedule"][name]
+                entry = schedule()[name]
                 self.assertEqual((entry["state"], entry["slot"]), ("running", slot))
                 self.assertEqual(read()["checks"][name]["status"], "running")
             duration, result = controller(name, slot, clock.now)
@@ -97,6 +97,9 @@ class Scheduler(unittest.TestCase):
 
         def read():
             return json.loads((output / "receipt.json").read_text())
+
+        def schedule():
+            return a.load_schedule(output, read())
 
         pool = self.enterContext(patch.object(a, "ThreadPoolExecutor")).return_value.__enter__.return_value
         pool.submit.side_effect = clock.submit
@@ -198,17 +201,17 @@ with a.acceptance_lock(output) as guard:
         )
         for label, capacity, states, launches, elapsed, diagnostic in cases:
             with self.subTest(label=label):
-                clock, _, calls, read, run = self.fixture(["vm:lane"], states=states,
+                clock, output, calls, read, run = self.fixture(["vm:lane"], states=states,
                     controller=lambda *_: (0, REFUSED), capacity=capacity)
                 self.assertEqual(run(), 1)
                 self.assertEqual(tuple(slot for _, _, slot in calls), launches)
                 self.assertEqual(clock.now, elapsed)
-                entry = read()["local_schedule"]["vm:lane"]
+                entry = a.load_schedule(output, read())["vm:lane"]
                 self.assertEqual((entry["state"], entry["remaining"]), ("exhausted", 0))
                 self.assertIn(diagnostic, entry["broker"])
                 self.assertEqual(entry["reason"], "capacity_memory" if launches else "broker-no-progress")
                 self.assertEqual(run(), 1)
-                self.assertEqual(read()["local_schedule"]["vm:lane"], entry)
+                self.assertEqual(a.load_schedule(output, read())["vm:lane"], entry)
                 self.assertEqual(len(calls), len(launches))
 
     def test_status_validates_inventory_and_closed_admission(self):
@@ -219,6 +222,8 @@ with a.acceptance_lock(output) as guard:
             (response([{"slot_id": "slot-002", "state": "available"}], admission_closed=True), {2: "admission-closed"}),
             (response([{"slot_id": "slot-004", "state": "quarantined"}]), {4: "quarantined"}),
             (response([{"slot_id": "not-a-slot", "state": "available"}]), {}),
+            (b'{"schema_version":1,"status":"ok","pool":null}', {}),
+            (b'{"schema_version":1,"status":"ok","pool":[]}', {}),
             (b"no status", {}),
         ):
             with self.subTest(expected=expected), patch.object(a.subprocess, "check_output", return_value=payload) as probe:
@@ -227,33 +232,33 @@ with a.acceptance_lock(output) as guard:
 
     def test_recovery_during_sibling_and_fairness_after_refusal(self):
         calls_expected = [(0, "vm:slow", 2), (2, "vm:large", 4), (2, "vm:small", 4), (4, "vm:large", 4)]
-        _, _, calls, read, run = self.fixture(
+        _, output, calls, read, run = self.fixture(
             ["vm:slow", "vm:large", "vm:small"],
             states=lambda t: {2: "available", 4: "available" if t >= 2 else "quarantined"},
             controller=lambda name, slot, t: (8, PASSED) if name == "vm:slow" else
                 (0, REFUSED if name == "vm:large" and t == 2 else PASSED))
         self.assertEqual(run(), 0)
         self.assertEqual(calls, calls_expected)
-        self.assertEqual(read()["local_schedule"]["vm:large"]["remaining"], 0)
-        self.assertEqual(read()["local_schedule"]["vm:small"]["remaining"], 1)
+        self.assertEqual(a.load_schedule(output, read())["vm:large"]["remaining"], 0)
+        self.assertEqual(a.load_schedule(output, read())["vm:small"]["remaining"], 1)
 
     def test_crash_reservation_and_restart_during_cleanup(self):
         for capacity in ("0s", "4s"):
             with self.subTest(capacity=capacity):
-                clock, _, calls, read, run = self.fixture(["vm:lane"], capacity=capacity,
+                clock, output, calls, read, run = self.fixture(["vm:lane"], capacity=capacity,
                     states=lambda t: {2: "recovering" if clock.crash_recovered and t < 2 else "available",
                                       4: "available"})
                 clock.crash_recovered = False
                 clock.crash = True
                 with self.assertRaises(SystemExit):
                     run()
-                entry = read()["local_schedule"]["vm:lane"]
+                entry = a.load_schedule(output, read())["vm:lane"]
                 self.assertEqual((entry["state"], entry["slot"]), ("running", 2))
                 self.assertEqual(calls, [])
                 clock.crash = False
                 clock.crash_recovered = True
                 self.assertEqual(run(), 1 if capacity == "0s" else 0)
-                after = read()["local_schedule"]["vm:lane"]
+                after = a.load_schedule(output, read())["vm:lane"]
                 self.assertEqual(after["id"], entry["id"])
                 self.assertEqual(after["remaining"], 0)
                 self.assertEqual(calls, [] if capacity == "0s" else [(2, "vm:lane", 4)])
@@ -264,7 +269,7 @@ with a.acceptance_lock(output) as guard:
         clock.stop_before_launch = True
         self.assertEqual(run(), 1)
         self.assertEqual(calls, [])
-        first = read()["local_schedule"][lane]
+        first = a.load_schedule(output, read())[lane]
         self.assertEqual((first["state"], first["remaining"]), ("queued", 1))
         self.assertEqual(read()["checks"][lane]["status"], "pending")
         invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
@@ -273,7 +278,29 @@ with a.acceptance_lock(output) as guard:
         clock.stop_at = float("inf")
         self.assertEqual(run(), 0)
         self.assertEqual(calls, [(0, lane, 2)])
-        self.assertEqual(read()["local_schedule"][lane]["id"], first["id"])
+        self.assertEqual(a.load_schedule(output, read())[lane]["id"], first["id"])
+
+    def test_completed_rerun_survives_a_schedule_write_failure(self):
+        lane = "vm:lane"
+        _, output, calls, read, run = self.fixture([lane],
+            states=lambda _: {2: "available"}, outcomes={lane: PASSED})
+        native_save = a.save_schedule
+
+        def fail_terminal_schedule_write(output, schedule):
+            if schedule[lane]["state"] == "done":
+                raise OSError("schedule write failed")
+            native_save(output, schedule)
+
+        with (
+            patch.object(a, "save_schedule", side_effect=fail_terminal_schedule_write),
+            self.assertRaisesRegex(OSError, "schedule write failed"),
+        ):
+            run(only=[lane], rerun=True)
+        self.assertEqual(read()["checks"][lane]["original_attempt"], ATTEMPT)
+        self.assertEqual(a.load_schedule(output, read())[lane]["state"], "running")
+        self.assertEqual(run(with_vms=False), 0)
+        self.assertEqual(calls, [(0, lane, 2)])
+        self.assertEqual(a.load_schedule(output, read())[lane]["state"], "done")
 
     def test_submitted_retry_resumes_after_preflight_blocks_an_ordinary_run(self):
         lane, preflight = "vm:lane", "profile-preflight:sample"
@@ -284,14 +311,16 @@ with a.acceptance_lock(output) as guard:
         _, output, calls, read, run = self.fixture([lane, preflight], capacity="0s",
             states=lambda _: {2: "available"}, controller=controller,
             outcomes={lane: dict(FAILED, original_attempt=ATTEMPT)})
+        before = (output / "receipt.json").read_bytes()
         a.request_retry(output, lane, ATTEMPT["id"])
+        self.assertEqual((output / "receipt.json").read_bytes(), before)
         self.assertEqual(run(with_vms=False), 1)
-        first = read()["local_schedule"][lane]
+        first = a.load_schedule(output, read())[lane]
         self.assertEqual((first["id"], first["state"], first["remaining"]), (ATTEMPT["id"], "queued", 1))
         preflight_result = PASSED
         self.assertEqual(run(with_vms=False), 0)
         self.assertEqual([name for _, name, _ in calls], [preflight, preflight, lane])
-        last = read()["local_schedule"][lane]
+        last = a.load_schedule(output, read())[lane]
         self.assertEqual((last["id"], last["state"], last["remaining"]), (ATTEMPT["id"], "done", 0))
 
     def test_ordinary_run_resumes_queued_selection_by_identity(self):
@@ -302,17 +331,78 @@ with a.acceptance_lock(output) as guard:
                     states=lambda now: {2: "held" if now == 0 else "available"})
                 clock.stop_at = 1
                 self.assertEqual(run(only=[lane], rerun=prior == PASSED), 1)
-                first = read()["local_schedule"][lane]
+                first = a.load_schedule(output, read())[lane]
                 self.assertEqual((first["state"], first["remaining"]), ("queued", 2))
                 self.assertEqual(read()["checks"][lane], prior)
-                self.assertEqual(read()["result"], "incomplete")
+                self.assertEqual(read()["result"], "passed" if prior == PASSED else "incomplete")
                 self.assertEqual(calls, [])
                 self.assertFalse((output / "retries").exists())
 
                 clock.stop_at = float("inf")
                 self.assertEqual(run(with_vms=False), 0)
                 self.assertEqual(calls, [(1, lane, 2)])
-                self.assertEqual(read()["local_schedule"][lane]["id"], first["id"])
+                self.assertEqual(a.load_schedule(output, read())[lane]["id"], first["id"])
+
+    def test_frozen_preflight_reports_queued_work_for_ordinary_run(self):
+        lane = "profile:sample"
+        clock, output, calls, _, run = self.fixture([lane],
+            states=lambda now: {2: "held" if now == 0 else "available"})
+        clock.stop_at = 1
+        self.assertEqual(run(only=[lane]), 1)
+        with patch.object(a, "public_broker_status", return_value={"admission_closed": True}):
+            report = a.preflight(output, slots=(2,))
+        check = next(check for check in report["checks"] if check["id"] == lane)
+        self.assertTrue(check["selected"])
+        self.assertEqual(report["capacity_summary"]["planning"], "insufficient")
+        self.assertEqual(calls, [])
+        clock.stop_at = float("inf")
+        self.assertEqual(run(with_vms=False), 0)
+        self.assertEqual(calls, [(1, lane, 2)])
+
+    def test_finished_hosted_split_dispatches_owner_with_a_busy_sibling(self):
+        split, owner, sibling = "vm:split", "vm:owner", "vm:sibling"
+        clock, output, calls, _, run = self.fixture([owner, split, sibling],
+            states=lambda _: {2: "available", 4: "available"}, requires={owner: [split]},
+            outcomes={sibling: dict(FAILED, original_attempt=ATTEMPT)},
+            controller=lambda name, *_: (100 if name == sibling else 0, PASSED))
+        clock.events.append((2, lambda: a.request_retry(output, sibling, ATTEMPT["id"])))
+        hosted_pass = dict(PASSED, ci_hosted={"run_id": 456, "job_id": 789})
+        self.assertEqual(run(only=[owner], hosted=[split], collect_hosted=lambda *_: (4, {split: hosted_pass})), 0)
+        self.assertEqual(calls, [(2, sibling, 2), (4, owner, 4)])
+
+    def test_retry_after_failed_local_phase_keeps_hosted_reservation(self):
+        local, hosted = "vm:local", "vm:hosted"
+        clock, output, calls, read, run = self.fixture([local, hosted],
+            states=lambda _: {2: "available", 4: "available"},
+            controller=lambda name, slot, now: (0, FAILED if name == local and now == 0 else PASSED))
+        clock.events.append((2, lambda: a.request_retry(output, local, ATTEMPT["id"])))
+
+        def collect(failed, *_):
+            self.assertTrue(failed)
+            return 4, {}
+
+        self.assertEqual(run(hosted=[hosted], collect_hosted=collect), 1)
+        self.assertEqual(calls, [(0, local, 2), (2, local, 2)])
+        self.assertEqual(read()["checks"][hosted], {"status": "pending"})
+
+    def test_local_owner_can_reopen_a_historical_split_failure_once(self):
+        owner, split = "vm:owner", "vm:split"
+        for recorded in (False, True):
+            with self.subTest(recorded=recorded):
+                split_result = FAILED
+                _, _, calls, _, run = self.fixture([owner, split], requires={owner: [split]},
+                    states=lambda _: {2: "available"}, outcomes={split: FAILED},
+                    controller=lambda name, *_: (0, split_result if name == split else PASSED))
+                if recorded:
+                    self.assertEqual(run(only=[split]), 1)
+                    calls.clear()
+                self.assertEqual(run(only=[owner]), 1)
+                self.assertEqual(calls, [(0, split, 2)])
+                split_result = PASSED
+                self.assertEqual(run(only=[owner]), 1)
+                self.assertEqual(calls, [(0, split, 2)])
+                self.assertEqual(run(only=[owner, split], rerun=True), 0)
+                self.assertEqual([name for _, name, _ in calls], [split, split, owner])
 
     def test_hosted_wait_and_same_phase_retry_use_latest_local_outcomes(self):
         lane, sibling, hosted = "vm:lane", "vm:sibling", "vm:hosted"
@@ -346,13 +436,13 @@ with a.acceptance_lock(output) as guard:
                 self.assertEqual(hosted_calls, [(8 if during_sibling else 0, False)])
                 initial = [(0, lane, 2), (0, sibling, 4)] if during_sibling else []
                 self.assertEqual(calls, [*initial, (late_at, lane, 2), (28 if during_sibling else 20, hosted, 2)])
-                self.assertEqual(read()["local_schedule"][lane]["id"], ATTEMPT["id"])
+                self.assertEqual(a.load_schedule(output, read())[lane]["id"], ATTEMPT["id"])
                 self.assertFalse((output / "retries").exists())
 
     def test_stop_or_capture_failure_drains_and_records_siblings(self):
         for mode in ("stop", "capture"):
             with self.subTest(mode=mode):
-                clock, _, calls, read, run = self.fixture(["vm:first", "vm:sibling", "vm:queued"],
+                clock, output, calls, read, run = self.fixture(["vm:first", "vm:sibling", "vm:queued"],
                     states=lambda _: {2: "available", 4: "available"},
                     controller=lambda name, *_: (1 if name == "vm:first" else 4, PASSED))
                 if mode == "stop":
@@ -392,7 +482,7 @@ with a.acceptance_lock(output) as guard:
                     ["verify", split] if mode == "failed split" else ["verify"])
                 self.assertEqual([name for _, name, _ in calls], expected)
                 receipt = read()
-                self.assertEqual(receipt["local_schedule"][owner]["id"], ATTEMPT["id"])
+                self.assertEqual(a.load_schedule(output, receipt)[owner]["id"], ATTEMPT["id"])
                 self.assertEqual(receipt["checks"][sibling], PASSED)
                 if success:
                     a.request_retry(output, owner, ATTEMPT["id"])
@@ -403,7 +493,7 @@ with a.acceptance_lock(output) as guard:
         split, owner, sibling = "vm:split", "vm:owner", "vm:sibling"
         for result in (PASSED, FAILED):
             with self.subTest(split=result):
-                _, _, calls, read, run = self.fixture([owner, split, sibling],
+                _, output, calls, read, run = self.fixture([owner, split, sibling],
                     states=lambda t: {2: "available", 4: "available"},
                     outcomes={split: PASSED, sibling: PASSED}, requires={owner: [split]},
                     controller=lambda name, *_: (2, result) if name == split else (0, PASSED))
@@ -419,7 +509,7 @@ with a.acceptance_lock(output) as guard:
                     nonlocal count
                     count += 1
                     return 0, dict(REFUSED, reason="capacity_" + resource) if count == 1 else PASSED
-                _, _, calls, read, run = self.fixture(["vm:hosted"], controller=controller,
+                _, output, calls, read, run = self.fixture(["vm:hosted"], controller=controller,
                     states=lambda t: self.fail("hosted job polled for local slots"), slots=(1,), capacity="30m")
                 execute = a.execute
                 def observe(name, command, root, output, env, slot):
@@ -429,7 +519,7 @@ with a.acceptance_lock(output) as guard:
                 with patch.object(a, "execute", side_effect=observe):
                     self.assertEqual(run(only=["vm:hosted"], hosted_job=True), 0)
                 self.assertEqual(calls, [(0, "vm:hosted", 1)] * 2)
-                self.assertNotIn("local_schedule", read())
+                self.assertFalse((output / "local-schedule.json").exists())
 
 
 if __name__ == "__main__":

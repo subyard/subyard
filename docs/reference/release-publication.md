@@ -516,8 +516,10 @@ Repeated `run` and `accept` continue the same local check requests and reuse pas
 `SUBYARD_E2E_CAPACITY_WAIT` sets a fixed number of five-second retry rounds per check
 (default `120m`). Each controller launch spends one round. A full idle poll interval with no
 admissible slot also spends one round. Time spent waiting on prerequisites or active siblings
-does not spend rounds. `0s` permits one immediate decision. The receipt retains the remaining
-rounds and the last attempted slot across hosted fallback and subsequent runs.
+does not spend rounds. `0s` permits one immediate decision. `local-schedule.json` retains the
+remaining rounds and the last attempted slot across hosted fallback and subsequent runs.
+Publication uses the evidence in `receipt.json`. A queued rerun leaves the existing result in place
+until its controller starts.
 
 Use `run --output DIR --only CHECK --rerun` to open a fresh allowance for a failed, exhausted,
 or already passed check. To queue a failed or interrupted check while a collector is running,
@@ -535,14 +537,13 @@ before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfi
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
 every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
-periodic-only lane as an unknown check. Available approved slots take the
-next queued check after their controller exits. A typed `blocked/capacity_memory` or
-`blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
-next independent check. After all first-pass controllers finish, capacity-blocked checks are
-retried once on slots whose workers drained the queue. Both attempts retain their logs and
-immutable records; a second capacity block leaves the candidate incomplete.
-Failures, interruptions, unknown refusals and attempts that
-reached a lease or guest start stop that worker's queue. Exit 4 alone does not permit continuation.
+periodic-only lane as an unknown check. An available selected slot takes the next eligible check.
+A typed broker refusal returns the check to the queue if it has rounds left. Other eligible
+checks can use available slots while it waits for the next poll. A controller failure ends that
+request, and the slot can take another check when the broker reports it available. Each attempt
+retains its log and immutable record. When the allowance runs out, its last recorded result remains
+in the evidence receipt. A completed hosted split can release its local owner as soon as a slot is
+available.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
 attempt and include the controllers' source and environment evidence. The run checks its platform

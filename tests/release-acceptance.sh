@@ -1312,13 +1312,13 @@ exit "$COLLECTOR_EXIT"
                         result.update(status=crash, exit_code=23 if crash == "failed" else -15,
                                       termination="exit" if crash == "failed" else "signal")
                     return result
-                write, count = m.write_receipt, []
+                write, count = m.save, []
                 def save_until_terminal(output, receipt):
                     count.append(True)
                     if crash == "aggregate" and len(count) == 3:
                         raise OSError("aggregate commit failed")
                     write(output, receipt)
-                with patch.object(m, "execute", side_effect=execute), patch.object(m, "write_receipt", side_effect=save_until_terminal), \
+                with patch.object(m, "execute", side_effect=execute), patch.object(m, "save", side_effect=save_until_terminal), \
                      patch.object(m, "execution_environment", return_value=before["environment"]):
                     if crash in ("execute", "aggregate"):
                         with self.assertRaises(OSError):
@@ -2971,7 +2971,7 @@ while True: time.sleep(1)
                 with patch.object(m, "load_bound", return_value=(output, receipt)), \
                      patch.object(m, "commands", return_value=checks), \
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
-                     patch.object(m, "write_receipt", wraps=m.write_receipt) as saved, \
+                     patch.object(m, "save", wraps=m.save) as saved, \
                      patch.object(m, "execute", side_effect=execute):
                     try:
                         if case == "stopped":
@@ -3049,7 +3049,7 @@ while True: time.sleep(1)
             receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
                        "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                        "checks": {"verify": {"status": "pending"}}}
-            write, saves = m.write_receipt, []
+            write, saves = m.save, []
             def fail_after_initial(output, receipt):
                 saves.append(True)
                 if len(saves) > 1:
@@ -3057,7 +3057,7 @@ while True: time.sleep(1)
                 write(output, receipt)
             with patch.object(m, "load_bound", return_value=(output, receipt)), \
                  patch.object(m, "commands", return_value={"verify": ["true"]}), \
-                 patch.object(m, "write_receipt", side_effect=fail_after_initial):
+                 patch.object(m, "save", side_effect=fail_after_initial):
                 with self.assertRaises(OSError):
                     m.run_checks(output, [], [], False)
             sidecar = json.loads(next((output / "runs").glob("*.json")).read_text())

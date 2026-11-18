@@ -654,6 +654,7 @@ class Contracts(unittest.TestCase):
             _, current = m.a.load_bound(target)
             current["checks"]["profile:sample"] = {"status": "pending"}
             m.a.save(target, current)
+            m.a.save_schedule(target, {"profile:sample": {"id": "1" * 32, "state": "exhausted", "remaining": 0, "rerun": False}})
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(m.a.reuse_isolated_tests(target, [source]), [("profile:sample", str(source.resolve()), 0)])
             capture_attempts(target)
@@ -670,6 +671,34 @@ class Contracts(unittest.TestCase):
             forged["checks"]["profile:sample"]["evidence_transfer"]["review"]["reason"] = "Reviewed elsewhere"
             with self.assertRaisesRegex(ValueError, "policy transfer"):
                 m.validate_attestation(forged, identity, root)
+
+    def test_publication_matches_unscheduled_evidence_with_schedule_metadata(self):
+        name = "profile:sample"
+        path = self.output / "receipt.json"
+        _, receipt = m.a.load_bound(self.output)
+        (self.output / receipt["checks"][name]["log"]).unlink()
+        receipt["checks"][name] = {"status": "pending"}
+        m.a.save(self.output, receipt)
+        options = ((), [name], "Known fixture issue", "operator:fixture")
+        baseline = m.attestation(self.output, self.identity, *options)
+        self.assertEqual(baseline["checks"][name]["execution"], "operator-deferred")
+        evidence = path.read_bytes()
+        for state in ("queued", "running", "done", "exhausted"):
+            with self.subTest(state=state):
+                schedule = {name: {"id": "1" * 32, "state": state, "remaining": 0, "rerun": True}}
+                m.a.save_schedule(self.output, schedule)
+                self.assertEqual(path.read_bytes(), evidence)
+                self.assertEqual(m.canonical(m.attestation(self.output, self.identity, *options)), m.canonical(baseline))
+                with self.assertRaisesRegex(ValueError, "complete passing acceptance"):
+                    m.attestation(self.output, self.identity)
+
+                # Older collectors embedded this metadata. Master binds the exact receipt bytes.
+                m.a.replace_json(path, {**receipt, "local_schedule": schedule})
+                expected = copy.deepcopy(baseline)
+                digest = m.a.digest(path)
+                expected["receipt_sha256"] = expected["checks"][name]["profile_deferral"]["receipt_sha256"] = digest
+                self.assertEqual(m.canonical(m.attestation(self.output, self.identity, *options)), m.canonical(expected))
+                path.write_bytes(evidence)
 
     def test_accept_offers_earlier_same_version_candidates_newest_first(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -821,7 +850,7 @@ class Contracts(unittest.TestCase):
                  patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
                                            "accept", "--candidate", identity["candidate_id"], *option]):
                 self.assertEqual(m.main(), 1)
-        exhausted = json.loads((output / "receipt.json").read_text())["local_schedule"]["profile:sample"]
+        exhausted = m.a.load_schedule(output, {})["profile:sample"]
         self.assertEqual(exhausted["state"], "exhausted")
 
     def test_release_scope_uses_previous_merged_tag_and_product_migration_paths(self):
@@ -2417,6 +2446,7 @@ class HostedChecks(unittest.TestCase):
         m.a.save(self.remote, receipt)
         capture_attempts(self.remote, {"profile:sample"})
         root, receipt = m.a.load_bound(self.output)
+        self.local_prior = receipt["checks"]["profile:sample"]
         receipt["checks"]["profile:sample"] = {"status": "pending"}
         m.a.save(self.output, receipt)
         self.policy = next(iter(m.a.CI_HOSTED_POLICIES))
@@ -2451,8 +2481,7 @@ class HostedChecks(unittest.TestCase):
                     return
                 return super().download(path, destination)
         self.github = HostedGitHub(self.identity)
-        self.addCleanup(patch.stopall)
-        patch.object(m.a, "CI_HOSTED_CHECKS", frozenset({"profile:sample"})).start()
+        self.enterContext(patch.object(m.a, "CI_HOSTED_CHECKS", frozenset({"profile:sample"})))
         self.receipt_mutation = lambda value: None
         self.execution_attempt = 1
 
@@ -2864,20 +2893,23 @@ class HostedChecks(unittest.TestCase):
             self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [name], False, [], 0), 1)
             _, first = m.a.load_bound(self.output)
             self.assertEqual(first["checks"][name], {"status": "pending"})
-            request = first["local_schedule"][name]
+            request = m.a.load_schedule(self.output, first)[name]
             self.assertEqual((request["state"], request["remaining"]), ("exhausted", 0))
 
             self.run["status"] = self.job["status"] = "completed"
             self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0), 0)
         _, last = m.a.load_bound(self.output)
-        self.assertEqual(last["local_schedule"][name], dict(request, state="done"))
+        self.assertEqual(m.a.load_schedule(self.output, last)[name], dict(request, state="done"))
         self.assertEqual(last["checks"][name]["execution"], "ci-hosted")
         m.validate_attestation(m.attestation(self.output, self.identity), self.identity, self.root)
 
-    def test_queued_explicit_rerun_prevents_attesting_prior_pass(self):
+    def test_fresh_local_rerun_cannot_count_an_uncounted_hosted_pass(self):
         name = "profile:sample"
-        prior, _ = self.collect()
         _, receipt = m.a.load_bound(self.output)
+        receipt["checks"][name] = self.local_prior
+        m.a.save(self.output, receipt)
+        _, receipt = capture_attempts(self.output, {name})
+        prior = receipt["checks"][name]
         stop = threading.Event()
 
         def held(_):
@@ -2889,17 +2921,17 @@ class HostedChecks(unittest.TestCase):
              patch.object(m.a, "execute", side_effect=AssertionError("unexpected local launch")):
             self.assertEqual(m.a.run_checks(self.output, [1], [name], True), 1)
         _, queued = m.a.load_bound(self.output)
-        self.assertEqual(queued["local_schedule"][name]["state"], "queued")
+        queued_request = m.a.load_schedule(self.output, queued)[name]
+        self.assertEqual(queued_request["state"], "queued")
         self.assertEqual(queued["checks"][name], prior)
-        with self.assertRaisesRegex(ValueError, "complete passing acceptance"):
-            m.attestation(self.output, self.identity)
+        m.validate_attestation(m.attestation(self.output, self.identity), self.identity, self.root)
 
         with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
              patch.object(m.a, "execute", wraps=m.a.execute) as launch:
             self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], False, [], 0), 0)
         self.assertEqual([call.args[0] for call in launch.call_args_list], [name])
         _, finished = m.a.load_bound(self.output)
-        self.assertEqual(finished["local_schedule"][name]["id"], queued["local_schedule"][name]["id"])
+        self.assertEqual(m.a.load_schedule(self.output, finished)[name]["id"], queued_request["id"])
         self.assertNotEqual(finished["checks"][name]["original_attempt"], prior["original_attempt"])
 
         execute = m.a.execute
@@ -2910,9 +2942,10 @@ class HostedChecks(unittest.TestCase):
              patch.object(m.a, "execute", side_effect=refuse), \
              patch.dict(os.environ, {"SUBYARD_E2E_CAPACITY_WAIT": "0s"}):
             self.assertEqual(m.a.run_checks(self.output, [1], [name], True), 1)
-        result, report = self.collect()
+        result, _ = self.collect()
         self.assertEqual(result["status"], "blocked")
-        self.assertIn("hosted attempt predates the local rerun", report)
+        with self.assertRaisesRegex(ValueError, "complete passing acceptance"):
+            m.attestation(self.output, self.identity)
 
     def test_accept_keeps_one_local_plan_across_hosted_fallback_and_repeated_accept(self):
         local, split, full = "vm:local", "vm:split", "vm:full"
@@ -2977,7 +3010,7 @@ class HostedChecks(unittest.TestCase):
                      patch.dict(os.environ, {"SUBYARD_E2E_CAPACITY_WAIT": "0s"}):
                     if recorded_split:
                         self.assertEqual(m.a.run_checks(output, [1], [split], False), 1)
-                        recorded = json.loads((output / "receipt.json").read_text())["local_schedule"][split]
+                        recorded = m.a.load_schedule(output, {})[split]
                         self.assertEqual(recorded["state"], "done")
                         self.assertEqual(calls, [split])
                         calls.clear()
@@ -2986,7 +3019,7 @@ class HostedChecks(unittest.TestCase):
                     only = [full] if state == "late-retry" else []
                     code = 0 if state == "late-retry" else 1
                     self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], only, True, [], 60), code)
-                    first = json.loads((output / "receipt.json").read_text())
+                    first = m.a.load_schedule(output, {})
                     expected = {"failed": [local, "collect"], "refused": [local, "wait", "collect", split, full],
                                 "hosted-pass": [local, "wait", "collect", full],
                                 "recorded-split-failure": [local, "wait", "collect", split, full],
@@ -2996,14 +3029,15 @@ class HostedChecks(unittest.TestCase):
                     calls.clear()
                     self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], only, True, [], 60), code)
                     last = json.loads((output / "receipt.json").read_text())
+                    last_schedule = m.a.load_schedule(output, last)
 
                 self.assertEqual(calls, {"failed": ["wait", "collect", split, full],
                                          "fallback-failure": ["wait", "collect"]}.get(state, []))
-                self.assertEqual(first["local_schedule"][local], last["local_schedule"][local])
-                self.assertEqual(last["local_schedule"][local]["state"], "done" if state in ("failed", "late-retry") else "exhausted")
+                self.assertEqual(first[local], last_schedule[local])
+                self.assertEqual(last_schedule[local]["state"], "done" if state in ("failed", "late-retry") else "exhausted")
                 self.assertEqual(last["checks"]["verify"], receipt["checks"]["verify"])
                 if state == "fallback-failure":
-                    self.assertEqual(first["local_schedule"][split], last["local_schedule"][split])
+                    self.assertEqual(first[split], last_schedule[split])
                 else:
                     self.assertEqual(last["checks"][full]["status"], "passed")
                 self.assertEqual(len(list((output / "runs").glob("*.json"))), 3 if recorded_split else 2)

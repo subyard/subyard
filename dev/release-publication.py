@@ -732,8 +732,7 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
                                          deferral_authorization_reference, identity, root, receipt)
     if set(accepted) & set(deferred_profiles):
         raise ValueError("a profile check cannot have both failure acceptance and deferral")
-    if ((receipt["reproducible_result"] != "passed" and not accepted and not deferred_profiles) or a.open_local_requests(receipt)
-        or receipt.get("superseded") or receipt.get("preparation") != identity
+    if ((receipt["reproducible_result"] != "passed" and not accepted and not deferred_profiles) or receipt.get("superseded") or receipt.get("preparation") != identity
         or receipt["source_fingerprint"] != identity["source_fingerprint"]
         or receipt["release_files"] != identity["release_files"]):
         raise ValueError("complete passing acceptance of this exact candidate is required")
@@ -1488,7 +1487,7 @@ def collect_ci(github, directory, identity, *, snapshot=None, cancelled=None):
         if name not in a.CI_HOSTED_CHECKS or name not in commands:
             print(f"CI-HOSTED-SKIP {name}: unknown check", flush=True)
             continue
-        if not a.hosted_target_open(receipt, name):
+        if not a.transfer_target_open(name, receipt["checks"][name]):
             continue
         try:
             matches = [job for job in jobs if job.get("name") == name and job.get("status") == "completed" and job.get("conclusion") == "success"]
@@ -1548,8 +1547,6 @@ def collect_ci(github, directory, identity, *, snapshot=None, cancelled=None):
                 or selected.get("selected_status") != "passed" or selected.get("receipt_sha256") != a.digest(cached / "receipt.json")):
                 raise ValueError("foreign candidate or incomplete hosted selection")
             record, manifest = a.original_attempt(cached, incoming, name, result)
-            if record["id"] == receipt.get("local_schedule", {}).get(name, {}).get("prior_hosted_attempt"):
-                raise ValueError("hosted attempt predates the local rerun")
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
@@ -1564,7 +1561,7 @@ def collect_ci(github, directory, identity, *, snapshot=None, cancelled=None):
             shutil.copyfile(cached / result["log"], output / log)
             result["log"] = log
             if snapshot is None:
-                a.record_hosted_result(receipt, name, result)
+                receipt["checks"][name] = result
                 a.save(output, receipt)
                 a.report_hosted_result(output, name, result)
             collected[name] = result
