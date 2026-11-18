@@ -7,7 +7,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 PROFILE="$ROOT/config/profiles/test-vms-client"
 slot=''
-usage() { printf 'usage: acceptance.sh --slot N\n' >&2; exit 2; }
+usage() { printf 'usage: acceptance.sh --slot N | --preflight\n' >&2; exit 2; }
+preflight() {
+  env -u SUBYARD_E2E_LEASE_IMAGE bash "$PROFILE/tests/fixtures.sh"
+}
+if [ "$#" = 1 ] && [ "$1" = --preflight ]; then
+  preflight
+  exit 0
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --slot) [ "$#" -ge 2 ] && [ -z "$slot" ] || usage; slot="$2"; shift 2 ;;
@@ -16,7 +23,7 @@ while [ "$#" -gt 0 ]; do
 done
 [[ "$slot" =~ ^[1-9][0-9]*$ ]] || usage
 fail() { printf 'test-vms-client acceptance: %s\n' "$*" >&2; exit 1; }
-bash "$PROFILE/tests/run.sh"
+preflight
 route=()
 if [ -n "${SUBYARD_E2E_ROLLOUT_YARD:-}" ]; then
   [[ "$SUBYARD_E2E_ROLLOUT_YARD" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || usage

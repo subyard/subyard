@@ -160,6 +160,7 @@ type testVMExecution struct {
 	service        *serviceSelection
 	json           bool
 	environment    string
+	image          string
 	action         string
 	slot           int
 	identity       testvmsruntime.LeaseIdentity
@@ -194,12 +195,22 @@ func (cli *CLI) prepareTestVMExecution(
 	action := ""
 	jsonOutput := false
 	environment := ""
+	image := ""
 	slot := 0
 	var expectedGeneration, expectedEpoch uint64
 	var expectedGenerationSet, expectedEpochSet bool
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		switch argument {
+		case "--image":
+			index++
+			if index >= len(arguments) || arguments[index] == "" || image != "" {
+				return nil, errors.New("--image requires one image")
+			}
+			image = arguments[index]
+			if err := testvmsruntime.ValidateImage(image); err != nil {
+				return nil, err
+			}
 		case "--json":
 			jsonOutput = true
 		case "-y", "--yes":
@@ -250,6 +261,9 @@ func (cli *CLI) prepareTestVMExecution(
 			action = argument
 		}
 	}
+	if image != "" && action != "refresh" {
+		return nil, errors.New("--image is valid only for refresh")
+	}
 	if jsonOutput && action != "status" {
 		return nil, errors.New("--json is supported only by test-vms status")
 	}
@@ -293,7 +307,7 @@ func (cli *CLI) prepareTestVMExecution(
 			return nil, fmt.Errorf("yard %q must be running", loaded.Context.YardInstanceName)
 		}
 	}
-	execution := &testVMExecution{action: action, slot: slot, environment: environment, json: jsonOutput}
+	execution := &testVMExecution{action: action, slot: slot, environment: environment, image: image, json: jsonOutput}
 	if action == "refresh" && loaded.Context.AccessKind != domain.AccessRemote {
 		pool, err := cli.probeTestVMPool(ctx, loaded)
 		if err != nil {
@@ -467,7 +481,7 @@ func (execution *testVMExecution) actionPlan() (domain.ActionID, domain.ActionDe
 	switch execution.action {
 	case "refresh":
 		return "test-vms.refresh", domain.ActionDelta{Changed: true, Consequences: []string{
-			"build and validate a new immutable base for " + execution.environment,
+			"build and validate a new immutable base for " + execution.environment + " image=" + testVMImage(execution.image),
 			"reserve builder resources; preserve active leases and the previous base on failure",
 		}}, nil
 	case "status":
@@ -562,6 +576,9 @@ func (cli *CLI) executeTestVMs(
 	arguments := []string{argument}
 	if execution.action == "refresh" {
 		arguments = append(arguments, "--yes")
+		if execution.image != "" {
+			arguments = append(arguments, "--image", execution.image)
+		}
 	}
 	if execution.action != "status" && execution.action != "refresh" {
 		arguments = append(arguments,
@@ -645,7 +662,7 @@ func (execution *testVMExecution) binding() string {
 	if execution.poolSnapshot != nil {
 		return testVMPoolBinding(*execution.poolSnapshot)
 	}
-	return operationStateDigest(struct{ Action, Environment string }{execution.action, execution.environment})
+	return operationStateDigest(struct{ Action, Environment, Image string }{execution.action, execution.environment, testVMImage(execution.image)})
 }
 func (execution *testVMExecution) steps() []domain.OperationStep {
 	if execution.service != nil && execution.action != "status" {
@@ -661,7 +678,7 @@ func (execution *testVMExecution) steps() []domain.OperationStep {
 		return nil
 	}
 	if execution.action == "refresh" {
-		return []domain.OperationStep{{ID: "base", Target: "test-vms/base/" + execution.environment, Observed: "captured active lease pool", Desired: "validated immutable base for approved environment; active allocations retained", Decision: decision, Preconditions: []string{"captured pool allocation identities remain unchanged"}, Verify: "native base validation succeeds before immutable publication", Consequence: "publish the validated immutable test VM base while retaining active allocations"}}
+		return []domain.OperationStep{{ID: "base", Target: "test-vms/base/" + execution.environment + "/" + testVMImage(execution.image), Observed: "captured active lease pool", Desired: "validated immutable base for approved environment; active allocations retained", Decision: decision, Preconditions: []string{"captured pool allocation identities remain unchanged"}, Verify: "native base validation succeeds before immutable publication", Consequence: "publish the validated immutable test VM base while retaining active allocations"}}
 	}
 	observed := "captured lease identity"
 	if execution.snapshot != nil {
@@ -675,4 +692,11 @@ func (execution *testVMExecution) steps() []domain.OperationStep {
 		desired = "available; legacy retained disks preserved"
 	}
 	return []domain.OperationStep{{ID: "slot", Target: fmt.Sprintf("test-vms/slot-%03d", execution.slot), Observed: observed, Desired: desired, Decision: decision, Preconditions: []string{"captured resource generation and lease epoch match native CAS"}, Verify: "native stop/empty-storage verification and available pool status", Consequence: "apply the captured test VM slot transition"}}
+}
+
+func testVMImage(image string) string {
+	if image == "" {
+		return testvmsruntime.DefaultImage
+	}
+	return image
 }

@@ -95,6 +95,7 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		runtime.Events = &recorder
 	}
 	yes := false
+	image := ""
 	var expectedGeneration uint64
 	var expectedEpoch uint64
 	expectedGenerationSet := false
@@ -103,6 +104,15 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		switch argument {
+		case "--image":
+			index++
+			if index >= len(arguments) || arguments[index] == "" || image != "" {
+				return errors.New("--image requires one image")
+			}
+			image = arguments[index]
+			if err := ValidateImage(image); err != nil {
+				return err
+			}
 		case "-y", "--yes":
 			yes = true
 		case "--expect-resource-generation", "--expect-lease-epoch":
@@ -138,6 +148,9 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		return errors.New("test-vms worker requires exactly one command")
 	}
 	action := positional[0]
+	if image != "" && !strings.HasPrefix(action, "refresh-") {
+		return errors.New("--image is valid only for refresh")
+	}
 	expectsLeaseIdentity := strings.HasPrefix(action, "revoke-slot-") ||
 		strings.HasPrefix(action, "recover-slot-") || strings.HasPrefix(action, "retire-legacy-slot-")
 	if expectsLeaseIdentity && (!expectedGenerationSet || !expectedEpochSet) {
@@ -195,7 +208,7 @@ func (runtime *Runtime) Run(ctx context.Context, arguments []string, environment
 		if !yes {
 			return errors.New("confirmation required (re-run with --yes for automation)")
 		}
-		return runtime.RefreshBase(ctx, LeaseStore{Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now}, strings.TrimPrefix(action, "refresh-"))
+		return runtime.RefreshBase(ctx, LeaseStore{Path: runtime.Config.leaseState(), SlotCount: runtime.Config.SlotCount, Now: runtime.Now}, strings.TrimPrefix(action, "refresh-"), image)
 	}
 	if strings.HasPrefix(action, "retire-legacy-slot-") {
 		if !yes {

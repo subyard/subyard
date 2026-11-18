@@ -250,9 +250,10 @@ case "${1:-}" in
     keep_diagnostics
     ;;
   check)
-    [ "$#" -ge 4 ] || die 'usage: periodic-e2e.sh check ID BUNDLE COMMAND...'
+    [ "$#" -ge 6 ] && [ "$4" = --image ] && [ -n "$5" ] \
+      || die 'usage: periodic-e2e.sh check ID BUNDLE --image IMAGE COMMAND...'
     shift
-    check_probes "$@"
+    SUBYARD_E2E_LEASE_IMAGE="$4" check_probes "$1" "$2" "${@:5}"
     ;;
   acceptance)
     [ "$#" = 5 ] || die 'usage: periodic-e2e.sh acceptance ID PREPARED OUTPUT VERSION'
@@ -266,5 +267,5 @@ case "${1:-}" in
     check_probes "$check_id" "$output/candidate-bundle.tar.gz" \
       run_collector_selection "$output" "$check_id"
     ;;
-  *) die 'usage: periodic-e2e.sh {check ID BUNDLE COMMAND...|acceptance ID PREPARED OUTPUT VERSION}' ;;
+  *) die 'usage: periodic-e2e.sh {check ID BUNDLE --image IMAGE COMMAND...|acceptance ID PREPARED OUTPUT VERSION}' ;;
 esac

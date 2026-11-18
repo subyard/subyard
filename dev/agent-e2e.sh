@@ -53,10 +53,10 @@ Usage:
   dev/agent-e2e.sh [--owner ID] [--pool ID] --logs [--slot N] [-n 1..200] [--json]
   dev/agent-e2e.sh [--owner ID] [--pool ID] --observe CURSOR|-
   dev/agent-e2e.sh [--owner ID] [--pool ID] --incident ID
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--disk 50GiB] [--vm 1|2|both] -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] --ssh 1|2 [-- COMMAND [ARG...]]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] --ssh-stdin 1|2 -- COMMAND [ARG...]
-  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] [--disk 50GiB] --verify-boundary
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--wait DURATION] [--purpose LABEL] [--type subyard-pair|android-test] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] [--vm 1|2|both] -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --ssh 1|2 [-- COMMAND [ARG...]]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--purpose LABEL] [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --ssh-stdin 1|2 -- COMMAND [ARG...]
+  dev/agent-e2e.sh [--owner ID] [--pool ID] --slot N [--vm-count 1|2] [--disk 50GiB] [--image debian-13|ubuntu-24.04|ubuntu-26.04] --verify-boundary
 
 The normal form copies the current tracked, dirty and non-ignored public worktree to each selected
 VM, runs COMMAND as dev, streams output and removes every run directory. A direct ./bin/yard command
@@ -76,6 +76,7 @@ Held leases expire twenty minutes after the last successful renewal or the initi
 The operator owns the outer test yard. Acquire creates disposable VMs from an immutable base;
 release fences access and deletes their disks. --type defaults to subyard-pair (two VMs);
 --vm-count 1 requests one standard VM instead. android-test supports only one larger VM.
+--image selects debian-13 (default), ubuntu-24.04 or ubuntu-26.04. Each OS and type keeps its own base.
 --disk 50GiB requests a 50 GiB disk per VM; omission uses the configured default.
 --vm selects the payload destination without changing the allocation count. The default VM
 selection includes every requested VM. e2e-vm-1 and e2e-vm-2 are
@@ -414,7 +415,7 @@ main() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --yard | --owner | --pool) route_option "$@"; shift 2 ;;
-      --slot | --type | --disk | --vm-count) allocation_option "$@"; shift 2 ;;
+      --slot | --type | --disk | --vm-count | --image) allocation_option "$@"; shift 2 ;;
       --vm) [ "$#" -ge 2 ] || die "--vm needs 1, 2 or both"; selector="$2"; shift 2 ;;
       --ssh) [ "$#" -ge 2 ] || die "--ssh needs 1 or 2"; mode=ssh; ssh_vm="$2"; shift 2 ;;
       --ssh-stdin)
@@ -479,6 +480,10 @@ main() {
   case "$mode" in
     run|ssh|verify) [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease" ;;
   esac
+  case "$mode" in
+    run|ssh|verify) ;;
+    *) [ -z "$IMAGE_REQUESTED" ] || die '--image is valid only for commands that acquire a lease' ;;
+  esac
   resolve_service_selection "$mode"
   configure_yard_scope
   [ -z "$diagnostic_mode" ] || [ "$diagnostic_mode" = "$mode" ] || die 'diagnostic reads cannot be combined with another mode'
@@ -486,12 +491,12 @@ main() {
   [ "$log_count_set" = 0 ] || [ "$mode" = logs ] || die '-n is valid only with --logs'
   [ -z "$incident_id" ] || [ "$mode" = incident ] || die '--incident cannot be combined with another mode'
   if [ "$mode" = observe ]; then
-    [ "${#command[@]}" -eq 0 ] && [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] && [ -z "$LEASE_REQUESTED_SLOT" ] || die 'observer reads accept no allocation options'
+    [ "${#command[@]}" -eq 0 ] && [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ -z "$IMAGE_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] && [ -z "$LEASE_REQUESTED_SLOT" ] || die 'observer reads accept no allocation options'
     read_agent_observations "$observer_cursor"
     return
   fi
   if [ "$mode" = logs ] || [ "$mode" = incident ]; then
-    [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] \
+    [ -z "$purpose_override" ] && [ -z "$VM_COUNT_REQUESTED" ] && [ -z "$DISK_REQUESTED" ] && [ -z "$IMAGE_REQUESTED" ] && [ "$WAIT_SECONDS" = 0 ] \
       || die 'diagnostic reads do not accept allocation options'
     [ "$mode" != incident ] || [ -z "$LEASE_REQUESTED_SLOT" ] || die '--slot is not valid with --incident'
     [ "${#command[@]}" -eq 0 ] || die 'diagnostic reads take no guest command'

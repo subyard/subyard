@@ -18,7 +18,7 @@ OLD_INSTALLER_SHA256=cbf54fbfc846c2e936c53a0d7efa6366f83220e906dfb893f0671a057b2
 OLD_BUNDLE_SHA256=9d9031ea8bd7c310d97a3d2060109c88754cc44f864d41b2f5c558710e77c3df
 
 usage() {
-  printf 'Usage: dev/e2e/nm-admin-uplink.sh --preflight | --slot N --lane upgrade|fresh\n' >&2
+  printf 'Usage: dev/e2e/nm-admin-uplink.sh --preflight | --slot N --lane upgrade|fresh [--image debian-13|ubuntu-24.04|ubuntu-26.04]\n' >&2
   exit 2
 }
 
@@ -46,11 +46,15 @@ controller_reboot() {
 
 controller_main() {
   local slot='' lane='' phase
-  [ "$#" = 4 ] && [ "$1" = --slot ] && [ "$3" = --lane ] || usage
+  { [ "$#" = 4 ] || [ "$#" = 6 ]; } && [ "$1" = --slot ] && [ "$3" = --lane ] || usage
   slot="$2" lane="$4"
   case "$lane" in upgrade|fresh) ;; *) usage ;; esac
   # shellcheck source=dev/agent-e2e.sh
   . "$ROOT/dev/agent-e2e.sh"
+  if [ "$#" = 6 ]; then
+    [ "$5" = --image ] || usage
+    allocation_option --image "$6"
+  fi
   set_requested_slot "$slot" --slot
   # Consumed by the sourced lease client.
   # shellcheck disable=SC2034

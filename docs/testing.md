@@ -215,6 +215,7 @@ A native-only checkout gets neutral guidance. The diagnostic environment value
 | GitHub broker status, loaded identity and issuer | Owning `config/profiles/github/broker` tests; required `TestConnectionFixtureIssuerLocal` and runtime skew/refusal cases | `TestClientHandlerAndFakeGitHubContractOverUnixSocket`: production handler/client plus synthetic upstream; `config/profiles/github/tests/run.sh --preflight` runs required cases once and checks JSON pass/skip counts | Owning GitHub acceptance: installed broker and client identities | Broker protocol/consumer changes; local Go/Python prerequisites, T0/T1 |
 | Shared RPC implementations | Go shared frame contracts and Rust golden/fault tests | Linux Veranda native Rust client builds the current Go engine, negotiates and queries it, then refuses version skew; existing Python subprocess owner retains the fault matrix | Existing Veranda owner/SSH lanes | RPC schema/client/server changes; stable Rust, Python and Go, T1; cold build separate |
 | Installed credential timer ownership and intent | Owning credential/release adapter checks, including verified ancestor replacement | `tests/installed-runtime-refresh.sh`: production validator on exact-mode `/tmp` files; receipt/no-receipt, altered/foreign/symlink/mode refusal with no writes or manager calls; stopped/disabled intent | `config/profiles/github/tests/e2e/acceptance.sh --installed-worker --slot N`: real user manager, installed runtime admission, due worker and SSH/SOPS peer result | Keys unit/sandbox, installer/refresh or shared admission changes; local checks T0/T1, actual worker T3 |
+| Periodic hosted VM image selection | `tests/workflow-real-adapter-gate.sh` checks the dispatch choices, all planned commands, pool boundary and Intel retry | Owning client and broker tests check lease request negotiation, grant validation and Incus alias selection | Periodic E2E on the selected OS, including both optional `periodic:nm-guard/fresh` and `periodic:nm-guard/upgrade` lanes | Changes to Periodic image routing, supported lease images or the NM guard fixture |
 | Test-VM client handles and skill delivery | `config/profiles/test-vms-client/tests/run.sh`: host-access refusal and selection, skill/client delivery with Hermes links and deselection, session handles against a fake facade | `tests/agent-e2e.sh`: the runner built on the same client | `config/profiles/test-vms-client/tests/e2e/acceptance.sh --slot N`: installed candidate provisions the profile into a Hermes-preset yard, then deselection and init retire it; installed copy outside a checkout acquires, runs root commands in two calls of one lease, releases; runner `--verify-boundary` | Shared client, its profile hook or skill, or facade lease protocol changes |
 | Broker bundled base recipe and supported upgrade | `config/profiles/test-vms`: `TestBaseRecipeInstallerContract`, both real archived environment recipes and installer with minimal context | Owning `tests/run.sh --preflight`: installer identity regression → bundled recipe contract; nonzero required cases and zero skips, validated collector PASS reuse. The full profile run repeats the installer check except under `make verify`, whose passed core suite sets `SUBYARD_CORE_INSTALLER_CHECKED=1` | `config/profiles/test-vms/tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`: pinned actual 0.28.0 updater → frozen candidate → cold acquire, new base/boot/SSH/release/cleanup | Recipe or archive producer, installer/called libraries, broker activation or release migrations; T0/T1 before T3. Synthetic rollback and full-uninstall remain separate required coverage |
 | Frozen historical producer ownership | `TestHistoricalUninstallSourceIgnoresMigrationReadiness`: frozen public bytes and independent production hash oracle; unknown/tampered/unsealed/rehashed negatives | Existing release/uninstall filesystem contracts preserve refusal and retained journals | Required full-uninstall and optional Periodic-only source-upgrade lanes when their physical behavior changes | Historical recognition/migration changes; owning frozen fixtures with provenance, T0/T1 |
@@ -732,7 +733,13 @@ except `boundary` and `cleanup`; a lane that the catalog also declares as its ow
 `split-covered` line of `--list-lanes`) keeps this `p0:` run instead of a duplicate `vm:` check. The `pool` job first installs the candidate's `test-vms` service on a
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
-becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it.
+becomes an ordinary owner with the packaged candidate. A dispatch can select
+`image=debian-13`, `image=ubuntu-24.04` or `image=ubuntu-26.04`. The default and scheduled
+runs use Debian 13. The planner passes `--image` to the hosted wrapper for every lane, and the
+pool boundary check uses the same image. The wrapper gives lane controllers a lease image default,
+which the shared client sends to the hosted broker. The broker creates leases from the matching
+Incus VM base. Intel retries retain the original image. Lane IDs and fixture images inside the
+leased VMs are shared across the dispatch choices.
 The `pool`, `check` and Intel `nested` jobs use the bounded runner/P0 snapshots and failed-log
 tails [listed in hosted check diagnostics](reference/release-publication.md#exact-candidate-hosted-release-checks), uploaded on every outcome as `pool-diagnostics-ATTEMPT`,
 `diagnostics-JOB_INDEX-ATTEMPT` and `nested-diagnostics-JOB_INDEX-ATTEMPT`. Their `runner/check.log`
@@ -780,6 +787,9 @@ bundle. Its controller budget is 45 minutes plus 10 minutes for TERM cleanup; a 
 17 minutes. It is outside the release catalog and release acceptance; changes listed in
 [coverage ownership](#coverage-ownership) require this lane.
 
+The optional `periodic:nm-guard/fresh` and `periodic:nm-guard/upgrade` checks use the selected
+lease image and run by default. They are outside release acceptance.
+
 A manual dispatch can name the check ids to run in `checks`. A check the planner marks `manual`, such
 as `veranda:wayland-ime`, runs only when named there. The separate Stale runs workflow cancels
 runs of any workflow left queued or in progress for over a day, since such a run holds its
@@ -792,7 +802,7 @@ test the branch head at their start, so watch them too: a required check counts 
 the current branch head. A parent run that finished before a later push does not cover the new head.
 
 ```sh
-subyard-github run -- gh workflow run periodic-e2e.yml --ref BRANCH -f checks='ID ...'
+subyard-github run -- gh workflow run periodic-e2e.yml --ref BRANCH -f image=ubuntu-24.04 -f checks='ID ...'
 subyard-github run -- gh run list --workflow periodic-e2e.yml --branch BRANCH --commit HEAD_SHA \
   --json databaseId,displayTitle,status,conclusion
 subyard-github run -- gh run watch RUN_ID --exit-status

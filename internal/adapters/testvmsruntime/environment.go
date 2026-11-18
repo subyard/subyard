@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 const (
@@ -16,6 +18,7 @@ const (
 // select a name and supported guest count, never arbitrary devices, privileges or resource limits.
 type EnvironmentSpec struct {
 	Name      string `json:"type"`
+	Image     string `json:"image,omitempty"`
 	Count     int    `json:"vm_count"`
 	CPU       int    `json:"cpu_per_vm"`
 	Memory    string `json:"memory_per_vm"`
@@ -43,21 +46,57 @@ func (cfg Config) environmentSpecForArch(name, arch string) (EnvironmentSpec, er
 	return spec, spec.Validate()
 }
 
+const DefaultImage = "debian-13"
+
+func normalizedImage(image string) string {
+	if image == "" {
+		return DefaultImage
+	}
+	return image
+}
+
+// ValidateImage accepts only the supported guest OS releases.
+func ValidateImage(image string) error {
+	switch normalizedImage(image) {
+	case DefaultImage, "ubuntu-24.04", "ubuntu-26.04":
+		return nil
+	default:
+		return fmt.Errorf("unsupported VM image %q (use debian-13, ubuntu-24.04 or ubuntu-26.04)", image)
+	}
+}
+
+func (cfg Config) withImage(image string) (Config, error) {
+	if err := ValidateImage(image); err != nil {
+		return cfg, err
+	}
+	switch image {
+	case DefaultImage:
+		cfg.Image = "images:debian/13/cloud"
+	case "ubuntu-24.04":
+		cfg.Image = "images:ubuntu/24.04/cloud"
+	case "ubuntu-26.04":
+		cfg.Image = "images:ubuntu/26.04/cloud"
+	}
+	// An omitted selection preserves the broker's existing configured source.
+	return cfg, nil
+}
+
 func (spec EnvironmentSpec) Validate() error {
+	refusals := []error{ValidateImage(spec.Image)}
 	if spec.Lifecycle != DisposableLifecycle || spec.CPU < 1 {
-		return errors.New("invalid environment lifecycle or CPU limit")
+		refusals = append(refusals, errors.New("invalid environment lifecycle or CPU limit"))
 	}
 	if (spec.Name != EnvironmentPair || (spec.Count != 1 && spec.Count != 2)) &&
 		(spec.Name != EnvironmentAndroid || spec.Count != 1) {
-		return errors.New("invalid named environment composition")
+		refusals = append(refusals, errors.New("invalid named environment composition"))
 	}
 	if _, err := sizeMiB(spec.Memory); err != nil {
-		return errors.New("invalid environment memory limit")
+		refusals = append(refusals, errors.New("invalid environment memory limit"))
 	}
 	if disk, err := sizeMiB(spec.Disk); err != nil || disk < 10*1024 {
-		return errors.New("environment disk must be at least 10GiB")
+		refusals = append(refusals, errors.New("environment disk must be at least 10GiB"))
 	}
-	return nil
+	return domain.CollectRefusals(refusals...)
 }
 
 func (cfg Config) guestCount() int {

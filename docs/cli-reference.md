@@ -186,7 +186,7 @@ Usage: yard service <register|install|start|stop|update|remove> ID [--owner ID] 
 manage the selected owner test VM service and read its broker log.
 
 ```text
-Usage: yard test-vms [--owner ID] [--pool ID] <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test | revoke --slot N | recover --slot N | retire-legacy --slot N>
+Usage: yard test-vms [--owner ID] [--pool ID] <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test [--image debian-13|ubuntu-24.04|ubuntu-26.04] | revoke --slot N | recover --slot N | retire-legacy --slot N>
 ```
 
 ## stop

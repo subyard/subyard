@@ -57,6 +57,7 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 	registry := ImageRegistry{SchemaVersion: 1, Owner: strings.Repeat("a", 32), LastError: "private/path and secret detail",
 		Bases: []BaseImage{
 			{Key: strings.Repeat("b", 64), Fingerprint: strings.Repeat("c", 64), Environment: EnvironmentPair, CreatedAt: now.Add(-time.Hour), Size: 42},
+			{Key: strings.Repeat("f", 64), Fingerprint: strings.Repeat("0", 64), Environment: EnvironmentPair, Image: "ubuntu-24.04", CreatedAt: now, Size: 43},
 			{Key: strings.Repeat("d", 64), Fingerprint: strings.Repeat("e", 64), Environment: EnvironmentPair, CreatedAt: now, Unusable: true},
 		},
 		Build: &BaseBuild{Environment: EnvironmentAndroid, Project: "private-builder-path", Memory: 8 << 30, Disk: 120 << 30},
@@ -102,8 +103,11 @@ func TestResourceStatusIsReadOnlyAndSeparatesPhysicalUsage(t *testing.T) {
 		value.Memory.PeakAvailable || value.Memory.EventsAvailable {
 		t.Fatal("physical MemAvailable was omitted or presented as full outer-host telemetry")
 	}
-	if value.Bases[0].Unusable || !value.Bases[1].Unusable || value.Bases[1].Current {
+	if value.Bases[0].Unusable || !value.Bases[2].Unusable || value.Bases[2].Current {
 		t.Fatal("unusable image concealed or selected as current")
+	}
+	if value.Bases[0].Image != DefaultImage || value.Bases[1].Image != "ubuntu-24.04" || !value.Bases[1].Current || value.Builder.Image != DefaultImage {
+		t.Fatal("status did not distinguish OS base identities")
 	}
 	body, _ := json.Marshal(value)
 	for _, secret := range []string{"secret-lease", "private-builder-path", "private/path", registry.Owner} {

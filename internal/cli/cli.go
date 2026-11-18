@@ -1097,7 +1097,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return 0
 	case "@test-vms":
 		fmt.Fprintf(cli.options.Stdout,
-			"Usage: %s test-vms [--owner ID] [--pool ID] <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test | revoke --slot N | recover --slot N | retire-legacy --slot N>\n",
+			"Usage: %s test-vms [--owner ID] [--pool ID] <logs [-n N] [-f] [--slot N] | status [--json] | refresh subyard-pair|android-test [--image debian-13|ubuntu-24.04|ubuntu-26.04] | revoke --slot N | recover --slot N | retire-legacy --slot N>\n",
 			cli.options.Program)
 		return 0
 	case "@teardown":

@@ -157,7 +157,8 @@ trap - EXIT
 ssh-keygen -A
 install -d -m 0755 /run/sshd
 sshd -t
-systemctl reload ssh`
+# Socket-activated installations can have no running sshd yet.
+systemctl reload-or-restart ssh.service`
 	if _, err := runtime.guest(ctx, vm, nil, "sh", "-eu", "-c", sshPolicy); err != nil {
 		return err
 	}

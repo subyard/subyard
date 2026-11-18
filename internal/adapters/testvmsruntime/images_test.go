@@ -501,6 +501,12 @@ func TestCachedBaseMissingOrChangedIsExcludedWithoutDeletion(t *testing.T) {
 }
 
 func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
+	for _, image := range []string{"", "ubuntu-24.04", "ubuntu-26.04"} {
+		t.Run(normalizedImage(image), func(t *testing.T) { testWarmAcquireImage(t, image) })
+	}
+}
+
+func testWarmAcquireImage(t *testing.T, image string) {
 	for _, mode := range []string{"warm", "changed", "offline"} {
 		t.Run(mode, func(t *testing.T) {
 			changed := mode == "changed"
@@ -514,12 +520,18 @@ func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
 			}
 			now := time.Now()
 			oldUpstream, newUpstream := strings.Repeat("a", 64), strings.Repeat("b", 64)
-			runtime := Runtime{Config: cfg, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, Now: func() time.Time { return now }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 256 << 30}, nil }, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }}
+			selected, err := cfg.withImage(image)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := Runtime{Config: selected, diskUsageProbe: func(context.Context) (uint64, error) { return 10 << 30, nil }, Now: func() time.Time { return now }, memoryProbe: func() (MemoryCapacity, error) { return MemoryCapacity{Available: 256 << 30}, nil }, cacheProbe: func(context.Context) (CacheUsage, error) { return CacheUsage{}, nil }}
 			recipe, err := runtime.recipeDigest(EnvironmentPair)
 			if err != nil {
 				t.Fatal(err)
 			}
 			base := BaseImage{Key: strings.Repeat("c", 64), Fingerprint: strings.Repeat("d", 64), Environment: EnvironmentPair, Recipe: recipe, Architecture: imageArchitecture(), Upstream: oldUpstream, CreatedAt: now.Add(-time.Hour)}
+			base.Image = image
+			runtime.Config = cfg // Acquire must select the requested OS itself.
 			registry := ImageRegistry{SchemaVersion: 1, Owner: strings.Repeat("e", 32), Bases: []BaseImage{base}}
 			if err := writeJSONAtomic(runtime.imageRegistryPath(), registry); err != nil {
 				t.Fatal(err)
@@ -529,9 +541,17 @@ func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			spec.Image = image
 			grant, err := store.AcquireV3Slot(spec, "client", "SHA256:key", "yard", "Project", "run", "tests", "slot-001")
 			if err != nil {
 				t.Fatal(err)
+			}
+			alias := "debian/13/cloud"
+			switch image {
+			case "ubuntu-24.04":
+				alias = "ubuntu/24.04/cloud"
+			case "ubuntu-26.04":
+				alias = "ubuntu/26.04/cloud"
 			}
 			upstreamCalls := 0
 			buildRequired := errors.New("new base build reached")
@@ -541,7 +561,7 @@ func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
 				switch command {
 				case "query /1.0/storage-pools/default/resources":
 					return []byte(`{"space":{"total":171798691840,"used":10737418240}}`), nil, nil
-				case "image list images: debian/13/cloud type=virtual-machine --format json":
+				case "image list images: " + alias + " type=virtual-machine --format json":
 					upstreamCalls++
 					if mode == "offline" {
 						return nil, nil, errors.New("upstream temporarily unavailable")
@@ -553,7 +573,7 @@ func TestWarmAcquireRechecksUpstreamFingerprint(t *testing.T) {
 					if changed {
 						fingerprint = newUpstream
 					}
-					return []byte(`[{"fingerprint":"` + fingerprint + `","architecture":"` + imageArchitecture() + `","type":"virtual-machine","aliases":[{"name":"debian/13/cloud"}]}]`), nil, nil
+					return []byte(`[{"fingerprint":"` + fingerprint + `","architecture":"` + imageArchitecture() + `","type":"virtual-machine","aliases":[{"name":"` + alias + `"}]}]`), nil, nil
 				case "image list local: " + base.Fingerprint + " --project default --format json":
 					payload, _ := json.Marshal([]incusImage{metadata})
 					return payload, nil, nil
@@ -696,7 +716,7 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 				case strings.HasPrefix(command, "query /1.0/instances/e2e-base-1/metadata?"):
 					return []byte(`{"templates":{}}`), nil, nil
 				case strings.HasPrefix(command, "exec e2e-base-1 "):
-					if strings.HasSuffix(command, "systemctl reload ssh") {
+					if strings.HasSuffix(command, "systemctl reload-or-restart ssh.service") {
 						return nil, nil, nativeFailure
 					}
 					if strings.Contains(command, "cloud-init status --wait") {

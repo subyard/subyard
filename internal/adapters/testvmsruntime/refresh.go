@@ -9,8 +9,18 @@ import (
 // RefreshBase builds a new immutable generation without acquiring or replacing a
 // lease. Publication is serialized with allocation and GC; existing base pins
 // and the prior current base survive failure.
-func (rt *Runtime) RefreshBase(ctx context.Context, store LeaseStore, name string) error {
+func (rt *Runtime) RefreshBase(ctx context.Context, store LeaseStore, name string, images ...string) error {
 	rt.prepareDefaults()
+	image := ""
+	if len(images) > 1 {
+		return errors.New("refresh accepts one image")
+	}
+	if len(images) == 1 {
+		image = images[0]
+	}
+	if err := ValidateImage(image); err != nil {
+		return err
+	}
 	spec, err := rt.Config.EnvironmentSpec(name)
 	if err != nil {
 		return err
@@ -22,6 +32,13 @@ func (rt *Runtime) RefreshBase(ctx context.Context, store LeaseStore, name strin
 	if err != nil {
 		return err
 	}
+	selected := *rt
+	selected.Config, err = rt.Config.withImage(image)
+	if err != nil {
+		return err
+	}
+	rt = &selected
+	spec.Image = image
 	ctx, cancel := context.WithTimeout(ctx, ProvisioningTTL-provisioningSafetyMargin)
 	defer cancel()
 	return imageBuildLock(ctx, rt.imageRegistryPath()+".lock", func() error {

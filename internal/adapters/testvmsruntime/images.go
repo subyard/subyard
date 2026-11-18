@@ -30,6 +30,7 @@ var errBaseMismatch = errors.New("image ownership or immutable recipe mismatch")
 type BaseImage struct {
 	Key          string    `json:"key"`
 	Environment  string    `json:"environment"`
+	Image        string    `json:"image,omitempty"`
 	Recipe       string    `json:"recipe"`
 	Upstream     string    `json:"upstream"`
 	Architecture string    `json:"architecture"`
@@ -44,6 +45,7 @@ type BaseImage struct {
 type BaseBuild struct {
 	Key          string            `json:"key"`
 	Environment  string            `json:"environment"`
+	Image        string            `json:"image,omitempty"`
 	Project      string            `json:"project"`
 	Memory       uint64            `json:"memory_bytes"`
 	Disk         uint64            `json:"disk_peak_bytes"`
@@ -178,6 +180,13 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 		return grant, err
 	}
 	rt = pinned
+	cfg, err := rt.Config.withImage(grant.Environment.Image)
+	if err != nil {
+		return grant, err
+	}
+	selected := *rt
+	selected.Config = cfg
+	rt = &selected
 	ctx, cancel := context.WithTimeout(ctx, ProvisioningTTL-provisioningSafetyMargin)
 	defer cancel()
 	err = imageBuildLock(ctx, rt.imageRegistryPath()+".lock", func() error {
@@ -221,7 +230,7 @@ func (rt *Runtime) prepareEnvironment(ctx context.Context, store LeaseStore, gra
 		var base *BaseImage
 		for i := range registry.Bases {
 			candidate := &registry.Bases[i]
-			if !candidate.Unusable && candidate.Environment == grant.Environment.Name && candidate.Recipe == recipe &&
+			if !candidate.Unusable && candidate.Environment == grant.Environment.Name && normalizedImage(candidate.Image) == normalizedImage(grant.Environment.Image) && candidate.Recipe == recipe &&
 				(upstreamErr != nil || candidate.Upstream == upstream.Fingerprint) &&
 				candidate.Architecture == imageArchitecture() && !rt.Now().Before(candidate.CreatedAt) &&
 				rt.Now().Sub(candidate.CreatedAt) < baseMaxAge && (base == nil || candidate.CreatedAt.After(base.CreatedAt)) {
@@ -384,6 +393,7 @@ func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseG
 	if err != nil {
 		return result, err
 	}
+	spec.Image = grant.Environment.Image
 	spec.Count = 1 // Builder is private, never an allocation or grant.
 	cfg := rt.Config.withEnvironment(spec)
 	cfg.Project = rt.Config.Project + "-builder"
@@ -407,7 +417,7 @@ func (rt *Runtime) buildBase(ctx context.Context, store LeaseStore, grant LeaseG
 	// Conservatively require evidence before cleanup until validation is durable.
 	// A failure-state write can fail too; the earlier staging record must protect
 	// an interrupted builder even when no observed readiness outcome survives.
-	registry.Build = &BaseBuild{Key: buildKey, Environment: spec.Name, Project: cfg.Project, Memory: buildRAM, Disk: buildDisk, IncidentSlot: slot,
+	registry.Build = &BaseBuild{Key: buildKey, Environment: spec.Name, Image: spec.Image, Project: cfg.Project, Memory: buildRAM, Disk: buildDisk, IncidentSlot: slot,
 		Failure: &readinessFailure{Label: "base builder validation incomplete", Project: cfg.Project, VM: vm, Phase: "builder-preparation", Budget: cfg.BootTimeout, StartedAt: rt.Now(), LastProbe: "error_kind=not_observed"}}
 	if err := writeJSONAtomic(rt.imageRegistryPath(), registry); err != nil {
 		return result, err
@@ -537,7 +547,7 @@ sha256sum -c manifest.sha256 >/dev/null`); err != nil {
 		registry.Build.Failure = pendingCapture
 		return result, err
 	}
-	result = BaseImage{Environment: spec.Name, Recipe: recipe, Upstream: upstream.Fingerprint, Architecture: upstream.Architecture,
+	result = BaseImage{Environment: spec.Name, Image: spec.Image, Recipe: recipe, Upstream: upstream.Fingerprint, Architecture: upstream.Architecture,
 		Manifest: strings.TrimSpace(manifest), CreatedAt: rt.Now(), LastUsedAt: rt.Now()}
 	result.Key = imageKey(buildKey, result.Manifest)
 	// The builder never had lease keys or a checkout. Remove generated machine
@@ -823,8 +833,8 @@ func (rt *Runtime) pruneImages(ctx context.Context, store LeaseStore, registry *
 	latest := map[string]string{}
 	sort.Slice(registry.Bases, func(i, j int) bool { return registry.Bases[i].CreatedAt.After(registry.Bases[j].CreatedAt) })
 	for _, base := range registry.Bases {
-		if !base.Unusable && latest[base.Environment] == "" {
-			latest[base.Environment] = base.Key
+		if !base.Unusable && latest[base.identity()] == "" {
+			latest[base.identity()] = base.Key
 		}
 	}
 	var references map[string]bool
@@ -832,7 +842,7 @@ func (rt *Runtime) pruneImages(ctx context.Context, store LeaseStore, registry *
 		base := registry.Bases[i]
 		// Keep the current image even after expiry. A failed refresh must not
 		// remove it; eligibility for issuing an image is checked separately.
-		if pins[base.Fingerprint] || latest[base.Environment] == base.Key {
+		if pins[base.Fingerprint] || latest[base.identity()] == base.Key {
 			continue
 		}
 		images, err := rt.listImages(ctx, "local:", base.Fingerprint, "--project", "default")
@@ -1111,4 +1121,9 @@ func (rt *Runtime) saveBuilderIncident(ctx context.Context, builder *Runtime, re
 		return fmt.Errorf("persist builder incident receipt: %w", err)
 	}
 	return nil
+}
+
+// Missing image metadata belongs to the original Debian base namespace.
+func (base BaseImage) identity() string {
+	return base.Environment + "/" + normalizedImage(base.Image)
 }
