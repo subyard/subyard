@@ -31,8 +31,8 @@ incus() {
 }
 yard() {
   # Init may update account membership without refreshing this fixture's groups.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$YARD_BIN" -Y "$YARD_NAME" "$@"
     sg incus-admin -c "$command"
@@ -303,8 +303,8 @@ export SUBYARD_TEST_PROJECT_ENGINE="$YARD_BIN"
 cat > "$STATE/project-yard" <<'PROJECT_YARD'
 #!/usr/bin/env bash
 set -euo pipefail
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
   printf -v command '%q ' "$SUBYARD_TEST_PROJECT_ENGINE" "$@"
   exec sg incus-admin -c "exec $command"
 fi

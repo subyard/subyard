@@ -22,7 +22,7 @@ check_input() {
   [ "$(dpkg-deb -f "$file" Version)" = "$version" ] || die 'unexpected package version'
   [ "$(dpkg-deb -f "$file" Architecture)" = "$architecture" ] || die 'package architecture differs from VM'
   files="$(dpkg-deb --fsys-tarfile "$file" | tar -tf -)"
-  if printf '%s\n' "$files" | grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)'; then die 'desktop package bundles a CLI or owner runtime'; fi
+  if grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)' <<<"$files"; then die 'desktop package bundles a CLI or owner runtime'; fi
 }
 BASE_VERSION="$(dpkg-deb -f "$BASE" Version)"
 NEXT_VERSION="$(dpkg-deb -f "$NEXT" Version)"
@@ -260,7 +260,7 @@ finally:
 PY
 }
 phase() {
-  local label="$1" file="$2" version="$3" mode="$4" desktop start=$SECONDS
+  local label="$1" file="$2" version="$3" mode="$4" desktop package_paths start=$SECONDS
   if [ "$mode" = package ]; then
     dpkg-query -W -f='${binary:Package}\t${Installed-Size}\t${Status}\n' > "$STATE/packages-before-$label"
   fi
@@ -268,12 +268,15 @@ phase() {
   apt_logged "apt-$label-$mode.log" install -y --allow-downgrades "$file"
   [ "$(dpkg-query -W -f='${Status}' subyard-veranda)" = 'install ok installed' ] || die 'package was not configured'
   [ "$(dpkg-query -W -f='${Version}' subyard-veranda)" = "$version" ] || die 'installed version differs'
-  desktop="$(dpkg-query -L subyard-veranda | sed -n '/\.desktop$/p')"
+  package_paths="$(dpkg-query -L subyard-veranda)" || die 'could not list installed desktop package paths'
+  desktop="$(sed -n '/\.desktop$/p' <<<"$package_paths")"
   [ "$desktop" = '/usr/share/applications/org.subyard.Veranda.desktop' ] || die 'unexpected desktop entry'
   if [ "$mode" = gtk ]; then desktop-file-validate "$desktop" > "$STATE/desktop-$label.log" 2>&1; fi
   [ "$(sed -n 's/^Exec=//p' "$desktop")" = subyard-veranda ] || die 'desktop Exec does not name the installed client'
   if [ "$(PATH=/usr/bin:/bin command -v subyard-veranda)" != /usr/bin/subyard-veranda ] || [ ! -x /usr/bin/subyard-veranda ]; then die 'desktop executable is unavailable'; fi
-  if dpkg-query -L subyard-veranda | grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)'; then die 'installed desktop package owns an owner CLI/runtime'; fi
+  if grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)' <<<"$package_paths"; then
+    die 'installed desktop package owns an owner CLI/runtime'
+  fi
   [ "$(cat "$STATE/data/subyard/veranda/package-preserved.txt")" = "$MARKER" ] || die 'app data marker was lost'
   cli_snapshot > "$STATE/cli-after"
   cmp "$STATE/cli-before" "$STATE/cli-after" || die 'installed CLI files changed'

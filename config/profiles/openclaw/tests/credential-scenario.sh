@@ -6,7 +6,7 @@ secret='super-secret-static-value'
 printf '%s' "$secret" | yard_one keys add staging-file --kind file --zone canonical --consumer staging-env --yes >/dev/null
 shared_id="$(yard_one keys list | awk -F '\t' '$8=="staging-file" {print $1}')"
 [ -n "$shared_id" ] || fail 'shared credential id missing'
-initial_revision="$(yard_one keys history "$shared_id" | awk -F '\t' -v id="$shared_id" '$1==id {print $2; exit}')"
+initial_revision="$(yard_one keys history "$shared_id" | awk -F '\t' -v id="$shared_id" '!found && $1==id {print $2; found=1}')"
 [ -n "$initial_revision" ] || fail 'initial revision missing from history'
 if grep -rFq -- "$secret" "$SUBYARD_KEYS_ROOT"; then fail 'plaintext landed in the credential store'; fi
 

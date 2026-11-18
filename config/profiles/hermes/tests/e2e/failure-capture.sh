@@ -51,6 +51,9 @@ owners = {"activation."+name for name in ("core-guest-runtime", "key-tools-runti
 try:
     payload = sys.stdin.buffer.read(65537)
     if len(payload) > 65536:
+        # Let the producer finish without retaining the oversized report.
+        while sys.stdin.buffer.read(65536):
+            pass
         raise ValueError()
     value = json.loads(payload)
     outcome, decisions, blockers = value["outcome"], value.get("decisions", []), value.get("blockers", [])
@@ -112,7 +115,7 @@ hermes_capture_probe() {
   shift 2
   local size
   local -a codes
-  timeout --signal=TERM --kill-after=2 10 "$@" 2>&1 | head -c 65536 >"$directory/$name"
+  timeout --signal=TERM --kill-after=2 10 "$@" 2>&1 | { head -c 65536 && cat >/dev/null; } >"$directory/$name"
   codes=("${PIPESTATUS[@]}")
   size="$(stat -c %s "$directory/$name")"
   printf '%s\t%s\t%s\t%s\n' "$name" "${codes[0]}" "${codes[1]}" "$size" >>"$directory/probes"
@@ -138,7 +141,7 @@ hermes_retain_failure() {
   ' _ "$source")" || return 2
   # Bound the native local transport too: remote timeout cannot stop stalled SSH.
   timeout --signal=TERM --kill-after=2 20 ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- "$command" \
-    2>"$output/capture-transport.log" | head -c 220000 >"$output/failure.tar"
+    2>"$output/capture-transport.log" | { head -c 220000 && cat >/dev/null; } >"$output/failure.tar"
   codes=("${PIPESTATUS[@]}")
   [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] || rc=1
   # Validate the archive without extracting or printing private original bytes.

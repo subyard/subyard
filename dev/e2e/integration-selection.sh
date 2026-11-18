@@ -70,8 +70,8 @@ incus() {
 incus_stopped=0
 command_with_group() {
   # First init can enroll this user, but cannot update its parent shell's groups.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$@"
     sg incus-admin -c "exec $command"
@@ -125,7 +125,7 @@ launcher="$(command_with_group bash -c \
   '. "$1/tests/helpers/release-candidate.sh"; release_candidate_install "$1" "$2"' _ "$ROOT" "$STATE/candidate")"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 port=$((33000 + ($$ % 1000)))
-while ss -Hln "sport = :$port" 2>/dev/null | grep -q .; do port=$((port + 1)); done
+while ss -Hln "sport = :$port" 2>/dev/null | grep >/dev/null .; do port=$((port + 1)); done
 config="$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
 cat > "$config" <<EOF
 # $MARKER
@@ -331,8 +331,8 @@ yard integration disable claude --yes > "$STATE/drift-disable-init-first.log" 2>
 yard init --yes > "$STATE/drift-init-first.log" 2>&1 || { tail -n 20 "$STATE/drift-init-first.log" >&2; die 'init-first release failed'; }
 # The disable releases the ownership itself when the change already made the
 # yard one that needs repair; otherwise the following init does.
-cat "$STATE/drift-disable-init-first.log" "$STATE/drift-init-first.log" \
-  | grep -Fq "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" \
+cat "$STATE/drift-disable-init-first.log" "$STATE/drift-init-first.log" |
+  grep -aF >/dev/null "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" \
   || die 'init-first release was not reported'
 guest sha256sum -c - < "$STATE/drift-settings.before" >/dev/null || die 'init-first release changed the document'
 host_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null || die 'init-first released yard is not release-ready'

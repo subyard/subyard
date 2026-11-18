@@ -251,7 +251,8 @@ jobs:
             bash dev/build-engine.sh --force --output "$stage/.subyard-acceptance/yard"
           GOTOOLCHAIN="${toolchain:-auto}" go version "$stage/.subyard-acceptance/yard"
           gzip -dc "$RUNNER_TEMP/candidate/candidate-bundle.tar.gz" > "$stage/bundle.tar"
-          if tar -tf "$stage/bundle.tar" | grep -Eqx '(\./)?\.subyard-acceptance/(veranda|yard)'; then
+          tar -tf "$stage/bundle.tar" > "$stage/bundle.members"
+          if grep -Eqx '(\./)?\.subyard-acceptance/(veranda|yard)' "$stage/bundle.members"; then
             echo 'the candidate bundle already holds a Veranda input'; exit 1
           fi
           tar -C "$stage" -rf "$stage/bundle.tar" .subyard-acceptance/veranda .subyard-acceptance/yard

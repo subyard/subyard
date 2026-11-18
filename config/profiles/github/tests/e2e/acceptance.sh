@@ -205,8 +205,8 @@ incus() {
 yard() {
   # Init may add the owner to incus-admin in a child session. Subsequent
   # fixture commands need a fresh group session for the host policy lock too.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$YARD_BIN" "$@"
     sg incus-admin -c "$command"
@@ -244,7 +244,7 @@ hermes_dev() {
 }
 next_port() {
   local candidate="$1"
-  while ss -Hln "sport = :$candidate" 2>/dev/null | grep -q .; do candidate=$((candidate + 1)); done
+  while ss -Hln "sport = :$candidate" 2>/dev/null | grep >/dev/null .; do candidate=$((candidate + 1)); done
   printf '%s\n' "$candidate"
 }
 save_checkpoint() {
@@ -397,7 +397,7 @@ cleanup_keys_timer() {
   done
   [ "$present" = 1 ] || return 0
   [ -n "${STATE:-}" ] && [ -f "$units/subyard-keys-sync.service" ] && [ ! -L "$units/subyard-keys-sync.service" ] \
-    && grep -x 'ExecStart=.* _keys-auto-sync --if-due' "$units/subyard-keys-sync.service" | grep -Fq "ExecStart=$STATE/" \
+    && grep -x 'ExecStart=.* _keys-auto-sync --if-due' "$units/subyard-keys-sync.service" | grep -F >/dev/null "ExecStart=$STATE/" \
     || { printf 'github-broker-e2e: refusing to remove a credential timer of another runtime\n' >&2; return 1; }
   systemctl_user disable --now subyard-keys-sync.timer >/dev/null 2>&1 || true
   rm -f -- "$units/subyard-keys-sync.timer" "$units/subyard-keys-sync.service" "$units/.subyard-keys-sync.json"
@@ -460,8 +460,8 @@ if [ "$MODE" != --verify-reboot ] && [ "$MODE" != --cleanup ] \
   )
 fi
 if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ] \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin \
-  && ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin; then
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+  && ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
   printf -v reexec 'exec env SUBYARD_E2E_VM=%q bash %q %q' \
     "$SUBYARD_E2E_VM" "$ROOT/config/profiles/github/tests/e2e/acceptance.sh" "$MODE"
   exec sg incus-admin -c "$reexec"
@@ -656,7 +656,7 @@ fi
 [ ! -e "$HERMES_UNIT_FILE" ] && [ ! -L "$HERMES_UNIT_FILE" ] \
   || die "Hermes fixture service path exists: $HERMES_UNIT_FILE"
 HERMES_PROJECT_CLAIMED=1
-if ss -Hln 'sport = :2224' 2>/dev/null | grep -q .; then
+if ss -Hln 'sport = :2224' 2>/dev/null | grep >/dev/null .; then
   # Retained VMs can have another fixture on the preset's standard port.
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$HERMES_YARD"
   install -m 0600 "$ROOT/config/profiles/hermes/yard.env" \
@@ -673,10 +673,10 @@ fi
 [ "$(hermes_setting DEV_SUDO)" = 0 ] || die 'Hermes preset enabled DEV_SUDO'
 [ "$(hermes_setting CODING_TOOL_INTEGRATIONS)" = '<unset>' ] \
   || die 'Hermes preset selected broad coding-tool integrations'
-hermes_profiles="$(hermes_setting ENVIRONMENT_PROFILES)"
-printf '%s\n' "$hermes_profiles" | tr ' ' '\n' | grep -Fxq hermes \
+hermes_profiles="$(hermes_setting ENVIRONMENT_PROFILES | tr ' ' '\n')"
+grep -Fxq hermes <<<"$hermes_profiles" \
   || die 'Hermes preset omitted hermes'
-printf '%s\n' "$hermes_profiles" | tr ' ' '\n' | grep -Fxq github \
+grep -Fxq github <<<"$hermes_profiles" \
   || die 'Hermes preset omitted github'
 incus project set "$HERMES_PROJECT" user.subyard.e2e="$MARKER"
 incus config set "$HERMES_INSTANCE" user.subyard.e2e="$MARKER" --project "$HERMES_PROJECT"

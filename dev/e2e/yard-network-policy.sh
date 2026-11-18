@@ -558,8 +558,8 @@ case "$MODE" in
 esac
 
 ensure_incus_platform
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
   command=''
   if [ "$MODE" = prepare ]; then
     sudo -n find "$STATE" -depth -delete
@@ -649,7 +649,7 @@ mark_yard() {
 next_port=$((36000 + ($$ % 9000)))
 create_yard_config() {
   local name="$1"
-  while ss -Hln "sport = :$next_port" 2>/dev/null | grep -q .; do
+  while ss -Hln "sport = :$next_port" 2>/dev/null | grep >/dev/null .; do
     next_port=$((next_port + 1))
   done
   install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
@@ -794,7 +794,7 @@ for name in "${YARDS[@]}"; do
     ' \
         >/dev/null \
     || die "Incus DHCP lease is missing for yard $name"
-  guest "$name" ip -4 route show default | grep -q . \
+  guest "$name" ip -4 route show default | grep >/dev/null . \
     || die "DHCP default route is missing in yard $name"
   guest "$name" getent ahostsv4 deb.debian.org >/dev/null \
     || die "DNS failed in yard $name"

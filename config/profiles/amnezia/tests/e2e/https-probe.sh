@@ -2,7 +2,7 @@
 # The caller applies a 95-second watchdog to both 45-second attempts and diagnostics.
 set -eu
 peer_counts() {
-  awg show awg0 transfer | awk 'NF == 3 { if (++n > 1) exit 1; print $2, $3 } END { if (n != 1) exit 1 }'
+  awg show awg0 transfer | awk 'NF == 3 && ++n == 1 { print $2, $3 } END { if (n != 1) exit 1 }'
 }
 printf 'amnezia_https_probe budget_seconds=95 attempts=2 attempt_seconds=45\n' >&2
 for attempt in 1 2; do

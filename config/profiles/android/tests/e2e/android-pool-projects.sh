@@ -35,8 +35,8 @@ remaining() {
 yard_command() {
   local seconds="$1" command
   shift
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     printf -v command '%q ' "$YARD_BIN" -Y "$yard_name" "$@"
     timeout --foreground "$seconds" sg incus-admin -c "exec $command"
   else
@@ -263,7 +263,7 @@ check_box() {
     command -v android-broker >/dev/null
     command -v adb >/dev/null
     command -v sdkmanager >/dev/null
-    android-broker --help | grep -q catalog
+    android-broker --help | grep >/dev/null catalog
     android-broker status >/dev/null
     android-broker catalog >/dev/null
   ' _ "$own" ".subyard-parallel-$other" ".subyard-parallel-$own" \

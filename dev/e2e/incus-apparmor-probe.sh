@@ -197,8 +197,8 @@ INSTANCE="yard-$YARD_NAME"
 APPARMOR_DROPIN="/etc/systemd/system/incus.service.d/90-$MARKER.conf"
 
 ensure_incus_platform
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
   reexec_with_incus_group
 fi
 [ ! -e "$APPARMOR_DROPIN" ] \
@@ -229,10 +229,10 @@ install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 
 ssh_port=$((36000 + ($$ % 12000)))
 for _ in $(seq 1 100); do
-  ss -Hln "sport = :$ssh_port" 2>/dev/null | grep -q . || break
+  ss -Hln "sport = :$ssh_port" 2>/dev/null | grep >/dev/null . || break
   ssh_port=$((ssh_port + 1))
 done
-ss -Hln "sport = :$ssh_port" 2>/dev/null | grep -q . \
+ss -Hln "sport = :$ssh_port" 2>/dev/null | grep >/dev/null . \
   && die 'could not reserve an unused loopback SSH port'
 
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF

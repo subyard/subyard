@@ -135,8 +135,8 @@ reexec_with_incus_group() {
 
 ensure_owner_incus() {
   local platform_root="$ORIGINAL_HOME/.cache/subyard-e2e-platform/incus"
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     reexec_with_incus_group
   fi
   if ! /usr/bin/incus query '/1.0/instances?project=default' >/dev/null 2>&1 \
@@ -161,8 +161,8 @@ ensure_owner_incus() {
       bash "$ROOT/scripts/01-install-incus.sh" --yes
     )
   fi
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     reexec_with_incus_group
   fi
   # Public migration uses the native session, not the sudo-backed incus wrapper.
@@ -175,8 +175,8 @@ ensure_owner_incus() {
   stage 'owner native Incus prerequisites are ready before public bootstrap'
 }
 yard() {
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$YARD_BIN" "$@"
     timeout --signal=TERM --kill-after=5s 900 sg incus-admin -c "exec $command"
@@ -1547,8 +1547,8 @@ guest_root systemctl is-active --quiet subyard-orca.service \
 status_reached=0
 # Init refreshes its own process groups; the parent fixture shell remains stale.
 status_command='exec "$SUBYARD_TTY_TEST_ENGINE" orca status'
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
   printf -v status_command 'exec sg incus-admin -c %q' "$status_command"
 fi
 timeout --signal=TERM --kill-after=5s 60 \

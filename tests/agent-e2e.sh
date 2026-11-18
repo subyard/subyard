@@ -700,12 +700,12 @@ LEASE_SLOT=
 bundle="$TMP/worktree.tar.gz"
 build_bundle "$fixture" "$bundle"
 contents="$(tar -tzf "$bundle" | sort)"
-printf '%s\n' "$contents" | grep -Fxq dirty.txt || fail "dirty untracked file was not copied"
-printf '%s\n' "$contents" | grep -Fxq tracked.txt || fail "modified tracked file was not copied"
-! printf '%s\n' "$contents" | grep -Fxq .subyard-e2e-index \
+grep -Fxq dirty.txt <<<"$contents" || fail "dirty untracked file was not copied"
+grep -Fxq tracked.txt <<<"$contents" || fail "modified tracked file was not copied"
+! grep -Fxq .subyard-e2e-index <<<"$contents" \
   || fail "obsolete Git inventory entered the worktree bundle"
-! printf '%s\n' "$contents" | grep -Fxq removed.txt || fail "deleted tracked file entered the bundle"
-! printf '%s\n' "$contents" | grep -Eq '(^|/)(private|temp|\.git)(/|$)|ignored\.secret' \
+! grep -Fxq removed.txt <<<"$contents" || fail "deleted tracked file entered the bundle"
+! grep -Eq '(^|/)(private|temp|\.git)(/|$)|ignored\.secret' <<<"$contents" \
   || fail "ignored or private data entered the worktree bundle"
 source_copy="$TMP/source-copy"
 mkdir "$source_copy"
@@ -836,7 +836,7 @@ direct_ssh="$(
     printf "must-not-reach-ssh\n" | run_direct_ssh 2 0 printf "%s" "argument with spaces"
   '
 )"
-printf '%s\n' "$direct_ssh" | grep -Fq -- '-T e2e-vm-2 --' \
+grep -Fq -- '-T e2e-vm-2 --' <<<"$direct_ssh" \
   || fail "direct SSH command did not use the pinned non-TTY VM route"
 direct_ssh_stdin="$(
   PATH="$TMP/direct-bin:$PATH" ROOT="$ROOT" bash -c '
@@ -846,7 +846,7 @@ direct_ssh_stdin="$(
     printf "explicit-stdin\n" | run_direct_ssh 1 1 sh -c "read -r value"
   '
 )"
-printf '%s\n' "$direct_ssh_stdin" | grep -Fq -- '-T e2e-vm-1 --' \
+grep -Fq -- '-T e2e-vm-1 --' <<<"$direct_ssh_stdin" \
   || fail "explicit direct SSH stdin did not use the pinned non-TTY VM route"
 cli_fixture_bin="$TMP/acceptance-cli-bin"
 cli_mktemp_log="$TMP/acceptance-cli-mktemp.log"
@@ -1085,13 +1085,13 @@ done
 nested_bridge_create_line="$(grep -nF 'incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none' \
   "$nested_teardown_script" | cut -d: -f1)"
 nested_yard_init_line="$(grep -nF 'yard init --yes' "$nested_teardown_script" \
-  | head -n 1 | cut -d: -f1)"
+  | sed -n '1p' | cut -d: -f1)"
 [ -n "$nested_bridge_create_line" ] && [ -n "$nested_yard_init_line" ] \
   && [ "$nested_bridge_create_line" -lt "$nested_yard_init_line" ] \
   && grep -A1 -F 'incus storage create "$OUTER_POOL" dir' "$nested_teardown_script" \
-    | grep -Fq 'user.subyard.owner=nested-teardown-e2e-v1' \
+    | grep -F 'user.subyard.owner=nested-teardown-e2e-v1' >/dev/null \
   && grep -A1 -F 'incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none' \
-    "$nested_teardown_script" | grep -Fq 'user.subyard.owner=nested-teardown-e2e-v1' \
+    "$nested_teardown_script" | grep -F 'user.subyard.owner=nested-teardown-e2e-v1' >/dev/null \
   || fail 'nested teardown does not publish marker-owned pool and bridge before yard init'
 # Execute the nested fixture's passive Docker prerequisite with stateful native stubs.
 docker_ready_function="$TMP/nested-docker-ready.sh"
@@ -3219,10 +3219,10 @@ resolve_bastion_route
 
 status_fixture='{"schema_version":1,"status":"ok","capabilities":["attribution-v2","environment-acquire-v3","disposable-v1"],"pool":{"schema_version":1,"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{"slot_id":"slot-001","resource_generation":1,"lease_epoch":3,"state":"held","yard":"default","project":"Subyard-2","run":"run-a","purpose":"contract-tests","acquired_at":"2026-07-26T20:00:00Z","expires_at":"2026-07-26T20:20:00Z"},{"slot_id":"slot-002","resource_generation":1,"lease_epoch":2,"state":"available"},{"slot_id":"slot-003","resource_generation":1,"lease_epoch":0,"state":"available","acquired_at":"0001-01-01T00:00:00Z","expires_at":"0001-01-01T00:00:00Z"}]}}'
 rendered_status="$(render_pool_status "$status_fixture")"
-printf '%s\n' "$rendered_status" | grep -Fq 'SLOT     STATE' \
-  && printf '%s\n' "$rendered_status" | grep -Fq 'Subyard-2' \
+grep -Fq 'SLOT     STATE' <<<"$rendered_status" \
+  && grep -Fq 'Subyard-2' <<<"$rendered_status" \
   || fail "human pool status omitted active-holder attribution"
-! printf '%s\n' "$rendered_status" | grep -Fq '0001-01-01' \
+! grep -Fq '0001-01-01' <<<"$rendered_status" \
   || fail "human pool status exposed zero timestamps"
 long_project=Project-abcdefghijklmnopqrstuvwxyz0123456789
 long_status="$(jq -c --arg project "$long_project" \
@@ -3884,11 +3884,11 @@ set -e
 [ "$cleanup_rc" = 3 ] || fail "trap cleanup failure returned $cleanup_rc instead of 3"
 
 if sed '/^[[:space:]]*#/d' "$ROOT/dev/agent-e2e.sh" \
-  | grep -Eq 'test-vms[[:space:]]+(up|down)|yard[[:space:]].*(start|stop)'; then
+  | grep -E 'test-vms[[:space:]]+(up|down)|yard[[:space:]].*(start|stop)' >/dev/null; then
   fail "agent E2E transport contains an allocation lifecycle call"
 fi
 if sed '/^[[:space:]]*#/d' "$ROOT/dev/e2e/p0-acceptance.sh" \
-  | grep -Eq 'test-vms[[:space:]]+(up|down)|yard[[:space:]].*(start|stop)'; then
+  | grep -E 'test-vms[[:space:]]+(up|down)|yard[[:space:]].*(start|stop)' >/dev/null; then
   fail "P0 acceptance contains an allocation lifecycle call"
 fi
 
@@ -4747,7 +4747,7 @@ for reboot_scenario in reboot-verify:none power-systemd:none legacy-continuation
     [ "$(cat "$reboot_fixture_log")" = "$reboot_expected" ] \
       || fail 'standalone reboot lane lost ordered preparation, two reboots, or runtime restoration'
   else
-    [ "$reboot_fixture_rc" = 45 ] && tail -n 1 "$reboot_fixture_log" | grep -Fxq 'exit=45 armed=1' \
+    [ "$reboot_fixture_rc" = 45 ] && tail -n 1 "$reboot_fixture_log" | grep -Fx 'exit=45 armed=1' >/dev/null \
       || fail "standalone reboot lane concealed $reboot_failure failure or disarmed fixture recovery"
   fi
 done

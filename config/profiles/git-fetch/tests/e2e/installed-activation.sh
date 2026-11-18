@@ -80,8 +80,8 @@ init_attempted=0
 loss_unknown=0
 incus() { sudo -n /usr/bin/incus "$@"; }
 fresh() {
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$@"
     sg incus-admin -c "exec $command"
@@ -202,8 +202,8 @@ guest systemctl disable --now subyard-git-fetch.timer
 drift
 migrate --yes
 assert_current
-timer_state | grep -Fxq ActiveState=inactive
-timer_state | grep -Fxq UnitFileState=disabled
+timer_state | grep -Fx >/dev/null ActiveState=inactive
+timer_state | grep -Fx >/dev/null UnitFileState=disabled
 printf 'git_fetch_activation_stage=deselected-installed-refresh\n'
 yard profile disable git-fetch --yes
 selection="$(sha256sum "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env" | cut -d ' ' -f1)"
@@ -211,7 +211,7 @@ drift
 migrate --yes
 [ "$(guest sha256sum "$worker" | cut -d ' ' -f1)" = "$expected" ] || die 'deselected installed worker was not refreshed'
 [ "$(sha256sum "$SUBYARD_CONFIG_HOME/yards/$NAME/config.env" | cut -d ' ' -f1)" = "$selection" ] || die 'ordinary migrate changed selection'
-timer_state | grep -Fxq ActiveState=inactive
-timer_state | grep -Fxq UnitFileState=disabled
+timer_state | grep -Fx >/dev/null ActiveState=inactive
+timer_state | grep -Fx >/dev/null UnitFileState=disabled
 migrate --check --json | jq -e '.outcome.status=="ready"' >/dev/null
 printf 'PASS: installed candidate normal init/start/migrate, worker identity, repeat, selected disabled and deselected intent\n'

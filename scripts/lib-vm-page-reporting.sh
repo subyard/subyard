@@ -20,7 +20,7 @@ vm_page_reporting_check_host() {
     || { printf 'VM Free Page Reporting requires qemu-system-x86_64\n' >&2; return 1; }
   help="$(qemu-system-x86_64 -device virtio-balloon-pci,help 2>&1)" \
     || { printf 'cannot inspect QEMU virtio-balloon-pci reporting capability\n' >&2; return 1; }
-  printf '%s\n' "$help" | grep -q 'free-page-reporting' \
+  printf '%s\n' "$help" | grep >/dev/null 'free-page-reporting' \
     || { printf 'QEMU virtio-balloon-pci has no free-page-reporting property\n' >&2; return 1; }
 }
 

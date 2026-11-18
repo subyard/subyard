@@ -208,20 +208,12 @@ connected() {
         # dmesg may be forbidden on Google APIs images; retain lmkd records too.
         lowmemory) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell 'dmesg; logcat -b all -d -t 512 -v threadtime -s lmkd lowmemorykiller') ;;
       esac
-      # Bound both runtime and bytes, including stderr and unavailable queries.
-      { timeout --kill-after=2 5 "${command[@]}" 2>&1; printf '\ncapture_exit=%s\n' "$?"; } |
-        head -c 65536 | sed -E \
-        -e 's/(token|credential|secret|password|authorization|api[_-]?key)[=: ][^[:space:]]+/[redacted]/Ig' \
-        -e 's/\b[0-9a-fA-F]{64}\b/[redacted]/g' \
-        -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[address]/g' \
-        -e 's/([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}/[address]/g' \
-        -e 's/([0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{0,4}::[0-9a-fA-F:.]*/[address]/g' \
-        -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/[address]/g' >&2 || true
+      android_capture_evidence "${command[@]}" || true
     done
   fi
   exit "$result"
 }
-export -f connected
+export -f connected android_capture_evidence
 export ANDROID_GRADLE_EVIDENCE="$work/emulator-evidence.log"
 # The child shell expands the exported evidence path and command arguments.
 # shellcheck disable=SC2016

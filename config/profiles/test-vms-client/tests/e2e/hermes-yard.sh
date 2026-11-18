@@ -19,8 +19,8 @@ for command in incus jq sg sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
   printf -v reexec 'exec env SUBYARD_E2E_VM=%q bash %q' "$SUBYARD_E2E_VM" "$ROOT/config/profiles/test-vms-client/tests/e2e/hermes-yard.sh"
   exec sg incus-admin -c "$reexec"
 fi
@@ -36,8 +36,8 @@ yard_named() {
   local name="$1" command
   shift
   # Init refreshes its child session; the fixture's parent keeps the old groups.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     printf -v command '%q ' "$CANDIDATE_ENGINE" -Y "$name" "$@"
     sg incus-admin -c "exec $command"
   else
@@ -168,12 +168,12 @@ for adapter in $LINKS; do
   test "$(readlink -f "$HOME/$adapter/subyard-test-vms")" = "$SKILL" || fail "link $adapter does not resolve"
 done
 test -f "$HOME/.hermes/skills/subyard-test-vms/SKILL.md" || fail "Hermes cannot read the skill"
-if find /srv/workspaces -maxdepth 4 -path "*/dev/agent-e2e.sh" 2>/dev/null | grep -q .; then
+if find /srv/workspaces -maxdepth 4 -path "*/dev/agent-e2e.sh" 2>/dev/null | grep -a >/dev/null .; then
   fail "the yard contains a Subyard checkout"
 fi
 if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then fail "dev has passwordless sudo"; fi
 test -d /var/lib/subyard/e2e-routes || fail "the route registry mount is missing"
-bash "$SKILL/client.sh" --help | grep -Fq "acquire --slot N" || fail "client help is unavailable"
+bash "$SKILL/client.sh" --help | grep -F >/dev/null "acquire --slot N" || fail "client help is unavailable"
 '
 # The nested owner has no registered broker, so status reports the documented diagnostic.
 set +e

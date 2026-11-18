@@ -108,7 +108,7 @@ for entry in "${SUBYARD_PROJECT_POLICY_HEAD[@]}"; do
 done
 # No Incus source-path allowlist: a restricted disk path forbids `shift` (idmapped
 # mounts), which the host mounts need. Tooling keeps sources under $RESTRICTED_DISK_PATHS.
-if incus project get "$INCUS_PROJECT" restricted.devices.disk.paths 2>/dev/null | grep -q .; then
+if incus project get "$INCUS_PROJECT" restricted.devices.disk.paths 2>/dev/null | grep >/dev/null .; then
   incus project unset "$INCUS_PROJECT" restricted.devices.disk.paths
   ok "restricted.devices.disk.paths unset (was set; blocks shift)"
 else
@@ -122,7 +122,7 @@ done
 # restricted.devices.nic defaults to "managed", so a managed bridge ('$INCUS_NETWORK') is allowed.
 echo "Default profile (root + nic):"
 prof_device_exists() {
-  incus profile device list default --project "$INCUS_PROJECT" 2>/dev/null | grep -qx "$1"
+  incus profile device list default --project "$INCUS_PROJECT" 2>/dev/null | grep -x >/dev/null "$1"
 }
 if prof_device_exists root; then
   ok "root disk already on default profile"

@@ -443,9 +443,9 @@ YARD_KIND=vm VM_FREE_PAGE_REPORTING=0 run_create
 grep -q '^init images:ubuntu/24.04 yard --project subyard --vm ' "$MOCK_INCUS_LOG" || fail 'container image was used for a VM'
 # A new VM is headless from its first boot, without a stop.
 [ "$(cat "$MOCK_INSTANCE_FILE.raw")" = '[device "qemu_gpu"]' ] || fail 'new VM kept the emulated display'
-sed -n '/^config set yard raw.qemu.conf /,$p' "$MOCK_INCUS_LOG" | grep -Fxq 'engine _vm-start-policy subyard yard ' \
+sed -n '/^config set yard raw.qemu.conf /,$p' "$MOCK_INCUS_LOG" | grep -Fx >/dev/null 'engine _vm-start-policy subyard yard ' \
   || fail 'new VM start skipped its device policy'
-if sed -n '1,/^config set yard raw.qemu.conf /p' "$MOCK_INCUS_LOG" | grep -q '^start '; then
+if sed -n '1,/^config set yard raw.qemu.conf /p' "$MOCK_INCUS_LOG" | grep >/dev/null '^start '; then
   fail 'new VM booted before its device policy'
 fi
 ! grep -q '^stop ' "$MOCK_INCUS_LOG" || fail 'new VM was stopped for its device policy'

@@ -242,4 +242,4 @@ run_go_as_dev env -w GOCACHE="$GOCACHE" GOMODCACHE="$GOMODCACHE" GOTOOLCHAIN=aut
 run_go_as_dev env GOCACHE GOMODCACHE GOTOOLCHAIN
 printf 'subyard-dev provision OK: %s; shellcheck %s\n' \
   "$(run_go_as_dev version)" \
-  "$(shellcheck --version | awk '/^version:/ { print $2; exit }')"
+  "$(shellcheck --version | awk '!found && /^version:/ { print $2; found=1 }')"

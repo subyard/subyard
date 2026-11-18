@@ -106,7 +106,7 @@ verify_recipe="$(awk '/^verify:/ {inside=1; next} inside && /^[^[:space:]]/ {exi
 [[ "$verify_recipe" == *'./tests/run.sh'* && "$verify_recipe" == *'bash dev/test-profiles.sh'* ]] \
   || fail 'shared verification gate must include core and profile checks'
 line_of() {
-  grep -nF "$2" "$1" | head -n1 | cut -d: -f1
+  grep -nF "$2" "$1" | sed -n '1p' | cut -d: -f1
 }
 
 release_adapter_line="$(line_of "$RELEASE_WORKFLOW" "run: bash $RUNNER")"

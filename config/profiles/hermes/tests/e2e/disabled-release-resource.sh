@@ -64,7 +64,7 @@ hermes_disabled_resource_prepare() {
   local address port
   address="100.127.253.$((20 + TOKEN % 200))"
   port=$((42000 + TOKEN % 1000))
-  ! ip -4 address show | grep -Fq "$address/" || die 'synthetic dashboard address already exists'
+  ! ip -4 address show | grep -F >/dev/null "$address/" || die 'synthetic dashboard address already exists'
   sudo -n ip address add "$address/32" dev lo
   printf '%s\n' "$address" > "$STATE_ROOT/dashboard-address"
   chmod 0600 "$STATE_ROOT/dashboard-address"

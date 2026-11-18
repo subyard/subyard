@@ -156,7 +156,7 @@ owner_cleanup() {
   if [ "$OWNER_BASELINE_CAPTURED" = 1 ]; then
     while IFS= read -r fingerprint; do
       [ -n "$fingerprint" ] || continue
-      printf '%s\n' "$OWNER_BASELINE_IMAGES" | grep -Fxq "$fingerprint" \
+      grep -Fxq "$fingerprint" <<<"$OWNER_BASELINE_IMAGES" \
         || incus image delete "$fingerprint" --project default >/dev/null 2>&1 \
         || cleanup_failed=1
     done < <(incus image list --project default --format csv -c f)
@@ -712,7 +712,7 @@ owner() (
   [ "$(incus exec yard-test-yard --project subyard-test-yard -- stat -c '%U:%G:%a' /var/lib/subyard/test-vms)" = root:root:700 ] \
     || die 'nested state permissions did not converge'
   ! incus exec yard-test-yard --project subyard-test-yard -- id -nG dev | tr ' ' '\n' \
-    | grep -Eq '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
+    | grep -E >/dev/null '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
   # Exercise L2 ownership through a synthetic profile, independently of shipped toolchains.
   # shellcheck source=tests/helpers/test-context.sh
   . "$ROOT/tests/helpers/test-context.sh"
@@ -999,8 +999,8 @@ ensure_incus() {
 	local state_root="$1" install_marker="${2:-}" resume_mode="$3"
 	local storage_path="${4:-$state_root/incus/storage}"
 	if command -v incus >/dev/null 2>&1 \
-		&& ! id -nG | tr ' ' '\n' | grep -qx incus-admin \
-		&& id -nG "$(id -un)" | tr ' ' '\n' | grep -qx incus-admin; then
+		&& ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin \
+		&& id -nG "$(id -un)" | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
 		reexec_with_incus_group "$resume_mode"
 	fi
 	if incus info >/dev/null 2>&1; then
@@ -1023,13 +1023,13 @@ ensure_incus() {
     [ -z "$install_marker" ] || printf '%s\n' "$MARKER" > "$install_marker"
     printf '  [ .. ] VM%s: reconciling a partial Incus installation\n' "$SUBYARD_E2E_VM"
     run_incus_installer "$state_root" "$storage_path" --yes --zabbly
-    id -nG | tr ' ' '\n' | grep -qx incus-admin || reexec_with_incus_group "$resume_mode"
+    id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin || reexec_with_incus_group "$resume_mode"
     return
   fi
 	[ -z "$install_marker" ] || printf '%s\n' "$MARKER" > "$install_marker"
 	printf '  [ .. ] VM%s: initializing the Incus owner API\n' "$SUBYARD_E2E_VM"
 	run_incus_installer "$state_root" "$storage_path" --yes --zabbly
-	id -nG | tr ' ' '\n' | grep -qx incus-admin || reexec_with_incus_group "$resume_mode"
+	id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin || reexec_with_incus_group "$resume_mode"
 }
 
 ensure_owner_incus() {
@@ -1813,7 +1813,7 @@ capacity_preflight() {
   # Fresh bases install Incus without granting the operator membership yet.
   # Give only this recovery process access; yard init still owns membership.
   if command -v incus >/dev/null 2>&1 && [ "$(id -u)" != 0 ] \
-    && ! id -nG | tr ' ' '\n' | grep -qx incus-admin; then
+    && ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
     exec sudo -n -E /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
       env HOME="$HOME" PATH="$PATH" \
       bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
@@ -1950,13 +1950,13 @@ capacity_verify_cleanup() {
     || die 'power reconciler executable residue remains after cleanup'
   if command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1; then
     leftover="$(incus project list --format csv -c n \
-      | awk '/^subyard-nested-e2e-/ { print; exit }')"
+      | awk '!found && /^subyard-nested-e2e-/ { print; found=1 }')"
     [ -z "$leftover" ] || die "nested-teardown project remains after cleanup: $leftover"
     leftover="$(incus storage list --project default --format csv -c n \
-      | awk '/^nested-e2e-/ { print; exit }')"
+      | awk '!found && /^nested-e2e-/ { print; found=1 }')"
     [ -z "$leftover" ] || die "nested-teardown pool remains after cleanup: $leftover"
     leftover="$(incus network list --project default --format csv -c n \
-      | awk '/^ne[a-z0-9]{6,8}br0$/ { print; exit }')"
+      | awk '!found && /^ne[a-z0-9]{6,8}br0$/ { print; found=1 }')"
     [ -z "$leftover" ] || die "nested-teardown network remains after cleanup: $leftover"
     ! incus storage show "$PEER_INCUS_POOL" --project default >/dev/null 2>&1 \
       || die "P0 Incus pool remains after cleanup: $PEER_INCUS_POOL"
@@ -1965,7 +1965,7 @@ capacity_verify_cleanup() {
         || die "P0 Incus project remains after cleanup: $project"
     done
     leftover="$(incus project list --format csv -c n \
-      | awk '/^subyard-systemd255-/ { print; exit }')"
+      | awk '!found && /^subyard-systemd255-/ { print; found=1 }')"
     [ -z "$leftover" ] || die "systemd 255 project remains after cleanup: $leftover"
     if incus storage show default --project default >/dev/null 2>&1; then
       p0_capacity_require_persistent_path \

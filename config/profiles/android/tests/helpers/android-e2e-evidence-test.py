@@ -21,6 +21,23 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[5]
 E2E = ROOT / 'config/profiles/android/tests/e2e'
+capture_helper = (E2E / 'android-failure-capture.sh').read_text()
+
+# Long records must drain at producer speed even when redaction is expensive.
+producer = ('import sys\nprint("x" * 65535)\n'
+            'for _ in range(512): print("a:" * 32767 + "a")\n'
+            'sys.exit(23)')
+result = subprocess.run(['bash', '-c', capture_helper + '\nandroid_capture_evidence "$@"',
+                         '_', sys.executable, '-c', producer],
+                        capture_output=True, text=True, timeout=10)
+assert result.returncode == 0 and result.stderr == 'x' * 65535 + '\n\ncapture_exit=23\n', result.stderr[-100:]
+
+# A token straddling the input cap must not appear even in part.
+producer = 'print("kept"); print("x" * (65536 - 5 - 33), "a" * 64); raise SystemExit(23)'
+result = subprocess.run(['bash', '-c', capture_helper + '\nandroid_capture_evidence "$@"',
+                         '_', sys.executable, '-c', producer],
+                        capture_output=True, text=True, timeout=10)
+assert result.returncode == 0 and result.stderr == 'kept\n\ncapture_exit=23\n', result.stderr[-100:]
 
 
 # Run the actual manifest validator against semantic output variations, not SDK
@@ -79,14 +96,14 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
         adb = tools / 'adb'
         adb.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n'
                        'printf "guest 12:34:56.789 192.0.2.1 2001:db8::1 2001:db8:0:1:2:3:4:5 aa:bb:cc:dd:ee:ff token=canary\\n"\n'
-                       'if [ "$ADB_EXIT" = 0 ]; then head -c 70000 /dev/zero | tr "\\0" x; fi\n'
+                       'if [ "$ADB_EXIT" != 124 ]; then printf "1.1.1.1\\n%.0s" {1..10000}; fi\n'
                        'if [ "$ADB_EXIT" = 124 ] && [ "${2:-}" = dumpsys ]; then sleep 30; fi\n'
                        'exit "$ADB_EXIT"\n')
         adb.chmod(0o755)
         script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "exit $2"); '
                   'export ANDROID_SDK_ROOT="$work" SUBYARD_EMU_SLOT=001 SUBYARD_EMU_GENERATION=2\n'
                   'android-broker() { shift 10; local result=0; "$@" || result=$?; '
-                  'echo released >> "$CALLS"; return "$result"; }\n' + connected)
+                  'echo released >> "$CALLS"; return "$result"; }\n' + capture_helper + connected)
         calls = directory / 'calls'
         result = subprocess.run(['bash', '-c', script, '_', name, str(child_exit)],
                                 env=dict(os.environ, PATH=name + os.pathsep + os.environ['PATH'],
@@ -103,8 +120,13 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
             assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
                                                           'aa:bb:cc:dd:ee:ff', 'canary'))
             assert '12:34:56.789' in evidence
-            if adb_exit:
-                assert evidence.count(f'capture_exit={adb_exit}') == 3
+            for section in ('logcat', 'meminfo', 'lowmemory'):
+                payload = evidence.split(f'android-gradle evidence: {section}\n', 1)[1]
+                payload, marker, remainder = payload.partition('\ncapture_exit=')
+                assert marker and remainder.splitlines()[0] == str(adb_exit)
+                assert len(payload.encode()) <= 65536
+                if adb_exit != 124:
+                    assert len(payload.encode()) >= 65528 and '1.1.1.1' not in payload
             observed = calls.read_text()
             assert 'logcat -b main -b system -b crash -d -t 512' in observed
             assert 'shell dumpsys meminfo' in observed and 'dmesg; logcat' in observed
@@ -118,11 +140,12 @@ journal_branch = runtime_source[runtime_source.index('  # The emulator journal s
                                 runtime_source.index('  if [ -n "$monitor_pid" ] &&')]
 for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'images', 0, False),
                                            (23, 'gradle', 0, True), (23, 'gradle', 7, True)):
-    script = ('set -euo pipefail\nstatus="$1"; failed_phase="$2"; capture_exit="$3"\n'
+    script = ('set -euo pipefail\nstatus="$1"; failed_phase="$2"; journal_exit="$3"\n'
               'lane=gradle; project=fixture; instance=fixture; incus_binary=(incus)\n'
               'timeout() { printf "%s\\n" "$*"; '
               'printf "journal 12:34:56.789 192.0.2.1 2001:db8::1 token=canary\\n"; '
-              'return "$capture_exit"; }\n' + journal_branch + '\nexit "$status"\n')
+              'printf "1.1.1.1\\n%.0s" {1..10000}; return "$journal_exit"; }\n'
+              + capture_helper + journal_branch + '\nexit "$status"\n')
     result = subprocess.run(['bash', '-c', script, '_', str(status), phase, str(capture_exit)],
                             capture_output=True, text=True)
     assert result.returncode == status, result.stderr
@@ -131,6 +154,9 @@ for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'image
         assert 'exec fixture -- journalctl' in result.stderr and '--user' not in result.stderr
         assert '-n 512 -o cat -u subyard-android-slot-*' in result.stderr
         assert f'capture_exit={capture_exit}' in result.stderr
+        payload, status_line = result.stderr.split('\n', 1)[1].rsplit('\ncapture_exit=', 1)
+        assert 65528 <= len(payload.encode()) <= 65536 and status_line == f'{capture_exit}\n'
+        assert '1.1.1.1' not in payload
         assert '12:34:56.789' in result.stderr
         assert not any(value in result.stderr for value in ('192.0.2.1', '2001:db8::1', 'canary'))
 

@@ -104,7 +104,7 @@ cp "$TMP/owned-project" "$MOCK_PROJECT_OWNER"
 
 # The native CLI supplies canonical SRV_POOL; STORAGE_POOL is a physical alias.
 env -u STORAGE_POOL SRV_POOL=custom-approved-pool "$ROOT/scripts/02-create-project.sh" --yes >/dev/null
-grep -F 'user.subyard.srv_pool=custom-approved-pool' "$MOCK_INCUS_LOG" | grep -Fq 'user.subyard.storage_pool=custom-approved-pool' \
+grep -F 'user.subyard.srv_pool=custom-approved-pool' "$MOCK_INCUS_LOG" | grep -F >/dev/null 'user.subyard.storage_pool=custom-approved-pool' \
   || fail 'project ownership did not retain the approved canonical custom pool without an alias'
 
 cat > "$TMP/bin/qemu-system-x86_64" <<'MOCK'

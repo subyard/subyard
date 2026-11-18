@@ -74,7 +74,7 @@ chmod 0600 "$legacy_temp"
 [ "$(sha256sum "$legacy_temp" | awk '{print $1}')" = "$legacy_digest" ] \
   || fail 'legacy temp content was modified'
 [ "$(stat -c '%a' "$config")" = 600 ] || fail 'SSH config mode is not 0600'
-if find "$sshdir" -maxdepth 1 -name '.subyard-ssh-config.*' -print -quit | grep -q .; then
+if find "$sshdir" -maxdepth 1 -name '.subyard-ssh-config.*' -print -quit | grep -a >/dev/null .; then
   fail 'atomic update left a staging file'
 fi
 
@@ -125,7 +125,7 @@ grep -Fq "unrelated.example $key_one" "$known" \
 [ "$(stat -c '%a' "$known")" = 600 ] || fail 'known_hosts mode is not 0600'
 ssh_known_host_remove "$known" '[127.0.0.1]:2223' \
   || fail 'could not atomically remove a pinned yard host key'
-! ssh-keygen -F '[127.0.0.1]:2223' -f "$known" | grep -q '^\[127' \
+! ssh-keygen -F '[127.0.0.1]:2223' -f "$known" | grep >/dev/null '^\[127' \
   || fail 'yard host-key pin remained after removal'
 grep -Fq "unrelated.example $key_one" "$known" \
   || fail 'host-key removal removed an unrelated pin'

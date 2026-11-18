@@ -542,7 +542,7 @@ diff "$tmp/preflight.expected" "$tmp/preflight.actual" >&2 || fail "preflight re
 arm_root="$tmp/arm-install"
 set_latest 0.147.0 "$sha_147_amd64" "$sha_147_arm64"
 run_hook arm64 "$arm_root" >/dev/null
-tail -n 1 "$curl_log" | grep -Fq '/rust-v0.147.0/codex-package-aarch64-unknown-linux-musl.tar.gz' \
+tail -n 1 "$curl_log" | grep -F >/dev/null '/rust-v0.147.0/codex-package-aarch64-unknown-linux-musl.tar.gz' \
   || fail "arm64 did not map to the aarch64 musl artifact"
 count="$(fetch_count)"
 if run_hook s390x "$tmp/unsupported" >/dev/null 2>&1; then

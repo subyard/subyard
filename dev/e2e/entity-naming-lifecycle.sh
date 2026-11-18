@@ -28,7 +28,7 @@ ADMIN_ALIAS="${SUBYARD_ENTITY_PEER_ALIAS:-e2e-vm-2}"
 if [ -n "$ADMIN_CONFIG" ]; then
   REMOTE_HOST="${SUBYARD_ENTITY_PEER_IP:?peer IP is required with peer config}"
 else
-  REMOTE_HOST="$(getent ahostsv4 "$ADMIN_ALIAS" | awk '$2=="STREAM" {print $1; exit}')"
+  REMOTE_HOST="$(getent ahostsv4 "$ADMIN_ALIAS" | awk '!found && $2=="STREAM" {print $1; found=1}')"
 fi
 [[ "$REMOTE_HOST" =~ ^[0-9a-fA-F:.]+$ ]] || fail 'cannot resolve VM2 address'
 

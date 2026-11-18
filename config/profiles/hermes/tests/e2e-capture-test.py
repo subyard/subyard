@@ -100,7 +100,7 @@ assert args[2:] == ['migrate', '--check', '--json']
 print('PRIVATE_SENTINEL', file=sys.stderr)
 if os.environ['READINESS_MODE'] == 'timeout' and not os.environ.get('WAIT_ONLY'): time.sleep(2)
 print((root/'response').read_text())
-raise SystemExit(17 if os.environ['READINESS_MODE'] == 'native-failure' else 0)
+raise SystemExit({'native-failure': 17, 'oversize': 23}.get(os.environ['READINESS_MODE'], 0))
 ''')
         engine.chmod(0o700)
         bound = root/'timeout'
@@ -108,7 +108,10 @@ raise SystemExit(17 if os.environ['READINESS_MODE'] == 'native-failure' else 0)
 test "$1 $2" = '--signal=TERM --kill-after=2' || exit 99
 case "$3" in 1|2|3|4|5|15) ;; *) exit 99 ;; esac
 shift 3
-exec /usr/bin/timeout --signal=TERM --kill-after=0.1 0.1 "$@"
+if [ "$READINESS_MODE" = timeout ]; then
+    exec /usr/bin/timeout --signal=TERM --kill-after=0.1 0.1 "$@"
+fi
+exec "$@"
 ''')
         bound.chmod(0o700)
         report = {'schemaVersion': 1, 'outcome': {'status': 'migration-required',
@@ -131,9 +134,11 @@ yard() {
 }
 ''' + repeat
         for mode, original, native, capture in (('report', 23, 0, 0), ('invalid', 23, 0, 2),
-                ('native-failure', 23, 17, 0), ('timeout', 23, 124, 2), ('success', 0, 0, 0)):
+                ('native-failure', 23, 17, 0), ('oversize', 37, 23, 2),
+                ('timeout', 23, 124, 2), ('success', 0, 0, 0)):
             (root/'called').unlink(missing_ok=True)
-            (root/'response').write_text('PRIVATE_SENTINEL' if mode == 'invalid' else json.dumps(report))
+            (root/'response').write_text({'invalid': 'PRIVATE_SENTINEL', 'oversize': 'PRIVATE_SENTINEL' * 131072}
+                                        .get(mode, json.dumps(report)))
             result = subprocess.run(['bash', '-c', script, 'fixture', str(SOURCE/'failure-capture.sh'), str(engine)],
                 env=dict(os.environ, PATH=str(root)+':'+os.environ['PATH'], READINESS_MODE=mode, REPEAT_ROOT=str(root),
                          REPEAT_EXIT=str(original)), capture_output=True, text=True, timeout=5)

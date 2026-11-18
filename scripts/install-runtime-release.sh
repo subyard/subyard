@@ -192,7 +192,7 @@ cleanup() {
 }
 trap cleanup EXIT
 tar -xzf "$BUNDLE" -C "$candidate" --no-same-owner --no-same-permissions
-if find "$candidate" -type l -print -quit | grep -q .; then
+if find "$candidate" -type l -print -quit | grep -a >/dev/null .; then
   printf 'install-runtime-release: bundle contains a symbolic link\n' >&2
   exit 1
 fi
@@ -261,7 +261,7 @@ fi
 if [ "$published" = 0 ]; then
   [ -d "$destination" ] && [ ! -L "$destination" ] \
     && cmp -s "$candidate/runtime-files.sha256" "$destination/runtime-files.sha256" \
-    && ! find "$destination" -type l -print -quit | grep -q . \
+    && ! find "$destination" -type l -print -quit | grep -a >/dev/null . \
     && (
       cd "$destination" &&
       sha256sum -c runtime-files.sha256 >/dev/null &&

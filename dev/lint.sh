@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 status=0
+python3 dev/lint-shell-pipelines.py || status=$?
 for script in dev/lint-workflows.sh dev/lint-python.sh dev/lint-go.sh; do
   if bash "$script"; then
     continue

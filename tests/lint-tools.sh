@@ -23,8 +23,9 @@ class LintTools(unittest.TestCase):
         self.root = Path(temporary.name)
         self.root.chmod(0o700)
         (self.root / "dev").mkdir(mode=0o700)
-        for name in ("lint.sh", "audit-go.sh", "check-govulncheck.py"):
+        for name in ("lint.sh", "lint-shell-pipelines.py", "audit-go.sh", "check-govulncheck.py"):
             shutil.copy2(source / "dev" / name, self.root / "dev" / name)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
 
     def messages(self, *findings):
         config = {"config": {"protocol_version": "v1.0.0", "scan_mode": "source", "scan_level": "symbol"}}
@@ -64,6 +65,44 @@ class LintTools(unittest.TestCase):
                 self.assertEqual(result.stderr.splitlines(), [
                     f"dev/{name}: failed (exit {code})" for name, code in zip(names, exits) if code
                 ])
+
+    def assert_shell_findings(self, path, content, lines):
+        self.write(path, content)
+        result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, int(bool(lines)), result.stderr)
+        self.assertEqual([line.partition(": ")[0] for line in result.stderr.splitlines()],
+                         [f"{path}:{number}" for number in lines])
+
+    def test_shell_lint_flags_early_consumers(self):
+        consumers = ["head -1", "read -r value", "grep -Fq term", "grep term -m1", "rg -l term",
+                     "grep -L term", "sudo -n grep --quiet term", "{ rg --max-count=1 term; }"]
+        self.assert_shell_findings("probe.sh", "\n".join("producer | " + cmd for cmd in consumers),
+                                   range(1, len(consumers) + 1))
+
+    def test_shell_lint_checks_extensionless_scripts(self):
+        pipe = "|"
+        self.assert_shell_findings("probe", f"#!/usr/bin/env bash\nproducer {pipe} grep -Fq term\n", [2])
+
+    def test_shell_lint_ignores_comments_and_draining_consumers(self):
+        pipe = "|"
+        self.assert_shell_findings("probe", f"""#!/bin/sh
+# producer {pipe} read -r value
+producer {pipe} {{ head -c 8 && cat >/dev/null; }}
+producer {pipe} grep -F term >/dev/null
+grep -q term file
+""", [])
+
+    def test_shell_lint_checks_workflow_run_lines(self):
+        pipe = "|"
+        self.assert_shell_findings(".github/workflows/test.yml", f"""steps:
+  - name: producer {pipe} head -1
+    run: producer {pipe} (head -1)
+  - run: {pipe}
+      # producer {pipe} read -r value
+      producer {pipe} grep -q term
+    name: producer {pipe} head -1
+""", [3, 6])
 
     def audit(self, payload, exit_code, entries=()):
         report = self.root / "payload"

@@ -463,7 +463,7 @@ assert_outer_vm_ssh_address() {
   local stage="$1" primary_interface eth0 foreign pinned relay_unit relay_service listeners
   primary_interface="$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
     ip -4 route show default \
-    | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); exit } }')"
+    | awk 'NR == 1 { for (i=1; i<=NF; i++) if ($i == "dev") { print $(i+1); break } }')"
   eth0="$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
     ip -4 -o address show dev "$primary_interface" scope global \
     | awk 'NR == 1 { split($4, address, "/"); print address[1] }')"
@@ -497,7 +497,7 @@ assert_outer_vm_ssh_address() {
 ensure_outer_foreign_ipv4() {
   incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- sh -eu -c '
     ip link show aaa0 >/dev/null 2>&1 || ip link add aaa0 type dummy
-    ip -4 address show dev aaa0 | grep -q "172.31.255.1/24" \
+    ip -4 address show dev aaa0 | grep >/dev/null "172.31.255.1/24" \
       || ip address add 172.31.255.1/24 dev aaa0
     ip link set aaa0 up
   '
@@ -611,7 +611,7 @@ install -d -m 0700 "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME/yards/$OUTER_Y
 YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
 
 ssh_port=$((32000 + ($$ % 10000)))
-while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -q .; do
+while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep >/dev/null .; do
   ssh_port=$((ssh_port + 1))
 done
 cat > "$SUBYARD_CONFIG_HOME/yards/$OUTER_YARD/config.env" <<EOF
@@ -691,7 +691,7 @@ yard init --yes
 assert_outer_data_home_metadata repeated-init
 assert_outer_vm_ssh_address repeated-init
 [ "$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
-  iptables -S FORWARD | head -n 1)" = '-P FORWARD ACCEPT' ] \
+  iptables -S FORWARD | sed -n '1p')" = '-P FORWARD ACCEPT' ] \
   || die 'repeated init retained stale FORWARD DROP'
 [ "$(incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- \
   systemctl show docker.service --property=MainPID --value)" = "$docker_pid_before" ] \

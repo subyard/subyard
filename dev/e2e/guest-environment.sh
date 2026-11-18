@@ -24,7 +24,7 @@ export STORAGE_PATH
 STORAGE_PATH="$(sudo -n /usr/bin/incus storage get default source)"
 install -d -m 0700 "$SUBYARD_OPERATOR_HOME"
 command_with_group() {
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local quoted
     printf -v quoted '%q ' "$@"
     sg incus-admin -c "exec $quoted"
@@ -61,7 +61,7 @@ launcher="$(command_with_group bash -c '. "$1/tests/helpers/release-candidate.sh
 version="$("$launcher" version)"; version="${version#yard }"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$name"
 port=$((30000 + $$ % 10000))
-while ss -H -ltn "sport = :$port" | grep -q .; do port=$((port+1)); done
+while ss -H -ltn "sport = :$port" | grep >/dev/null .; do port=$((port+1)); done
 printf 'ENVIRONMENT_PROFILES=\nCODING_TOOL_INTEGRATIONS=\nFORWARD_SSH_AGENT=0\nSSH_PORT=%s\n' "$port" > "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
 chmod 0600 "$SUBYARD_CONFIG_HOME/yards/$name/config.env"
 yard init --yes

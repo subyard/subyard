@@ -209,7 +209,7 @@ secret='super-secret-static-value'
 printf '%s' "$secret" | yard_one keys add shared-file --kind file --zone canonical --consumer none --yes >/dev/null
 shared_id="$(yard_one keys list | awk -F '\t' '$8=="shared-file" {print $1}')"
 [ -n "$shared_id" ] || fail 'shared credential id missing'
-initial_revision="$(yard_one keys history "$shared_id" | awk -F '\t' -v id="$shared_id" '$1==id {print $2; exit}')"
+initial_revision="$(yard_one keys history "$shared_id" | awk -F '\t' -v id="$shared_id" '!found && $1==id {print $2; found=1}')"
 [ -n "$initial_revision" ] || fail 'initial revision missing from history'
 if grep -rFq -- "$secret" "$SUBYARD_KEYS_ROOT"; then fail 'plaintext landed in the credential store'; fi
 
@@ -379,7 +379,7 @@ git -C "$SUBYARD_KEYS_ROOT/four/shared" -c user.name="$actor_four" -c user.email
   -c commit.gpgsign=true commit -S -m 'corrupt ciphertext fixture' >/dev/null
 git -C "$SUBYARD_KEYS_ROOT/four/shared" push -q origin main
 if yard_three keys sync @srv4 --now --yes >"$TMP/corrupt.out" 2>&1; then fail 'corrupt signed ciphertext was accepted'; fi
-find "$SUBYARD_KEYS_ROOT/three/quarantine" -name "$bad_remote_rev.json" -print -quit | grep -q . \
+find "$SUBYARD_KEYS_ROOT/three/quarantine" -name "$bad_remote_rev.json" -print -quit | grep -a >/dev/null . \
   || fail 'corrupt signed ciphertext was not quarantined'
 
 # Removing a recipient emits successors without that actor and removes reciprocal signing trust.
@@ -432,7 +432,7 @@ git -C "$SUBYARD_KEYS_ROOT/two/shared" -c user.name="$actor_two" -c user.email="
   -c commit.gpgsign=true commit -S -m 'cyclic parent fixture' >/dev/null
 git -C "$SUBYARD_KEYS_ROOT/two/shared" push -q origin main
 if yard_one keys sync @two --now --yes >"$TMP/cycle.out" 2>&1; then fail 'cyclic remote revision graph was accepted'; fi
-find "$SUBYARD_KEYS_ROOT/one/quarantine" -name "$cycle_rev_a.json" -print -quit | grep -q . \
+find "$SUBYARD_KEYS_ROOT/one/quarantine" -name "$cycle_rev_a.json" -print -quit | grep -a >/dev/null . \
   || fail 'cyclic revision graph was not quarantined'
 
 # No failed/interrupted operation may leave plaintext in command output or the private temp root.
