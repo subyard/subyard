@@ -16,6 +16,8 @@ case "$lane" in full|skills|diagnostics|projects|recovery|viewer|viewer-native-d
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 # shellcheck source=config/profiles/android/tests/e2e/android-candidate.sh
 . "$root/config/profiles/android/tests/e2e/android-candidate.sh"
+# shellcheck source=config/profiles/android/tests/e2e/android-failure-capture.sh
+. "$root/config/profiles/android/tests/e2e/android-failure-capture.sh"
 YARD_BIN="$root/.build/yard"
 unset YARD_ENGINE_PATH
 for command in go incus sudo timeout; do command -v "$command" >/dev/null || exit 1; done
@@ -85,16 +87,8 @@ cleanup() {
   if [ "$status" -ne 0 ] && [ "$lane" = gradle ] && [ "$failed_phase" = gradle ] \
     && [ -n "$project" ] && [ -n "$instance" ]; then
     printf 'android-gradle evidence: emulator\n' >&2
-    { timeout --kill-after=2 5 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
-        journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' 2>&1
-      printf '\ncapture_exit=%s\n' "$?"; } |
-      { head -c 65536 && cat >/dev/null; } | sed -E \
-      -e 's/(token|credential|secret|password|authorization|api[_-]?key)[=: ][^[:space:]]+/[redacted]/Ig' \
-      -e 's/\b[0-9a-fA-F]{64}\b/[redacted]/g' \
-      -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[address]/g' \
-      -e 's/([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}/[address]/g' \
-      -e 's/([0-9a-fA-F]{1,4}:)*[0-9a-fA-F]{0,4}::[0-9a-fA-F:.]*/[address]/g' \
-      -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/[address]/g' >&2 || true
+    android_capture_evidence "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+      journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' || true
   fi
   if [ -n "$monitor_pid" ] && [ -n "$project" ] && [ -n "$instance" ]; then
     timeout 20 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
@@ -400,9 +394,10 @@ if [ "$lane" = gradle ]; then
     incus_binary=(sudo -n /usr/bin/incus)
   fi
   # Default-package build, broker SDK addition and connected tests through one lease.
+  gradle_script="$(cat "$root/config/profiles/android/tests/e2e/android-failure-capture.sh" \
+    "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
   timeout --foreground --kill-after=30 3600 "${incus_binary[@]}" --project "$project" exec "$instance" \
-    --user 1000 --group 1000 --env HOME=/home/dev -- bash -se \
-    < "$root/config/profiles/android/tests/e2e/android-gradle.sh"
+    --user 1000 --group 1000 --env HOME=/home/dev -- bash -se <<< "$gradle_script"
   android_phase_end 0
   android_phase_begin relay-owner
   # The loopback relay refuses a connection owned by another local account.

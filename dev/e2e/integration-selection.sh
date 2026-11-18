@@ -331,8 +331,8 @@ yard integration disable claude --yes > "$STATE/drift-disable-init-first.log" 2>
 yard init --yes > "$STATE/drift-init-first.log" 2>&1 || { tail -n 20 "$STATE/drift-init-first.log" >&2; die 'init-first release failed'; }
 # The disable releases the ownership itself when the change already made the
 # yard one that needs repair; otherwise the following init does.
-grep -Fq "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" \
-  "$STATE/drift-disable-init-first.log" "$STATE/drift-init-first.log" \
+cat "$STATE/drift-disable-init-first.log" "$STATE/drift-init-first.log" |
+  grep -aF >/dev/null "yard $YARD_NAME: released ownership of /home/dev/.claude/settings.json: owned fields changed" \
   || die 'init-first release was not reported'
 guest sha256sum -c - < "$STATE/drift-settings.before" >/dev/null || die 'init-first release changed the document'
 host_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null || die 'init-first released yard is not release-ready'

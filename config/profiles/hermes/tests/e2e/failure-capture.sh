@@ -51,6 +51,9 @@ owners = {"activation."+name for name in ("core-guest-runtime", "key-tools-runti
 try:
     payload = sys.stdin.buffer.read(65537)
     if len(payload) > 65536:
+        # Let the producer finish without retaining the oversized report.
+        while sys.stdin.buffer.read(65536):
+            pass
         raise ValueError()
     value = json.loads(payload)
     outcome, decisions, blockers = value["outcome"], value.get("decisions", []), value.get("blockers", [])

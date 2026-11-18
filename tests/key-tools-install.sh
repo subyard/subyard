@@ -9,7 +9,15 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 mkdir -p "$TMP/fixture/age" "$TMP/bin" "$TMP/home"
 cat > "$TMP/fixture/age/age" <<'SH'
 #!/usr/bin/env bash
-echo 'age 9.9.1'
+case "${KEY_TOOL_PROBE:-normal}" in
+  normal) echo 'age 9.9.1' ;;
+  silent) exit 0 ;;
+  failure) exit 23 ;;
+  noisy-failure) echo 'could not read version' >&2; exit 23 ;;
+  mismatch) printf 'age 1.0.0\nage 9.9.1\n' ;;
+  large) printf 'age 9.9.1\n'; printf 'extra output\n%.0s' {1..16384} ;;
+  *) exit 99 ;;
+esac
 SH
 cat > "$TMP/fixture/age/age-keygen" <<'SH'
 #!/usr/bin/env bash
@@ -77,6 +85,18 @@ PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
 
 receipt="$SUBYARD_KEYS_TOOLS_DIR/bin/.subyard-native-tools.json"
 [ "$(stat -c '%a' "$receipt")" = 600 ] || fail 'native tool receipt is not protected'
+while read -r probe expected; do
+  status=0
+  KEY_TOOL_PROBE="$probe" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check || status=$?
+  [ "$status" = "$expected" ] || fail "version probe $probe: expected exit $expected, got $status"
+done <<'PROBES'
+normal 0
+silent 0
+failure 23
+noisy-failure 23
+mismatch 1
+large 0
+PROBES
 # The same operator may invoke yard through sg with a different primary group.
 KEY_TOOL_REAL_ID="$(command -v id)"
 export KEY_TOOL_REAL_ID
