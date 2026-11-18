@@ -262,7 +262,7 @@ func (runtime *Runtime) PrepareCurrentTransition(ctx context.Context, arguments 
 	if protected != nil {
 		recoveryRequest = protected.recoveryRequest
 	}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil, delegate, recoveryRequest)
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(ctx, options{root: parsed.root, expectedLinks: &before.links}, owner, target, request, inspection, activationOwned, nil, delegate, recoveryRequest)
 	if err != nil {
 		return Prepared{}, err
 	}

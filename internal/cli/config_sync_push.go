@@ -339,12 +339,7 @@ func (adapter *configSyncPushAdapter) Run(
 	if err != nil || preview.Digest != prepared.preview.Digest {
 		return domain.AdapterResult{}, "", errors.New("configuration source or local settings changed after preview; rerun push")
 	}
-	if err := adapter.cli.fetchRegisteredConfigUpstream(
-		ctx, prepared.checkout, prepared.remote, prepared.remoteURL,
-		prepared.expectedRemote,
-	); err != nil {
-		return domain.AdapterResult{}, "", err
-	}
+
 	if prepared.createdCommit {
 		if err := adapter.cli.configGitRun(
 			ctx, prepared.checkout, "fetch", "--quiet", "--no-tags", "--",

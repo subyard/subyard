@@ -1140,7 +1140,7 @@ func TestRepairNeedsTheInstalledReleaseTooling(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "running tooling does not match the sealed completed release; next: yard update") ||
+		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "running tooling does not match the sealed completed release; next: resolve the protected release source failure with the sealed active release owner") ||
 			harness.effects() != 0 {
 			t.Fatalf("%v outside the installed runtime: code=%d effects=%d\n%s%s", arguments, code, harness.effects(), stdout.String(), stderr.String())
 		}
@@ -1504,7 +1504,7 @@ func TestConfigSyncConsumerRefreshIsAConsumerRepair(t *testing.T) {
 	}
 	program.sourceBinding = nil // the real proof refuses this fixture CLI
 	if _, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default"}); err == nil ||
-		!strings.Contains(err.Error(), "running tooling does not match the sealed completed release; next: yard update") {
+		!strings.Contains(err.Error(), "running tooling does not match the sealed completed release; next: resolve the protected release source failure with the sealed active release owner") {
 		t.Fatalf("consumer refresh with other tooling: %v", err)
 	}
 	testkit.WriteFile(t, harness.inspect, harness.ready, 0o600)

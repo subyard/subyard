@@ -440,25 +440,43 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 	if len(targets) == 0 {
 		return nil, errors.New("config apply: no local yards selected")
 	}
-	if err := cli.checkNativeTargets(targets[0].Loaded, len(targets) > 1, nil); err != nil {
+	assessments, err := cli.assessConfigTargets(ctx, targets, "inspect", nil)
+	if err != nil {
 		return nil, err
 	}
-	if err := validateManagedConfigTree(targets[0].Loaded.Context.Paths.ConfigHome); err != nil {
+	return &configApplyExecution{selector: selector, approved: assessments, current: slices.Clone(assessments)}, nil
+}
+
+// An unreadable optional discovery target cannot establish drift. Required
+// targets, including previously approved consumers, must be observable.
+func (cli *CLI) assessConfigTargets(ctx context.Context, targets []configTarget, phase string, required func(string) bool) ([]configTargetAssessment, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	loaded := targets[0].Loaded
+	if err := domain.CollectRefusals(
+		cli.checkNativeTargets(loaded, len(targets) > 1, nil),
+		validateManagedConfigTree(loaded.Context.Paths.ConfigHome),
+	); err != nil {
 		return nil, err
 	}
-	execution := &configApplyExecution{selector: selector}
+	var assessments []configTargetAssessment
+	var refusals []error
 	for _, target := range targets {
 		if target.Loaded.Context.AccessKind == domain.AccessRemote {
-			return nil, fmt.Errorf("config apply does not implicitly operate on remote yard %s", target.Name)
+			refusals = append(refusals, fmt.Errorf("config apply does not implicitly operate on remote yard %s", target.Name))
+			continue
 		}
 		assessment, err := cli.assessConfigTarget(ctx, target, true)
 		if err != nil {
-			return nil, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome}
+			if required == nil || required(target.Name) {
+				refusals = append(refusals, materializedConfigActivationError{err, target.Name, "materialized config", "config status", phase, target.Loaded.Context.Paths.ConfigHome})
+			}
+			continue
 		}
-		execution.approved = append(execution.approved, assessment)
+		assessments = append(assessments, assessment)
 	}
-	execution.current = slices.Clone(execution.approved)
-	return execution, nil
+	return assessments, domain.CollectRefusals(refusals...)
 }
 
 func (execution *configApplyExecution) changed() bool {
@@ -491,30 +509,34 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 	if !sameConfigTargetSet(execution.approved, targets) {
 		return fmt.Errorf("%w: selected local yard set changed after confirmation", domain.ErrPlanStale)
 	}
-	if err := cli.checkNativeTargets(targets[0].Loaded, len(targets) > 1, nil); err != nil {
+	assessments, err := cli.assessConfigTargets(ctx, targets, "verify", nil)
+	if err != nil {
 		return err
 	}
-	if err := validateManagedConfigTree(targets[0].Loaded.Context.Paths.ConfigHome); err != nil {
-		return err
+	return execution.accept(assessments)
+}
+
+func (execution *configApplyExecution) accept(assessments []configTargetAssessment) error {
+	byName := make(map[string]configTargetAssessment, len(assessments))
+	for _, assessment := range assessments {
+		byName[assessment.Target.Name] = assessment
 	}
-	byName := make(map[string]configTargetAssessment, len(targets))
-	for _, target := range targets {
-		assessment, err := cli.assessConfigTarget(ctx, target, true)
-		if err != nil {
-			return materializedConfigActivationError{err, target.Name, "materialized config", "config status", "verify", target.Loaded.Context.Paths.ConfigHome}
-		}
-		byName[target.Name] = assessment
+	refusals := []error{}
+	if len(execution.approved) != len(byName) {
+		refusals = append(refusals, fmt.Errorf("%w: selected local yard set changed after confirmation", domain.ErrPlanStale))
 	}
 	var current []configTargetAssessment
 	for _, initial := range execution.approved {
-		fresh := byName[initial.Target.Name]
-		if initial.DesiredFingerprint != fresh.DesiredFingerprint {
-			return fmt.Errorf("%w: yard %s: desired configuration or target changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
-		}
-		if !(initial.Changed && !fresh.Changed) && (initial.MaterializedFingerprint != fresh.MaterializedFingerprint || initial.Changed != fresh.Changed) {
-			return fmt.Errorf("%w: yard %s: materialized configuration changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
+		fresh, found := byName[initial.Target.Name]
+		if !found || initial.DesiredFingerprint != fresh.DesiredFingerprint {
+			refusals = append(refusals, fmt.Errorf("%w: yard %s: desired configuration or target changed after confirmation", domain.ErrPlanStale, initial.Target.Name))
+		} else if !(initial.Changed && !fresh.Changed) && (initial.MaterializedFingerprint != fresh.MaterializedFingerprint || initial.Changed != fresh.Changed) {
+			refusals = append(refusals, fmt.Errorf("%w: yard %s: materialized configuration changed after confirmation", domain.ErrPlanStale, initial.Target.Name))
 		}
 		current = append(current, fresh)
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	execution.current = current
 	return nil
@@ -544,14 +566,18 @@ func (prepared *preparedCommand) attachConfigApply(execution *configApplyExecuti
 }
 
 func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyExecution, approvedSteps []domain.OperationStep, output io.Writer) error {
-	copyCLI := *cli
-	copyCLI.options.Stdout, copyCLI.options.Stderr = output, output
 	if err := cli.refreshConfigApply(ctx, execution); err != nil {
 		return err
 	}
 	if err := domain.CheckOperationSteps(approvedSteps, execution.steps()); err != nil {
 		return err
 	}
+	return cli.applyObservedConfig(ctx, execution, output)
+}
+
+func (cli *CLI) applyObservedConfig(ctx context.Context, execution *configApplyExecution, output io.Writer) error {
+	copyCLI := *cli
+	copyCLI.options.Stdout, copyCLI.options.Stderr = output, output
 	var targets []configTarget
 	for index, assessment := range execution.current {
 		if assessment.Changed {

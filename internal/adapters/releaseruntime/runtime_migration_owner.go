@@ -166,7 +166,7 @@ func (runtime *Runtime) prepareMigrationOwnerReplacement(ctx context.Context, pa
 		return Prepared{}, true, errors.New("migration owner candidate returned invalid inspection")
 	}
 	verification := candidateVerification{candidate: candidate.candidate, digest: candidate.manifestDigest, version: candidate.version, registryDigest: candidate.registryDigest}
-	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(parsed, verification, verification, request.TransitionRequest(), *response.Inspection, response.ActivationReconciliationOwned, nil, nil, &request)
+	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(ctx, parsed, verification, verification, request.TransitionRequest(), *response.Inspection, response.ActivationReconciliationOwned, nil, nil, &request)
 	return prepared, true, err
 }
 

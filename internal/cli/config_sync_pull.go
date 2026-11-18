@@ -178,12 +178,7 @@ func (adapter *configSyncPullAdapter) Run(
 			"checkout HEAD changed after preview; rerun pull",
 		)
 	}
-	if err := adapter.cli.fetchRegisteredConfigUpstream(
-		ctx, prepared.checkout, prepared.remote, prepared.remoteURL,
-		prepared.expectedRemote,
-	); err != nil {
-		return domain.AdapterResult{}, "", err
-	}
+
 	if prepared.fastForward {
 		if err := adapter.cli.configGitRun(
 			ctx, prepared.checkout, "merge", "--ff-only", "--no-edit",

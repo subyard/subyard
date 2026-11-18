@@ -457,7 +457,7 @@ func (cli *CLI) admitGate(
 	// history was still recorded above.
 	if admitted.kind == admissionRepair && request.handler != "@shell" {
 		if admitted.sources, err = cli.repairSources(ctx); err != nil {
-			return nil, outcome, inspection, nil, scoped, fmt.Errorf("%w: %w; next: %s", domain.ErrPlanStale, err, repairSourceNext)
+			return nil, outcome, inspection, nil, scoped, fmt.Errorf("%w: %w; next: %s", domain.ErrPlanStale, err, admitted.gate.sourceRepairNext())
 		}
 	}
 	return admitted, outcome, inspection, nil, scoped, nil
@@ -596,15 +596,6 @@ func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
 	if current == nil || *current != admission.history {
 		return fmt.Errorf("%w: the release changed after confirmation; rerun the command", domain.ErrPlanStale)
 	}
-	if admission.sources != nil {
-		sources, err := cli.repairSources(ctx)
-		if err != nil {
-			return fmt.Errorf("%w: %w; next: %s", domain.ErrPlanStale, err, repairSourceNext)
-		}
-		if *sources != *admission.sources {
-			return fmt.Errorf("%w: the installed release source changed after confirmation; rerun the command", domain.ErrPlanStale)
-		}
-	}
 	outcome, inspection, err := cli.inspectMutationGateInspection(ctx, admission.request.yard)
 	if err != nil {
 		return err
@@ -620,6 +611,15 @@ func (admission *gateAdmission) recheck(ctx context.Context, cli *CLI) error {
 		admission.gate = &gate
 	} else {
 		admission.gate = &yardGate{}
+	}
+	if admission.sources != nil {
+		sources, err := cli.repairSources(ctx)
+		if err != nil {
+			return fmt.Errorf("%w: %w; next: %s", domain.ErrPlanStale, err, admission.gate.sourceRepairNext())
+		}
+		if *sources != *admission.sources {
+			return fmt.Errorf("%w: the installed release source changed after confirmation; rerun the command", domain.ErrPlanStale)
+		}
 	}
 	if current, err = cli.readReleaseHistory(); err != nil {
 		return err
@@ -718,6 +718,18 @@ func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names
 	}, nil
 }
 
+// A yard blocker can prevent update from repairing the source, while the
+// source failure prevents yard repair. Resolve the source prerequisite first.
+func (gate yardGate) sourceRepairNext() string {
+	for _, name := range gate.order {
+		state := gate.state(name)
+		if state.config || state.failed || state.unreachable || state.pending {
+			return "resolve the protected release source failure with the sealed active release owner before retrying"
+		}
+	}
+	return repairSourceNext
+}
+
 // configRefreshRefusal is shared by consumer admission and read-only advice.
 func (gate yardGate) configRefreshRefusal(names []string, sourceErr error) (error, string) {
 	var refusals []error
@@ -738,7 +750,7 @@ func (gate yardGate) configRefreshRefusal(names []string, sourceErr error) (erro
 	}
 	switch {
 	case sourceErr != nil:
-		return domain.CollectRefusals(append(refusals, sourceErr)...), repairSourceNext
+		return domain.CollectRefusals(append(refusals, sourceErr)...), gate.sourceRepairNext()
 	case blockedNext != "":
 		return domain.CollectRefusals(refusals...), blockedNext
 	default:
@@ -852,16 +864,19 @@ func (gate yardGate) materializedDriftYards() []string {
 	return names
 }
 
-func (cli *CLI) updateCheckAdvice(ctx context.Context, inspection *releasetransition.Inspection) (string, string) {
+func (cli *CLI) updateAdvice(ctx context.Context, inspection *releasetransition.Inspection) (string, string) {
 	gate, ok := cli.yardScopedGate(inspection.Outcome, inspection)
-	names := gate.materializedDriftYards()
-	if !ok || len(names) == 0 {
+	if !ok {
 		return "", ""
 	}
 	_, sourceErr := cli.repairSources(ctx)
-	cause, next := gate.configRefreshRefusal(names, sourceErr)
+	cause, next := gate.configRefreshRefusal(gate.order, sourceErr)
 	if cause != nil {
 		return cause.Error(), next
+	}
+	names := gate.materializedDriftYards()
+	if len(names) == 0 {
+		return "", ""
 	}
 	for _, name := range names {
 		if cli.fileRefreshNeeded(ctx, name) {

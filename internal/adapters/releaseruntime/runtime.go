@@ -50,8 +50,8 @@ type Config struct {
 	// ConfigurationState supplies configuration state that update --check
 	// reports beside its inspection, such as ignored operator assignments.
 	ConfigurationState func() []config.ConfigurationState
-	// UpdateCheckAdvice supplies caller-specific advice for checks without a blocker.
-	UpdateCheckAdvice func(context.Context, *releasetransition.Inspection) (message, retry string)
+	// UpdateAdvice selects the human next step from the full inspection.
+	UpdateAdvice func(context.Context, *releasetransition.Inspection) (message, retry string)
 }
 
 type Prepared struct {
@@ -671,7 +671,7 @@ func (runtime *Runtime) PrepareTransition(
 			if newerRelease == nil {
 				runtime.setV0111StandaloneRetry(ctx, parsed.root, protected)
 				runtime.setV0173StandaloneRetry(ctx, parsed.root, protected)
-				prepared, err := runtime.prepareProtectedTransition(parsed, protected)
+				prepared, err := runtime.prepareProtectedTransition(ctx, parsed, protected)
 				if err == nil && unfinished {
 					prepared.newerRelease = runtime.newerReleaseProbe(parsed, configHome)
 				}
@@ -1197,6 +1197,7 @@ func sourceIngressRequestFromEnvironment(
 }
 
 func (runtime *Runtime) prepareProtectedTransition(
+	ctx context.Context,
 	parsed options,
 	protected *protectedTransitionInspection,
 ) (Prepared, error) {
@@ -1214,7 +1215,7 @@ func (runtime *Runtime) prepareProtectedTransition(
 		)
 	}
 	prepared, err := runtime.prepareInspectedCandidateTransitionWithDelegate(
-		parsed, protected.owner, protected.target,
+		ctx, parsed, protected.owner, protected.target,
 		protected.request, protected.inspection,
 		protected.activationReconciliationOwned, nil, nil, protected.recoveryRequest,
 	)
@@ -1520,7 +1521,7 @@ func (runtime *Runtime) inspectVerifiedTransition(
 		return Prepared{}, publicReleaseInspectionError{cause: transitionOutcomeError(*outcome), outcome: *outcome}
 	}
 	return runtime.prepareInspectedCandidateTransition(
-		parsed,
+		ctx, parsed,
 		candidateVerification{
 			candidate: owner.candidate, digest: owner.manifestDigest, version: owner.version,
 			registryDigest: owner.registryDigest,
@@ -1535,6 +1536,7 @@ func (runtime *Runtime) inspectVerifiedTransition(
 }
 
 func (runtime *Runtime) prepareInspectedCandidateTransition(
+	ctx context.Context,
 	parsed options,
 	owner candidateVerification,
 	target candidateVerification,
@@ -1544,11 +1546,12 @@ func (runtime *Runtime) prepareInspectedCandidateTransition(
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
 	return runtime.prepareInspectedCandidateTransitionWithDelegate(
-		parsed, owner, target, request, inspection, activationReconciliationOwned, revalidation, nil, nil,
+		ctx, parsed, owner, target, request, inspection, activationReconciliationOwned, revalidation, nil, nil,
 	)
 }
 
 func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
+	ctx context.Context,
 	parsed options,
 	owner candidateVerification,
 	target candidateVerification,
@@ -1598,23 +1601,40 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 					Message string `json:"message"`
 					Retry   string `json:"retry"`
 				}
+				report := inspection
 				var next *advice
-				if !parsed.json && len(inspection.Blockers) == 0 && runtime.config.UpdateCheckAdvice != nil {
-					if message, retry := runtime.config.UpdateCheckAdvice(ctx, &inspection); retry != "" {
+				if !parsed.json && runtime.config.UpdateAdvice != nil {
+					if message, retry := runtime.config.UpdateAdvice(ctx, &inspection); retry != "" {
 						next = &advice{Message: message, Retry: retry}
+						outcome := *report.Outcome
+						outcome.Retry = retry
+						report.Outcome = &outcome
+						report.Blockers = slices.Clone(report.Blockers)
+						for i := range report.Blockers {
+							report.Blockers[i].Retry = retry
+						}
 					}
 				}
 				return runtime.writeInspection(parsed, struct {
 					releasetransition.Inspection
 					Configuration []config.ConfigurationState `json:"configuration,omitempty"`
 					Advice        *advice                     `json:"advice,omitempty"`
-				}{inspection, runtime.configurationState(), next})
+				}{report, runtime.configurationState(), next})
 			},
 		}, nil
 	}
 	if inspection.Outcome.Status == releasetransition.StatusOperatorActionRequired {
+		outcome := *inspection.Outcome
+		if runtime.config.UpdateAdvice != nil {
+			if message, retry := runtime.config.UpdateAdvice(ctx, &inspection); retry != "" {
+				if message != "" {
+					outcome.Message = message
+				}
+				outcome.Retry = retry
+			}
+		}
 		return Prepared{}, publicReleaseInspectionError{
-			cause: transitionOutcomeError(*inspection.Outcome), outcome: *inspection.Outcome,
+			cause: transitionOutcomeError(outcome), outcome: outcome,
 		}
 	}
 	consequences := slices.Clone(inspection.Assessment.Consequences)

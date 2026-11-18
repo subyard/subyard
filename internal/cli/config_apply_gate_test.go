@@ -26,6 +26,10 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	options.Environment = slices.DeleteFunc(slices.Clone(options.Environment), func(value string) bool {
 		return strings.HasPrefix(value, "HOST_BASE=") || strings.HasPrefix(value, "RESTRICTED_DISK_PATHS=")
 	})
+	options.Environment = append(options.Environment,
+		"GIT_AUTHOR_NAME=Subyard Test", "GIT_AUTHOR_EMAIL=test@invalid",
+		"GIT_COMMITTER_NAME=Subyard Test", "GIT_COMMITTER_EMAIL=test@invalid",
+	)
 	writeCLIFile(t, filepath.Join(home, "yards/named/config.env"), fmt.Sprintf("SSH_PORT=2223\nHOST_BASE=%s/host-named\nRESTRICTED_DISK_PATHS=%s/host-named\n", root, root), 0o600)
 	active, err := filepath.EvalSymlinks(filepath.Join(fixture.cli.env["YARD_RUNTIME_ROOT"], "current"))
 	if err != nil {
@@ -129,6 +133,29 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 			t.Fatalf("%v gave inconsistent advice: %s", args, output)
 		}
 	}
+	// A source failure can block init while a different yard blocks update.
+	mixedEngine := strings.Replace(engine, `{"resource":"activation.materialized-config","scope":"yard-attribution","decision":"preserve","result":"drift named"}],"outcome"`,
+		`{"resource":"activation.core-guest-runtime","scope":"yard-attribution","decision":"preserve","result":"failed named"}],
+"blockers":[{"code":"dependency-unavailable","resource":"activation.core-guest-runtime","message":"yard named: activation failed","retry":"yard -Y named init"}],"outcome"`, 1)
+	mixedEngine = strings.ReplaceAll(mixedEngine, `"status":"migration-required"`, `"status":"operator-action-required","transaction":"tx-0123456789abcdef"`)
+	mixedEngine = strings.ReplaceAll(mixedEngine, `"code":"transition-required","message":"activation drift","retry":"run yard update"`,
+		`"code":"dependency-unavailable","message":"yard named: activation failed","retry":"yard -Y named init"`)
+	sealCurrentEngine(t, fixture, mixedEngine)
+	for _, check := range []struct {
+		exit int
+		args []string
+	}{
+		{0, []string{"update", "--check", "--offline"}},
+		{1, []string{"-Y", "named", "init"}},
+		{1, []string{"update"}},
+	} {
+		output := run(check.exit, check.args...)
+		if !strings.Contains(output, refusal) || !strings.Contains(output, "resolve the protected release source failure") ||
+			strings.Contains(output, "yard -Y named init") || strings.Contains(output, "next: yard update") {
+			t.Fatalf("%v sent the operator back to a blocked command: %s", check.args, output)
+		}
+	}
+	sealCurrentEngine(t, fixture, engine)
 	if err := os.Remove(pending); err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +177,58 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	}
 	options.Executor = fake
 
+	checkout := strings.TrimSpace(run(0, "config", "sync", "path"))
+	for _, scenario := range []struct {
+		verb      string
+		converged bool
+	}{
+		{"pull", true},
+		{"push", false},
+	} {
+		before := configSourceGitOutput(t, checkout, "rev-parse", "HEAD")
+		prompt := &callbackPrompt{callback: func() {
+			writeConfigCommandFile(t, filepath.Join(publisher, "hosts/owner-a/yards/named/config.env"),
+				fmt.Sprintf("# Move upstream during %s consent.\nSSH_PORT=2223\n", scenario.verb))
+			commitConfigSource(t, publisher, "move upstream")
+			runConfigSyncGit(t, publisher, "push", "-q")
+			if scenario.converged {
+				writeCLIFile(t, fixture.readyMarker, "", 0o600)
+			}
+		}}
+		options.Prompt = prompt
+		observe(false, 1)
+		want, unconsumed := 1, 0
+		message := "upstream changed after preview"
+		for _, yard := range []string{"default", "named"} {
+			loaded := loadConfigCommandContext(t, active, options.Environment, yard)
+			if scenario.converged {
+				appendHashSteps(t, fake, loaded)
+			} else {
+				appendMismatchedHashSteps(t, fake, loaded, "0")
+			}
+		}
+		if scenario.converged {
+			want, message = 0, "drift converged after confirmation"
+			for _, yard := range []string{"default", "named"} {
+				size := len(fake.ExecSteps)
+				appendMismatchedHashSteps(t, fake, loadConfigCommandContext(t, active, options.Environment, yard), "0")
+				unconsumed += len(fake.ExecSteps) - size
+			}
+		}
+		output := run(want, "config", "sync", scenario.verb, "--apply")
+		if !strings.Contains(output, message) || len(prompt.requests) != 1 || len(applier.yards) != 0 ||
+			len(fake.ExecSteps) != unconsumed || configSourceGitOutput(t, checkout, "rev-parse", "HEAD") != before {
+			t.Fatalf("consumer-only %s selected unexpected writes or observations: %s, %v", scenario.verb, output, applier.yards)
+		}
+		options.Prompt = nil
+		if scenario.converged {
+			if err := os.Remove(fixture.readyMarker); err != nil {
+				t.Fatal(err)
+			}
+		}
+		run(0, "config", "sync", "pull", "--yes")
+	}
+
 	prompt := &callbackPrompt{callback: func() {
 		namedAsset := filepath.Join(publisher, "hosts/owner-a/yards/named/overrides/agents", asset)
 		writeConfigCommandFile(t, namedAsset, "named update\n")
@@ -164,7 +243,7 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	}
 	options.Prompt = nil
 
-	observe(false, 3)
+	observe(false, 2)
 	beforeHash := fmt.Sprintf("%x", sha256.Sum256([]byte("updated\n")))
 	afterHash := fmt.Sprintf("%x", sha256.Sum256([]byte("named update\n")))
 	for range 2 {
@@ -180,25 +259,66 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 		!slices.Equal(applier.yards, []string{"default", "named"}) || len(fake.ExecSteps) != 0 {
 		t.Fatalf("retry did not converge exactly both consumers: %s, %v", output, applier.yards)
 	}
-	for _, wantOutput := range []string{"already converged", "applied generation"} {
-		if wantOutput == "applied generation" {
-			writeConfigCommandFile(t, filepath.Join(publisher, "hosts/owner-a/yards/named/config.env"),
-				"# Keep the named yard port.\nSSH_PORT=2223\n")
-			commitConfigSource(t, publisher, "document named yard port")
-			runConfigSyncGit(t, publisher, "push", "-q")
+	// An unreachable discovery-only yard cannot prevent a named publication.
+	namedAsset := filepath.Join(publisher, "hosts/owner-a/yards/named/overrides/agents", asset)
+	writeConfigCommandFile(t, namedAsset, "named only\n")
+	commitConfigSource(t, publisher, "change the named override")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	fake.ExecSteps = nil
+	applier.yards = nil
+	defaultTarget := loadConfigCommandContext(t, active, options.Environment, "default")
+	namedTarget := loadConfigCommandContext(t, active, options.Environment, "named")
+	for range 2 {
+		start := len(fake.ExecSteps)
+		appendHashSteps(t, fake, defaultTarget)
+		for i := start; i < len(fake.ExecSteps); i++ {
+			fake.ExecSteps[i] = testkit.IncusExecStep{Err: fmt.Errorf("guest agent is unreachable")}
+		}
+		appendMismatchedHashSteps(t, fake, namedTarget, "0")
+	}
+	for range 2 {
+		start := len(fake.ExecSteps)
+		appendHashSteps(t, fake, namedTarget)
+		for i := start; i < len(fake.ExecSteps); i++ {
+			result := &fake.ExecSteps[i].Result
+			result.Stdout = bytes.ReplaceAll(result.Stdout, []byte(afterHash), fmt.Appendf(nil, "%x", sha256.Sum256([]byte("named only\n"))))
+		}
+	}
+	output = run(0, "-Y", "named", "config", "sync", "pull", "--apply", "--yes")
+	namedPublished := filepath.Join(home, config.GitSettingsRelativePath, "yards/named/overrides/agents", asset)
+	if string(mustReadConfigFixture(t, namedPublished)) != "named only\n" || !slices.Equal(applier.yards, []string{"named"}) ||
+		len(fake.ExecSteps) != 0 || strings.Contains(output, "config.apply.default") {
+		t.Fatalf("named publication selected the wrong consumers: %s, %v", output, applier.yards)
+	}
+
+	for _, scenario := range []struct{ verb, result string }{
+		{"pull", "already converged"}, {"pull", "applied generation"}, {"push", "applied generation"},
+	} {
+		if scenario.result == "applied generation" {
+			repo := publisher
+			if scenario.verb == "push" {
+				repo = checkout
+			}
+			writeConfigCommandFile(t, filepath.Join(repo, "hosts/owner-a/yards/named/config.env"),
+				fmt.Sprintf("# Document the named yard port on %s.\nSSH_PORT=2223\n", scenario.verb))
+			commitConfigSource(t, repo, "document named yard port")
+			if scenario.verb == "pull" {
+				runConfigSyncGit(t, publisher, "push", "-q")
+			}
 		}
 		applier.yards = nil
-		observe(false, 3)
+		observe(false, 2)
 		for range 2 {
 			for _, yard := range []string{"default", "named"} {
 				appendHashSteps(t, fake, loadConfigCommandContext(t, active, options.Environment, yard))
 			}
 		}
-		if output := run(0, "config", "sync", "pull", "--apply", "--yes"); !strings.Contains(output, wantOutput) ||
+		if output := run(0, "config", "sync", scenario.verb, "--apply", "--yes"); !strings.Contains(output, scenario.result) ||
 			!slices.Equal(applier.yards, []string{"default", "named"}) || len(fake.ExecSteps) != 0 {
-			t.Fatalf("retry did not converge exactly both consumers: %s, %v", output, applier.yards)
+			t.Fatalf("%s retry did not converge exactly both consumers: %s, %v", scenario.verb, output, applier.yards)
 		}
 	}
+
 	after, err := fixture.cli.readReleaseHistory()
 	if err != nil || after == nil || *after != *history {
 		t.Fatalf("consumer refresh changed release history: %v", err)

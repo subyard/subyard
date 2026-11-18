@@ -22,7 +22,7 @@ type configSyncExecution struct {
 	consumers         *configSyncConsumers
 	consumersApplied  bool
 	guard             func(context.Context) error
-	checkConsumerOnly func(context.Context) error
+	recheckUpstream   func(context.Context) error
 	run               func(context.Context, *CLI, domain.AdapterRequest) (configsync.Plan, error)
 }
 
@@ -101,11 +101,16 @@ func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution
 			return domain.AdapterResult{}, configPreparedStale(err)
 		}
 		execution.current = fresh
-		if err := execution.consumers.refresh(ctx, cli); err != nil {
+		if err := execution.consumers.refresh(ctx, cli, fresh); err != nil {
 			return domain.AdapterResult{}, err
 		}
 		if err := domain.CheckOperationSteps(prepared.Plan.Steps, execution.steps()); err != nil {
 			return domain.AdapterResult{}, err
+		}
+		if execution.recheckUpstream != nil && execution.changed() {
+			if err := execution.recheckUpstream(ctx); err != nil {
+				return domain.AdapterResult{}, configPreparedStale(err)
+			}
 		}
 		copyCLI := *cli
 		copyCLI.options.Stdout, copyCLI.options.Stderr = output, output
@@ -113,10 +118,6 @@ func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution
 		if slices.ContainsFunc(execution.publicationSteps(), func(step domain.OperationStep) bool { return step.Decision != domain.StepSkip }) {
 			applied, err = execution.run(ctx, &copyCLI, domain.AdapterRequest{OperationID: prepared.Plan.OperationID})
 			if err != nil {
-				return domain.AdapterResult{}, configPreparedStale(err)
-			}
-		} else if execution.checkConsumerOnly != nil && execution.consumers != nil && execution.consumers.execution.changed() {
-			if err := execution.checkConsumerOnly(ctx); err != nil {
 				return domain.AdapterResult{}, configPreparedStale(err)
 			}
 		}
@@ -131,11 +132,11 @@ func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution
 			fmt.Fprintln(output, "config sync: already converged")
 		}
 		if !execution.consumersApplied {
-			if err := execution.consumers.apply(ctx, &copyCLI, loaded, applied, output); err != nil {
+			if err := execution.consumers.apply(ctx, &copyCLI, loaded, output); err != nil {
 				return domain.AdapterResult{}, err
 			}
 		}
-		copyCLI.writeConfigSyncFollowups(loaded, applied, execution.consumers != nil)
+		copyCLI.writeConfigSyncFollowups(loaded, applied, execution.consumers != nil && len(execution.consumers.execution.approved) != 0)
 		return configPreparedResult(prepared), nil
 	}
 }
@@ -315,7 +316,7 @@ func (prepared *preparedCommand) prepareConfigPull(ctx context.Context, argument
 		}
 		return cli.checkPreparedConfigGit(ctx, native.checkout, native.expectedHead, native.remote, native.remoteURL)
 	}
-	execution.checkConsumerOnly = func(ctx context.Context) error {
+	execution.recheckUpstream = func(ctx context.Context) error {
 		return cli.fetchRegisteredConfigUpstream(ctx, native.checkout, native.remote, native.remoteURL, native.expectedRemote)
 	}
 	execution.run = func(ctx context.Context, copyCLI *CLI, request domain.AdapterRequest) (configsync.Plan, error) {
@@ -378,6 +379,9 @@ func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request 
 		}
 		return cli.checkPreparedConfigGit(ctx, native.checkout, native.expectedHead, native.remote, native.remoteURL)
 	}
+	execution.recheckUpstream = func(ctx context.Context) error {
+		return cli.fetchRegisteredConfigUpstream(ctx, native.checkout, native.remote, native.remoteURL, native.expectedRemote)
+	}
 	execution.run = func(ctx context.Context, copyCLI *CLI, adapterRequest domain.AdapterRequest) (configsync.Plan, error) {
 		unlock := func() {}
 		if len(request.authoring) != 0 && request.authoring[0].scope == config.ScopeYard {
@@ -401,7 +405,7 @@ func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request 
 		if err := adapter.plan.VerifyPublished(); err != nil {
 			return adapter.plan, err
 		}
-		if err := execution.consumers.apply(ctx, copyCLI, loaded, adapter.plan, copyCLI.options.Stdout); err != nil {
+		if err := execution.consumers.apply(ctx, copyCLI, loaded, copyCLI.options.Stdout); err != nil {
 			return adapter.plan, err
 		}
 		if native.pushRequired {
@@ -441,7 +445,7 @@ func (execution *configSyncExecution) gateSubject() gateSubject {
 		paths = append(paths, change.Path)
 	}
 	var consumers []string
-	if execution.consumers != nil && execution.consumers.execution != nil {
+	if execution.consumers != nil {
 		for _, assessment := range execution.consumers.execution.approved {
 			consumers = append(consumers, assessment.Target.Name)
 		}

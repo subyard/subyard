@@ -103,7 +103,7 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 		OperationID:  cli.env["SUBYARD_OPERATION_ID"],
 	})
 	runtimeConfig.ConfigurationState = func() []config.ConfigurationState { return cli.localConfigurationState(loaded) }
-	runtimeConfig.UpdateCheckAdvice = cli.updateCheckAdvice
+	runtimeConfig.UpdateAdvice = cli.updateAdvice
 	runtime := releaseruntime.New(runtimeConfig)
 	prepared, err := runtime.PrepareTransition(
 		ctx, arguments, loaded.Environment["SUBYARD_CONFIG_HOME"],

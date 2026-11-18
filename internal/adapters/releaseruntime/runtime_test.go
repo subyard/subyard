@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1448,15 +1449,21 @@ func TestUpdateCheckPreservesActivationBlocker(t *testing.T) {
 		},
 	}
 	request := releasetransition.ProcessRequest{Target: target, Direction: releasetransition.DirectionActivateTarget}
+	const sourceRetry = "resolve the pending protected release publication"
 	for _, jsonOutput := range []bool{false, true} {
 		var stdout bytes.Buffer
+		called := false
 		runtime := New(Config{
 			Stdout: &stdout,
-			UpdateCheckAdvice: func(context.Context, *releasetransition.Inspection) (string, string) {
-				return "default has file drift", "yard -Y default config apply"
+			UpdateAdvice: func(_ context.Context, full *releasetransition.Inspection) (string, string) {
+				called = true
+				if !slices.Equal(full.Blockers, inspection.Blockers) {
+					t.Fatalf("advice did not receive the activation blockers: %#v", full.Blockers)
+				}
+				return "protected release publication is pending", sourceRetry
 			},
 		})
-		prepared, err := runtime.prepareInspectedCandidateTransition(options{check: true, json: jsonOutput},
+		prepared, err := runtime.prepareInspectedCandidateTransition(ctx, options{check: true, json: jsonOutput},
 			candidateVerification{}, candidateVerification{}, request, inspection, true, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -1469,10 +1476,14 @@ func TestUpdateCheckPreservesActivationBlocker(t *testing.T) {
 			t.Fatal(err)
 		}
 		goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
+		want := blocker
+		if !jsonOutput {
+			want.Retry = sourceRetry
+		}
 		if err := releasetransition.ValidateProcessInspection(goal, report); err != nil ||
-			len(report.Blockers) != 1 || report.Outcome.Retry != blocker.Retry ||
-			strings.Contains(stdout.String(), "config apply") {
-			t.Fatalf("update check lost its blocker: %v\n%s", err, stdout.String())
+			called == jsonOutput || !slices.Equal(report.Blockers, []releasetransition.Blocker{want}) ||
+			report.Outcome.Retry != want.Retry || strings.Contains(stdout.String(), "yard -Y named init") != jsonOutput {
+			t.Fatalf("update check lost its blocker or gave conflicting advice: %v\n%s", err, stdout.String())
 		}
 	}
 }
