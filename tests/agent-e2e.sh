@@ -1848,6 +1848,70 @@ EOF_PEER_INSTALL
     || fail 'peer startup did not preserve fresh init, repeated init, check and start'
 )
 # End fresh peer init contract.
+
+# Run the real peer project phase with a fake remote launcher and inventory.
+{
+  printf 'set -euo pipefail\n'
+  fixture_functions "$ROOT/dev/e2e/p0-guest.sh" peer_projects
+  cat <<'PEER_SYNC'
+source "$1/dev/e2e/lib-owner-project-contract.sh"
+PEER_ROOT="$2" scenario="$3" HOME="$2/home"
+SUBYARD_E2E_VM=1 PEER_IP=127.0.0.1 MARKER=fixture PEER_YARD_ENTRY=peer_yard
+trace="$PEER_ROOT/trace"
+die() { printf '%s\n' "$1" >&2; exit 2; }
+valid_ip() { [ "$1" = 127.0.0.1 ]; }
+peer_yard() {
+  case "$*" in
+    'remote add peer dev@127.0.0.1 --yes'|'-Y peer _project-state upsert project project sync yard') ;;
+    "-Y peer sync $PEER_ROOT/project --yes")
+      [ "$(tail -n 1 "$PEER_ROOT/project/result.txt")" = concurrent ] || return 0
+      printf 'sync\n' >> "$trace"
+      if mkdir "$PEER_ROOT/first-launch" 2>/dev/null; then
+        [ "$scenario" != two-successes ] || return 0
+        printf '%s\n' 'yard: release gate: release operator-action-required (plan-stale): active fixture; this command is not run' >&2
+        if [ "$scenario" = wrong-refusal ]; then
+          printf '%s\n' 'yard: cause: a different stale plan' >&2
+        else
+          printf '%s\n' 'yard: cause: release state is changing; retry' >&2
+        fi
+        return 1
+      fi
+      if mkdir "$PEER_ROOT/second-launch" 2>/dev/null; then
+        sleep 0.1
+        printf 'sibling-finished\n' >> "$trace"
+      fi ;;
+    'list')
+      printf 'list\n' >> "$trace"
+      printf '%s\n' 'project-2 sync yard owner default' 'project-3 sync yard owner default' \
+        'project-4 sync yard owner default'
+      if [ "$scenario" = two-successes ]; then printf '%s\n' 'project-5 sync yard owner default'; fi ;;
+    '-Y e2e-vm-2/default shell project-2 --yes -- pwd') printf '/srv/workspaces/project-2/src\n' ;;
+    '-Y e2e-vm-2/default shell project-5 --yes -- grep -Fxq concurrent result.txt')
+      printf 'verify-recovery\n' >> "$trace" ;;
+    '-Y e2e-vm-2/default shell project-'*) ;;
+    *) die "unexpected peer fixture command: $*" ;;
+  esac
+}
+trap 'printf "teardown\n" >> "$trace"' EXIT
+peer_projects
+PEER_SYNC
+} > "$TMP/peer-sync.sh"
+for peer_sync_case in two-successes one-busy wrong-refusal; do
+  peer_sync_dir="$TMP/peer-sync-$peer_sync_case"
+  peer_sync_rc=0
+  bash "$TMP/peer-sync.sh" "$ROOT" "$peer_sync_dir" "$peer_sync_case" > "$peer_sync_dir.log" 2>&1 || peer_sync_rc=$?
+  peer_sync_expected=$'sync\nsync\nsibling-finished'
+  case "$peer_sync_case" in
+    two-successes) peer_sync_expected+=$'\nlist'; [ "$peer_sync_rc" = 0 ] || fail 'peer lost two successful launches' ;;
+    one-busy) peer_sync_expected+=$'\nlist\nsync\nverify-recovery'; [ "$peer_sync_rc" = 0 ] || fail 'peer lost busy-refusal recovery' ;;
+    wrong-refusal)
+      [ "$peer_sync_rc" = 1 ] && grep -Fxq 'yard: cause: a different stale plan' "$peer_sync_dir.log" \
+        || fail 'peer accepted an unrelated stale refusal' ;;
+  esac
+  [ "$(cat "$peer_sync_dir/trace")" = "$peer_sync_expected"$'\nteardown' ] \
+    || fail "peer sync $peer_sync_case lost launch, inventory, recovery or teardown ordering"
+done
+
 # Fresh owner init must also create its own project, using the exact cached image.
 # Globals below are consumed by the extracted fixture helpers.
 # shellcheck disable=SC2034
@@ -5114,7 +5178,7 @@ smoke_rollback_fixture_contract() {
   (
     set -euo pipefail
     local scenario="$1" fixture="$TMP/smoke-rollback-$1"
-    for function_name in verify_smoke_state establish_smoke_ownership verify_predecessor_rollback_refusal finish_smoke; do
+    for function_name in verify_smoke_state capture_smoke_release_state establish_smoke_ownership verify_predecessor_rollback_refusal finish_smoke; do
       eval "$(sed -n "/^${function_name}() {/,/^}/p" "$ROOT/dev/e2e/p0-release-smoke.sh")"
     done
     for function_name in assert_registered_ownership establish_registered_ownership; do
@@ -5139,6 +5203,7 @@ smoke_rollback_fixture_contract() {
     ln -s "$CANDIDATE_RELEASE_TARGET" "$OPERATOR_HOME/.subyard/runtime/current"
     ln -s "$OLD_RELEASE_TARGET" "$OPERATOR_HOME/.subyard/runtime/previous"
     for record in history-checkpoint.json ledger.json journal.json; do
+      [ "$scenario" != "missing-$record" ] || continue
       printf 'retained %s\n' "$record" > "$V2_STATE_ROOT/$record"
       chmod 0600 "$V2_STATE_ROOT/$record"
     done
@@ -5241,11 +5306,24 @@ smoke_rollback_fixture_contract() {
               links-change) printf 'releases/foreign\n' > "$STATE_ROOT/previous" ;;
               checkpoint-change) printf 'changed\n' > "$V2_STATE_ROOT/history-checkpoint.json" ;;
               ledger-change) printf 'changed\n' > "$V2_LEDGER" ;;
-              journal-change) printf 'changed\n' > "$V2_JOURNAL" ;;
+              journal-change|registry-journal-change) printf 'changed\n' > "$V2_JOURNAL" ;;
+              registry-mode-change) chmod 0644 "$V2_JOURNAL" ;;
+              registry-evidence-change) printf 'changed\n' > "$V2_STATE_ROOT/evidence/retained/verified.json" ;;
             esac
             case "$scenario" in
               other-blocker) printf 'release transition operator-action-required: code=rollback-incompatible; the VM QEMU policy cannot roll back\n' >&2 ;;
               epoch-blocker) printf 'release transition operator-action-required: code=rollback-incompatible; the retained release cannot safely accept the current migration ledger\n' >&2 ;;
+              registry-*)
+                local code=rollback-incompatible prefix='yard: update:'
+                [ "$scenario" != registry-wrong-code ] || code=dependency-unavailable
+                [ "$scenario" != registry-combined ] || prefix+=' cannot safely list yards for VM rollback inspection;'
+                printf '%s\n' 'Installed version: candidate' 'Inspecting the installed release...'
+                printf '%s release transition operator-action-required: code=%s active=candidate previous=predecessor target=predecessor transaction=none; %s; next: %s\n' \
+                  "$prefix" "$code" "the selected release's migration registry differs from the active release's registry" \
+                  'keep the current release active and resolve all reported release compatibility requirements before retrying' >&2
+                if [ "$scenario" = registry-extra-line ]; then
+                  printf '%s\n' 'cannot safely list yards for VM rollback inspection' >&2
+                fi ;;
               *) printf 'yard-engine: release transition: source release has invalid or foreign V2 registry provenance\nrelease transition operator-action-required: code=rollback-incompatible\n' >&2 ;;
             esac
             return 1
@@ -5307,17 +5385,23 @@ for smoke_rollback_scenario in success \
   enrollment-evidence-change enrollment-mode-change enrollment-project-change \
   missing-ownership foreign-ownership init-ownership-change unexpected-grant installation-change \
   init-fail repeat-init-fail init-unrelated-fail init-wrong-exit init-reboot-required \
+  missing-history-checkpoint.json missing-ledger.json missing-journal.json \
   wrong-reason unexpected-accept links-change checkpoint-change ledger-change journal-change \
-  rollback-fail rollforward-fail other-blocker epoch-blocker; do
+  rollback-fail rollforward-fail other-blocker epoch-blocker registry-blocker registry-wrong-code \
+  registry-combined registry-extra-line registry-journal-change registry-mode-change registry-evidence-change; do
   smoke_rollback_log="$TMP/smoke-rollback-$smoke_rollback_scenario.log"
   set +e
   smoke_rollback_fixture_contract "$smoke_rollback_scenario" > "$smoke_rollback_log" 2>&1
   smoke_rollback_rc=$?
   set -e
-  if [ "$smoke_rollback_scenario" = success ] || [ "$smoke_rollback_scenario" = epoch-blocker ]; then
+  if [[ "$smoke_rollback_scenario" = success || "$smoke_rollback_scenario" = epoch-blocker || "$smoke_rollback_scenario" = registry-blocker ]]; then
     if [ "$smoke_rollback_rc" != 0 ]; then
       cat "$smoke_rollback_log" >&2
       fail 'release smoke did not preserve incompatible refusal and compatible rollback/roll-forward'
+    fi
+    if [ "$smoke_rollback_scenario" = registry-blocker ]; then
+      grep -Fxq 'evidence: release smoke predecessor rollback refused by the retained-release registry check' "$smoke_rollback_log" \
+        || fail 'release smoke lost retained registry evidence'
     fi
   else
     smoke_rollback_expected=2
@@ -5331,6 +5415,21 @@ for smoke_rollback_scenario in success \
       || fail "release smoke concealed $smoke_rollback_scenario failure (exit $smoke_rollback_rc, expected $smoke_rollback_expected)"
     [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/passed" ] \
       || fail 'release smoke reported success after a rollback contract failure'
+    case "$smoke_rollback_scenario" in
+      missing-history-checkpoint.json|missing-ledger.json|missing-journal.json)
+        grep -Fxq "release smoke: required V2 rollback file ${smoke_rollback_scenario#missing-} is missing or is not a regular file" \
+          "$smoke_rollback_log" || fail 'release smoke did not identify the missing rollback file'
+        [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/rollback-refusal.before.metadata" ] \
+          && [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/predecessor-rollback.log" ] \
+          || fail 'release smoke entered rollback with a missing file' ;;
+      wrong-reason|other-blocker|registry-wrong-code|registry-combined|registry-extra-line)
+        while IFS= read -r diagnostic; do
+          grep -Fxq -- "$diagnostic" "$smoke_rollback_log" || fail 'release smoke concealed an unexpected refusal'
+        done < "$TMP/smoke-rollback-$smoke_rollback_scenario/state/predecessor-rollback.log" ;;
+      registry-journal-change|registry-mode-change|registry-evidence-change)
+        grep -Fxq 'refused predecessor rollback changed protected history or runtime links' "$smoke_rollback_log" \
+          || fail "release smoke did not detect $smoke_rollback_scenario" ;;
+    esac
     if [[ "$smoke_rollback_scenario" = enrollment-* ]]; then
       [ ! -e "$TMP/smoke-rollback-$smoke_rollback_scenario/state/plain-inits" ] \
         || fail 'release smoke initialized after failed inventory enrollment'

@@ -356,18 +356,31 @@ assert_legacy_native_policy() {
   assert_upgrade_ownership
 }
 
-# A rollback refused across the device-guard epoch: `code=rollback-incompatible` and either the
-# rollback-compatibility blocker's own message or, for every published target before this epoch,
-# the source provenance check that runs first (the retained engine cannot read the newer
-# registry). The CLI exposes no check past provenance, so that expected case prints LIMIT and the
-# blocker itself is proven host-free (go:releasetransition). Anything else fails.
+# The device-guard epoch can refuse rollback at the retained registry check,
+# the compatibility blocker, or the earlier source provenance check.
 classify_epoch_rollback_refusal() { # <log> <label>
-  grep -Fq 'code=rollback-incompatible' "$1" || die "$2 failed for an unexpected reason"
-  if grep -Fq 'the retained release cannot safely accept the current migration ledger' "$1"; then
+  local registry_reason="the selected release's migration registry differs from the active release's registry"
+  local registry_retry='keep the current release active and resolve all reported release compatibility requirements before retrying'
+  local nl=$'\n' log progress fields registry_refusal
+  progress="(Installed version: [^[:space:];]+$nl)?(Inspecting the installed release[.][.][.]$nl)?"
+  fields='active=[^[:space:];]+ previous=[^[:space:];]+ target=[^[:space:];]+ transaction=[^[:space:];]+'
+  registry_refusal="^${progress}yard: update: release transition operator-action-required: code=rollback-incompatible $fields; $registry_reason; next: $registry_retry$"
+  if grep -Fq "$registry_reason" "$1"; then
+    log="$(<"$1")"
+    if [[ ! "$log" =~ $registry_refusal ]]; then
+      cat "$1" >&2
+      die "$2 did not report a standalone retained-release registry refusal"
+    fi
+    printf 'evidence: %s refused by the retained-release registry check\n' "$2"
+  elif ! grep -Eq '(^|[[:space:]])code=rollback-incompatible([[:space:];]|$)' "$1"; then
+    cat "$1" >&2
+    die "$2 failed for an unexpected reason"
+  elif grep -Fq 'the retained release cannot safely accept the current migration ledger' "$1"; then
     printf 'evidence: %s refused by the rollback-compatibility blocker\n' "$2"
   elif grep -Fq 'source release has invalid or foreign V2 registry provenance' "$1"; then
-    printf 'LIMIT: %s refused by the source provenance check, which runs before the rollback-compatibility blocker for every published target before this epoch\n' "$2"
+    printf 'LIMIT: %s refused by the source provenance check before the rollback-compatibility blocker ran\n' "$2"
   else
+    cat "$1" >&2
     die "$2 was refused by another rollback-incompatible blocker"
   fi
 }
