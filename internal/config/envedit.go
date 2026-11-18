@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 var ErrPersistentTargetStale = errors.New("persistent configuration target is stale")
@@ -494,56 +496,79 @@ func editAssignmentContent(
 	value *string,
 	settings Catalog,
 ) ([]byte, error) {
+	return settings.editPersistentAssignments(path, content, []PersistentAssignment{{Name: name, Value: dereference(value)}}, value == nil)
+}
+
+// EditPersistentAssignmentsContent sets every selected assignment in one draft,
+// then validates the final values together.
+func (settings Catalog) EditPersistentAssignmentsContent(path string, content []byte, assignments []PersistentAssignment) ([]byte, error) {
+	return settings.editPersistentAssignments(path, content, assignments, false)
+}
+
+func (settings Catalog) editPersistentAssignments(path string, content []byte, assignments []PersistentAssignment, unset bool) ([]byte, error) {
 	records, err := parseEnvEditRecords(path, content, settings)
 	if err != nil {
 		return nil, err
 	}
-	name = canonicalSettingName(name)
+	last := make(map[string]int, len(assignments))
+	values := make(map[string]string, len(assignments))
+	for _, assignment := range assignments {
+		values[canonicalSettingName(assignment.Name)] = assignment.Value
+	}
 	for index := range records {
 		records[index].name = canonicalSettingName(records[index].name)
-	}
-	replacement := []byte(name + "=" + quotePersistentValue(dereference(value)) + "\n")
-	last := -1
-	for index := range records {
-		if records[index].name == name {
-			last = index
+		if _, selected := values[records[index].name]; selected {
+			last[records[index].name] = index
 		}
 	}
 	var result bytes.Buffer
 	for index, record := range records {
-		if record.name != name {
+		if value, selected := values[record.name]; !selected {
 			result.Write(record.content)
-			continue
-		}
-		if value != nil && index == last {
-			result.Write(replacement)
+		} else if !unset && index == last[record.name] {
+			result.WriteString(record.name + "=" + quotePersistentValue(value) + "\n")
 		}
 	}
-	if value != nil && last == -1 {
-		if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
-			result.WriteByte('\n')
+	if !unset {
+		for _, assignment := range assignments {
+			name := canonicalSettingName(assignment.Name)
+			if _, exists := last[name]; exists {
+				continue
+			}
+			if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
+				result.WriteByte('\n')
+			}
+			result.WriteString(name + "=" + quotePersistentValue(assignment.Value) + "\n")
 		}
-		result.Write(replacement)
 	}
-	// Removing a direct assignment can activate a conditional default in a
-	// preserved record. Reject that ambiguity rather than deleting unrelated
-	// settings or saving a file that will conflict on its next load.
-	assignments, err := settings.ParsePersistentAssignments(path, result.Bytes())
+	// Preserved records can still assign the selected settings. Verify what
+	// the final draft actually assigns before approving publication.
+	observed, err := settings.ParsePersistentAssignments(path, result.Bytes())
 	if err != nil {
 		return nil, err
 	}
-	var effective PersistentAssignment
-	for _, assignment := range assignments {
-		if canonicalSettingName(assignment.Name) != name {
+	effective := make(map[string]PersistentAssignment, len(assignments))
+	var refusals []error
+	for _, assignment := range observed {
+		name := canonicalSettingName(assignment.Name)
+		if _, selected := values[name]; !selected {
 			continue
 		}
-		if value == nil || assignment.Name != name {
-			return nil, sourceError(path, assignment.Line, name, "persistent settings", "setting is still assigned by a preserved record; simplify conditional assignments before authoring", nil)
+		if unset || assignment.Name != name {
+			refusals = append(refusals, sourceError(path, assignment.Line, name, "persistent settings", "setting is still assigned by a preserved record; simplify conditional assignments before authoring", nil))
 		}
-		effective = assignment
+		effective[name] = assignment
 	}
-	if value != nil && effective.Value != *value {
-		return nil, sourceError(path, effective.Line, name, "persistent settings", "a preserved record changes the requested setting; simplify conditional assignments before authoring", nil)
+	if !unset {
+		for _, assignment := range assignments {
+			name := canonicalSettingName(assignment.Name)
+			if actual, exists := effective[name]; !exists || actual.Value != assignment.Value {
+				refusals = append(refusals, sourceError(path, actual.Line, name, "persistent settings", "a preserved record changes the requested setting; simplify conditional assignments before authoring", nil))
+			}
+		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
 	}
 	return result.Bytes(), nil
 }

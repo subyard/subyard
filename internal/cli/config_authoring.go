@@ -64,6 +64,11 @@ func (cli *CLI) runConfigAuthoring(
 	}
 	home := loaded.Context.Paths.ConfigHome
 	if len(requests) > 1 {
+		if !requests[0].git {
+			return cli.runPreparedConfigMutation(ctx, loaded, append([]string{action}, arguments...), requests[0].assumeYes, func(prepared *preparedCommand) error {
+				return prepared.prepareConfigScalar(ctx, action, arguments, true)
+			})
+		}
 		if err := cli.configGitScalarsRefusal(loaded, requests); err != nil {
 			cli.reportConfigRefusal("config "+action, home, err)
 			return 2
@@ -203,12 +208,9 @@ func configScalarStateRefusals(state config.Loaded, request configAuthoringReque
 	return refusals
 }
 
-// configGitScalarsRefusal validates several Git scalar assignments. Each value
-// is checked on its own and each canonical setting may appear once. Checks
-// that relate settings use the combined target state, loaded through the
-// normal resolver with every assignment applied to the Git settings layer;
-// that state exists only when every assignment is individually valid.
-func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configAuthoringRequest) error {
+// configScalarBatchSyntaxRefusal checks each assignment and rejects duplicate
+// canonical settings before constructing the combined draft.
+func configScalarBatchSyntaxRefusal(loaded config.Loaded, requests []configAuthoringRequest) error {
 	var refusals []error
 	seen := make(map[string]string, len(requests))
 	for _, request := range requests {
@@ -224,13 +226,19 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 		syntax, _ := configScalarSyntaxRefusals(loaded, definition, request)
 		refusals = append(refusals, syntax...)
 	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
+	return domain.CollectRefusals(refusals...)
+}
+
+// Git assignments are also checked against their combined resolver state.
+func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configAuthoringRequest) error {
+	if err := configScalarBatchSyntaxRefusal(loaded, requests); err != nil {
 		return err
 	}
 	target, err := cli.configGitScalarsTarget(loaded, requests)
 	if err != nil {
 		return fmt.Errorf("combined configuration: %w", err)
 	}
+	var refusals []error
 	for _, request := range requests {
 		refusals = append(refusals, configScalarStateRefusals(target, request)...)
 	}
@@ -313,7 +321,7 @@ func parseConfigAuthoringRequest(
 }
 
 // parseConfigAuthoringRequests accepts one setting, or several SETTING VALUE
-// pairs for config set --git, which share one commit and push.
+// pairs for config set in the same scope and storage layer.
 func parseConfigAuthoringRequests(
 	action string,
 	arguments []string,
@@ -353,12 +361,9 @@ func parseConfigAuthoringRequests(
 	default:
 		return nil, fmt.Errorf("unsupported scope %q", request.scope)
 	}
-	if action == "set" && (len(positional) == 0 || len(positional)%2 != 0) {
-		return nil, errors.New("expects SETTING VALUE pairs")
-	}
-	if action == "set" && len(positional) > 2 {
-		if !request.git {
-			return nil, errors.New("several SETTING VALUE pairs require --git")
+	if action == "set" {
+		if len(positional) == 0 || len(positional)%2 != 0 {
+			return nil, errors.New("expects SETTING VALUE pairs")
 		}
 		requests := make([]configAuthoringRequest, 0, len(positional)/2)
 		for index := 0; index < len(positional); index += 2 {
@@ -369,16 +374,13 @@ func parseConfigAuthoringRequests(
 		return requests, nil
 	}
 	expected := 1
-	if action == "set" || action == "import" {
+	if action == "import" {
 		expected = 2
 	}
 	if len(positional) != expected {
 		return nil, fmt.Errorf("expects %d positional argument(s)", expected)
 	}
 	request.name = positional[0]
-	if action == "set" {
-		request.value = positional[1]
-	}
 	if action == "import" {
 		request.inputPath = positional[1]
 	}

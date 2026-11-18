@@ -1010,7 +1010,7 @@ perform unrelated activation work. When several yards drift, use `--all-local` t
 Use the typed persistent writers to save locally or in Git:
 
 ```sh
-yard config set <SETTING> <VALUE> --scope shared|host|yard [--local | --git]
+yard config set <SETTING> <VALUE> [<SETTING> <VALUE> ...] --scope shared|host|yard [--local | --git]
 yard config unset <SETTING> --scope shared|host|yard [--local | --git]
 yard config import <FILE_SETTING> <path> --scope shared|host|yard [--local | --git]
 yard config edit <FILE_SETTING> --scope shared|host|yard [--local | --git]
@@ -1110,14 +1110,14 @@ for other listeners remain with their declaring core or profile settings; listen
 alone does not make a setting portable.
 
 The default is local storage; `--local` makes that choice explicit and needs no Git source.
-`--git` saves only the selected assignment or file in the registered source, creates one commit
-with an automatic message that omits the value, and pushes the exact upstream immediately.
-`config set` with `--git` accepts several `SETTING VALUE` pairs in one scope and saves them in
-one commit and push, for example
-`yard config set GIT_USER_NAME 'Jane Doe' GIT_USER_EMAIL jane@example.com --scope shared --git`.
+`config set` accepts several `SETTING VALUE` pairs in one scope and saves them in one atomic
+local write or, with `--git`, one commit and push. For example,
+`yard config set GIT_USER_NAME 'Jane Doe' GIT_USER_EMAIL jane@example.com --scope shared`.
 Every pair is validated before planning, and each setting may appear once. Constraints between
-settings, such as a yard template that forbids coding tools, apply to the combined result. It
-does not publish unrelated local overrides. Local values still take precedence: an explicit empty
+settings, such as a yard template that forbids coding tools, apply to the combined result.
+Git commits use an automatic message that omits setting values and push to the exact upstream
+immediately. Git authoring leaves unrelated local overrides private.
+Local values still take precedence: an explicit empty
 assignment is a value, while `config unset` removes the local assignment and reveals the Git
 fallback. `config unset --git` removes the Git assignment and leaves any local value intact.
 File settings have no `unset` command; removing a local file override requires an explicit file

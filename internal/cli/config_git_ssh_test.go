@@ -879,12 +879,8 @@ func TestConfigGitSSHWatchdogRefusesForeignInputs(t *testing.T) {
 	assertKept(t, directory)
 }
 
-func TestConfigSetSeveralPairsRequiresGitAndReportsEveryRefusal(t *testing.T) {
+func TestConfigSetSeveralGitPairsReportsEveryRefusal(t *testing.T) {
 	f := newConfigSSHFixture(t)
-	f.run(2, "config", "set", "GIT_USER_NAME", "One", "GIT_USER_EMAIL", "one@example.invalid", "--scope", "shared")
-	if !strings.Contains(f.stderr.String(), "several SETTING VALUE pairs require --git") {
-		t.Fatalf("local pairs: %s", f.stderr.String())
-	}
 	f.run(2, "config", "set", "GIT_USER_NAME", "One", "GIT_USER_EMAIL", "--scope", "shared", "--git")
 	if !strings.Contains(f.stderr.String(), "expects SETTING VALUE pairs") {
 		t.Fatalf("odd arguments: %s", f.stderr.String())

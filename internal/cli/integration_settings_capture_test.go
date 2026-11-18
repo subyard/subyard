@@ -83,7 +83,7 @@ func TestLegacyIntegrationSettingsCapturedBeforeDesiredWrite(t *testing.T) {
 				t.Fatal(err)
 			}
 			definition := nativeConfigCommandDefinition()
-			prepared, err := admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "AGENT_codex_COMMAND", "new-command", "--scope", "yard"}})
+			prepared, err := admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: []string{"set", "AGENT_codex_COMMAND", "new-command", "CODING_TOOL_GIT_APPROVAL", "off", "--scope", "yard"}})
 			if scenario == "stopped" || scenario == "conflict" {
 				if err == nil {
 					prepared.Close()
@@ -117,7 +117,7 @@ func TestLegacyIntegrationSettingsCapturedBeforeDesiredWrite(t *testing.T) {
 				t.Fatalf("capture/write failed: %v calls=%d", err, capture.calls)
 			}
 			actual, _ := os.ReadFile(path)
-			if !strings.Contains(string(actual), "new-command") {
+			if !strings.Contains(string(actual), "new-command") || !strings.Contains(string(actual), "CODING_TOOL_GIT_APPROVAL='off'") {
 				t.Fatal("new desired configuration was not written")
 			}
 		})
@@ -145,7 +145,7 @@ func TestHostIntegrationSettingsCaptureSkipsUnaffectedStoppedYard(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer prospective.close()
-	captures, err := cli.prepareIntegrationSettingsCaptures(context.Background(), loaded, request, prospective)
+	captures, err := cli.prepareIntegrationSettingsCaptures(context.Background(), loaded, prospective, request)
 	if err != nil || len(captures) != 1 || captures[0].loaded.Context.YardName != "default" {
 		t.Fatalf("affected yard capture: %#v %v", captures, err)
 	}
@@ -173,7 +173,7 @@ func TestHostIntegrationSettingsCaptureReportsAllStoppedYards(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer prospective.close()
-	_, err = cli.prepareIntegrationSettingsCaptures(context.Background(), loaded, request, prospective)
+	_, err = cli.prepareIntegrationSettingsCaptures(context.Background(), loaded, prospective, request)
 	if err == nil || !strings.Contains(err.Error(), "yard default:") || !strings.Contains(err.Error(), "yard neighbor:") || strings.Index(err.Error(), "yard default:") > strings.Index(err.Error(), "yard neighbor:") {
 		t.Fatalf("independent refusal diagnostics: %v", err)
 	}

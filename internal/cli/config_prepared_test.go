@@ -152,7 +152,7 @@ func TestConfigExactRPCUsesRetainedNativeCaptureAndSafeDiagnostics(t *testing.T)
 	}
 	handler := &rpcHandler{cli: program, loaded: loaded}
 	defer handler.closePlans()
-	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "config-native", Params: json.RawMessage(`{"command":"config","arguments":["set","SSH_PORT","2390","--scope","host"],"exact":true,"stepSchema":1}`)}, nil)
+	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "config-native", Params: json.RawMessage(`{"command":"config","arguments":["set","SSH_PORT","2390","DEV_SUDO","1","--scope","host"],"exact":true,"stepSchema":1}`)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +172,8 @@ func TestConfigExactRPCUsesRetainedNativeCaptureAndSafeDiagnostics(t *testing.T)
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(filepath.Join(configHome, "config.env"))
-	if err != nil || string(after) != "SSH_PORT='2390'\n" {
-		t.Fatalf("native config execution did not publish approved assignment: %v", err)
+	if err != nil || string(after) != "SSH_PORT='2390'\nDEV_SUDO='1'\n" {
+		t.Fatalf("native config execution did not publish approved assignments: %v", err)
 	}
 	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "config set: updated") {
 		t.Fatal("configuration diagnostics corrupted framed stdout")
@@ -946,6 +946,52 @@ func TestInventoryQueriesRenderSiblingLoadRefusalsWithoutValues(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	withSyntheticYardTemplate(t, root, environment)
+	target := filepath.Join(configHome, "yards", "default", "config.env")
+	writeConfigCommandFile(t, target, "# keep this comment\nYARD_TEMPLATE=no-tools\n", 0o640)
+	run := func(wantCode int, arguments ...string) string {
+		t.Helper()
+		var stderr bytes.Buffer
+		program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: append([]string{"config", "set"}, arguments...), Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code != wantCode {
+			t.Fatalf("exit = %d, want %d: %s", code, wantCode, &stderr)
+		}
+		return stderr.String()
+	}
+
+	run(0, "YARD_TEMPLATE", "", "CODING_TOOL_INTEGRATIONS", "codex", "--scope", "yard", "--yes")
+	want := "# keep this comment\nYARD_TEMPLATE=''\nCODING_TOOL_INTEGRATIONS='codex'\n"
+	assertFile := func() {
+		t.Helper()
+		if content, err := os.ReadFile(target); err != nil || string(content) != want {
+			t.Fatalf("local settings = %q, want %q: %v", content, want, err)
+		}
+		if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o640 {
+			t.Fatalf("local settings permissions: %v, %v", info, err)
+		}
+	}
+	assertFile()
+
+	output := run(1, "YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "codex", "SSH_PORT", "2390", "--scope", "yard", "--local", "--yes")
+	if !strings.Contains(output, "yard role forbids non-empty CODING_TOOL_INTEGRATIONS") {
+		t.Fatalf("combined configuration refusal: %s", output)
+	}
+	assertFile()
+
+	output = run(2, "UNKNOWN_SETTING", "1", "SSH_PORT", "2390", "SSH_PORT", "invalid", "--scope", "yard", "--local", "--yes")
+	for _, refusal := range []string{"UNKNOWN_SETTING", "SSH_PORT and SSH_PORT assign the same setting", "SSH_PORT (scalar settings): invalid port value"} {
+		if !strings.Contains(output, refusal) {
+			t.Fatalf("missing %q: %s", refusal, output)
+		}
+	}
+	assertFile()
 }
 
 func TestConfigSetReportsEveryRefusalAndFixedRootDiagnostics(t *testing.T) {
