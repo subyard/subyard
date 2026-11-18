@@ -405,7 +405,7 @@ nm_guard_pin_bridges() {
 # Refusals go to NM_GUARD_REFUSALS, one per line; NM_GUARD_PROPOSED holds the proposal.
 NM_GUARD_REFUSALS='' NM_GUARD_PROPOSED=''
 nm_guard_preflight() { # <conf> <desired or empty for removal> <bridges> <active> <binary>
-  local conf="$1" desired="$2" bridges="$3" active="$4" binary="$5" proposed routes device type state
+  local conf="$1" desired="$2" bridges="$3" active="$4" binary="$5" proposed violations routes device type state
   local -a bridge_args=()
   NM_GUARD_REFUSALS='' NM_GUARD_PROPOSED=''
   [ -n "$binary" ] || return 0
@@ -424,9 +424,13 @@ nm_guard_preflight() { # <conf> <desired or empty for removal> <bridges> <active
       NM_GUARD_REFUSALS+="NetworkManager rejects the proposed configuration"$'\n'
       NM_GUARD_PROPOSED=''
     elif [ -n "$desired" ]; then
-      while IFS= read -r device; do
-        [ -z "$device" ] || NM_GUARD_REFUSALS+="proposed guard: $device"$'\n'
-      done < <(printf '%s\n' "$NM_GUARD_PROPOSED" | power_nm_config_violations "${bridge_args[@]}")
+      if violations="$(power_nm_config_violations "${bridge_args[@]}" <<< "$NM_GUARD_PROPOSED")"; then
+        while IFS= read -r device; do
+          [ -z "$device" ] || NM_GUARD_REFUSALS+="proposed guard: $device"$'\n'
+        done <<< "$violations"
+      else
+        NM_GUARD_REFUSALS+="cannot validate the proposed NetworkManager configuration with the Subyard engine"$'\n'
+      fi
     fi
     rm -rf "$proposed"
   fi

@@ -201,6 +201,18 @@ esac
 SH
 chmod +x "$tmp/bin/"*
 export PATH="$tmp/bin:$PATH"
+export TEST_NM_VALIDATOR="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
+[ -x "$TEST_NM_VALIDATOR" ] || fail "build the test engine before running this check"
+cat > "$tmp/bin/dispatcher" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  _nm-guard-violations) exec "$TEST_NM_VALIDATOR" "$@" ;;
+  _publications) exit 0 ;;
+  *) exit 90 ;;
+esac
+SH
+chmod 0755 "$tmp/bin/dispatcher"
+export SUBYARD_DISPATCHER_PATH="$tmp/bin/dispatcher"
 
 # shellcheck source=scripts/lib-power.sh
 # shellcheck disable=SC1091
@@ -258,6 +270,15 @@ MOCK_UID=0 MOCK_NM_DEVICES='incusbr0:bridge:connected (externally)'
 if power_nm_guard_effective incusbr0; then fail "a managed bridge passed the guard"; fi
 [ "$POWER_ERROR" = 'NetworkManager guard is not effective: NetworkManager manages yard bridge incusbr0 — rerun yard init' ] \
   || fail "bridge-only remedy: $POWER_ERROR"
+
+reset_case
+MOCK_UID=0 MOCK_NMCLI_READ_RC=1
+if SUBYARD_DISPATCHER_PATH='' power_nm_guard_effective incusbr0; then
+  fail "guard passed without a validator"
+fi
+case "$POWER_ERROR" in *"cannot validate NetworkManager's effective configuration"*"cannot read NetworkManager's devices"*) ;;
+  *) fail "validator failure hid an independent refusal: $POWER_ERROR" ;;
+esac
 
 reset_case
 power_nm_prepare_reader || fail "sudo credential preparation failed"
@@ -384,7 +405,8 @@ fi
 case "$POWER_ERROR" in *"engine is unavailable"*"FAILED to stop"*) ;; *)
   fail 'CPU scheduling stop failure was reported as success' ;;
 esac
-unset VM_CPU_WEIGHT SUBYARD_DISPATCHER_PATH
+unset VM_CPU_WEIGHT
+SUBYARD_DISPATCHER_PATH="$tmp/bin/dispatcher"
 
 # shellcheck disable=SC2034 # consumed by sourced config module
 SUBYARD_CONFIG_LOADED=1
@@ -586,6 +608,18 @@ grep -Fq 'NetworkManager is active but its binary is unavailable at a known path
  done
  [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] \
    || fail "a failed preflight copy changed the guard")
+
+# A dispatcher that exits unsuccessfully must prevent publication.
+guard_case
+before_hash="$(hash_of "$guard_conf")"
+if (SUBYARD_DISPATCHER_PATH=/bin/false nm_unmanaged_guard_early "$guard_conf" >"$tmp/guard.out" 2>&1); then
+  fail "init published a guard without validation"
+fi
+grep -Fq 'cannot validate the proposed NetworkManager configuration' "$tmp/guard.out" \
+  || fail "validator execution failure: $(cat "$tmp/guard.out")"
+if [ "$(hash_of "$guard_conf")" != "$before_hash" ] || [ -e "$POWER_NM_GUARD_STATE" ]; then
+  fail "validator failure changed the guard"
+fi
 
 # First install with NetworkManager running: the early call writes the static section, records
 # `unread init` for this boot and stops; planning, starts and init refuse until the host reboots,

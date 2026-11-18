@@ -58,9 +58,11 @@ case "$*" in
   *) exit 90 ;;
 esac
 SH
+export TEST_NM_VALIDATOR="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
 cat > "$TMP/bin/yard-engine" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+[ "${1:-}" != _nm-guard-violations ] || exec "$TEST_NM_VALIDATOR" "$@"
 case "$*" in
   "_network-lock check")
     [ "${MOCK_REQUIRE_NOAUTH:-0}" != 1 ] || [ "${SUBYARD_SUDO_PREAUTHORIZED:-0}" != 1 ] || exit 1

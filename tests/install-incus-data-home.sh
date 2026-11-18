@@ -138,8 +138,14 @@ cat > "$TMP/bin/apt-get" <<'SH'
 #!/usr/bin/env bash
 [ "$*" = 'install -y -qq --no-install-recommends acl' ] || exit 97
 SH
+export TEST_NM_VALIDATOR="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
+if [ -z "${YARD_ENGINE_PATH:-}" ] && [ ! -x "$TEST_NM_VALIDATOR" ]; then
+  TMPDIR=/tmp bash "$ROOT/dev/build-engine.sh"
+fi
+[ -x "$TEST_NM_VALIDATOR" ] || fail "test engine is unavailable"
 cat > "$TMP/bin/dispatcher" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" != _nm-guard-violations ] || exec "$TEST_NM_VALIDATOR" "$@"
 [ "$#" = 2 ] && [ "$1" = _incus-operator-access ] && [ "$2" = "$(/usr/bin/id -u)" ] || exit 96
 SH
 chmod 0755 "$TMP/bin"/*
@@ -392,6 +398,12 @@ printf 'VERSION_CODENAME=test\n' > "$TMP/etc/os-release"
 printf 'fixture-key\n' > "$TMP/etc/apt/keyrings/zabbly.asc"
 version_bin="$TMP/version-bin"
 mkdir "$version_bin"
+# The dispatcher fixture owns operator access. Keep the Incus package tests independent
+# of whether the host has ACL utilities installed.
+ln -s /bin/true "$version_bin/setfacl"
+ln -s /bin/true "$version_bin/getfacl"
+sed -i "s|/usr/bin/setfacl|$version_bin/setfacl|g; s|/usr/bin/getfacl|$version_bin/getfacl|g" \
+  "$TMP/version-scripts/01-install-incus.sh"
 for command_name in bash dirname cut realpath awk find stat cp sed sort grep tr cat python3 cmp chmod rm tail script mktemp mkdir mv sha256sum join sync; do
   ln -s "$(command -v "$command_name")" "$version_bin/$command_name"
 done
@@ -542,7 +554,7 @@ for installed in 6.0.6 7.0.0 6.0.5 none; do
             TEST_UID=0 TEST_INITIAL_INCUS_VERSION="$installed" TEST_INCUS_VERSION=6.0.6 \
               TEST_DISTRO_CANDIDATE="$distro_candidate" TEST_NM_STATE="$nm_state" TEST_EFFECT_STDOUT=1 \
               TEST_INCUS_FIXTURE="$TMP/bin/incus" TEST_FAKE_BIN="$version_bin" \
-              TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+              TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" \
               TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
               run_installer "$source_home" "${source_args[@]}"
           }
@@ -648,7 +660,7 @@ for mode in normal upgrade-only; do
       for attempt in retry completed; do
         : > "$effect_log"
         if ! TEST_UID=0 TEST_INCUS_VERSION=6.0.6 TEST_SERVER_VERSION_FILE="$TMP/server-version" \
-          TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+          TEST_COMMAND_PATH="$version_bin" TEST_EFFECT_LOG="$effect_log" \
           TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
           run_installer "$failure_home" "${failure_args[@]}" >"$TMP/retry.out" 2>&1; then
           cat "$TMP/retry.out" >&2
@@ -694,7 +706,7 @@ while IFS='|' read -r client server plan_kind query_rc root_only service_state; 
           TEST_SERVER_QUERY_RC="$query_rc" TEST_SERVER_ROOT_ONLY="$root_only" TEST_SUDO_MODE=reexec \
           TEST_INCUS_SERVICE_STATE="${service_state:-active}" \
           TEST_NM_STATE="$nm_state" TEST_EFFECT_STDOUT=1 TEST_COMMAND_PATH="$version_bin" \
-          TEST_EFFECT_LOG="$effect_log" TEST_DISPATCHER_PATH='' \
+          TEST_EFFECT_LOG="$effect_log" \
           TEST_INSTALLER_PATH="$TMP/version-scripts/01-install-incus.sh" \
           run_installer "$server_home" "${server_args[@]}"
       }
