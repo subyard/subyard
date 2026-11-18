@@ -1006,3 +1006,44 @@ func TestConfigSetSeveralPairsValidatesCombinedTarget(t *testing.T) {
 		t.Fatalf("refused pairs contacted the remote: %#v", events)
 	}
 }
+
+func TestConfigSetGitBatchPreservesLayeredSettings(t *testing.T) {
+	f := newConfigSSHFixture(t)
+	f.publishRemoteChange(`GIT_USER_EMAIL="${GIT_USER_NAME:=Jane}@example.invalid"` + "\n")
+	f.run(0, "config", "sync", "pull", "--yes")
+	head := f.commitCount()
+	f.run(1, "config", "set", "GIT_USER_EMAIL", "new@example.invalid", "E2E_VM_CPU", "3", "--scope", "shared", "--git", "--yes")
+	if !strings.Contains(f.stderr.String(), "edit changes effective setting GIT_USER_NAME in yard default") || f.commitCount() != head {
+		t.Fatalf("refused edit changed source or missed collateral setting: %s", f.stderr.String())
+	}
+
+	const dependent = "GIT_USER_NAME=Jane\n" + `GIT_USER_EMAIL="${GIT_USER_NAME}@example.invalid"` + "\n"
+	for _, reverse := range []bool{false, true} {
+		f.publishRemoteChange(dependent)
+		f.run(0, "config", "sync", "pull", "--yes")
+		pairs := []string{"GIT_USER_NAME", "Janet", "GIT_USER_EMAIL", "new@example.invalid"}
+		if reverse {
+			pairs = []string{pairs[2], pairs[3], pairs[0], pairs[1]}
+		}
+		f.run(0, append(append([]string{"config", "set"}, pairs...), "--scope", "shared", "--git", "--yes")...)
+		want := "GIT_USER_NAME='Janet'\nGIT_USER_EMAIL='new@example.invalid'\n"
+		if stored := configSourceGitOutput(t, f.remote, "show", "HEAD:shared/config.env"); stored != want {
+			t.Fatalf("reverse=%t: stored source = %q, want %q", reverse, stored, want)
+		}
+	}
+
+	const duplicates = dependent + "GIT_USER_NAME=Jane\n"
+	f.publishRemoteChange(duplicates)
+	f.run(0, "config", "sync", "pull", "--yes")
+	f.run(0, "config", "set", "GIT_USER_NAME", "Jane", "E2E_VM_CPU", "3", "--scope", "shared", "--git", "--yes")
+	if stored := configSourceGitOutput(t, f.remote, "show", "HEAD:shared/config.env"); stored != duplicates+"E2E_VM_CPU='3'\n" {
+		t.Fatalf("same-value pair rewrote existing source: %q", stored)
+	}
+
+	writeConfigCommandFile(t, filepath.Join(f.configHome, "config.env"), `GIT_USER_EMAIL="${GIT_USER_NAME}@local.invalid"`+"\n")
+	head = f.commitCount()
+	f.run(1, "config", "set", "GIT_USER_NAME", "Janet", "E2E_VM_CPU", "4", "--scope", "shared", "--git", "--yes")
+	if !strings.Contains(f.stderr.String(), "edit changes effective setting GIT_USER_EMAIL in yard default") || f.commitCount() != head {
+		t.Fatalf("refused edit changed source or missed a later local dependency: %s", f.stderr.String())
+	}
+}

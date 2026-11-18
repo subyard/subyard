@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -198,25 +197,43 @@ func (cli *CLI) prepareConfigSyncPush(
 	candidateOptions := options
 	candidateOptions.SourceRoot = repository.checkout
 	candidateOptions.SourceIdentityRoot = record.Checkout
+	if len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset") {
+		// Keep the layered comparison and the sync plan's local input bindings
+		// on the same observation of the configuration root.
+		unlock, err := config.LockRoot(options.ConfigHome, false)
+		if err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, err
+		}
+		defer unlock()
+		candidateOptions.ConfigLocked = true
+	}
 	// Validate every source boundary before a writer touches the isolated candidate.
-	if _, err := configsync.BuildPlan(candidateOptions); err != nil {
+	baseline, err := configsync.BuildPlan(candidateOptions)
+	if err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("validate configuration before source change: %w", err)
 	}
-	paths, err := sanitizeLegacySSHSource(repository.checkout, syncState.HostID, cli.catalog)
+	var paths []string
+	if len(request.authoring) != 0 {
+		authoring := request.authoring[0]
+		var err error
+		if authoring.action == "set" || authoring.action == "unset" {
+			paths, err = exportSelectedScalars(baseline, authoring.scope, loaded.Context.YardName, configScalarEdits(loaded.Catalog, request.authoring))
+		} else {
+			paths, err = cli.exportSelectedFile(loaded, repository.checkout, syncState.HostID, authoring, request.content)
+		}
+		if err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, configAuthoringFailure{options.ConfigHome, err}
+		}
+	}
+	prepared.sshCleanupPaths, err = sanitizeLegacySSHSource(repository.checkout, syncState.HostID, cli.catalog)
 	if err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("prepare legacy SSH source cleanup: %w", err)
 	}
-	prepared.sshCleanupPaths = slices.Clone(paths)
-	for _, authoring := range request.authoring {
-		selected, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, authoring, request.content)
-		if err != nil {
-			prepared.cleanup(cli, ctx)
-			return nil, fmt.Errorf("prepare selected configuration change: %w", err)
-		}
-		paths = append(paths, selected...)
-	}
+	paths = append(paths, prepared.sshCleanupPaths...)
 	if err := hardenConfigCandidate(repository.checkout); err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, err

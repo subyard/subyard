@@ -94,6 +94,9 @@ type settingTracker struct {
 	assignments           map[string][]settingAssignment
 	order                 int
 	ignored               []IgnoredAssignment
+	scalarEditPath        string
+	scalarEditAssignments []observedAssignment
+	scalarEditValues      environment
 }
 
 func newSettingTracker() *settingTracker {

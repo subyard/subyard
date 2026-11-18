@@ -26,14 +26,54 @@ type configProspective struct {
 	binding         string
 	semantics       string
 	directoryInputs map[string]bool
+	scalarEdits     config.PersistentScalarEdits
 }
 
 func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot) (*configProspective, error) {
 	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path}
+	if err := plan.prepare(desired); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+func (cli *CLI) prepareConfigScalarDraft(loaded config.Loaded, request configAuthoringRequest, path string, baseline config.PersistentFileSnapshot, edits config.PersistentScalarEdits) (*configProspective, config.PersistentFileSnapshot, error) {
+	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path, scalarEdits: edits}
+	options := plan.loadOptions()
+	names, err := plan.yardNames()
+	if err != nil {
+		return nil, config.PersistentFileSnapshot{}, configProspectiveError{loaded.Context.Paths.ConfigHome, err}
+	}
+	var before []config.Loaded
+	var refusals []error
+	for _, name := range names {
+		options.YardName = name
+		current, err := config.Load(options)
+		if err != nil {
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+			continue
+		}
+		before = append(before, current)
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, config.PersistentFileSnapshot{}, configProspectiveError{loaded.Context.Paths.ConfigHome, err}
+	}
+	content, err := edits.LayerContent(path, baseline.Content, before)
+	if err != nil {
+		return nil, config.PersistentFileSnapshot{}, err
+	}
+	desired := config.PersistentFileSnapshot{Exists: request.action != "unset" || len(content) != 0, Content: content}
+	if err := plan.prepare(desired); err != nil {
+		return nil, config.PersistentFileSnapshot{}, err
+	}
+	return plan, desired, nil
+}
+
+func (plan *configProspective) prepare(desired config.PersistentFileSnapshot) error {
 	if desired.Exists {
 		file, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
 		if err != nil {
-			return nil, err
+			return err
 		}
 		plan.draft = file.Name()
 		err = file.Chmod(0o600)
@@ -46,16 +86,15 @@ func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAut
 		}
 		if err != nil {
 			plan.close()
-			return nil, err
+			return err
 		}
 	}
 	var err error
 	plan.binding, plan.semantics, err = plan.inspect(true, false)
 	if err != nil {
 		plan.close()
-		return nil, err
 	}
-	return plan, nil
+	return err
 }
 
 func (plan *configProspective) close() {
@@ -122,21 +161,16 @@ func (cli *CLI) reportConfigNext(err error) {
 	}
 }
 
-func (plan *configProspective) inspect(draft, locked bool) (binding, semantics string, result error) {
-	defer func() {
-		if result != nil {
-			result = configProspectiveError{plan.loaded.Context.Paths.ConfigHome, result}
-		}
-	}()
+func (plan *configProspective) yardNames() ([]string, error) {
 	paths := plan.loaded.Context.Paths
-	names := []string{plan.loaded.Context.YardName}
 	if plan.request.scope != config.ScopeYard {
-		var err error
-		names, err = config.YardNames(paths.ConfigDir, paths.ConfigHome)
-		if err != nil {
-			return "", "", err
-		}
+		return config.YardNames(paths.ConfigDir, paths.ConfigHome)
 	}
+	return []string{plan.loaded.Context.YardName}, nil
+}
+
+func (plan *configProspective) loadOptions() config.LoadOptions {
+	paths := plan.loaded.Context.Paths
 	environment := make(map[string]string)
 	for name, value := range plan.cli.baseEnv {
 		if _, setting := plan.loaded.Catalog.LookupSetting(name); setting || plan.loaded.Catalog.IsLegacySetting(name) {
@@ -148,9 +182,30 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
 	environment["SUBYARD_HOME"] = paths.DataHome
 	delete(environment, "SUBYARD_YARD")
-	var overrides map[string]string
+	options := config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
+		OperatorHome: paths.OperatorHome, Environment: environment}
+	if plan.scalarEdits != nil {
+		options.ScalarEditPath = plan.path
+	}
+	return options
+}
+
+func (plan *configProspective) inspect(draft, locked bool) (binding, semantics string, result error) {
+	defer func() {
+		if result != nil {
+			result = configProspectiveError{plan.loaded.Context.Paths.ConfigHome, result}
+		}
+	}()
+	paths := plan.loaded.Context.Paths
+	names, err := plan.yardNames()
+	if err != nil {
+		return "", "", err
+	}
+	options := plan.loadOptions()
+	options.ConfigLocked = locked
+	candidateOptions := options
 	if draft {
-		overrides = map[string]string{plan.path: plan.draft}
+		candidateOptions.FileOverrides = map[string]string{plan.path: plan.draft}
 	}
 	var contexts []config.Loaded
 	inputs := map[string]config.PersistentFileSnapshot{}
@@ -212,20 +267,25 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		inputs[path] = snapshot
 		return nil
 	}
+	var refusals []error
 	for _, name := range names {
-		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
-			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked})
+		options.YardName, candidateOptions.YardName = name, name
+		loaded, err := config.Load(candidateOptions)
 		if err != nil {
-			return "", "", fmt.Errorf("yard %s: %w", name, err)
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+			continue
 		}
-		if draft && plan.request.action == "selection-repair" {
-			before, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
-				OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, ConfigLocked: locked})
+		if draft && (plan.scalarEdits != nil || plan.request.action == "selection-repair") {
+			before, err := config.Load(options)
 			if err != nil {
-				return "", "", err
+				refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+				continue
 			}
-			if err := plan.cli.checkSelectionReduction(before, loaded, plan.request.name); err != nil {
-				return "", "", err
+			if plan.scalarEdits != nil {
+				refusals = append(refusals, plan.scalarEdits.CheckLayer(plan.path, before, loaded))
+			}
+			if plan.request.action == "selection-repair" {
+				refusals = append(refusals, plan.cli.checkSelectionReduction(before, loaded, plan.request.name))
 			}
 		}
 		contexts = append(contexts, loaded)
@@ -324,6 +384,9 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		if err := observe(filepath.Join(paths.ConfigHome, ".yard-reset-"+name)); err != nil {
 			return "", "", err
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return "", "", err
 	}
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		if err := observe(filepath.Join(paths.ConfigDir, name)); err != nil {

@@ -3242,32 +3242,73 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 	}
 }
 
-func TestConfigSetRefusesSharedAssignmentRecord(t *testing.T) {
-	for _, mode := range []string{"local", "git"} {
-		t.Run(mode, func(t *testing.T) {
+func TestConfigSetPreservesLayeredSettings(t *testing.T) {
+	const layered = `GIT_USER_NAME=Jane
+GIT_USER_EMAIL="${GIT_USER_NAME:-${DEV_USER:-Jane}}@example.invalid"
+GIT_USER_NAME=Jane
+`
+	for _, test := range []struct {
+		name, shared, host, yard, setting, value, refusal, want string
+	}{
+		{name: "same value keeps duplicate records", shared: "DEV_USER=alice\n", host: layered,
+			setting: "GIT_USER_NAME", value: "Jane", want: layered},
+		{name: "earlier layer changes fallback", shared: "DEV_USER=alice\n", host: layered,
+			setting: "GIT_USER_NAME", value: "Janet", refusal: "GIT_USER_EMAIL in yard default", want: layered},
+		{name: "earlier layer prevents conditional assignment", shared: "GIT_USER_NAME=Jane\n",
+			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:=fallback}@example.invalid"` + "\n",
+			setting: "GIT_USER_EMAIL", value: "new@example.invalid", want: "GIT_USER_EMAIL='new@example.invalid'\n"},
+		{name: "earlier layer satisfies required parameter", shared: "GIT_USER_NAME=Jane\n",
+			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:?required}@example.invalid"` + "\n",
+			setting: "GIT_USER_EMAIL", value: "new@example.invalid", want: "GIT_USER_EMAIL='new@example.invalid'\n"},
+		{name: "later named yard reads the setting", host: "GIT_USER_NAME=Jane\n",
+			yard:    `GIT_USER_EMAIL="${GIT_USER_NAME}@example.invalid"` + "\n",
+			setting: "GIT_USER_NAME", value: "Janet", refusal: "GIT_USER_EMAIL in yard neighbor", want: "GIT_USER_NAME=Jane\n"},
+		{name: "later yard introduces an empty setting", host: "GIT_USER_NAME=Jane\n",
+			yard:    `: "${GIT_USER_NAME:-${GIT_USER_EMAIL:=}}"` + "\n",
+			setting: "GIT_USER_NAME", refusal: "GIT_USER_EMAIL in yard neighbor", want: "GIT_USER_NAME=Jane\n"},
+		{name: "active shared assignment record",
+			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n",
+			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "GIT_USER_NAME in yard default",
+			want: `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
 			path := filepath.Join(configHome, "config.env")
-			args := []string{"config", "set", "GIT_USER_EMAIL", "new@example.invalid", "--scope", "host", "--yes"}
-			if mode == "git" {
-				path = filepath.Join(configHome, filepath.FromSlash(config.GitSettingsRelativePath), "config.env")
-				args = append(args, "DEV_UID", "2298", "--git")
+			writeConfigCommandFile(t, path, test.host)
+			if test.shared != "" {
+				writeConfigCommandFile(t, filepath.Join(configHome, "overrides/shared/config.env"), test.shared)
 			}
-			initial := "GIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
-			writeConfigCommandFile(t, path, initial, 0o600)
-			var stdout, stderr bytes.Buffer
-			program, err := New(Options{
-				RepositoryRoot: root, Program: "yard", WorkingDir: root,
-				Arguments: args, Environment: environment, Stdout: &stdout, Stderr: &stderr,
-			})
+			if test.yard != "" {
+				writeConfigCommandFile(t, filepath.Join(configHome, "yards/neighbor/config.env"), test.yard)
+			}
+			before, err := os.Stat(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if code := program.Run(context.Background()); code == 0 ||
-				!strings.Contains(stderr.String(), "edit changes effective setting GIT_USER_NAME") {
-				t.Fatalf("config set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			args := []string{"config", "set", test.setting, test.value}
+			if test.value == "" {
+				args = []string{"config", "unset", test.setting}
 			}
-			if stored, err := os.ReadFile(path); err != nil || string(stored) != initial {
-				t.Fatalf("refused set changed settings: %q, %v", stored, err)
+			args = append(args, "--scope", "host", "--yes")
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", WorkingDir: root,
+				Arguments: args, Environment: environment, Stdout: &stdout, Stderr: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			code := program.Run(context.Background())
+			if (test.refusal == "" && code != 0) || (test.refusal != "" &&
+				(code != 1 || !strings.Contains(stderr.String(), "edit changes effective setting "+test.refusal))) {
+				t.Fatalf("config authoring: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if stored, err := os.ReadFile(path); err != nil || string(stored) != test.want {
+				t.Fatalf("stored settings = %q, %v; want %q", stored, err, test.want)
+			}
+			if test.want == test.host {
+				after, err := os.Stat(path)
+				if err != nil || !os.SameFile(before, after) {
+					t.Fatalf("configuration file was replaced: %v", err)
+				}
 			}
 		})
 	}

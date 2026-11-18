@@ -60,38 +60,30 @@ func TestWritePersistentAssignmentPreservesUnrelatedRecords(t *testing.T) {
 	}
 }
 
-func TestPersistentAssignmentRefusesSharedRecords(t *testing.T) {
-	for _, initial := range []string{
-		"GIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n",
-		"GIT_USER_NAME=earlier\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n",
-	} {
-		for _, name := range []string{"GIT_USER_EMAIL", "GIT_USER_NAME"} {
-			if name == "GIT_USER_NAME" && strings.HasPrefix(initial, "GIT_USER_NAME=") {
-				continue
-			}
-			value := "replacement"
-			_, err := EditPersistentAssignmentContent("config.env", []byte(initial), name, &value)
-			var source *SourceError
-			reason := "edit changes effective setting"
-			if strings.HasPrefix(initial, "GIT_USER_NAME=") {
-				reason = "record can also assign"
-			}
-			if !errors.As(err, &source) || source.Key != name || !strings.Contains(source.Reason, reason) {
-				t.Fatalf("editing %s in %q: %v", name, initial, err)
-			}
+func TestPersistentAssignmentChecksWhetherRecordsShareAssignments(t *testing.T) {
+	const shared = "GIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
+	for _, name := range []string{"GIT_USER_EMAIL", "GIT_USER_NAME"} {
+		value := "replacement"
+		_, err := EditPersistentAssignmentContent("config.env", []byte(shared), name, &value)
+		var source *SourceError
+		if !errors.As(err, &source) || source.Key != name || !strings.Contains(source.Reason, "edit changes effective setting") {
+			t.Fatalf("editing %s in %q: %v", name, shared, err)
 		}
+	}
+	value := "new@example.invalid"
+	content, err := EditPersistentAssignmentContent("config.env", []byte("GIT_USER_NAME=earlier\n"+shared), "GIT_USER_EMAIL", &value)
+	if want := "GIT_USER_NAME=earlier\nGIT_USER_EMAIL='new@example.invalid'\n"; err != nil || string(content) != want {
+		t.Fatalf("safe edit = %q, %v; want %q", content, err, want)
 	}
 }
 
-func TestPersistentAssignmentRefusesLatentSharedRecordForEitherSetting(t *testing.T) {
+func TestPersistentAssignmentLeavesDormantDefaults(t *testing.T) {
 	const initial = "GATE=earlier\n: \"${GATE:-${GIT_USER_NAME:=original}${GIT_USER_EMAIL:=old@example.invalid}}\"\n"
 	for _, name := range []string{"GIT_USER_NAME", "GIT_USER_EMAIL"} {
 		t.Run(name, func(t *testing.T) {
-			_, err := EditPersistentAssignmentContent("config.env", []byte(initial), name, nil)
-			var source *SourceError
-			if !errors.As(err, &source) || source.Key != name || source.Line != 2 ||
-				!strings.Contains(source.Reason, "record can also assign") {
-				t.Fatalf("expected refusal for shared record, got %v", err)
+			content, err := EditPersistentAssignmentContent("config.env", []byte(initial), name, nil)
+			if err != nil || string(content) != initial {
+				t.Fatalf("unsetting an unassigned setting produced %q, %v", content, err)
 			}
 		})
 	}
@@ -705,7 +697,7 @@ func TestWritePersistentAssignmentRejectsPreservedConditionalAlias(t *testing.T)
 		reason  string
 	}{
 		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "preserved record"},
-		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "record can also assign"},
+		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "preserved record"},
 		{"ENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{nil, &empty}, "preserved record"},
 		{"YARD_PROFILES=neighbor\nENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{&empty}, "preserved record"},
 	} {

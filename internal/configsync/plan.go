@@ -379,11 +379,12 @@ func validateCandidate(
 		}
 	}
 	contexts := make([]config.Loaded, 0, len(yardNames)+1)
+	var refusals []error
 	load := func(name string) error {
 		loaded, err := config.Load(config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
 			YardName: name, Environment: environment, DisablePrivate: true,
-			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides,
+			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides, ScalarEditPath: options.scalarEditPath,
 		})
 		if err != nil {
 			return fmt.Errorf("yard %s: %w", name, err)
@@ -392,27 +393,31 @@ func validateCandidate(
 		return nil
 	}
 	if err := load("default"); err != nil {
-		return err
+		refusals = append(refusals, err)
 	}
 	for _, name := range yardNames {
 		reset, err := config.YardFallbackReset(options.ConfigHome, name)
 		if err != nil {
-			return err
+			refusals = append(refusals, err)
+			continue
 		}
 		if reset && localYards[name] == "" {
 			continue
 		}
 		if err := load(name); err != nil {
-			return err
+			refusals = append(refusals, err)
 		}
+	}
+	if len(capture) != 0 {
+		*capture[0] = contexts
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	if !options.inspectionOnly {
 		if err := validateInventory(contexts); err != nil {
 			return err
 		}
-	}
-	if len(capture) != 0 {
-		*capture[0] = contexts
 	}
 	return nil
 }

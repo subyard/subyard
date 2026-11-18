@@ -304,32 +304,36 @@ func writePersistentAssignment(
 		return err
 	}
 	if value == nil && len(updated) == 0 {
-		relative, err := filepath.Rel(configHome, path)
-		if err != nil || relative == "." || filepath.IsAbs(relative) ||
-			relative == ".." ||
-			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("persistent setting path escaped the configuration root")
-		}
-		info, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-			return sourceError(path, 0, "", "persistent settings", persistentOwnershipReason(info, stat), nil)
-		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-		return syncPersistentDirectory(filepath.Dir(path))
+		return removePersistentFile(configHome, path)
 	}
 	return writePersistentFile(configHome, path, updated)
+}
+
+func removePersistentFile(configHome, path string) error {
+	relative, err := filepath.Rel(configHome, path)
+	if err != nil || relative == "." || filepath.IsAbs(relative) ||
+		relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return errors.New("persistent setting path escaped the configuration root")
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
+		return sourceError(path, 0, "", "persistent settings", persistentOwnershipReason(info, stat), nil)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncPersistentDirectory(filepath.Dir(path))
 }
 
 // EditPersistentAssignmentContent returns the complete persistent settings
@@ -368,6 +372,17 @@ func WritePersistentFileIfUnchanged(
 	content []byte,
 	guards ...func() error,
 ) error {
+	return ApplyPersistentFileIfUnchanged(configHome, path, expected, PersistentFileSnapshot{Exists: true, Content: content}, guards...)
+}
+
+// ApplyPersistentFileIfUnchanged publishes the exact validated draft, or removes
+// the target if the draft is absent.
+func ApplyPersistentFileIfUnchanged(
+	configHome string,
+	path string,
+	expected, desired PersistentFileSnapshot,
+	guards ...func() error,
+) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
 	}
@@ -391,7 +406,10 @@ func WritePersistentFileIfUnchanged(
 			return err
 		}
 	}
-	return writePersistentFile(configHome, path, content)
+	if !desired.Exists {
+		return removePersistentFile(configHome, path)
+	}
+	return writePersistentFile(configHome, path, desired.Content)
 }
 
 func persistentFileSnapshot(path string) (PersistentFileSnapshot, error) {
@@ -472,66 +490,19 @@ func editAssignmentContent(
 	name = canonicalSettingName(name)
 	policy := operatorDiscardPolicy(nil, settings)
 	before := environment{}
-	assigned := make(map[int]map[string]bool)
-	last := 0
-	observe := func(key, _ string, line int) {
-		key = canonicalSettingName(key)
-		if assigned[line] == nil {
-			assigned[line] = make(map[string]bool)
-		}
-		assigned[line][key] = true
-		if key == name {
-			last = line
-		}
+	var assignments []observedAssignment
+	observe := func(key, value string, line int) {
+		assignments = append(assignments, observedAssignment{name: key, value: value, line: line})
 	}
 	if err := applyEnvReaderObservedRetired(bytes.NewReader(content), path, before, observe, policy, observe); err != nil {
 		return nil, err
 	}
-
-	var result bytes.Buffer
-	var refusals []error
-	replacement := name + "=" + quotePersistentValue(dereference(value)) + "\n"
-	err := scanEnvRecords(bytes.NewReader(content), path, "persistent settings", func(record envRecord) error {
-		actual := assigned[record.line]
-		if record.text != "" {
-			// A record can also be loaded over a different input layer.
-			// The whole-file comparison covers assignments observed here.
-			possible := make(map[string]bool)
-			observe := func(key, _ string) { possible[canonicalSettingName(key)] = true }
-			probe := envEvaluation{values: environment{}, observe: observe, policy: policy, possible: true}
-			probe.policy.report = observe
-			if err := probe.applyRecord(record.text); err != nil {
-				return err
-			}
-			if actual[name] || possible[name] {
-				for other := range possible {
-					if other != name && !(actual[name] && actual[other]) {
-						refusals = append(refusals, sourceError(path, record.line, name, "persistent settings", "record can also assign "+other+"; split the assignments before editing", nil))
-					}
-				}
-			}
-		}
-		if !actual[name] {
-			result.WriteString(record.raw)
-		} else if value != nil && record.line == last {
-			result.WriteString(replacement)
-		}
-		return nil
-	})
+	updated, err := (PersistentScalarEdits{{Name: name, Value: value}}).editContent(path, content, [][]observedAssignment{assignments}, false)
 	if err != nil {
-		return nil, domain.CollectRefusals(append(refusals, err)...)
+		return nil, err
 	}
-	if value != nil && last == 0 {
-		if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
-			result.WriteByte('\n')
-		}
-		result.WriteString(replacement)
-	}
+	var refusals []error
 
-	if result.Len() > 8<<20 {
-		err := sourceError(path, 0, name, "persistent settings", "edited content exceeds its size bound", nil)
-		return nil, domain.CollectRefusals(append(refusals, err)...)
-	}
 	after := environment{}
 	var effective PersistentAssignment
 	observe = func(key, assignedValue string, line int) {
@@ -543,7 +514,7 @@ func editAssignmentContent(
 		}
 		effective = PersistentAssignment{Name: key, Value: assignedValue, Line: line}
 	}
-	if err := applyEnvReaderObservedRetired(bytes.NewReader(result.Bytes()), path, after, observe, policy, observe); err != nil {
+	if err := applyEnvReaderObservedRetired(bytes.NewReader(updated), path, after, observe, policy, observe); err != nil {
 		return nil, domain.CollectRefusals(append(refusals, err)...)
 	}
 	if value != nil && (effective.Name == "" || effective.Value != *value) {
@@ -568,18 +539,11 @@ func editAssignmentContent(
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return nil, err
 	}
-	return result.Bytes(), nil
+	return updated, nil
 }
 
 func quotePersistentValue(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", escapedEnvApostrophe) + "'"
-}
-
-func dereference(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }
 
 func writePersistentFile(configHome, path string, content []byte) error {

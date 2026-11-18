@@ -42,6 +42,8 @@ type LoadOptions struct {
 	ProspectiveFiles *ProspectiveFiles
 	FileOverrides    map[string]string
 	YardDirs         []string
+	// ScalarEditPath retains assignments from one scalar layer for authoring.
+	ScalarEditPath string
 }
 
 const GitSettingsRelativePath = ".sync/settings"
@@ -73,6 +75,8 @@ type Loaded struct {
 	assetValidationInputs []string
 	ProspectiveFiles      *ProspectiveFiles
 	ignored               []IgnoredAssignment
+	scalarEditAssignments []observedAssignment
+	scalarEditValues      environment
 }
 
 // AssetValidationInputs returns the logical file sources opened while validating
@@ -110,6 +114,7 @@ func Load(options LoadOptions) (Loaded, error) {
 	tracker := newSettingTracker()
 	tracker.fileOverrides = options.FileOverrides
 	tracker.prospectiveFiles = options.ProspectiveFiles
+	tracker.scalarEditPath = options.ScalarEditPath
 	if options.Catalog != nil {
 		tracker.catalog = *options.Catalog
 	} else {
@@ -134,6 +139,8 @@ func Load(options LoadOptions) (Loaded, error) {
 		assetValidationInputs: tracker.assetValidationInputs,
 		ProspectiveFiles:      options.ProspectiveFiles,
 		ignored:               tracker.ignoredAssignments(ctx.YardName, ctx.Paths.ConfigHome),
+		scalarEditAssignments: tracker.scalarEditAssignments,
+		scalarEditValues:      tracker.scalarEditValues,
 	}, nil
 }
 
@@ -481,6 +488,9 @@ func load(
 	setConfigurationRolePaths(values, configHome, yardName)
 	if yardName != "default" {
 		values["YARD_NAME"] = yardName
+	}
+	if tracker.scalarEditPath != "" {
+		tracker.scalarEditValues = cloneEnvironment(values)
 	}
 	normalizationLayer := tracker.addLayer(
 		"derived", "derived", "resolver normalization", true, settingScalar, "E2E_VM_CPU",
@@ -1067,10 +1077,17 @@ func applyEnvFileTrackedValidated(
 	requireSyncable bool,
 ) error {
 	source := tracker.fileSource(path)
+	observeEdit := func(name, value string, line int) {
+		if path == tracker.scalarEditPath {
+			tracker.scalarEditAssignments = append(tracker.scalarEditAssignments, observedAssignment{name: name, value: value, line: line})
+		}
+	}
 	return tracker.catalog.applyEnvFileValidatedFrom(path, source, values, scope, requireSyncable,
 		func(name, value string, line int) {
+			observeEdit(name, value, line)
 			tracker.record(layer, name, value, path, line, "")
 		}, func(name, value string, line int) {
+			observeEdit(name, value, line)
 			tracker.observeProfileOnly(layer, name, value, path, line)
 		}, tracker.prospectiveReader())
 }

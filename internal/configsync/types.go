@@ -93,6 +93,7 @@ type Options struct {
 	YardInUse           YardUseProbe
 	validationOverrides map[string]string
 	inspectionOnly      bool
+	scalarEditPath      string
 }
 
 func (plan Plan) candidate(path string) (candidateFile, bool) {

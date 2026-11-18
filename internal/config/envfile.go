@@ -223,9 +223,6 @@ type envEvaluation struct {
 	values  environment
 	observe func(name, value string)
 	policy  discardPolicy
-
-	// possible visits defaults that may run over a different input layer.
-	possible bool
 }
 
 func (evaluation envEvaluation) applyRecord(record string) error {
@@ -258,7 +255,7 @@ func (evaluation envEvaluation) applyRecord(record string) error {
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
-	if expand && !(discard && evaluation.possible) {
+	if expand {
 		expanded, err := evaluation.expandValue(value)
 		if err != nil && !(discard && evaluation.policy.ignores(name)) {
 			return err
@@ -372,9 +369,6 @@ func (evaluation envEvaluation) expandParameter(expression string) (string, erro
 	discard := evaluation.policy.discards(name)
 	if discard {
 		// A default of a discarded name stays inside this expansion.
-		if evaluation.possible {
-			return "", nil
-		}
 		evaluation.values = cloneEnvironment(evaluation.values)
 		evaluation.observe = nil
 	}
@@ -386,17 +380,13 @@ func (evaluation envEvaluation) expandParameter(expression string) (string, erro
 		if current != "" {
 			return current, nil
 		}
-		if operator == ":?" && (evaluation.possible || evaluation.policy.ignores(name)) {
+		if operator == ":?" && evaluation.policy.ignores(name) {
 			// A required check evaluates its message only on failure.
 			// For an ignored name the check itself is skipped.
 			return "", nil
 		}
 		expanded, err := evaluation.expandValue(fallback)
 		if err != nil {
-			// A different input layer can skip an invalid fallback.
-			if evaluation.possible {
-				return "", nil
-			}
 			return "", err
 		}
 		if operator == ":?" {

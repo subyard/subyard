@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -227,6 +228,11 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return err
 	}
+	if !slices.ContainsFunc(requests, func(request configAuthoringRequest) bool {
+		return request.name == "YARD_TEMPLATE" || request.name == "CODING_TOOL_INTEGRATIONS"
+	}) {
+		return nil
+	}
 	target, err := cli.configGitScalarsTarget(loaded, requests)
 	if err != nil {
 		return fmt.Errorf("combined configuration: %w", err)
@@ -235,6 +241,19 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 		refusals = append(refusals, configScalarStateRefusals(target, request)...)
 	}
 	return domain.CollectRefusals(refusals...)
+}
+
+func configScalarEdits(catalog config.Catalog, requests []configAuthoringRequest) config.PersistentScalarEdits {
+	edits := make(config.PersistentScalarEdits, 0, len(requests))
+	for _, request := range requests {
+		definition, _ := catalog.LookupSetting(request.name)
+		var value *string
+		if request.action == "set" {
+			value = &request.value
+		}
+		edits = append(edits, config.PersistentScalarEdit{Name: definition.Name, Value: value})
+	}
+	return edits
 }
 
 // configGitScalarsTarget loads the selected yard with the assignments applied
@@ -257,14 +276,22 @@ func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAu
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return config.Loaded{}, err
 	}
-	for _, request := range requests {
-		value := request.value
-		if content, err = cli.catalog.EditPersistentAssignmentContent(path, content, request.name, &value); err != nil {
-			return config.Loaded{}, err
-		}
+	environment := maps.Clone(cli.baseEnv)
+	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
+	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
+	environment["SUBYARD_HOME"] = paths.DataHome
+	delete(environment, "SUBYARD_YARD")
+	options := config.LoadOptions{Resources: cli.operationResourceRegistry, RepositoryRoot: cli.options.RepositoryRoot,
+		OperatorHome: paths.OperatorHome, YardName: yard, Environment: environment, ScalarEditPath: path}
+	before, err := config.Load(options)
+	if err != nil {
+		return config.Loaded{}, err
 	}
-	// The same temporary root as the isolated Git candidate.
-	draft, err := os.CreateTemp("", "subyard-config-draft-*")
+	content, err = configScalarEdits(loaded.Catalog, requests).LayerContent(path, content, []config.Loaded{before})
+	if err != nil {
+		return config.Loaded{}, err
+	}
+	draft, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
 	if err != nil {
 		return config.Loaded{}, err
 	}
@@ -279,13 +306,8 @@ func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAu
 	if err != nil {
 		return config.Loaded{}, err
 	}
-	environment := maps.Clone(cli.baseEnv)
-	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
-	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
-	environment["SUBYARD_HOME"] = paths.DataHome
-	delete(environment, "SUBYARD_YARD")
-	return config.Load(config.LoadOptions{Resources: cli.operationResourceRegistry, RepositoryRoot: cli.options.RepositoryRoot,
-		OperatorHome: paths.OperatorHome, YardName: yard, Environment: environment, FileOverrides: map[string]string{path: draft.Name()}})
+	options.FileOverrides = map[string]string{path: draft.Name()}
+	return config.Load(options)
 }
 
 // configGitAuthoringMessage names the selected settings without their values.

@@ -402,7 +402,7 @@ func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T)
 	writeConfigCommandFile(t, filepath.Join(root, "config/yards/profiles/isolated.env"), "YARD_KIND=vm\nREQUIRED_YARD_KIND=vm\nEXCLUSIVE_ENVIRONMENT_PROFILE=service\nENVIRONMENT_PROFILES=service\nALLOWS_CODING_TOOLS=false\n")
 	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROVISION_SCOPE=dedicated\n")
 	target := filepath.Join(configHome, "yards/named/config.env")
-	writeConfigCommandFile(t, target, "YARD_TEMPLATE=isolated\n")
+	writeConfigCommandFile(t, target, "YARD_TEMPLATE=isolated\nSSH_PORT=2222\n")
 	loaded := loadConfigCommandContext(t, root, environment, "named")
 	program := configExactProgram(t, root, environment, nil, nil)
 	valid := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Loaded: loaded}
@@ -419,7 +419,7 @@ func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T)
 			t.Fatalf("incompatible draft accepted: %v", arguments)
 		}
 	}
-	if content, err := os.ReadFile(target); err != nil || string(content) != "YARD_TEMPLATE=isolated\n" {
+	if content, err := os.ReadFile(target); err != nil || string(content) != "YARD_TEMPLATE=isolated\nSSH_PORT=2222\n" {
 		t.Fatalf("invalid draft persisted: %s, %v", content, err)
 	}
 }
