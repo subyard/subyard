@@ -2177,7 +2177,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
                  patch.object(m, "execute", side_effect=AssertionError("execution")), \
                  patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status),
-                                          "--slots", "1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
+                                          "--slots", "slot-1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(m.main(), 1)
             self.assertEqual(before, set(checkout.rglob("*")))
 
