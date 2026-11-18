@@ -616,12 +616,20 @@ An interactive `codex` from an SSH or VS Code shell prefers upstream's shared ap
 - **Disconnects:** when a plain client's terminal dies during a slow tool, the tool finishes on the daemon
   and its result reaches the model. Under `--no-daemon` the tool stops with the client.
 
-Codex readiness tests that Bubblewrap can create user and network namespaces as the yard
-developer. On kernels with AppArmor user namespace restrictions, provisioning can restore a
-failing sandbox by extracting the distribution's two Bubblewrap profiles into a Subyard-managed
-directory. A dedicated systemd unit loads those profiles inside the yard at boot. Provisioning
-repairs missing boot registration and adds missing managed profiles without replacing loaded
-administrator policy.
+On hosts with AppArmor user namespace restrictions, yard setup runs Bubblewrap as the yard
+developer and checks that it can create user and network namespaces. If the probe fails in a
+container yard, provisioning loads the distribution's `bwrap` and `unpriv_bwrap` profiles in the
+yard's own AppArmor namespace. The host-wide restriction stays enabled. This yard policy applies
+independently of which coding tools are selected, including Codex and Claude Code.
+
+The boot loader verifies the two profiles against the Subyard ownership record in
+`/var/lib/subyard/bwrap-apparmor-ownership` before loading either one. Setup repairs missing boot
+registration and missing live profiles. Administrator overrides, unrecorded policy installations,
+and missing or changed owned files require operator review.
+
+To opt out, set `BWRAP_APPARMOR=off` in the yard's settings and run `yard setup` for that yard.
+Setup disables the boot loader and unloads the two verified profiles, attachment first. Stop any
+affected sandbox jobs before opting out.
 
 #### Codex version drift
 

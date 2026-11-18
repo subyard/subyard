@@ -321,11 +321,13 @@ func (runtime Runtime) integrationScopeFromInputs(entries []integrationArtifact,
 		uid = 1000
 	}
 	payload, err := json.Marshal(struct {
-		UID       int                   `json:"uid"`
-		Allows    string                `json:"allows"`
-		Sources   string                `json:"sources,omitempty"`
-		Artifacts []integrationArtifact `json:"artifacts"`
-	}{UID: uid, Sources: sourceBinding, Allows: runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), Artifacts: entries})
+		UID        int                   `json:"uid"`
+		Allows     string                `json:"allows"`
+		Bubblewrap string                `json:"bubblewrap,omitempty"`
+		Sources    string                `json:"sources,omitempty"`
+		Artifacts  []integrationArtifact `json:"artifacts"`
+	}{UID: uid, Sources: sourceBinding, Allows: runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"),
+		Bubblewrap: runtime.environmentValue("BWRAP_APPARMOR"), Artifacts: entries})
 	if err != nil {
 		return "", nil, err
 	}
@@ -923,13 +925,19 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	}
 	plan.Changed = plan.Changed || servicesChanged
 	fingerprints = append(fingerprints, serviceFingerprint)
-	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "deselected managed services inactive; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
+	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
 	plan.fingerprints = slices.Clone(fingerprints)
 	plan.pendingOnly = observed.Pending && !plan.Changed
 	plan.Changed = plan.Changed || observed.Pending
 	if plan.Changed {
 		plan.Steps = []string{reconcileIntegrationsStep(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))}
+		switch {
+		case strings.Contains(serviceFingerprint, "bwrap=retire\n"):
+			plan.Steps = append(plan.Steps, "disable the yard's Bubblewrap boot loader and unload its two verified AppArmor profiles")
+		case strings.Contains(serviceFingerprint, "bwrap=enable\n"), strings.Contains(serviceFingerprint, "bwrap=repair\n"):
+			plan.Steps = append(plan.Steps, "reconcile the two Bubblewrap AppArmor profiles inside this yard")
+		}
 		for _, step := range plan.PersistOperationSteps(runtime.Yard.IncusProject + "/" + runtime.Yard.YardInstanceName) {
 			plan.Steps = append(plan.Steps, step.Consequence)
 		}
@@ -1480,7 +1488,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 		return runtime.storeAppliedIntegrationSettings(ctx)
 	}
 	execution := runtime
-	if err := runtime.retireIntegrationServices(ctx); err != nil {
+	if err := runtime.reconcileIntegrationServices(ctx); err != nil {
 		return err
 	}
 	entries, err := runtime.integrationArtifactsPhase("apply")

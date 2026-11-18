@@ -2,15 +2,26 @@ package reconcileruntime
 
 import (
 	"context"
+	_ "embed"
 	"errors"
+	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
 
-// A role-forbidden utility is removed only after its ownership is proven.
+//go:embed bwrap_policy.sh
+var bubblewrapPolicy string
+
+// Integration services are reconciled even when the yard selects no coding tools.
 func (runtime Runtime) integrationServices(ctx context.Context, mode string) (string, bool, error) {
+	setting := runtime.environmentDefault("BWRAP_APPARMOR", "on")
+	claude := "0"
+	if slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), "claude") {
+		claude = "1"
+	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-c", `
 mode=$1
 allowed=$2
@@ -40,24 +51,36 @@ if [ "$allowed" = false ] && { [ -e /usr/local/bin/ccusage ] || [ -L /usr/local/
   if [ "$mode" = apply ]; then rm -- /usr/local/bin/ccusage "$receipt"; rm -f -- "$activation_receipt"; fi
 fi
 printf 'changed=%s\n' "$changed"
-`, "subyard", mode, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true")}})
+bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7"
+`, "subyard", mode, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), bubblewrapPolicy, setting, runtime.devUser(), claude, string(runtime.Yard.YardKind)}})
 	if err != nil || result.ExitCode != 0 {
 		yard := runtime.Yard.YardName
 		if yard == "" {
 			yard = "default"
 		}
 		retry := "run " + shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
+		var refusals []error
 		for _, line := range strings.Split(string(result.Stderr), "\n") {
 			if line == "subyard-integration-conflict:ccusage" {
-				return "", false, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry}
+				refusals = append(refusals, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry})
 			}
+			if strings.HasPrefix(line, "Bubblewrap AppArmor: ") {
+				refusals = append(refusals, errors.New(line))
+			}
+		}
+		if refusal := domain.CollectRefusals(refusals...); refusal != nil {
+			return "", false, refusal
 		}
 		return "", false, errors.New("integration service or utility ownership is unknown or changed")
 	}
-	return string(result.Stdout), strings.Contains(string(result.Stdout), "changed=1"), nil
+	output := string(result.Stdout)
+	lines := strings.Split(output, "\n")
+	changed := slices.Contains(lines, "changed=1") || slices.Contains(lines, "bwrap=install") ||
+		slices.Contains(lines, "bwrap=retire") || slices.Contains(lines, "bwrap=repair") || slices.Contains(lines, "bwrap=enable")
+	return output, changed, nil
 }
 
-func (runtime Runtime) retireIntegrationServices(ctx context.Context) error {
+func (runtime Runtime) reconcileIntegrationServices(ctx context.Context) error {
 	_, _, err := runtime.integrationServices(ctx, "apply")
 	return err
 }
