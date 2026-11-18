@@ -124,6 +124,15 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 	if err := checkIntegrationNames(values, requested, shipped, retired); err != nil {
 		return result, err
 	}
+	_, err := walkIntegrationDependencies(values, requested, &result, nil)
+	return result, err
+}
+
+// A batch can have unavailable metadata. Skip only the branch that needs it
+// and continue checking the remaining edges. A regular load stops on error.
+func walkIntegrationDependencies(values map[string]string, requested []string, result *IntegrationSelection, batch *localBatch) (bool, error) {
+	available := true
+	var refusals []error
 	visiting := make(map[string]bool)
 	visited := make(map[string]bool)
 	var visit func(string) error
@@ -134,33 +143,61 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 		if visiting[agent] {
 			return fmt.Errorf("agent dependency cycle at %q", agent)
 		}
+		key := "AGENT_" + agent + "_DEPENDS"
+		if batch != nil && !batch.available(key) {
+			available = false
+			return nil
+		}
 		visiting[agent] = true
-		dependencies := strings.Fields(values["AGENT_"+agent+"_DEPENDS"])
+		dependencies := strings.Fields(values[key])
 		seenDependencies := make(map[string]bool, len(dependencies))
 		for _, dependency := range dependencies {
+			var err error
 			if seenDependencies[dependency] {
-				return fmt.Errorf("duplicate dependency %q for agent %q", dependency, agent)
+				err = fmt.Errorf("duplicate dependency %q for agent %q", dependency, agent)
+			} else if batch != nil && !batch.integrationMetadataKnown(values, dependency) {
+				available = false
+			} else if !knownIntegration(values, dependency) {
+				err = fmt.Errorf("unknown dependency %q for agent %q", dependency, agent)
+			} else {
+				if result != nil {
+					result.DependencyReasons[dependency] = append(result.DependencyReasons[dependency], agent)
+				}
+				err = visit(dependency)
 			}
 			seenDependencies[dependency] = true
-			if !knownIntegration(values, dependency) {
-				return fmt.Errorf("unknown dependency %q for agent %q", dependency, agent)
-			}
-			result.DependencyReasons[dependency] = append(result.DependencyReasons[dependency], agent)
-			if err := visit(dependency); err != nil {
-				return err
+			if err != nil {
+				if batch == nil {
+					return err
+				}
+				refusals = append(refusals, err)
 			}
 		}
 		delete(visiting, agent)
 		visited[agent] = true
-		result.Effective = append(result.Effective, agent)
+		if result != nil {
+			result.Effective = append(result.Effective, agent)
+		}
 		return nil
 	}
 	for _, agent := range requested {
+		if batch != nil {
+			if batch.catalog.RetiredIntegration(agent) {
+				continue
+			}
+			if !batch.integrationMetadataKnown(values, agent) {
+				available = false
+				continue
+			}
+			if !knownIntegration(values, agent) {
+				continue
+			}
+		}
 		if err := visit(agent); err != nil {
-			return result, err
+			return false, err
 		}
 	}
-	return result, nil
+	return available, domain.CollectRefusals(refusals...)
 }
 
 func knownIntegration(values map[string]string, agent string) bool {

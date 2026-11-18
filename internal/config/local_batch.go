@@ -276,13 +276,8 @@ func (batch *localBatch) checkConstraints(options LoadOptions, root, configDir, 
 				len(requested) != 0 && batch.scope == ScopeYard {
 				refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools))
 			}
-			for _, id := range requested {
-				if knownIntegration(values, id) && !batch.catalog.RetiredIntegration(id) &&
-					batch.integrationDependenciesAvailable(values, []string{id}) {
-					_, err := batch.catalog.ResolveIntegrationSelection(values, []string{id})
-					refusals = append(refusals, err)
-				}
-			}
+			_, err := walkIntegrationDependencies(values, requested, nil, batch)
+			refusals = append(refusals, refusalCauses(err)...)
 		case "ENVIRONMENT_PROFILES":
 			if !assignment.Valid || values[assignment.Name] != assignment.Value {
 				authored := cloneEnvironment(values)
@@ -299,14 +294,23 @@ func (batch *localBatch) checkConstraints(options LoadOptions, root, configDir, 
 	if batch.available("ALLOWS_CODING_TOOLS") {
 		refusals = append(refusals, integrationRoleRefusal(values, tracker))
 	}
-	if batch.available("CODING_TOOL_INTEGRATIONS", "ALLOWS_CODING_TOOLS") &&
-		batch.integrationDependenciesAvailable(values, strings.Fields(values["CODING_TOOL_INTEGRATIONS"])) {
-		_, err := resolveLoadedIntegrations(values, tracker)
-		refusals = append(refusals, err)
-		batch.setAvailable("CODING_TOOL_INTEGRATIONS", err == nil)
-	} else {
-		batch.setAvailable("CODING_TOOL_INTEGRATIONS", false)
+	integrationsAvailable := false
+	if batch.available("CODING_TOOL_INTEGRATIONS") {
+		requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
+		requested = slices.DeleteFunc(requested, batch.catalog.RetiredIntegration)
+		available, dependencyErr := walkIntegrationDependencies(values, requested, nil, batch)
+		refusals = append(refusals, refusalCauses(dependencyErr)...)
+		namesErr := checkUnknownIntegrations(values, requested, batch.catalog.RetiredIntegration, batch.integrationMetadataKnown)
+		repeatedErr := checkRepeatedIntegrations(requested, func(id string) bool { return batch.catalog.ShippedIntegration(id) && knownIntegration(values, id) })
+		refusals = append(refusals, refusalCauses(namesErr)...)
+		refusals = append(refusals, refusalCauses(repeatedErr)...)
+		if available && dependencyErr == nil && namesErr == nil && repeatedErr == nil && batch.available("ALLOWS_CODING_TOOLS") {
+			_, err := resolveLoadedIntegrations(values, tracker)
+			refusals = append(refusals, err)
+			integrationsAvailable = err == nil
+		}
 	}
+	batch.setAvailable("CODING_TOOL_INTEGRATIONS", integrationsAvailable)
 	if batch.available("ALLOWS_HOST_ACCESS") && values["ALLOWS_HOST_ACCESS"] == "false" {
 		for _, owner := range batch.catalog.Integrations() {
 			for _, artifact := range owner.Artifacts {
@@ -338,23 +342,6 @@ func (batch *localBatch) integrationMetadataKnown(values map[string]string, id s
 		}
 	}
 	return true
-}
-
-func (batch *localBatch) integrationDependenciesAvailable(values environment, requested []string) bool {
-	seen := map[string]bool{}
-	var visit func(string) bool
-	visit = func(id string) bool {
-		if seen[id] {
-			return true
-		}
-		seen[id] = true
-		key := "AGENT_" + id + "_DEPENDS"
-		if !batch.integrationMetadataKnown(values, id) || !batch.available(key) {
-			return false
-		}
-		return !slices.ContainsFunc(strings.Fields(values[key]), func(dependency string) bool { return !visit(dependency) })
-	}
-	return !slices.ContainsFunc(requested, func(id string) bool { return !visit(id) })
 }
 
 func (batch *localBatch) resolveProfiles(configDir, yard string, values environment) error {

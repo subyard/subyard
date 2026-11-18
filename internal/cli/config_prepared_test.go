@@ -1016,7 +1016,9 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		retiredSetting  = "setting is retired and can no longer be set"
 		preservedRecord = "a preserved record changes the requested setting"
 		unavailable     = "an input is invalid or unavailable"
+		invalidDepends  = "AGENT_blocked_DEPENDS (scalar settings): invalid name value"
 	)
+	const branchMetadata = "AGENT_relay_COMMAND=relay\nAGENT_blocked_COMMAND=blocked\nAGENT_loop_COMMAND=loop\n"
 	longName := "AGENT_" + strings.Repeat("a", 120) + "_COMMAND"
 	for _, test := range []struct {
 		name, yardConfig, scope                  string
@@ -1026,7 +1028,7 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		manifest, link, pending                  bool
 		namedConfig                              string
 		hostLink, badSibling, dedicated, retired bool
-		otherConfig                              string
+		hostConfig, otherConfig                  string
 		forbidden                                []string
 	}{
 		{name: "unprintable duplicate", scope: "yard",
@@ -1056,6 +1058,12 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		{name: "malformed integration and known integration dependency", scope: "yard",
 			assignments: []string{"CODING_TOOL_INTEGRATIONS", "relay bad,name", "AGENT_relay_DEPENDS", "relay"}, code: 2,
 			refusals: []string{invalidName, unknown, unavailable}, forbidden: []string{"relay", "bad,name"}},
+		{name: "explicit integration cycle beside unavailable dependency", scope: "yard", yardConfig: branchMetadata,
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "relay", "AGENT_relay_DEPENDS", "blocked loop", "AGENT_blocked_DEPENDS", "bad,name", "AGENT_loop_DEPENDS", "relay"},
+			code:        2, refusals: []string{invalidDepends, unavailable}, forbidden: []string{"bad,name", "agent dependency cycle"}},
+		{name: "inherited integration cycle beside unavailable dependency", scope: "yard", hostConfig: "CODING_TOOL_INTEGRATIONS=relay\n" + branchMetadata,
+			assignments: []string{"AGENT_relay_DEPENDS", "blocked loop", "AGENT_blocked_DEPENDS", "bad,name", "AGENT_loop_DEPENDS", "relay"},
+			code:        2, refusals: []string{invalidDepends, unavailable}, forbidden: []string{"bad,name", "agent dependency cycle"}},
 		{name: "singleton stops at first affected yard", scope: "host", namedConfig: "SSH_PORT=invalid\n", otherConfig: "DEV_SUDO=invalid\n",
 			assignments: []string{"GIT_USER_NAME", "new"}, code: 1,
 			refusals: []string{"yards/named/config.env:1: SSH_PORT (local scalar settings): invalid port value"}, forbidden: []string{"DEV_SUDO"}},
@@ -1117,6 +1125,11 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 			yardPath := filepath.Join(configHome, "yards", "default", "config.env")
 			writeConfigCommandFile(t, yardPath, test.yardConfig)
 			files := map[string]string{filepath.Join(configHome, "config.env"): "", yardPath: test.yardConfig}
+			if test.hostConfig != "" {
+				path := filepath.Join(configHome, "config.env")
+				writeConfigCommandFile(t, path, test.hostConfig)
+				files[path] = test.hostConfig
+			}
 			if test.namedConfig != "" {
 				path := filepath.Join(configHome, "yards", "named", "config.env")
 				writeConfigCommandFile(t, path, test.namedConfig)
