@@ -70,8 +70,8 @@ incus() {
 incus_stopped=0
 command_with_group() {
   # First init can enroll this user, but cannot update its parent shell's groups.
-  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$@"
     sg incus-admin -c "exec $command"
@@ -125,7 +125,7 @@ launcher="$(command_with_group bash -c \
   '. "$1/tests/helpers/release-candidate.sh"; release_candidate_install "$1" "$2"' _ "$ROOT" "$STATE/candidate")"
 install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 port=$((33000 + ($$ % 1000)))
-while ss -Hln "sport = :$port" 2>/dev/null | grep -a >/dev/null .; do port=$((port + 1)); done
+while ss -Hln "sport = :$port" 2>/dev/null | grep >/dev/null .; do port=$((port + 1)); done
 config="$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env"
 cat > "$config" <<EOF
 # $MARKER

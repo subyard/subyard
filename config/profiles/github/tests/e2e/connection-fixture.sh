@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # Source-only connection operations. Callers own environment, traps and phases.
 fresh() {
-  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$@"
     sg incus-admin -c "exec $command"

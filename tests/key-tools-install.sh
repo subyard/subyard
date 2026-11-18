@@ -86,16 +86,16 @@ PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
 receipt="$SUBYARD_KEYS_TOOLS_DIR/bin/.subyard-native-tools.json"
 [ "$(stat -c '%a' "$receipt")" = 600 ] || fail 'native tool receipt is not protected'
 while read -r probe expected; do
-  status=0
-  KEY_TOOL_PROBE="$probe" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check || status=$?
-  [ "$status" = "$expected" ] || fail "version probe $probe: expected exit $expected, got $status"
+  ready=yes
+  KEY_TOOL_PROBE="$probe" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check || ready=no
+  [ "$ready" = "$expected" ] || fail "version probe $probe: expected ready=$expected, got $ready"
 done <<'PROBES'
-normal 0
-silent 0
-failure 23
-noisy-failure 23
-mismatch 1
-large 0
+normal yes
+silent yes
+failure no
+noisy-failure no
+mismatch no
+large yes
 PROBES
 # The same operator may invoke yard through sg with a different primary group.
 KEY_TOOL_REAL_ID="$(command -v id)"

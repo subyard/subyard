@@ -447,7 +447,7 @@ group="/sys/fs/cgroup$(systemctl show -p ControlGroup --value subyard-orca.servi
 count=0
 while read -r pid; do
   [ "$(stat -c %U "/proc/$pid" 2>/dev/null)" = dev ] || continue
-  if tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | grep -aFx >/dev/null -- --dangerously-skip-permissions; then
+  if tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | grep -Fx >/dev/null -- --dangerously-skip-permissions; then
     count=$((count + 1))
   fi
 done < <(find "$group" -name cgroup.procs -exec cat {} +)

@@ -46,8 +46,8 @@ ensure_owner_incus() {
       SUBYARD_DISPATCHER_PATH="$ROOT/.build/yard" bash "$ROOT/scripts/01-install-incus.sh" --yes
     )
   fi
-  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command 'exec bash %q' "$ROOT/dev/e2e/integration-remote.sh"
     exec sg incus-admin -c "$command"
@@ -86,8 +86,8 @@ incus() {
 owner() {
   # Init can enroll this user without refreshing its parent shell groups.
   # Use the existing disposable-fixture convention; preserve every argument.
-  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local owner_command
     printf -v owner_command '%q ' "$ROOT/.build/yard" -Y "$YARD_NAME" "$@"
     SUBYARD_CONFIG_HOME="$OWNER_CONFIG" SUBYARD_HOME="$STATE/owner-data" \
@@ -192,7 +192,7 @@ cmp -s "$ROOT/.build/yard" "$YARD_RUNTIME_ROOT/current/bin/yard-engine" \
 printf 'integration-remote: engine-identity-preflight=PASS\n'
 install -d -m 0700 "$OWNER_CONFIG/yards/$YARD_NAME" "$CONTROLLER_CONFIG/yards/remote" "$STATE/client-bin"
 port=$((35000 + ($$ % 1000)))
-while ss -Hln "sport = :$port" 2>/dev/null | grep -a >/dev/null .; do port=$((port + 1)); done
+while ss -Hln "sport = :$port" 2>/dev/null | grep >/dev/null .; do port=$((port + 1)); done
 cat > "$config" <<CONFIG
 # $MARKER
 SSH_PORT=$port
@@ -292,7 +292,7 @@ pathlib.Path(path).write_text(program)
 PY
 chmod 0700 "$STATE/owner-rpc"
 ssh_port=$((port + 2000))
-while ss -Hln "sport = :$ssh_port" 2>/dev/null | grep -a >/dev/null .; do ssh_port=$((ssh_port + 1)); done
+while ss -Hln "sport = :$ssh_port" 2>/dev/null | grep >/dev/null .; do ssh_port=$((ssh_port + 1)); done
 cat > "$STATE/sshd_config" <<CONFIG
 Port $ssh_port
 ListenAddress 127.0.0.1
@@ -359,7 +359,7 @@ printf '#!/bin/sh\nexec /usr/bin/ssh -F %s "$@"\n' "$STATE/ssh_config" > "$STATE
 chmod 0700 "$STATE/client-bin/ssh"
 for _ in $(seq 1 50); do
   kill -0 "$sshd_job" 2>/dev/null || die 'ephemeral sshd exited'
-  if ss -Hln "sport = :$ssh_port" | grep -a >/dev/null .; then break; fi
+  if ss -Hln "sport = :$ssh_port" | grep >/dev/null .; then break; fi
   sleep 0.1
 done
 # New strong-step cases use the same real owner consumer and native state probes.

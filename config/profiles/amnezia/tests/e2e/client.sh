@@ -188,13 +188,13 @@ fail() {
     'NF == 3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { printf "client_rx_bytes=%s client_tx_bytes=%s\n", $2, $3 }' >&2 || true
   exit 1
 }
-route() { ip -4 route get "$1" 2>/dev/null | grep -a >/dev/null ' dev awg0 '; }
+route() { ip -4 route get "$1" 2>/dev/null | grep >/dev/null ' dev awg0 '; }
 route 1.1.1.1 || fail 'public IPv4 does not route through awg0'
 route "$PROBE_OWNER_IP" || fail 'owner management IPv4 does not route through awg0'
 if [ -n "$PROBE_PRIVATE_IP" ]; then
   route "$PROBE_PRIVATE_IP" || fail 'private IPv4 does not route through awg0'
 fi
-ip -6 route show table all 2>/dev/null | grep -aE >/dev/null '^default dev awg0( |$)' \
+ip -6 route show table all 2>/dev/null | grep -E >/dev/null '^default dev awg0( |$)' \
   || fail 'IPv6 default route is not captured by awg0'
 # A server restart loses the current session; allow the retained peer to rekey.
 for attempt in $(seq 1 15); do

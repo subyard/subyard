@@ -26,7 +26,7 @@ DEV_UID="${DEV_UID:-1000}"
 # above). Lines: "<name>:<yard-path>:<ro|rw>:<dir-mode>".
 
 PROJ=(--project "$INCUS_PROJECT")
-device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -ax >/dev/null "$1"; }
+device_exists() { incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -x >/dev/null "$1"; }
 dev_get() { incus config device get "$YARD_INSTANCE_NAME" "$1" "$2" "${PROJ[@]}" 2>/dev/null || true; }
 
 # Parse HOST_MOUNTS once into parallel arrays; build the announce summary too.

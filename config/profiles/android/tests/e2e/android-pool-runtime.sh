@@ -195,7 +195,7 @@ android_candidate_command "$YARD_BIN" migrate --check --json | jq -e '.outcome.s
 printf 'android candidate release-preflight=PASS\n'
 mkdir -p "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 ssh_port=$((30000 + ($$ % 10000)))
-while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -a >/dev/null .; do ssh_port=$((ssh_port + 1)); done
+while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep >/dev/null .; do ssh_port=$((ssh_port + 1)); done
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 ENVIRONMENT_PROFILES=android
 CODING_TOOL_INTEGRATIONS=

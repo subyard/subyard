@@ -712,7 +712,7 @@ owner() (
   [ "$(incus exec yard-test-yard --project subyard-test-yard -- stat -c '%U:%G:%a' /var/lib/subyard/test-vms)" = root:root:700 ] \
     || die 'nested state permissions did not converge'
   ! incus exec yard-test-yard --project subyard-test-yard -- id -nG dev | tr ' ' '\n' \
-    | grep -aE >/dev/null '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
+    | grep -E >/dev/null '^(incus-admin|yard)$' || die 'dev retained a privileged L1 group'
   # Exercise L2 ownership through a synthetic profile, independently of shipped toolchains.
   # shellcheck source=tests/helpers/test-context.sh
   . "$ROOT/tests/helpers/test-context.sh"
@@ -999,8 +999,8 @@ ensure_incus() {
 	local state_root="$1" install_marker="${2:-}" resume_mode="$3"
 	local storage_path="${4:-$state_root/incus/storage}"
 	if command -v incus >/dev/null 2>&1 \
-		&& ! id -nG | tr ' ' '\n' | grep -ax >/dev/null incus-admin \
-		&& id -nG "$(id -un)" | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
+		&& ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin \
+		&& id -nG "$(id -un)" | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
 		reexec_with_incus_group "$resume_mode"
 	fi
 	if incus info >/dev/null 2>&1; then
@@ -1023,13 +1023,13 @@ ensure_incus() {
     [ -z "$install_marker" ] || printf '%s\n' "$MARKER" > "$install_marker"
     printf '  [ .. ] VM%s: reconciling a partial Incus installation\n' "$SUBYARD_E2E_VM"
     run_incus_installer "$state_root" "$storage_path" --yes --zabbly
-    id -nG | tr ' ' '\n' | grep -ax >/dev/null incus-admin || reexec_with_incus_group "$resume_mode"
+    id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin || reexec_with_incus_group "$resume_mode"
     return
   fi
 	[ -z "$install_marker" ] || printf '%s\n' "$MARKER" > "$install_marker"
 	printf '  [ .. ] VM%s: initializing the Incus owner API\n' "$SUBYARD_E2E_VM"
 	run_incus_installer "$state_root" "$storage_path" --yes --zabbly
-	id -nG | tr ' ' '\n' | grep -ax >/dev/null incus-admin || reexec_with_incus_group "$resume_mode"
+	id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin || reexec_with_incus_group "$resume_mode"
 }
 
 ensure_owner_incus() {
@@ -1813,7 +1813,7 @@ capacity_preflight() {
   # Fresh bases install Incus without granting the operator membership yet.
   # Give only this recovery process access; yard init still owns membership.
   if command -v incus >/dev/null 2>&1 && [ "$(id -u)" != 0 ] \
-    && ! id -nG | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
+    && ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
     exec sudo -n -E /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
       env HOME="$HOME" PATH="$PATH" \
       bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"

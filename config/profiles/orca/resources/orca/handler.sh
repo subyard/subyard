@@ -153,7 +153,7 @@ clear_mobile_request() {
 
 device_exists() {
   incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null |
-    grep -ax >/dev/null "$ORCA_DEVICE"
+    grep -x >/dev/null "$ORCA_DEVICE"
 }
 
 device_value() {
@@ -274,9 +274,9 @@ resolve_owner_address() {
       awk '{print $1}' | sort -u
   )
   for candidate in "${tailscale_ips[@]}"; do
-    if printf '%s\n' "${resolved_ips[@]}" | grep -aFx >/dev/null "$candidate" &&
+    if printf '%s\n' "${resolved_ips[@]}" | grep -Fx >/dev/null "$candidate" &&
       ip -4 -brief address show scope global |
-        awk '{sub(/\/.*/, "", $3); print $3}' | grep -aFx >/dev/null "$candidate"; then
+        awk '{sub(/\/.*/, "", $3); print $3}' | grep -Fx >/dev/null "$candidate"; then
       ORCA_OWNER_IP="$candidate"
       count=$((count + 1))
     fi
@@ -314,7 +314,7 @@ refuse_port_collision() {
   route_matches && return 0
   if ss -Hltn "sport = :$ORCA_HOST_PORT" |
     awk '{print $4}' |
-    grep -aE >/dev/null "^($ORCA_OWNER_IP|0\\.0\\.0\\.0|\\*):$ORCA_HOST_PORT$"; then
+    grep -E >/dev/null "^($ORCA_OWNER_IP|0\\.0\\.0\\.0|\\*):$ORCA_HOST_PORT$"; then
     die "owner endpoint $ORCA_OWNER_IP:$ORCA_HOST_PORT is already in use"
   fi
 }

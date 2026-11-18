@@ -63,8 +63,8 @@ grep -Eq 'claude.*unmanaged' "${yard_status_logs[0]}" \
 yard_declined() {
   local command
   printf -v command '%q ' "$YARD_BIN" "$@"
-  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     command="sg incus-admin -c $(printf '%q' "exec $command")"
   fi
   printf 'n\n' | timeout --signal=TERM --kill-after=5s 900 script -q -e -c "$command" /dev/null

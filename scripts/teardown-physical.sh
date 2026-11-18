@@ -150,7 +150,7 @@ if [ "$KEEP_DATA" = 0 ]; then
       guard_resource profile "$prof"
       incus profile delete "$prof" "${PROJ[@]}" >/dev/null 2>&1 && ok "deleted profile '$prof'" || true
     done < <(approved_names profile)
-    if approved_names profile | grep -ax >/dev/null default; then
+    if approved_names profile | grep -x >/dev/null default; then
     guard_resource profile default
     incus profile device remove default eth0 "${PROJ[@]}" >/dev/null 2>&1 || true
     incus profile device remove default root "${PROJ[@]}" >/dev/null 2>&1 || true

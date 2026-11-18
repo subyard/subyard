@@ -24,7 +24,7 @@ HERMES_OWNERSHIP_VERSION=v1
 
 device_exists() {
   incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null |
-    grep -ax >/dev/null "$HERMES_DEVICE"
+    grep -x >/dev/null "$HERMES_DEVICE"
 }
 
 device_value() {
@@ -66,11 +66,11 @@ resolve_owner_address() {
   [ "${#resolved_ips[@]}" -eq 1 ] \
     || die "HERMES_DASHBOARD_ADVERTISE_HOST must have exactly one IPv4 DNS answer"
   candidate="${resolved_ips[0]}"
-  printf '%s\n' "${tailscale_ips[@]}" | grep -aFx >/dev/null "$candidate" \
+  printf '%s\n' "${tailscale_ips[@]}" | grep -Fx >/dev/null "$candidate" \
     || die "HERMES_DASHBOARD_ADVERTISE_HOST is not an active Tailscale IPv4 address"
   ip -4 -brief address show scope global |
     awk '{for (field = 3; field <= NF; field++) {sub(/\/.*/, "", $field); print $field}}' |
-    grep -aFx >/dev/null "$candidate" \
+    grep -Fx >/dev/null "$candidate" \
     || die "HERMES_DASHBOARD_ADVERTISE_HOST is not active on the owner host"
   HERMES_OWNER_IP="$candidate"
 }
@@ -229,7 +229,7 @@ refuse_port_collision() {
   route_matches && return 0
   if ss -Hltn "sport = :$HERMES_DASHBOARD_HOST_PORT" |
     awk '{print $4}' |
-    grep -aE >/dev/null "^($HERMES_OWNER_IP|0\\.0\\.0\\.0|\\*):$HERMES_DASHBOARD_HOST_PORT$"; then
+    grep -E >/dev/null "^($HERMES_OWNER_IP|0\\.0\\.0\\.0|\\*):$HERMES_DASHBOARD_HOST_PORT$"; then
     die "owner endpoint $HERMES_OWNER_IP:$HERMES_DASHBOARD_HOST_PORT is already in use"
   fi
 }

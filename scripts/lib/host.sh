@@ -102,7 +102,7 @@ subyard_state_remove_canonical() {
 incus_preflight() {
   command -v incus >/dev/null 2>&1 || die "incus not found — run 'yard init' first"
   incus info >/dev/null 2>&1 && return 0
-  if id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
+  if id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
     warn "can't reach the Incus daemon: this session predates your 'incus-admin' group (the yard is fine)."
     printf "  Log out and back in once to fix it everywhere, or run %snewgrp incus-admin%s for this shell.\n" \
       "$C_HEAD" "$C_OFF" >&2
@@ -256,7 +256,7 @@ nm_guard_bridges_in() { # <conf>: bridges a current-format guard lists
   ' "$1" | LC_ALL=C sort -u
 }
 
-nm_device_is_veth() { ip -d -o link show dev "$1" 2>/dev/null | grep -aE >/dev/null ' veth( |@|$)'; }
+nm_device_is_veth() { ip -d -o link show dev "$1" 2>/dev/null | grep -E >/dev/null ' veth( |@|$)'; }
 
 nm_device_is_own() { # <device> <newline-separated bridges>
   grep -Fxq -- "$1" <<< "$2" && return 0

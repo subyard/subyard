@@ -190,8 +190,8 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 incus() { sudo -n /usr/bin/incus "$@"; }
 fresh() {
-  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$@"
     sg incus-admin -c "exec $command"
@@ -433,10 +433,10 @@ verify_git_wiring() {
   local mode
   mode="$(setting GITHUB_GIT_MODE)"
   guest_dev /usr/local/bin/subyard-github status --git | jq -e --arg mode "$mode" '.mode==$mode and .state=="current"' >/dev/null
-  guest_dev git config --get subyard.githubGitMode | grep -aFx >/dev/null "$mode"
+  guest_dev git config --get subyard.githubGitMode | grep -Fx >/dev/null "$mode"
   [ "$(guest stat -c '%a:%u:%g' /usr/local/bin/git-remote-subyard-github)" = 755:0:0 ] || die 'Git remote helper permissions differ'
   [ "$(guest stat -c '%a:%u:%g' /home/dev/.config/subyard/github-git.conf)" = "644:$FIXTURE_DEV_UID:$(guest id -g dev)" ] || die 'Git fragment permissions differ'
-  guest_dev git config --file /home/dev/.config/git/config --get-all include.path | grep -aFx >/dev/null /home/dev/.config/subyard/github-git.conf
+  guest_dev git config --file /home/dev/.config/git/config --get-all include.path | grep -Fx >/dev/null /home/dev/.config/subyard/github-git.conf
 }
 verify_github_profile() {
   local expected="$1" prefix="$2" ready=false
@@ -631,7 +631,7 @@ fi
 stage capacity-and-platform
 bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
 bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$TOKEN"
-fresh id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin || die 'platform did not establish a usable refreshed Incus operator session'
+fresh id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin || die 'platform did not establish a usable refreshed Incus operator session'
 CREATION_GID="$(fresh id -g)"
 printf 'release_activation_creation_context uid=%s gid=%s validation_gid=%s\n' "$(id -u)" "$CREATION_GID" "$(id -g)"
 # The cached cloud image already uses UID 1000. Prove the configured fixture UID
@@ -875,14 +875,14 @@ set_git_mode broker-last "$STATE/git-last"
 verify_git_wiring
 set_git_mode off "$STATE/git-off"
 guest test ! -e /home/dev/.config/subyard/github-git.conf
-guest_dev git config --global --get user.name | grep -aFx >/dev/null 'Delivered fixture'
+guest_dev git config --global --get user.name | grep -Fx >/dev/null 'Delivered fixture'
 set_git_mode broker-last "$STATE/git-on"
 verify_git_wiring
 yard profile disable github --yes > "$STATE/git-disable.log" 2>&1
 claim_units
 guest test ! -e /home/dev/.config/subyard/github-git.conf
 guest test ! -e /usr/local/bin/git-remote-subyard-github
-guest_dev git config --global --get user.name | grep -aFx >/dev/null 'Delivered fixture'
+guest_dev git config --global --get user.name | grep -Fx >/dev/null 'Delivered fixture'
 yard profile enable github --yes > "$STATE/git-reenable.log" 2>&1
 claim_units
 verify_git_wiring

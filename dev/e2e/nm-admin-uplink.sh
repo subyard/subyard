@@ -151,7 +151,7 @@ watchdog_clean() { [ ! -s "$STATE/watchdog.log" ] || die "watchdog restored the 
 uplink_admins() { # <label>: unmanaged and addressed, no NetworkManager profile active on it
   [ "$(device_state "$UP")" = unmanaged ] || die "$1: NetworkManager manages the uplink $UP ($(device_state "$UP"))"
   [ -n "$(address_of "$UP")" ] || die "$1: the uplink $UP has no IPv4 address"
-  ip -4 route show default | grep -a >/dev/null " dev $UP" || die "$1: the default route left $UP"
+  ip -4 route show default | grep >/dev/null " dev $UP" || die "$1: the default route left $UP"
 }
 yard_devices_unmanaged() { # <label>
   local device state checked=0
@@ -393,7 +393,7 @@ resume)
   owner "$launcher" status >"$STATE/status-after.log" 2>&1 || true
   ! grep -Fq 'Reminder: reboot the host once' "$STATE/status-after.log" || die 'yard status still asks for a reboot'
   uplink_admins 'after the reboot'
-  ! nmcli -t -f NAME,DEVICE connection show --active | grep -a >/dev/null ":$UP$" || die 'an NetworkManager profile is active on the uplink'
+  ! nmcli -t -f NAME,DEVICE connection show --active | grep >/dev/null ":$UP$" || die 'an NetworkManager profile is active on the uplink'
   [ "$(effective_unmanaged)" = "interface-name:$UP,interface-name:docker*" ] || die "effective unmanaged-devices is not exactly the administrator's: $(effective_unmanaged)"
   for bridge in docker0 virbr0; do
     [ -n "$(address_of "$bridge")" ] || die "$bridge lost its address after the reboot"
@@ -402,10 +402,10 @@ resume)
   pass 'after the reboot the uplink is the administrator'"'"'s and docker0/virbr0 keep their addresses'
 
   for _ in $(seq 1 60); do
-    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -a >/dev/null ",RUNNING$" && break
+    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep >/dev/null ",RUNNING$" && break
     sleep 3
   done
-  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -a >/dev/null ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
+  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep >/dev/null ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
   yard_devices_unmanaged 'yard restored at boot'
   [ "$(device_state dum0)" = connected ] || die 'the reboot lost dum0'
   pass 'the boot reconciler restored the running yard with its veth unmanaged'
@@ -604,10 +604,10 @@ fresh-final)
   load_uplink
   launcher="$STATE/bin/yard"
   for _ in $(seq 1 60); do
-    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -a >/dev/null ",RUNNING$" && break
+    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep >/dev/null ",RUNNING$" && break
     sleep 3
   done
-  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -a >/dev/null ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
+  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep >/dev/null ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
   settle
   yard_devices_unmanaged 'yard restored at boot'
   uplink_admins 'after the final reboot'

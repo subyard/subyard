@@ -15,7 +15,7 @@ observe() { timeout --foreground 30 incus "$@" </dev/null; }
 
 # Keep the physical systemd contract beside the existing P0 cleanup fixture.
 sink_lifecycle() (
-  if ! id -nG | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -x >/dev/null incus-admin; then
     exec sudo -n -E /usr/sbin/runuser -u "$(id -un)" -g incus-admin -- \
       env HOME="$HOME" PATH="$PATH" bash "$0" sink-lifecycle "$token"
   fi

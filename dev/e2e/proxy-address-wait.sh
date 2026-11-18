@@ -200,7 +200,7 @@ wait_for() {
 }
 has_waiting() {
   sudo -n journalctl -u "$UNIT" --no-pager -o cat \
-    | grep -aF "subyard-power: waiting-for-address $PROJECT/a-waiting: $ADDRESS" >/dev/null
+    | grep -F "subyard-power: waiting-for-address $PROJECT/a-waiting: $ADDRESS" >/dev/null
 }
 expected_wait_state() {
   local snapshot

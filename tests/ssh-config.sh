@@ -125,7 +125,7 @@ grep -Fq "unrelated.example $key_one" "$known" \
 [ "$(stat -c '%a' "$known")" = 600 ] || fail 'known_hosts mode is not 0600'
 ssh_known_host_remove "$known" '[127.0.0.1]:2223' \
   || fail 'could not atomically remove a pinned yard host key'
-! ssh-keygen -F '[127.0.0.1]:2223' -f "$known" | grep -a >/dev/null '^\[127' \
+! ssh-keygen -F '[127.0.0.1]:2223' -f "$known" | grep >/dev/null '^\[127' \
   || fail 'yard host-key pin remained after removal'
 grep -Fq "unrelated.example $key_one" "$known" \
   || fail 'host-key removal removed an unrelated pin'

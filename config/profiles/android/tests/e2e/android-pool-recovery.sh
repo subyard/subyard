@@ -50,8 +50,8 @@ remaining() {
 yard() {
   local seconds="$1" command
   shift
-  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     printf -v command '%q ' "$YARD_BIN" -Y "$yard_name" "$@"
     timeout --foreground "$(remaining "$seconds")" sg incus-admin -c "exec $command"
   else

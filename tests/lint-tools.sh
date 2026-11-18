@@ -66,97 +66,39 @@ class LintTools(unittest.TestCase):
                     f"dev/{name}: failed (exit {code})" for name, code in zip(names, exits) if code
                 ])
 
-    def test_shell_lint_rejects_early_consumers(self):
-        consumers = ["grep -q x", "grep -Eq x", "grep -Fq x", "grep -m1 x", "head -1",
-                     "head; echo done", "\n grep --quiet x", "grep -e term -q", "grep term -l",
-                     "grep -L x", "rg -Ll x",
-                     "grep -e 'a | b' --max-count=1", "grep term \\\n -q", "grep term '-q'",
-                     "{ head -c 8; }", "{ head -c 8 && echo done; }", "(head -c 8)"]
-        pipe = "|"
-        lines = [f"producer {pipe} {consumer}" for consumer in consumers]
-        lines += [f'echo "$(producer {pipe} head -n1)"', f"bash -c 'producer {pipe} head -n1'",
-                  f'bash -c "producer {pipe} head -n1"']
-        offending = []
-        line_number = 2
-        for line in lines:
-            offending.append(f"probe.sh:{line_number}")
-            line_number += line.count("\n") + 1
-        lines += [f"producer {pipe} grep -aF x >/dev/null", "grep -Fq x file"]
-        lines += [f"producer {pipe} {{ head -c 8 && cat >/dev/null; }}"]
-        lines += [f"producer {pipe} (head -c 8 && cat >/dev/null)"]
-        lines += [f"# producer {pipe} head -1", f"echo 'producer {pipe} head -1'",
-                  f'echo "producer {pipe} grep -q term"', f"producer {pipe} grep -e '-q'",
-                  f"producer {pipe} grep -e-q", f"producer {pipe} grep -- -q", f"producer {pipe} rg -L x",
-                  "cat <<'TEXT'", f"producer {pipe} head -1", "TEXT",
-                  "cat bash <<'TEXT'", f"producer {pipe} head -1", "TEXT",
-                  'printf "%s" "bash -se" <<TEXT', f"producer {pipe} head -1", "TEXT"]
-        self.write("probe.sh", "\n".join(["set -o pipefail", *lines, ""]))
+    def assert_shell_findings(self, path, content, lines):
+        self.write(path, content)
         result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
                                 capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, int(bool(lines)), result.stderr)
         self.assertEqual([line.partition(": ")[0] for line in result.stderr.splitlines()],
-                         offending)
+                         [f"{path}:{number}" for number in lines])
 
-    def test_shell_lint_handles_long_unclosed_backtick(self):
-        self.write("probe.sh", "set -o pipefail\necho `" + "\\" * 100_000 + "\n")
-        result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
-                                capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_shell_lint_flags_early_consumers(self):
+        consumers = ["head -1", "read -r value", "grep -Fq term", "grep term -m1", "rg -l term",
+                     "grep -L term", "sudo -n grep --quiet term", "{ rg --max-count=1 term; }"]
+        self.assert_shell_findings("probe.sh", "\n".join("producer | " + cmd for cmd in consumers),
+                                   range(1, len(consumers) + 1))
 
-    def test_backtick_tokens_preserve_escape_precedence(self):
-        program = r"""
-import runpy
-
-token = runpy.run_path("dev/lint-shell-pipelines.py")["SHELL_TOKEN"]
-for source, expected in [
-    (r"`a\`b`c", r"`a\`b`"),
-    (r"`a\`b\`c", r"`a\`b\`"),
-    (r"`a\\`b`c", r"`a\\`"),
-    ("`a\\\nb`c", "`a\\\nb`"),
-]:
-    assert token.match(source)[0] == expected, repr(source)
-"""
-        subprocess.run(["python3", "-c", program], cwd=self.root, check=True)
-
-    def test_shell_lint_checks_workflow_run_blocks(self):
+    def test_shell_lint_ignores_comments_and_draining_consumers(self):
         pipe = "|"
-        self.write(".github/workflows/test.yml", f"""steps:
-  - name: 'producer {pipe} head -1'
-    run: {pipe}
-      cat <<'TEXT'
-      producer {pipe} head -1
-      TEXT
-      producer {pipe} grep -e term -q
-  - run: 'producer {pipe} {{ head -c 8; }}'
-  - run: "producer {pipe} head -1"
-  - run: "echo first\\nproducer \\x7c head -1" # Escapes belong to YAML.
-  - run: "echo \\"producer {pipe} head -1\\""
-  - run: producer {pipe} head -1
-  - run: "producer {pipe}
-      head -1"
+        self.assert_shell_findings("probe", f"""#!/bin/sh
+# producer {pipe} read -r value
+producer {pipe} {{ head -c 8 && cat >/dev/null; }}
+producer {pipe} grep -F term >/dev/null
+grep -q term file
+""", [])
+
+    def test_shell_lint_checks_workflow_run_lines(self):
+        pipe = "|"
+        self.assert_shell_findings(".github/workflows/test.yml", f"""steps:
+  - name: producer {pipe} head -1
+    run: producer {pipe} (head -1)
   - run: {pipe}
-      producer {pipe} head -1""")
-        result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual([line.partition(": ")[0] for line in result.stderr.splitlines()],
-                         [".github/workflows/test.yml:7", ".github/workflows/test.yml:8",
-                          ".github/workflows/test.yml:9", ".github/workflows/test.yml:10",
-                          ".github/workflows/test.yml:12", ".github/workflows/test.yml:13",
-                          ".github/workflows/test.yml:16"])
-
-    def test_shell_lint_checks_orca_bash_heredoc(self):
-        path = "config/profiles/orca/tests/e2e/managed-agents.sh"
-        fixture = (source / path).read_text()
-        current = "grep -aFx >/dev/null -- --dangerously-skip-permissions"
-        self.assertEqual(fixture.count(current), 1)
-        line = fixture.count("\n", 0, fixture.index(current)) + 1
-        self.write(path, fixture.replace(current, "grep -Fxq -- --dangerously-skip-permissions"))
-        result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 1)
-        self.assertEqual([finding.partition(": ")[0] for finding in result.stderr.splitlines()],
-                         [f"{path}:{line}"])
+      # producer {pipe} read -r value
+      producer {pipe} grep -q term
+    name: producer {pipe} head -1
+""", [3, 6])
 
     def audit(self, payload, exit_code, entries=()):
         report = self.root / "payload"

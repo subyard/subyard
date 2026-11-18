@@ -294,7 +294,7 @@ real_config="$fixture_home/.config/subyard"
 install -d -m 0700 -o "$FIXTURE_USER" -g "$FIXTURE_USER" \
   "$fixture_home/.config" "$real_config" "$real_config/yards"
 real_ssh_port=$((30000 + ($$ % 20000)))
-while ss -H -ltn "sport = :$real_ssh_port" 2>/dev/null | grep -a >/dev/null .; do
+while ss -H -ltn "sport = :$real_ssh_port" 2>/dev/null | grep >/dev/null .; do
   real_ssh_port=$((real_ssh_port + 1))
 done
 install -d -m 0700 "$real_config/yards/$real_yard" "$real_config/yards/sudo-e2e-sentinel"

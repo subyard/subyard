@@ -11,5 +11,5 @@ EMU_PROCESS_PATTERN='^(([^[:space:]]*/)?bash[[:space:]]+/tmp/subyard-android/emu
 # Pure form used by the host-free migration regression test; pgrep/pkill use the same POSIX ERE.
 emulator_process_cmdline_matches() { # <full-command-line>
   [ "$#" -eq 1 ] || return 2
-  printf '%s\n' "$1" | grep -aE >/dev/null -- "$EMU_PROCESS_PATTERN"
+  printf '%s\n' "$1" | grep -E >/dev/null -- "$EMU_PROCESS_PATTERN"
 }

@@ -215,11 +215,11 @@ cleanup() {
       && [ "$(cat "$OPERATOR_HOME/.subyard-group-reexec-home")" = "$MARKER" ]; then
       if [ -n "$ACCESS_SOCKET" ] && [ -S "$ACCESS_SOCKET" ] && [ ! -L "$ACCESS_SOCKET" ] \
         && [ "$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")" = "$SOCKET_ID" ]; then
-        if /usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -aFx >/dev/null "user:$OPERATOR_UID:rw-"; then
+        if /usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -Fx >/dev/null "user:$OPERATOR_UID:rw-"; then
           /usr/bin/setfacl -n -x "u:$OPERATOR_UID" -- "$ACCESS_SOCKET" || { rc=3; keep_state=1; }
         fi
       elif [ -n "$ACCESS_SOCKET" ] && [ -S "$ACCESS_SOCKET" ] \
-        && /usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -aFx >/dev/null "user:$OPERATOR_UID:rw-"; then
+        && /usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -Fx >/dev/null "user:$OPERATOR_UID:rw-"; then
         printf 'incus-group-reexec-e2e: retaining operator after socket identity changed\n' >&2
         rc=3; keep_state=1
       fi
@@ -378,9 +378,9 @@ EOF
 chmod 0755 "$STATE/bin/sg"
 install -o "$OPERATOR" -g "$OPERATOR" -m 0600 /dev/null "$SG_PROOF"
 
-id -nG "$OPERATOR" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
   && die 'fresh fixture account unexpectedly belongs to incus-admin'
-operator_env id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+operator_env id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
   && die 'fresh fixture process unexpectedly has incus-admin active'
 if operator_env /usr/bin/incus info >/dev/null 2>&1; then
   die 'fresh fixture process can already reach Incus without incus-admin'
@@ -408,7 +408,7 @@ operator_yard migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/
 [ "$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")" = "$SOCKET_ID" ] \
   && [ "$(/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | sed '/^mask:/d')" = "$SOCKET_ACL" ] \
   || die 'public installer changed native socket access'
-id -nG "$OPERATOR" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
   && die 'public installer changed incus-admin membership'
 [ ! -s "$SG_PROOF" ] || die 'public installer invoked sg'
 ok 'public installer completed the cold release transition without Incus access'
@@ -484,20 +484,20 @@ grep -Fq 'Subyard initialized' "$first_output" \
 [ ! -s "$SG_PROOF" ] || die 'first init replaced its approved parent through sg'
 [ "$(stat -c '%d:%i:%u:%g:%a' "$ACCESS_SOCKET")" = "$SOCKET_ID" ] \
   || die 'operator activation changed native socket identity or permissions'
-/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -aFx >/dev/null "user:$OPERATOR_UID:rw-" \
+/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | grep -Fx >/dev/null "user:$OPERATOR_UID:rw-" \
   || die 'first native init did not grant the captured operator socket access'
 [ "$(/usr/bin/getfacl -cpnE -- "$ACCESS_SOCKET" | sed "/^user:$OPERATOR_UID:/d; /^mask:/d")" = "$SOCKET_ACL" ] \
   || die 'operator activation changed unrelated native socket access'
 
 [ "$(stat -c '%d:%i:%u:%g:%a' "$POLICY_LOCK")" = "$POLICY_LOCK_ID" ] \
   || die 'operator activation changed native policy-lock identity or permissions'
-/usr/bin/getfacl -cpnE -- "$POLICY_LOCK" | grep -aFx >/dev/null "user:$OPERATOR_UID:rw-" \
+/usr/bin/getfacl -cpnE -- "$POLICY_LOCK" | grep -Fx >/dev/null "user:$OPERATOR_UID:rw-" \
   || die 'first native init did not grant the captured operator policy-lock access'
 [ "$(/usr/bin/getfacl -cpnE -- "$POLICY_LOCK" | sed "/^user:$OPERATOR_UID:/d; /^mask:/d")" = "$POLICY_LOCK_ACL" ] \
   || die 'operator activation changed unrelated native policy-lock access'
 ok 'retained native parent verified and acquired the original policy lock without sg'
 
-id -nG "$OPERATOR" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+id -nG "$OPERATOR" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
   || die 'product installer did not persist incus-admin membership'
 incus project show "$PROJECT" >/dev/null 2>&1 \
   || die 'first init did not create its Incus project'

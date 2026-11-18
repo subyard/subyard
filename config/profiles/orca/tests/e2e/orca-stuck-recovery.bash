@@ -81,7 +81,7 @@ run_stuck_recovery() {
     '{worktree:$selector,activate:false,clientMutationId:"orca-stuck-saved"}')" | jq -er '.tab.id')" \
     || die 'saved tab was not created'
   yard orca restart --yes >/dev/null
-  stuck_tabs "$removed_wt" | grep -aFx >/dev/null "$saved_tab" || die 'saved tab did not survive the Orca restart'
+  stuck_tabs "$removed_wt" | grep -Fx >/dev/null "$saved_tab" || die 'saved tab did not survive the Orca restart'
   agent_tab="$(stuck_agent_tab "$removed_wt" removed)"
   read -r live_tab live_pty < <(stuck_live_terminal "$removed_wt") || die 'live terminal was not created'
   neighbour_agent="$(stuck_agent_tab "$neighbour_wt" neighbour)"
@@ -136,8 +136,8 @@ run_stuck_recovery() {
     || die 'removed-project tabs survived the recovery'
   ! stuck_pty_live "$live_pty" || die 'removed-project live terminal survived the recovery'
   stuck_pty_live "$neighbour_pty" || die 'recovery ended the neighbour live terminal'
-  stuck_tabs "$neighbour_wt" | grep -aFx >/dev/null "$neighbour_agent" || die 'recovery closed the neighbour agent-session tab'
-  stuck_tabs "$neighbour_wt" | grep -aFx >/dev/null "$neighbour_live" || die 'recovery closed the neighbour terminal tab'
+  stuck_tabs "$neighbour_wt" | grep -Fx >/dev/null "$neighbour_agent" || die 'recovery closed the neighbour agent-session tab'
+  stuck_tabs "$neighbour_wt" | grep -Fx >/dev/null "$neighbour_live" || die 'recovery closed the neighbour terminal tab'
   yard config status >"$STATE/stuck-config.out" 2>"$STATE/stuck-config.err" \
     || die 'materialized config is not converged after recovery'
   yard orca status >"$STATE/stuck-status.out" 2>"$STATE/stuck-status.err" \
@@ -145,7 +145,7 @@ run_stuck_recovery() {
   # The predecessor's Orca package and service stay until orca up; their status warnings are
   # expected here. Project registration and cleanup must already be clean.
   if grep -h -F '[warn]' "$STATE/stuck-status.out" "$STATE/stuck-status.err" \
-    | grep -aEi >/dev/null 'cleanup|registration|checkouts registered|orca registration'; then
+    | grep -Ei >/dev/null 'cleanup|registration|checkouts registered|orca registration'; then
     show_output "$STATE/stuck-status.out" "$STATE/stuck-status.err"
     die 'Orca status warns about project registration or cleanup after recovery'
   fi

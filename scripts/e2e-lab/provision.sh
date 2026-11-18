@@ -105,7 +105,7 @@ restore_inner_apparmor_default() {
 remove_group_member() {
   local user="$1" group="$2"
   getent group "$group" >/dev/null 2>&1 || return 0
-  id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -aFx >/dev/null "$group" || return 0
+  id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -Fx >/dev/null "$group" || return 0
   gpasswd -d "$user" "$group" >/dev/null
 }
 

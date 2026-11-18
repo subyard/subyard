@@ -497,7 +497,7 @@ assert_outer_vm_ssh_address() {
 ensure_outer_foreign_ipv4() {
   incus exec "$OUTER_INSTANCE" --project "$OUTER_PROJECT" -- sh -eu -c '
     ip link show aaa0 >/dev/null 2>&1 || ip link add aaa0 type dummy
-    ip -4 address show dev aaa0 | grep -a >/dev/null "172.31.255.1/24" \
+    ip -4 address show dev aaa0 | grep >/dev/null "172.31.255.1/24" \
       || ip address add 172.31.255.1/24 dev aaa0
     ip link set aaa0 up
   '
@@ -611,7 +611,7 @@ install -d -m 0700 "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME/yards/$OUTER_Y
 YARD_BIN="$(release_candidate_install "$ROOT" "$STATE")"
 
 ssh_port=$((32000 + ($$ % 10000)))
-while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -a >/dev/null .; do
+while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep >/dev/null .; do
   ssh_port=$((ssh_port + 1))
 done
 cat > "$SUBYARD_CONFIG_HOME/yards/$OUTER_YARD/config.env" <<EOF
