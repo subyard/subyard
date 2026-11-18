@@ -201,8 +201,17 @@ class TestAcceptance(unittest.TestCase):
             self.assertEqual(results, [(2, "blocked", "slot_draining"), (4, "passed", None)])
 
     def test_recovered_slot_retries_after_wait_expires_while_sibling_runs(self):
+        for snapshots, limit in (
+            (("draining", "draining", "available"), 1),
+            ((None, None, "available"), 1),
+            (("held", "held", "held", "available"), 4),
+        ):
+            with self.subTest(snapshots=snapshots):
+                self.check_slot_recovery(snapshots, limit)
+
+    def check_slot_recovery(self, snapshots, limit):
         recorded, retried = threading.Event(), threading.Event()
-        states = iter(("draining", "draining", "available"))
+        states = iter(snapshots)
         now = 100
         calls = []
 
@@ -211,7 +220,8 @@ class TestAcceptance(unittest.TestCase):
             if not recorded.is_set():
                 return {2: "available", 4: "available"}
             now += 1
-            return {2: "available", 4: next(states, "available")}
+            state = next(states, "available")
+            return {2: "available", 4: state} if state else {}
 
         def execute(name, slot):
             calls.append((name, slot))
@@ -229,11 +239,43 @@ class TestAcceptance(unittest.TestCase):
             return result
 
         self.slots.side_effect = status
-        with patch.object(m, "time", wraps=time) as clock:
+        with patch.object(m, "time", wraps=time) as clock, redirect_stdout(io.StringIO()) as printed:
             clock.monotonic.side_effect = lambda: now
             self.assertFalse(m.dispatch_live(["sibling", "retry"], (2, 4), {},
-                lambda _: True, execute, record, list, 1))
+                lambda _: True, execute, record, list, limit))
+        if snapshots[0] == "held":
+            self.assertNotIn("slot-4=draining persisted", printed.getvalue())
         self.assertEqual([slot for name, slot in calls if name == "retry"], [4, 4])
+
+    def test_slot_flapping_does_not_extend_capacity_wait(self):
+        now, polls = 100, 0
+        calls = []
+
+        def status(env):
+            nonlocal polls
+            polls += 1
+            self.assertLessEqual(now, 108, "slot flapping extended the capacity wait")
+            return {2: "available" if polls % 2 else "held"}
+
+        def advance(seconds):
+            nonlocal now
+            now += seconds
+
+        def execute(name, slot):
+            calls.append(now)
+            return {"status": "blocked", "termination": "exit", "reason": "capacity_memory"}
+
+        self.slots.side_effect = status
+        with (patch.object(m, "time", wraps=time) as clock,
+              patch.object(m, "SLOT_POLL_SECONDS", 2),
+              patch.object(m.STOP, "wait", side_effect=advance),
+              redirect_stdout(io.StringIO()) as printed):
+            clock.monotonic.side_effect = lambda: now
+            self.assertTrue(m.dispatch_live(["lane"], (2,), {}, lambda _: True, execute,
+                                            lambda name, result: result, list, 8))
+        self.assertEqual(now, 108)
+        self.assertEqual(calls, [100, 102])
+        self.assertIn("lane@slot-2=capacity_memory", printed.getvalue())
 
     def test_initial_idle_wait_does_not_spend_capacity_retry_budget(self):
         calls, probes = [], []
