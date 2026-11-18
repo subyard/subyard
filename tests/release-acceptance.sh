@@ -144,6 +144,47 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def setUp(self):
+        self.probe_slots = m.broker_slots
+        self.slots = self.enterContext(patch.object(m, "broker_slots",
+                                                  return_value=dict.fromkeys(m.DEFAULT_SLOTS, "available")))
+        self.enterContext(patch.object(m, "SLOT_POLL_SECONDS", 0.02))
+        self.enterContext(patch.dict(os.environ, {"SUBYARD_E2E_CAPACITY_WAIT": "1s"}))
+
+    def test_bare_slot_number_is_refused(self):
+        argv = ["acceptance", "run", "--output", "/tmp/unused", "--slots", "2"]
+        with (patch.object(sys, "argv", argv), redirect_stderr(io.StringIO()) as error,
+              self.assertRaises(SystemExit) as stopped):
+            m.main()
+        self.assertEqual(stopped.exception.code, 2)
+        self.assertIn("comma-separated slot IDs", error.getvalue())
+
+    def test_status_and_exact_acquire_can_race(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            name = "vm:sample"
+            def status(state):
+                return json.dumps({"schema_version": 1, "status": "ok",
+                    "pool": {"slots": [{"slot_id": "slot-004", "state": state}]}})
+            responses = [status("available"), status("held"), status("draining"), status("available")]
+            with patch.object(m.subprocess, "check_output", side_effect=responses):
+                self.slots.side_effect = self.probe_slots
+                results = []
+                def run_lane(name, slot):
+                    command = ["true"] if results else ["bash", "-c",
+                        "printf '%s\\n' 'agent-e2e: requested E2E slot slot-004 is unavailable: state=held reason=busy'; exit 2"]
+                    return m.execute(name, command, output, output, m.clean_environment(), slot)
+                def record(name, result):
+                    results.append((result["slot"], result["status"], result.get("reason")))
+                    return result
+                self.assertFalse(m.dispatch_live([name], (4,), {}, lambda _: True, run_lane, record, list, 1))
+            self.assertEqual(results, [(4, "blocked", "slot_held"), (4, "passed", None)])
+            self.slots.side_effect = lambda env: {4: "quarantined"}
+            with redirect_stdout(io.StringIO()) as printed:
+                self.assertTrue(m.dispatch_live([name], (4,), {}, lambda _: self.fail("acquired a quarantined slot"),
+                                                run_lane, record, list, 0))
+            self.assertIn("slot-4=quarantined", printed.getvalue())
+
     def test_shellcheck_command_preserves_historical_receipts(self):
         self.assertEqual(m.commands(root, "test", {})["shellcheck"], ["bash", "dev/shellcheck.sh"])
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -1983,7 +2024,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with self.assertRaisesRegex(ValueError, "deferral"):
                 m.defer_external(output, ["sample:account"], "Unavailable external account", "operator-authorization-1")
 
-    def test_transport_and_capacity_defaults_are_scoped_to_physical_controllers(self):
+    def test_hosted_job_keeps_the_physical_controller_capacity_wait(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         for capacity_wait in (None, "7s"):
@@ -2007,7 +2048,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                         os.environ.pop("SUBYARD_E2E_CAPACITY_WAIT", None)
                     else:
                         os.environ["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
-                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 0)
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True, hosted_job=True), 0)
                 self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", set(observed["verify"]))
                 self.assertNotIn("SUBYARD_E2E_CONTROLLER_WORKSPACE", set(observed["verify"]))
                 self.assertNotIn("SUBYARD_E2E_CAPACITY_WAIT", set(observed["verify"]))
@@ -2015,6 +2056,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CONTROLLER_WORKSPACE"], str(m.ROOT))
                 self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CANDIDATE_BUNDLE"],
                                  str(output / "candidate-bundle.tar.gz"))
+        self.slots.assert_not_called()
 
     def test_lane_inventory_family_exact_selection_and_complete_aggregate(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2177,7 +2219,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
                  patch.object(m, "execute", side_effect=AssertionError("execution")), \
                  patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status),
-                                          "--slots", "1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
+                                          "--slot-count", "1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(m.main(), 1)
             self.assertEqual(before, set(checkout.rglob("*")))
 
@@ -2241,6 +2283,12 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             active = set()
             lock = threading.Lock()
             release_slow = threading.Event()
+            got_two = threading.Event()
+            def status(env):
+                if self.slots.call_count == 1:
+                    return {}
+                return {2: "available", 4: "available" if got_two.is_set() else "held"}
+            self.slots.side_effect = status
             def execute(name, command, root, output, env, slot=None):
                 with lock:
                     self.assertNotIn(slot, active if slot else set())
@@ -2248,25 +2296,33 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                         active.add(slot)
                     started.append((name, slot))
                 if name == "profile:sample/one":
+                    got_two.set()
                     self.assertTrue(release_slow.wait(3))
-                if name == "p0-release-smoke":
+                if name == "profile:sample/two" and started.count((name, slot)) > 1:
                     release_slow.set()
+                if name == "p0-release-smoke":
+                    self.assertEqual(m.request_retry(output, "profile:sample/two", "a" * 32), 0)
                 with lock:
                     active.discard(slot)
+                    if name == "profile:sample/two" and started.count((name, slot)) == 1:
+                        return {"status": "failed", "exit_code": 3}
                 return {"status": "passed", "exit_code": 0}
             with patch.object(m, "load_bound", return_value=(output / "source", receipt)), \
                  patch.object(m, "commands", return_value=checks), \
                  patch.object(m, "source_fingerprint", return_value="a" * 64), \
                  patch.object(m, "execute", side_effect=execute):
-                self.assertEqual(m.run_checks(output, [1, 2], [], False,
+                self.assertEqual(m.run_checks(output, [2, 4], [], False,
                     first=["profile:sample/one", "profile:sample/two"], exclude=["profile:sample/three"], with_vms=True), 1)
                 self.assertEqual([name for name, slot in started[:2]], ["verify", "compatibility"])
                 # The two first-order checks start concurrently, so only their set is ordered.
                 self.assertEqual(sorted(name for name, slot in started[2:4]), ["profile:sample/one", "profile:sample/two"])
                 self.assertEqual(started[4][0], "p0-release-smoke")
+                self.assertEqual(started[5], ("profile:sample/two", 4))
                 slots_by_name = dict(started[2:])
+                self.assertEqual((slots_by_name["profile:sample/one"], slots_by_name["profile:sample/two"]), (2, 4))
                 self.assertEqual(slots_by_name["profile:sample/two"], slots_by_name["p0-release-smoke"])
                 started.clear()
+                self.slots.side_effect = None
                 self.assertEqual(m.run_checks(output, [1], ["profile:sample"], False), 0)
                 self.assertEqual(started, [("profile:sample/three", 1)])
 
@@ -2360,16 +2416,13 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertEqual(m.capacity_reason(log), expected, released)
             log.write_text(lease + refusal)
             self.assertIsNone(m.capacity_reason(log))
-            # Two overlapping leases with one released still hold a lease at the refusal.
-            log.write_text(lease + lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal)
-            self.assertIsNone(m.capacity_reason(log))
             log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
             self.assertIsNone(m.capacity_reason(log))
             script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
             result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
 
-    def test_client_handle_release_evidence_keeps_the_slot_after_a_lane_failure(self):
+    def test_client_handle_without_release_cannot_pass(self):
         # The standalone client's acquire line and handle-release markers, then a lane failure.
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
@@ -2383,10 +2436,43 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"]), ("failed", 1))
             self.assertEqual(result["cleanup"]["lease-release"], {"exit_code": 0, "duration_seconds": 2})
-            self.assertTrue(m.slot_continues_after(result))
-            script.write_text(script.read_text().replace("duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0", "duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=1"))
+            script.write_text(script.read_text().replace("exit 1\n", "exit 0\n").replace("E2E_RELEASE state=end", "unknown END"))
             result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
-            self.assertFalse(m.slot_continues_after(result))
+            self.assertEqual((result["status"], result["reason"]), ("failed", "lease-cleanup-unconfirmed"))
+
+    def test_retry_survives_restart_and_blocks_earlier_import(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            checkout = fixture_checkout(directory)
+            earlier, output = directory / "earlier", directory / "acceptance"
+            source, source_receipt = prepare_fixture(checkout, earlier)
+            frozen, receipt = prepare_fixture(checkout, output)
+            name = "profile:sample/one"
+            run_live(earlier, source, source_receipt, name)
+            checks = m.commands(frozen, "test", receipt["profiles"])
+            failed = m.execute(name, ["false"], frozen, output, m.clean_environment(), 1)
+            failed["command"] = m.command_identity(checks[name], frozen)
+            failed["original_attempt"] = m.completed_attempt(output, frozen, receipt, name, failed)
+            attempt = failed["original_attempt"]["id"]
+            for check in checks:
+                if not m.is_live(check) and check != "process-coverage":
+                    receipt["checks"][check] = {"status": "passed", "log": failed["log"], "log_sha256": failed["log_sha256"]}
+            receipt["checks"][name] = failed
+            sibling = "profile:sample/two"
+            run_live(output, frozen, receipt, sibling)
+            with m.acceptance_lock(output):
+                self.assertEqual(m.request_retry(output, name, attempt), 0)
+                self.assertEqual(m.request_retry(output, name, attempt), 0)
+            with self.assertRaisesRegex(ValueError, "fresh execution required before importing"):
+                m.import_evidence(output, earlier, [name])
+            with patch.object(m, "execution_environment", return_value=receipt["environment"]):
+                m.run_checks(output, (1,), [name], False)
+            _, saved = m.load_bound(output)
+            self.assertEqual(saved["checks"][name]["status"], "passed")
+            self.assertNotEqual(saved["checks"][name]["original_attempt"]["id"], attempt)
+            self.assertEqual(saved["checks"][sibling], receipt["checks"][sibling])
+            self.assertEqual(m.request_retry(output, name, attempt), 0)
+            self.assertEqual(m.consume_retries(output, saved), [])
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2679,7 +2765,7 @@ while True: time.sleep(1)
                 ("fixture/unfinished", "start", 0, 0)])
             self.assertNotIn("do-not-export", json.dumps(events))
 
-    def test_prelease_capacity_refusal_retries_once_and_later_continues_same_candidate(self):
+    def test_prelease_capacity_refusal_rotates_and_expires_then_resumes(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         for resource in ("memory", "disk"):
@@ -2702,7 +2788,7 @@ while True: time.sleep(1)
                 execute = m.execute
                 def observe(name, *args):
                     calls.append((name, args[-1]))
-                    self.assertEqual(args[3]["SUBYARD_E2E_CAPACITY_WAIT"], m.LIVE_CAPACITY_WAIT)
+                    self.assertNotIn("SUBYARD_E2E_CAPACITY_WAIT", args[3])
                     result = execute(name, *args)
                     original[name] = copy.deepcopy(result)
                     return result
@@ -2711,7 +2797,8 @@ while True: time.sleep(1)
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
                      patch.object(m, "execute", side_effect=observe):
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                    self.assertEqual(calls, [(blocked, 1), (following, 1), (blocked, 1)])
+                    self.assertEqual(calls[:3], [(blocked, 1), (following, 1), (blocked, 1)])
+                    self.assertTrue(all(call == (blocked, 1) for call in calls[3:]))
                     persisted = json.loads((output / "receipt.json").read_text())
                     self.assertEqual(persisted["result"], "incomplete")
                     self.assertEqual(persisted["checks"][blocked], original[blocked] | {
@@ -2721,7 +2808,7 @@ while True: time.sleep(1)
                     events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
                     attempts = [item for item in events if item["event"] == "check-result"]
                     self.assertEqual([(item["check"], item["status"]) for item in attempts],
-                                     [(blocked, "blocked"), (following, "passed"), (blocked, "blocked")])
+                                     [(name, "blocked" if name == blocked else "passed") for name, _ in calls])
                     self.assertEqual(events[-1]["status"], "incomplete")
                     blocked_log = output / original[blocked]["log"]
                     log_bytes = blocked_log.read_bytes()
@@ -2738,7 +2825,7 @@ while True: time.sleep(1)
                     self.assertEqual((output / "events.jsonl").read_text().splitlines()[:len(events)],
                                      [json.dumps(item, sort_keys=True) for item in events])
 
-    def test_capacity_retry_waits_for_active_checks_and_records_both_attempts(self):
+    def test_capacity_retry_overlaps_active_check_and_records_both_attempts(self):
         for slow_exit in (0, 23):
             with self.subTest(slow_exit=slow_exit), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 directory = Path(temporary)
@@ -2752,7 +2839,7 @@ while True: time.sleep(1)
                 checks = {blocked: command, slow: ["bash", "-c", "exit " + str(slow_exit)], following: ["true"]}
                 # Local gate behavior is covered separately; use real execution and immutable records here.
                 receipt["checks"] = {name: {"status": "pending"} for name in checks}
-                started, finished = threading.Event(), threading.Event()
+                started, retried = threading.Event(), threading.Event()
                 following_done = threading.Event()
                 calls = []
                 execute = m.execute
@@ -2760,17 +2847,16 @@ while True: time.sleep(1)
                     calls.append((name, slot))
                     if name == blocked:
                         if marker.exists():
-                            self.assertTrue(finished.is_set(), "capacity retry overlapped an active first-pass check")
+                            retried.set()
                         else:
                             self.assertTrue(started.wait(3))
                     if name == slow:
                         started.set()
                         self.assertTrue(following_done.wait(3))
+                        self.assertTrue(retried.wait(3))
                     result = execute(name, command, root, output, env, slot)
                     if name == following:
                         following_done.set()
-                    if name == slow:
-                        finished.set()
                     return result
                 with patch.object(m, "load_bound", return_value=(source, receipt)), \
                      patch.object(m, "commands", return_value=checks), \
@@ -2793,7 +2879,7 @@ while True: time.sleep(1)
                 record, _ = m.original_attempt(output, persisted, blocked, persisted["checks"][blocked])
                 self.assertEqual(record["result"]["status"], "passed")
 
-    def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
+    def test_unknown_refusal_fails_only_its_lane(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         typed = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
@@ -2822,16 +2908,16 @@ while True: time.sleep(1)
                 self.assertEqual(attempt["failure_class"], "unknown")
                 self.assertNotIn("reason", attempt)
                 self.assertEqual(persisted["result"], "failed")
-                self.assertEqual(persisted["checks"][following]["status"], "pending")
+                self.assertEqual(persisted["checks"][following]["status"], "passed")
                 events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
-                self.assertEqual([item["check"] for item in events if item["event"] == "check-start"], [blocked])
+                self.assertEqual([item["check"] for item in events if item["event"] == "check-start"], [blocked, following])
                 results = [item for item in events if item["event"] == "check-result"]
-                self.assertEqual([(item["status"], item["exit_code"], item["failure_class"]) for item in results],
-                                 [("failed", code, "unknown")])
+                self.assertEqual([(item["status"], item["exit_code"], item.get("failure_class")) for item in results],
+                                 [("failed", code, "unknown"), ("passed", 0, None)])
                 self.assertNotIn("reason", results[0])
                 self.assertEqual(events[-1]["status"], "failed")
 
-    def test_interrupted_attempt_saved_and_untyped_blocked_worker_stops_queue(self):
+    def test_interrupted_attempt_saved_and_untyped_blocked_worker_continues(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
@@ -2850,9 +2936,9 @@ while True: time.sleep(1)
                  patch.object(m, "source_fingerprint", return_value="a" * 64), \
                  patch.object(m, "execute", side_effect=execute):
                 self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                self.assertEqual(calls, ["profile:sample/one"])
+                self.assertEqual(calls, ["profile:sample/one", "profile:sample/two"])
                 persisted = json.loads((output / "receipt.json").read_text())
-                self.assertEqual(persisted["checks"]["profile:sample/two"]["status"], "pending")
+                self.assertEqual(persisted["checks"]["profile:sample/two"]["status"], "blocked")
                 self.assertEqual(persisted["checks"]["profile:sample/one"]["exit_code"], 4)
                 self.assertEqual(persisted["result"], "incomplete")
                 def interrupt(name, *args):
@@ -2874,7 +2960,7 @@ while True: time.sleep(1)
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(calls, ["profile:sample/one"])
                 self.assertEqual(persisted["checks"]["verify"]["status"], "passed")
-                self.assertEqual(persisted["checks"]["profile:sample/two"]["status"], "pending")
+                self.assertEqual(persisted["checks"]["profile:sample/two"]["status"], "blocked")
                 self.assertEqual(persisted["source_fingerprint"], "a" * 64)
                 self.assertEqual(persisted["candidate_bundle_sha256"], "b" * 64)
                 self.assertEqual(persisted["result"], "incomplete")
@@ -3253,20 +3339,16 @@ while True: time.sleep(1)
                 self.assertEqual((code, argv), (2, []), arguments)
                 self.assertIn("release-vm-check:", error)
 
-    def test_live_failure_inside_a_clean_lease_keeps_the_slot_for_later_checks(self):
+    def test_broker_available_slot_continues_after_any_lane_failure(self):
         # This scheduler fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         lease = {"status": "failed", "termination": "exit", "exit_code": 1, "duration_seconds": 1,
                  "environment_evidence": "recorded", "environments": [], "cleanup_status": "recorded",
                  "cleanup": {"guest-cleanup": {"exit_code": 0}, "lease-release": {"exit_code": 0}}}
-        for name, failure, continues in (("lease", lease, True),
-                                         ("cleanup", {**lease, "exit_code": 3}, False),
-                                         ("cleanup-phase", {**lease, "cleanup": {**lease["cleanup"], "guest-cleanup": {"exit_code": 1}}}, False),
-                                         ("no-cleanup-witness", {**lease, "cleanup": {}, "cleanup_status": "unknown"}, False),
-                                         ("no-lease-release", {**lease, "cleanup": {"guest-cleanup": {"exit_code": 0}}}, False),
-                                         ("failed-lease-release", {**lease, "cleanup": {**lease["cleanup"], "lease-release": {"exit_code": 1}}}, False),
-                                         ("unallocated", {**lease, "environment_evidence": "unknown"}, False),
-                                         ("timeout", {**lease, "termination": "timeout", "exit_code": 124}, False)):
+        for name, failure in (("lease", lease), ("cleanup", {**lease, "exit_code": 3}),
+                              ("no-cleanup-witness", {**lease, "cleanup": {}, "cleanup_status": "unknown"}),
+                              ("unallocated", {**lease, "environment_evidence": "unknown"}),
+                              ("timeout", {**lease, "termination": "timeout", "exit_code": 124})):
             with self.subTest(name=name), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
                 names = ["verify", "vm:one", "vm:two"]
@@ -3283,10 +3365,10 @@ while True: time.sleep(1)
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
                      patch.object(m, "execute", side_effect=execute):
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                self.assertEqual(calls, ["vm:one", "vm:two"] if continues else ["vm:one"])
+                self.assertEqual(calls, ["vm:one", "vm:two"])
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(persisted["checks"]["vm:one"]["status"], "failed")
-                self.assertEqual(persisted["checks"]["vm:two"]["status"], "passed" if continues else "pending")
+                self.assertEqual(persisted["checks"]["vm:two"]["status"], "passed")
                 self.assertEqual(persisted["result"], "failed")
 
     def test_single_collector_lock(self):
@@ -3322,6 +3404,9 @@ def run_live(output, root, receipt, name):
 
 
 class FullSplitRequirement(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(m, "broker_slots", return_value={1: "available"}))
+
     def assert_requires_split(self, receipt, owner="vm:p0-full", split=("vm:p0-split",)):
         # Every other check passes: the aggregate then depends only on the split checks.
         forged = copy.deepcopy(receipt)

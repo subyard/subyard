@@ -189,7 +189,7 @@ and serialize publication with setup, updates, and full uninstall.
 compatibility manifest and provenance. Runtime releases use the
 [prepare → accept → publish flow](reference/release-publication.md): CI builds exact assets,
 acceptance defaults to host-free/local checks, and publication verifies the immutable release.
-Long core/profile VM checks run only on explicit request (`accept --with-vms --slots N` or a
+Long core/profile VM checks run only on explicit request (`accept --with-vms` or a
 collector `--only` selection); unrequested checks stay `not-run`.
 [Live external checks](reference/release-publication.md#external-checks) are optional. `yard update`
 verifies all release inputs, applies the candidate's migration registry, publishes an immutable

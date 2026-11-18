@@ -108,10 +108,10 @@ and never gate a release or PR.
 Local long VM smoke and shipped-profile VM checks run on explicit request:
 
 ```sh
-dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slots 1 2 3
+dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms
 # Or select one check from an existing frozen collector:
 python3 dev/release-acceptance.py run --output .build/release-local \
-  --only p0-release-smoke --slots 1
+  --only p0-release-smoke --slot-count 1
 ```
 
 `--slots` alone does not request local VM execution. Checks without counted hosted evidence or an
@@ -226,7 +226,7 @@ VM status. Collector selectors can target the downloaded candidate's acceptance 
 
 ```sh
 python3 dev/release-acceptance.py preflight \
-  --output .build/release-publication/ID/acceptance --with-vms --slots 1 2 3
+  --output .build/release-publication/ID/acceptance --with-vms
 ```
 
 Source, asset or tooling changes require a new candidate. Never amend a frozen tree, its policy
@@ -415,7 +415,7 @@ Agents preparing a release apply the
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).
   Long VM smoke and shipped-profile VM checks run only on explicit operator request:
-  `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
+  `accept --with-vms` or collector `run --only CHECK`.
   Available slots alone do not request a VM run. Core `p0-release-smoke` is mandatory:
   local-only acceptance remains incomplete until it passes, and it cannot be excluded
   or waived as optional. Unrequested shipped-profile VM checks remain `not-run`,
@@ -461,22 +461,28 @@ python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/releas
 python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
-Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke, core and profile checks,
-or use `run --only p0-release-smoke --slots 1` for one check. `--slots` alone does not
+Add `--with-vms` to `preflight`/`run` to request all VM smoke, core and profile checks,
+or use `run --only p0-release-smoke --slot-count 1` for one check. `--slots` alone does not
 request VM execution. Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
 (full P0 and its split lanes, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
 and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
 selects one family. A catalog entry's optional `requires` lists sibling checks that must also pass
 whenever that check is requested or recorded; preparation records them in the receipt and the
 candidate's catalog must still match. Selecting a check also runs its required checks that have not
-passed for the candidate, so `run --only vm:p0-full --slots 1 2 3` runs the full P0 outside a release:
+passed for the candidate, so `run --only vm:p0-full` runs the full P0 outside a release:
 `vm:p0-full --split-covered` plus its split checks; `--exclude` keeps a required check not run and the
-result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
-runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
-the next check; a refusal, interruption, timeout, cleanup failure or attempt without a lease stops the slot,
-so an unusable slot cannot turn later checks into failures. One collector owns a candidate's receipt
-at a time; run every check through it rather than separately, so the result is recorded. Once explicitly requested, a pending VM check remains required on
-continuation; interruption or exclusion cannot turn it back into optional passing acceptance.
+result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks.
+
+Live acceptance uses slots 1–4 by default. Use `--slot-count 2` for slots 1 and 2, or
+`--slots slot-2,slot-4` to select those exact slots. A bare `--slots 2` is rejected. The collector
+runs one lane at a time per slot and polls broker status while work waits. After a lane exits,
+the broker's current state guides dispatch to that slot. The exact-slot acquire decides admission.
+Memory and disk refusals requeue the lane with backoff so a smaller lane can run.
+`SUBYARD_E2E_CAPACITY_WAIT` bounds the wait without progress (default `120m`).
+The collector reports pending lanes and slot states if the wait expires. It finishes normally if
+fewer lanes remain than there are slots. Hosted single jobs keep the client's bounded capacity wait.
+
+One collector owns the receipt. Requested VM checks remain required after interruption or exclusion.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
 `--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
@@ -511,11 +517,17 @@ attribution while executing controllers and guest payloads from the frozen candi
 
 A repeated `run` executes only checks without a passing result. Use `--only profile:NAME` or
 `--only p0-release-smoke` for a remaining independent check; `--rerun` also repeats passed checks.
-After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
-the same frozen candidate with `run --output DIR --slots N --only CHECK`. Passing local checks remain
-bound to that identity and are retained; capacity alone does not require another `prepare`.
-This is a separate continuation run: retry the blocked check after conditions change, retaining
-its original attempt logs/events and applicable PASS results from the same candidate.
+After capacity changes, inspect a new snapshot with `preflight --output DIR` and resume with
+`run --output DIR --only CHECK`. Applicable PASS results and logs remain bound to the candidate.
+For a failed or interrupted live lane, pass its `original_attempt.id` from `receipt.json`:
+
+```sh
+python3 dev/release-acceptance.py retry --output DIR --check CHECK --attempt ATTEMPT_ID
+```
+
+A running local collector picks up the request when the lane is eligible to run. The request
+survives a restart and prevents earlier evidence from satisfying it. Repeating the same request is safe.
+With the collector idle, `run --output DIR --only CHECK --rerun` also reruns the selected lane.
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1

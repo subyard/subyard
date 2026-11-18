@@ -1494,6 +1494,7 @@ def collect_ci(github, directory, identity):
         return
     root, receipt = a.load_bound(output)
     commands = a.commands(root, identity["version"], receipt["profiles"])
+    a.consume_retries(output, receipt)
     unavailable_artifacts = set()
     for name in state["checks"]:
         if a.STOP.is_set():
@@ -1631,7 +1632,7 @@ def release_level(requested, reason, scope, recorded=None):
     if requested == "ordinary":
         if changed:
             refusals.append(f"full release required: migration or update-contract changes since {baseline}: {listed}; "
-                            "rerun accept with --level full --slots N [N ...]")
+                            "rerun accept with --level full")
         elif changed is None and reason is None:
             refusals.append("cannot determine migration changes since the previous release from local tags; "
                             "use --level full, or --level-reason to record why an ordinary release is safe")
@@ -1708,7 +1709,7 @@ def main():
         command = sub.add_parser(action)
         command.add_argument("--candidate", required=True)
         if action == "accept":
-            command.add_argument("--slots", nargs="+", type=int, default=[])
+            a.add_slot_arguments(command)
             command.add_argument("--ci-wait-seconds", type=int, default=21600,
                                  help="bounded hosted-check wait (default six hours); 0 collects finished jobs immediately")
             command.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
@@ -1822,8 +1823,6 @@ def main():
         if args.action == "accept":
             for signum in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(signum, lambda signum, frame: a.STOP.set())
-            if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
-                raise ValueError("slots must be unique integers from 1 to 999")
             ensure_acceptance(directory, identity, prepared)
             if not 0 <= args.ci_wait_seconds <= 86400:
                 raise ValueError("--ci-wait-seconds must be from 0 to 86400")
@@ -1837,7 +1836,7 @@ def main():
             print(f"RELEASE_LEVEL {level['level']} reason={level['reason']}", flush=True)
             previous = earlier_candidates(state_dir, directory, identity)
             a.reuse_isolated_tests(output, previous)
-            result = accept_checks(github, directory, identity, args.slots, args.only,
+            result = accept_checks(github, directory, identity, a.selected_slots(args), args.only,
                                    args.with_vms or level["level"] == "full", previous, args.ci_wait_seconds)
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
