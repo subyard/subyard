@@ -4378,7 +4378,8 @@ set -e
   source_root="$ROOT"
   bootstrap_fixture="$TMP/incus-bootstrap-isolation"
   mkdir -p "$bootstrap_fixture/repo/tests/helpers" "$bootstrap_fixture/repo/config" \
-    "$bootstrap_fixture/repo/scripts" "$bootstrap_fixture/state" "$bootstrap_fixture/platform/incus"
+    "$bootstrap_fixture/repo/scripts" "$bootstrap_fixture/repo/dev" \
+    "$bootstrap_fixture/state" "$bootstrap_fixture/platform/incus"
   cp "$ROOT/tests/helpers/test-context.sh" "$bootstrap_fixture/repo/tests/helpers/"
   cp "$ROOT/config/host.env" "$bootstrap_fixture/repo/config/"
   # shellcheck source=dev/e2e/lib-p0-capacity.sh
@@ -4389,13 +4390,26 @@ set -e
   printf '%s\n' "$P0_CAPACITY_MARKER" > "$P0_CAPACITY_STATE_ROOT/.subyard-p0-marker"
   printf 'retained\n' > "$P0_CAPACITY_PLATFORM_ROOT/incus/sentinel"
   chmod 0555 "$P0_CAPACITY_PLATFORM_ROOT/incus"
+  mkdir -p "$bootstrap_fixture/repo/.build"
+  printf 'lane engine\n' > "$bootstrap_fixture/repo/.build/yard"
   p0_capacity_prepare_platform_root() { :; }
   export EXPECTED_BOOTSTRAP="$P0_CAPACITY_STATE_ROOT/incus-bootstrap"
   export EXPECTED_STORAGE="$P0_CAPACITY_PLATFORM_ROOT/incus/incus/storage"
   export BOOTSTRAP_CALL_LOG="$bootstrap_fixture/calls" BOOTSTRAP_EXIT
+  cat > "$bootstrap_fixture/repo/dev/build-engine.sh" <<'BOOTSTRAP_BUILD'
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+[ "$#" = 2 ] && [ "$1" = --output ] && [ "$2" = "$root/.build/incus-bootstrap/yard" ]
+mkdir -p "$(dirname "$2")"
+printf '#!/bin/sh\nprintf "candidate validator\\n"\n' > "$2"
+chmod 0755 "$2"
+BOOTSTRAP_BUILD
+  chmod 0755 "$bootstrap_fixture/repo/dev/build-engine.sh"
   cat > "$bootstrap_fixture/repo/scripts/01-install-incus.sh" <<'BOOTSTRAP_INSTALLER'
 #!/usr/bin/env bash
 set -euo pipefail
+[ "$("$SUBYARD_DISPATCHER_PATH" _nm-guard-violations)" = "candidate validator" ]
 [ "$SUBYARD_CONFIG_HOME" = "$EXPECTED_BOOTSTRAP/config" ]
 [ "$SUBYARD_HOME" = "$EXPECTED_BOOTSTRAP/subyard" ]
 [ -d "$SUBYARD_HOME" ] && [ -O "$SUBYARD_HOME" ]
@@ -4422,6 +4436,7 @@ BOOTSTRAP_INSTALLER
     done
   done
   [ "$(wc -l < "$BOOTSTRAP_CALL_LOG")" = 4 ] || fail 'Incus bootstrap skipped the installer'
+  [ "$(cat "$ROOT/.build/yard")" = 'lane engine' ] || fail 'Incus bootstrap changed the lane engine'
   chmod 0755 "$P0_CAPACITY_PLATFORM_ROOT/incus"
 )
 # Exercise the actual standalone dispatch with VM boundaries replaced by a strict

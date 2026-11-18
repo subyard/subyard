@@ -66,6 +66,7 @@ ensure_owner_incus() {
     # shellcheck source=config/host.env
     . "$ROOT/config/host.env"
     set +a
+    prepare_test_incus_dispatcher "$ROOT" || exit
     bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
   )
   if ! id -nG | tr ' ' '\n' | grep -qx incus-admin \

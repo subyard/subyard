@@ -128,6 +128,7 @@ SH
 cat > "$tmp/bin/ip" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  '-4 -o address show scope global') printf '2: eth0 inet 192.0.2.5/24\n' ;;
   '-4 route show default') printf '%s' "${MOCK_DEFAULT_ROUTES:-}"; exit 0 ;;
   "-d -o link show dev "*)
     device="${*: -1}"
@@ -145,6 +146,7 @@ set -euo pipefail
 case "${1:-}" in
   list) printf '%s,STOPPED\n' "$2" ;;
   network)
+    [ "$*" != "network show incusbr0 --project default" ] || exit 0
     [ "${2:-}" = list ] || exit 90
     [ "${MOCK_INCUS_NETWORK_RC:-0}" = 0 ] || exit "$MOCK_INCUS_NETWORK_RC"
     printf '%s' "${MOCK_INCUS_NETWORKS:-[]}"
@@ -682,6 +684,33 @@ nm_guard_write_file "$guard_conf" "$(render incusbr0)"
 if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "init continued after a hand edit"; fi
 reboot_host
 power_host_safe incusbr0 || fail "a start was refused after NetworkManager read the guard: $POWER_ERROR"
+# Run both standalone E2E assertions against the same loaded guard without an ambient dispatcher.
+(
+  unset SUBYARD_DISPATCHER_PATH
+  OPERATOR_HOME="$tmp/boot-operator"
+  runtime="$OPERATOR_HOME/.subyard/runtime"
+  release="$runtime/releases/candidate"
+  mkdir -p "$release/scripts" "$release/bin"
+  ln -s releases/candidate "$runtime/current"
+  ln -s "$TEST_NM_VALIDATOR" "$release/bin/yard-engine"
+  cp "$ROOT/scripts/lib-power.sh" "$release/scripts/lib-power.sh"
+  {
+    printf 'tmp=%q\n' "$tmp"
+    declare -f power_nm_binary power_nm_boot_id
+    printf 'POWER_NM_GUARD_CONF=%q POWER_NM_GUARD_STATE=%q\n' "$POWER_NM_GUARD_CONF" "$POWER_NM_GUARD_STATE"
+  } >> "$release/scripts/lib-power.sh"
+  operator_env() { "$@"; }
+  eval "$(sed -n '/^assert_guards() {/,/^}/p' "$ROOT/dev/e2e/proxy-address-boot.sh")"
+  assert_guards
+
+  YARD_BIN="$TEST_NM_VALIDATOR"
+  BASELINE_BRIDGE=incusbr0
+  HOST_DEFAULT_ROUTE_BEFORE="$(ip -4 route show default | sort)"
+  HOST_GLOBAL_IPV4_BEFORE="$(ip -4 -o address show scope global | awk '{print $2, $4}' | sort)"
+  export YARD_BIN BASELINE_BRIDGE HOST_DEFAULT_ROUTE_BEFORE HOST_GLOBAL_IPV4_BEFORE
+  eval "$(sed -n '/^assert_host_network_unchanged() {/,/^}/p' "$ROOT/dev/e2e/nested-teardown-data-boundary.sh")"
+  assert_host_network_unchanged
+)
 inode_before="$(stat -c '%i:%Z' "$guard_conf")"
 nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out"
 grep -Fq 'already current' "$tmp/guard.out" && [ "$(stat -c '%i:%Z' "$guard_conf")" = "$inode_before" ] \

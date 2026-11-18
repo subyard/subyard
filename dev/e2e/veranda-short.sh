@@ -27,7 +27,7 @@ SUBYARD_INSTALLATION_CONTEXT="$(test_installation_context default)"
 export SUBYARD_INSTALLATION_CONTEXT
 # The product Phase 1 installer prepares Incus and enrolls the operator; the helper then starts
 # in a fresh session that holds the new group.
-bash scripts/01-install-incus.sh --yes --zabbly
+SUBYARD_DISPATCHER_PATH="$root/.subyard-acceptance/yard" bash scripts/01-install-incus.sh --yes --zabbly
 sudo -n runuser -u "$operator" -- env -i \
   HOME="$operator_home" USER="$operator" LOGNAME="$operator" PATH=/usr/local/bin:/usr/bin:/bin TMPDIR=/tmp \
   SUBYARD_E2E_VM="$SUBYARD_E2E_VM" SUBYARD_E2E_RUN_ID="${SUBYARD_E2E_RUN_ID:-}" SUBYARD_E2E_SLOT="${SUBYARD_E2E_SLOT:-}" \

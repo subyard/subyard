@@ -928,6 +928,7 @@ run_incus_installer() {
     # shellcheck source=config/host.env
     . "$ROOT/config/host.env"
     set +a
+    prepare_test_incus_dispatcher "$ROOT" || exit
     MIN_INCUS_VER=6.0.7 bash "$ROOT/scripts/01-install-incus.sh" "$@"
   )
 }

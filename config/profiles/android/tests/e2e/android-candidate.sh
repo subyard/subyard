@@ -13,7 +13,7 @@ android_candidate_command() {
 }
 
 android_candidate_platform() {
-  local root="$1" state="$2" runtime_source="$3"
+  local root="$1" state="$2" runtime_source="$3" candidate_engine="$4"
   if ! android_candidate_command /usr/bin/incus storage show default --project default >/dev/null 2>&1; then
     (
       # Reuse the product initializer; immutable bases only install the packages.
@@ -27,6 +27,11 @@ android_candidate_platform() {
       # shellcheck source=config/host.env
       . "$runtime_source/config/host.env"
       set +a
+      if [ -n "$candidate_engine" ]; then
+        export SUBYARD_DISPATCHER_PATH="$candidate_engine"
+      else
+        prepare_test_incus_dispatcher "$root" || exit
+      fi
       bash "$runtime_source/scripts/01-install-incus.sh" --yes
     ) >&2 || return
   fi
@@ -65,7 +70,7 @@ android_candidate_install() {
     # Packaging builds the engine and every declared profile/integration executable.
     "$root/dev/package-engine.sh" --version "$release_version" --output-dir "$release_root" >&2 || return
   fi
-  android_candidate_platform "$root" "$state" "$runtime_source" || return
+  android_candidate_platform "$root" "$state" "$runtime_source" "$candidate_engine" || return
   android_candidate_command env YARD_RELEASE_BASE_URL="file://$release_root" YARD_RELEASE_CACHE="$state/releases" \
     YARD_RUNTIME_ROOT="$state/runtime" YARD_BIN_DIR="$state/bin" \
     YARD_SHELL_RC="$state/bashrc" YARD_LOGIN_RC="$state/profile" \

@@ -139,7 +139,7 @@ cat > "$TMP/bin/apt-get" <<'SH'
 [ "$*" = 'install -y -qq --no-install-recommends acl' ] || exit 97
 SH
 export TEST_NM_VALIDATOR="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
-if [ -z "${YARD_ENGINE_PATH:-}" ] && [ ! -x "$TEST_NM_VALIDATOR" ]; then
+if [ -z "${YARD_ENGINE_PATH:-}" ]; then
   TMPDIR=/tmp bash "$ROOT/dev/build-engine.sh"
 fi
 [ -x "$TEST_NM_VALIDATOR" ] || fail "test engine is unavailable"

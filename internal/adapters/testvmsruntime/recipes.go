@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -26,37 +27,18 @@ var recipeFiles = []string{
 }
 
 // RecipeBundle produces the exact trusted archive installed for base builders.
-func RecipeBundle(root string) ([]byte, []byte, error) {
-	var archive, manifest bytes.Buffer
+func RecipeBundle(root, dispatcher string) ([]byte, []byte, error) {
+	var archive bytes.Buffer
 	compressed := gzip.NewWriter(&archive)
 	writer := tar.NewWriter(compressed)
-	appendFile := func(name string, body []byte) error {
-		if err := writer.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
-			return err
-		}
-		_, err := writer.Write(body)
-		return err
+	manifest, err := recipeManifest(root, dispatcher, writer)
+	if err != nil {
+		return nil, nil, err
 	}
-	for _, name := range recipeFiles {
-		path := filepath.Join(root, filepath.FromSlash(name))
-		info, err := os.Lstat(path)
-		if err != nil {
-			return nil, nil, err
-		}
-		if !info.Mode().IsRegular() {
-			return nil, nil, fmt.Errorf("recipe must be a regular file: %s", name)
-		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return nil, nil, err
-		}
-		digest := sha256.Sum256(body)
-		fmt.Fprintf(&manifest, "%x  %s\n", digest, name)
-		if err := appendFile(name, body); err != nil {
-			return nil, nil, err
-		}
+	if err := writer.WriteHeader(&tar.Header{Name: "manifest.sha256", Mode: 0644, Size: int64(len(manifest)), Typeflag: tar.TypeReg}); err != nil {
+		return nil, nil, err
 	}
-	if err := appendFile("manifest.sha256", manifest.Bytes()); err != nil {
+	if _, err := writer.Write(manifest); err != nil {
 		return nil, nil, err
 	}
 	if err := writer.Close(); err != nil {
@@ -65,11 +47,53 @@ func RecipeBundle(root string) ([]byte, []byte, error) {
 	if err := compressed.Close(); err != nil {
 		return nil, nil, err
 	}
-	return archive.Bytes(), manifest.Bytes(), nil
+	return archive.Bytes(), manifest, nil
 }
 
-func recipeBundleDigest(root string) (string, error) {
-	_, manifest, err := RecipeBundle(root)
+const recipeEngine = "bin/yard-engine"
+
+func recipeManifest(root, dispatcher string, archive *tar.Writer) ([]byte, error) {
+	var manifest bytes.Buffer
+	appendFile := func(name, path string, mode int64) error {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("recipe must be a regular file: %s", name)
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		digest := sha256.New()
+		var destination io.Writer = digest
+		if archive != nil {
+			if err := archive.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: info.Size(), Typeflag: tar.TypeReg}); err != nil {
+				return err
+			}
+			destination = io.MultiWriter(archive, digest)
+		}
+		if _, err := io.Copy(destination, file); err != nil {
+			return err
+		}
+		fmt.Fprintf(&manifest, "%x  %s\n", digest.Sum(nil), name)
+		return nil
+	}
+	for _, name := range recipeFiles {
+		if err := appendFile(name, filepath.Join(root, filepath.FromSlash(name)), 0644); err != nil {
+			return nil, err
+		}
+	}
+	if err := appendFile(recipeEngine, dispatcher, 0755); err != nil {
+		return nil, err
+	}
+	return manifest.Bytes(), nil
+}
+
+func recipeBundleDigest(root, dispatcher string) (string, error) {
+	manifest, err := recipeManifest(root, dispatcher, nil)
 	if err != nil {
 		return "", err
 	}
@@ -78,7 +102,7 @@ func recipeBundleDigest(root string) (string, error) {
 }
 
 func (backend *Backend) installRecipes(ctx context.Context) error {
-	archive, manifest, err := RecipeBundle(backend.RepositoryRoot)
+	archive, manifest, err := RecipeBundle(backend.RepositoryRoot, backend.Dispatcher)
 	if err != nil {
 		return err
 	}

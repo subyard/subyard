@@ -18,7 +18,12 @@ import (
 )
 
 func TestBaseRecipeInstallerContract(t *testing.T) {
-	archive, _, err := testvmsruntime.RecipeBundle("../../..")
+	dispatcher := filepath.Join(testkit.TempDir(t), "yard-engine")
+	build := exec.Command("bash", "../../../dev/build-engine.sh", "--output", dispatcher)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build recipe engine: %v\n%s", err, output)
+	}
+	archive, _, err := testvmsruntime.RecipeBundle("../../..", dispatcher)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,15 +58,24 @@ func TestBaseRecipeInstallerContract(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				testkit.WriteFile(t, path, body, 0600)
+				if header.Name == "scripts/lib-power.sh" {
+					// Redirect the host-only paths while keeping the recipe and installer intact.
+					source := strings.NewReplacer(
+						"/usr/sbin/NetworkManager", filepath.Join(root, "fixture-bin/NetworkManager"),
+						"/etc/NetworkManager/conf.d/", filepath.Join(root, "nm/conf.d")+"/",
+						"/var/lib/subyard/nm-guard-state", filepath.Join(root, "nm/state"),
+					).Replace(string(body))
+					body = []byte(source)
+				}
+				testkit.WriteFile(t, path, body, os.FileMode(header.Mode))
 			}
-			bin := filepath.Join(root, "bin")
+			bin := filepath.Join(root, "fixture-bin")
 			if err := os.Mkdir(bin, 0700); err != nil {
 				t.Fatal(err)
 			}
 			// Only read-only tools and narrowly bounded physical peers are reachable.
 			// In particular, a pool/network or filesystem mutation cannot escape via PATH.
-			for _, name := range []string{"bash", "dirname", "cut", "awk", "sed", "sort", "dpkg"} {
+			for _, name := range []string{"bash", "dirname", "cut", "awk", "sed", "sort", "dpkg", "mktemp", "chmod", "rm", "tr", "grep", "sha256sum", "stat", "cat", "install", "sync", "mv"} {
 				path, err := exec.LookPath(name)
 				if err != nil {
 					t.Fatal(err)
@@ -82,10 +96,11 @@ case "$name:$*" in
   'incus:--version') printf '6.0.7\n' ;;
   'incus:network list --project default --format csv -c n,t') : ;;
   'systemctl:is-active NetworkManager') printf 'inactive\n' ;;
+  'NetworkManager:--config-dir '*" --print-config") exec cat "$2/zz-subyard-unmanaged.conf" ;;
   *) printf 'unexpected physical operation: %s %s\n' "$name" "$*" >&2; exit 99 ;;
 esac
 `
-			for _, name := range []string{"id", "getent", "incus", "systemctl"} {
+			for _, name := range []string{"id", "getent", "incus", "systemctl", "NetworkManager"} {
 				testkit.WriteFile(t, filepath.Join(bin, name), []byte(stub), 0700)
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -110,6 +125,9 @@ printf 'caller-complete\n'
 			effects, err := os.ReadFile(filepath.Join(root, "effects"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !bytes.Contains(effects, []byte("NetworkManager --config-dir ")) {
+				t.Fatalf("recipe skipped NetworkManager preflight: %s", effects)
 			}
 			if !bytes.HasSuffix(effects, []byte("finalized\n")) || bytes.Contains(effects, []byte("incus storage")) || bytes.Contains(effects, []byte("incus admin")) || bytes.Contains(effects, []byte("incus network create")) {
 				t.Fatalf("unexpected installation-owned effects: %s", effects)

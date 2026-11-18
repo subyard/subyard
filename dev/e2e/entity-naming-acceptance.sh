@@ -68,6 +68,7 @@ root="$1"
 . "$root/src/tests/helpers/test-context.sh"
 setup_test_context "$root/incus-bootstrap"
 export SUBYARD_USER=dev SUBYARD_OPERATOR_HOME=/home/dev
+prepare_test_incus_dispatcher "$root/src" || exit
 bash "$root/src/scripts/01-install-incus.sh" --yes --zabbly
 EOS
   guest "$vm" /usr/sbin/runuser -u dev -- env HOME=/home/dev \
