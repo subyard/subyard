@@ -4156,25 +4156,24 @@ func publicActivationDiagnostic(err error, message, retry string, contexts ...co
 	// Only explicitly public diagnostics cross this boundary.
 	fallback := domain.Finding{Message: message, Recovery: retry}
 	var findings []domain.Finding
+	var full []domain.Finding
 	seen := map[[2]string]bool{}
+	hasStderr := len(contexts) != 0 && hasMigrationDiagnosticWriter(contexts[0])
 	for _, cause := range domain.RefusalCauses(err) {
 		finding, ok := domain.PublicFinding(cause)
-		recorded := ok && len(contexts) != 0 && recordLongActivationRecovery(contexts[0], finding)
-		if recorded {
-			finding.Recovery = "follow the recovery command printed on stderr"
-		}
+		longRecovery := hasStderr && len(finding.Recovery) > maxDiagnosticText &&
+			validateActionText(finding.Recovery, len(finding.Recovery)) == nil && utf8.ValidString(finding.Recovery)
 		// A long finding must not discard its usable recovery. Legacy
 		// diagnostics without an input keep the bounded fallback.
 		maximum := maxDiagnosticText
-		if finding.Input != "" || recorded {
+		if finding.Input != "" || longRecovery {
 			maximum = max(maximum, len(finding.Message))
 		}
 		if !ok || !utf8.ValidString(finding.Message) || validateText(finding.Message, "activation diagnostic", maximum, true) != nil {
 			finding = fallback
-		} else {
-			finding.Message = boundedFailureText(finding.Message, maxDiagnosticText)
+			longRecovery = false
 		}
-		if !utf8.ValidString(finding.Recovery) || validateSafeAction(finding.Recovery) != nil {
+		if !longRecovery && (!utf8.ValidString(finding.Recovery) || validateSafeAction(finding.Recovery) != nil) {
 			if finding.Input == "" {
 				finding = fallback
 			} else {
@@ -4187,21 +4186,31 @@ func publicActivationDiagnostic(err error, message, retry string, contexts ...co
 		}
 		if finding.Message != "" && !seen[key] {
 			seen[key] = true
+			full = append(full, finding)
+			finding.Message = boundedFailureText(finding.Message, maxDiagnosticText)
+			if longRecovery {
+				finding.Recovery = "follow the recovery command printed on stderr"
+			}
 			findings = append(findings, finding)
 		}
 	}
 	if len(findings) == 0 {
 		return message, retry
 	}
-	slices.SortStableFunc(findings, func(left, right domain.Finding) int {
-		return strings.Compare(left.Message, right.Message)
-	})
-	return renderActivationFindings(findings)
+	message, retry, visible := renderActivationFindings(findings)
+	if hasStderr {
+		for index, finding := range full {
+			if index >= visible || finding.Recovery != findings[index].Recovery {
+				recordActivationFinding(contexts[0], finding)
+			}
+		}
+	}
+	return message, retry
 }
 
 // renderActivationFindings preserves finding order and spends the message
 // budget on findings first. An omitted recovery action does not hide a finding.
-func renderActivationFindings(findings []domain.Finding) (string, string) {
+func renderActivationFindings(findings []domain.Finding) (string, string, int) {
 	retry := findings[0].Recovery
 	omitted := func(count int) string {
 		if count == 1 {
@@ -4247,7 +4256,7 @@ func renderActivationFindings(findings []domain.Finding) (string, string) {
 			message = candidate
 		}
 	}
-	return message, retry
+	return message, retry, visible
 }
 
 func withPublicFailureCause(ctx context.Context, outcome Outcome, cause error, fallback string) Outcome {

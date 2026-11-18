@@ -41,7 +41,7 @@ func TestReleaseDiagnosticsPreservePublicWrapperOverRawRefusals(t *testing.T) {
 			message := "yard work: cannot inspect materialized config for release activation"
 			retry := "run yard -Y work config status"
 			if multiple {
-				cause = domain.CollectRefusals(cause, wrapped("default"))
+				cause = domain.CollectOrderedRefusals(wrapped("default"), cause)
 				message = "yard default: cannot inspect materialized config for release activation; " + message + "; Additional recovery: " + retry
 				retry = "run yard -Y default config status"
 			}

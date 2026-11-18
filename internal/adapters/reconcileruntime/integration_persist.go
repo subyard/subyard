@@ -439,7 +439,7 @@ func (runtime Runtime) ReadPersistRetained(ctx context.Context) ([]PersistRetain
 			}
 			id, matched := strings.CutPrefix(evidence.Path.value, prefix)
 			if prefix != "" && matched && validPersistHex(id, 8) {
-				retained = append(retained, PersistRetained{Integration: mapping.Integration, Kind: kind, Path: prefix + id, Bytes: evidence.Bytes})
+				retained = append(retained, PersistRetained{Integration: mapping.Integration, Kind: kind, Path: filepath.Dir(prefix), Bytes: evidence.Bytes})
 				break
 			}
 		}
@@ -456,7 +456,7 @@ func (runtime Runtime) PersistRetainedLines(retained []PersistRetained) []string
 			size = fmt.Sprintf("%d bytes", *item.Bytes)
 		}
 		inspect := shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "ls", "-la", "--", item.Path})
-		lines = append(lines, fmt.Sprintf("persist retained %s %s (%s): an adoption could not remove it. Next, inspect it on the owner host: %s; remove it manually once its data is no longer needed", item.Kind, item.Path, size, inspect))
+		lines = append(lines, fmt.Sprintf("persist retained %s in %s (%s): an adoption could not remove it. Next, inspect the directory on the owner host: %s; remove the retained data manually once it is no longer needed", item.Kind, item.Path, size, inspect))
 	}
 	return lines
 }
@@ -543,6 +543,27 @@ var persistInspectionReasons = map[string]string{
 	"persist target filesystem":    "persist target filesystem",
 }
 
+// Resolve a refused child against the current tree by identity. For target
+// entries that could not be created, the corresponding source name can still
+// identify the path. The command receives only declared paths and a digest.
+func persistEntryInspection(mapping PersistMapping, root, evidence string, mount bool) []string {
+	roots := []string{"find", root}
+	if root == mapping.Target && mapping.Source != root {
+		roots = append(roots, mapping.Source)
+	}
+	command := "namei -l --"
+	if mount {
+		command = "findmnt --target"
+	}
+	script := `root=$1; source=$2; expected=$3; shift 3; for path do candidate=$path; ` +
+		`case "$path" in "$source"/*) if [ "$root" != "$source" ]; then candidate=$root/${path#"$source"/}; ` +
+		`if [ -e "$candidate" ] || [ -L "$candidate" ]; then continue; fi; fi;; esac; ` +
+		`digest=$(printf %s "$candidate" | sha256sum); ` +
+		`if [ "${digest%% *}" = "$expected" ]; then ` + command + ` "$candidate"; fi; done`
+	return append(roots, "-xdev", "-exec", "sh", "-c", script, "subyard", root,
+		mapping.Source, fmt.Sprintf("%x", sha256.Sum256([]byte(evidence))), "{}", "+")
+}
+
 // Only typed persist conflicts are pending configuration.
 func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, item integrationWorkItem) error {
 	var report struct {
@@ -566,8 +587,9 @@ func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, 
 		return shellquote.RecoveryCommand(append([]string{"incus", "exec", instance, "--project", project, "--"}, command...))
 	}
 	causes := []error{}
-	for _, conflict := range report.Conflicts {
+	for index, conflict := range report.Conflicts {
 		mapping, path := persistConflictMapping(mappings, conflict.Integration, conflict.Path)
+		child := path != "" && strings.HasPrefix(conflict.Path.value, path+"/")
 		finding := item
 		if mapping.Integration != "" {
 			finding = finding.withOwner(mapping.Integration)
@@ -582,12 +604,16 @@ func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, 
 			retry = shellquote.Command([]string{"yard", "-Y", yard, "init"})
 		case persistInspectionReasons[reason] != "":
 			message = persistInspectionReasons[reason]
-			if path != "" {
+			if child && !runtime.PersistFinishOnly {
+				retry = inspect(persistEntryInspection(mapping, path, conflict.Path.value, false)...)
+			} else if path != "" {
 				retry = inspect("namei", "-l", "--", path)
 			}
 		case reason == "persist mount boundary":
 			message = "a mount point lies inside persist data"
-			if path != "" {
+			if child && !runtime.PersistFinishOnly {
+				retry = inspect(persistEntryInspection(mapping, path, conflict.Path.value, true)...)
+			} else if path != "" {
 				retry = inspect("findmnt", "--submounts", "--target", path)
 			}
 		case reason == "persist paths overlap":
@@ -620,7 +646,9 @@ func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, 
 		default:
 			message = "unrecognized persist transfer refusal"
 		}
-		if path != "" {
+		if child && (persistInspectionReasons[conflict.Reason.value] != "" || conflict.Reason.value == "persist mount boundary") {
+			message += fmt.Sprintf(" for entry %d under %q", index+1, path)
+		} else if path != "" {
 			message += fmt.Sprintf(" at %q", path)
 		}
 		finding.Message = message + "; data was preserved"

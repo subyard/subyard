@@ -2374,12 +2374,12 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 	if reconciler.projectedIntegrationPlans {
 		stage = "compare-projected"
 		if err := reconcileruntime.CheckIntegrationPlan(approved, compared); err != nil {
-			return runtime.IntegrationPlanDiagnostic(err, approved, compared)
+			return runtime.IntegrationPlanDiagnostic(err, approved, compared, false)
 		}
 	} else {
 		stage = "compare-exact"
 		if compared.Fingerprint != approved.Fingerprint {
-			return runtime.IntegrationPlanDiagnostic(domain.ErrPlanStale, approved, compared)
+			return runtime.IntegrationPlanDiagnostic(domain.ErrPlanStale, approved, compared, true)
 		}
 	}
 	stage, comparison = "apply", nil

@@ -117,7 +117,7 @@ func configContentDiagnostics(target configTarget, applied reconcileruntime.Appl
 						continue
 					}
 					if installed.Path != asset.Source {
-						result.Differences = append(result.Differences, domain.ConfigurationDifference{Name: asset.Setting, Installed: installed.Path, Desired: asset.Source, InstalledSet: true, DesiredSet: true})
+						result.Differences = append(result.Differences, domain.ConfigurationDifference{Name: asset.Setting, Installed: "different source", Desired: asset.Source, InstalledSet: true, DesiredSet: true})
 						continue
 					}
 					payload, err := target.Loaded.ProspectiveFiles.ReadAsset(config.MaterializedAsset{Source: asset.Source})
@@ -125,7 +125,7 @@ func configContentDiagnostics(target configTarget, applied reconcileruntime.Appl
 					if err != nil || !ok {
 						result.Differences = append(result.Differences, domain.ConfigurationDifference{Name: asset.Setting, Kind: domain.ConfigurationContentUnknown})
 					} else if config.ConfigurationInputDigest(asset.Setting, definition.Kind, key, payload) != installed.Digest {
-						result.Differences = append(result.Differences, domain.ConfigurationDifference{Name: asset.Setting, Installed: installed.Path, Desired: asset.Source, InstalledSet: true, DesiredSet: true, Kind: domain.ConfigurationContentChanged})
+						result.Differences = append(result.Differences, domain.ConfigurationDifference{Name: asset.Setting, Kind: domain.ConfigurationContentChanged})
 					}
 				}
 			}

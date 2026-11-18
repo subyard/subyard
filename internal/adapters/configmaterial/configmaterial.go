@@ -66,8 +66,7 @@ type JSONObservation struct {
 	// document: ReleaseChanged or ReleaseMissingDocument. Empty otherwise.
 	Release string `json:"release,omitempty"`
 	// ReleasedCount counts the owned field pointers that such a release leaves
-	// in place. Released lists all of them when they are short and safe to
-	// print, and is empty otherwise.
+	// in place. Released carries bounded private evidence for those pointers.
 	Released      []string `json:"released,omitempty"`
 	ReleasedCount int      `json:"released_count,omitempty"`
 }
@@ -407,8 +406,7 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 		Release: encoded.Release, Released: encoded.Released, ReleasedCount: encoded.ReleasedCount}, nil
 }
 
-// Released pointers are rendered to the operator: accept only a bounded,
-// sorted, unique list of printable JSON pointers.
+// Accept only a bounded, sorted, unique list of printable JSON pointers.
 func validReleasedPointers(pointers []string) bool {
 	if len(pointers) > maxReleasedPointers {
 		return false

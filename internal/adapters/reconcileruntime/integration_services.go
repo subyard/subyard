@@ -94,6 +94,13 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 		refusals := []error{settingsErr}
 		if completedGuestFailure(result, err) {
 			for _, line := range strings.Split(string(result.Stderr), "\n") {
+				if line == "subyard-integration-failure:bwrap-sandbox" ||
+					strings.HasPrefix(line, "Bubblewrap AppArmor: the developer's Bubblewrap sandbox could not create user and network namespaces.") {
+					refusals = append(refusals, integrationFailure{Finding: domain.Finding{
+						Input: "services Bubblewrap sandbox", Message: "Bubblewrap sandbox could not create user and network namespaces", Recovery: retry,
+					}})
+					continue
+				}
 				if line == "subyard-integration-conflict:ccusage" {
 					finding := integrationOwnershipFailure("this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry, false)
 					finding.Input = "services ccusage ownership"

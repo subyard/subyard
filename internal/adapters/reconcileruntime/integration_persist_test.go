@@ -18,6 +18,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -1030,8 +1031,8 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 		t.Fatal("guest text reached public diagnostics", text)
 	}
 	for _, want := range []string{"projects.subyard-transfer.json", "not a complete Subyard record", "'disable' 'claude'", "release activation does not start", "init",
-		`/home/dev/.claude/projects\046notes`, "'findmnt'", "AGENT_claude_PERSIST", "unrecognized persist transfer refusal", "'integration' 'status'",
-		"persist target entry refused", "'namei' '-l' '--' '/mnt/host/agent-sessions/claude/projects'"} {
+		`/home/dev/.claude/projects\046notes`, "findmnt --target", "AGENT_claude_PERSIST", "unrecognized persist transfer refusal", "'integration' 'status'",
+		"persist target entry refused for entry 8", "namei -l --", "/mnt/host/agent-sessions/claude/projects"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("refusal omitted %q: %s", want, text)
 		}
@@ -1052,6 +1053,20 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 		var pending interface{ PendingIntegrationConfiguration() bool }
 		if !errors.As(cause, &pending) || !pending.PendingIntegrationConfiguration() {
 			t.Fatalf("refusal is not pending configuration: %v", cause)
+		}
+	}
+	root := testkit.TempDir(t)
+	source, target := filepath.Join(root, "source"), filepath.Join(root, "target")
+	mkdirs(t, source)
+	mkdirs(t, target)
+	testkit.WriteFile(t, filepath.Join(source, "one"), []byte("first entry"), 0600)
+	testkit.WriteFile(t, filepath.Join(source, "two"), []byte("second entry"), 0600)
+	for _, name := range []string{"one", "two"} {
+		path := filepath.Join(target, name)
+		command := shellquote.RecoveryCommand(persistEntryInspection(PersistMapping{Source: source, Target: target}, target, path, false))
+		output, err := exec.Command("sh", "-c", command).CombinedOutput()
+		if !strings.Contains(string(output), "f: "+path) || strings.Count(string(output), "f: ") != 1 {
+			t.Fatalf("could not inspect exactly the refused target %s: %v %s", name, err, output)
 		}
 	}
 	finish := persistStep{Ops: []string{"finish"}, Source: "/home/dev/.claude/projects"}

@@ -69,7 +69,8 @@ type Runtime struct {
 	// the helper's own retained descriptor used only for physical source reads.
 	LogicalRepositoryRoot string
 	// SourceReader is read-only prospective desired input; nil uses normal asset policy.
-	SourceReader func(config.MaterializedAsset) ([]byte, error)
+	SourceReader   func(config.MaterializedAsset) ([]byte, error)
+	captureSources *diagnosticSourceSnapshot
 	// PreparedSources retains only owning prospective file provenance. Its
 	// pinned root proves an approved virtual asset's actual publication.
 	PreparedSources *config.ProspectiveFiles

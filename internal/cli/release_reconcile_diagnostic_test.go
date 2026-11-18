@@ -389,7 +389,10 @@ func TestIntegrationActivationFailureBoundaries(t *testing.T) {
 			boundary := materializedConfigActivationError{cause: err, yard: "default", phase: "integrations", action: "reconcile", command: "integration status"}
 			message, retry := boundary.ActivationDiagnostic()
 			attributed := strings.Contains(message, "stage="+stage+" projected=")
-			if stage == "apply" {
+			switch stage {
+			case "legacy-adoption":
+				attributed = message == "integration inspect legacy adoption prerequisites failed in yard default" && retry == "run yard migrate"
+			case "apply":
 				attributed = message == "integration apply observe inventory failed in yard default" && retry == "run yard migrate"
 			}
 			if !attributed || strings.Contains(message, "private-sentinel") || len(message) > 512 {

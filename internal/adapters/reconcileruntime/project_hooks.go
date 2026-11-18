@@ -93,7 +93,7 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 			}
 		}
 	}
-	if runtime.PersistFinishOnly {
+	if runtime.PersistFinishOnly || runtime.HookPlan != nil {
 		add := func(path string, item integrationWorkItem) {
 			if filepath.IsAbs(path) && filepath.Clean(path) == path {
 				approved = append(approved, path)
@@ -123,13 +123,17 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 			}
 		}
 		if len(declared) != 0 {
-			if observation, err := runtime.observeProjectHookInputs(ctx); err == nil {
-				for hook, items := range declared {
-					path := observation.Resolved[hook]
-					if filepath.Base(path) == hook {
-						for _, item := range items {
-							add(path, item)
-						}
+			var observation hookObservation
+			if runtime.HookPlan != nil {
+				observation = runtime.HookPlan.current
+			} else {
+				observation, _ = runtime.observeProjectHookInputs(ctx)
+			}
+			for hook, items := range declared {
+				path := observation.Resolved[hook]
+				if filepath.Base(path) == hook {
+					for _, item := range items {
+						add(path, item)
 					}
 				}
 			}
@@ -142,7 +146,7 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 		return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	}, approved...); err != nil {
 		var failure *application.ProjectHookFailure
-		if runtime.PersistFinishOnly && errors.As(err, &failure) {
+		if errors.As(err, &failure) {
 			var findings []error
 			for _, path := range failure.Hooks {
 				for _, item := range byPath[path] {
@@ -152,7 +156,7 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 			if reported := domain.CollectRefusals(findings...); reported != nil {
 				return reported
 			}
-			failure.Hooks = nil // Only declared hook names may be rendered by activation.
+			failure.Hooks = nil // Only the matched declarations supply diagnostic labels.
 		}
 		return err
 	}

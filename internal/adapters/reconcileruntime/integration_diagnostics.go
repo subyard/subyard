@@ -319,7 +319,7 @@ func collectIntegrationRefusals(causes ...error) error {
 }
 
 // IntegrationPlanDiagnostic attributes a stale guard to the inputs that changed.
-func (runtime Runtime) IntegrationPlanDiagnostic(cause error, approved, fresh IntegrationPlan) error {
+func (runtime Runtime) IntegrationPlanDiagnostic(cause error, approved, fresh IntegrationPlan, exact bool) error {
 	var findings []error
 	for name, binding := range approved.packageSources {
 		if fresh.packageSources[name] != binding {
@@ -331,7 +331,7 @@ func (runtime Runtime) IntegrationPlanDiagnostic(cause error, approved, fresh In
 			findings = append(findings, runtime.integrationDiagnostic(cause, profile.IntegrationDefinition{Name: name}, "apply", "observation-changed"))
 		}
 	}
-	changed, missing := unapprovedIntegrationFacts(approved, fresh)
+	changed, missing := compareIntegrationFacts(approved, fresh, exact)
 	for _, fact := range slices.Concat(changed, missing) {
 		if fact.item.Input != "" {
 			findings = append(findings, fact.item.failure(cause, ": "+lifecycleReasons["observation-changed"]))

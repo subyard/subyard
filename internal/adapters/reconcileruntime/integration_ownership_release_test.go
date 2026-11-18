@@ -90,7 +90,7 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 		pointers []string
 		fields   string
 	}{
-		{[]string{"/edited/mode", "/kept"}, "fields left in place: /edited/mode, /kept"},
+		{[]string{"/edited/mode", "/kept"}, "2 fields left in place"},
 		{nil, "no owned fields remain"},
 	} {
 		t.Run(scenario.fields, func(t *testing.T) {
@@ -151,7 +151,7 @@ func TestOwnershipReleaseNoticeStaysWithinDiagnosticBound(t *testing.T) {
 		observation configmaterial.Observation
 		fields      string
 	}{
-		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 2}, "fields left in place: /a, /b"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 2}, "2 fields left in place"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: long, ReleasedCount: len(long)}, "40 fields left in place"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, ReleasedCount: 300}, "300 fields left in place"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged}, "no owned fields remain"},
@@ -179,7 +179,7 @@ func TestIntegrationOwnershipNoticesPreviewOwnershipRelease(t *testing.T) {
 	runtime.Integrations = []profile.IntegrationDefinition{{Name: "sample", Root: runtime.RepositoryRoot}}
 	runtime.Environment = []string{"AGENT_sample_CONFIG_DEST=.sample/settings.json"}
 	warnings, err := runtime.IntegrationOwnershipNotices(context.Background())
-	notice := "retiring sample releases ownership of " + path + ": owned fields changed after Subyard applied them; fields left in place: /kept"
+	notice := "retiring sample releases ownership of " + path + ": owned fields changed after Subyard applied them; 1 field left in place"
 	if err != nil || !slices.Equal(warnings, []string{notice}) {
 		t.Fatalf("init preview: warnings=%q err=%v", warnings, err)
 	}

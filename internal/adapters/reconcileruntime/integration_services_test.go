@@ -49,6 +49,17 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 	if !strings.Contains(message, bubblewrapPolicyRefusal) {
 		t.Fatalf("independent Bubblewrap refusal was lost: %s", message)
 	}
+	for _, record := range []string{
+		"subyard-integration-failure:bwrap-sandbox",
+		"Bubblewrap AppArmor: the developer's Bubblewrap sandbox could not create user and network namespaces. Inspect the yard policy",
+	} {
+		runtime.Executor = &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(record)}}}}
+		_, _, err := runtime.integrationServices(context.Background(), "observe")
+		finding, ok := domain.PublicFinding(err)
+		if !ok || !strings.Contains(finding.Message, "sandbox could not create") || IntegrationOwnershipConflict(err) {
+			t.Fatalf("capability failure lost its classification: %v", err)
+		}
+	}
 }
 
 func TestIntegrationServiceUnknownErrorsStaySanitized(t *testing.T) {

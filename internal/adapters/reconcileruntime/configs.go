@@ -274,10 +274,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 		}
 		item := runtime.integrationItem("apply configs", file.integration).atDestination(file.destination)
 		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
-			if runtime.applyingIntegrations {
-				return item.refusal(err)
-			}
-			return fmt.Errorf("apply %s: %w", file.label, err)
+			return item.refusal(err)
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
@@ -485,6 +482,10 @@ func (runtime Runtime) guestConfigFilesWithSourceReader(reader func(config.Mater
 	for _, source := range sources {
 		asset := source.Asset
 		file := guestConfigFile{readAsset: reader, integration: source.Integration, setting: asset.Setting, label: source.Label, source: asset.Source, destination: asset.Destination, followSymlinks: asset.FollowSymlinks, previewInstructions: runtime.legacyPreviewInstructions && source.PreviewInstructions, ownedFormat: asset.OwnedFormat}
+		if runtime.captureSources != nil {
+			item := runtime.integrationItem("apply inventory capture settings", file.integration).atDestination(file.destination)
+			file.readAsset = runtime.captureSources.readerFor(item)
+		}
 		if file.previewInstructions {
 			file.previewSource = filepath.Join(runtime.RepositoryRoot, "config", "preview", "instructions.md")
 		}
@@ -555,10 +556,16 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 }
 
 func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
+	return runtime.preserveConfigCommand(path, ".subyard-invalid-", "--backup=numbered")
+}
+
+func (runtime Runtime) preserveConfigCommand(path, prefix, option string) string {
 	exec := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--"}
-	direct := shellquote.RecoveryCommand(append(slices.Clone(exec), "mv", "--backup=numbered", "--", path, path+".subyard-invalid"))
+	digest := sha256.Sum256([]byte(filepath.Base(path)))
+	sibling := fmt.Sprintf("%s%x", prefix, digest[:8])
+	direct := shellquote.RecoveryCommand(append(slices.Clone(exec), "mv", "-T", option, "--", path, filepath.Join(filepath.Dir(path), sibling)))
 	// Pass a long destination once to keep the recovery command short.
-	compact := shellquote.RecoveryCommand(append(exec, "sh", "-c", `mv --backup=numbered -- "$1" "$1.subyard-invalid"`, "subyard", path))
+	compact := shellquote.RecoveryCommand(append(exec, "sh", "-c", `mv -T "$3" -- "$1" "${1%/*}/$2"`, "subyard", path, sibling, option))
 	if len(compact) < len(direct) {
 		return compact
 	}

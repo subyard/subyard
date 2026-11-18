@@ -451,6 +451,32 @@ func TestAppliedDiagnosticCaptureRejectsSourceChangeBeforePublication(t *testing
 			}
 		})
 	}
+	t.Run("legacy rules digest", func(t *testing.T) {
+		runtime, _, _, _ := integrationSourceFixture(t)
+		root := runtime.RepositoryRoot
+		rules := filepath.Join(root, "rules")
+		testkit.WriteFile(t, rules, []byte("rules"), 0600)
+		runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_RULES=" + rules, "AGENT_codex_RULES_DEST=.codex/repo.rules"}
+		runtime.Yard = domain.Context{YardName: "sample", DevUser: "dev", DevUID: os.Getuid()}
+		bindInstructionTestPackage(t, &runtime, root, "codex")
+		legacy := filepath.Join(root, "config/agents/codex/legacy-config")
+		if err := os.Mkdir(legacy, 0700); err != nil {
+			t.Fatal(err)
+		}
+		digest := filepath.Join(legacy, "repo.rules.sha256")
+		testkit.WriteFile(t, digest, []byte(strings.Repeat("a", 64)), 0600)
+		sources := newDiagnosticSourceSnapshot(nil)
+		runtime.captureSources = sources
+		if _, err := runtime.integrationArtifactsWithSourceReader("verify", sources.read); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, digest, []byte(strings.Repeat("b", 64)), 0600)
+		err := sources.verify(runtime)
+		finding, ok := domain.PublicFinding(err)
+		if !ok || finding.Owner != "codex" || !strings.Contains(finding.Message, "/home/dev/.codex/repo.rules") || !errors.Is(err, domain.ErrPlanStale) {
+			t.Fatalf("legacy digest change lost attribution: %v", err)
+		}
+	})
 }
 
 func TestIntegrationSettingsPublicationRetry(t *testing.T) {

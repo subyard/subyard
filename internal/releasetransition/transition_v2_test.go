@@ -3240,9 +3240,9 @@ func (err v2FindingError) Error() string                     { return err.Messag
 func (err v2FindingError) ActivationFinding() domain.Finding { return err.Finding }
 
 func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
-	cause := domain.CollectRefusals(
-		fmt.Errorf("first: %w", v2PublicActivationError{"yard work: profile unavailable", "run yard -Y work config status"}),
-		fmt.Errorf("second: %w", v2PublicActivationError{"yard default: profile unavailable", "run yard -Y default config status"}),
+	cause := domain.CollectOrderedRefusals(
+		fmt.Errorf("first: %w", v2PublicActivationError{"yard default: profile unavailable", "run yard -Y default config status"}),
+		fmt.Errorf("second: %w", v2PublicActivationError{"yard work: profile unavailable", "run yard -Y work config status"}),
 	)
 	message, retry := publicActivationDiagnostic(cause, "fallback", "run yard update --check")
 	if message != "yard default: profile unavailable; yard work: profile unavailable; Additional recovery: run yard -Y work config status" || retry != "run yard -Y default config status" || strings.Contains(message, "private observation") {
@@ -3271,6 +3271,33 @@ func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
 	message, retry = publicActivationDiagnostic(domain.CollectRefusals(first, second), "fallback", "run yard update --check")
 	if !strings.HasPrefix(message, "source unavailable; and 1 more finding;") || retry != first.Recovery {
 		t.Fatalf("omitted finding misreported: %q / %q", message, retry)
+	}
+
+	var causes []error
+	for _, yard := range []string{"default", "alpha", "beta", "delta", "echo", "foxtrot", "golf", "hotel"} {
+		causes = append(causes, v2FindingError{domain.Finding{Input: yard,
+			Message:  "yard " + yard + ": " + strings.Repeat("observation unavailable ", 4) + "again",
+			Recovery: "run yard -Y " + yard + " integration status"}})
+	}
+	var stderr bytes.Buffer
+	ctx, flush := captureMigrationDiagnostics(WithMigrationDiagnosticWriter(context.Background(), &stderr))
+	message, retry = publicActivationDiagnostic(domain.CollectOrderedRefusals(causes...), "fallback", "run yard migrate", ctx)
+	flush()
+	if !strings.HasPrefix(message, "yard default:") || retry != "run yard -Y default integration status" ||
+		!strings.Contains(message, "more findings") {
+		t.Fatalf("bounded summary changed yard order: %q / %q", message, retry)
+	}
+	previous := -1
+	for _, cause := range causes {
+		finding, _ := domain.PublicFinding(cause)
+		if strings.Contains(message, finding.Message) {
+			continue
+		}
+		offset := strings.Index(stderr.String(), finding.Message+"; retry: "+finding.Recovery)
+		if offset <= previous {
+			t.Fatalf("omitted finding missing or out of order on stderr: %s", finding.Input)
+		}
+		previous = offset
 	}
 }
 
@@ -4569,7 +4596,7 @@ func TestV2FreshOwnerWarningPreservesAssessmentWithoutWriting(t *testing.T) {
 }
 
 func TestPublicActivationDiagnosticPreservesWrappedFallbackAndSafeActions(t *testing.T) {
-	cause := fmt.Errorf("private wrapper: %w", domain.CollectRefusals(errors.New("private transport"), v2PublicActivationError{"route unavailable", "run yard update --check"}))
+	cause := fmt.Errorf("private wrapper: %w", domain.CollectOrderedRefusals(errors.New("private transport"), v2PublicActivationError{"route unavailable", "run yard update --check"}))
 	message, retry := publicActivationDiagnostic(cause, "installation cannot be inspected", "inspect installation ownership")
 	if message != "installation cannot be inspected; route unavailable; Additional recovery: run yard update --check" || retry != "inspect installation ownership" || validateSafeAction(retry) != nil {
 		t.Fatalf("%q / %q", message, retry)

@@ -520,8 +520,9 @@ an existing target must be owned by the developer and not writable by group or o
    The plan reports how many entries already exist in the target;
    their source copies are deleted with the backup. Only directories the transfer
    creates get the source modes; existing target directories are never changed. If the
-   target refuses entries (permissions or space), every refused path is reported as
-   pending configuration and there is no exchange; the next `yard init` restarts it.
+   target refuses entries (permissions or space), each refusal names its declared
+   mapping and provides a read-only command to inspect that entry. The transfer remains
+   pending with no exchange, and the next `yard init` restarts it.
 4. One atomic exchange replaces the directory with a link to the target; the original
    directory lands at `<directory>.subyard-backup-<id>`. The path is never absent.
 5. Finish removes the transfer's own stage copies, the backup and the record. Nothing

@@ -54,6 +54,9 @@ by full initialization after core substrate provisioning. `scripts/reconcile-int
 bounded package/proxy/project-hook leaf. A per-yard lock serializes confirmed desired publication
 and reconciliation. Guest ownership evidence covers structured fields, plain files, instruction
 files, derived session links and known service receipts; evidence conflicts preserve artifacts.
+Plans and diagnostics label integration work with host declarations. Guest paths and
+comparison keys identify matching declarations, including when a retired artifact has no
+current path to display.
 See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
 
 The project-hook pass verdict comes from its exit status. With approved paths, the

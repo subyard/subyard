@@ -133,6 +133,7 @@ check_loader() {
     case "$(sha256sum < "$policy/load")" in
       '67af6296afdba16d3511438b80184e5deefe1dfc9bab2d632def0b268a3b1e30  -' | \
       '3a3bfed285a93bd59669f466e65c4ff61802a519820783a45502be7072d77d72  -' | \
+      '958d8e0c45a913ad823e982a4d28a8ca0c4e5c905728dc462c208783650977b5  -' | \
       'ca44357a350eb3d4bb0e9f1746eba3fa2a75918cd26b9986aedd28f359772a0d  -') return 0 ;;
       *) return 1 ;;
     esac
@@ -187,6 +188,11 @@ check_live() {
 probe() {
   runuser -u "$dev_user" -- /usr/bin/bwrap --unshare-user --unshare-net \
     --ro-bind / / --chdir / -- /bin/true
+}
+
+sandbox_failure() {
+  printf 'subyard-integration-failure:bwrap-sandbox\n' >&2
+  exit 1
 }
 
 restricted() {
@@ -401,7 +407,7 @@ if [ "$owned" = 1 ]; then
   elif [ "$mode" = apply ]; then
     if [ "$record" = "$pending" ]; then publish_path "$pending" "$marker"; fi
     load_missing
-    probe
+    probe >/dev/null 2>&1 || sandbox_failure
     register_boot
   fi
   exit 0
@@ -410,8 +416,7 @@ fi
 if [ "$eligible" = 0 ] && [ "$need_bwrap" = 0 ]; then exit 0; fi
 if probe >/dev/null 2>&1; then exit 0; fi
 if [ "$eligible" = 0 ]; then
-  problem "the developer's Bubblewrap sandbox could not create user and network namespaces"
-  check_refusals
+  sandbox_failure
 fi
 check_parent "$policy_parent" || :
 check_parent "$record_parent" || :
@@ -458,5 +463,5 @@ record=$marker
 check_files
 check_refusals
 load_missing
-probe
+probe >/dev/null 2>&1 || sandbox_failure
 register_boot

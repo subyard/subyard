@@ -251,9 +251,22 @@ func TestIntegrationDiagnosticPreservesExistingSafeCause(t *testing.T) {
 	if message != "integration sample inspect: "+cause.Message || retry != cause.Recovery {
 		t.Fatalf("diagnostic = %q / %q", message, retry)
 	}
-	err = runtime.IntegrationPlanDiagnostic(domain.ErrPlanStale, IntegrationPlan{}, IntegrationPlan{})
+	err = runtime.IntegrationPlanDiagnostic(domain.ErrPlanStale, IntegrationPlan{}, IntegrationPlan{}, false)
 	if !errors.Is(err, domain.ErrPlanStale) {
 		t.Fatalf("unidentified drift fallback = %v", err)
+	}
+	check := integrationFact{Key: "check:fixture-check", Desired: "ready", Observed: "false",
+		item: runtime.integrationRead("inspect", "package check", "sample")}
+	approved := IntegrationPlan{Fingerprint: "approved", Scope: "scope", Changed: true, facts: []integrationFact{check}}
+	check.Observed, check.AtDesired = "true", true
+	fresh := IntegrationPlan{Fingerprint: "fresh", Scope: "scope", facts: []integrationFact{check}}
+	if err := CheckIntegrationPlan(approved, fresh); err != nil {
+		t.Fatalf("projected guard rejected an improvement: %v", err)
+	}
+	err = runtime.IntegrationPlanDiagnostic(domain.ErrPlanStale, approved, fresh, true)
+	finding, ok := domain.PublicFinding(err)
+	if !ok || finding.Owner != "sample" || !strings.Contains(finding.Message, "package check") || !errors.Is(err, domain.ErrPlanStale) {
+		t.Fatalf("exact guard lost the owner of a now-ready check: %v", err)
 	}
 }
 
@@ -432,11 +445,11 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 		{"persist", "integration sample apply persist failed"},
 		{"persist observe", "integration sample apply observe persist failed"},
 		{"source and persist", "integration claude apply observe config source failed"},
-		{"persist progress", "integration apply inventory apply failed"},
+		{"persist progress", "integration apply inventory failed"},
 		{"inventory observe", "integration apply observe inventory failed"},
-		{"inventory apply", "integration apply inventory apply failed"},
-		{"inventory interrupted", "integration apply inventory apply failed"},
-		{"inventory conflict", "integration codex apply inventory apply: integration ownership conflict in yard sample"},
+		{"inventory apply", "integration apply inventory failed"},
+		{"inventory interrupted", "integration apply inventory failed"},
+		{"inventory conflict", "integration codex apply inventory: integration ownership conflict in yard sample"},
 		{"inventory commit", "integration apply inventory commit failed"},
 		{"inventory capture-settings", "integration apply inventory capture settings failed"},
 		{"configs", "integration codex apply configs failed"},
@@ -728,7 +741,7 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 				}
 			case "inventory conflict":
 				wantMessage = test.message + `: owned artifact drift at "/home/dev/.codex/AGENTS.md"; managed artifacts were preserved`
-				wantRetry = "'incus' 'exec' '' '--project' '' '--' 'mv' '--no-clobber' '--' '/home/dev/.codex/AGENTS.md' '/home/dev/.codex/AGENTS.md.subyard-preserved'"
+				wantRetry = runtime.preserveConfigCommand("/home/dev/.codex/AGENTS.md", ".subyard-preserved-", "--no-clobber")
 			case "retire structured config":
 				wantMessage += ` at "/home/dev/settings.json"`
 			case "verify inventory drift":

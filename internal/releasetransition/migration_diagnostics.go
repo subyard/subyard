@@ -15,9 +15,10 @@ import (
 type migrationDiagnosticWriterKey struct{}
 type migrationDiagnosticCaptureKey struct{}
 type migrationDiagnosticCapture struct {
-	writer   io.Writer
-	messages map[string]bool
-	yards    map[string]map[string]bool
+	writer     io.Writer
+	messages   map[string]bool
+	yards      map[string]map[string]bool
+	activation []string
 }
 
 // WithMigrationDiagnosticWriter selects the engine's diagnostic stream. It is
@@ -46,6 +47,9 @@ func captureMigrationDiagnostics(ctx context.Context) (context.Context, func()) 
 		}
 		slices.Sort(rows)
 		for _, message := range rows {
+			fmt.Fprintln(capture.writer, message)
+		}
+		for _, message := range capture.activation {
 			fmt.Fprintln(capture.writer, message)
 		}
 		yards := make([]string, 0, len(capture.yards))
@@ -127,16 +131,25 @@ func recordMigrationDiagnostics(ctx context.Context, err error) {
 
 // A valid recovery can exceed the frozen response limit, for example when it
 // passes a nested guest path. Keep the full finding available on stderr.
-func recordLongActivationRecovery(ctx context.Context, finding domain.Finding) bool {
-	capture, _ := ctx.Value(migrationDiagnosticCaptureKey{}).(*migrationDiagnosticCapture)
-	if capture == nil || capture.writer == nil || len(finding.Recovery) <= maxDiagnosticText ||
-		!utf8.ValidString(finding.Recovery) || !utf8.ValidString(finding.Message) ||
-		validateActionText(finding.Recovery, len(finding.Recovery)) != nil ||
-		validateText(finding.Message, "activation diagnostic", len(finding.Message), true) != nil {
-		return false
+func hasMigrationDiagnosticWriter(ctx context.Context) bool {
+	if capture, _ := ctx.Value(migrationDiagnosticCaptureKey{}).(*migrationDiagnosticCapture); capture != nil {
+		return capture.writer != nil
 	}
-	capture.messages["release transition refusal: "+finding.Message+"; retry: "+finding.Recovery] = true
-	return true
+	writer, _ := ctx.Value(migrationDiagnosticWriterKey{}).(io.Writer)
+	return writer != nil
+}
+
+func recordActivationFinding(ctx context.Context, finding domain.Finding) {
+	message := "release transition refusal: " + finding.Message + "; retry: " + finding.Recovery
+	if capture, _ := ctx.Value(migrationDiagnosticCaptureKey{}).(*migrationDiagnosticCapture); capture != nil && capture.writer != nil {
+		if !slices.Contains(capture.activation, message) {
+			capture.activation = append(capture.activation, message)
+		}
+		return
+	}
+	if writer, _ := ctx.Value(migrationDiagnosticWriterKey{}).(io.Writer); writer != nil {
+		fmt.Fprintln(writer, message)
+	}
 }
 
 // Attach the protected owner name before flattening a multi-cause error. Raw

@@ -205,12 +205,18 @@ func TestUnownedInvalidConfigRefusalNamesNativePreservationStep(t *testing.T) {
 
 	t.Run("nested destination", func(t *testing.T) {
 		root := testkit.TempDir(t)
-		destination := filepath.Join(root, strings.Repeat("d", 205), strings.Repeat("e", 205), "settings&notes.json")
+		basename := strings.Repeat("f", 236) + "&settings-notes.txt"
+		if len(basename) != 255 {
+			t.Fatalf("fixture basename has %d bytes", len(basename))
+		}
+		destination := filepath.Join(root, strings.Repeat("d", 205), strings.Repeat("e", 205), basename)
 		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
 			t.Fatal(err)
 		}
 		testkit.WriteFile(t, destination, []byte("keep this document"), 0600)
-		testkit.WriteFile(t, destination+".subyard-invalid", []byte("keep the earlier backup"), 0600)
+		digest := sha256.Sum256([]byte(basename))
+		sibling := filepath.Join(filepath.Dir(destination), fmt.Sprintf(".subyard-invalid-%x", digest[:8]))
+		testkit.WriteFile(t, sibling, []byte("keep the earlier backup"), 0600)
 		testkit.WriteFile(t, filepath.Join(root, "incus"), []byte("#!/bin/sh\nshift 5\nexec \"$@\"\n"), 0700)
 		t.Setenv("PATH", root+":"+os.Getenv("PATH"))
 		recovery := runtime.preserveInvalidConfigCommand(destination)
@@ -223,10 +229,10 @@ func TestUnownedInvalidConfigRefusalNamesNativePreservationStep(t *testing.T) {
 		if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("invalid configuration was not moved: %v", err)
 		}
-		if actual := read(t, destination+".subyard-invalid"); actual != "keep this document" {
+		if actual := read(t, sibling); actual != "keep this document" {
 			t.Fatalf("invalid document changed: %q", actual)
 		}
-		if actual := read(t, destination+".subyard-invalid.~1~"); actual != "keep the earlier backup" {
+		if actual := read(t, sibling+".~1~"); actual != "keep the earlier backup" {
 			t.Fatalf("existing backup changed: %q", actual)
 		}
 	})
