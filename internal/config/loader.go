@@ -1523,23 +1523,25 @@ func contextFrom(
 		return tracker.inputsAvailable(name) && zeroOne(values, name, &refusals)
 	}
 	forwardAgent, devSudo, nestedE2EVMs := boolSetting("FORWARD_SSH_AGENT"), boolSetting("DEV_SUDO"), boolSetting("NESTED_E2E_VMS")
-	rawE2EVMCPU := values["E2E_VM_CPU"]
-	e2eVMCPU, err := resolveE2EVMCPU(rawE2EVMCPU, runtime.NumCPU())
-	if !tracker.inputsAvailable("E2E_VM_CPU") {
-		e2eVMCPU = rawE2EVMCPU
-	} else if err != nil {
-		refusals = append(refusals, err)
-	} else {
-		values["E2E_VM_CPU"] = e2eVMCPU
-		if e2eVMCPU != rawE2EVMCPU {
-			tracker.record(
-				normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
-				"resolved from "+rawE2EVMCPU,
-			)
+	e2eVMCPUResolved := false
+	if tracker.inputsAvailable("E2E_VM_CPU") {
+		rawE2EVMCPU := values["E2E_VM_CPU"]
+		e2eVMCPU, err := resolveE2EVMCPU(rawE2EVMCPU, runtime.NumCPU())
+		if err != nil {
+			refusals = append(refusals, err)
+		} else {
+			e2eVMCPUResolved = true
+			values["E2E_VM_CPU"] = e2eVMCPU
+			if e2eVMCPU != rawE2EVMCPU {
+				tracker.record(
+					normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
+					"resolved from "+rawE2EVMCPU,
+				)
+			}
 		}
 	}
 	// Edge D7: the CPU count is validated only after it resolves.
-	refusals = append(refusals, refusalCauses(validateE2EConfigAvailable(values, err == nil && tracker.inputsAvailable("E2E_VM_CPU"), tracker.inputsAvailable))...)
+	refusals = append(refusals, refusalCauses(validateE2EConfigAvailable(values, e2eVMCPUResolved, tracker.inputsAvailable))...)
 	ctx := domain.Context{
 		YardName:         yardName,
 		AccessKind:       domain.AccessKind(values["ACCESS_KIND"]),
