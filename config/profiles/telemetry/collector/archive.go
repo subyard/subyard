@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -15,6 +16,8 @@ import (
 )
 
 var archiveName = regexp.MustCompile(`^archive(-[1-9][0-9]*)?$`)
+
+const pendingArchive = ".telemetry-archive.pending"
 
 func fenceBeforeUpgrade(dir string) error {
 	// A standalone writer cannot stop a service. Require its legacy observer
@@ -71,7 +74,33 @@ type metadataWriter interface {
 	Exec(string, ...any) (sql.Result, error)
 }
 
-func recordInterruptedRuns(db metadataWriter, dir string, identities ...identity) error {
+type legacyRunManifest struct {
+	Run        string `json:"agent_run_id"`
+	Boot       string `json:"boot_id"`
+	PID        int    `json:"pid"`
+	StartTicks uint64 `json:"start_ticks"`
+}
+
+func (m legacyRunManifest) alive(boot string) bool {
+	if boot == "" || boot != m.Boot || m.PID <= 0 || m.StartTicks == 0 {
+		return false
+	}
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(m.PID), "stat"))
+	if err != nil {
+		return false
+	}
+	end := strings.LastIndex(string(stat), ") ")
+	if end < 0 {
+		return false
+	}
+	fields := strings.Fields(string(stat[end+2:]))
+	if len(fields) <= 19 || fields[0] == "Z" {
+		return false
+	}
+	return fields[19] == strconv.FormatUint(m.StartTicks, 10)
+}
+
+func recordInterruptedRuns(db metadataWriter, dir string, activeKey identityKey) error {
 	entries, err := os.ReadDir(filepath.Join(dir, "runs"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -80,6 +109,15 @@ func recordInterruptedRuns(db metadataWriter, dir string, identities ...identity
 		return err
 	}
 	var runs []string
+	var boot string
+	identities := []identity{keepID}
+	if activeKey != nil {
+		data, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
+		boot = strings.TrimSpace(string(data))
+		identities = []identity{activeKey.id}
+	} else if key, err := readIdentityKey(dir); err == nil {
+		identities = append(identities, key.legacy)
+	}
 	for _, entry := range entries {
 		run, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || !legacyID.MatchString(run) || !entry.Type().IsRegular() {
@@ -97,14 +135,24 @@ func recordInterruptedRuns(db metadataWriter, dir string, identities ...identity
 		if err != nil {
 			return err
 		}
-		var manifest struct {
-			Run string `json:"agent_run_id"`
-		}
+		var manifest legacyRunManifest
 		if json.Unmarshal(data, &manifest) != nil || manifest.Run != run {
 			continue
 		}
 		for _, mapID := range identities {
 			runs = append(runs, mapID(run))
+		}
+		if manifest.alive(boot) {
+			// Re-register the living process under its current opaque ID.
+			// Historical records and resource counters stay in the archive.
+			id := activeKey.id(run)
+			body, err := json.Marshal(map[string]string{"agent_run_id": id, "state": "starting"})
+			if err != nil {
+				return err
+			}
+			if _, err = db.Exec("INSERT INTO runs(agent_run_id,body,source_time) VALUES(?,?,?)", id, string(body), unknownSourceTime); err != nil {
+				return err
+			}
 		}
 	}
 	if len(runs) == 0 {
@@ -119,11 +167,7 @@ func recordInterruptedRuns(db metadataWriter, dir string, identities ...identity
 }
 
 func archiveStore(dir string, db *sql.DB) error {
-	identities := []identity{keepID}
-	if key, err := readIdentityKey(dir); err == nil {
-		identities = append(identities, key.legacy)
-	}
-	if err := recordInterruptedRuns(db, dir, identities...); err != nil {
+	if err := recordInterruptedRuns(db, dir, nil); err != nil {
 		return err
 	}
 	// SQLite checkpoints the WAL when leaving WAL mode. The rename must
@@ -133,6 +177,30 @@ func archiveStore(dir string, db *sql.DB) error {
 		return errors.New("cannot checkpoint legacy telemetry for archiving")
 	}
 	if err := db.Close(); err != nil {
+		return err
+	}
+	if err := renameArchive(filepath.Join(dir, databaseName), filepath.Join(dir, pendingArchive)); err != nil {
+		return err
+	}
+	return publishPendingArchive(dir)
+}
+
+func renameArchive(from, to string) error {
+	return unix.Renameat2(unix.AT_FDCWD, from, unix.AT_FDCWD, to, unix.RENAME_NOREPLACE)
+}
+
+func publishPendingArchive(dir string) error {
+	pending := filepath.Join(dir, pendingArchive)
+	if _, err := os.Lstat(pending); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	// Make the staging rename durable before changing the inode's mode.
+	if err := syncArchiveDirectory(dir); err != nil {
+		return err
+	}
+	if err := sealDatabase(pending); err != nil {
 		return err
 	}
 	for sequence := 1; ; sequence++ {
@@ -145,19 +213,18 @@ func archiveStore(dir string, db *sql.DB) error {
 			return err
 		}
 		target := filepath.Join(archive, databaseName)
-		err := unix.Renameat2(unix.AT_FDCWD, filepath.Join(dir, databaseName), unix.AT_FDCWD, target, unix.RENAME_NOREPLACE)
+		err := renameArchive(pending, target)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		return sealArchive(dir, archive)
+		return syncArchiveRename(dir, archive)
 	}
 }
 
-// Finish a rename interrupted before the mode change or directory syncs.
-// Publish the new active database only after the archive is durable.
+// Recover archives published by older upgraders and finish directory syncs.
 func sealArchives(dir string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -183,6 +250,20 @@ func sealArchive(dir, archive string) error {
 	if err := privateDir(archive); err != nil {
 		return err
 	}
+	if err := sealDatabase(path); err != nil {
+		return err
+	}
+	return syncArchiveRename(dir, archive)
+}
+
+func syncArchiveRename(dir, archive string) error {
+	if err := syncArchiveDirectory(archive); err != nil {
+		return err
+	}
+	return syncArchiveDirectory(dir)
+}
+
+func sealDatabase(path string) error {
 	sealed := checkPrivateFile(path, 0400) == nil
 	if !sealed {
 		if err := checkPrivateFile(path, 0600); err != nil {
@@ -196,17 +277,13 @@ func sealArchive(dir, archive string) error {
 	if !sealed {
 		err = file.Chmod(0400)
 	}
-	if err = errors.Join(err, file.Sync(), file.Close()); err != nil {
+	return errors.Join(err, file.Sync(), file.Close())
+}
+
+func syncArchiveDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
 		return err
 	}
-	for _, path := range []string{archive, dir} {
-		parent, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		if err = errors.Join(parent.Sync(), parent.Close()); err != nil {
-			return err
-		}
-	}
-	return nil
+	return errors.Join(dir.Sync(), dir.Close())
 }

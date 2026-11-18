@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 )
 
 func TestArchiveUpgrade(t *testing.T) {
@@ -58,7 +59,19 @@ func TestArchiveUpgrade(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(runs, 0700) })
-			testkit.WriteFile(t, filepath.Join(runs, "legacy.json"), []byte(`{"agent_run_id":"legacy"}`), 0600)
+			boot, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			process, err := os.ReadFile("/proc/self/stat")
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := strings.Fields(string(process)[strings.LastIndex(string(process), ") ")+2:])[19]
+			for run, ticks := range map[string]string{"legacy": start, "stale": start + "0"} {
+				manifest := fmt.Sprintf(`{"agent_run_id":%q,"boot_id":%q,"pid":%d,"start_ticks":%s}`, run, strings.TrimSpace(string(boot)), os.Getpid(), ticks)
+				testkit.WriteFile(t, filepath.Join(runs, run+".json"), []byte(manifest), 0600)
+			}
 			switch version {
 			case 1:
 				// Token validation happens after opening the standalone writer.
@@ -71,9 +84,17 @@ func TestArchiveUpgrade(t *testing.T) {
 					t.Fatal(err)
 				}
 				code := `import os, signal, sys; os.rename(*sys.argv[1:]); os.kill(os.getpid(), signal.SIGKILL)`
-				if err = exec.Command("python3", "-B", "-c", code, path, archivedDB).Run(); err == nil ||
+				if err = exec.Command("python3", "-B", "-c", code, path, filepath.Join(dir, pendingArchive)).Run(); err == nil ||
 					err.(*exec.ExitError).Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
-					t.Fatalf("archive rename was not interrupted: %v", err)
+					t.Fatalf("archive staging was not interrupted: %v", err)
+				}
+				if err = publishPendingArchive(dir); err != nil {
+					t.Fatal(err)
+				}
+				// Try a writer before the original data directory is reopened.
+				if writer, err := Open(archive, DefaultLimits()); err == nil {
+					writer.Close()
+					t.Fatal("published archive opened for writing")
 				}
 			case 3:
 				// Leave a committed row exclusively in the legacy writer's WAL.
@@ -107,6 +128,15 @@ os._exit(0)
 				active, err := Open(dir, DefaultLimits())
 				if err != nil {
 					t.Fatal(err)
+				}
+				if err = active.prune(); err != nil {
+					t.Fatal(err)
+				}
+				if err = active.resourceContext(context.WithValue(ctx, runContextKey{}, "legacy"), pcommon.NewMap()); err != nil {
+					t.Fatalf("native OTLP rejected the live legacy registration: %v", err)
+				}
+				if active.RegisteredRun(ctx, "stale") {
+					t.Fatal("stale registration carried into the active store")
 				}
 				stats, err := Stats(ctx, active.db)
 				if closeErr := active.Close(); closeErr != nil {

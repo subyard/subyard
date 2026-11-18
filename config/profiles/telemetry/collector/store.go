@@ -151,6 +151,9 @@ func Open(dir string, limits Limits) (*Store, error) {
 	if err = sealArchives(dir); err != nil {
 		return fail(err)
 	}
+	if err = publishPendingArchive(dir); err != nil {
+		return fail(err)
+	}
 	path := filepath.Join(dir, databaseName)
 	db, version, err := openWriterDatabase(path)
 	if err != nil {
@@ -249,7 +252,7 @@ func initializeStore(db *sql.DB, dir string, key identityKey) error {
 	if _, err = tx.Exec("INSERT INTO metadata(key,value) VALUES('origin_id',?),('identity_key_verifier',?)", newID(), key.verifier()); err != nil {
 		return err
 	}
-	if err = recordInterruptedRuns(tx, dir, key.id); err != nil {
+	if err = recordInterruptedRuns(tx, dir, key); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", storeVersion)); err != nil {
@@ -534,8 +537,11 @@ func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error
 		return false, ErrStorage
 	}
 	producerRetry := e.local && !e.replay && e.Encoding == "json"
+	// An unsigned outbox retry can get a new fingerprint for the same payload.
+	legacyRetry := old.PolicyVersion != e.PolicyVersion && !e.replay && e.Encoding == "json" &&
+		e.OriginID == "producer:"+e.SourceID && samePayload(old, e)
 	if old.SourceID != e.SourceID || old.Encoding != e.Encoding ||
-		(!producerRetry && (old.Kind != e.Kind || old.PolicyVersion != e.PolicyVersion)) {
+		(!producerRetry && !legacyRetry && (old.Kind != e.Kind || old.PolicyVersion != e.PolicyVersion)) {
 		return false, errEventCollision
 	}
 	// The same signed input may project to a different kind after a policy
@@ -593,7 +599,12 @@ func (s *Store) prune() error {
 		}
 	}
 	for table, key := range map[string]string{"runs": "agent_run_id", "objects": "object_id", "allocations": "object_id"} {
-		if _, err = tx.Exec("DELETE FROM " + table + " WHERE NOT EXISTS(SELECT 1 FROM records r WHERE r.encoding='json' AND json_extract(r.body,'$." + key + "')=" + table + "." + key + ")"); err != nil {
+		query := "DELETE FROM " + table + " WHERE NOT EXISTS(SELECT 1 FROM records r WHERE r.encoding='json' AND json_extract(r.body,'$." + key + "')=" + table + "." + key + ")"
+		if table == "runs" {
+			// Carried registrations have no corresponding historical record.
+			query += " AND agent_run_id NOT IN (SELECT i.value FROM metadata m,json_each(m.value) i WHERE m.key='upgrade_interrupted_runs')"
+		}
+		if _, err = tx.Exec(query); err != nil {
 			return err
 		}
 	}

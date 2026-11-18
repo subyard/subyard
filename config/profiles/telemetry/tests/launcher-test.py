@@ -508,9 +508,21 @@ class LauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             target = root/'context.json'
+            code = '''
+import json, os, sys, time
+from pathlib import Path
+outbox = Path(os.environ['SUBYARD_TELEMETRY_DATA_DIR'])/'outbox'
+deadline = time.monotonic()+5
+while not any(json.loads(path.read_bytes())['record']['kind'] == 'process' for path in outbox.glob('*.json')):
+    if time.monotonic() >= deadline:
+        raise RuntimeError('standalone observer did not sample the workload')
+    time.sleep(.05)
+Path(sys.argv[1]).write_text(json.dumps({k:os.environ[k] for k in ("SUBYARD_AGENT_RUN_ID","SUBYARD_TASK_ID")}))
+raise SystemExit(23)
+'''
             command = [sys.executable, '-B', str(Path(launcher.__file__)), 'run', '--data-dir', str(root/'data'),
                        '--agent', 'other', '--scope-mode', 'partial', '--task-id', 'task', '--', sys.executable, '-c',
-                       'import json,os,sys; json.dump({k:os.environ.get(k) for k in ("SUBYARD_AGENT_RUN_ID","SUBYARD_TASK_ID")},open(sys.argv[1],"w")); raise SystemExit(23)', str(target)]
+                       code, str(target)]
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             self.assertEqual(result.returncode, 23, result.stderr)
             value = json.loads(target.read_text())
@@ -518,8 +530,11 @@ class LauncherTest(unittest.TestCase):
             self.assertTrue(value['SUBYARD_AGENT_RUN_ID'])
             events = [records.read_outbox(path) for path in (root/'data/outbox').glob('*.json')]
             self.assertTrue(any(event['kind'] == 'run' and event['body'].get('state') == 'starting' for event in events))
-            self.assertEqual(launcher.observe(root/'data', once=True), 0)
-            self.assertFalse(list((root/'data/runs-v4').glob('*.json')))
+            manifest = root/'data/runs-v4'/(value['SUBYARD_AGENT_RUN_ID']+'.json')
+            deadline = time.monotonic()+5
+            while manifest.exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertFalse(manifest.exists())
 
     def test_native_binding_does_not_persist_argv_or_claim_shared_backend(self):
         arguments = launcher.native_arguments('codex', ['codex', 'exec', 'PRIVATE_PROMPT'], 'run')

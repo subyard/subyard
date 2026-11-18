@@ -27,6 +27,14 @@ def safe(path):
             raise ValueError('non-directory managed parent: ' + str(parent))
 
 
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def mkdir(path, mode, uid, gid):
     safe(path)
     if path.exists():
@@ -42,38 +50,27 @@ def mkdir(path, mode, uid, gid):
         current.mkdir(mode=mode)
         current.chmod(mode)
         os.chown(current, uid, gid)
+        sync_directory(current)
+        sync_directory(current.parent)
 
 
 def write(path, data, mode, uid, gid, staging=None):
     safe(path)
-    fd, temporary = tempfile.mkstemp(prefix='.skill-', dir=staging or path.parent)
-    try:
-        with os.fdopen(fd, 'wb') as stream:
+    with tempfile.TemporaryDirectory(prefix='.staging-', dir=staging or path.parent) as directory:
+        temporary = Path(directory)/'content'
+        with temporary.open('xb') as stream:
             os.fchmod(stream.fileno(), mode)
             os.fchown(stream.fileno(), uid, gid)
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        sync_directory(path.parent)
 
 
 def metadata(path, mode, uid, gid):
     st = path.lstat()
     return stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == mode and (st.st_uid, st.st_gid) == (uid, gid)
-
-
-def staging_directory(parent, uid, gid):
-    path = parent / '.staging'
-    mkdir(path, 0o700, uid, gid)
-    st = path.stat()
-    if (st.st_uid, st.st_gid) != (uid, gid) or stat.S_IMODE(st.st_mode) != 0o700:
-        raise ValueError('unsafe skill staging directory')
-    for entry in path.iterdir():
-        entry.unlink()
-    return path
 
 
 def validate_sources(result):
@@ -213,24 +210,24 @@ def delivery(args):
         return 10 if changed else 0
     mkdir(state, 0o700, owner, os.getegid())
     mkdir(canonical, 0o755, owner, os.getegid())
-    receipt_staging = staging_directory(state, owner, os.getegid())
-    skill_staging = staging_directory(canonical, owner, os.getegid())
     # Record the union before writes; retries recognize files installed just
     # before an interruption without claiming any unrecognized path.
     pending = dict(desired, skills={name: dict(old['skills'].get(name, {}), **desired['skills'].get(name, {})) for name in names})
     if names:
-        write(receipt_path, (json.dumps(pending, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), receipt_staging)
+        write(receipt_path, (json.dumps(pending, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), state)
     for name in sorted(names):
         directory = canonical / name
         for adapter in adapters + ('.codex/skills',):
             link = args.home / adapter / name
             if os.path.lexists(link) and (name not in wanted or adapter not in adapters):
                 link.unlink()
+                sync_directory(link.parent)
         for relative in old['skills'].get(name, {}):
             path = directory / relative
             if relative not in wanted.get(name, {}) and path.exists():
                 safe(path)
                 path.unlink()
+                sync_directory(path.parent)
         if name in wanted:
             mkdir(directory, 0o755, owner, os.getegid())
             directory.chmod(0o755)
@@ -244,22 +241,26 @@ def delivery(args):
                     parent.chmod(0o755)
                     os.chown(parent,owner,os.getegid())
                 if not path.exists() or not metadata(path, 0o644, owner, os.getegid()) or path.read_bytes() != data:
-                    write(path, data, 0o644, owner, os.getegid(), skill_staging)
+                    write(path, data, 0o644, owner, os.getegid(), canonical)
             for adapter in adapters:
                 link = args.home / adapter / name
                 mkdir(link.parent, 0o755, args.uid, args.gid)
                 if not os.path.lexists(link):
                     link.symlink_to(directory)
                 os.chown(link, args.uid, args.gid, follow_symlinks=False)
+                sync_directory(link.parent)
         elif directory.exists():
             for child in sorted(directory.rglob('*'), reverse=True):
                 if child.is_dir():
                     child.rmdir()
+                    sync_directory(child.parent)
             directory.rmdir()
+            sync_directory(canonical)
     if wanted:
-        write(receipt_path, (json.dumps(desired, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), receipt_staging)
+        write(receipt_path, (json.dumps(desired, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), state)
     elif receipt_path.exists():
         receipt_path.unlink()
+        sync_directory(receipt_path.parent)
     return 0
 
 

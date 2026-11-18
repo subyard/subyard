@@ -58,14 +58,39 @@ class Delivery(unittest.TestCase):
 
     def test_apply_recovers_after_kill_before_skill_rename(self):
         target = self.installed/'SKILL.md'
+        state = self.root/'var/lib/subyard/agent-skills'
+        staging_roots = (self.installed.parent, state)
+        for root in staging_roots:
+            (root/'.staging').mkdir(mode=0o700, parents=True)
+            (root/'.staging').chmod(0o700)
+            (root/'.staging/notes').write_text('operator notes')
+        self.installed.parent.chmod(0o755)
+        state.chmod(0o700)
         command = ['apply', '--provider', self.args.provider, '--root', str(self.root),
                    '--home', str(self.home), '--uid', str(self.args.uid), '--gid', str(self.args.gid),
                    '--source', str(self.source)]
         code = """
 import os, runpy, signal, sys
+from pathlib import Path
 script, target, *args = sys.argv[1:]
+state = Path(args[args.index('--root')+1])/'var/lib/subyard/agent-skills'
+receipt = state/'synthetic.json'
+sync = os.fsync
+receipt_published = receipt_synced = False
+def fsync(fd):
+    global receipt_synced
+    sync(fd)
+    if receipt_published and os.readlink('/proc/self/fd/'+str(fd)) == str(state):
+        receipt_synced = True
+os.fsync = fsync
 def interrupt(event, values):
-    if event == 'os.rename' and values[1] == target:
+    global receipt_published
+    if event != 'os.rename':
+        return
+    if values[1] == str(receipt):
+        receipt_published = True
+    if values[1] == target:
+        assert receipt.exists() and receipt_synced
         os.kill(os.getpid(), signal.SIGKILL)
 sys.addaudithook(interrupt)
 sys.argv = [script, *args]
@@ -74,13 +99,17 @@ runpy.run_path(script, run_name='__main__')
         script = str(SOURCE/'deliver.py')
         result = subprocess.run([sys.executable, '-B', '-c', code, script, str(target), *command], timeout=5)
         self.assertEqual(result.returncode, -signal.SIGKILL)
-        staging = self.installed.parent/'.staging'
-        self.assertEqual(len(list(staging.iterdir())), 1)
+        staging, = self.installed.parent.glob('.staging-*')
+        unfinished = staging/'content'
+        previous = unfinished.read_bytes()
         self.assertFalse(target.exists())
         self.assertEqual(self.run_mode('check'), 10)
         subprocess.run([sys.executable, '-B', script, *command], check=True, timeout=5)
         self.assertEqual(target.read_bytes(), (self.skill/'SKILL.md').read_bytes())
-        self.assertFalse(list(staging.iterdir()))
+        self.assertEqual(unfinished.read_bytes(), previous)
+        self.assertEqual(list(self.installed.parent.glob('.staging-*')), [staging])
+        for root in staging_roots:
+            self.assertEqual((root/'.staging/notes').read_text(), 'operator notes')
         self.assertEqual(self.run_mode('check'), 0)
         operator = self.installed/'.skill-operator'
         operator.write_text('operator content')

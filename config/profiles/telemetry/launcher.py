@@ -22,6 +22,12 @@ import records
 
 
 RUNS = 'runs-v4'
+DEFAULT_DATA_DIR = '/var/lib/subyard/telemetry'
+GAP_MARKERS = (
+    ('health', 'run_manifest_capacity'),
+    ('startup-health', 'run_startup_unavailable'),
+    ('observer-health', 'scope_observation_unavailable'),
+)
 MAX_RUNS = 4096
 MAX_RUN_BYTES = 16*1024*1024
 MAX_RUN_PAYLOAD = 16384
@@ -46,18 +52,42 @@ def manifest_lock(root):
         yield
 
 
-def manifest_health(data_dir, root, failed=False):
-    path = root/'health'
-    health = records.read_private(path) if path.exists() else None
-    if failed:
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        health = health or dict(event_id=str(uuid.uuid4()), first_time=now, count=0)
-        health.update(last_time=now, count=min(2**63-1, health['count']+1))
-        records.atomic_json(path, health)
-    elif health and records.emit(data_dir, 'gap', dict(reason='run_manifest_capacity', quality='partial',
+def increment_health(path):
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        health = records.read_private(path)
+    except FileNotFoundError:
+        health = dict(event_id=str(uuid.uuid4()), first_time=now, count=0)
+    health.update(last_time=now, count=min(2**63-1, health['count']+1))
+    records.atomic_json(path, health)
+
+
+def publish_health(data_dir, path, reason, retire=True):
+    try:
+        health = records.read_private(path)
+    except FileNotFoundError:
+        return True
+    if not records.emit(data_dir, 'gap', dict(reason=reason, quality='partial',
             missing=health['count'], coverage_start=health['first_time'], coverage_end=health['last_time']),
             event_id=health['event_id'], source_time=health['first_time']):
+        return False
+    if retire:
         path.unlink()
+    return True
+
+
+def note_gap(data_dir, marker):
+    try:
+        root = records.private_directory(records.private_directory(data_dir)/RUNS)
+        with manifest_lock(root):
+            increment_health(root/marker)
+            fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    except (OSError, ValueError, KeyError, TypeError):
+        print('Telemetry coverage gap could not be saved', file=sys.stderr, flush=True)
 
 
 def admit_manifest(data_dir, run, reserve=False):
@@ -74,17 +104,18 @@ def admit_manifest(data_dir, run, reserve=False):
             value.update(manifest_state='reserved', launcher_pid=os.getpid(),
                          launcher_start_ticks=processes.start_ticks(os.getpid()))
         size = len((json.dumps(value, sort_keys=True, separators=(',', ':'))+'\n').encode())
+        health = root/'health'
         with manifest_lock(root):
             path = root/(identity+'.json')
             if size > MAX_RUN_PAYLOAD or path.exists() or path.is_symlink():
-                manifest_health(data_dir, root, True)
+                increment_health(health)
                 return False
             count = total = 0
             deadline = time.monotonic()+.1
             with os.scandir(root) as entries:
                 for scanned, item in enumerate(entries, 1):
                     if scanned > MAX_RUNS+16 or time.monotonic() > deadline:
-                        manifest_health(data_dir, root, True)
+                        increment_health(health)
                         return False
                     if not item.name.endswith('.json'):
                         continue
@@ -99,14 +130,14 @@ def admit_manifest(data_dir, run, reserve=False):
                     total += MAX_RUN_PAYLOAD if entry.get('manifest_state') == 'reserved' else length
                     count += 1
                     if count >= MAX_RUNS or total+(MAX_RUN_PAYLOAD if reserve else size) > MAX_RUN_BYTES:
-                        manifest_health(data_dir, root, True)
+                        increment_health(health)
                         return False
             if count+1 > MAX_RUNS or (MAX_RUN_PAYLOAD if reserve else size)+total > MAX_RUN_BYTES:
-                manifest_health(data_dir, root, True)
+                increment_health(health)
                 return False
             records.atomic_json(path, value)
             try:
-                manifest_health(data_dir, root)
+                publish_health(data_dir, health, 'run_manifest_capacity')
             except (OSError, ValueError, KeyError):
                 pass  # The admitted snapshot remains durable if health replay fails.
         return True
@@ -325,14 +356,15 @@ def removed_scope(run):
     return None
 
 
-def observe(data_dir, once=False, interval=5):
+def observe(data_dir, once=False, interval=5, standalone_lock=None):
+    root = records.private_directory(Path(data_dir)/RUNS)
     samplers = {}
     sampled_sources = 0
     source_thread = None
     scan = None
     deferred = []
+    legacy_health_pending = True
     while True:
-        root = records.private_directory(Path(data_dir)/RUNS)
         pending = []
         total = 0
         batch, deferred = deferred, []
@@ -367,9 +399,26 @@ def observe(data_dir, once=False, interval=5):
                 pending.append((path, run))
             except (OSError, ValueError):
                 continue
+        if legacy_health_pending:
+            # The frozen marker keeps its original coverage interval and event
+            # identity. Restarts can safely retry the same event.
+            try:
+                legacy = Path(data_dir)/'runs'
+                info = legacy.lstat()
+                if stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o500 and info.st_uid == os.getuid():
+                    legacy_health_pending = not publish_health(data_dir, legacy/'health', 'run_manifest_capacity', retire=False)
+            except FileNotFoundError:
+                legacy_health_pending = False
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         try:
             with manifest_lock(root):
-                manifest_health(data_dir, root)
+                for marker, reason in GAP_MARKERS:
+                    publish_health(data_dir, root/marker, reason)
+                if standalone_lock is not None and not any(root.glob('*.json')):
+                    # Release before a new admission can race the idle exit.
+                    fcntl.flock(standalone_lock, fcntl.LOCK_UN)
+                    return 0
         except (OSError, ValueError, KeyError, TypeError):
             pass
         if not pending and not batch and scan is None and (Path(data_dir)/'drain.json').exists():
@@ -419,7 +468,7 @@ def observe(data_dir, once=False, interval=5):
             if scan is not None:
                 scan.close()
             return 0
-        if time.monotonic()-sampled_sources >= 30:
+        if standalone_lock is None and time.monotonic()-sampled_sources >= 30:
             if source_thread is None or not source_thread.is_alive():
                 def poll_sources():
                     try:
@@ -431,6 +480,35 @@ def observe(data_dir, once=False, interval=5):
                 source_thread.start()
             sampled_sources = time.monotonic()
         time.sleep(interval)
+
+
+def run_manager(data_dir, interval, standalone=False):
+    root = records.private_directory(Path(data_dir)/RUNS)
+    fd = os.open(root/'manager.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'rb') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if standalone else 0))
+        except BlockingIOError:
+            if not standalone:
+                raise
+            return 0
+        return observe(data_dir, interval=interval, standalone_lock=lock if standalone else None)
+
+
+def start_standalone_observer(data_dir):
+    pid = os.fork()
+    if pid:
+        os.waitpid(pid, 0)
+        return
+    try:
+        os.setsid()
+        if os.fork() == 0:
+            with open(os.devnull, 'r+b') as null:
+                for fd in (0, 1, 2):
+                    os.dup2(null.fileno(), fd)
+            run_manager(data_dir, interval=1, standalone=True)
+    finally:
+        os._exit(0)
 
 
 def gated_child(command, env):
@@ -490,7 +568,8 @@ def launch(args):
             return 2
         records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'managed_scope_unavailable', 'quality': 'partial'})
     record = {**run, 'state': 'starting', 'scope_quality': 'managed' if group else 'partial'}
-    records.emit(data_dir, 'run', record)
+    if not records.emit(data_dir, 'run', record):
+        note_gap(data_dir, 'startup-health')
     print('agent_run_id='+run['agent_run_id'], file=sys.stderr, flush=True)
     if group:
         try:
@@ -583,6 +662,11 @@ def launch(args):
     finally:
         if write_fd >= 0:
             os.close(write_fd)
+    if tracked and group is None and data_dir != Path(DEFAULT_DATA_DIR):
+        try:
+            start_standalone_observer(data_dir)
+        except OSError:
+            note_gap(data_dir, 'observer-health')
     previous = {}
     def forward(signum, frame):
         try:
@@ -605,7 +689,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='verb', required=True)
     run = sub.add_parser('run')
-    run.add_argument('--data-dir', default=os.environ.get('SUBYARD_TELEMETRY_DATA_DIR', '/var/lib/subyard/telemetry'))
+    run.add_argument('--data-dir', default=os.environ.get('SUBYARD_TELEMETRY_DATA_DIR', DEFAULT_DATA_DIR))
     run.add_argument('--agent', required=True, choices=['codex', 'claude', 'other'])
     run.add_argument('--agent-version', default='unknown')
     run.add_argument('--scope-mode', choices=['auto', 'require', 'partial'], default='auto')
@@ -614,7 +698,7 @@ def main():
         run.add_argument('--'+name)
     run.add_argument('command', nargs=argparse.REMAINDER)
     manager = sub.add_parser('manager')
-    manager.add_argument('--data-dir', default='/var/lib/subyard/telemetry')
+    manager.add_argument('--data-dir', default=DEFAULT_DATA_DIR)
     manager.add_argument('--delegate', action='store_true')
     manager.add_argument('--sample-interval', type=float, default=5)
     args = parser.parse_args()
@@ -628,11 +712,7 @@ def main():
             records.emit(args.data_dir, 'gap', {'reason': 'delegation_unavailable', 'quality': 'partial'})
     if not 0.1 <= args.sample_interval <= 300:
         parser.error('sample interval must be between 0.1 and 300 seconds')
-    root = records.private_directory(Path(args.data_dir)/RUNS)
-    fd = os.open(root/'manager.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, 'rb') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        return observe(args.data_dir, interval=args.sample_interval)
+    return run_manager(args.data_dir, args.sample_interval)
 
 
 if __name__ == '__main__':

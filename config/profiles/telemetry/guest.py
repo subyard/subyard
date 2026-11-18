@@ -393,7 +393,9 @@ class Runtime:
                 with open(f'/proc/self/fd/{fd}', 'rb') as handle:
                     os.fchmod(handle.fileno(), 0)
                     os.fsync(handle.fileno())
-            self.stop_lock_users(info)
+            if self.stop_lock_users(info):
+                from launcher import note_gap
+                note_gap(self.data, 'observer-health')
         finally:
             os.close(fd)
         runs = self.data/'runs'
@@ -410,7 +412,12 @@ class Runtime:
 
     def stop_lock_users(self, lock):
         script = os.fsencode(self.library/'launcher.py')
-        for process in Path('/proc').iterdir():
+        unknown = False
+        try:
+            processes = list(Path('/proc').iterdir())
+        except OSError:
+            return True
+        for process in processes:
             if not process.name.isdecimal():
                 continue
             try:
@@ -418,6 +425,9 @@ class Runtime:
                     continue
                 pidfd = os.pidfd_open(int(process.name))
             except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                unknown = True
                 continue
             try:
                 for entry in (process/'fd').iterdir():
@@ -430,12 +440,18 @@ class Runtime:
                         exited = select.poll()
                         exited.register(pidfd, select.POLLIN)
                         if not exited.poll(5000):
-                            raise TimeoutError('legacy observer did not stop')
+                            unknown = True
                         break
             except (FileNotFoundError, ProcessLookupError):
                 pass
+            except OSError:
+                # Ptrace access to /proc/PID/fd can require a matching GID.
+                # Leave an unidentified process alone. The fence still blocks
+                # its legacy writes, even when it holds the retired lock open.
+                unknown = True
             finally:
                 os.close(pidfd)
+        return unknown
 
     def prepare_store(self):
         account = [] if self.uid == os.getuid() else ['--reuid', str(self.uid), '--regid', str(self.gid), '--clear-groups']
@@ -476,6 +492,16 @@ class Runtime:
         finally:
             os.close(directory)
 
+    def publish_asset(self, path, saved):
+        content, mode = self.assets[path]
+        before = self.asset_snapshot(path)
+        if before != content:
+            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
+                raise ValueError('managed asset changed')
+            native.publish(path, content, before, max_bytes=self.asset_limit(path), mode=mode)
+        elif stat.S_IMODE(path.stat().st_mode) != mode:
+            os.chmod(path, mode)
+
     def apply(self):
         installed = self.owned()
         if (self.selected or installed) and native.agent_config_diagnostics(self.home, self.agents, getattr(self, 'managed_agents', ())):
@@ -514,6 +540,8 @@ class Runtime:
         if receipt is not None and receipt != PUBLISHING and not re.fullmatch(START_READY+b'[0-9a-f]{64}\n', receipt):
             raise ValueError('invalid telemetry publication receipt')
         preparing = changed or not installed or (receipt is not None and receipt != ready)
+        launch_assets = [self.library/name for name in ('record-policy.txt', 'records.py', 'processes.py', 'launcher.py')]
+        launch_assets.append(self.commands/'subyard-telemetry-run')
         if preparing:
             if receipt != PUBLISHING:
                 native.publish(publication, PUBLISHING, receipt)
@@ -522,20 +550,20 @@ class Runtime:
                 # A reboot during publication must not auto-start old units.
                 systemctl('disable', *stop)
                 systemctl('stop', *stop)
+            # Switch the launch entry point before retiring the old manifest
+            # directory and producer interface. New runs can spool while the
+            # collector is down, including when apply is interrupted.
+            for path in launch_assets:
+                self.publish_asset(path, saved)
             self.as_developer(self.quiesce_legacy_observers)
             self.as_developer(self.fence_outbox)
         elif receipt is None:
             stop = [unit for unit, fields in before_states.items() if not self.running_no_new_privs(fields)]
             if stop:
                 systemctl('stop', *stop)
-        for path, (content, mode) in self.assets.items():
-            before = self.asset_snapshot(path)
-            if before != content:
-                if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
-                    raise ValueError('managed asset changed')
-                native.publish(path, content, before, max_bytes=self.asset_limit(path), mode=mode)
-            elif stat.S_IMODE(path.stat().st_mode) != mode:
-                os.chmod(path, mode)
+        for path in self.assets:
+            if not preparing or path not in launch_assets:
+                self.publish_asset(path, saved)
         for path, mode in self.retained.items():
             if self.asset_snapshot(path) is not None:
                 os.chmod(path, mode)

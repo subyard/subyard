@@ -160,9 +160,11 @@ held in an indefinite WAL reader transaction.
 
 ### Pre-upgrade archive
 
-The profile upgrade stops the collector, the run manager, and legacy detached
-observers while agent workloads keep running. It fences the outbox, moves the
-schema 1–3 database to
+The profile upgrade stops the collector, the run manager, and identified legacy detached
+observers while agent workloads keep running. An unreadable observer is recorded as a
+coverage gap. The upgrade installs the new launcher before fencing the outbox, so
+new runs can queue their registration or save a gap marker while the collector is down.
+It seals the schema 1–3 database read-only before moving it to
 `/var/lib/subyard/telemetry/archive/telemetry.sqlite` and initializes an empty
 schema 4 database at `/var/lib/subyard/telemetry/telemetry.sqlite` before
 starting the updated services. An interrupted upgrade resumes on retry. A
@@ -180,9 +182,10 @@ indefinitely.
 
 Runs still under observation at the stop keep their recorded samples.
 `show-run` marks them as `interrupted_by_upgrade` and reports a missing final
-run sample. The new run manager observes new runs. Queued records are retained for
-sanitized delivery to the active store, where those runs carry the same
-interruption marker.
+run sample. The new store carries a registration for each legacy manifest whose
+agent process is still alive, so native OTLP can continue under the same run ID.
+The new run manager observes new runs and reports any pending legacy manifest
+capacity gap. Queued records are retained for sanitized delivery to the active store.
 
 ```sh
 "$collector" stats --data-dir "$data/archive"
@@ -478,6 +481,8 @@ Configure trusted senders for HTTP/protobuf `/v1/logs`, `/v1/metrics` and
 `/v1/traces` with their private Bearer credential. A standalone receiver can retain
 native events without Subyard; full process/resource attribution still needs the
 explicit local producers and available delegation/owner capabilities.
+Partial launches with a separate `--data-dir` start a local observer when no
+manager holds that directory's lock. The observer exits after pending manifests drain.
 
 A nested devcontainer has a different loopback network. Explicitly mount only
 the collector's private Unix socket at an agreed container path and run:

@@ -12,8 +12,9 @@ Names are globally unique across providers.
 `/usr/local/share/subyard/skills/`, with mode-0644 files and mode-0755 directories.
 Each provider has a protected mode-0600 ownership receipt in
 `/var/lib/subyard/agent-skills/`. Receipts list only managed content paths and hashes.
-Atomic writes stage in private installer directories alongside the receipt and
-skill roots' contents. Retries clean the staging directories.
+Each atomic write uses a fresh private staging directory on the destination
+filesystem. The installer syncs the pending receipt before publishing skill
+content and leaves pre-existing staging directories alone.
 Writes to managed content repair drift; unexpected files, foreign links and symlinked
 parents cause a diagnostic before the provider's artifacts change. User skills remain
 outside these receipts.

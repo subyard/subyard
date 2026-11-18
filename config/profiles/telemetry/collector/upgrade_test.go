@@ -275,6 +275,52 @@ assert records.emit(root, 'relation', dict(session_id='fixture-session', agent_r
 	}
 }
 
+func TestUnsignedOutboxRelationDrainsAfterPolicyChange(t *testing.T) {
+	ctx := context.Background()
+	dir := testkit.TempDir(t)
+	s, err := Open(dir, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := record("relation", map[string]any{
+		"agent_run_id": "legacy-run", "correlation_id": "legacy-correlation", "source": "acquire-correlation",
+	})
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outbox := filepath.Join(dir, "outbox")
+	path := filepath.Join(outbox, "legacy-relation.json")
+	testkit.WriteFile(t, path, data, 0600)
+	before := DefaultPolicy()
+	if err = s.ingest(ctx, []Record{r}, before); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(dir, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	after := before
+	after.SpanNames = nil
+	if policyFingerprint(after) == policyFingerprint(before) {
+		t.Fatal("fixture did not change policy")
+	}
+	if err = restarted.ingestOutbox(ctx, outbox, after); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("committed legacy relation still in the outbox: %v", err)
+	}
+	r.Body["correlation_id"] = "different-correlation"
+	if err = restarted.ingest(ctx, []Record{r}, after); !errors.Is(err, errEventCollision) {
+		t.Fatalf("different legacy payload must still collide: %v", err)
+	}
+}
+
 func TestSessionPolicyAcrossProducerIngestAndReplay(t *testing.T) {
 	ctx := context.Background()
 	p := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
