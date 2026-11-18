@@ -30,14 +30,14 @@ producer = ('import sys\nprint("x" * 65535)\n'
 result = subprocess.run(['bash', '-c', capture_helper + '\nandroid_capture_evidence "$@"',
                          '_', sys.executable, '-c', producer],
                         capture_output=True, text=True, timeout=10)
-assert result.returncode == 0 and result.stderr == 'x' * 65535 + '\n\ncapture_exit=23\n', result.stderr[-100:]
+assert result.returncode == 23 and result.stderr == 'x' * 65535 + '\n\ncapture_exit=23\n', result.stderr[-100:]
 
 # A token straddling the input cap must not appear even in part.
 producer = 'print("kept"); print("x" * (65536 - 5 - 33), "a" * 64); raise SystemExit(23)'
 result = subprocess.run(['bash', '-c', capture_helper + '\nandroid_capture_evidence "$@"',
                          '_', sys.executable, '-c', producer],
                         capture_output=True, text=True, timeout=10)
-assert result.returncode == 0 and result.stderr == 'kept\n\ncapture_exit=23\n', result.stderr[-100:]
+assert result.returncode == 23 and result.stderr == 'kept\n\ncapture_exit=23\n', result.stderr[-100:]
 
 
 # Run the actual manifest validator against semantic output variations, not SDK
@@ -97,11 +97,12 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
         adb.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n'
                        'printf "guest 12:34:56.789 192.0.2.1 2001:db8::1 2001:db8:0:1:2:3:4:5 aa:bb:cc:dd:ee:ff token=canary\\n"\n'
                        'if [ "$ADB_EXIT" != 124 ]; then printf "1.1.1.1\\n%.0s" {1..10000}; fi\n'
-                       'if [ "$ADB_EXIT" = 124 ] && [ "${2:-}" = dumpsys ]; then sleep 30; fi\n'
+                       'if [ "$1" = -L ]; then exit 0; fi\n'
+                       'if [ "$ADB_EXIT" = 124 ] && [ "${6:-}" = dumpsys ]; then sleep 30; fi\n'
                        'exit "$ADB_EXIT"\n')
         adb.chmod(0o755)
         script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "exit $2"); '
-                  'export ANDROID_SDK_ROOT="$work" SUBYARD_EMU_SLOT=001 SUBYARD_EMU_GENERATION=2\n'
+                  'export ANDROID_SDK_ROOT="$work" ANDROID_ADB_SERVER_PORT=5038 ADB_SERVER_SOCKET=localfilesystem:/fixture.sock\n'
                   'android-broker() { shift 10; local result=0; "$@" || result=$?; '
                   'echo released >> "$CALLS"; return "$result"; }\n' + capture_helper + connected)
         calls = directory / 'calls'
@@ -116,12 +117,12 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
         else:
             assert all('android-gradle evidence: ' + section in evidence
                        for section in ('logcat', 'meminfo', 'lowmemory'))
-            assert len(evidence) < 3 * 66000 and 'emulator' not in evidence
+            assert len(evidence) < (6 if adb_exit == 124 else 3) * 66000 and 'emulator' not in evidence
             assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
                                                           'aa:bb:cc:dd:ee:ff', 'canary'))
             assert '12:34:56.789' in evidence
             for section in ('logcat', 'meminfo', 'lowmemory'):
-                payload = evidence.split(f'android-gradle evidence: {section}\n', 1)[1]
+                payload = evidence.split(f'android-gradle evidence: {section} transport=tcp\n', 1)[1]
                 payload, marker, remainder = payload.partition('\ncapture_exit=')
                 assert marker and remainder.splitlines()[0] == str(adb_exit)
                 assert len(payload.encode()) <= 65536
@@ -130,6 +131,13 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
             observed = calls.read_text()
             assert 'logcat -b main -b system -b crash -d -t 512' in observed
             assert 'shell dumpsys meminfo' in observed and 'dmesg; logcat' in observed
+            assert observed.count('-H 127.0.0.1 -P 5038 ') == 3
+            assert observed.count('-L localfilesystem:/fixture.sock ') == (3 if adb_exit == 124 else 0)
+            for section in ('logcat', 'meminfo', 'lowmemory'):
+                unix = f'android-gradle evidence: {section} transport=unix'
+                assert (unix in evidence) == (adb_exit == 124)
+                if adb_exit == 124:
+                    assert evidence.split(unix, 1)[1].split('capture_exit=', 1)[1].splitlines()[0] == '0'
             assert observed.splitlines()[-1] == 'released'
 
 

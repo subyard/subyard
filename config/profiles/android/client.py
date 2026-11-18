@@ -186,11 +186,16 @@ class TcpRelay(socketserver.ThreadingTCPServer):
 
     def verify_request(self, request, client_address):
         # Loopback is shared by every local account; accept only this client's own uid.
-        if loopback_peer_uid(request) == os.getuid():
+        peer_uid = loopback_peer_uid(request)
+        expected_uid = os.getuid()
+        if peer_uid == expected_uid:
             return True
         if not self.rejected:
             self.rejected = True
-            print('Android ADB relay: refused a loopback connection owned by another account', file=sys.stderr)
+            print('Android ADB relay: refused a loopback connection owned by another account '
+                  f'peer_uid={peer_uid if peer_uid is not None else "unknown"} expected_uid={expected_uid} '
+                  f'peer_port={client_address[1]} relay_port={self.server_address[1]} time={time.time():.3f}',
+                  file=sys.stderr)
         return False
 
 
