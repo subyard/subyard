@@ -21,7 +21,7 @@ func TestTOMLMaterializationPreservesRuntimeFields(t *testing.T) {
 	h.format = "toml"
 	desired := []byte("approval_policy = 'on-request'\nsandbox_mode = 'danger-full-access'\n")
 	original := string(desired) + "# Runtime-owned additions\n[hooks]\nenabled = true\n[projects.sample]\ntrust_level = 'trusted'\n[tui]\nnotifications = true\n"
-	h.writeDestination(t, original)
+	testkit.WriteFile(t, h.destination, []byte(original), 0o644)
 	h.apply(t, desired)
 	first := h.observe(t, desired)
 	if !first.Converged {
@@ -57,6 +57,63 @@ func TestTOMLMaterializationPreservesRuntimeFields(t *testing.T) {
 	baseline, _ := os.ReadFile(h.baselinePath(t))
 	if bytes.Contains(baseline, []byte("on-request")) || bytes.Contains(baseline, []byte("projects")) {
 		t.Fatal("baseline captured runtime fields or configuration values")
+	}
+}
+
+func TestMaterializationPreservesPrivateDocumentMode(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = format
+			original, desired := []byte(`{"managed":false}`), []byte(`{"managed":true}`)
+			if format == "toml" {
+				original, desired = []byte("managed = false\n"), []byte("managed = true\n")
+			}
+			testkit.WriteFile(t, h.destination, original, 0o600)
+			for range 2 {
+				h.apply(t, desired)
+				info, err := os.Stat(h.destination)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := info.Mode().Perm(); got != 0o600 {
+					t.Fatalf("mode = %04o, want 0600", got)
+				}
+			}
+		})
+	}
+}
+
+func TestMaterializationChecksAndRepairsRegisteredContribution(t *testing.T) {
+	h := newGuestHarness(t)
+	template := []byte(`{"settings":{"public":true}}`)
+	h.apply(t, template)
+	state := filepath.Join(testkit.TempDir(t), "owner.json")
+	testkit.WriteFile(t, state, []byte(`{"schema":1,"fields":{"flag":{"managed":"fixture-value"}}}`), 0o600)
+	key := strings.TrimSuffix(h.baselinePath(t), ".json")
+	reference, err := json.Marshal(map[string]string{"receipt": state, "path": "/fields", "section": "settings"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, key+".contribution", reference, 0o600)
+	testkit.WriteFile(t, h.destination, []byte("[broken"), 0o644)
+	if h.observe(t, template).Converged {
+		t.Fatal("owned, damaged document reported current")
+	}
+	h.apply(t, template)
+	if got := h.readDestination(t); !jsonEqual(got, map[string]any{"settings": map[string]any{"public": true, "flag": "fixture-value"}}) {
+		t.Fatal("repair did not restore both contributors")
+	}
+	before := snapshotMaterialization(t, h.root)
+	conflict := []byte(`{"settings":{"flag":"template-value"}}`)
+	for _, mode := range []string{ModeObserve, ModeApply} {
+		stderr, err := h.run(conflict, mode)
+		if err == nil || ContributionConflict(ports.InstanceExecResult{ExitCode: 2, Stderr: []byte(stderr)}, nil) != "configuration contribution conflicts at /settings/flag" {
+			t.Fatalf("%s did not return a field-only conflict: %v %q", mode, err, stderr)
+		}
+	}
+	if !jsonEqual(snapshotMaterialization(t, h.root), before) {
+		t.Fatal("a refused contribution conflict changed materialization state")
 	}
 }
 
@@ -686,7 +743,7 @@ type guestHarness struct {
 
 func newGuestHarness(t *testing.T) guestHarness {
 	t.Helper()
-	root := t.TempDir()
+	root := testkit.TempDir(t)
 	home := filepath.Join(root, "home", "dev")
 	if err := os.MkdirAll(filepath.Join(home, ".agent"), 0o755); err != nil {
 		t.Fatal(err)
@@ -1572,7 +1629,7 @@ func TestStaleReleaseRecordDoesNotChangeOrdinaryRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, file_mode)"
+	needle := "    atomic_write(destination, payload, uid, file_mode, gid)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1598,7 +1655,7 @@ func TestInterruptedRetirementStillRefusesChangedOwnedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, file_mode)"
+	needle := "    atomic_write(destination, payload, uid, file_mode, gid)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1639,7 +1696,7 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			needle := "    atomic_write(destination, payload, uid, file_mode)"
+			needle := "    atomic_write(destination, payload, uid, file_mode, gid)"
 			injected := "    raise MaterializationError(\"synthetic interruption\")\n" + needle
 			if stage == "after" {
 				injected = needle + "\n    raise MaterializationError(\"synthetic interruption\")"

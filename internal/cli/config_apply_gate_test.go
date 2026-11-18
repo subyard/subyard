@@ -50,25 +50,17 @@ func (fixture *sampleRepairPlatformFixture) ObserveProfileRuntimes(context.Conte
 	return map[string]ports.RuntimeObservation{"sample-runtime": observation}, nil
 }
 
-func TestConfigApplyRepairAdmitsOnlySelectedPendingInputs(t *testing.T) {
-	for _, scenario := range []string{"pending", "stale", "pending neighbor"} {
-		t.Run(scenario, func(t *testing.T) {
-			fixture := newConfigApplyRepairFixture(t, scenario == "pending neighbor")
-			diagnostics := ports.RuntimeDiagnostics{{Parameter: "sample.input.invalid", Installed: "changed", Desired: "current"}}
-			state := ports.RuntimeObservation{State: ports.RuntimeStatePending, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Diagnostics: &diagnostics}
-			if scenario == "stale" {
-				state.State = ports.RuntimeStateStale
-			}
-			platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &state}
-			for stage := range platform.converged {
-				platform.converged[stage] = true
-			}
-			fixture.cli.options.InitPlatform = platform
-			permit, err := fixture.cli.prepareConfigApplyRepair(context.Background(), "default", false, fixture.outcome)
-			if err != nil || (permit != nil) != (scenario == "pending") {
-				t.Fatalf("pending repair permit=%#v err=%v", permit, err)
-			}
-		})
+func TestConfigApplyRepairRefusesIndependentProfileDrift(t *testing.T) {
+	fixture := newConfigApplyRepairFixture(t, false)
+	state := ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64)}
+	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &state}
+	for stage := range platform.converged {
+		platform.converged[stage] = true
+	}
+	fixture.cli.options.InitPlatform = platform
+	permit, err := fixture.cli.prepareConfigApplyRepair(context.Background(), "default", false, fixture.outcome)
+	if err != nil || permit != nil {
+		t.Fatalf("independent profile drift admitted: permit=%#v err=%v", permit, err)
 	}
 }
 

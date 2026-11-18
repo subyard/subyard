@@ -468,10 +468,10 @@ def capture_assets():
     assets = []
     seen = set()
     for relative in paths:
-        # Keep the core vendor pair shipped by package-engine.sh; retained
+        # Keep the core materializer shipped by package-engine.sh; retained
         # handlers use it after the original runtime has been removed.
         if not relative.startswith(("scripts/", "config/", "completions/")) and relative not in (
-                "bin/yard", "internal/adapters/configmaterial/tomli_w.py",
+                "bin/yard", "internal/adapters/configmaterial/guest_json.py", "internal/adapters/configmaterial/tomli_w.py",
                 "internal/adapters/configmaterial/TOMLI_W_LICENSE"):
             continue
         if os.path.isabs(relative) or os.path.normpath(relative) != relative or relative == ".." or relative.startswith("../") or any(character in relative for character in "\r\n\t\0") or relative in seen or len(assets) >= 4096:

@@ -55,7 +55,7 @@ export SUBYARD_TELEMETRY_FIXTURE_ASSETS="$fixture_assets"
 asset="$fixture_assets/subyard-telemetry"
 mkdir "$state/source"
 cp config/profiles/telemetry/*.py "$state/source/"
-cp internal/adapters/configmaterial/tomli_w.py "$state/source/"
+cp internal/adapters/configmaterial/{tomli_w,guest_json}.py "$state/source/"
 cp "$asset" "$state/source/subyard-telemetry"
 chmod 0755 "$state/source/subyard-telemetry"
 if [ "$mode" != --held-diagnostic ] && [ "$mode" != --resources ] && [ "$mode" != --native-only ] && [ "$android_only" = 0 ]; then

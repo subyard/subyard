@@ -35,7 +35,8 @@ class Runtime:
                  data=Path('/var/lib/subyard/telemetry'), library=Path('/usr/local/lib/subyard-telemetry'),
                  units=Path('/etc/systemd/system'), commands=Path('/usr/local/bin'), account=None):
         self.source, self.user, self.selected, self.agents = source, user, selected, agents
-        self.managed_agents = set()
+        self.templates = {agent: content for agent in agents
+                          if (content := native.snapshot(source/(agent+'.template'))) is not None}
         self.control, self.data, self.library, self.units, self.commands = control, data, library, units, commands
         account = account or pwd.getpwnam(user)
         self.uid, self.gid, self.home = account.pw_uid, account.pw_gid, Path(account.pw_dir)
@@ -75,7 +76,6 @@ class Runtime:
     def identity_runtime(self,record):
         wanted = Runtime(self.source,record['user'],self.selected,self.agents,self.control,self.data,self.library,self.units,self.commands,
                        account=SimpleNamespace(pw_uid=record['uid'],pw_gid=record['gid'],pw_dir=record['home']))
-        wanted.managed_agents = set(getattr(self, 'managed_agents', ()))
         return wanted
 
     def identity_files(self,wanted):
@@ -253,25 +253,23 @@ class Runtime:
                     'hint': 'run yard migrate to repair; inspect the guest collector services'}
         return {'state': 'ready' if all(state.get('ActiveState') == 'active' and state.get('UnitFileState') == 'enabled' for state in states) else 'drift'}
 
-    def pending_agent_config(self, diagnostics):
-        return {'state': 'pending',
-                'actual': hashlib.sha256(json.dumps(diagnostics, sort_keys=True).encode()).hexdigest(),
-                'desired': self.desired(), 'diagnostics': diagnostics}
+    def reconcile_native(self, token, check=False):
+        agents = self.agents if self.selected else []
+        return native.reconcile(self.home, self.control/'native.json', agents, self.endpoint,
+                                token, tomli_w, self.uid, self.gid, check=check,
+                                templates=getattr(self, 'templates', {}), developer=getattr(self, 'user', None))
 
     def observe(self):
         installed = self.owned()
         if not installed and any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
             raise ValueError('unmanaged collector assets')
-        unavailable = native.agent_config_diagnostics(self.home, self.agents, getattr(self, 'managed_agents', ())) if self.selected or installed else []
-        if unavailable:
-            return self.pending_agent_config(unavailable)
         if not installed:
+            if self.selected and self.agents:
+                self.reconcile_native(None, check=True)
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
                 result['diagnostics'] = [{'parameter': 'telemetry.runtime', 'installed': 'absent', 'desired': 'present'}]
             return result
-        # Materialization must be able to repair an agent document even when
-        # collector assets also await refresh. No native ownership is inferred.
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
@@ -283,12 +281,10 @@ class Runtime:
         converged = converged and all(self.running_no_new_privs(state) for state in states.values())
         if self.selected:
             converged = converged and states[MANAGER].get('ActiveState') == 'active' and states[MANAGER].get('UnitFileState') == 'enabled'
-        native_diagnostics = []
-        native_current = native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, self.token(), tomli_w, self.uid, self.gid, check=True, diagnostics=native_diagnostics, managed_agents=getattr(self, 'managed_agents', ())) if converged else None
-        if native_diagnostics:
-            # Agent document repair belongs to materialization. Do not make its
-            # damaged input block that owner through activation readiness.
-            return self.pending_agent_config(native_diagnostics)
+        token = ''
+        if self.selected:
+            token = self.token() if native.snapshot(self.data/'auth.token') is not None else None
+        native_current = self.reconcile_native(token, check=True) and token is not None
         converged = converged and native_current is True
         actual = hashlib.sha256(json.dumps({'files': files, 'states': states, 'native_current': converged}, sort_keys=True).encode()).hexdigest()
         desired = self.desired()
@@ -302,7 +298,7 @@ class Runtime:
                 elif stat.S_IMODE(path.stat().st_mode) != mode:
                     diagnostics.append({'parameter': 'telemetry.mode.' + path.name, 'installed': 'mismatch', 'desired': 'matched'})
             if native_current is not True:
-                diagnostics.append({'parameter': 'telemetry.native', 'installed': 'unknown' if native_current is None else 'changed', 'desired': 'current'})
+                diagnostics.append({'parameter': 'telemetry.native', 'installed': 'changed', 'desired': 'current'})
             for unit in (COLLECTOR, MANAGER):
                 expected = self.selected if unit == COLLECTOR else True if self.selected else None
                 if expected is None:
@@ -318,7 +314,8 @@ class Runtime:
 
     def desired(self):
         value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
-                 'selected': self.selected, 'agents': self.agents, 'managed_agents': sorted(getattr(self, 'managed_agents', ()))}
+                 'selected': self.selected, 'agents': self.agents,
+                 'templates': {agent: hashlib.sha256(content).hexdigest() for agent, content in getattr(self, 'templates', {}).items()}}
         if self.retained:
             # Paths and modes only: packaged and source unselected runs agree.
             value['retained'] = {str(path): mode for path, mode in self.retained.items()}
@@ -326,8 +323,6 @@ class Runtime:
 
     def apply(self):
         installed = self.owned()
-        if (self.selected or installed) and native.agent_config_diagnostics(self.home, self.agents, getattr(self, 'managed_agents', ())):
-            raise ValueError('agent configuration pending; run yard config apply, then yard migrate')
         if not self.selected and not installed:
             return
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
@@ -359,7 +354,8 @@ class Runtime:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
-        native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
+        self.reconcile_native(token, check=True)
+        self.reconcile_native(token)
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)
             if before != content:
@@ -387,11 +383,6 @@ def main():
     if os.getuid() != 0:
         raise ValueError('guest root required')
     mode, selected, user, agents, *bindings = sys.argv[1:]
-    managed_agents = set()
-    if bindings and bindings[0].startswith('managed='):
-        managed_agents = set(filter(None, bindings.pop(0)[8:].split(',')))
-        if not managed_agents <= set(agents.split()) or not managed_agents <= {'claude', 'codex'}:
-            raise ValueError('invalid managed agent binding')
     if mode in ('identity-observe','identity-apply'):
         import authority
         source=bindings[-1]
@@ -399,14 +390,12 @@ def main():
             journal,recipe=authority.load(source,'telemetry')
             account=recipe['original']
             runtime=Runtime(Path(__file__).resolve().parent,account['user'],selected=='1',agents.split(),account=SimpleNamespace(pw_uid=account['uid'],pw_gid=account['gid'],pw_dir=account['home']))
-            runtime.managed_agents = managed_agents
             runtime.identity_rebooted=authority.rebooted(journal)
             phase='rebind' if journal['phase']=='account-ready' else 'quiesce'
             runtime.identity_check(recipe,phase)
         except FileNotFoundError:
             if mode!='identity-observe':raise
             runtime=Runtime(Path(__file__).resolve().parent,user,selected=='1',agents.split())
-            runtime.managed_agents = managed_agents
             target=dict(user=bindings[0],uid=runtime.uid,gid=runtime.gid,home='/home/'+bindings[0],group=bindings[0])
             recipe=runtime.identity_observe(target,source)
         if mode=='identity-observe':print(json.dumps(recipe))
@@ -414,7 +403,6 @@ def main():
         return
     runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1' and mode != 'startup', agents.split())
     runtime.selected = selected == '1'
-    runtime.managed_agents = managed_agents
     if mode == 'pause':
         if runtime.owned() and runtime.manager(COLLECTOR).get('ActiveState') == 'active':
             systemctl('stop', COLLECTOR)
@@ -432,7 +420,7 @@ def main():
         print(json.dumps(observation))
         return
     if mode == 'check':
-        if observation['state'] in ('stale', 'pending'):
+        if observation['state'] == 'stale':
             print('telemetry-drift')
         elif observation['state'] not in ('current', 'absent'):
             raise ValueError('telemetry drift')
@@ -455,7 +443,7 @@ def failure_diagnostic(error):
         if filename in ('guest.py', 'native.py'):
             location = filename+':'+str(trace.tb_lineno)
         trace = trace.tb_next
-    kind = 'ValueError' if isinstance(error, native.AgentConfigRefusal) else type(error).__name__
+    kind = 'ValueError' if isinstance(error, (native.AgentConfigRefusal, native.materializer.MaterializationError)) else type(error).__name__
     return 'telemetry: local reconciliation failed ('+kind+' at '+location+')'
 
 
@@ -463,8 +451,14 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-        if isinstance(error, native.AgentConfigRefusal):
-            print('telemetry-agent-config-invalid-v1 '+error.agent, file=sys.stderr)
+        failures = error.failures if isinstance(error, native.AgentConfigRefusals) else [('', error)]
+        for agent, failure in failures:
+            if isinstance(failure, native.AgentConfigRefusal):
+                print('telemetry-agent-config-invalid-v1 '+failure.agent, file=sys.stderr)
+            elif isinstance(failure, native.materializer.ContributionConflict):
+                print('telemetry-config-contribution-conflict-v1 '+str(failure), file=sys.stderr)
+            elif agent:
+                print('telemetry-agent-config-unavailable-v1 '+agent, file=sys.stderr)
         if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):
             import authority
             print(authority.refusal('Telemetry', error), file=sys.stderr)

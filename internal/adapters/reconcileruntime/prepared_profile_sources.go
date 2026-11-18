@@ -127,16 +127,17 @@ func (runtime Runtime) profileSourcePaths(owner string) (profile.Definition, []s
 		}
 		native = append(native, installedSourceGuard{relative, before})
 	}
-	const writer = "internal/adapters/configmaterial/tomli_w.py"
-	if _, err := os.Lstat(filepath.Join(runtime.RepositoryRoot, writer)); err == nil {
-		paths = append(paths, writer)
-		before, err := nativeInstalledFilesLabeled([]string{filepath.Join(runtime.RepositoryRoot, writer)}, runtime.bindingPath)
-		if err != nil {
+	for _, writer := range []string{"internal/adapters/configmaterial/guest_json.py", "internal/adapters/configmaterial/tomli_w.py"} {
+		if _, err := os.Lstat(filepath.Join(runtime.RepositoryRoot, writer)); err == nil {
+			paths = append(paths, writer)
+			before, err := nativeInstalledFilesLabeled([]string{filepath.Join(runtime.RepositoryRoot, writer)}, runtime.bindingPath)
+			if err != nil {
+				return definition, nil, nil, err
+			}
+			native = append(native, installedSourceGuard{writer, before})
+		} else if !os.IsNotExist(err) {
 			return definition, nil, nil, err
 		}
-		native = append(native, installedSourceGuard{writer, before})
-	} else if !os.IsNotExist(err) {
-		return definition, nil, nil, err
 	}
 	slices.Sort(paths)
 	paths = slices.Compact(paths)

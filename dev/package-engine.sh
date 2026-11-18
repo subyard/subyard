@@ -124,6 +124,7 @@ install -m 0755 "$artifact" "$bundle_stage/bin/yard-engine"
 install -m 0755 "$REPO/bin/yard" "$bundle_stage/bin/yard"
 runtime_list="$bundle_stage/.runtime-inputs"
 runtime_extras=(
+  internal/adapters/configmaterial/guest_json.py
   internal/adapters/configmaterial/tomli_w.py
   internal/adapters/configmaterial/TOMLI_W_LICENSE
   scripts/e2e-lab/base.sh
@@ -155,7 +156,7 @@ while IFS= read -r -d '' relative; do
     config/release-owner.json|config/release-owner.schema.json|config/release-owner-build.json|config/profiles/*/tests/*|config/profiles/*/*.go|config/profiles/*/*.rs|config/profiles/*/Cargo.toml|config/profiles/*/Cargo.lock|config/profiles/*/go.mod|config/profiles/*/go.sum|config/agents/*/tests/*|config/agents/*/*.go|config/agents/*/*.rs) continue ;;
   esac
   case "$relative" in
-    scripts/*|config/*|completions/*|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;
+    scripts/*|config/*|completions/*|internal/adapters/configmaterial/guest_json.py|internal/adapters/configmaterial/tomli_w.py|internal/adapters/configmaterial/TOMLI_W_LICENSE) ;;
     *) printf 'package-engine: runtime allowlist escaped: %s\n' "$relative" >&2; exit 1 ;;
   esac
   case "$relative" in *\\*|*$'\n'*|*$'\r'*|*$'\t'*) printf 'package-engine: unsafe runtime path\n' >&2; exit 1 ;; esac
@@ -165,7 +166,7 @@ while IFS= read -r -d '' relative; do
   # Public runtime assets need fixed modes regardless of the checkout's umask.
   mode=0644
   [ ! -x "$REPO/$relative" ] || mode=0755
-  [ "$relative" != internal/adapters/configmaterial/tomli_w.py ] || mode=0644
+  case "$relative" in internal/adapters/configmaterial/*.py) mode=0644 ;; esac
   install -m "$mode" -- "$REPO/$relative" "$bundle_stage/$relative"
 done < "$runtime_list"
 rm -f -- "$runtime_list"
@@ -176,6 +177,7 @@ install -m 0644 "$MIGRATION_REGISTRY" "$bundle_stage/config/migrations.json"
 install -m 0644 "$RELEASE_TRANSITION_REGISTRY" "$bundle_stage/config/release-transition.json"
 for required in config/installation-capabilities.json \
   config/retired-components.json \
+  internal/adapters/configmaterial/guest_json.py \
   internal/adapters/configmaterial/tomli_w.py \
   internal/adapters/configmaterial/TOMLI_W_LICENSE \
   scripts/e2e-lab/base.sh \

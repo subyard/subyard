@@ -177,6 +177,7 @@ grep -Fxq './config/profiles/package-fixture/asset.txt' "$bundle_list" \
   || fail 'runtime bundle omitted untracked profile assets or native executable'
 grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './bin/yard-engine' "$bundle_list" \
+  && grep -Fxq './internal/adapters/configmaterial/guest_json.py' "$bundle_list" \
   && grep -Fxq './internal/adapters/configmaterial/tomli_w.py' "$bundle_list" \
   && grep -Fxq './internal/adapters/configmaterial/TOMLI_W_LICENSE' "$bundle_list" \
   && grep -Fxq './scripts/install-runtime-release.sh' "$bundle_list" \
@@ -225,10 +226,10 @@ with tarfile.open(sys.argv[1], 'r:gz') as bundle:
     assert all(member.mode == 0o755 for member in bundle.getmembers() if member.isdir()), \
         'runtime bundle directory permissions depend on packaging umask'
 PY
-for support in tomli_w.py TOMLI_W_LICENSE; do
+for support in guest_json.py tomli_w.py TOMLI_W_LICENSE; do
   [ "$(stat -c '%a' "$bundle_extract/internal/adapters/configmaterial/$support")" = 644 ] \
     && cmp -s "$ROOT/internal/adapters/configmaterial/$support" "$bundle_extract/internal/adapters/configmaterial/$support" \
-    || fail 'runtime bundle changed shared TOML support bytes or public data mode'
+    || fail 'runtime bundle changed shared materializer bytes or public data mode'
 done
 [ "$(stat -c '%a' "$bundle_extract/config/preview/subyard-preview")" = 755 ] \
   && cmp -s "$ROOT/config/preview/subyard-preview" "$bundle_extract/config/preview/subyard-preview" \

@@ -1059,11 +1059,7 @@ func (cli *CLI) configStatus(
 				}
 				for _, id := range slices.Sorted(maps.Keys(observations)) {
 					observation := observations[id]
-					if observation.State == ports.RuntimeStatePending {
-						drift = true
-						fmt.Fprintf(cli.options.Stdout, "profile %s pending input repair; next: run yard -Y %s config apply\n", id, target.Name)
-					}
-					if observation.State != ports.RuntimeStateStale && observation.State != ports.RuntimeStatePending {
+					if observation.State != ports.RuntimeStateStale {
 						continue
 					}
 					owner := &profileRuntimeActivationReconciler{cli: cli, request: releasetransition.ProcessRequest{ConfigHome: configHome}, id: id}
@@ -1294,7 +1290,11 @@ func (cli *CLI) assessConfigTarget(
 		observed := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
 		if asset.OwnedFormat != "" {
 			if err != nil || result.ExitCode != 0 {
-				failures = append(failures, fmt.Errorf("%s: structured configuration observation failed", asset.Name))
+				detail := "structured configuration observation failed"
+				if conflict := configmaterial.ContributionConflict(result, err); conflict != "" {
+					detail = conflict
+				}
+				failures = append(failures, fmt.Errorf("%s: %s", asset.Name, detail))
 				continue
 			}
 			observation, err := configmaterial.ParseObservation(result.Stdout)

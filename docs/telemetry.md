@@ -30,8 +30,10 @@ checks the running processes as well as unit files. Foreign unit overrides are
 refused; interrupted startup changes can be retried without terminating agent
 workloads.
 
-The telemetry owner records existing native exporter leaves before acquiring its own
-settings and restores them on disable. Existing ownership conflicts remain errors.
+The telemetry owner records existing native exporter fields before applying its own
+settings through the agent config materializer. Both agent configuration formats use mode
+`0600` while they contain telemetry settings. An agent template that specifies a different
+value for the same field is refused with the field path.
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection
 should begin. No running agent is killed to reload exporter settings.
@@ -42,7 +44,8 @@ Disable collection through the same profile family:
 yard -Y default profile disable telemetry --yes
 ```
 
-Disabling restores only unchanged owned native settings and retains the database.
+Disabling restores only unchanged owned native settings and retains the database. A missing
+agent document stays absent and its telemetry ownership is released.
 The run manager drains existing observations without terminating agent workloads.
 
 ## Managed runs

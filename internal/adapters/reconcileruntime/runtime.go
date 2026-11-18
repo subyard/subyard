@@ -219,7 +219,7 @@ func (runtime Runtime) profileRuntimesConverged(observations map[string]ports.Ru
 		if observation.State == ports.RuntimeStateDeferred {
 			runtime.reportProfileRuntimeDeferred(activationID)
 		}
-		if observation.State == ports.RuntimeStateStale || observation.State == ports.RuntimeStatePending {
+		if observation.State == ports.RuntimeStateStale {
 			return false
 		}
 	}

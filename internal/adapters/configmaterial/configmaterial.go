@@ -86,6 +86,20 @@ func UnownedInvalidDestination(stderr []byte, format string) bool {
 	return bytes.HasPrefix(stderr, []byte("config materialization: unowned-invalid-destination-v1 "+strings.ToUpper(format)+";"))
 }
 
+// ContributionConflict returns the guest's bounded, field-only refusal.
+func ContributionConflict(result ports.InstanceExecResult, err error) string {
+	var completed *ports.GuestExitError
+	if result.ExitCode != 2 || err != nil && (!errors.As(err, &completed) || completed.Code != 2) {
+		return ""
+	}
+	line := strings.TrimSuffix(string(result.Stderr), "\n")
+	detail, ok := strings.CutPrefix(line, "config materialization: configuration contribution conflicts at ")
+	if !ok || detail == "" || len(detail) > 480 || strings.ContainsFunc(detail, unicode.IsControl) {
+		return ""
+	}
+	return "configuration contribution conflicts at " + detail
+}
+
 func ParseObservation(payload []byte) (Observation, error) {
 	return ParseJSONObservation(payload)
 }

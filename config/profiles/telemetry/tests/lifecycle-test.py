@@ -22,52 +22,41 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
-    def test_missing_managed_document_waits_before_first_telemetry_install(self):
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            root = Path(name)
-            runtime = object.__new__(guest.Runtime)
-            runtime.selected, runtime.agents, runtime.managed_agents = True, ['claude', 'codex'], {'claude', 'codex'}
-            runtime.home, runtime.control, runtime.library, runtime.data = root, root/'control', root/'library', root/'data'
-            runtime.assets, runtime.retained = {}, {}
-            runtime.owned = lambda: False
-            runtime.desired = lambda: 'a'*64
-            runtime.manager = lambda unit: {}
-            observed = runtime.observe()
-            self.assertEqual(observed['state'], 'pending')
-            self.assertEqual([item['parameter'] for item in observed['diagnostics']],
-                             ['telemetry.agent.claude.config.missing', 'telemetry.agent.codex.config.missing'])
-            with self.assertRaisesRegex(ValueError, 'config apply'):
-                runtime.apply()
-            self.assertEqual(list(root.iterdir()), [], 'pending managed inputs allowed partial installation')
+    def setUp(self):
+        root = self.enterContext(tempfile.TemporaryDirectory(dir='/tmp'))
+        self.enterContext(patch.object(guest.native.materializer, 'STATE_ROOT', str(Path(root)/'materialization')))
+        self.enterContext(patch.object(guest.native.materializer, 'STATE_UID', os.getuid()))
 
-    def test_invalid_agent_document_is_pending_until_config_repair(self):
+    def test_disable_does_not_require_missing_owned_agent_documents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             runtime = object.__new__(guest.Runtime)
-            asset = root/'collector'
-            asset.write_bytes(b'stale collector')
-            runtime.assets, runtime.retained = {asset: (b'current collector', 0o755)}, {}
-            runtime.selected, runtime.agents = True, ['claude']
-            runtime.managed_agents = {'claude'}
-            runtime.home, runtime.control = root, root/'control'
-            runtime.library = root/'library'
-            runtime.endpoint, runtime.uid, runtime.gid = 'http://127.0.0.1:14318', os.getuid(), os.getgid()
+            runtime.selected, runtime.agents = False, ['claude', 'codex']
+            runtime.home, runtime.control, runtime.data = root, root/'control', root/'data'
+            runtime.control.mkdir(mode=0o700)
+            runtime.data.mkdir(mode=0o700)
+            runtime.assets, runtime.retained = {}, {}
             runtime.owned = lambda: True
             runtime.saved_inventory = lambda: {}
-            runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
-            runtime.running_no_new_privs = lambda state: True
+            runtime.manager = lambda unit: {'ActiveState': 'inactive', 'UnitFileState': 'disabled'}
             runtime.desired = lambda: 'a'*64
-            runtime.token = lambda: 'x'*64
-            (root/'.claude').mkdir()
-            (root/'.claude/settings.json').write_bytes(b'private invalid content')
-            observation = runtime.observe()
-            self.assertEqual(observation['state'], 'pending')
-            self.assertEqual(len(observation['actual']), 64)
-            self.assertEqual(observation['desired'], 'a'*64)
-            self.assertIn('telemetry.agent.claude.config.invalid', str(observation['diagnostics']))
-            self.assertNotIn('private invalid content', str(observation))
-            (root/'.claude/settings.json').write_text('{}')
-            self.assertEqual(runtime.observe()['state'], 'stale', 'repairing the document must reveal pending collector refresh')
+            runtime.endpoint = 'http://localhost:14318'
+            runtime.uid, runtime.gid = os.getuid(), os.getgid()
+            token = 'a'*64
+            token_path = runtime.data/'auth.token'
+            guest.native.publish(token_path, token.encode(), None)
+            guest.native.publish(runtime.control/'assets.json', b'{}', None)
+            state = runtime.control/'native.json'
+            guest.native.reconcile(root, state, runtime.agents, runtime.endpoint, token, guest.tomli_w, runtime.uid, runtime.gid)
+            paths = [guest.native.agent_document(root, agent)[0] for agent in runtime.agents]
+            for path in paths:
+                path.unlink()
+            self.assertEqual(runtime.observe()['state'], 'stale')
+            with patch.object(guest, 'systemctl', return_value=''):
+                runtime.apply()
+            self.assertEqual(runtime.observe()['state'], 'current')
+            self.assertEqual(json.loads(state.read_bytes())['agents'], {})
+            self.assertTrue(all(not path.exists() for path in paths))
 
     def test_runtime_diagnostics_name_changed_asset_without_contents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -78,6 +67,8 @@ class LifecycleTest(unittest.TestCase):
             runtime.retained = {}
             runtime.selected = True
             runtime.home, runtime.agents = Path(name), []
+            runtime.control, runtime.data = Path(name)/'control', Path(name)/'data'
+            runtime.uid, runtime.gid, runtime.endpoint = os.getuid(), os.getgid(), ''
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
@@ -226,6 +217,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             for path in Path(guest.__file__).parent.glob('*.py'):
                 shutil.copyfile(path, source/path.name)
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
+            shutil.copyfile(Path(guest.native.materializer.__file__), source/'guest_json.py')
             # Match the compiled collector's observed 25 MiB size, not a tiny stub.
             (source/'subyard-telemetry').write_bytes(b'\x7fELF'+b'\0'*(25_333_922-4))
             for directory in ('home', 'units', 'bin'):
@@ -406,6 +398,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             for path in Path(guest.__file__).parent.glob('*.py'):
                 shutil.copyfile(path, source/path.name)
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
+            shutil.copyfile(Path(guest.native.materializer.__file__), source/'guest_json.py')
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             def runtime(selected, origin=source):
                 return guest.Runtime(origin, 'dev', selected, [], root/'control', root/'data', root/'library',

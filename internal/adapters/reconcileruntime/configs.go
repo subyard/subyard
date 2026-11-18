@@ -354,54 +354,66 @@ func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
 }
 
 func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestConfigFile) (bool, error) {
+	converged := true
+	var refusals []error
 	for _, file := range files {
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return false, err
+			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
+			continue
 		}
 		request := ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}}
 		if file.ownedFormat != "" {
 			request, err = configmaterial.Request(file.ownedFormat, configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
 			if err != nil {
-				return false, err
+				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
+				continue
 			}
 		}
 		result, execErr := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 		if execErr != nil && result.ExitCode == 0 {
-			return false, execErr
+			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, execErr))
+			continue
 		}
 		desiredHash := fmt.Sprintf("%x", sha256.Sum256(payload))
 		if file.ownedFormat != "" {
 			desiredHash, err = configmaterial.DesiredDigestFor(file.ownedFormat, payload)
 			if err != nil {
-				return false, err
+				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
+				continue
 			}
 		}
 		desired := config.DesiredMaterializedArtifact{Name: file.label, Destination: file.destination, OwnedFormat: file.ownedFormat, DesiredHash: desiredHash}
 		observation := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
 		if file.ownedFormat != "" {
 			if execErr != nil || result.ExitCode != 0 {
-				return false, fmt.Errorf("observe %s: structured configuration unavailable", file.label)
+				detail := configmaterial.ContributionConflict(result, execErr)
+				if detail == "" {
+					detail = "structured configuration unavailable"
+				}
+				refusals = append(refusals, fmt.Errorf("observe %s: %s", file.label, detail))
+				continue
 			}
 			observed, err := configmaterial.ParseObservation(result.Stdout)
 			if err != nil {
-				return false, err
+				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
+				continue
 			}
 			observation.Fingerprint, observation.OwnedConverged = observed.Fingerprint, observed.Converged
 		}
 		assessed, err := config.AssessMaterializedArtifact(desired, observation)
 		if err != nil {
-			return false, err
+			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
+			continue
 		}
-		if !assessed.Converged {
-			return false, nil
-		}
+		converged = converged && assessed.Converged
 	}
 
-	return true, nil
+	err := domain.CollectRefusals(refusals...)
+	return converged && err == nil, err
 }
 
 func (runtime Runtime) applyGitIdentity(ctx context.Context) error {
@@ -557,6 +569,9 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err != nil || result.ExitCode != 0 {
 		var completed *ports.GuestExitError
+		if detail := configmaterial.ContributionConflict(result, err); detail != "" {
+			return errors.New(detail)
+		}
 		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
 			preserve := runtime.preserveInvalidConfigCommand(file.destination)
 			repair := "yard config apply"

@@ -1163,6 +1163,9 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 	if err != nil || result.ExitCode != 0 {
 		var completed *ports.GuestExitError
 		detail := ""
+		if conflict := configmaterial.ContributionConflict(result, err); conflict != "" {
+			return configmaterial.Observation{}, fmt.Errorf("%s: %s", path, conflict)
+		}
 		switch strings.TrimSpace(string(result.Stderr)) {
 		case "config materialization: adoption ownership evidence unavailable":
 			detail = "no protected baseline or exact recognized legacy template"

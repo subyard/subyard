@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tarfile
@@ -20,17 +21,28 @@ def run(arguments, **kwargs):
     result = subprocess.run(arguments, stdin=subprocess.DEVNULL if 'input' not in kwargs else None,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, **kwargs)
     if result.returncode:
+        refusals, retry = [], None
         for line in result.stderr[-65536:].decode(errors='replace').splitlines()[-32:]:
+            if line.startswith('telemetry-config-contribution-conflict-v1 '):
+                detail = line.removeprefix('telemetry-config-contribution-conflict-v1 ')
+                if len(detail.encode()) <= 480 and detail.isprintable():
+                    refusals.append(detail)
+            if line in ('telemetry-agent-config-unavailable-v1 claude', 'telemetry-agent-config-unavailable-v1 codex'):
+                refusals.append('agent configuration unavailable: '+line.rsplit(' ', 1)[1])
             if line in ('telemetry-agent-config-invalid-v1 claude', 'telemetry-agent-config-invalid-v1 codex'):
                 agent = line.rsplit(' ', 1)[1]
                 path = '/home/'+os.environ['DEV_USER']+('/.claude/settings.json' if agent == 'claude' else '/.codex/config.toml')
                 command = ['incus', 'exec', os.environ['YARD_INSTANCE_NAME'], '--project', os.environ['INCUS_PROJECT'], '--', 'mv', '--backup=numbered', '--', path, path+'.subyard-invalid']
-                raise Refusal(['invalid unmanaged agent configuration '+path], 'run '+shlex.join(command))
+                refusals.append('invalid unmanaged agent configuration '+path)
+                if retry is None:
+                    retry = 'run '+shlex.join(command)
             match = SAFE_GUEST_FAILURE.fullmatch(line)
             if match:
                 print(line, file=sys.stderr)
                 print('subyard-profile-observation-diagnostic-v1 '+match['kind']+' '+match['location'], file=sys.stderr)
                 break
+        if refusals:
+            raise Refusal(refusals, retry)
         raise ValueError('telemetry owner transport failed')
     return result.stdout.decode().strip()
 
@@ -111,18 +123,27 @@ def main():
     source = Path(__file__).resolve().parent
     binary, refusals = collector_binary(source, selected and operation != 'startup')
     agents = ' '.join(name for name in ('claude', 'codex') if name in os.environ.get('CODING_TOOL_INTEGRATIONS', '').split())
-    managed_agents = []
+    templates = {}
     for agent in agents.split():
         source_path = os.environ.get('AGENT_'+agent+'_CONFIG', '').strip()
-        if source_path:
-            if Path(source_path).is_file() and os.access(source_path, os.R_OK):
-                managed_agents.append(agent)
-            elif selected:
-                refusals.append('managed agent source missing or unreadable: '+source_path)
         destination = os.environ.get('AGENT_'+agent+'_CONFIG_DEST')
         expected = '.claude/settings.json' if agent == 'claude' else '.codex/config.toml'
-        if selected and destination != expected:
+        if selected and (destination or source_path) and destination != expected:
             refusals.append(f'standard native destination required: AGENT_{agent}_CONFIG_DEST must be {expected}')
+        if source_path and destination == expected and operation in ('observe', 'refresh', 'check', 'apply'):
+            try:
+                if source_path.startswith('/proc/self/fd/'):
+                    source_path = source_path.replace('/proc/self/', f'/proc/{os.getppid()}/', 1)
+                with os.fdopen(os.open(source_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), 'rb') as template:
+                    if not stat.S_ISREG(os.fstat(template.fileno()).st_mode):
+                        raise ValueError('not regular')
+                    content = template.read(4*1024*1024+1)
+                    if len(content) > 4*1024*1024:
+                        raise ValueError('size bound')
+                templates[agent] = content
+            except (OSError, ValueError):
+                if selected:
+                    refusals.append('managed agent source missing, unsafe or unreadable: '+source_path)
     if refusals:
         raise Refusal(refusals)
     stream = io.BytesIO()
@@ -132,14 +153,18 @@ def main():
         # Only a selected run installs the collector; an unselected one keeps its path only.
         if binary is not None:
             archive.add(binary, arcname='subyard-telemetry', recursive=False)
-        archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
+        for name in ('tomli_w.py', 'guest_json.py'):
+            archive.add(source.parents[2]/'internal/adapters/configmaterial'/name, arcname=name, recursive=False)
+        for agent, content in templates.items():
+            entry = tarfile.TarInfo(agent+'.template')
+            entry.size, entry.mode = len(content), 0o600
+            archive.addfile(entry, io.BytesIO(content))
         if operation.startswith('identity-'):
             archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     remaining = os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')
     startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
-    managed = 'managed='+','.join(managed_agents)
     output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
-                  GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, managed, *bindings], input=stream.getvalue())
+                  GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
     if operation == 'check':
         if output == 'telemetry-drift':
             return 1
@@ -148,8 +173,7 @@ def main():
         return 0
     if output and operation == 'observe' and os.environ.get('SUBYARD_PROFILE_DIAGNOSTICS') != '1':
         observation = json.loads(output)
-        if observation.get('state') != 'pending':
-            observation.pop('diagnostics', None)
+        observation.pop('diagnostics', None)
         output = json.dumps(observation)
     if output:
         print(output)
