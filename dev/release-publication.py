@@ -532,14 +532,15 @@ def validate_operator_acceptance(document, name, command, identity):
                (("reason", 1024), ("authorization_reference", 256), ("repair_reference", 256)))):
         raise ValueError("operator acceptance requires public reason, authorization and repair reference")
     if (not isinstance(document["artifacts"], dict)
-        or set(document["artifacts"]) != {"receipt", "declaration", "native", "launch", "timing", "log"}
+        or set(document["artifacts"]) != {"receipt", "declaration", "native", "launch", "timing", "log", "leases"}
         or any(not sha(value) for value in document["artifacts"].values())):
         raise ValueError("operator acceptance original evidence hashes missing")
     actual = document["actual_command"]
     prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
               "SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
               "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}",
-              "SUBYARD_E2E_CANDIDATE_SHA256=" + tested["candidate_bundle_sha256"]]
+              "SUBYARD_E2E_CANDIDATE_SHA256=" + tested["candidate_bundle_sha256"],
+              "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"]
     if (not isinstance(actual, list) or actual[:-2] != prefix + command or actual[-2:-1] != ["--slot"]
         or not isinstance(actual[-1], str) or not re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1])):
         raise ValueError("operator acceptance original command differs")
@@ -593,7 +594,7 @@ def operator_acceptances(paths, identity, root, receipt):
             or source["receipt_sha256"] != a.digest(source_output / "receipt.json")):
             raise ValueError("operator acceptance original or target candidate binding changed")
         descriptors = declaration["artifacts"]
-        if not isinstance(descriptors, dict) or set(descriptors) != {"native", "launch", "timing", "log"}:
+        if not isinstance(descriptors, dict) or set(descriptors) != {"native", "launch", "timing", "log", "leases"}:
             raise ValueError("operator acceptance original artifact declarations missing")
         files, hashes = {}, {"receipt": source["receipt_sha256"], "declaration": a.digest(path)}
         for role, descriptor in descriptors.items():
@@ -613,13 +614,15 @@ def operator_acceptances(paths, identity, root, receipt):
         prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
         argv = launch.get("argv")
         if (launch.get("cwd") != str(source_root) or not isinstance(argv, list) or not all(isinstance(value, str) for value in argv)
-            or argv[:6] != prefix or len(argv) != len(prefix) + 3 + len(command) + 2):
+            or argv[:6] != prefix or len(argv) != len(prefix) + 4 + len(command) + 2):
             raise ValueError("operator acceptance original launcher differs")
-        assignments = dict(value.split("=", 1) for value in argv[6:9] if "=" in value)
-        if (set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256"}
+        assignments = dict(value.split("=", 1) for value in argv[6:10] if "=" in value)
+        if (set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256", "SUBYARD_E2E_LEASE_EVENTS"}
+            or not Path(assignments["SUBYARD_E2E_LEASE_EVENTS"]).is_absolute()
+            or Path(assignments["SUBYARD_E2E_LEASE_EVENTS"]).resolve() != files["leases"]
             or assignments["SUBYARD_E2E_CANDIDATE_BUNDLE"] != str(source_output / "candidate-bundle.tar.gz")
             or assignments["SUBYARD_E2E_CANDIDATE_SHA256"] != original["candidate_bundle_sha256"]
-            or a.command_identity(argv[9:-2], source_root) != command or argv[-2] != "--slot"
+            or a.command_identity(argv[10:-2], source_root) != command or argv[-2] != "--slot"
             or not re.fullmatch(r"[1-9][0-9]{0,2}", argv[-1])):
             raise ValueError("operator acceptance original transport or command differs")
         duration = timing.get("whole_duration_seconds")
@@ -630,23 +633,33 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        ledger = a.lease_ledger(files["log"], hashes["log"])
-        environments = ledger.environments
-        cleanup = dict(ledger.guest_cleanup)
-        if len(cleanup) != len(ledger.guest_cleanup):
-            raise ValueError("operator acceptance cleanup evidence is ambiguous")
-        if (not ledger.granted or not ledger.safe or not environments or ledger.controller_cleanup != [0]
+        a.validate_pass_leases(files["leases"], hashes["leases"], int(argv[-1]))
+        scan = a.PhaseLog()
+        environments, cleanup, controller_cleanup = set(), {}, []
+        for _, stage, environment in scan.read(files["log"], final=True):
+            if environment:
+                environments.add(environment)
+            if stage and stage.group(1, 2) == (b"guest-cleanup", b"end"):
+                vm = int(stage[5])
+                if vm in cleanup:
+                    raise ValueError("operator acceptance cleanup evidence is ambiguous")
+                cleanup[vm] = int(stage[4])
+            if stage and stage.group(1, 2) == (b"cleanup/release", b"end"):
+                controller_cleanup.append(int(stage[4]))
+        if (scan.sha256 != hashes["log"] or not environments or controller_cleanup != [0]
             or cleanup != {vm: 0 for vm in range(1, max(count for _, count, _ in environments) + 1)}):
             raise ValueError("operator acceptance original cleanup or release unconfirmed")
         for original_result in (original["checks"][name], receipt["checks"][name]):
             if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
                 or "evidence_transfer" in original_result or original_result.get("status") == "failed" and
                 (original_result.get("exit_code") != native["exit_code"] or original_result.get("log_sha256") != hashes["log"]
+                 or original_result.get("lease_events_sha256") != hashes["leases"]
                  or original_result.get("command") != command)):
                 raise ValueError("operator acceptance collector status or original failure differs")
         public = {"schema_version": 1, "check": name, "target": identity, "tested": declaration["tested"], "command": command,
                   "actual_command": prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
-                      "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"]] + command + argv[-2:],
+                      "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"],
+                      "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"] + command + argv[-2:],
                   "decision": declaration["decision"], "artifacts": hashes, "source_status": original["checks"][name]["status"],
                   "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
                   "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),
@@ -755,6 +768,7 @@ def attestation(output, identity, operator_acceptance_paths=(), profile_deferral
                                                      if result["status"] == "passed" else {})}
         if a.is_live(name) and result["status"] == "passed":
             checks[name]["environments"] = result.get("environments", [])
+            checks[name]["lease_events_sha256"] = result["lease_events_sha256"]
         if result.get("execution") == "ci-preparation":
             checks[name].update(execution="ci-preparation", ci_job=a.CI_PREPARED_CHECKS[name])
         if result.get("execution") == "ci-hosted":
@@ -887,7 +901,7 @@ def validate_attestation(document, identity, root):
                     or result["environments"] != decision["environments"]):
                     raise ValueError("operator acceptance original failure changed")
                 continue
-            keys = {"status", "log_sha256", "exit_code"} | ({"environments"} if a.is_live(name) else set())
+            keys = {"status", "log_sha256", "exit_code"} | ({"environments", "lease_events_sha256"} if a.is_live(name) else set())
             if result.get("execution") == "ci-preparation":
                 if name not in a.CI_PREPARED_CHECKS or result.get("ci_job") != a.CI_PREPARED_CHECKS[name]:
                     raise ValueError("CI preparation result names a different job")
@@ -914,7 +928,8 @@ def validate_attestation(document, identity, root):
                 a.validate_evidence_transfer(transfer, name, a.command_identity(command, root), target, result["log_sha256"], manifests, root)
                 if transfer.get("schema_version") == 2:
                     bind_attempt(transfer["original_attempt"])
-                if result["execution"] != "inherited" or result.get("environments", []) != result["evidence_transfer"]["environments"]:
+                if (result["execution"] != "inherited" or result.get("environments", []) != transfer["environments"]
+                    or result.get("lease_events_sha256") != transfer["artifacts"].get("leases")):
                     raise ValueError("reviewed transfer execution provenance changed")
             if "original_attempt" in result:
                 record = result["original_attempt"]
@@ -930,6 +945,7 @@ def validate_attestation(document, identity, root):
                     or result.get("execution") != "ci-hosted" and (manifest["environment"] != document["environment"]
                         or record["result"]["execution_environment"] != document["environment"])
                     or result.get("environments", []) != record["result"]["environments"]
+                    or result.get("lease_events_sha256") != record["result"].get("lease_events_sha256")
                     or any(manifest["candidate"][key] != value for key, value in {
                         "candidate_sha256": identity_hash(identity), "version": identity["version"],
                         "source_fingerprint": identity["source_fingerprint"], "release_files": identity["release_files"]}.items())):
@@ -948,6 +964,8 @@ def validate_attestation(document, identity, root):
                         or manifest["candidate"]["release_files"].get(manifest["candidate"]["runtime_file"]) != manifest["candidate"]["runtime_sha256"]):
                         raise ValueError("hosted attestation runner or runtime binding changed")
             if a.is_live(name):
+                if not a.is_sha(result["lease_events_sha256"]):
+                    raise ValueError("physical acceptance lease evidence missing")
                 environments = result["environments"]
                 if not isinstance(environments, list) or not environments:
                     raise ValueError("physical acceptance environment missing")
@@ -1370,7 +1388,7 @@ def hosted_artifact(github, artifact, destination):
     with zipfile.ZipFile(archive) as zipped:
         for item in zipped.infolist():
             name = item.filename
-            if (name in seen or not re.fullmatch(r"(?:receipt\.json|ci-execution\.json|events\.jsonl|[A-Za-z0-9._-]+\.log|(?:attempts|manifests|runs)/[0-9a-f]+\.json)", name)
+            if (name in seen or not re.fullmatch(r"(?:receipt\.json|ci-execution\.json|events\.jsonl|[A-Za-z0-9._-]+\.(?:log|leases\.jsonl)|(?:attempts|manifests|runs)/[0-9a-f]+\.json)", name)
                 or item.file_size > 20 << 20 or item.external_attr >> 16 & 0o170000 == 0o120000):
                 raise ValueError("unsafe hosted artifact member")
             seen.add(name)
@@ -1561,6 +1579,7 @@ def collect_ci(github, directory, identity):
                     a.immutable_json(target, json.loads((cached / relative).read_text()))
             log = "ci-hosted-" + record["id"] + ".log"
             shutil.copyfile(cached / result["log"], output / log)
+            a.copy_lease_evidence(cached / result["log"], output / log, result["lease_events_sha256"])
             result["log"] = log
             receipt["checks"][name] = result
             a.save(output, receipt)

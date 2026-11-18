@@ -23,7 +23,6 @@ import tarfile
 import tempfile
 import time
 import threading
-from typing import NamedTuple
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -209,7 +208,7 @@ def source_fingerprint(root):
 def clean_environment():
     env = os.environ.copy()
     for key in ("SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256",
-                "SUBYARD_E2E_LOCAL_EVIDENCE",
+                "SUBYARD_E2E_LOCAL_EVIDENCE", "SUBYARD_E2E_LEASE_EVENTS",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE",
                 "SUBYARD_REPOSITORY_ROOT", "YARD_ENGINE_PATH"):
         env.pop(key, None)
@@ -670,7 +669,8 @@ class Invocation:
     """One selection run, distinct from the candidate's accumulated evidence."""
     OUTCOME_FIELDS = ("status", "exit_code", "termination", "signal", "reason", "duration_seconds",
                       "log", "log_sha256", "failure_class", "last_completed_phase", "cleanup",
-                      "cleanup_status", "capture_status", "environment_evidence", "slot")
+                      "cleanup_status", "capture_status", "environment_evidence", "slot",
+                      "lease_events_sha256", "lease_state")
 
     def __init__(self, output, receipt, selected, pending, excluded, requested=None):
         self.output, self.receipt = output, receipt
@@ -775,7 +775,7 @@ class Invocation:
               f"result={self.path}", flush=True)
 
 
-def execute(name, command, root, output, env, slot=None, observe_lease=None):
+def execute(name, command, root, output, env, slot=None):
     log = output / (name.replace(":", "-").replace("/", "-") + "-" + uuid.uuid4().hex[:8] + ".log")
     argv = command + (["--slot", str(slot)] if slot else [])
     print(f"RUN {name}" + (f" slot={slot}" if slot else ""), flush=True)
@@ -785,10 +785,16 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
     cleanup_status = None
     markers = set()
     phases = {}
-    scan = LeaseLedger()
+    scan = PhaseLog()
     next_heartbeat = start + HEARTBEAT_SECONDS
     process, code, capture_error = None, None, False
+    lease_path = lease_file(log)
+    ledger, lease_sha256 = LeaseLedger(), None
     try:
+        if slot:
+            with private_file(lease_path, "wb"):
+                pass
+            env = dict(env, SUBYARD_E2E_LEASE_EVENTS=str(lease_path.resolve()))
         with private_file(log, "wb") as stream:
             process = subprocess.Popen(argv, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=stream,
                                        stderr=subprocess.STDOUT, start_new_session=True)
@@ -802,9 +808,11 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
                     event(output, "heartbeat", check=name, slot=slot,
                           duration_seconds=round(time.monotonic() - start, 2))
                     next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
-                phase_events(output, name, log, scan, markers, phases=phases, observe_lease=observe_lease)
+                phase_events(output, name, log, scan, markers, phases=phases)
             if STOP.is_set() and not interrupted:
                 interrupted = True
+                cleanup_status = interrupt_group(process)
+            if slot and cleanup_status is None and group_alive(process.pid):
                 cleanup_status = interrupt_group(process)
             code = process.poll() if cleanup_status == "unconfirmed" else process.wait()
             stream.flush()
@@ -812,21 +820,26 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
     except (OSError, subprocess.SubprocessError):
         capture_error = True
         if process is not None:
-            if process.poll() is None:
+            if process.poll() is None or slot and group_alive(process.pid):
                 cleanup_status = interrupt_group(process)
             code = process.poll()
     try:
-        phase_events(output, name, log, scan, markers, final=True, phases=phases, observe_lease=observe_lease)
+        phase_events(output, name, log, scan, markers, final=True, phases=phases)
         log_sha256 = scan.sha256
-        ledger = scan if slot else None
     except OSError:
-        ledger, capture_error = None, True
+        capture_error = True
         try:
             log_sha256 = digest(log)
         except OSError:
             log_sha256 = None
-    refusal = ledger.refusal if ledger and not interrupted else None
-    blocked = refusal if (code, refusal) in ((4, "memory"), (4, "disk"), (2, "slot"), (4, "slot")) else None
+    if slot and cleanup_status != "unconfirmed":
+        try:
+            with lease_path.open("rb") as stream:
+                os.fsync(stream.fileno())
+                ledger, lease_sha256 = LeaseLedger.read(stream, slot)
+        except OSError:
+            capture_error = True
+    blocked = ledger.refusal if not interrupted else None
     result = {"status": "interrupted" if interrupted else "blocked" if blocked else "passed" if code == 0 and not capture_error else "failed", "exit_code": code,
               "duration_seconds": round(time.monotonic() - start, 2), "log": log.name,
               "log_sha256": log_sha256, "command": command_identity(command, root)}
@@ -857,10 +870,9 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
         result["cleanup_status"] = cleanup_status
     if slot:
         result["slot"] = slot
-        if (not ledger or not ledger.safe or not ledger.granted
-            and (code == 3 or not interrupted and result["termination"] != "exit")):
-            result["cleanup_status"] = "unconfirmed"
-        if result["status"] == "passed" and (not ledger or not ledger.granted or result["cleanup_status"] == "unconfirmed"):
+        result["lease_events_sha256"] = lease_sha256
+        result["lease_state"] = ledger.state
+        if result["status"] == "passed" and ledger.state != "released":
             result.update(status="failed", reason="lease-cleanup-unproven")
     try:
         event(output, "check-result", check=name, **{key: value for key, value in result.items() if key != "command"})
@@ -877,8 +889,8 @@ ENVIRONMENT_MARKER = re.compile(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair
 RELEASE_TIMING = re.compile(rb"E2E_RELEASE state=(start|end) duration_seconds=([0-9]{1,9}) budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n")
 
 
-def phase_events(output, name, log, scan, seen, final=False, phases=None, observe_lease=None):
-    for line, stage, environment, lease in scan.read(log, final):
+def phase_events(output, name, log, scan, seen, final=False, phases=None):
+    for line, stage, environment in scan.read(log, final):
         marker = re.fullmatch(rb"  \[( \.\. | ok |fail)\] phase=([a-zA-Z0-9_./-]{1,100})(?: [^\r\n]*)?\n", line)
         if marker:
             key = (marker[1], marker[2])
@@ -886,8 +898,6 @@ def phase_events(output, name, log, scan, seen, final=False, phases=None, observ
                 seen.add(key)
                 event(output, "phase", check=name, phase=marker[2].decode(),
                       state={b" .. ": "started", b" ok ": "passed", b"fail": "failed"}[marker[1]])
-        if observe_lease and lease:
-            observe_lease(lease)
         if stage:
             event(output, "controller-phase", check=name, phase=stage[1].decode(),
                   state=stage[2].decode(), duration_seconds=int(stage[3]),
@@ -921,127 +931,17 @@ def phase_events(output, name, log, scan, seen, final=False, phases=None, observ
                 event(output, "environment", check=name, type=key[1], vm_count=key[2], base_fingerprint=key[3])
 
 
-class LeaseEvent(NamedTuple):
-    kind: str
-    handle: bytes | None = None
-    slot: int | None = None
-    reason: str | None = None
-
-
-def lease_event(line, stage):
-    if stage and stage.group(1, 2) == (b"allocation", b"start") and not stage[6]:
-        return LeaseEvent("start")
-    if not line.startswith((b"E2E lease", b"agent-e2e: ", b"subyard-test-vms: ")):
-        return None
-    if line.startswith(b"E2E lease:"):
-        slot, run = (re.search(rb" " + key + rb"=(\S+)", line) for key in (b"slot", b"run"))
-        return named_lease_event("grant", slot[1], run[1]) if slot and run else LeaseEvent("unknown")
-    for prefix, kind in ((b"allocation started:", "start"), (b"released:", "release")):
-        marker = re.fullmatch(b"E2E lease " + prefix + rb" slot=(\S+) run=(\S+)\n", line)
-        if marker:
-            return named_lease_event(kind, *marker.groups())
-    refused = re.fullmatch(rb"E2E lease allocation refused: slot=(\S+) run=(\S+) reason=(memory|disk|slot|other)\n", line)
-    if refused:
-        return named_lease_event("refused", refused[1], refused[2], None if refused[3] == b"other" else refused[3].decode())
-    client = re.fullmatch(rb"E2E lease (?:released: handle=(\S+) slot=(\S+) reason=\S+|had already ended: handle=(\S+) slot=(\S+))\n", line)
-    if client:
-        return named_lease_event("release", client[2] or client[4], client[1] or client[3])
-    if not line.startswith((b"agent-e2e: ", b"subyard-test-vms: ")):
-        return None
-    message = line.split(b": ", 1)[1]
-    capacity = re.fullmatch(rb"retryable capacity refusal for slot-([0-9]{1,3}): resource=(memory|disk); retry after resources become available\n", message)
-    if capacity:
-        return LeaseEvent("refused", slot=int(capacity[1]), reason=capacity[2].decode())
-    busy = re.match(rb"(?:requested E2E slot |timed out waiting for )slot-([0-9]{1,3}):", message)
-    if busy or message == b"lease acquire failed (invalid_request: invalid_slot)\n":
-        return LeaseEvent("refused", slot=int(busy[1]) if busy else None, reason="slot")
-    lost = re.fullmatch(rb"release rejected for slot=(\S+) run=(\S+) \(lease_lost\)\n", message)
-    if lost:
-        return named_lease_event("release", *lost.groups())
-    uncertain = re.fullmatch(
-        rb"(?:lease acquire unknown-outcome cause=[^\r\n]+?|lease acquire handoff is unknown; cleanup required|"
-        rb"(?:interrupted )?acquire cleanup remains unconfirmed:|release (?:failed|rejected) for)"
-        rb"(?: slot=(\S+) run=(\S+))?(?: \([^\r\n]+\))?\n", message)
-    if uncertain:
-        return named_lease_event("unknown", *uncertain.groups()) if uncertain[1] else LeaseEvent("unknown")
-    return None
-
-
-def named_lease_event(kind, slot, handle, reason=None):
-    number = slot.removeprefix(b"slot-")
-    if not number.isdigit() or len(number) > 3 or int(number) == 0:
-        return LeaseEvent("unknown")
-    return LeaseEvent(kind, handle, int(number), reason)
-
-
-class LeaseLedger:
-    """Interpret lease transitions as the log is read, including during live execution."""
+class PhaseLog:
+    """Read bounded controller telemetry independently of lease evidence."""
 
     def __init__(self):
         self.offset = 0
         self.discard = False
         self.checksum = hashlib.sha256()
-        self.handles = {}
-        self.legacy_start = self.named_starts = self.invalid = self.granted = False
-        self.last_refusal = None
-        self.environments, self.guest_cleanup, self.controller_cleanup = set(), [], []
 
     @property
     def sha256(self):
         return self.checksum.hexdigest()
-
-    @property
-    def safe(self):
-        return (not self.invalid and not self.legacy_start
-                and all(state in ("released", "refused") for _, state in self.handles.values()))
-
-    @property
-    def refusal(self):
-        return self.last_refusal if self.safe else None
-
-    def apply(self, lease):
-        kind, handle, slot, reason = lease
-        if handle is None:
-            if kind == "start":
-                self.invalid |= self.legacy_start
-                self.legacy_start, self.last_refusal = True, None
-                return None
-            if kind == "refused":
-                if self.legacy_start or not self.named_starts:
-                    self.legacy_start = False
-                    self.last_refusal = reason
-                    return lease
-                return None
-            self.invalid = True
-            return None
-
-        current = self.handles.get(handle)
-        if kind == "start":
-            self.invalid |= current is not None
-            self.named_starts, self.last_refusal = True, None
-            self.handles[handle] = slot, "starting"
-        elif kind == "refused":
-            if current == (slot, "starting"):
-                self.handles[handle] = slot, "refused"
-                self.last_refusal = reason
-                return lease
-        elif kind == "release":
-            if current in ((slot, "grant"), (slot, "unknown")):
-                self.handles[handle] = slot, "released"
-                return lease
-        elif kind in ("grant", "unknown"):
-            state = current[1] if current else ("starting" if self.legacy_start or not self.named_starts else None)
-            if state == "starting" or kind == "unknown" and current in ((slot, "grant"), (slot, "unknown")):
-                if current is None:
-                    self.legacy_start = False
-                self.handles[handle] = slot, kind
-                self.last_refusal = None
-                if kind == "grant":
-                    self.granted = True
-                    return lease
-            else:
-                self.invalid = True
-        return None
 
     def read(self, log, final):
         with log.open("rb") as stream:
@@ -1067,43 +967,106 @@ class LeaseLedger:
                               or stage[6] and stage.group(1, 2) != (b"allocation", b"start")
                               or bool(stage[5]) != (stage[1] in (b"transport", b"guest", b"guest-cleanup"))):
                     stage = None
-                lease = lease_event(line, stage)
-                transition = self.apply(lease) if lease else None
                 environment = ENVIRONMENT_MARKER.fullmatch(line)
                 if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
                     environment = environment[1].decode(), int(environment[2]), environment[3].decode()
-                    if transition and transition.kind == "grant":
-                        self.environments.add(environment)
                 else:
                     environment = None
-                if stage:
-                    if stage.group(1, 2) == (b"guest", b"start"):
-                        self.invalid |= not any(state == "grant" for _, state in self.handles.values())
-                        self.last_refusal = None
-                    elif stage.group(1, 2) == (b"guest-cleanup", b"end"):
-                        self.guest_cleanup.append((int(stage[5]), int(stage[4])))
-                    elif stage.group(1, 2) == (b"cleanup/release", b"end"):
-                        self.controller_cleanup.append(int(stage[4]))
-                yield line, stage, environment, transition
+                yield line, stage, environment
 
 
-def lease_ledger(log, expected_sha256=None):
-    ledger = LeaseLedger()
-    for _ in ledger.read(log, final=True):
-        pass
-    if expected_sha256 is not None and ledger.sha256 != expected_sha256:
-        raise ValueError("attempt log changed")
-    return ledger
+class LeaseLedger:
+    """The decision about a drained attempt's client-owned lease stream."""
+
+    def __init__(self):
+        self.handles = {}
+        self.invalid = self.granted = False
+        self.last_handle = None
+
+    @property
+    def state(self):
+        if self.invalid or not self.handles or any(state not in ("refusal", "closed") for _, state, _ in self.handles.values()):
+            return "unconfirmed"
+        return "released" if self.granted else "closed"
+
+    @property
+    def refusal(self):
+        if self.state != "unconfirmed":
+            reason = self.handles[self.last_handle][2]
+            return reason if reason in ("slot", "memory", "disk") else None
+        return None
+
+    def apply(self, record):
+        if (not isinstance(record, dict) or set(record) != {"schema_version", "event", "handle", "slot", "reason"}
+            or type(record["schema_version"]) is not int or record["schema_version"] != 1):
+            raise ValueError("invalid lease record")
+        kind, handle, slot, reason = (record[key] for key in ("event", "handle", "slot", "reason"))
+        if (not isinstance(handle, str) or not re.fullmatch(r"[0-9a-f]{8}\.[1-9][0-9]{0,9}", handle)
+            or not isinstance(slot, str) or not re.fullmatch(r"slot-[0-9]{3}", slot) or slot == "slot-000"
+            or (reason not in ("memory", "disk", "slot", "other") if kind == "refusal" else reason != "")):
+            raise ValueError("invalid lease record")
+        original, previous, _ = self.handles.get(handle, (slot, None, None))
+        if original != slot:
+            raise ValueError("lease changed slots")
+        if kind == "start" and previous is None:
+            self.last_handle = handle
+        elif kind in ("grant", "refusal") and previous == "start":
+            self.granted |= kind == "grant"
+        elif kind == "unknown" and previous in ("start", "grant"):
+            pass
+        elif kind in ("release", "lease_lost") and previous in ("start", "grant", "unknown"):
+            kind = "closed"
+        else:
+            raise ValueError("invalid lease transition")
+        self.handles[handle] = slot, kind, reason
+
+    @classmethod
+    def read(cls, stream, slot=None):
+        ledger = cls()
+        checksum = hashlib.sha256()
+        while line := stream.readline(1025):
+            checksum.update(line)
+            if ledger.invalid:
+                continue
+            try:
+                if len(line) > 1024 or not line.endswith(b"\n"):
+                    raise ValueError("incomplete lease record")
+                record = json.loads(line, object_pairs_hook=unique_evidence_fields)
+                ledger.apply(record)
+                if slot is not None and record["slot"] != f"slot-{slot:03d}":
+                    raise ValueError("lease used a different slot")
+            except (ValueError, RecursionError):
+                ledger.invalid = True
+        return ledger, checksum.hexdigest()
+
+
+def lease_file(log):
+    return log.with_suffix(".leases.jsonl")
 
 
 class UnprovenLease(ValueError):
     pass
 
 
-def validate_pass_leases(log, sha256):
-    ledger = lease_ledger(log, sha256)
-    if not ledger.granted or not ledger.safe:
-        raise UnprovenLease("PASS lacks confirmed lease cleanup")
+def validate_pass_leases(path, sha256, slot=None):
+    if is_sha(sha256):
+        try:
+            with path.open("rb") as stream:
+                ledger, measured = LeaseLedger.read(stream, slot)
+            if measured == sha256 and ledger.state == "released":
+                return
+        except OSError:
+            pass
+    raise UnprovenLease("PASS lacks confirmed lease cleanup")
+
+
+def copy_lease_evidence(source_log, target_log, sha256):
+    with lease_file(source_log).open("rb") as original, private_file(lease_file(target_log), "wb") as copied:
+        shutil.copyfileobj(original, copied)
+        copied.flush()
+        os.fsync(copied.fileno())
+    if digest(lease_file(target_log)) != sha256:
+        raise ValueError("copied lease evidence changed")
 
 
 def prepare(output, version, prepared=None):
@@ -1287,9 +1250,9 @@ def load_bound(output, entries=None, context=None):
             if name in required_commands and required_commands[name] is not None and "command" in result:
                 if result["command"] != command_identity(required_commands[name], root):
                     raise ValueError("passing command provenance changed")
-            if is_live(name) and "original_attempt" not in result:
+            if is_live(name) and "original_attempt" not in result and "evidence_transfer" not in result:
                 try:
-                    validate_pass_leases(output / log, result["log_sha256"])
+                    validate_pass_leases(lease_file(output / log), result.get("lease_events_sha256"), result.get("slot"))
                 except UnprovenLease:
                     unproven.add(name)
             if result.get("inherited") and result.get("evidence_transfer", {}).get("schema_version") != 2 and (not re.fullmatch(r"[0-9a-f]{64}", result.get("from_receipt_sha256", ""))
@@ -1367,10 +1330,6 @@ def is_live(name):
 def default_selection(checks, with_vms):
     return {name for name, result in checks.items()
             if with_vms or not is_live(name) or result == QUEUED_RETRY}
-
-
-def slot_continues_after(result):
-    return result.get("cleanup_status") != "unconfirmed"
 
 
 def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=(), with_vms=False):
@@ -1575,28 +1534,9 @@ def print_acceptance_summary(output, receipt):
 def run_live(output, live, eligible, slots, start, execute_check, record, queue_retry):
     pending, free, active = list(live), set(slots or DEFAULT_SLOTS), {}
     deferred, unsafe, slot_refused, reported = {}, set(), set(), set()
-    availability = dict.fromkeys([None, *free], 0)
-    progress, availability_lock = {}, threading.Lock()
-
-    def execute_attempt(name, slot, observed):
-        refused_at = {key: observed[key] for key in (None, slot)}
-        counts = {}
-
-        def observe_lease(lease):
-            with availability_lock:
-                if lease.kind == "refused" and lease.reason:
-                    key = slot if lease.reason == "slot" else None
-                    refused_at[key] = availability[key]
-                elif lease.kind == "release" or lease.kind == "grant" and lease.slot == slot:
-                    # A release can free pool capacity. Only a grant on this slot proves it
-                    # recovered. Replaying the same prefix on a retry adds no progress.
-                    key = None if lease.kind == "release" else slot
-                    counts[key] = counts.get(key, 0) + 1
-                    if counts[key] > progress.get((name, key), 0):
-                        progress[name, key] = counts[key]
-                        availability[key] += 1
-
-        return execute_check(name, slot, observe_lease), refused_at, slot in counts
+    # Blocked attempts cannot keep each other eligible. A sibling completion
+    # permits another attempt, including when it finished during the refusal.
+    completed = 0
 
     with retry_socket(output, listen=True) as listener, ThreadPoolExecutor(max_workers=len(free)) as pool:
         while not STOP.is_set():
@@ -1611,7 +1551,7 @@ def run_live(output, live, eligible, slots, start, execute_check, record, queue_
                         channel.settimeout(0.1)
                         name = channel.recv(4096).decode()
                         if (free or active) and name in eligible and name not in pending and name not in unsafe \
-                            and all(name != running for _, running in active.values()):
+                            and all(name != running for _, running, _ in active.values()):
                             channel.sendall(b"ready")
                             authorized = channel.recv(32) == b"queue"
                         else:
@@ -1622,52 +1562,49 @@ def run_live(output, live, eligible, slots, start, execute_check, record, queue_
                         queue_retry(name)
                         pending.insert(0, name)
                         deferred.pop(name, None)
-                        with availability_lock:
-                            for key in availability:
-                                progress.pop((name, key), None)
                         try:
                             channel.sendall(b"queued")
                         except OSError:
                             pass
-            with availability_lock:
-                current = availability.copy()
             for slot in sorted(free):
                 name = next((item for item in pending
-                             if all(deferred.get(item, {}).get(key) != current[key] for key in (None, slot))), None)
+                             if all(deferred.get(item, {}).get(key) != completed for key in (None, slot))), None)
                 if name is not None and start(name):
                     pending.remove(name)
                     free.remove(slot)
-                    active[pool.submit(execute_attempt, name, slot, current)] = slot, name
+                    active[pool.submit(execute_check, name, slot)] = slot, name, completed
             if not active:
                 break
             done, _ = wait(active, timeout=0.2, return_when=FIRST_COMPLETED)
             for future in done:
-                slot, name = active.pop(future)
-                result, refused_at, granted = future.result()
+                slot, name, dispatched_at = active.pop(future)
+                result = future.result()
                 record(name, result)
-                if not slot_continues_after(result):
+                if result["status"] != "blocked":
+                    completed += 1
+                if result.get("lease_state") not in ("closed", "released"):
                     unsafe.add(name)
                     print(f"SLOT-CLEANUP-UNCONFIRMED slot=slot-{slot} check={name} log={result.get('log')}", flush=True)
                     continue
                 free.add(slot)
                 reason = result.get("reason")
                 if reason == "slot-unavailable":
-                    deferred.setdefault(name, {})[slot] = refused_at[slot]
+                    deferred.setdefault(name, {})[slot] = dispatched_at
                     slot_refused.add(slot)
                     pending.append(name)
                     if slots and slot not in reported:
                         reported.add(slot)
                         print(f"SLOT-UNAVAILABLE slot=slot-{slot} check={name} log={result['log']}", flush=True)
                 else:
-                    if granted:
+                    if result.get("lease_state") == "released":
                         slot_refused.discard(slot)
                     if reason in ("capacity_memory", "capacity_disk"):
-                        deferred.setdefault(name, {})[None] = refused_at[None]
+                        deferred.setdefault(name, {})[None] = dispatched_at
                         pending.append(name)
                     else:
                         deferred.pop(name, None)
-        for future, (_, name) in active.items():
-            record(name, future.result()[0])
+        for future, (_, name, _) in active.items():
+            record(name, future.result())
     return bool(slots and slot_refused)
 
 
@@ -1702,6 +1639,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     order = list(dict.fromkeys([*priority_order, *checks]))
     env = clean_environment()
     env.pop("SUBYARD_E2E_CAPACITY_WAIT", None)
+    capacity_wait = env.pop("SUBYARD_E2E_HOSTED_CAPACITY_WAIT", "0s")
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and ((rerun and name not in dependencies) or receipt["checks"][name]["status"] != "passed")]
@@ -1741,10 +1679,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             save(output, receipt)  # Invalidate a previous PASS before any child can start.
             return True
 
-        def execute_check(name, slot=None, observe_lease=None):
+        def execute_check(name, slot=None):
             check_env = dict(env, SUBYARD_E2E_LOCAL_EVIDENCE=str(output)) if name in preflights else env
             args = (name, checks[name], root, output, check_env)
-            return execute(*args, slot, observe_lease) if slot else execute(*args)
+            return execute(*args, slot) if slot else execute(*args)
 
         def record(name, result):
             result["execution_environment"] = measured_environment
@@ -1801,7 +1739,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             print("INCOMPLETE: profile preflights await successful local gates; not passed: " + ", ".join(unready_local), flush=True)
             failure_reason = "prerequisite-stop"
         # Physical controllers consume the frozen transport; local tests keep normal bundling.
-        env.update(SUBYARD_E2E_CAPACITY_WAIT="0s",
+        env.update(SUBYARD_E2E_CAPACITY_WAIT=capacity_wait,
                    SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
                    SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
                    SUBYARD_E2E_LOCAL_EVIDENCE=str(output),
@@ -1852,6 +1790,13 @@ ATTEMPT_FIELDS = ("status", "exit_code", "termination", "signal", "duration_seco
     "log_sha256", "execution_environment", "environments", "environment_evidence",
     "slot", "cleanup", "cleanup_status", "capture_status", "last_completed_phase",
     "phase_budgets", "failure_class", "reason")
+
+
+def attempt_result_fields(result):
+    fields = {key: result.get(key, [] if key == "environments" else None) for key in ATTEMPT_FIELDS}
+    if "lease_events_sha256" in result:
+        fields["lease_events_sha256"] = result["lease_events_sha256"]
+    return fields
 
 
 def evidence_bytes(value):
@@ -1923,7 +1868,8 @@ def validate_attempt(record, manifest, name, command, log_sha256=None):
         or not isinstance(command, list) or not command or any(not isinstance(value, str) or not value for value in command)):
         raise ValueError("invalid original attempt binding")
     facts = record["result"]
-    if (not isinstance(facts, dict) or set(facts) != set(ATTEMPT_FIELDS)
+    if (not isinstance(facts, dict) or set(facts) - {"lease_events_sha256"} != set(ATTEMPT_FIELDS)
+        or facts.get("lease_events_sha256") is not None and not is_sha(facts["lease_events_sha256"])
         or facts["status"] not in ("passed", "failed", "interrupted", "blocked")
         or facts["exit_code"] is not None and type(facts["exit_code"]) is not int
         or facts["termination"] not in (None, "exit", "signal", "timeout", "unknown")
@@ -2006,9 +1952,11 @@ def completed_attempt(output, root, receipt, name, result):
             raise ValueError("completed attempt log changed")
         with (output / log).open("rb") as stream:
             os.fsync(stream.fileno())
+        if result.get("lease_events_sha256") is not None and digest(lease_file(output / log)) != result["lease_events_sha256"]:
+            raise ValueError("completed attempt lease evidence changed")
     record = {"schema_version": 1, "id": uuid.uuid4().hex, "manifest_sha256": manifest_sha,
               "check": name, "command": result["command"],
-              "result": {key: result.get(key, [] if key == "environments" else None) for key in ATTEMPT_FIELDS}}
+              "result": attempt_result_fields(result)}
     validate_attempt(record, manifest, name, result["command"])
     sha = immutable_json(output / "attempts" / (record["id"] + ".json"), record)
     return {"id": record["id"], "sha256": sha}
@@ -2039,16 +1987,16 @@ def original_attempt(output, receipt, name, result):
     if not hosted and (manifest["candidate"] != transfer_candidate(receipt) or manifest["environment"] != receipt["environment"]):
         raise ValueError("current original attempt candidate or environment differs")
     if (record["id"] != reference["id"] or result.get("inherited")
-        or record["result"] != {key: result.get(key, [] if key == "environments" else None) for key in ATTEMPT_FIELDS}):
+        or record["result"] != attempt_result_fields(result)):
         raise ValueError("current original attempt differs")
     if result.get("log_sha256") is not None:
         log = result.get("log")
         if not isinstance(log, str) or Path(log).name != log:
             raise ValueError("original attempt log changed")
-        if is_live(name) and result["status"] == "passed":
-            validate_pass_leases(output / log, result["log_sha256"])
-        elif digest(output / log) != result["log_sha256"]:
+        if digest(output / log) != result["log_sha256"]:
             raise ValueError("original attempt log changed")
+        if is_live(name) and result["status"] == "passed":
+            validate_pass_leases(lease_file(output / log), result.get("lease_events_sha256"), result.get("slot"))
     return record, manifest
 
 
@@ -2279,6 +2227,8 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
     for name in names:
         if name not in check_commands or check_commands[name] is None:
             raise ValueError("evidence import requires an exact executable check name")
+        if receipt["checks"][name] == QUEUED_RETRY:
+            raise ValueError("evidence import cannot replace a queued local retry")
         result = source["checks"][name]
         if result.get("execution") == "ci-hosted":
             raise ValueError("CI hosted results cannot be transfer sources")
@@ -2316,6 +2266,8 @@ def import_evidence(output, source_output, names, allow_other_profile_tests=Fals
             os.fsync(copied.fileno())
         if digest(log) != result["log_sha256"]:
             raise ValueError("imported evidence changed during copy")
+        if is_live(name):
+            copy_lease_evidence(source_output / result["log"], log, result["lease_events_sha256"])
         receipt["checks"][name] = {**{key: value for key, value in result.items() if key != "original_attempt"}, "log": log.name, "inherited": True,
                                    "from_receipt_sha256": source_hash,
                                    "from_log_sha256": result["log_sha256"],
@@ -2332,15 +2284,17 @@ def transfer_candidate(receipt):
         "candidate_sha256": deferral_candidate_sha256(receipt)}
 
 
+def unique_evidence_fields(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate evidence fields")
+    return result
+
+
 def read_transfer_json(path):
-    def unique(pairs):
-        result = dict(pairs)
-        if len(result) != len(pairs):
-            raise ValueError("duplicate evidence fields")
-        return result
     if path.stat().st_size > 16 << 20:
         raise ValueError("evidence JSON is too large")
-    return json.loads(path.read_text(), object_pairs_hook=unique)
+    return json.loads(path.read_text(), object_pairs_hook=unique_evidence_fields)
 
 
 def validate_evidence_transfer(document, name, command, target, log_sha256, manifests=None, root=None, _attempt=False):
@@ -2375,6 +2329,9 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
                 raise ValueError("policy transfer scope is not limited to harness-only changes")
         record = document["original_attempt"]
         validate_attempt(record, tested, name, command, log_sha256)
+        leases = {"leases": record["result"].get("lease_events_sha256")} if is_live(name) else {}
+        if leases and not is_sha(leases["leases"]):
+            raise UnprovenLease("PASS lacks confirmed lease cleanup")
         if (record["result"]["status"] != "passed" or record["result"]["exit_code"] != 0
             or record["result"]["capture_status"] != "recorded"
             or record["result"]["execution_environment"] is None
@@ -2384,12 +2341,12 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
             or document["preparation_environment"] != tested["environment"]
             or any(document[key] != value for key, value in attempt_facts(record).items())
             or document["artifacts"] != {"attempt": evidence_hash(record), "manifest": document["tested_manifest_sha256"],
-                "target_manifest": document["target_manifest_sha256"], "log": log_sha256, "review": document["artifacts"].get("review")}):
+                "target_manifest": document["target_manifest_sha256"], "log": log_sha256, "review": document["artifacts"].get("review"), **leases}):
             raise ValueError("transfer original attempt facts changed or incomplete")
         legacy = {key: value for key, value in document.items() if key not in
                   ("tested_manifest_sha256", "target_manifest_sha256", "original_attempt")}
         legacy.update(schema_version=1, origin="receipt", tested=tested["candidate"], target=destination["candidate"],
-                      artifacts={"receipt": document["artifacts"]["attempt"], "review": document["artifacts"]["review"], "log": log_sha256})
+                      artifacts={"receipt": document["artifacts"]["attempt"], "review": document["artifacts"]["review"], "log": log_sha256, **leases})
         validate_evidence_transfer(legacy, name, command, target, log_sha256, _attempt=True)
         return
     keys = {"schema_version", "check", "tested", "target", "command", "actual_command", "origin",
@@ -2418,6 +2375,10 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
                (("unchanged_scope", 2048), ("reason", 1024), ("authorization_reference", 256)))):
         raise ValueError("reviewed transfer requires scope, reason and authorization")
     roles = {"receipt", "review", "log"} | ({"native", "launch"} if document["origin"] == "standalone" else set())
+    if is_live(name):
+        if not isinstance(document["artifacts"], dict) or not is_sha(document["artifacts"].get("leases")):
+            raise UnprovenLease("PASS lacks confirmed lease cleanup")
+        roles.add("leases")
     if (not isinstance(document["artifacts"], dict) or set(document["artifacts"]) != roles
         or any(not is_sha(value) for value in document["artifacts"].values())
         or document["artifacts"]["log"] != log_sha256):
@@ -2434,7 +2395,8 @@ def validate_evidence_transfer(document, name, command, target, log_sha256, mani
         raise ValueError("transferred actual command missing")
     actual_prefix = (["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
         "SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}", "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}",
-        "SUBYARD_E2E_CANDIDATE_SHA256=" + document["tested"]["candidate_bundle_sha256"]]
+        "SUBYARD_E2E_CANDIDATE_SHA256=" + document["tested"]["candidate_bundle_sha256"],
+        "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"]
         if document["origin"] == "standalone" else [])
     base = actual_prefix + command
     if (actual[:len(base)] != base or (actual != base and
@@ -2508,96 +2470,7 @@ def validate_standalone_bundle(root, receipt, entries=None):
         raise ValueError("invalid standalone tested bundle archive") from None
 
 
-# This exact historical producer asserts guest rc=23 in transport_probes(), and
-# its direct cleanup trap exits 3 on any cleanup/release failure. It predates
-# expected-negative and cleanup/release telemetry; unknown producers stay strict.
-HISTORICAL_P0_SHA256 = "97c607ffc81cce7d11646e45702ee68b5cb6a0de316e7726d308c25e765d59f5"
-
-
-def validate_historical_p0_log(path, bundle, slot):
-    expected = ["lease", "transport-start", "negative", "negative-cleanup", "transport-end",
-                "cleanup-start", "clean-1", "final-guest-1", "final-cleanup-1",
-                "clean-2", "final-guest-2", "final-cleanup-2", "cleanup-end", "success", "release"]
-    events, active, owner, lease = [], {}, None, None
-    def invalid():
-        raise ValueError("historical P0 controller evidence differs")
-    with path.open("rb") as stream:
-        for line in stream:
-            if events and events[-1] == "release" and line.strip():
-                invalid()
-            if line.startswith(b"E2E lease:"):
-                if not re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=subyard-pair vms=2 base=[0-9a-f]{64}\n", line):
-                    invalid()
-                fields = [item.split(b"=", 1) for item in line.split()[2:]]
-                if any(len(item) != 2 for item in fields) or len(dict(fields)) != len(fields):
-                    invalid()
-                fields = dict(fields)
-                if fields.get(b"slot") != f"slot-{int(slot):03d}".encode() or not fields.get(b"run"):
-                    invalid()
-                lease = fields[b"slot"], fields[b"run"]
-                events.append("lease")
-            marker = re.fullmatch(rb"  \[ (\.\.|ok) \] phase=(transport|cleanup) (bundle=([0-9a-f]{64})|duration=[0-9]{1,9}s)\n", line)
-            if not marker and re.match(rb"  \[ (?:\.\.|ok) \] phase=(?:transport|cleanup)(?:[ \r\n]|$)", line):
-                invalid()
-            if marker:
-                phase = marker[2].decode()
-                if active:
-                    invalid()
-                if marker[1] == b"..":
-                    if owner is not None or marker[4] != bundle.encode():
-                        invalid()
-                    owner = phase
-                    events.append(phase + "-start")
-                else:
-                    if owner != phase or marker[4] is not None:
-                        invalid()
-                    owner = None
-                    events.append(phase + "-end")
-            if line.startswith(b"E2E_PHASE"):
-                stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
-                if not stage or int(stage[4]) > 255:
-                    invalid()
-                key = stage[1], stage[5]
-                if stage[2] == b"start":
-                    if active or stage[3] != b"0" or stage[4] != b"0":
-                        invalid()
-                    pending = {"negative": b"1", "final-guest-1": b"1", "final-guest-2": b"2"}.get(events[-1] if events else None)
-                    if pending is not None and key != (b"guest-cleanup", pending):
-                        invalid()
-                    active[key] = owner
-                else:
-                    if key not in active:
-                        invalid()
-                    started_owner = active.pop(key)
-                    if stage[4] != b"0":
-                        if key != (b"guest", b"1") or stage[4] != b"23" or owner != "transport" or started_owner != owner:
-                            invalid()
-                        events.append("negative")
-                    elif key == (b"guest-cleanup", b"1") and owner == "transport":
-                        events.append("negative-cleanup")
-                    elif owner == "cleanup" and stage[5] is not None:
-                        vm = stage[5].decode()
-                        if stage[1] == b"guest" and events[-1:] == ["clean-" + vm]:
-                            events.append("final-guest-" + vm)
-                        elif stage[1] == b"guest-cleanup" and events[-1:] == ["final-guest-" + vm]:
-                            events.append("final-cleanup-" + vm)
-            clean = re.fullmatch(rb"ok: VM([12]) exact P0 state, pools, projects and releases removed\n", line)
-            if clean:
-                if owner != "cleanup" or (b"guest", clean[1]) not in active:
-                    invalid()
-                events.append("clean-" + clean[1].decode())
-            if line == b"ok: P0 release smoke passed within one broker lease\n":
-                events.append("success")
-            released = re.fullmatch(rb"E2E lease released: slot=([^\r\n ]+) run=([^\r\n ]+)\n", line)
-            if released:
-                if (released[1], released[2]) != lease:
-                    invalid()
-                events.append("release")
-    if events != expected or active or owner is not None:
-        invalid()
-
-
-def standalone_result(root, receipt, name, command, files, verify_source=True, entries=None):
+def standalone_result(root, receipt, name, command, files, verify_source=True, entries=None, lease_sha256=None):
     """Verify existing bounded controller evidence, without inventing collector timing."""
     native = read_transfer_json(files["native"])
     if (type(native.get("exit_code")) is not int or native["exit_code"] != 0 or native.get("session_id") is not None
@@ -2618,18 +2491,19 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
     argv = launch.get("argv")
     if not isinstance(argv, list) or any(not isinstance(value, str) for value in argv):
         raise ValueError("standalone launcher command missing")
-    # Existing manual controller launches use this finite outer timeout and only
-    # the four public transport assignments. Never accept an arbitrary shell wrapper.
+    # Manual evidence must bind the separate client capture to the exact launcher.
     prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
-    if argv[:len(prefix)] != prefix or len(argv) < len(prefix) + 3:
+    if argv[:len(prefix)] != prefix or len(argv) < len(prefix) + 4:
         raise ValueError("standalone launcher wrapper differs")
-    assignments = argv[len(prefix):len(prefix) + 3]
+    assignments = argv[len(prefix):len(prefix) + 4]
     env = dict(value.split("=", 1) for value in assignments if "=" in value)
-    if (set(env) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256"}
+    if (set(env) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256", "SUBYARD_E2E_LEASE_EVENTS"}
+        or not Path(env["SUBYARD_E2E_LEASE_EVENTS"]).is_absolute()
+        or verify_source and Path(env["SUBYARD_E2E_LEASE_EVENTS"]).resolve() != files["leases"].resolve()
         or env["SUBYARD_E2E_CANDIDATE_BUNDLE"] != str(root.parent / "candidate-bundle.tar.gz")
         or env["SUBYARD_E2E_CANDIDATE_SHA256"] != receipt["candidate_bundle_sha256"]):
         raise ValueError("standalone launcher transport differs")
-    actual = argv[len(prefix) + 3:]
+    actual = argv[len(prefix) + 4:]
     if (actual[:len(command)] != command or len(actual) != len(command) + 2
         or actual[-2] != "--slot" or not re.fullmatch(r"[1-9][0-9]{0,2}", actual[-1])):
         raise ValueError("standalone actual check command differs")
@@ -2656,33 +2530,24 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
             launched = parsed.astimezone(timezone.utc).isoformat()
     if raw and verify_source:
         validate_standalone_bundle(root, receipt, entries)
-    # Initial import checks the actual bound controller above. Copied, hash-bound
-    # rich evidence retains this exact interpretation during portable revalidation.
-    historical_p0 = (not raw and name == "p0-release-smoke" and command == ["bash", "dev/e2e/p0-acceptance.sh"]
-        and launch["acceptance_script_sha256"] == HISTORICAL_P0_SHA256)
-    if historical_p0:
-        validate_historical_p0_log(files["log"], receipt["candidate_bundle_sha256"], actual[-1])
-    # The bound source and exact launcher select a checksum-verified bundle.
+    validate_pass_leases(files["leases"], lease_sha256 or digest(files["leases"]), int(actual[-1]))
     # Direct controllers need not use run_guest's transport/guest timing wrapper.
     environments, stages = set(), set()
-    with files["log"].open("rb") as stream:
-        for line in stream:
-            environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
-            if environment:
-                environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
-            stage = re.fullmatch(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=end duration_seconds=[0-9]{1,9} exit_code=([0-9]{1,3})(?: vm=([12]))?\n", line)
-            if stage:
-                if stage[2] != b"0" and not (historical_p0 and stage.groups() == (b"guest", b"23", b"1")):
-                    raise ValueError("standalone controller contains a failed phase")
-                stages.add((stage[1].decode(), int(stage[3]) if stage[3] else None))
-            if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
+    for line, stage, environment in PhaseLog().read(files["log"], final=True):
+        if environment:
+            environments.add(environment)
+        if stage and stage[2] == b"end":
+            if stage[4] != b"0":
                 raise ValueError("standalone controller contains a failed phase")
-    validate_pass_leases(files["log"], None)
-    if (not environments or not historical_p0 and ("cleanup/release", None) not in stages
+            stages.add((stage[1].decode(), int(stage[5]) if stage[5] else None))
+        if re.fullmatch(rb"  \[fail\] phase=[a-zA-Z0-9_./-]{1,100}(?: [^\r\n]*)?\n", line):
+            raise ValueError("standalone controller contains a failed phase")
+    if (not environments or ("cleanup/release", None) not in stages
         or any(("guest-cleanup", vm) not in stages for _, count, _ in environments for vm in range(1, count + 1))):
         raise ValueError("standalone controller evidence incomplete")
     sanitized = prefix + ["SUBYARD_E2E_CONTROLLER_WORKSPACE=${CONTROLLER_WORKSPACE}",
-        "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"]] + command_identity(actual, root)
+        "SUBYARD_E2E_CANDIDATE_BUNDLE=${TESTED_BUNDLE}", "SUBYARD_E2E_CANDIDATE_SHA256=" + receipt["candidate_bundle_sha256"],
+        "SUBYARD_E2E_LEASE_EVENTS=${LEASE_EVENTS}"] + command_identity(actual, root)
     return {"actual_command": sanitized, "duration_seconds": None, "launched_at_utc": launched,
             "execution_environment": None, "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base}
                 for kind, count, base in sorted(environments)]}
@@ -2690,14 +2555,24 @@ def standalone_result(root, receipt, name, command, files, verify_source=True, e
 
 def validate_transferred_result(output, receipt, name, result, command, root):
     transfer = result["evidence_transfer"]
+    if is_live(name):
+        sha256 = transfer.get("artifacts", {}).get("leases")
+        if not is_sha(sha256):
+            raise UnprovenLease("PASS lacks confirmed lease cleanup")
+        if result.get("lease_events_sha256") != sha256:
+            raise ValueError("reviewed transfer lease evidence binding differs")
     if transfer.get("schema_version") == 2:
         files = result.get("evidence_files")
         if not isinstance(files, dict) or set(files) != set(transfer["artifacts"]):
             raise ValueError("original attempt transfer artifacts missing")
         for role, filename in files.items():
-            if not isinstance(filename, str) or Path(filename).name != filename or digest(output / filename) != transfer["artifacts"][role]:
+            if not isinstance(filename, str) or Path(filename).name != filename:
+                raise ValueError("original attempt transfer artifact changed")
+            if role != "leases" and digest(output / filename) != transfer["artifacts"][role]:
                 raise ValueError("original attempt transfer artifact changed")
         record = read_transfer_json(output / files["attempt"])
+        if is_live(name):
+            validate_pass_leases(output / files["leases"], transfer["artifacts"]["leases"], record["result"]["slot"])
         manifests = {transfer[key]: read_transfer_json(output / files[role]) for key, role in
                      (("tested_manifest_sha256", "manifest"), ("target_manifest_sha256", "target_manifest"))}
         validate_evidence_transfer(transfer, name, command_identity(command, root), transfer_candidate(receipt), result["log_sha256"], manifests, root)
@@ -2720,7 +2595,9 @@ def validate_transferred_result(output, receipt, name, result, command, root):
         or result.get("environments", []) != transfer["environments"]):
         raise ValueError("reviewed transfer receipt provenance changed")
     for role, filename in files.items():
-        if not isinstance(filename, str) or Path(filename).name != filename or digest(output / filename) != transfer["artifacts"][role]:
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            raise ValueError("reviewed transfer original artifact changed")
+        if role != "leases" and digest(output / filename) != transfer["artifacts"][role]:
             raise ValueError("reviewed transfer original artifact changed")
     original = json.loads((output / files["receipt"]).read_text())
     review = read_transfer_json(output / files["review"])
@@ -2736,6 +2613,10 @@ def validate_transferred_result(output, receipt, name, result, command, root):
             or original_result.get("command") != transfer["command"]
             or original_result.get("log_sha256") != transfer["artifacts"]["log"]):
             raise ValueError("reviewed transfer original check changed")
+        if is_live(name):
+            if original_result.get("lease_events_sha256") != transfer["artifacts"]["leases"]:
+                raise ValueError("reviewed transfer original lease evidence changed")
+            validate_pass_leases(output / files["leases"], transfer["artifacts"]["leases"], original_result.get("slot"))
         facts = {"actual_command": original_result["command"] + (["--slot", str(original_result["slot"])] if "slot" in original_result else []),
                  "duration_seconds": original_result.get("duration_seconds"), "launched_at_utc": None,
                  "execution_environment": original_result.get("execution_environment"), "environments": original_result.get("environments", [])}
@@ -2744,8 +2625,9 @@ def validate_transferred_result(output, receipt, name, result, command, root):
             raise ValueError("standalone original check was already attempted")
         paths = {role: output / filename for role, filename in files.items()}
         launch = read_transfer_json(paths["launch"])
-        facts = standalone_result(Path(launch["cwd"]), original, name, transfer["command"], paths, verify_source=False)
-        if any(review["standalone"][role]["sha256"] != transfer["artifacts"][role] for role in ("native", "launch", "log")):
+        facts = standalone_result(Path(launch["cwd"]), original, name, transfer["command"], paths,
+                                  verify_source=False, lease_sha256=transfer["artifacts"]["leases"])
+        if any(review["standalone"][role]["sha256"] != transfer["artifacts"][role] for role in ("native", "launch", "log", "leases")):
             raise ValueError("standalone original declaration changed")
     if any(transfer[key] != value for key, value in facts.items()):
         raise ValueError("reviewed transfer original execution provenance changed")
@@ -2787,6 +2669,8 @@ def prepare_attempt_transfer(target, source, name, review_path, review):
     files = {"attempt": source_output / "attempts" / (record["id"] + ".json"),
              "manifest": source_output / "manifests" / (tested_sha + ".json"),
              "target_manifest": evidence_bytes(target_manifest), "review": review_path, "log": source_output / original["log"]}
+    if is_live(name):
+        files["leases"] = lease_file(files["log"])
     hashes = {role: hashlib.sha256(path).hexdigest() if isinstance(path, bytes) else digest(path) for role, path in files.items()}
     transfer = {"schema_version": 2, "check": name, "tested_manifest_sha256": tested_sha, "target_manifest_sha256": target_sha,
         "original_attempt": record, "command": expected, "origin": "attempt", "artifacts": hashes,
@@ -2827,12 +2711,14 @@ def prepare_transfer(target_candidate, source_candidate, name, review_path, revi
             or original.get("command") != expected or original.get("inherited")):
             raise ValueError("reviewed transfer requires original passing command-bound evidence")
         files["log"] = source_output / original["log"]
+        if is_live(name):
+            files["leases"] = lease_file(files["log"])
         facts = {"actual_command": expected + (["--slot", str(original["slot"])] if "slot" in original else []),
                  "duration_seconds": original.get("duration_seconds"), "launched_at_utc": None,
                  "execution_environment": original.get("execution_environment"), "environments": original.get("environments", [])}
         origin = "receipt"
     else:
-        if original["status"] != "pending" or not isinstance(review["standalone"], dict) or set(review["standalone"]) != {"native", "launch", "log"}:
+        if original["status"] != "pending" or not isinstance(review["standalone"], dict) or set(review["standalone"]) != {"native", "launch", "log", "leases"}:
             raise ValueError("standalone transfer requires uncollected original evidence")
         for role, descriptor in review["standalone"].items():
             if not isinstance(descriptor, dict) or set(descriptor) != {"path", "sha256"} or not isinstance(descriptor["path"], str):
@@ -3025,6 +2911,7 @@ def transfer_result(transfer, copied, batch_id):
             hashes["attempt" if transfer["schema_version"] == 2 else "receipt"],
         "evidence_transfer": transfer, "evidence_files": copied,
         **({"transfer_batch_sha256": batch_id} if batch_id is not None else {}),
+        **({"lease_events_sha256": hashes["leases"]} if "leases" in hashes else {}),
         **{key: transfer[key] for key in ("execution_environment", "environments", "duration_seconds")}}
 
 
@@ -3112,7 +2999,7 @@ def transfer_batch(output, request_path, plan=False):
             standalone = review.get("standalone") if isinstance(review, dict) else None
             if plan:
                 if standalone is not None:
-                    if not isinstance(standalone, dict) or set(standalone) != {"native", "launch", "log"} or original["status"] != "pending":
+                    if not isinstance(standalone, dict) or set(standalone) != {"native", "launch", "log", "leases"} or original["status"] != "pending":
                         raise ValueError("invalid standalone batch planning evidence")
                     files = {}
                     for role, descriptor in standalone.items():

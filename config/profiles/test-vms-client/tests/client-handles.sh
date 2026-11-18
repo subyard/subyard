@@ -157,6 +157,7 @@ grep -Fq -- '--project must be a safe project label' "$TMP/err" || fail 'missing
 
 # One lease spans separate processes: state written by one exec is read by the next.
 for protocol in v3 v4; do
+  export SUBYARD_E2E_LEASE_EVENTS="$TMP/$protocol.leases.jsonl"
   rm -f "$TMP/v4" "$TMP/vm/state"
   [ "$protocol" = v3 ] || touch "$TMP/v4"
   : > "$TMP/facade.log"
@@ -192,6 +193,9 @@ for protocol in v3 v4; do
   grep -Fxq 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0' "$TMP/release.err" \
     && grep -Eq '^E2E_RELEASE state=end duration_seconds=[0-9]+ budget_seconds=180 grace_seconds=5 exit_code=0$' "$TMP/release.err" \
     || fail "$protocol handle release left no release evidence: $(cat "$TMP/release.err")"
+  jq -se --arg handle "$handle.1" '
+    map(.event) == ["start", "grant", "release"] and all(.[]; .handle == $handle and .slot == "slot-002")
+  ' "$SUBYARD_E2E_LEASE_EVENTS" >/dev/null || fail "$protocol release lost the original capture handle"
   [ ! -e "$dir" ] || fail "$protocol release kept the handle"
   wait_for '! kill -0 "$keeper" 2>/dev/null' || fail "$protocol keeper outlived its released handle"
   renewals="$(count renew)"
@@ -201,6 +205,7 @@ for protocol in v3 v4; do
   grep -Fq "no active lease handle '$handle'" "$TMP/err" || fail "$protocol released handle diagnostic"
   client release "$handle" 2>/dev/null || fail "$protocol repeated release is not idempotent"
 done
+unset SUBYARD_E2E_LEASE_EVENTS
 rm -f "$TMP/v4"
 
 # Keeper death: exec refuses and nothing renews; the broker's expiry ends the lease.

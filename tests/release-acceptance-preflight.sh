@@ -13,7 +13,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location("acceptance", Path(sys.argv[1]) / "dev/release-acceptance.py")
+REPO = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("acceptance", REPO / "dev/release-acceptance.py")
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 spec = importlib.util.spec_from_file_location("publication", Path(sys.argv[1]) / "dev/release-publication.py")
@@ -74,7 +75,7 @@ class ProfilePreflightTests(unittest.TestCase):
             receipt["checks"]["verify"] = {"status": "passed"}
         calls = []
         native_execute = m.execute
-        def execute(name, command, root, output, env, slot=None, observe_lease=None):
+        def execute(name, command, root, output, env, slot=None):
             calls.append((name, slot))
             if name.startswith("profile-preflight:"):
                 self.assertEqual(env["SUBYARD_E2E_LOCAL_EVIDENCE"], str(self.root))
@@ -83,8 +84,10 @@ class ProfilePreflightTests(unittest.TestCase):
                     m.STOP.set()
                     return {"status": "interrupted", "exit_code": -15}
             code = 9 if local_failure and name == "verify" else outcomes.get(name, 0)
-            lease = ("E2E lease: slot=slot-001 run=fixture\nE2E lease released: slot=slot-001 run=fixture\n") if slot else ""
-            return native_execute(name, [sys.executable, "-c", f"print({lease!r}, end=''); raise SystemExit({code})"], root, output, env, slot, observe_lease)
+            if slot:
+                fixture = ["bash", str(REPO / "tests/helpers/release-lease-fixture.sh"), str(REPO), "pass"]
+                return native_execute(name, fixture, root, output, dict(env, LEASE_FIXTURE_EXIT=str(code)), slot)
+            return native_execute(name, [sys.executable, "-c", f"raise SystemExit({code})"], root, output, env)
         stdout = io.StringIO()
         with patch.object(m, "load_bound", return_value=(self.root, receipt)), \
              patch.object(m, "commands", return_value=checks), \

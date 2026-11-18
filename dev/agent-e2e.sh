@@ -27,8 +27,6 @@ phase_marker() {
   case "$vm" in ''|1|2) ;; *) return 0 ;; esac
   { printf 'E2E_PHASE phase=%s state=%s duration_seconds=%s exit_code=%s' "$phase" "$state" "$duration" "$rc"
     [ -z "$vm" ] || printf ' vm=%s' "$vm"
-    # The client logs the actual allocation start when it sends the broker request.
-    [ "$phase:$state" != allocation:start ] || printf ' scope=timing'
     printf '\n'
   } >&2 || true
 }

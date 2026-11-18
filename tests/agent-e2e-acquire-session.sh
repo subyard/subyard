@@ -184,6 +184,46 @@ full_grant='{"schema_version":1,"status":"ok","grant":{"environment":{"type":"su
   grep -Fqx 'agent-e2e: lease acquire handoff is unknown; cleanup required slot=slot-001 run=abcdef13' "$TMP/grant-guard-gone/stderr" ||
   { cat "$TMP/grant-guard-gone/stderr" >&2; fail "grant after guard exit rc=$rc was accepted as handed off"; }
 
+# A requester can disappear while the outer wrapper is still able to clean up.
+# The guard and wrapper may both receive closure of the same reservation.
+(
+  LOCAL_TEMP="$TMP/guard-wrapper-release"
+  install -d -m 0700 "$LOCAL_TEMP"
+  export SUBYARD_E2E_LEASE_EVENTS="$LOCAL_TEMP/lease-events.jsonl"
+  LEASE_ACQUIRE_REPLY="$LOCAL_TEMP/replies"
+  LEASE_REQUESTED_SLOT='slot-001'
+  LEASE_RUN=abcdef14
+  LEASE_EVENT_HANDLE="$LEASE_RUN.1"
+  lease_event start "$LEASE_REQUESTED_SLOT"
+  facade_request() {
+    case "$1" in
+      acquire-v4\ *) printf '%s\n' "$reservation_json"; sleep 30 ;;
+      release\ *)
+        if [ -e "$LOCAL_TEMP/released" ]; then
+          printf '%s\n' '{"schema_version":1,"status":"error","code":"lease_lost"}'
+        else
+          : > "$LOCAL_TEMP/released"
+          printf '%s\n' '{"schema_version":1,"status":"ok","message":"released"}'
+        fi ;;
+    esac
+  }
+  lease_keeper_wait() {
+    local attempt
+    for ((attempt=0; attempt<50; attempt++)); do
+      [ ! -s "$LEASE_ACQUIRE_REPLY" ] || break
+      sleep 0.1
+    done
+    return 1
+  }
+  (lease_acquire_guard 0 0 0 0 'acquire-v4 fixture') && exit 36
+  [ -e "$LOCAL_TEMP/released" ] || exit 37
+  parse_lease_reservation "$reservation_json"
+  record_lease_outcome unknown "$LEASE_SLOT"
+  if record_lease_outcome grant "$LEASE_SLOT"; then exit 38; fi
+  release_lease || [ "$RELEASE_CODE" = lease_lost ]
+  jq -se 'map(.event) == ["start", "release"] and (map(.handle) | unique | length) == 1' "$SUBYARD_E2E_LEASE_EVENTS" >/dev/null
+) || fail 'the guard and wrapper recorded conflicting outcomes for one reservation'
+
 # A guard that exits without a terminal frame stays unknown and names its cause.
 (
   LOCAL_TEMP="$TMP/no-frame"

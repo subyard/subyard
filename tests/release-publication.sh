@@ -6,12 +6,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B "$ROOT/tests/helpers/hosted-diagnostics-tes
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import base64
 import copy
+from functools import cache
 import hashlib
 import importlib.util
 import io
 import itertools
 import json
 import os
+import shlex
 from pathlib import Path
 import shutil
 import subprocess
@@ -30,8 +32,24 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-LEASE_GRANT = "E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
-LEASE_RELEASE = "E2E lease released: slot=slot-001 run=sample\n"
+LEASE_FIXTURE = ["bash", str(ROOT / "tests/helpers/release-lease-fixture.sh"), str(ROOT), "pass"]
+
+
+@cache
+def fixture_capture(slot):
+    with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+        leases = Path(temporary) / "fixture.leases.jsonl"
+        native = subprocess.run(LEASE_FIXTURE + ["--slot", str(slot)], check=True, stderr=subprocess.STDOUT,
+                                stdout=subprocess.PIPE, env=dict(m.a.clean_environment(), SUBYARD_E2E_LEASE_EVENTS=str(leases)))
+        return native.stdout, leases.read_bytes()
+
+
+def physical_log(log, slot=1):
+    output, events = fixture_capture(slot)
+    m.a.lease_file(log).write_bytes(events)
+    log.write_bytes(output)
+    return {"slot": slot, "lease_events_sha256": m.a.digest(m.a.lease_file(log)),
+            "environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "a" * 64}]}
 
 
 def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
@@ -58,7 +76,7 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
     (root / "dev/test-profiles.sh").write_text("#!/bin/bash\nprintf 'runner\\tsample\\tconfig/profiles/sample/tests/e2e/acceptance.sh\\n'\n")
     profile = root / "config/profiles/sample/tests/e2e"
     profile.mkdir(parents=True)
-    (profile / "acceptance.sh").write_text("#!/bin/bash\nprintf '%s' '" + LEASE_GRANT + LEASE_RELEASE + "'\n")
+    (profile / "acceptance.sh").write_text("#!/bin/bash\n" + shlex.join(LEASE_FIXTURE) + ' "$@"\n')
     if lanes:
         (profile / "acceptance-lanes.json").write_text(json.dumps({"schema_version": 1, "lanes": [
             {"id": lane, "arguments": ["--lane", lane]} for lane in lanes]}))
@@ -119,12 +137,12 @@ def accepted(directory, prepared, identity, external_passed=True, with_vms=True)
     for name, command in m.a.commands(root, identity["version"], receipt["profiles"]).items():
         if command and (with_vms or name == "p0-release-smoke" or not m.a.is_live(name)):
             log = output / (name.replace(":", "-").replace("/", "-") + ".log")
-            log.write_text(LEASE_GRANT + LEASE_RELEASE if m.a.is_live(name) else "synthetic passing evidence fixture\n")
+            physical = physical_log(log) if m.a.is_live(name) else {}
+            if not physical:
+                log.write_text("synthetic passing evidence fixture\n")
             receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name,
                 "log_sha256": m.a.digest(log), "command": m.a.command_identity(command, root),
-                "execution_environment": receipt["environment"]}
-            if m.a.is_live(name):
-                receipt["checks"][name]["environments"] = [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]
+                "execution_environment": receipt["environment"], **physical}
     if external_passed:
         for item in receipt["external_obligations"].values():
             item.update({"status": "passed", "evidence_sha256": "c" * 64})
@@ -328,11 +346,13 @@ class Contracts(unittest.TestCase):
                 self.assertEqual((result["status"], result["command"]), ("passed", ["ci-prepared", "r123-a1", m.a.CI_PREPARED_CHECKS[name]]))
             elif name != "package" and result["status"] == "pending":
                 log = output / (name.replace(":", "-").replace("/", "-") + ".log")
-                log.write_text(LEASE_GRANT + LEASE_RELEASE if m.a.is_live(name) else "synthetic passing evidence fixture\n")
+                physical = physical_log(log) if m.a.is_live(name) else {}
+                if not physical:
+                    log.write_text("synthetic passing evidence fixture\n")
                 receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
                     "command": m.a.command_identity(m.a.commands(root, receipt["version"], receipt["profiles"])[name], root),
                     "execution_environment": receipt["environment"],
-                    **({"environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]} if m.a.is_live(name) else {})}
+                    **physical}
         for item in receipt["external_obligations"].values():
             item.update({"status": "passed", "evidence_sha256": "c" * 64})
         m.a.save(output, receipt)
@@ -596,11 +616,11 @@ class Contracts(unittest.TestCase):
             output, root, identity = self.split_candidate(Path(temporary), with_vms=False)
             _, receipt = m.a.load_bound(output)
             log = output / "vm-p0-full.log"
-            log.write_text(LEASE_GRANT + LEASE_RELEASE)
+            physical = physical_log(log)
             receipt["checks"]["vm:p0-full"] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
                 "command": m.a.command_identity(m.a.commands(root, identity["version"], receipt["profiles"])["vm:p0-full"], root),
                 "execution_environment": receipt["environment"],
-                "environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]}
+                **physical}
             receipt["checks"]["profile:sample"] = {"status": "pending"}
             m.a.save(output, receipt)
             self.assertEqual(receipt["result"], "incomplete")
@@ -1135,6 +1155,8 @@ class Contracts(unittest.TestCase):
                 continue
             receipt["checks"][check] = copy.deepcopy(result)
             shutil.copyfile(self.output / result["log"], target / result["log"])
+            if m.a.is_live(check):
+                m.a.copy_lease_evidence(self.output / result["log"], target / result["log"], result["lease_events_sha256"])
         receipt["external_obligations"] = copy.deepcopy(source["external_obligations"])
         m.a.save(target, receipt)
         document = m.attestation(target, self.identity)
@@ -1167,8 +1189,6 @@ class Contracts(unittest.TestCase):
         for name, result in source["checks"].items():
             if name != "package":
                 result["duration_seconds"] = 123.5
-                if m.a.is_live(name):
-                    result["slot"] = 2
         m.a.save(source_output, source)
         _, source = capture_attempts(source_output)
         state_dir = self.directory / "publication"
@@ -1377,10 +1397,14 @@ class Contracts(unittest.TestCase):
         target["checks"][name] = {"status": "pending"}
         m.a.save(self.output, target)
         command = m.a.command_identity(m.a.commands(original_root, identity["version"], original["profiles"])[name], original_root)
+        log = self.directory / "failure.log"
+        physical_log(log, 2)
+        leases = m.a.lease_file(log)
         argv = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE=" + str(self.directory / "controller"),
                 "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
-                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], *command, "--slot", "2"]
+                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"],
+                "SUBYARD_E2E_LEASE_EVENTS=" + str(leases), *command, "--slot", "2"]
         launch = {"argv": argv, "cwd": str(original_root), "started_at": "2026-10-12T00:00:00+00:00", "started_monotonic": 1000.0}
         timing = {**launch, "ended_at": "2026-10-12T00:02:03.500000+00:00", "ended_monotonic": 1123.5,
                   "whole_duration_seconds": 123.5, "exit_code": 1}
@@ -1388,13 +1412,9 @@ class Contracts(unittest.TestCase):
         files = {role: self.directory / ("failure-" + role + ".json") for role in ("native", "launch", "timing")}
         for role, data in (("native", native), ("launch", launch), ("timing", timing)):
             m.write_json(files[role], data)
-        files["log"] = self.directory / "failure.log"
-        files["log"].write_text("E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
-            "  [fail] phase=fixture/init\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n"
-            "E2E lease released: slot=2 run=fixture\n"
-            "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
+        files.update(log=log, leases=leases)
+        with log.open("a") as stream:
+            stream.write("  [fail] phase=fixture/init\n")
         declaration = {"schema_version": 1, "check": name, "target": self.identity, "tested": m.a.transfer_candidate(original),
             "command": command, "decision": {"reason": "Accept this known failure for this exact release",
                 "authorization_reference": "operator-decision:fixture", "repair_reference": "p0-repair:fixture"},
@@ -1561,6 +1581,8 @@ class Contracts(unittest.TestCase):
         review_text = {"unchanged_scope": "Exact synthetic fixture behavior", "reason": "Reviewed complete candidate delta",
                        "authorization_reference": "operator:batch-fixture"}
         native, launch, log = (self.directory / ("standalone-" + role) for role in ("native", "launch", "log"))
+        physical_log(log, 2)
+        leases = m.a.lease_file(log)
         native.write_text(json.dumps({"exit_code": 0, "chunk_id": "original", "output": "", "wall_time_seconds": 1}))
         command = m.a.commands(original_root, self.identity["version"], original["profiles"])["profile:sample/two"]
         launch.write_text(json.dumps({"cwd": str(original_root), "source_fingerprint": original["source_fingerprint"],
@@ -1569,14 +1591,10 @@ class Contracts(unittest.TestCase):
             "argv": ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE=/fixture/controller",
                 "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
-                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], *command, "--slot", "2"]}))
-        log.write_text("E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n"
-            "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
-            "E2E lease released: slot=2 run=fixture\n")
+                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"],
+                "SUBYARD_E2E_LEASE_EVENTS=" + str(leases), *command, "--slot", "2"]}))
         standalone = {role: {"path": str(path), "sha256": m.a.digest(path)} for role, path in
-                      (("native", native), ("launch", launch), ("log", log))}
+                      (("native", native), ("launch", launch), ("log", log), ("leases", leases))}
         request = {"schema_version": 1, "target": m.a.transfer_candidate(receipt), "checks": []}
         for name in ("verify", "local-adapters", "profile:sample/two"):
             reference = original["checks"][name].get("original_attempt")
@@ -1688,23 +1706,22 @@ class Contracts(unittest.TestCase):
                 else:
                     data["argv"][8] = "SUBYARD_E2E_CANDIDATE_SHA256=" + "f" * 64
                 m.write_json(files[role], data)
+            elif change == "cleanup":
+                files["log"].write_bytes(originals["log"].replace(b"exit_code=0 vm=2", b"exit_code=1 vm=2"))
             else:
-                content = originals["log"].decode()
-                if change == "cleanup":
-                    content = content.replace("exit_code=0 vm=2", "exit_code=1 vm=2")
-                elif change == "release":
-                    content = content.replace("E2E lease released:", "missing release:")
+                start, grant, release = originals["leases"].splitlines(keepends=True)
+                handle = json.loads(start)["handle"].encode()
+                extra = start.replace(handle, b"00000000.2")
+                if change == "release":
+                    files["leases"].write_bytes(start + grant)
                 elif change == "unresolved allocation":
-                    content = ("E2E_PHASE phase=allocation state=start duration_seconds=0 exit_code=0\n" * 2
-                               + content)
+                    files["leases"].write_bytes(start + grant + release + extra)
                 else:
-                    second_grant = content.splitlines(keepends=True)[0].replace("run=fixture", "run=other")
-                    content = second_grant + content
-                files["log"].write_text(content)
+                    files["leases"].write_bytes(start + grant + release + extra + grant.replace(handle, b"00000000.2"))
             declaration["artifacts"] = {role: {"path": str(file), "sha256": m.a.digest(file)} for role, file in files.items()}
             m.write_json(path, declaration)
-            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "cleanup or release unconfirmed"
-                    if change in ("outstanding lease", "unresolved allocation") else "."):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "lacks confirmed lease cleanup"
+                    if change in ("outstanding lease", "unresolved allocation", "release") else "."):
                 m.attestation(self.output, self.identity, [path])
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
@@ -2478,7 +2495,7 @@ class HostedChecks(unittest.TestCase):
             archive.writestr("runs/" + "d" * 32 + ".json", json.dumps(selected))
             archive.writestr("ci-execution.json", json.dumps({"run_id": 456, "run_attempt": self.execution_attempt,
                 "head_sha": self.identity["commit"], "check": "profile:sample"}))
-            for pattern in ("*.log", "attempts/*.json", "manifests/*.json"):
+            for pattern in ("*.log", "*.leases.jsonl", "attempts/*.json", "manifests/*.json"):
                 for path in self.remote.glob(pattern):
                     archive.write(path, str(path.relative_to(self.remote)))
         return stream.getvalue()
@@ -2507,17 +2524,18 @@ class HostedChecks(unittest.TestCase):
         name = "profile:sample"
         receipt = json.loads((self.remote / "receipt.json").read_text())
         result = receipt["checks"][name]
-        second = LEASE_GRANT.replace("run=sample", "run=second")
-        trace = LEASE_GRANT + second + (
-            "E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0\n"
-            "broker diagnostics\n" + LEASE_RELEASE.replace("run=sample", "run=second"))
         log = self.remote / result["log"]
-        log.write_text(trace)
-        result["log_sha256"] = m.a.digest(log)
+        events = m.a.lease_file(log)
+        contents = events.read_bytes()
+        start = contents.splitlines(keepends=True)[0]
+        events.write_bytes(contents + start.replace(json.loads(start)["handle"].encode(), b"00000000.2"))
+        result["lease_events_sha256"] = m.a.digest(events)
         result["original_attempt"] = m.a.completed_attempt(self.remote, self.root, receipt, name, result)
         m.a.save(self.remote, receipt)
-        fresh = m.a.execute(name, ["bash", "-c", 'cat "$1"', "fixture", str(log)], self.root, self.output, m.a.clean_environment(), 1)
-        self.assertEqual((fresh["status"], fresh["exit_code"], fresh["cleanup_status"]), ("failed", 0, "unconfirmed"))
+        fresh = m.a.execute(name, ["bash", "-c", 'cat "$1"; cat "$2" > "$SUBYARD_E2E_LEASE_EVENTS"',
+                                   "fixture", str(log), str(events)], self.root, self.output, m.a.clean_environment(), 1)
+        self.assertEqual((fresh["status"], fresh["exit_code"], fresh["lease_state"]), ("failed", 0, "unconfirmed"))
+        self.assertEqual(m.a.lease_file(self.output / fresh["log"]).read_bytes(), events.read_bytes())
         counted, report = self.collect()
         self.assertEqual(counted, {"status": "pending"})
         self.assertIn("PASS lacks confirmed lease cleanup", report)
@@ -2749,6 +2767,7 @@ class HostedChecks(unittest.TestCase):
         source, receipt = m.a.load_bound(self.remote)
         result = receipt["checks"]["profile:sample"]
         log = self.remote / "profile-sample-12345678.log"
+        m.a.copy_lease_evidence(self.remote / result["log"], log, result["lease_events_sha256"])
         log.write_text("fixture failure: missing guest socket\n"
                        "E2E_PHASE phase=cleanup/release state=end exit_code=0\n")
         result.update(status="failed", exit_code=1, log=log.name, log_sha256=m.a.digest(log))

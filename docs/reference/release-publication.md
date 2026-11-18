@@ -348,12 +348,13 @@ The declaration has exactly these fields:
 | `command` | Exact normalized declared command from `release_acceptance.command_identity` |
 | `decision` | Exactly `reason`, `authorization_reference`, `repair_reference`; nonblank public English strings without credentials or private paths |
 | `source` | Exactly local frozen acceptance `output` path and original `receipt_sha256` |
-| `artifacts` | Exactly `native`, `launch`, `timing`, `log`; each with local `path` and original `sha256` |
+| `artifacts` | Exactly `native`, `launch`, `timing`, `log`, `leases`; each with local `path` and original `sha256` |
 
 Paths resolve relative to the declaration. Repeat `--operator-acceptance` for separately authorized
 checks. Keep the original frozen source, runtime, bundle and full asset inventory. Original and target
 commands and versions must match. Evidence must prove terminal nonzero exit, complete launch/timing,
-VM identities, successful cleanup of every guest and lease release. Interrupted, incomplete, changed
+VM identities, successful cleanup of every guest and confirmed lease closure. The launcher must
+set `SUBYARD_E2E_LEASE_EVENTS` to the original `leases` file. Interrupted, incomplete, changed
 or ambiguous evidence is refused. Only pending/uncollected or matching failed entries qualify;
 passing or inherited entries cannot use this path. Publication reports `native_status=failed` and
 the original exit and log hash without claiming a PASS.
@@ -478,6 +479,15 @@ The broker admits each request against current memory and disk capacity. The col
 broker slot refusals while work is waiting and returns exit 2 if any explicitly selected slot
 still lacks a subsequent grant on that slot. A pending VM check remains
 required on continuation once explicitly requested, including after interruption or exclusion.
+Deferred lanes become eligible again on sibling completion. Hosted single-lane jobs retain a
+bounded capacity wait.
+
+Each live attempt retains a private `.leases.jsonl` file and its SHA-256 alongside the controller
+log. The client writes a start before every acquire, then records the broker outcome and any
+confirmed release. An unresolved or invalid stream leaves the slot unavailable for that run.
+A live PASS requires a grant and closure of every start. Resuming a receipt with unproven live
+evidence reruns the affected selected lane and keeps other validated results. Candidates frozen
+with a client that cannot emit the stream need to be rebuilt before their live checks can pass.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
 `--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
@@ -677,7 +687,8 @@ this declaration. The transfer copies and rehashes the original record, both man
 log, with no dependency on a digest of the mutable carrier receipt. Physical attempt transfer also
 requires recorded environment and successful cleanup evidence.
 
-Legacy receipt and standalone declarations remain supported unchanged.
+Version 1 receipt and standalone declarations remain supported with structured lease proof for
+physical checks.
 Their `REVIEW.json` has exactly `schema_version: 1`, `check`, `tested`, `target`,
 `source_receipt_sha256`, `review` and `standalone`. Each candidate identity contains
 `version`, `source_fingerprint`, `runtime_file`, `runtime_sha256`,
@@ -697,10 +708,11 @@ retained. Already inherited results cannot be transferred again. `package` and e
 obligations cannot use this path; current preparation and external rules remain authoritative.
 
 An uncollected physical controller PASS may instead supply `standalone` with exactly
-`native`, `launch` and `log`, each containing `path` and `sha256` for ORIGINAL evidence.
+`native`, `launch`, `log` and `leases`, each containing `path` and `sha256` for original evidence.
 Relative paths resolve beside the review declaration. The original collector entry stays
 pending. The native terminal object must have a final integer exit zero, and the complete
-controller log must retain the VM base, successful cleanup of every VM and lease release.
+controller log must retain the VM base and successful cleanup of every VM. The separate
+`leases` stream proves that every acquisition closed.
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
 for direct controllers and stays unknown; any observed failed phase rejects the transfer.
@@ -710,8 +722,9 @@ and timezone-aware `started_at` are also supported. Their checksum-bound bundle 
 the frozen source, executable modes, candidate metadata and complete release inventory; do not
 add hashes to original records. Contradictory bindings or malformed timestamps/clocks are refused.
 The command must be the exact check plus `--slot N`, in the supported
-`timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR` and the three
-controller/transport assignments. Unmeasured duration and execution environment stay unknown;
+`timeout --signal=TERM --kill-after=300s 90m env` wrapper with `TMPDIR`, the three
+controller/transport assignments and `SUBYARD_E2E_LEASE_EVENTS` set to the absolute path of the
+private lease stream for that attempt. Unmeasured duration and execution environment stay unknown;
 preparation environment and final-poll duration cannot substitute for them.
 
 Single and batch transfers stage and validate evidence before replacing the receipt. A copy failure

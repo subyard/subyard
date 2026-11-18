@@ -60,6 +60,8 @@ LEASE_KEEPER_LOG=""
 LEASE_YARD=""
 LEASE_PROJECT=""
 LEASE_RUN=""
+LEASE_EVENT_HANDLE=""
+LEASE_EVENT_SEQUENCE=0
 LEASE_PURPOSE=""
 LEASE_REQUESTED_SLOT=""
 ENVIRONMENT_TYPE=subyard-pair
@@ -76,14 +78,20 @@ declare -A VM_IP=()
 declare -A VM_HOST_KEY=()
 
 die() { printf '%s: %s\n' "$E2E_PROGRAM" "$*" >&2; exit 2; }
+# The controller supplies a private file, separate from guest output.
+lease_event() {
+  [ -n "${SUBYARD_E2E_LEASE_EVENTS:-}" ] && [ -n "$LEASE_EVENT_HANDLE" ] || return 0
+  [[ "$2" =~ ^slot-[0-9]{3}$ ]] || return 1
+  printf '{"schema_version":1,"event":"%s","handle":"%s","slot":"%s","reason":"%s"}\n' \
+    "$1" "$LEASE_EVENT_HANDLE" "$2" "${3:-}" >> "$SUBYARD_E2E_LEASE_EVENTS"
+}
+
 die_acquire_unknown() {
   local slot="$LEASE_REQUESTED_SLOT"
   [ -z "$LEASE_ID" ] || slot="$LEASE_SLOT"
+  record_lease_outcome unknown "$slot" || die "cannot record unknown lease outcome"
   printf '%s: lease acquire unknown-outcome cause=%s slot=%s run=%s\n' "$E2E_PROGRAM" "$1" "$slot" "$LEASE_RUN" >&2
   die "lease acquire outcome is unknown; refusing a second allocation"
-}
-lease_allocation_refused() {
-  printf 'E2E lease allocation refused: slot=%s run=%s reason=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" "$1" >&2
 }
 info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
@@ -710,18 +718,28 @@ report_exact_slot_wait() {
 
 parse_lease_grant() {
   local response="$1" count selector name address key_type key_blob
-  local response_yard response_project response_run response_purpose
+  local response_yard response_project response_run response_purpose slot lease_id epoch capability
   [ "$(jq -r '.status // empty' <<<"$response")" = ok ] || return 1
-  LEASE_SLOT="$(jq -r '.grant.slot_id // empty' <<<"$response")"
+  slot="$(jq -r '.grant.slot_id // empty' <<<"$response")"
+  lease_id="$(jq -r '.grant.lease_id // empty' <<<"$response")"
+  epoch="$(jq -r '.grant.lease_epoch // empty' <<<"$response")"
+  capability="$(jq -r '.grant.capability // empty' <<<"$response")"
+  [[ "$slot" =~ ^slot-[0-9]{3}$ && "$lease_id" =~ ^[0-9a-f]+$ \
+    && "$epoch" =~ ^[1-9][0-9]*$ && "$capability" =~ ^[0-9a-f]+$ ]] \
+    || die "facade returned invalid lease credentials"
+  if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ] && [ -n "$LEASE_ID" ]; then
+    # Keep early credentials available to the trap if the final frame is damaged.
+    if [ "$slot" != "$LEASE_SLOT" ]; then
+      record_lease_outcome unknown "$slot" || die "cannot record unknown lease outcome"
+      die "facade changed the lease reservation slot"
+    fi
+    [ "$lease_id" = "$LEASE_ID" ] && [ "$epoch" = "$LEASE_EPOCH" ] \
+      && [ "$capability" = "$LEASE_CAPABILITY" ] || die "facade changed the lease reservation"
+  fi
+  LEASE_SLOT="$slot" LEASE_ID="$lease_id" LEASE_EPOCH="$epoch" LEASE_CAPABILITY="$capability"
   LEASE_GENERATION="$(jq -r '.grant.resource_generation // empty' <<<"$response")"
-  LEASE_ID="$(jq -r '.grant.lease_id // empty' <<<"$response")"
-  LEASE_EPOCH="$(jq -r '.grant.lease_epoch // empty' <<<"$response")"
-  LEASE_CAPABILITY="$(jq -r '.grant.capability // empty' <<<"$response")"
   DATA_USER="$(jq -r '.grant.data_user // empty' <<<"$response")"
   case "$DATA_USER" in subyard-e2e-slot-[1-9]* ) ;; *) die "facade returned an invalid data user" ;; esac
-  [[ "$LEASE_SLOT" =~ ^slot-[0-9]{3}$ && "$LEASE_ID" =~ ^[0-9a-f]+$ \
-    && "$LEASE_EPOCH" =~ ^[1-9][0-9]*$ && "$LEASE_CAPABILITY" =~ ^[0-9a-f]+$ ]] \
-    || die "facade returned invalid lease credentials"
   jq -e '
     (.grant.context | type == "object") and
     ((.grant.context | keys | sort) ==
@@ -895,17 +913,18 @@ acquire_lease() {
   request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
   started=$SECONDS
   last_report=-30
-  printf 'E2E lease allocation started: slot=%s run=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
   while true; do
     elapsed=$((SECONDS - started))
     if [ "$attempt" -gt 0 ] && [ "$last_state" != capacity ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
-      lease_allocation_refused slot
       printf '%s: timed out waiting for %s: state=%s reason=%s\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$last_state" "$last_reason" >&2
       [ -z "$last_owner_summary" ] || printf '%s: %s\n' "$E2E_PROGRAM" "$last_owner_summary" >&2
       return 4
     fi
     attempt=$((attempt + 1))
+    LEASE_EVENT_SEQUENCE=$((LEASE_EVENT_SEQUENCE + 1))
+    LEASE_EVENT_HANDLE="$LEASE_RUN.$LEASE_EVENT_SEQUENCE"
+    lease_event start "$LEASE_REQUESTED_SLOT" || die "cannot record lease start"
     if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ]; then
       lease_acquire_stream "$request" || die_acquire_unknown "${LEASE_ACQUIRE_FAILURE:-stream-failed}"
       response="$ACQUIRE_RESPONSE"
@@ -914,12 +933,13 @@ acquire_lease() {
       response="$(facade_request "$request")" || transport_rc=$?
       [ "$transport_rc" = 0 ] || die_acquire_unknown "transport-rc=$transport_rc"
     fi
-    jq -e 'type == "object" and .schema_version == 1 and
-      (.status == "ok" or .status == "error")' \
+    jq -se 'length == 1 and (.[0] | type == "object" and .schema_version == 1 and
+      (.status == "ok" or .status == "error"))' \
       <<<"$response" >/dev/null 2>&1 \
       || die_acquire_unknown invalid-envelope
     code="$(jq -r '.code // empty' <<<"$response")"
     if parse_lease_grant "$response"; then
+      record_lease_outcome grant "$LEASE_SLOT" || die "cannot record lease grant"
       printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s type=%s vms=%s base=%s\n' \
         "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" \
         "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
@@ -943,7 +963,10 @@ acquire_lease() {
       write_client_config
       if [ "$LEASE_ACQUIRE_PROTOCOL" = acquire-v4 ]; then
         start_lease_keeper
-        finish_acquire_session || die "lease acquire handoff is unknown; cleanup required slot=$LEASE_SLOT run=$LEASE_RUN"
+        if ! finish_acquire_session; then
+          record_lease_outcome unknown "$LEASE_SLOT" || die "cannot record unknown lease outcome"
+          die "lease acquire handoff is unknown; cleanup required slot=$LEASE_SLOT run=$LEASE_RUN"
+        fi
       fi
       return 0
     fi
@@ -967,6 +990,7 @@ acquire_lease() {
         || die_acquire_unknown invalid-capacity-refusal
       # A validated capacity refusal confirms the broker aborted before creating guests.
       [ "$LEASE_ACQUIRE_PROTOCOL" != acquire-v4 ] || LEASE_ID=''
+      lease_event refusal "$LEASE_REQUESTED_SLOT" "$reason" || die "cannot record capacity refusal"
       elapsed=$((SECONDS - started))
       # Retry only while another request can still start before the deadline, so a
       # grant never arrives after it and the final refusal stays typed.
@@ -985,7 +1009,6 @@ acquire_lease() {
         sleep "$sleep_seconds"
         continue
       fi
-      lease_allocation_refused "$reason"
       printf '%s: retryable capacity refusal for %s: resource=%s; retry after resources become available\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$reason" >&2
       local admission_snapshot
@@ -995,17 +1018,26 @@ acquire_lease() {
       return 4
     fi
     if [ "$code" != busy ]; then
-      reason="$(jq -r '.reason // .message // empty' <<<"$response")"
+      reason="$(jq -r '.reason // empty' <<<"$response")"
       [ -n "$code" ] && [ "$(jq -r '.status' <<<"$response")" = error ] \
         || die_acquire_unknown invalid-envelope
       case "$code:$reason" in
-        invalid_request:invalid_slot) lease_allocation_refused slot ;;
-        *) lease_allocation_refused other ;;
+        invalid_request:invalid_slot)
+          [ -z "$LEASE_ID" ] || die_acquire_unknown invalid-slot-after-reservation
+          lease_event refusal "$LEASE_REQUESTED_SLOT" slot || die "cannot record slot refusal" ;;
+        invalid_request:unsupported_environment|invalid_request:invalid_vm_count|invalid_request:invalid_disk_size|invalid_request:unsupported_image)
+          [ -z "$LEASE_ID" ] || die_acquire_unknown invalid-request-after-reservation
+          lease_event refusal "$LEASE_REQUESTED_SLOT" other || die "cannot record lease refusal" ;;
+        unavailable:legacy_retirement_required)
+          LEASE_ID=''
+          lease_event refusal "$LEASE_REQUESTED_SLOT" other || die "cannot record lease refusal" ;;
+        *) die_acquire_unknown "$code: $(jq -r '.reason // .message // "unspecified"' <<<"$response")" ;;
       esac
       die "lease acquire failed ($code: ${reason:-unspecified})"
     fi
     validate_exact_busy_response "$response" \
       || die_acquire_unknown invalid-busy-refusal
+    [ -z "$LEASE_ID" ] || die_acquire_unknown busy-after-reservation
     owner_summary=''
     if [ "$state" = held ]; then
       owner_acquired_epoch="$(date -u -d "$(jq -r '.owner.acquired_at' <<<"$response")" +%s 2>/dev/null)" \
@@ -1019,8 +1051,8 @@ acquire_lease() {
     last_state="$state"
     last_reason="$reason"
     last_owner_summary="$owner_summary"
+    lease_event refusal "$LEASE_REQUESTED_SLOT" slot || die "cannot record slot refusal"
     if [ "$WAIT_SECONDS" -eq 0 ]; then
-      lease_allocation_refused slot
       die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason${owner_summary:+; $owner_summary}"
     fi
     elapsed=$((SECONDS - started))
@@ -1042,18 +1074,32 @@ lease_command() {
 
 # One bounded release with its E2E_RELEASE evidence. Sets RELEASE_STATE to released,
 # refused (RELEASE_CODE then holds the broker's refusal code) or failed (no reply).
-# Only the reply's status decides success; a refusal code is display text.
+# Keep release timing and the command's native outcome independent of lease closure.
 RELEASE_STATE='' RELEASE_CODE=''
+# Serialize the guard's cleanup with the wrapper's observation of the same
+# reservation. A grant cannot be used after that reservation has closed.
+record_lease_outcome() (
+  [ -n "${SUBYARD_E2E_LEASE_EVENTS:-}" ] && [ -n "$LEASE_EVENT_HANDLE" ] || return 0
+  [[ "$2" =~ ^slot-[0-9]{3}$ ]] || return 1
+  local marker="$LOCAL_TEMP/.closed-$LEASE_EVENT_HANDLE-$2"
+  exec 9>>"$marker.lock" && flock -x 9 || return 1
+  if [ -e "$marker" ]; then
+    [ "$1" != grant ]
+  else
+    lease_event "$1" "$2" || return 1
+    case "$1" in release|lease_lost) : > "$marker" ;; esac
+  fi
+)
 lease_release_request() {
   local response started=$SECONDS rc=0
   RELEASE_STATE=failed RELEASE_CODE=''
   printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n' >&2 || true
   if response="$(facade_request "$(lease_command release)" 180)"; then
-    if jq -e 'type == "object" and .status == "ok"' <<<"$response" >/dev/null 2>&1; then
+    if jq -se 'length == 1 and (.[0] | type == "object" and .status == "ok")' <<<"$response" >/dev/null 2>&1; then
       RELEASE_STATE=released
     else
       RELEASE_STATE=refused rc=1
-      RELEASE_CODE="$(jq -r '.code | strings' <<<"$response" 2>/dev/null)" || RELEASE_CODE=''
+      RELEASE_CODE="$(jq -rs 'select(length == 1) | .[0] | select(.status == "error") | .code | strings' <<<"$response" 2>/dev/null)" || RELEASE_CODE=''
       [ -n "$RELEASE_CODE" ] || RELEASE_CODE=invalid_response
     fi
   else
@@ -1061,12 +1107,22 @@ lease_release_request() {
   fi
   printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' \
     "$((SECONDS - started))" "$rc" >&2 || true
+  if [ -n "${SUBYARD_E2E_LEASE_EVENTS:-}" ] && [ -n "$LEASE_EVENT_HANDLE" ]; then
+    case "$RELEASE_STATE:$RELEASE_CODE" in
+      released:*)
+        jq -e '.schema_version == 1 and .message == "released"' <<<"$response" >/dev/null 2>&1 \
+          && record_lease_outcome release "$LEASE_SLOT" ;;
+      refused:lease_lost)
+        jq -e '.schema_version == 1 and .status == "error"' <<<"$response" >/dev/null 2>&1 \
+          && record_lease_outcome lease_lost "$LEASE_SLOT" ;;
+    esac
+  fi
 }
 
 release_lease() {
   local released_slot="$LEASE_SLOT" released_run="$LEASE_RUN"
   [ -n "$LEASE_ID" ] || return 0
-  lease_release_request
+  lease_release_request || return 1
   case "$RELEASE_STATE" in
     released) ;;
     failed)
@@ -1075,6 +1131,7 @@ release_lease() {
     *)
       printf '%s: release rejected for slot=%s run=%s (%s)\n' "$E2E_PROGRAM" \
         "$released_slot" "$released_run" "$RELEASE_CODE" >&2
+      [ "$RELEASE_CODE" != lease_lost ] || LEASE_ID=''
       return 1 ;;
   esac
   LEASE_ID=""
@@ -1455,7 +1512,7 @@ write_handle_state() {
   touch -- "$dir/activity" "$dir/active.lock" "$dir/release.lock" "$dir/keeper.lock"
   temp="$(mktemp "$dir/.lease.XXXXXX")"
   jq -n \
-    --arg handle "$LEASE_RUN" --arg slot "$LEASE_SLOT" --arg generation "$LEASE_GENERATION" \
+    --arg handle "$LEASE_RUN" --arg event_handle "$LEASE_EVENT_HANDLE" --arg slot "$LEASE_SLOT" --arg generation "$LEASE_GENERATION" \
     --arg lease_id "$LEASE_ID" --arg epoch "$LEASE_EPOCH" --arg capability "$LEASE_CAPABILITY" \
     --arg yard "$LEASE_YARD" --arg project "$LEASE_PROJECT" --arg purpose "$LEASE_PURPOSE" \
     --arg type "$ENVIRONMENT_TYPE" --argjson vm_count "$VM_COUNT" \
@@ -1466,7 +1523,7 @@ write_handle_state() {
     --arg service_generation "$E2E_SERVICE_GENERATION" --arg state_root "$STATE_ROOT" \
     --arg identity "$IDENTITY" --arg hostname "$BASTION_HOSTNAME" --arg port "$BASTION_PORT" \
     --arg alias "$BASTION_HOST_KEY_ALIAS" --arg user "$BASTION_USER" --arg data_user "$DATA_USER" \
-    '{schema_version:1, handle:$handle, slot:$slot, resource_generation:$generation,
+    '{schema_version:1, handle:$handle, event_handle:$event_handle, slot:$slot, resource_generation:$generation,
       lease_id:$lease_id, lease_epoch:$epoch, capability:$capability, yard:$yard, project:$project,
       purpose:$purpose, type:$type, vm_count:$vm_count, cpu_per_vm:$cpu, memory_per_vm:$memory,
       disk_per_vm:$disk, base_fingerprint:$base, idle_seconds:$idle, acquired_at:$acquired,
@@ -1487,15 +1544,16 @@ load_handle() {
      .project, .purpose, .type, (.vm_count | tostring), (.idle_seconds | tostring),
      .route.owner, .route.pool, .route.yard, .route.service_generation, .route.state_root,
      .route.identity, .route.hostname, .route.port, .route.host_key_alias, .route.user,
-     .route.data_user, "end"] | map(tostring) | join("\u001f")' "$dir/lease.json" 2>/dev/null)" || return 1
+     .route.data_user, (.event_handle // ""), "end"] | map(tostring) | join("\u001f")' "$dir/lease.json" 2>/dev/null)" || return 1
   IFS=$'\x1f' read -r LEASE_RUN LEASE_SLOT LEASE_GENERATION LEASE_ID LEASE_EPOCH LEASE_CAPABILITY \
     LEASE_YARD LEASE_PROJECT LEASE_PURPOSE ENVIRONMENT_TYPE VM_COUNT HANDLE_IDLE_SECONDS \
     E2E_OWNER E2E_POOL E2E_YARD E2E_SERVICE_GENERATION STATE_ROOT IDENTITY BASTION_HOSTNAME \
-    BASTION_PORT BASTION_HOST_KEY_ALIAS BASTION_USER DATA_USER end <<<"$fields"
+    BASTION_PORT BASTION_HOST_KEY_ALIAS BASTION_USER DATA_USER LEASE_EVENT_HANDLE end <<<"$fields"
   [ "$end" = end ] || return 1
   [[ "$LEASE_SLOT" =~ ^slot-[0-9]{3}$ && "$LEASE_ID" =~ ^[0-9a-f]+$ \
     && "$LEASE_EPOCH" =~ ^[1-9][0-9]*$ && "$LEASE_CAPABILITY" =~ ^[0-9a-f]+$ \
     && "$LEASE_RUN" = "${dir##*/}" ]] || return 1
+  [[ -z "$LEASE_EVENT_HANDLE" || "$LEASE_EVENT_HANDLE" =~ ^${LEASE_RUN}\.[1-9][0-9]*$ ]] || return 1
   HANDLE_DIRECTORY="$dir"
   LOCAL_TEMP="$dir"
   E2E_ROUTE_CAPTURED=1
@@ -1520,7 +1578,7 @@ release_handle() {
   exec {fd}>>"$dir/release.lock" || return 1
   flock -x "$fd"
   if [ -f "$dir/lease.json" ]; then
-    lease_release_request
+    lease_release_request || rc=1
     case "$RELEASE_STATE:$RELEASE_CODE" in
       released:*) printf 'E2E lease released: handle=%s slot=%s reason=%s\n' "$LEASE_RUN" "$LEASE_SLOT" "$reason" >&2 ;;
       refused:lease_lost) printf 'E2E lease had already ended: handle=%s slot=%s\n' "$LEASE_RUN" "$LEASE_SLOT" >&2 ;;
@@ -1654,7 +1712,7 @@ handle_keeper_main() {
 start_handle_keeper() {
   local dir="$HANDLE_DIRECTORY" waited=0
   write_handle_state
-  setsid -f bash "$CLIENT_SELF" _keeper "$dir" </dev/null >>"$dir/keeper.log" 2>&1 \
+  env -u SUBYARD_E2E_LEASE_EVENTS setsid -f bash "$CLIENT_SELF" _keeper "$dir" </dev/null >>"$dir/keeper.log" 2>&1 \
     || die 'cannot start the lease keeper'
   while [ ! -s "$dir/keeper.ready" ]; do
     [ "$waited" -lt 100 ] || die 'lease keeper did not start'

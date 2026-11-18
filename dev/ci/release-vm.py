@@ -37,7 +37,7 @@ def export(output, destination, check):
                  "head_sha": os.environ["GITHUB_SHA"], "check": check}
     (destination / "ci-execution.json").write_text(json.dumps(execution))
     total = 0
-    for pattern in ("receipt.json", "events.jsonl", "*.log", "attempts/*.json", "manifests/*.json", "runs/*.json"):
+    for pattern in ("receipt.json", "events.jsonl", "*.log", "*.leases.jsonl", "attempts/*.json", "manifests/*.json", "runs/*.json"):
         for path in sorted(output.glob(pattern)):
             size = path.stat().st_size
             if path.is_symlink() or not path.is_file() or size > 20 << 20:
