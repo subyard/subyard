@@ -36,8 +36,11 @@ func normalizeLegacySelection(name, value string) string {
 
 // resolveLoadedIntegrations returns a role refusal separately from load errors,
 // so the loader collects it with the other independent role refusals.
-func resolveLoadedIntegrations(values environment, tracker *settingTracker) (refusal, err error) {
+func resolveLoadedIntegrations(values environment, tracker *settingTracker, rejected []string) (refusal, err error) {
 	requested := strings.Fields(values["CODING_TOOL_INTEGRATIONS"])
+	if len(rejected) != 0 && slices.Equal(requested, rejected) {
+		requested = nil
+	}
 	var retired []string
 	for _, definition := range tracker.catalog.Integrations() {
 		if !definition.Retired {
@@ -113,37 +116,7 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 		Requested: append([]string{}, requested...), Effective: []string{}, Present: true,
 		DependencyReasons: map[string][]string{}, AllowsCodingTools: values["ALLOWS_CODING_TOOLS"] != "false" && values["ALLOWS_CODING_TOOLS"] != "0",
 	}
-	knownAgent := func(agent string) bool {
-		if !domain.SafeName(agent) {
-			return false
-		}
-		for _, suffix := range integrationMetadataSuffixes {
-			if _, found := values["AGENT_"+agent+"_"+suffix]; found {
-				return true
-			}
-		}
-		return false
-	}
-	// Only a shipped integration is named in the rendered diagnostic; the
-	// supplied text of any other request stays in the Go error only.
-	refusal := func(known, unknown domain.ConfigRefusalCode, agent string) error {
-		if name, ok := domain.ConfigIntegrationName(agent); ok && knownAgent(agent) && shipped(agent) {
-			return domain.NewConfigRefusal(known, name)
-		}
-		return fmt.Errorf("%w %q", domain.NewConfigRefusal(unknown), agent)
-	}
-	var refusals []error
-	selected := make(map[string]int, len(requested))
-	for _, agent := range requested {
-		if selected[agent]++; selected[agent] == 2 {
-			refusals = append(refusals, refusal(domain.ConfigDuplicateIntegration, domain.ConfigDuplicateUnknownIntegration, agent))
-		}
-		// A retired integration has its own refusal; it is not also unknown.
-		if selected[agent] == 1 && !knownAgent(agent) && !retired(agent) {
-			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownIntegration), agent))
-		}
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
+	if err := checkIntegrationNames(values, requested, shipped, retired); err != nil {
 		return result, err
 	}
 	visiting := make(map[string]bool)
@@ -164,7 +137,7 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 				return fmt.Errorf("duplicate dependency %q for agent %q", dependency, agent)
 			}
 			seenDependencies[dependency] = true
-			if !domain.SafeName(dependency) || !knownAgent(dependency) {
+			if !knownIntegration(values, dependency) {
 				return fmt.Errorf("unknown dependency %q for agent %q", dependency, agent)
 			}
 			result.DependencyReasons[dependency] = append(result.DependencyReasons[dependency], agent)
@@ -183,6 +156,46 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 		}
 	}
 	return result, nil
+}
+
+// CheckIntegrationNames checks the requested roots without resolving dependencies.
+func (settings Catalog) CheckIntegrationNames(values map[string]string, requested []string) error {
+	return checkIntegrationNames(values, requested, settings.ShippedIntegration, settings.RetiredIntegration)
+}
+
+func knownIntegration(values map[string]string, agent string) bool {
+	if !domain.SafeName(agent) {
+		return false
+	}
+	for _, suffix := range integrationMetadataSuffixes {
+		if _, found := values["AGENT_"+agent+"_"+suffix]; found {
+			return true
+		}
+	}
+	return false
+}
+
+func checkIntegrationNames(values map[string]string, requested []string, shipped, retired func(string) bool) error {
+	// Only a shipped integration is named in the rendered diagnostic; the
+	// supplied text of any other request stays in the Go error only.
+	refusal := func(known, unknown domain.ConfigRefusalCode, agent string) error {
+		if name, ok := domain.ConfigIntegrationName(agent); ok && knownIntegration(values, agent) && shipped(agent) {
+			return domain.NewConfigRefusal(known, name)
+		}
+		return fmt.Errorf("%w %q", domain.NewConfigRefusal(unknown), agent)
+	}
+	var refusals []error
+	selected := make(map[string]int, len(requested))
+	for _, agent := range requested {
+		if selected[agent]++; selected[agent] == 2 {
+			refusals = append(refusals, refusal(domain.ConfigDuplicateIntegration, domain.ConfigDuplicateUnknownIntegration, agent))
+		}
+		// A retired integration has its own refusal; it is not also unknown.
+		if selected[agent] == 1 && !knownIntegration(values, agent) && !retired(agent) {
+			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownIntegration), agent))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }
 
 // WithIntegrationSelection prepares consumers for a planned requested set without

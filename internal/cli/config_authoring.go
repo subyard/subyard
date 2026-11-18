@@ -29,6 +29,8 @@ type configAuthoringRequest struct {
 	storage       string
 	sourceBinding string
 	sourceGuard   func() error
+	// A refused integration list still supplies its non-empty role input.
+	rejectedSelection bool
 }
 
 // configAuthoringDefinition validates the setting for its scope. Operator
@@ -215,27 +217,43 @@ func configScalarIntegrationRoleRefusal(state config.Loaded, request configAutho
 }
 
 // checkConfigScalarBatch collects assignment refusals and returns the
-// unambiguous, syntactically valid assignments for prospective validation.
-func checkConfigScalarBatch(loaded config.Loaded, requests []configAuthoringRequest) ([]configAuthoringRequest, error) {
-	var refusals []error
-	var valid []configAuthoringRequest
+// unambiguous assignments for prospective validation. A rejected template
+// must not supply role settings to the prospective checks.
+func checkConfigScalarBatch(loaded config.Loaded, requests []configAuthoringRequest) (valid []configAuthoringRequest, rejectedTemplate bool, refusal error) {
+	var usage, refusals []error
+	var selections []configAuthoringRequest
+	var templateValues map[string]string
 	seen := make(map[string]string, len(requests))
 	duplicates := make(map[string]bool)
 	for _, request := range requests {
 		definition, err := configAuthoringDefinition(loaded.Catalog, request.action, request.scope, request.name, false)
 		if err != nil {
-			refusals = append(refusals, configNamedRefusal{request.name, err})
+			usage = append(usage, configNamedRefusal{request.name, err})
 			continue
 		}
 		if prior, ok := seen[definition.Name]; ok {
-			refusals = append(refusals, configPublicRefusal(prior+" and "+request.name+" assign the same setting"))
+			usage = append(usage, configPublicRefusal(prior+" and "+request.name+" assign the same setting"))
 			duplicates[definition.Name] = true
 		}
 		seen[definition.Name] = request.name
 		syntax, writable := configScalarSyntaxRefusal(loaded, definition, request)
-		refusals = append(refusals, syntax)
-		if writable && request.name == "CODING_TOOL_INTEGRATIONS" {
-			refusals = append(refusals, loaded.Catalog.CheckSelectableIntegrations(strings.Fields(request.value)))
+		usage = append(usage, syntax)
+		if writable && definition.Name == "CODING_TOOL_INTEGRATIONS" {
+			retired := loaded.Catalog.CheckSelectableIntegrations(strings.Fields(request.value))
+			usage = append(usage, retired)
+			if !request.git {
+				selections = append(selections, request)
+				request.rejectedSelection = retired != nil
+			}
+		}
+		if !request.git && definition.Name == "YARD_TEMPLATE" {
+			values, templateErr := config.CheckYardTemplate(loaded, request.value)
+			refusals = append(refusals, templateErr)
+			if syntax != nil || templateErr != nil {
+				rejectedTemplate = true
+				continue
+			}
+			templateValues = values
 		}
 		if syntax == nil {
 			request.name = definition.Name
@@ -243,12 +261,36 @@ func checkConfigScalarBatch(loaded config.Loaded, requests []configAuthoringRequ
 		}
 	}
 	valid = slices.DeleteFunc(valid, func(request configAuthoringRequest) bool { return duplicates[request.name] })
-	return valid, domain.CollectRefusals(refusals...)
+	if len(selections) != 0 {
+		// Custom integrations can be declared by metadata settings in the same
+		// batch. Only unambiguous, valid declarations can supply names.
+		values := maps.Clone(loaded.Environment)
+		if !duplicates["YARD_TEMPLATE"] {
+			maps.Copy(values, templateValues)
+		}
+		for _, request := range valid {
+			values[request.name] = request.value
+		}
+		for _, request := range selections {
+			err := loaded.Catalog.CheckIntegrationNames(values, strings.Fields(request.value))
+			refusals = append(refusals, err)
+			if err != nil {
+				index := slices.IndexFunc(valid, func(request configAuthoringRequest) bool { return request.name == "CODING_TOOL_INTEGRATIONS" })
+				if index >= 0 {
+					valid[index].rejectedSelection = true
+				}
+			}
+		}
+	}
+	if err := domain.CollectRefusals(usage...); err != nil {
+		refusals = append(refusals, configUsage(err))
+	}
+	return valid, rejectedTemplate || duplicates["YARD_TEMPLATE"], domain.CollectRefusals(refusals...)
 }
 
 // Git assignments are also checked against their combined resolver state.
 func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configAuthoringRequest) error {
-	if _, err := checkConfigScalarBatch(loaded, requests); err != nil {
+	if _, _, err := checkConfigScalarBatch(loaded, requests); err != nil {
 		return err
 	}
 	target, err := cli.configGitScalarsTarget(loaded, requests)

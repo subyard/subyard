@@ -19,21 +19,28 @@ import (
 // The binding includes absent layer inputs and inode/security metadata, so an
 // equivalent-value replacement still requires a new assessment.
 type configProspective struct {
-	cli             *CLI
-	loaded          config.Loaded
-	request         configAuthoringRequest
-	integrations    []string
-	path, draft     string
-	binding         string
-	semantics       string
-	directoryInputs map[string]bool
+	cli                  *CLI
+	loaded               config.Loaded
+	request              configAuthoringRequest
+	integrations         []string
+	rejectedIntegrations []string
+	scalarBatch          bool
+	path, draft          string
+	binding              string
+	semantics            string
+	directoryInputs      map[string]bool
 }
 
 func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot, batch ...configAuthoringRequest) (*configProspective, error) {
-	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path}
+	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path, scalarBatch: len(batch) != 0}
 	for _, assignment := range batch {
 		if assignment.name == "CODING_TOOL_INTEGRATIONS" {
-			plan.integrations = strings.Fields(assignment.value)
+			ids := strings.Fields(assignment.value)
+			if assignment.rejectedSelection {
+				plan.rejectedIntegrations = ids
+			} else {
+				plan.integrations = ids
+			}
 		}
 	}
 	if desired.Exists {
@@ -221,7 +228,8 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	var refusals []error
 	for _, name := range names {
 		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
-			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked, AuthoredIntegrations: plan.integrations})
+			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked, AuthoredIntegrations: plan.integrations,
+			RejectedIntegrations: plan.rejectedIntegrations, ValidateScalarBatch: plan.scalarBatch})
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 			continue

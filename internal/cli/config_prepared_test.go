@@ -992,9 +992,23 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 		}
 	}
 	assertFile()
+
+	run(0, "CODING_TOOL_INTEGRATIONS", "testhelper", "AGENT_testhelper_COMMAND", "testhelper", "--scope", "yard", "--yes")
+	if loaded := loadConfigCommandContext(t, root, environment, "default"); !slices.Equal(loaded.Integrations.Effective, []string{"testhelper"}) {
+		t.Fatalf("custom integration selection = %v", loaded.Integrations.Effective)
+	}
 }
 
 func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
+	const (
+		unknownTemplate = "unknown YARD_TEMPLATE"
+		duplicate       = `duplicate agent "codex"`
+		unknown         = "unknown integration"
+		invalidPort     = "SSH_PORT (scalar settings): invalid port value"
+		role            = "yard role forbids non-empty CODING_TOOL_INTEGRATIONS"
+		portCollision   = "WEB_PREVIEW_HOST_PORT collides with SSH_PORT"
+		storageConflict = "HOST_BASE must equal RESTRICTED_DISK_PATHS"
+	)
 	for _, test := range []struct {
 		name, yardConfig, scope string
 		assignments             []string
@@ -1003,16 +1017,34 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 	}{
 		{"masked integration", "CODING_TOOL_INTEGRATIONS=codex\n", "host",
 			[]string{"CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "2390"}, 1,
-			[]string{"unknown integration"}},
+			[]string{unknown}},
 		{"role and invalid port", "YARD_TEMPLATE=no-tools\n", "yard",
 			[]string{"CODING_TOOL_INTEGRATIONS", "codex", "SSH_PORT", "invalid"}, 2,
-			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "SSH_PORT (scalar settings): invalid port value"}},
+			[]string{role, invalidPort}},
 		{"template and invalid port", "CODING_TOOL_INTEGRATIONS=codex\n", "yard",
 			[]string{"YARD_TEMPLATE", "no-tools", "SSH_PORT", "invalid"}, 2,
-			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "SSH_PORT (scalar settings): invalid port value"}},
+			[]string{role, invalidPort}},
 		{"template, unknown integration and invalid port", "", "yard",
 			[]string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "invalid"}, 2,
-			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "unknown integration", "SSH_PORT (scalar settings): invalid port value"}},
+			[]string{role, unknown, invalidPort}},
+		{"unknown template and duplicate integration", "", "yard",
+			[]string{"YARD_TEMPLATE", "missing-template", "CODING_TOOL_INTEGRATIONS", "codex codex", "SSH_PORT", "invalid"}, 2,
+			[]string{unknownTemplate, duplicate, invalidPort}},
+		{"unknown template and unknown integration", "", "yard",
+			[]string{"CODING_TOOL_INTEGRATIONS", "missing-one", "YARD_TEMPLATE", "missing-template"}, 1,
+			[]string{unknownTemplate, unknown}},
+		{"unknown template with an existing restrictive role", "YARD_TEMPLATE=no-tools\n", "yard",
+			[]string{"YARD_TEMPLATE", "missing-template", "CODING_TOOL_INTEGRATIONS", "codex codex missing-one", "SSH_PORT", "invalid"}, 2,
+			[]string{unknownTemplate, duplicate, unknown, invalidPort}},
+		{"role, duplicate and unknown integration and invalid port", "", "yard",
+			[]string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "codex codex missing-one", "SSH_PORT", "invalid"}, 2,
+			[]string{role, duplicate, unknown, invalidPort}},
+		{"role, duplicate integration and port collision", "", "yard",
+			[]string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "codex codex", "SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2390"}, 1,
+			[]string{role, duplicate, portCollision}},
+		{"context conflict and port collision", "", "yard",
+			[]string{"HOST_BASE", "/var/lib/subyard-validation-fixture", "SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2390"}, 1,
+			[]string{storageConflict, portCollision}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
@@ -1029,9 +1061,13 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 			if code := program.Run(context.Background()); code != test.code {
 				t.Errorf("exit = %d, want %d: %s", code, test.code, &stderr)
 			}
-			for _, refusal := range test.refusals {
-				if !strings.Contains(stderr.String(), refusal) {
-					t.Errorf("missing %q: %s", refusal, &stderr)
+			if strings.Contains(stderr.String(), "missing-template") || strings.Contains(stderr.String(), "missing-one") {
+				t.Errorf("refusal disclosed an unknown name: %s", &stderr)
+			}
+			for _, refusal := range []string{unknownTemplate, duplicate, unknown, invalidPort, role, portCollision, storageConflict} {
+				count := strings.Count(stderr.String(), refusal)
+				if want := slices.Contains(test.refusals, refusal); (want && count != 1) || (!want && count != 0) {
+					t.Errorf("refusal %q appeared %d times, want present=%t: %s", refusal, count, want, &stderr)
 				}
 			}
 			for path, want := range map[string]string{filepath.Join(configHome, "config.env"): "", yardPath: test.yardConfig} {

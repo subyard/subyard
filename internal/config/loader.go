@@ -21,6 +21,11 @@ type LoadOptions struct {
 	// AuthoredIntegrations also checks an explicit draft selection that a
 	// higher-priority layer may mask.
 	AuthoredIntegrations []string
+	// RejectedIntegrations may contribute a role refusal. Their dependency
+	// closure is unavailable because the batch already refused these roots.
+	RejectedIntegrations []string
+	// ValidateScalarBatch also checks ports after an independent role or selection refusal.
+	ValidateScalarBatch bool
 
 	// NativeTargetOnly resolves scalar address/paths for registry assessment. Its
 	// result must never be used for guest access, provisioning or activation.
@@ -509,7 +514,7 @@ func load(
 		_, authoredErr := tracker.catalog.ResolveIntegrationSelection(values, options.AuthoredIntegrations)
 		roleRefusals = append(roleRefusals, refusalCauses(authoredErr)...)
 	}
-	integrationRefusal, err := resolveLoadedIntegrations(values, tracker)
+	integrationRefusal, err := resolveLoadedIntegrations(values, tracker, options.RejectedIntegrations)
 	roleRefusals = append(roleRefusals, integrationRefusal)
 	if err != nil {
 		// Edge D5: unresolved integration roots select nothing for the checks below.
@@ -529,31 +534,46 @@ func load(
 	// Role, profile and context checks read independent settings, so each stage
 	// runs and every refusal is reported. Edge D6: any earlier refusal (command
 	// override, asset source, integration, role or profile constraint) skips
-	// profile resolution, which only adds shipped package integrity refusals.
+	// profile resolution for ordinary loads. Batch validation collects its
+	// independent findings as well.
 	var refusals []error
 	if err := validateProfileConstraints(configDir, yardName, values, roleRefusals...); err != nil {
 		refusals = append(refusals, refusalCauses(err)...)
-	} else if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
-		refusals = append(refusals, err)
+	}
+	if len(refusals) == 0 || options.ValidateScalarBatch {
+		if err := resolveLoadedEnvironmentProfiles(configDir, yardName, values, tracker); err != nil {
+			refusals = append(refusals, err)
+		}
 	}
 	ctx, err := contextFrom(root, yardName, values, tracker, defaultLayer, normalizationLayer)
-	// Edge D8: any refusal up to the context skips saved endpoints, derived
-	// ports and all collision checks, which need a valid context.
-	if err := domain.CollectRefusals(append(refusals, refusalCauses(err)...)...); err != nil {
-		return domain.Context{}, nil, err
+	// Edge D8: ordinary loads stop here. A batch continues with the
+	// endpoint and port checks whose context inputs are available.
+	refusals = append(refusals, refusalCauses(err)...)
+	if !options.ValidateScalarBatch && len(refusals) != 0 {
+		return domain.Context{}, nil, domain.CollectRefusals(refusals...)
 	}
 	// Edge D10: an unreadable saved endpoint skips only the collisions of the
 	// listener ports it would provide; the other port checks still run.
-	unchecked, endpointErr := applySavedResourceEndpoints(root, options, ctx, values, tracker)
-	// Edge D9: a derived-port source failure skips collisions and the web
-	// preview check. Collisions are otherwise collected once per pair.
 	collisions := newPortCollisions()
-	collisions.unchecked = unchecked
-	if err := normalizeDerivedPorts(values, tracker, collisions); err != nil {
-		return ctx, values, domain.CollectRefusals(append(refusalCauses(endpointErr), err)...)
+	if filepath.IsAbs(ctx.Paths.DataHome) {
+		unchecked, endpointErr := applySavedResourceEndpoints(root, options, ctx, values, tracker)
+		collisions.unchecked = unchecked
+		refusals = append(refusals, refusalCauses(endpointErr)...)
 	}
-	webPreview := normalizeWebPreviewPort(values, tracker, ctx.SSHPort, collisions)
-	return ctx, values, domain.CollectRefusals(append(append(refusalCauses(endpointErr), collisions.refusals...), webPreview)...)
+	// Edge D9: ordinary loads stop on a derived-port source failure. A
+	// batch can still check the ports whose values are available.
+	derivedErr := normalizeDerivedPorts(values, tracker, collisions)
+	refusals = append(refusals, refusalCauses(derivedErr)...)
+	if derivedErr != nil {
+		if !options.ValidateScalarBatch {
+			return ctx, values, domain.CollectRefusals(refusals...)
+		}
+		addHostListenerCollisions(values, tracker.catalog, collisions)
+	}
+	if err == nil || values["WEB_PREVIEW_HOST_PORT"] != "" || (ctx.SSHPort > 0 && ctx.SSHPort <= 65535) {
+		refusals = append(refusals, normalizeWebPreviewPort(values, tracker, ctx.SSHPort, collisions))
+	}
+	return ctx, values, domain.CollectRefusals(append(refusals, collisions.refusals...)...)
 }
 
 // refusalCauses lets independent stages merge into one stable collection.
@@ -1000,24 +1020,49 @@ func applyYardConfigTracked(
 	)
 }
 
+// CheckYardTemplate checks an authored template and returns its declarations
+// for other assignment checks that recognize names supplied by a template.
+func CheckYardTemplate(loaded Loaded, template string) (map[string]string, error) {
+	if template == "" {
+		return nil, nil
+	}
+	path, err := yardTemplateFile(loaded.Context.Paths.ConfigDir, loaded.Context.YardName, template, "")
+	if err != nil {
+		return nil, err
+	}
+	values := cloneEnvironment(loaded.Environment)
+	if err := loaded.Catalog.applyEnvFileValidated(path, values, ScopeShipped, false, nil); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func yardTemplateFile(configDir, yardName, template, yardFile string) (string, error) {
+	if !domain.SafeName(template) {
+		return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
+	}
+	if template == "e2e-vms" {
+		return "", retiredE2EVMTemplateError(yardName, yardFile)
+	}
+	templateFile := filepath.Join(configDir, "yards", "profiles", template+".env")
+	info, err := os.Stat(templateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
+		}
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
+	}
+	return templateFile, nil
+}
+
 func applyYardTemplateTracked(configDir, yardName, template, yardFile string, values environment, tracker *settingTracker) error {
 	if template != "" {
-		if !domain.SafeName(template) {
-			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
-		}
-		if template == "e2e-vms" {
-			return retiredE2EVMTemplateError(yardName, yardFile)
-		}
-		templateFile := filepath.Join(configDir, "yards", "profiles", template+".env")
-		info, err := os.Stat(templateFile)
+		templateFile, err := yardTemplateFile(configDir, yardName, template, yardFile)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
-			}
 			return err
-		}
-		if info.IsDir() {
-			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
 		}
 		settings := Catalog{}
 		if tracker != nil {
@@ -1501,8 +1546,8 @@ func contextFrom(
 		ctx.OwnerYardName = "default"
 	}
 	normalized, err := domain.NormalizeContext(ctx)
-	if len(refusals) == 0 {
-		return normalized, err
+	if len(refusals) == 0 && err == nil {
+		return normalized, nil
 	}
 	// Context validation is independent of the setting checks above, except that
 	// an unparsed SSH_PORT already explains the port range refusal.
@@ -1512,7 +1557,7 @@ func contextFrom(
 			refusals = append(refusals, cause)
 		}
 	}
-	return domain.Context{}, domain.CollectRefusals(refusals...)
+	return ctx, domain.CollectRefusals(refusals...)
 }
 
 func resolveE2EVMCPU(value string, hostCPUs int) (string, error) {

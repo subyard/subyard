@@ -181,29 +181,27 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, requests []configAuthoringRequest) (result error) {
 	cli, loaded := prepared.CLI, prepared.Loaded
 	isBatch := len(requests) > 1
-	var assignmentRefusal error
+	var assignmentRefusal, writableRefusal error
+	var rejectedTemplate bool
 	if isBatch {
-		requests, assignmentRefusal = checkConfigScalarBatch(loaded, requests)
-		if len(requests) == 0 {
-			return configUsage(assignmentRefusal)
-		}
-	}
-	if assignmentRefusal != nil {
-		// Validate the accepted assignments against the persisted configuration,
-		// then refuse the whole batch before attaching a mutation plan.
+		requests, rejectedTemplate, assignmentRefusal = checkConfigScalarBatch(loaded, requests)
 		defer func() {
-			ingressRefusal := cli.checkResourceConfigChanges(ctx, loaded, requests)
-			result = configUsage(domain.CollectRefusals(assignmentRefusal, result, ingressRefusal))
+			if err := domain.CollectRefusals(assignmentRefusal, writableRefusal, result); err != nil {
+				result = configProspectiveError{loaded.Context.Paths.ConfigHome, err}
+			}
 		}()
+		if len(requests) == 0 {
+			return nil
+		}
 	}
 	request := requests[0]
 	action := request.action
 	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
 		refusal := configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
-		if assignmentRefusal == nil {
+		if !isBatch {
 			return refusal
 		}
-		assignmentRefusal = domain.CollectRefusals(assignmentRefusal, refusal)
+		writableRefusal = refusal
 	}
 	path, err := configScalarAuthoringPath(loaded, request.scope)
 	if err != nil {
@@ -218,6 +216,9 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 	for _, assignment := range requests {
 		names = append(names, assignment.name)
 		assignments = append(assignments, config.PersistentAssignment{Name: assignment.name, Value: assignment.value})
+	}
+	if rejectedTemplate {
+		assignments = append(assignments, config.PersistentAssignment{Name: "YARD_TEMPLATE", Value: ""})
 	}
 	var candidate []byte
 	if action == "unset" {
@@ -241,16 +242,19 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 	if isBatch {
 		batch = requests
 	}
-	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired, batch...)
-	if err != nil {
-		return err
+	changed := !sameConfigAuthoringSnapshot(baseline, desired)
+	var ingressRefusal error
+	if isBatch && changed {
+		ingressRefusal = cli.checkResourceConfigChanges(ctx, loaded, requests)
 	}
-	if assignmentRefusal != nil {
-		prospective.close()
-		return nil
+	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired, batch...)
+	if domain.CollectRefusals(assignmentRefusal, writableRefusal, ingressRefusal, err) != nil {
+		if prospective != nil {
+			prospective.close()
+		}
+		return domain.CollectRefusals(ingressRefusal, err)
 	}
 	prepared.closeResource = func() error { prospective.close(); return nil }
-	changed := !sameConfigAuthoringSnapshot(baseline, desired)
 	if changed {
 		protected, err := readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
 		if err != nil {
@@ -260,7 +264,7 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 			return domain.ErrPlanStale
 		}
 	}
-	if changed {
+	if changed && !isBatch {
 		if err := cli.checkResourceConfigChanges(ctx, loaded, requests); err != nil {
 			return err
 		}
