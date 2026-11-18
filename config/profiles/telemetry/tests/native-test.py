@@ -248,6 +248,72 @@ class NativeTest(unittest.TestCase):
                 native.reconcile(*args)
                 self.assertTrue(native.reconcile(*args, check=True))
 
+    def test_interrupted_enable_does_not_authorize_reconstruction(self):
+        for agent, section, encode in (('claude', 'env', json.dumps), ('codex', 'otel', tomli_w.dumps)):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                state = root/'native.json'
+                path = native.agent_path(root, agent)
+                original = encode({'unrelated': True}).encode()
+                path.parent.mkdir()
+                path.write_bytes(original)
+                path.chmod(0o400)
+                args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                with patch.object(native.materializer, 'replace_destination', side_effect=OSError('interrupted')):
+                    with self.assertRaisesRegex(OSError, 'interrupted'):
+                        native.reconcile(*args)
+                self.assertFalse(state.exists())
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+
+                # The former writer stored this intent in the receipt slot.
+                records = {key: {'managed': value, 'present': False, 'value': None, 'previous': []}
+                           for key, value in native.desired(agent, *args[3:5]).items()}
+                native.publish(state, json.dumps({'schema': 1, 'agents': {agent: records}}).encode(), None)
+                path.chmod(0o600)
+                path.write_bytes(original + b'[')
+                path.chmod(0o400)
+                with self.assertRaises(native.AgentConfigRefusal):
+                    native.reconcile(*args)
+                refused = self.materialize(agent, path, encode({section: {}}).encode())
+                self.assertEqual(refused.returncode, 2, refused.stderr)
+                self.assertIn(b'unowned-invalid-destination', refused.stderr)
+                self.assertEqual(path.read_bytes(), original + b'[')
+                self.assertEqual(path.stat().st_mode & 0o777, 0o400)
+
+    def test_permission_repair_requires_selection_and_receipt(self):
+        root, state = self.root, self.root/'native.json'
+        claude, codex = (native.agent_path(root, agent) for agent in ('claude', 'codex'))
+        native.reconcile(root, state, ['claude'], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+        claude.chmod(0o644)
+        codex.parent.mkdir()
+        codex.write_text('')
+        codex.chmod(0o400)
+        native.repair_modes(root, state, ['codex'], os.getuid())
+        self.assertEqual(claude.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(codex.stat().st_mode & 0o777, 0o400)
+        native.repair_modes(root, state, ['claude'], os.getuid())
+        self.assertEqual(claude.stat().st_mode & 0o777, 0o600)
+
+    def test_template_value_is_removed_after_both_owners_release(self):
+        for agent, section, field, value, encode, decode in (
+                ('claude', 'env', 'OTEL_LOGS_EXPORTER', 'otlp', json.dumps, json.loads),
+                ('codex', 'otel', 'log_user_prompt', False, tomli_w.dumps, tomllib.loads)):
+            for retire in (False, True):
+                with self.subTest(agent=agent, retire=retire), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                    root = Path(name)
+                    path, state = native.agent_path(root, agent), root/'native.json'
+                    template = encode({section: {field: value}}).encode()
+                    result = self.materialize(agent, path, template)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                    native.reconcile(*args, templates={agent: template})
+                    result = self.materialize(agent, path, encode({}).encode(), 'retire' if retire else 'apply')
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(decode(path.read_text())[section][field], value)
+                    native.reconcile(*args[:2], [], *args[3:])
+                    self.assertEqual(decode(path.read_text()), {})
+
     def test_format_only_native_changes_preserve_bytes(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
@@ -531,7 +597,7 @@ class NativeTest(unittest.TestCase):
 
                     def save_after_comparison(name, *arguments, **keywords):
                         contents = read(name, *arguments, **keywords)
-                        if name.startswith('.subyard-config-recovery.'):
+                        if name == 'document':
                             open_editor.seek(0)
                             open_editor.write(edit + b'\n\n\n')
                             open_editor.flush()
@@ -539,11 +605,43 @@ class NativeTest(unittest.TestCase):
 
                     with patch.object(native.materializer, 'read_destination', side_effect=save_after_comparison):
                         native.reconcile(*args)
-                    old_inode = next(saved for saved in path.parent.glob('.subyard-config-recovery.*') if saved.stat().st_ino == inode)
+                    old_inode = next(saved for saved in path.parent.glob('.subyard-config-recovery.*/document') if saved.stat().st_ino == inode)
                     self.assertEqual(old_inode.read_bytes(), edit + b'\n\n\n')
                     self.assertEqual(old_inode.stat().st_mode & 0o777, 0o600)
                 native.reconcile(*args)
                 self.assertEqual(decode(path.read_text())['unrelated'], 'editor')
+
+    def test_interruption_at_exchange_keeps_recovery_file_private(self):
+        for agent in ('claude', 'codex'):
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                path = native.agent_path(root, agent)
+                args = (root, root/'native.json', [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                native.reconcile(*args)
+                exchange = native.materializer.exchange_destination
+                original = path.read_bytes()
+
+                def interrupt(*arguments):
+                    path.chmod(0o644)
+                    exchange(*arguments)
+                    os._exit(57)
+
+                child = os.fork()
+                if child == 0:
+                    try:
+                        with patch.object(native.materializer, 'exchange_destination', side_effect=interrupt):
+                            native.reconcile(*args[:4], 'y'*64, *args[5:])
+                    finally:
+                        os._exit(1)
+                self.assertEqual(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]), 57)
+                saved, = path.parent.glob('.subyard-config-recovery.*/document')
+                self.assertEqual(saved.read_bytes(), original)
+                self.assertEqual(saved.stat().st_mode & 0o777, 0o644)
+                self.assertEqual(saved.parent.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                receipt = json.loads(args[1].read_bytes())
+                managed = {key: record['managed'] for key, record in receipt['agents'][agent].items()}
+                self.assertEqual(managed, native.desired(agent, *args[3:5]))
 
     def test_claude_strict_parse_and_precise_round_trip(self):
         state = self.root/'native.json'
@@ -606,7 +704,7 @@ class NativeTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'destination exceeds size bound'):
                 native.reconcile(*args, check=check)
             self.assertTrue(path.read_bytes() == original)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o644 if check else 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
             self.assertFalse(state.exists())
             self.assertFalse(list(self.state_root.glob('*.contribution')))
         # The template writer has the same bound before contribution registration.

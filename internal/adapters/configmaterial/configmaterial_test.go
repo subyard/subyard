@@ -136,7 +136,7 @@ func TestEmptyDocumentWithContributionReportsBooleanDrift(t *testing.T) {
 			}
 			key := strings.TrimSuffix(h.baselinePath(t), ".json")
 			testkit.WriteFile(t, key+".contribution", reference, 0o600)
-			testkit.WriteFile(t, h.destination, nil, 0o600)
+			testkit.WriteFile(t, h.destination, template, 0o600)
 			if h.observe(t, template).Converged {
 				t.Fatal("empty document reported current with an active contribution")
 			}
@@ -300,6 +300,39 @@ func TestTOMLMaterializationRejectsInvalidInputsWithoutOverwrite(t *testing.T) {
 	}
 }
 
+func TestPermissionRepairRequiresPublishedOwnership(t *testing.T) {
+	h := newGuestHarness(t)
+	payload := []byte(`{"managed":true}`)
+	testkit.WriteFile(t, h.destination, []byte(`{}`), 0400)
+	assertMode := func(want os.FileMode) {
+		t.Helper()
+		info, err := os.Stat(h.destination)
+		if err != nil || info.Mode().Perm() != want {
+			t.Fatalf("mode after repair = %v, want %o: %v", info, want, err)
+		}
+	}
+	repair := func() {
+		t.Helper()
+		if stderr, err := h.run(nil, ModeRepair); err != nil {
+			t.Fatalf("repair failed: %v %s", err, stderr)
+		}
+	}
+	repair()
+	assertMode(0400)
+	h.apply(t, payload)
+	if err := os.Chmod(h.destination, 0644); err != nil {
+		t.Fatal(err)
+	}
+	repair()
+	assertMode(0600)
+	h.observeMode(t, nil, ModeRetire)
+	if err := os.Chmod(h.destination, 0400); err != nil {
+		t.Fatal(err)
+	}
+	repair()
+	assertMode(0400)
+}
+
 func TestTOMLMaterializationPreservesTimePrecision(t *testing.T) {
 	h := newGuestHarness(t)
 	h.format = "toml"
@@ -314,8 +347,21 @@ func TestTOMLMaterializationPreservesTimePrecision(t *testing.T) {
 			t.Fatalf("existing time literal changed: %q %v", payload, err)
 		}
 		info, err := os.Stat(h.destination)
-		if err != nil || info.Mode().Perm() != 0600 {
-			t.Fatalf("refused rewrite did not repair permissions: %v %v", info, err)
+		if err != nil || info.Mode().Perm() != 0644 {
+			t.Fatalf("refused rewrite changed unmanaged permissions: %v %v", info, err)
+		}
+		if h.observe(t, []byte(original)).Converged {
+			t.Fatal("unowned time literal reported converged")
+		}
+		h.apply(t, []byte(original))
+		if !h.observe(t, []byte(original)).Converged {
+			t.Fatal("byte-identical time literal did not converge")
+		}
+		if got, err := os.ReadFile(h.destination); err != nil || string(got) != original {
+			t.Fatalf("exact template changed time literal: %v", err)
+		}
+		if err := os.Remove(h.baselinePath(t)); err != nil {
+			t.Fatal(err)
 		}
 	}
 	h.writeDestination(t, "unrelated = '12:34:56.123456789' # 12:34:56.123456789\n")
@@ -1384,8 +1430,11 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				if err := os.Chmod(h.destination, 0o644); err != nil {
 					t.Fatal(err)
 				}
-				if h.observeMode(t, nil, ModeAssessRetire).Converged || !h.observeMode(t, nil, ModeRetire).Converged {
-					t.Fatal("retired document mode drift did not reconcile")
+				if !h.observeMode(t, nil, ModeAssessRetire).Converged || !h.observeMode(t, nil, ModeRetire).Converged {
+					t.Fatal("released retirement no longer reported completion")
+				}
+				if info, err := os.Stat(h.destination); err != nil || info.Mode().Perm() != 0644 {
+					t.Fatalf("retirement changed released permissions: %v %v", info, err)
 				}
 				// Re-enabling establishes fresh ownership over the retained document.
 				h.apply(t, []byte(desired))
@@ -1803,15 +1852,15 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 func TestRetirementChecksFreshModeOnForeignDocument(t *testing.T) {
 	h := newGuestHarness(t)
 	h.apply(t, []byte(`{"managed":true}`))
-	h.observeMode(t, nil, ModeRetire)
+	h.writeDestination(t, `{"managed":"edited"}`)
 	request, err := h.request(nil, ModeRetire)
 	if err != nil {
 		t.Fatal(err)
 	}
 	request.Command[7] = fmt.Sprint(os.Getuid() + 1)
-	needle := "    if mode == \"retire\":\n        repair_document_mode(destination, allowed_home, uid)"
+	needle := "        repair_document_mode(destination, allowed_home, uid)\n        if document_mode_drift(destination):"
 	request.Command[3] = strings.Replace(request.Command[3], needle,
-		"    if mode == \"retire\":\n        os.chmod(destination, 0o644)\n        repair_document_mode(destination, allowed_home, uid)", 1)
+		"        os.chmod(destination, 0o644)\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
 	output, err := command.CombinedOutput()

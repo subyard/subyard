@@ -23,7 +23,7 @@ def run(arguments, **kwargs):
     if result.returncode:
         refusals, retry = [], None
         for line in result.stderr[-65536:].decode(errors='replace').splitlines()[-32:]:
-            recovery = re.fullmatch(r'telemetry-agent-config-recovery-v1 (claude|codex) (\.subyard-config-recovery\.[0-9a-f]{24})', line)
+            recovery = re.fullmatch(r'telemetry-agent-config-recovery-v1 (claude|codex) (\.subyard-config-recovery\.[0-9a-f]{24}(?:/document)?)', line)
             if recovery:
                 agent, name = recovery.groups()
                 directory = '/home/'+os.environ['DEV_USER']+'/.'+agent

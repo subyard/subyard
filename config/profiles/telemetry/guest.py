@@ -323,7 +323,7 @@ class Runtime:
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
     def repair_native_modes(self):
-        native.repair_modes(self.home, self.control/'native.json', self.agents if self.selected else [], self.uid)
+        native.repair_modes(self.home, self.control/'native.json', self.agents, self.uid)
 
     def apply(self):
         self.repair_native_modes()
@@ -398,7 +398,7 @@ def main():
         if account.pw_uid == 0:
             raise ValueError('developer account required')
         native.repair_modes(Path(account.pw_dir), Path('/var/lib/subyard/telemetry-control/native.json'),
-                            agents.split() if selected == '1' else [], account.pw_uid)
+                            agents.split(), account.pw_uid)
         return
     if mode in ('identity-observe','identity-apply'):
         import authority

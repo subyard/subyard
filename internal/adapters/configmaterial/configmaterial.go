@@ -102,7 +102,7 @@ func ContributionConflict(result ports.InstanceExecResult, err error) string {
 	return "configuration contribution conflicts at " + detail
 }
 
-var publicationRefusal = regexp.MustCompile(`^config materialization: (concurrent destination change|invalid destination path|configuration publication failed|configuration permissions could not be tightened to 0600|TOML time precision exceeds the writer's supported precision)(; preserved file \.subyard-config-recovery\.[0-9a-f]{24})?\n?$`)
+var publicationRefusal = regexp.MustCompile(`^config materialization: (concurrent destination change|invalid destination path|configuration publication failed|configuration permissions could not be tightened to 0600|TOML time precision exceeds the writer's supported precision)(; preserved file \.subyard-config-recovery\.[0-9a-f]{24}(?:/document)?)?\n?$`)
 
 // WriteRefusal admits only fixed writer messages and its generated recovery name.
 func WriteRefusal(result ports.InstanceExecResult, err error) string {

@@ -333,6 +333,13 @@ func (cli *CLI) repairModesBeforeReleaseInspection(ctx context.Context, yard, ha
 		if _, err := parseInitArguments(arguments); err != nil {
 			return nil
 		}
+	case "@migrate":
+		for _, argument := range arguments {
+			if argument != "--yes" && argument != "-y" {
+				return nil
+			}
+		}
+		allLocal = true
 	default:
 		return nil
 	}

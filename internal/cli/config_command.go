@@ -1147,7 +1147,7 @@ func (cli *CLI) repairStructuredConfigModes(ctx context.Context, loaded config.L
 	if yard.AccessKind != domain.AccessLocal {
 		return nil
 	}
-	paths := config.StructuredConfigDestinations(loaded.Environment, yard.DevUser, loaded.Catalog.Integrations()...)
+	paths := config.SelectedStructuredConfigDestinations(loaded.Environment, yard.DevUser, loaded.Catalog.Integrations()...)
 	if len(paths) == 0 {
 		return nil
 	}

@@ -71,6 +71,9 @@ func (prepared *preparedCommand) prepareCurrentMigration(ctx context.Context, _ 
 		return err
 	}
 	prepared.Loaded = loaded
+	if err := cli.repairModesBeforeReleaseInspection(ctx, "default", "@migrate", prepared.Arguments); err != nil {
+		return err
+	}
 	runtime := releaseruntime.New(cli.releaseRuntimeConfig(releaseruntime.RuntimeContext{
 		OperatorHome: loaded.Context.Paths.OperatorHome, DataHome: loaded.Context.Paths.DataHome, ConfigHome: loaded.Context.Paths.ConfigHome, RuntimeRoot: loaded.Environment["YARD_RUNTIME_ROOT"], OperationID: cli.env["SUBYARD_OPERATION_ID"],
 	}))

@@ -121,21 +121,29 @@ def read_baseline(state):
     return original, baseline
 
 
+def receipt_lock(state, read_only):
+    # The receipt covers both destinations, even for disjoint selections.
+    path = materializer.asset_key('telemetry', str(state)) + '.lock'
+    return materializer.asset_lock(path, read_only, allow_missing=True)
+
+
 def repair_modes(home, state, agents, uid):
-    scope = set(agents)
-    try:
-        _, baseline = read_baseline(state)
-        scope.update(baseline['agents'])
-    except (OSError, ValueError):
-        # An unreadable receipt cannot tell us which options hold a token.
-        scope.update(('claude', 'codex'))
+    if agents:
+        with receipt_lock(state, True):
+            _, baseline = read_baseline(state)
+            repair_receipted_modes(home, baseline, agents, uid)
+
+
+def repair_receipted_modes(home, baseline, agents, uid):
     failures = []
     for agent in ('claude', 'codex'):
-        if agent in scope:
-            try:
+        if agent not in agents:
+            continue
+        try:
+            if materializer.published_contribution(baseline['agents'].get(agent, {})):
                 materializer.repair_document_mode(str(agent_path(home, agent)), str(home), uid)
-            except (OSError, ValueError) as error:
-                failures.append((agent, error))
+        except (OSError, ValueError) as error:
+            failures.append((agent, error))
     raise_refusals(failures)
 
 
@@ -147,50 +155,21 @@ def raise_refusals(failures):
 
 
 def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=False, templates=None, developer=None):
-    if not check:
-        repair_modes(home, state, agents, uid)
-    if token is None and not check:
-        raise ValueError('collector token required')
     templates = templates or {}
     developer = developer or home.name
-    with ExitStack() as locks:
+    with receipt_lock(state, check), ExitStack() as locks:
         return reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, check, templates, developer, locks)
 
 
 def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, check, templates, developer, locks):
     original, baseline = read_baseline(state)
+    if not check:
+        repair_receipted_modes(home, baseline, agents, uid)
+        if token is None:
+            raise ValueError('collector token required')
     next_state = {**baseline, 'agents': baseline['agents'].copy()}
-    pending = {**baseline, 'agents': baseline['agents'].copy()}
-    edits = []
-    references = []
+    publications = []
     failures = []
-    for agent in ('claude', 'codex'):
-        section, file_format = ('env', 'json') if agent == 'claude' else ('otel', 'toml')
-        owned = baseline['agents'].get(agent, {})
-        enabled = agent in agents
-        if not enabled and not owned:
-            continue
-        try:
-            path = agent_path(home, agent)
-            entry = {'receipt': str(state), 'path': '/agents/'+agent, 'section': section}
-            want = desired(agent, endpoint, token) if enabled else None
-            final, transitional, edit, register = materializer.prepare_contribution(
-                locks, str(path), str(home), uid, file_format, developer, entry, owned, want,
-                templates.get(agent), check=check, writer=writer.dumps, gid=gid)
-            if enabled:
-                next_state['agents'][agent] = final
-                pending['agents'][agent] = transitional
-            else:
-                next_state['agents'].pop(agent, None)
-            if edit is not None:
-                edits.append((agent, edit))
-            if register is not None:
-                references.append(register)
-        except materializer.InvalidContributionDestination:
-            failures.append((agent, AgentConfigRefusal(agent, path)))
-        except (OSError, ValueError, KeyError) as error:
-            failures.append((agent, error))
-    raise_refusals(failures)
 
     def receipt(value):
         try:
@@ -201,18 +180,48 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
             raise ValueError('native ownership exceeds size bound')
         return payload
 
-    intent, final = receipt(pending), receipt(next_state)
-    if check:
-        return not edits and not references and receipt(baseline) == final
-    for register in references:
-        register()
-    publish(state, intent, original)
-    for agent, edit in edits:
+    for agent in ('claude', 'codex'):
+        section, file_format = ('env', 'json') if agent == 'claude' else ('otel', 'toml')
+        enabled = agent in agents
+        if not enabled and agent not in baseline['agents']:
+            continue
+        path = agent_path(home, agent)
         try:
-            edit()
+            owned = materializer.published_contribution(baseline['agents'].get(agent, {}))
+            if not enabled and not owned:
+                next_state['agents'].pop(agent)
+                publications.append((agent, None, None, receipt(next_state)))
+                continue
+            entry = {'receipt': str(state), 'path': '/agents/'+agent, 'section': section}
+            want = desired(agent, endpoint, token) if enabled else None
+            final, edit, register = materializer.prepare_contribution(
+                locks, str(path), str(home), uid, file_format, developer, entry, owned, want,
+                templates.get(agent), check=check, writer=writer.dumps, gid=gid)
+            if enabled:
+                next_state['agents'][agent] = final
+            else:
+                next_state['agents'].pop(agent, None)
+            publications.append((agent, edit, register, receipt(next_state)))
+        except materializer.InvalidContributionDestination:
+            failures.append((agent, AgentConfigRefusal(agent, path)))
+        except (OSError, ValueError, KeyError) as error:
+            failures.append((agent, error))
+    raise_refusals(failures)
+
+    if check:
+        return all(edit is None and register is None for _, edit, register, _ in publications) and receipt(baseline) == receipt(next_state)
+    for agent, edit, register, final in publications:
+        if register is not None:
+            register()
+        try:
+            if edit is not None:
+                edit()
         except materializer.PublicationRefusal as error:
             if not error.recovery:
                 raise
             raise AgentConfigRefusals([(agent, error)]) from None
-    publish(state, final, intent)
+        publish(state, final, original)
+        original = final
+        if edit is not None and agent in agents:
+            repair_receipted_modes(home, next_state, [agent], uid)
     return True

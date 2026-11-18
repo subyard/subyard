@@ -140,6 +140,52 @@ func TestMigrateCheckReadsInstalledRuntimeWithoutLoadingYardConfiguration(t *tes
 	}
 }
 
+func TestMigrateRepairsSelectedConfigOnlyForMutation(t *testing.T) {
+	for _, readOnly := range []bool{false, true} {
+		t.Run(fmt.Sprintf("check=%t", readOnly), func(t *testing.T) {
+			root, environment, _ := migrateCLIFixture(t, false)
+			yard := filepath.Join(root, "state", "yards", "default")
+			agent := filepath.Join(root, "config", "agents", "fixture")
+			for _, directory := range []string{yard, agent} {
+				if err := os.MkdirAll(directory, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeCLIFile(t, filepath.Join(yard, "config.env"), "CODING_TOOL_INTEGRATIONS=fixture\n", 0600)
+			writeCLIFile(t, filepath.Join(agent, "integration.json"), `{"schema_version":2,"provision":"provision.sh","command":"sample","check":"sample-check","artifacts":[{"id":"config","kind":"config","source":"settings.json","destination":".sample/settings.json","format":"destination"}]}`, 0600)
+			writeCLIFile(t, filepath.Join(agent, "provision.sh"), "#!/bin/sh\nexit 0\n", 0700)
+			writeCLIFile(t, filepath.Join(agent, "settings.json"), "{}", 0600)
+			incus := lifecycleIncus()
+			instance := incus.Instances["subyard/yard"]
+			instance.Status = "Running"
+			incus.Instances["subyard/yard"] = instance
+			arguments := []string{"migrate"}
+			if readOnly {
+				arguments = append(arguments, "--check")
+			}
+			var output bytes.Buffer
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, Incus: incus, Executor: incus, Stdout: &output, Stderr: &output})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("migrate exit=%d: %s", code, &output)
+			}
+			want := 1
+			if readOnly {
+				want = 0
+			}
+			if got := len(incus.ConfigModeRepairs); got != want {
+				t.Fatalf("permission repair count=%d, want %d", got, want)
+			}
+			if !readOnly && incus.ConfigModeRepairs[0].Request.Command[6] != "/home/dev/.sample/settings.json" {
+				t.Fatal("unexpected destination in permission repair")
+			}
+		})
+	}
+}
+
 func TestMigrateAppliesOnlyAfterConfirmationAndSkipsReadyWork(t *testing.T) {
 	for _, test := range []struct {
 		name                  string

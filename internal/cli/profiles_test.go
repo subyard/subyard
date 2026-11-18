@@ -152,19 +152,21 @@ func prepareScopedProfile(t *testing.T, cli *CLI, arguments ...string) (*prepare
 	return admitPreparedFixture(cli).prepareCommand(context.Background(), prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments, ExplicitYard: true, InteractiveSetup: true})
 }
 
-func TestScopedProfileMutationRepairsBeforeConvergenceRefusal(t *testing.T) {
-	cli, incus, runtime, _, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
+func TestScopedProfileMutationRepairsSelectedIntegrationsBeforeConvergenceRefusal(t *testing.T) {
+	cli, incus, runtime, configPath, _ := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
 	for _, format := range []string{"json", "toml"} {
 		root := filepath.Join(cli.options.RepositoryRoot, "config", "agents", format)
 		writeProfileTestFile(t, filepath.Join(root, "integration.json"), fmt.Appendf(nil, `{"schema_version":2,"provision":"provision.sh","command":"sample","check":"sample-check","artifacts":[{"id":"config","kind":"config","source":"settings.%s","destination":".sample/settings.%s","format":"destination"}]}`, format, format), 0600)
 		writeProfileTestFile(t, filepath.Join(root, "provision.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
 		writeProfileTestFile(t, filepath.Join(root, "settings."+format), nil, 0600)
 	}
-	loaded, err := cli.loadContext("default")
+	writeProfileTestFile(t, configPath, []byte("ENVIRONMENT_PROFILES=fixture\nCODING_TOOL_INTEGRATIONS=json\n"), 0600)
+	catalog, err := config.LoadCatalog(cli.options.RepositoryRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded.Catalog, err = config.LoadCatalog(cli.options.RepositoryRoot)
+	cli.catalog = catalog
+	loaded, err := cli.loadContext("default")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +185,7 @@ func TestScopedProfileMutationRepairsBeforeConvergenceRefusal(t *testing.T) {
 					}
 					paths = append(paths, command[6])
 				}
-				if !slices.Equal(paths, []string{"/home/dev/.sample/settings.json", "/home/dev/.sample/settings.toml"}) {
+				if !slices.Equal(paths, []string{"/home/dev/.sample/settings.json"}) {
 					t.Fatalf("convergence check ran before permissions were repaired: %v", paths)
 				}
 				return fixtureConflict
