@@ -996,14 +996,23 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 
 func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 	for _, test := range []struct {
-		name, yardConfig, scope, integration, port string
-		code                                       int
-		refusals                                   []string
+		name, yardConfig, scope string
+		assignments             []string
+		code                    int
+		refusals                []string
 	}{
-		{"masked integration", "CODING_TOOL_INTEGRATIONS=codex\n", "host", "missing-one", "2390", 1,
+		{"masked integration", "CODING_TOOL_INTEGRATIONS=codex\n", "host",
+			[]string{"CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "2390"}, 1,
 			[]string{"unknown integration"}},
-		{"role and invalid port", "YARD_TEMPLATE=no-tools\n", "yard", "codex", "invalid", 2,
+		{"role and invalid port", "YARD_TEMPLATE=no-tools\n", "yard",
+			[]string{"CODING_TOOL_INTEGRATIONS", "codex", "SSH_PORT", "invalid"}, 2,
 			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "SSH_PORT (scalar settings): invalid port value"}},
+		{"template and invalid port", "CODING_TOOL_INTEGRATIONS=codex\n", "yard",
+			[]string{"YARD_TEMPLATE", "no-tools", "SSH_PORT", "invalid"}, 2,
+			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "SSH_PORT (scalar settings): invalid port value"}},
+		{"template, unknown integration and invalid port", "", "yard",
+			[]string{"YARD_TEMPLATE", "no-tools", "CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "invalid"}, 2,
+			[]string{"yard role forbids non-empty CODING_TOOL_INTEGRATIONS", "unknown integration", "SSH_PORT (scalar settings): invalid port value"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
@@ -1011,7 +1020,8 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 			yardPath := filepath.Join(configHome, "yards", "default", "config.env")
 			writeConfigCommandFile(t, yardPath, test.yardConfig)
 			var stderr bytes.Buffer
-			arguments := []string{"config", "set", "CODING_TOOL_INTEGRATIONS", test.integration, "SSH_PORT", test.port, "--scope", test.scope, "--yes"}
+			arguments := append([]string{"config", "set"}, test.assignments...)
+			arguments = append(arguments, "--scope", test.scope, "--yes")
 			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments, Environment: environment, WorkingDir: root, Stdout: io.Discard, Stderr: &stderr})
 			if err != nil {
 				t.Fatal(err)

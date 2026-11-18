@@ -144,9 +144,6 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	defer prepared.setGateSubject(configAuthoringSubject(prepared.Loaded.Context.YardName, requests))
 	if len(requests) > 1 {
 		if !requests[0].git {
-			if err := configLocalScalarBatchRefusal(prepared.Loaded, requests); err != nil {
-				return configUsage(err)
-			}
 			return prepared.prepareLocalConfigScalars(ctx, requests)
 		}
 		if err := prepared.CLI.configGitScalarsRefusal(prepared.Loaded, requests); err != nil {
@@ -181,12 +178,32 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	return prepared.prepareLocalConfigScalars(ctx, []configAuthoringRequest{request})
 }
 
-func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, requests []configAuthoringRequest) error {
+func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, requests []configAuthoringRequest) (result error) {
 	cli, loaded := prepared.CLI, prepared.Loaded
+	isBatch := len(requests) > 1
+	var assignmentRefusal error
+	if isBatch {
+		requests, assignmentRefusal = checkConfigScalarBatch(loaded, requests)
+		if len(requests) == 0 {
+			return configUsage(assignmentRefusal)
+		}
+	}
+	if assignmentRefusal != nil {
+		// Validate the accepted assignments against the persisted configuration,
+		// then refuse the whole batch before attaching a mutation plan.
+		defer func() {
+			ingressRefusal := cli.checkResourceConfigChanges(ctx, loaded, requests)
+			result = configUsage(domain.CollectRefusals(assignmentRefusal, result, ingressRefusal))
+		}()
+	}
 	request := requests[0]
 	action := request.action
 	if err := config.CheckLocalSettingsWritable(loaded.Context.Paths.ConfigHome); err != nil {
-		return configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
+		refusal := configAuthoringFailure{loaded.Context.Paths.ConfigHome, err}
+		if assignmentRefusal == nil {
+			return refusal
+		}
+		assignmentRefusal = domain.CollectRefusals(assignmentRefusal, refusal)
 	}
 	path, err := configScalarAuthoringPath(loaded, request.scope)
 	if err != nil {
@@ -221,12 +238,16 @@ func (prepared *preparedCommand) prepareLocalConfigScalars(ctx context.Context, 
 		prospectiveRequest.action = "selection-repair"
 	}
 	var batch []configAuthoringRequest
-	if len(requests) > 1 {
+	if isBatch {
 		batch = requests
 	}
 	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired, batch...)
 	if err != nil {
 		return err
+	}
+	if assignmentRefusal != nil {
+		prospective.close()
+		return nil
 	}
 	prepared.closeResource = func() error { prospective.close(); return nil }
 	changed := !sameConfigAuthoringSnapshot(baseline, desired)

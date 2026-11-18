@@ -18,6 +18,10 @@ import (
 )
 
 type LoadOptions struct {
+	// AuthoredIntegrations also checks an explicit draft selection that a
+	// higher-priority layer may mask.
+	AuthoredIntegrations []string
+
 	// NativeTargetOnly resolves scalar address/paths for registry assessment. Its
 	// result must never be used for guest access, provisioning or activation.
 	NativeTargetOnly bool
@@ -501,6 +505,10 @@ func load(
 	// One collection point: command overrides, asset sources, integration
 	// selection, role, profile and context refusals are reported together.
 	roleRefusals := append(commandRefusals, refusalCauses(normalizeAgentAssetPaths(values, tracker))...)
+	if len(options.AuthoredIntegrations) != 0 {
+		_, authoredErr := tracker.catalog.ResolveIntegrationSelection(values, options.AuthoredIntegrations)
+		roleRefusals = append(roleRefusals, refusalCauses(authoredErr)...)
+	}
 	integrationRefusal, err := resolveLoadedIntegrations(values, tracker)
 	roleRefusals = append(roleRefusals, integrationRefusal)
 	if err != nil {
