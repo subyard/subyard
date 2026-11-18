@@ -2562,10 +2562,13 @@ Release activation reconciles the approved owners in one pass. Stale runtimes ca
 validated configuration diagnostics when config status requests them.
 
 A shipped profile can submit a contribution to the guest config materializer. The
-materializer uses the same destination lock and atomic replacement as the agent template.
-The contribution keeps its profile-owned protected receipt. A protected per-document
+materializer strictly parses, compares, validates and replaces documents under the same
+destination lock for contributions and agent templates. The profile supplies desired fields
+and retains prior values in its protected receipt. A protected per-document
 reference lets the template writer detect overlapping values and reconstruct an active
-contribution when it repairs a damaged document. Conflict output identifies field paths.
+contribution when it repairs a damaged document. Contribution writes use mode `0600`.
+On opt-out, the materializer restores or removes unchanged contributed fields and preserves
+later edits, including edits within a contributed table. Conflict output identifies field paths.
 Unpublished `.subyard-config.*` files left by an interrupted materializer are outside its explicit
 artifact inventory. Later observation and replacement ignore them, including similarly named
 symlinks, without reading or deleting unrelated directory entries.

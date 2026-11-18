@@ -117,6 +117,36 @@ func TestMaterializationChecksAndRepairsRegisteredContribution(t *testing.T) {
 	}
 }
 
+func TestEmptyDocumentWithContributionReportsBooleanDrift(t *testing.T) {
+	for _, format := range []string{"json", "toml"} {
+		t.Run(format, func(t *testing.T) {
+			h := newGuestHarness(t)
+			h.format = format
+			template := []byte(`{}`)
+			if format == "toml" {
+				template = nil
+			}
+			h.apply(t, template)
+			state := filepath.Join(testkit.TempDir(t), "owner.json")
+			testkit.WriteFile(t, state, []byte(`{"schema":1,"fields":{"flag":{"managed":true}}}`), 0o600)
+			reference, err := json.Marshal(map[string]string{"receipt": state, "path": "/fields", "section": "settings"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := strings.TrimSuffix(h.baselinePath(t), ".json")
+			testkit.WriteFile(t, key+".contribution", reference, 0o600)
+			testkit.WriteFile(t, h.destination, template, 0o600)
+			if h.observe(t, template).Converged {
+				t.Fatal("empty document reported current with an active contribution")
+			}
+			h.apply(t, template)
+			if !h.observe(t, template).Converged {
+				t.Fatal("contribution repair did not converge")
+			}
+		})
+	}
+}
+
 func TestManagedInvalidDestinationIsDriftAndRepairable(t *testing.T) {
 	for _, format := range []string{"json", "toml"} {
 		for _, broken := range []string{"", "[broken"} {

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]/'internal/adapters/configmaterial'))
@@ -34,18 +35,22 @@ class NativeTest(unittest.TestCase):
                               input=payload, capture_output=True)
 
     def test_repair_mode_when_exporters_already_match(self):
-        for agent in ('claude', 'codex'):
+        for agent, payload in [('claude', b'{"unrelated":true}'), ('codex', b'unrelated = true\n')]:
             with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
                 root = Path(name)
                 args = (root, root/'native.json', [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-                native.reconcile(*args)
-                path, before, _, _ = native.agent_document(root, agent)
+                templates = {agent: payload}
+                path = native.agent_path(root, agent)
+                applied = self.materialize(agent, path, payload)
+                self.assertEqual(applied.returncode, 0, applied.stderr)
+                native.reconcile(*args, templates=templates)
+                before = path.read_bytes()
                 path.chmod(0o644)
-                self.assertFalse(native.reconcile(*args, check=True))
+                self.assertFalse(native.reconcile(*args, check=True, templates=templates))
                 self.assertEqual(path.stat().st_mode & 0o777, 0o644)
                 for _ in range(2):
-                    native.reconcile(*args)
-                    self.assertTrue(native.reconcile(*args, check=True))
+                    native.reconcile(*args, templates=templates)
+                    self.assertTrue(native.reconcile(*args, check=True, templates=templates))
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                     self.assertEqual(path.read_bytes(), before)
 
@@ -57,7 +62,7 @@ class NativeTest(unittest.TestCase):
                     state = root/'native.json'
                     args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
                     templates = {agent: payload}
-                    path = native.agent_document(root, agent)[0]
+                    path = native.agent_path(root, agent)
                     if profile_first:
                         native.reconcile(*args, templates=templates)
                         adopted = self.materialize(agent, path, payload, 'assess-adopt')
@@ -78,8 +83,7 @@ class NativeTest(unittest.TestCase):
                         repaired = self.materialize(agent, path, payload)
                         self.assertEqual(repaired.returncode, 0, repaired.stderr)
                         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                        _, _, values, cause = native.agent_document(root, agent)
-                        self.assertEqual(cause, '')
+                        values = json.loads(path.read_bytes()) if agent == 'claude' else tomllib.loads(path.read_text())
                         self.assertIs(values['unrelated'], True)
                         self.assertEqual(values['env' if agent == 'claude' else 'otel'],
                                          native.desired(agent, args[3], args[4]))
@@ -92,7 +96,7 @@ class NativeTest(unittest.TestCase):
             with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
                 root = Path(name)
                 args = (root, root/'native.json', [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-                path = native.agent_document(root, agent)[0]
+                path = native.agent_path(root, agent)
                 with self.assertRaisesRegex(native.materializer.ContributionConflict, field) as error:
                     native.reconcile(*args, templates={agent: payload})
                 self.assertNotIn('template-value', str(error.exception))
@@ -113,7 +117,7 @@ class NativeTest(unittest.TestCase):
                 state = root/'native.json'
                 endpoint, token = 'http://localhost:14318', 'x'*64
                 args = (root, state, [agent], endpoint, token, tomli_w, os.getuid(), os.getgid())
-                path = native.agent_document(root, agent)[0]
+                path = native.agent_path(root, agent)
                 path.parent.mkdir()
                 managed = native.desired(agent, endpoint, token)
                 section, field, prior = ('env', 'OTEL_LOGS_EXPORTER', 'console') if agent == 'claude' else ('otel', 'log_user_prompt', True)
@@ -180,12 +184,7 @@ class NativeTest(unittest.TestCase):
             claude.write_text(json.dumps(value, separators=(',', ':'))+'\n')
             before = {path: path.read_bytes() for path in (codex, claude)}
             ownership = state.read_bytes()
-            original_dumps = json.dumps
-            def state_only_dumps(value, *args, **kwargs):
-                self.assertNotIn('env', value, 'unchanged native configuration must not be serialized')
-                return original_dumps(value, *args, **kwargs)
-            with patch.object(tomli_w, 'dumps', side_effect=AssertionError('unchanged TOML must not be serialized')), \
-                 patch.object(native.json, 'dumps', side_effect=state_only_dumps):
+            with patch.object(tomli_w, 'dumps', side_effect=AssertionError('unchanged TOML must not be serialized')):
                 self.assertTrue(native.reconcile(root, state, agents, 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid(), check=True))
                 self.assertEqual(state.read_bytes(), ownership, 'check must not change ownership')
                 native.reconcile(root, state, agents, 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
@@ -305,6 +304,72 @@ class NativeTest(unittest.TestCase):
                 native.reconcile(root, state, ['claude'], 'http://127.0.0.1:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
             native.reconcile(root, state, [], '', '', tomli_w, os.getuid(), os.getgid())
             self.assertEqual(json.loads(path.read_text())['env'], {'OTEL_LOGS_EXPORTER': 'console'})
+
+    def test_opt_out_preserves_scalar_replacement_for_owned_section(self):
+        for agent, replacement in [('claude', b'{"env":"user edit"}'), ('codex', b'otel = "user edit"\n')]:
+            with self.subTest(agent=agent):
+                state = self.root/(agent+'.receipt')
+                path = native.agent_path(self.root, agent)
+                args = (self.root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                native.reconcile(*args)
+                path.write_bytes(replacement)
+                native.reconcile(*args[:2], [], *args[3:])
+                self.assertEqual(path.read_bytes(), replacement)
+                self.assertEqual(json.loads(state.read_bytes())['agents'], {})
+
+    def test_opt_out_removes_unchanged_header_beside_edited_endpoint(self):
+        state = self.root/'native.json'
+        path = native.agent_path(self.root, 'codex')
+        args = (self.root, state, ['codex'], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+        native.reconcile(*args)
+        values = tomllib.loads(path.read_text())
+        exporter = values['otel']['exporter']['otlp-http']
+        exporter['endpoint'] = 'http://localhost:23456/v1/logs'
+        exporter['headers']['User-Header'] = 'keep'
+        path.write_text(tomli_w.dumps(values))
+        path.chmod(0o644)
+        native.reconcile(*args[:2], [], *args[3:])
+        self.assertEqual(tomllib.loads(path.read_text()), {'otel': {'exporter': {'otlp-http': {
+            'endpoint': 'http://localhost:23456/v1/logs', 'headers': {'User-Header': 'keep'}}}}})
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(state.read_bytes())['agents'], {})
+
+    def test_claude_strict_parse_and_precise_round_trip(self):
+        state = self.root/'native.json'
+        path = native.agent_path(self.root, 'claude')
+        path.parent.mkdir()
+        args = (self.root, state, ['claude'], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+        duplicate = b'{"unrelated":{"key":1,"key":2}}'
+        path.write_bytes(duplicate)
+        for check in (True, False):
+            with self.assertRaises(native.AgentConfigRefusal):
+                native.reconcile(*args, check=check)
+            self.assertEqual(path.read_bytes(), duplicate)
+            self.assertFalse(state.exists())
+
+        number = Decimal('1.00000000000000000001')
+        path.write_bytes(b'{"unrelated":1.00000000000000000001}')
+        for agents in (['claude'], []):
+            native.reconcile(*args[:2], agents, *args[3:])
+            values = json.loads(path.read_bytes(), parse_float=Decimal)
+            self.assertEqual(values['unrelated'], number)
+
+    def test_oversize_output_is_refused_before_replacement(self):
+        state = self.root/'native.json'
+        path = native.agent_path(self.root, 'claude')
+        path.parent.mkdir()
+        prefix, suffix = b'{"unrelated":"', b'"}'
+        original = prefix + b'x'*(4*1024*1024-6-len(prefix)-len(suffix)) + suffix
+        path.write_bytes(original)
+        path.chmod(0o644)
+        args = (self.root, state, ['claude'], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+        for check in (False, True):
+            with self.assertRaisesRegex(ValueError, 'destination exceeds size bound'):
+                native.reconcile(*args, check=check)
+            self.assertTrue(path.read_bytes() == original)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            self.assertFalse(state.exists())
+            self.assertFalse(list(self.state_root.glob('*.contribution')))
 
 
 if __name__ == '__main__':

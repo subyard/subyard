@@ -27,7 +27,28 @@ class LifecycleTest(unittest.TestCase):
         self.enterContext(patch.object(guest.native.materializer, 'STATE_ROOT', str(Path(root)/'materialization')))
         self.enterContext(patch.object(guest.native.materializer, 'STATE_UID', os.getuid()))
 
-    def test_disable_does_not_require_missing_owned_agent_documents(self):
+    def test_first_enable_detects_template_conflict_before_creating_token(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.selected, runtime.agents = True, ['codex']
+            runtime.home, runtime.control, runtime.data = root, root/'control', root/'data'
+            runtime.assets, runtime.retained = {}, {}
+            runtime.owned = lambda: False
+            runtime.endpoint = 'http://localhost:14318'
+            runtime.uid, runtime.gid = os.getuid(), os.getgid()
+            runtime.templates = {'codex': b'[otel]\nlog_user_prompt = true\n'
+                                 b'[otel.exporter.otlp-http.headers]\nAuthorization = "template-value"\n'}
+            for operation in (runtime.observe, runtime.apply):
+                with self.assertRaisesRegex(guest.native.materializer.ContributionConflict, '/otel/log_user_prompt') as error:
+                    operation()
+                self.assertIn('/otel/exporter/otlp-http/headers/Authorization', str(error.exception))
+                self.assertNotIn('template-value', str(error.exception))
+                self.assertFalse(runtime.control.exists())
+                self.assertFalse(runtime.data.exists())
+                self.assertFalse(guest.native.agent_path(root, 'codex').exists())
+
+    def test_disable_does_not_require_missing_owned_agent_documents_or_valid_templates(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             runtime = object.__new__(guest.Runtime)
@@ -48,9 +69,10 @@ class LifecycleTest(unittest.TestCase):
             guest.native.publish(runtime.control/'assets.json', b'{}', None)
             state = runtime.control/'native.json'
             guest.native.reconcile(root, state, runtime.agents, runtime.endpoint, token, guest.tomli_w, runtime.uid, runtime.gid)
-            paths = [guest.native.agent_document(root, agent)[0] for agent in runtime.agents]
+            paths = [guest.native.agent_path(root, agent) for agent in runtime.agents]
             for path in paths:
                 path.unlink()
+            runtime.templates = {agent: b'[broken' for agent in runtime.agents}
             self.assertEqual(runtime.observe()['state'], 'stale')
             with patch.object(guest, 'systemctl', return_value=''):
                 runtime.apply()

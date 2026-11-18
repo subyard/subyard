@@ -325,6 +325,9 @@ class Runtime:
         installed = self.owned()
         if not self.selected and not installed:
             return
+        token_path = self.data/'auth.token'
+        if self.selected and self.agents and native.snapshot(token_path) is None:
+            self.reconcile_native(None, check=True)
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         if not installed:
             if self.library.exists():
@@ -340,8 +343,8 @@ class Runtime:
         self.data.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.data, 0o700)
         os.chown(self.data, self.uid, self.gid)
-        if not (self.data/'auth.token').exists():
-            native.publish(self.data/'auth.token', (secrets.token_hex(32)+'\n').encode(), None, self.uid, self.gid)
+        if not token_path.exists():
+            native.publish(token_path, (secrets.token_hex(32)+'\n').encode(), None, self.uid, self.gid)
         token = self.token()
         saved = json.loads((self.control/'assets.json').read_text())
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
@@ -354,7 +357,6 @@ class Runtime:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
-        self.reconcile_native(token, check=True)
         self.reconcile_native(token)
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)
