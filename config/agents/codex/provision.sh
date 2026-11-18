@@ -91,22 +91,30 @@ def simple_commands(command):
         yield words
 
 
-def shell_command(args):
+def shell_command(executable, args):
     options = iter(args)
     command_mode = noexec = False
+    # sh can be Bash under its POSIX invocation name. POSIX sh and dash
+    # use -o; Bash also takes operands for -O, --init-file and --rcfile.
+    bash_options = executable in {"bash", "sh"}
     for arg in options:
         if arg == "--":
             arg = next(options, None)
             break
+        if bash_options and arg in {"--init-file", "--rcfile"}:
+            next(options, None)
+            continue
         if re.fullmatch(r"[-+][a-zA-Z]+", arg):
             enabled = arg[0] == "-"
-            flags = arg[1:]
-            if "c" in flags and enabled:
-                command_mode = True
-            if "n" in flags:
-                noexec = enabled
-            if flags.endswith("o") and next(options, None) == "noexec":
-                noexec = enabled
+            for flag in arg[1:]:
+                if flag == "c" and enabled:
+                    command_mode = True
+                elif flag == "n":
+                    noexec = enabled
+                elif flag == "o" or (flag == "O" and bash_options):
+                    option = next(options, None)
+                    if flag == "o" and option == "noexec":
+                        noexec = enabled
         elif not arg.startswith("--"):
             break
     else:
@@ -136,7 +144,7 @@ def denied_action(command, nested=False, depth=0):
                            command[tokens[0][1]:tokens[1][2]] != f"git {action}"):
                 return action
         elif executable in {"sh", "bash", "dash", "zsh", "ksh"}:
-            script = shell_command(args)
+            script = shell_command(executable, args)
             if script is not None:
                 action = denied_action(script, nested=True, depth=depth + 1)
                 if action:
