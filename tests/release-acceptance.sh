@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
 
@@ -2367,8 +2368,9 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             script = output / "client-lane.sh"
-            script.write_text("#!/bin/bash\n"
-                "printf 'E2E lease: yard=hermes project=hermes run=0123abcd purpose=test-vms-client slot=slot-001 type=subyard-pair vms=1 base=%s\\n' " + "a" * 64 + " >&2\n"
+            grant = ("printf 'E2E lease: yard=hermes project=hermes run=0123abcd purpose=test-vms-client "
+                     "slot=slot-001 type=subyard-pair vms=1 base=%s\\n' " + "a" * 64 + " >&2\n")
+            script.write_text("#!/bin/bash\n" + grant +
                 "printf 'E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\\n' >&2\n"
                 "printf 'E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\\n' >&2\n"
                 "printf 'E2E lease released: handle=0123abcd slot=slot-001 reason=explicit\\n' >&2\n"
@@ -2379,6 +2381,13 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertTrue(m.slot_continues_after(result))
             script.write_text(script.read_text().replace("duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0", "duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=1"))
             result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertFalse(m.slot_continues_after(result))
+            # A matching grant after the successful release still owns a lease,
+            # even when its environment was already recorded for the first grant.
+            script.write_text(script.read_text().replace("exit_code=1", "exit_code=0").replace("exit 1\n", grant + "exit 143\n"))
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual(result["termination"], "signal")
+            self.assertEqual(result["cleanup_status"], "unconfirmed")
             self.assertFalse(m.slot_continues_after(result))
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
@@ -2810,10 +2819,12 @@ while True: time.sleep(1)
         def hosted(names):
             self.assertTrue(peer_started.wait(3))
             self.assertEqual(names, {"hosted-failed", "hosted-passed", "hosted-running"})
-            return {"hosted-passed"}, {"hosted-failed"}, set()
+            return {"hosted-passed": m.Schedule.DONE, "hosted-failed": m.Schedule.READY,
+                    "hosted-running": m.Schedule.DEFERRED}
 
-        m.run_live(attempt, results.__setitem__, ["slow", "flaky"], m.BROKER_SLOTS, 2, "1s",
-                   {"hosted-failed", "hosted-passed", "hosted-running"}, hosted, lambda: ())
+        schedule = m.OrderedDict.fromkeys(("slow", "flaky"), m.Schedule.READY)
+        schedule.update(m.OrderedDict.fromkeys(("hosted-failed", "hosted-passed", "hosted-running"), m.Schedule.HOSTED))
+        m.run_live(attempt, results.__setitem__, schedule, m.BROKER_SLOTS, 2, "1s", hosted)
         self.assertEqual({name for name, _ in calls}, {"slow", "flaky", "hosted-failed"})
         self.assertEqual(sum(name == "flaky" for name, _ in calls), 2)
         self.assertTrue(all(result["status"] == "passed" for result in results.values()))
@@ -2834,9 +2845,23 @@ while True: time.sleep(1)
             return {"status": "passed"}
 
         with patch.object(m, "ADMISSION_POLL_SECONDS", 0):
-            m.run_live(attempt, results.__setitem__, ["slow", "waiting"], m.BROKER_SLOTS, 4, "4s",
-                       (), None, lambda: ())
+            schedule = m.OrderedDict.fromkeys(("slow", "waiting"), m.Schedule.READY)
+            m.run_live(attempt, results.__setitem__, schedule, m.BROKER_SLOTS, 4, "4s", None)
         self.assertEqual(results, {"slow": {"status": "passed"}, "waiting": {"status": "passed"}})
+
+    def test_missing_slot_is_a_refusal_only_for_explicit_selection(self):
+        refusal = {"status": "blocked", "reason": "capacity_slot_missing"}
+        for exact in (False, True):
+            with self.subTest(exact=exact):
+                schedule = m.OrderedDict.fromkeys(("one", "two"), m.Schedule.READY)
+                results = {}
+                def attempt(name, slot):
+                    return refusal if slot == 2 else {"status": "passed"}
+                invalid = m.run_live(attempt, results.__setitem__, schedule, (1, 2), 2, "1s", None,
+                                     exact_slots=exact)
+                self.assertEqual(invalid, {2} if exact else set())
+                self.assertEqual(results["one"]["status"], "passed")
+                self.assertEqual(results["two"]["status"], "blocked" if exact else "passed")
 
     def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
@@ -3346,13 +3371,54 @@ while True: time.sleep(1)
     def test_concurrent_rerun_queues_one_exact_live_lane(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             output = Path(temporary)
-            name = "profile:sample"
-            (output / "receipt.json").write_text(json.dumps({"checks": {name: {"status": "failed"}}}))
-            with m.acceptance_lock(output), patch.object(m.signal, "signal"), \
-                 patch.object(sys, "argv", ["collector", "run", "--output", str(output), "--only", name, "--rerun"]):
-                self.assertEqual(m.main(), 0)
-            self.assertTrue(m.retry_path(output, name).is_file())
-            self.assertEqual(json.loads((output / "receipt.json").read_text())["checks"][name], {"status": "failed"})
+            fallback, peer, unselected = "vm:fallback", "vm:peer", "vm:unselected"
+            checks = dict.fromkeys(("verify", peer, fallback, unselected), ["true"])
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "checks": {name: {"status": "pending"} for name in checks}}
+            receipt["checks"]["verify"]["status"] = "passed"
+            receipt["checks"][unselected]["status"] = "failed"
+            first_attempt, finished = threading.Event(), threading.Event()
+            calls = []
+            native_save = m.save
+
+            def save(target, current):
+                native_save(target, current)
+                if current["checks"][fallback]["status"] == "passed":
+                    first_attempt.set()
+
+            def execute(name, command, root, output, env, slot=None):
+                calls.append((name, slot))
+                if name == peer:
+                    self.assertTrue(finished.wait(15))
+                return {"status": "passed", "exit_code": 0}
+
+            def run():
+                with m.acceptance_lock(output):
+                    return m.run_checks(output, [1, 2], [peer, fallback], False, hosted={fallback},
+                                        poll_hosted=lambda *args: {fallback: m.Schedule.READY})
+
+            def retry(name):
+                with patch.object(sys, "argv", ["collector", "run", "--output", str(output), "--only", name, "--rerun"]):
+                    return m.main()
+
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "save", side_effect=save), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                 patch.object(m, "execute", side_effect=execute), \
+                 patch.object(m, "completed_attempt", return_value={}), ThreadPoolExecutor(max_workers=1) as pool:
+                collector = pool.submit(run)
+                try:
+                    self.assertTrue(first_attempt.wait(5))
+                    with self.assertRaisesRegex(ValueError, "not accepting"):
+                        retry(unselected)
+                    self.assertEqual(retry(fallback), 0)
+                finally:
+                    finished.set()
+                self.assertEqual(collector.result(timeout=5), 1)
+            self.assertEqual(calls, [(peer, 1), (fallback, 2), (fallback, 2)])
+            self.assertFalse((output / "retry.sock").exists())
 
     def test_single_collector_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3573,6 +3639,23 @@ class FullSplitRequirement(unittest.TestCase):
 
 
 class HostedInventory(unittest.TestCase):
+    def test_retired_check_is_eligible_only_under_a_reviewed_historical_policy(self):
+        policy = "911e6588dded3367817a8c21c5a849dd5b945b2e"
+        name = "vm:published-upgrade/0.11.0-chain"
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            source = Path(temporary)
+            (source / "dev").mkdir()
+            (source / ".github/workflows").mkdir(parents=True)
+            (source / "dev/release-acceptance.py").write_text(f"CI_HOSTED_CHECKS = frozenset({{{name!r}}})\n")
+            (source / ".github/workflows/release-vm.yml").touch()
+            with patch.object(m, "commands", return_value={name: ["true"]}), \
+                 patch.object(m, "git_blob_sha", return_value=policy):
+                self.assertEqual(m.hosted_checks(source, "0.29.0", {}), [name])
+            with patch.object(m, "commands", return_value={name: ["true"]}), \
+                 patch.object(m, "git_blob_sha", return_value="e1e7aa9e268532cf97f661792cc1adb54b6ff7c1"):
+                with self.assertRaisesRegex(ValueError, "unreviewed hosted checks"):
+                    m.hosted_checks(source, "0.29.0", {})
+
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
         self.assertEqual(len(m.CI_HOSTED_CHECKS), 24)

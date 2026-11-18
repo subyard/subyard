@@ -62,9 +62,28 @@ jobs:
     permissions:
       actions: read
     outputs:
-      run: ${{ steps.compare.outputs.run }}
+      run: ${{ steps.release.outputs.active == 'false' && steps.compare.outputs.run == 'true' }}
     steps:
+      - &release-capacity
+        name: Give release checks first use of runner capacity
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for workflow in release.yml release-vm.yml; do
+            for status in queued in_progress requested waiting pending; do
+              count="$(gh api "repos/$GH_REPO/actions/workflows/$workflow/runs?status=$status&per_page=1" --jq .total_count)"
+              if [ "$count" -gt 0 ]; then
+                printf 'Deferred Periodic E2E while %s has a %s run.\n' "$workflow" "$status" >> "$GITHUB_STEP_SUMMARY"
+                printf 'active=true\n' >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done
+          done
+          printf 'active=false\n' >> "$GITHUB_OUTPUT"
       - name: Compare with the last finished run
+        if: steps.release.outputs.active == 'false'
         id: compare
         env:
           GH_TOKEN: ${{ github.token }}
@@ -80,8 +99,11 @@ jobs:
             for id in $(gh run list --workflow periodic-e2e.yml --branch "$REF" --status completed \
               --limit 30 --json databaseId,headSha,event,conclusion \
               --jq ".[] | select(.headSha == \"$HEAD\" and (.event == \"schedule\" or .event == \"push\") and .conclusion != \"cancelled\") | .databaseId"); do
-              pool="$(gh run view "$id" --json jobs --jq '.jobs[] | select(.name == "pool") | .conclusion')"
-              if [ "$pool" = success ]; then
+              covered="$(gh run view "$id" --json jobs --jq '
+                any(.jobs[]; .name == "pool" and .conclusion == "success")
+                and all(.jobs[] | select(.name == "admit");
+                    any(.steps[]; .name == "Record matrix admission" and .conclusion == "success"))')"
+              if [ "$covered" = true ]; then
                 run=false
                 break
               fi
@@ -301,19 +323,36 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  # Packaging and the pool probe can take long enough for a release to arrive meanwhile.
+  admit:
+    needs: [candidate, pool]
+    if: >-
+      ${{ !cancelled() && needs.candidate.result == 'success'
+      && (needs.pool.result == 'success' || (needs.pool.result == 'skipped' && inputs.origin)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.release.outputs.active == 'false' }}
+    steps:
+      - *release-capacity
+      - name: Record matrix admission
+        if: steps.release.outputs.active == 'false'
+        run: printf 'Admitted Periodic E2E matrices.\n' >> "$GITHUB_STEP_SUMMARY"
+
   # Ordinary checks can use CI while the separate Veranda bundle builds.
   check:
     continue-on-error: ${{ matrix.optional || false }}
     name: ${{ matrix.id }}
-    needs: [candidate, pool]
-    if: ${{ !cancelled() && needs.candidate.outputs.checks && needs.pool.result == 'success' }}
+    needs: [candidate, admit]
+    if: ${{ !cancelled() && needs.candidate.outputs.checks && needs.admit.outputs.run == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      # With the nested and Veranda jobs, leaves room in the account-wide 20-job pool for
-      # ordinary CI and release acceptance.
-      max-parallel: 11
+      # Together with Veranda (2) and nested (3), keep the previous 14-runner budget.
+      max-parallel: 9
       matrix: ${{ fromJSON(needs.candidate.outputs.checks) }}
     steps: &periodic-check-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -363,8 +402,8 @@ jobs:
 
   veranda:
     name: ${{ matrix.id }}
-    needs: [candidate, pool, veranda-bundle]
-    if: ${{ !cancelled() && needs.candidate.outputs.veranda && needs.pool.result == 'success' && needs.veranda-bundle.result == 'success' }}
+    needs: [candidate, admit, veranda-bundle]
+    if: ${{ !cancelled() && needs.candidate.outputs.veranda && needs.admit.outputs.run == 'true' && needs.veranda-bundle.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
@@ -382,10 +421,8 @@ jobs:
   # runners until one is Intel.
   nested:
     name: "${{ matrix.copy && format('{0} #{1}', matrix.id, matrix.copy) || matrix.id }}"
-    needs: [candidate, pool]
-    if: >-
-      ${{ !cancelled() && needs.candidate.outputs.nested && needs.candidate.result == 'success'
-      && (needs.pool.result == 'success' || (needs.pool.result == 'skipped' && inputs.origin)) }}
+    needs: [candidate, admit]
+    if: ${{ !cancelled() && needs.candidate.outputs.nested && needs.admit.outputs.run == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:

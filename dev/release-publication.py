@@ -1390,38 +1390,36 @@ def hosted_artifact(github, artifact, destination):
     archive.unlink()
 
 
-def hosted_target_open(name, result):
-    return a.transfer_target_open(name, result) or result["status"] in ("failed", "blocked", "interrupted", "running")
-
-
 def hosted_open(directory, output):
-    """Hosted checks of a dispatched request that are not yet passed in the local receipt."""
+    """Hosted checks of a dispatched request that have no local attempt to preserve."""
     if not (directory / "ci-hosted.json").exists():
         return []
     checks = json.loads((output / "receipt.json").read_text())["checks"]
     state = json.loads((directory / "ci-hosted.json").read_text())
-    return sorted(name for name in state["checks"] if name in checks and hosted_target_open(name, checks[name]))
+    return sorted(name for name in state["checks"] if name in checks and a.transfer_target_open(name, checks[name]))
 
 
 DISCOVERY_SECONDS = 600
 
 
 def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds, slot_count=None):
-    """Feed terminal hosted failures back to local workers as soon as they are available."""
+    """Send finished hosted checks without a usable pass to local workers."""
     output = directory / "acceptance"
     started = time.monotonic()
-    hosted = hosted_open(directory, output) if with_vms or only else []
 
     def poll(root, receipt, lock, names):
         passed, fallback, state = collect_ci(github, directory, identity, bound=(root, receipt, lock), names=names)
         elapsed = time.monotonic() - started
-        waiting = names if (state != "finished" and elapsed < wait_seconds
-                            and (state != "missing" or elapsed < DISCOVERY_SECONDS)) else set()
-        if not waiting and names - passed - fallback:
-            print("CI-HOSTED pending: " + ", ".join(sorted(names - passed - fallback)), flush=True)
-        return passed, fallback, waiting
+        waiting = (state != "finished" and elapsed < wait_seconds
+                   and (state != "missing" or elapsed < DISCOVERY_SECONDS))
+        remaining = names - passed - fallback
+        if not waiting and remaining:
+            print("CI-HOSTED pending: " + ", ".join(sorted(remaining)), flush=True)
+        return {**dict.fromkeys(passed, a.Schedule.DONE), **dict.fromkeys(fallback, a.Schedule.READY),
+                **dict.fromkeys(remaining, a.Schedule.HOSTED if waiting else a.Schedule.DEFERRED)}
 
     with a.acceptance_lock(output):
+        hosted = hosted_open(directory, output) if with_vms or only else []
         return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous,
                             slot_count=slot_count, hosted=hosted, poll_hosted=poll)
 
@@ -1452,6 +1450,7 @@ def collect_ci(github, directory, identity, bound=None, names=None):
         raise ValueError("retained hosted request candidate changed")
     names = sorted(set(state["checks"]) if names is None else set(state["checks"]) & names)
     passed, fallback = set(), set()
+    terminal = False
     try:
         run = discover(github, "release-vm.yml", state["request"])
         if not run:
@@ -1461,11 +1460,13 @@ def collect_ci(github, directory, identity, bound=None, names=None):
         run_id, latest = run["id"], run["run_attempt"]
         retry_visible = latest >= state.get("retry_attempt", 1)
         terminal = retry_visible and run.get("status") == "completed"
+        policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
+        allowed = a.hosted_policy_checks(policy)
         inventory = set(state["checks"])
         jobs = {}
         for attempt in range(latest, 0, -1):
             entries = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
-            if len(entries) > len(a.CI_HOSTED_CHECKS) or len({job["name"] for job in entries}) != len(entries):
+            if len(entries) > len(allowed) or len({job["name"] for job in entries}) != len(entries):
                 raise ValueError("hosted job inventory exceeds reviewed matrix or has duplicates")
             for job in entries:
                 jobs.setdefault(job["name"], (attempt, job))
@@ -1473,11 +1474,13 @@ def collect_ci(github, directory, identity, bound=None, names=None):
                 break
         artifacts = [item for item in github.pages(f"actions/runs/{run_id}/artifacts", "artifacts")
                      if re.fullmatch(r"ci-hosted-[0-9]+(?:-[0-9]+)?", item["name"]) and not item.get("expired")]
-        if len(artifacts) > latest * len(a.CI_HOSTED_CHECKS):
+        if len(artifacts) > latest * len(allowed):
             raise ValueError("hosted artifact inventory exceeds reviewed matrix limit")
     except (ValueError, OSError) as error:
         for name in names:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
+        if terminal:
+            return passed, set(names), "finished"
         return passed, fallback, "pending"
     root, receipt, lock = bound if bound else (*a.load_bound(output), nullcontext())
     commands = a.commands(root, identity["version"], receipt["profiles"])
@@ -1485,13 +1488,15 @@ def collect_ci(github, directory, identity, bound=None, names=None):
     for name in names:
         if a.STOP.is_set():
             break
-        if name not in a.CI_HOSTED_CHECKS or name not in commands:
+        if name not in allowed or not commands.get(name):
             print(f"CI-HOSTED-SKIP {name}: unknown check", flush=True)
+            if terminal:
+                fallback.add(name)
             continue
         with lock:
             if receipt["checks"][name]["status"] == "passed":
                 passed.add(name)
-            if not hosted_target_open(name, receipt["checks"][name]):
+            if not a.transfer_target_open(name, receipt["checks"][name]):
                 continue
         attempt, job = jobs.get(name, (latest, {}))
         if job.get("status") != "completed" or job.get("conclusion") != "success":
@@ -1500,7 +1505,6 @@ def collect_ci(github, directory, identity, bound=None, names=None):
                 print(f"CI-HOSTED-SKIP {name}: job missing or unsuccessful", flush=True)
             continue
         try:
-            policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
             metadata = {"run_id": run_id, "run_attempt": attempt, "job_id": job["id"], "policy": policy,
                         "head_sha": identity["commit"], "candidate_sha256": identity_hash(identity)}
             hosted_run_job(github, identity, name, metadata)
@@ -1568,7 +1572,7 @@ def collect_ci(github, directory, identity, bound=None, names=None):
             shutil.copyfile(cached / result["log"], output / log)
             result["log"] = log
             with lock:
-                if not hosted_target_open(name, receipt["checks"][name]):
+                if not a.transfer_target_open(name, receipt["checks"][name]):
                     continue
                 receipt["checks"][name] = result
                 a.save(output, receipt)
@@ -1577,6 +1581,8 @@ def collect_ci(github, directory, identity, bound=None, names=None):
             print(f"CI-HOSTED {name} run={run_id} job={job['id']}", flush=True)
         except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
+            if terminal and name not in passed:
+                fallback.add(name)
     return passed, fallback, "finished" if terminal else "pending"
 
 

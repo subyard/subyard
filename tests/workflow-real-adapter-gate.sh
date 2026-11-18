@@ -157,6 +157,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 import sys
 root = Path(sys.argv[1])
 
@@ -276,6 +277,7 @@ def module(name, path):
 token_sites = {
     "release-vm.yml": {("check", "actions/download-artifact", "github-token: ${{ github.token }}")},
     "periodic-e2e.yml": {
+        ("changes", "Give release checks first use of runner capacity", "GH_TOKEN: ${{ github.token }}"),
         ("changes", "Compare with the last finished run", "GH_TOKEN: ${{ github.token }}"),
         ("supersede", "Replace earlier runs on this branch", "GH_TOKEN: ${{ github.token }}"),
         ("reschedule", "Retry nested VM checks that landed on AMD", "GH_TOKEN: ${{ github.token }}"),
@@ -289,8 +291,8 @@ for filename, allowed in token_sites.items():
     for line in workflow.split("\njobs:\n", 1)[1].splitlines():
         if match := re.fullmatch(r"  ([a-z][a-z0-9-]*):", line):
             job = match[1]
-        if line.startswith("      - name: "):
-            step = line.removeprefix("      - name: ")
+        if match := re.fullmatch(r"      (?:- |  )name: (.+)", line):
+            step = match[1]
         elif line.startswith("      - uses: "):
             step = line.removeprefix("      - uses: ").split("@", 1)[0]
         if re.search(r"github\s*(?:\.\s*token|\[\s*['\"]token['\"]\s*\])", line):
@@ -384,6 +386,24 @@ assert {kind: {"include": [entry for entry in group["include"]
         for kind, group in plan.items()} == p.plan(root)
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
 workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
+changes = workflow.split("  changes:\n", 1)[1].split("  supersede:\n", 1)[0]
+assert "steps.release.outputs.active == 'false' && steps.compare.outputs.run == 'true'" in changes
+release_gate = changes.split("        id: release\n", 1)[1].split("        run: |\n", 1)[1].split("      - name:", 1)[0]
+with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+    output = Path(temporary) / "output"
+    stub = r'''gh() {
+        case "$2" in
+          */"$BUSY"/runs\?status=queued\&*) printf '1\n' ;;
+          *) printf '0\n' ;;
+        esac
+    }
+    '''
+    for busy in ("", "release.yml", "release-vm.yml"):
+        output.write_text("")
+        subprocess.run(["bash", "-euc", stub + release_gate], check=True, cwd=root,
+                       env=dict(os.environ, GH_REPO="fixture/repository", BUSY=busy,
+                                GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(output.with_suffix(".summary"))))
+        assert output.read_text() == ("active=true\n" if busy else "active=false\n")
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
 for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
@@ -398,10 +418,17 @@ for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "pu
     assert selected == expected
 check_job, veranda_job = (workflow.split(f"  {name}:\n", 1)[1].split("    steps:", 1)[0]
                           for name in ("check", "veranda"))
-assert "needs: [candidate, pool]" in check_job
-assert "needs: [candidate, pool, veranda-bundle]" in veranda_job
+assert "needs: [candidate, admit]" in check_job
+assert "needs: [candidate, admit, veranda-bundle]" in veranda_job
 assert "    steps: *periodic-check-steps" in workflow
 assert "fail-fast: false" in check_job and "fail-fast: false" in veranda_job
+nested_job = workflow.split("  nested:\n", 1)[1].split("    steps:", 1)[0]
+admit_job = workflow.split("  admit:\n", 1)[1].split("  check:\n", 1)[0]
+assert "needs: [candidate, pool]" in admit_job and "      - *release-capacity" in admit_job
+assert "needs: [candidate, admit]" in nested_job
+assert all("needs.admit.outputs.run == 'true'" in job for job in (check_job, veranda_job, nested_job))
+assert workflow.count("*release-capacity") == 1
+assert sum(int(re.search(r"max-parallel: (\d+)", job)[1]) for job in (check_job, veranda_job, nested_job)) == 14
 assert {entry["id"] for entry in plan["veranda"]["include"]} == p.VERANDA.keys() | p.VERANDA_MANUAL.keys()
 assert all(entry["bundle"] == "veranda-bundle" for entry in plan["veranda"]["include"])
 assert all("bundle" not in entry for kind in ("checks", "nested") for entry in plan[kind]["include"])

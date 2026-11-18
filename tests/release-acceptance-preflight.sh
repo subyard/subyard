@@ -189,51 +189,38 @@ class ProfilePreflightTests(unittest.TestCase):
         self.assertIn("INCOMPLETE: profile preflights not run: profile-preflight:zeta", stdout)
         self.assertNotIn("profile preflights refused:", stdout)
 
-    def test_accept_only_full_counts_hosted_split_checks_before_running_them(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
-            directory = Path(temporary)
-            output = directory / "acceptance"
-            output.mkdir(mode=0o700)
-            (output / "receipt.json").write_text(json.dumps({
-                "requirements": {"vm:p0-full": ["vm:p0-split"]},
-                "checks": {name: m.OPTIONAL_VM_NOT_RUN.copy() for name in ("vm:p0-full", "vm:p0-split", "vm:other")}}))
-            calls = []
-            def run_checks(output, slots, only, rerun, exclude=(), **kwargs):
-                calls.append((list(only), list(exclude)))
-                return 0
-            with patch.object(publication, "a", m), \
-                 patch.object(publication, "hosted_open", return_value=["vm:other", "vm:p0-split"]), \
-                 patch.object(publication, "wait_ci_hosted"), patch.object(publication, "collect_ci"), \
-                 patch.object(m, "run_checks", side_effect=run_checks):
-                self.assertEqual(publication.accept_checks(None, directory, {}, [1], ["vm:p0-full"], False, [], 60), 0)
-            # The hosted split result is awaited instead of rerun locally; an unrelated hosted check is not.
-            self.assertEqual(calls, [(["vm:p0-full"], ["vm:p0-split"]), (["vm:p0-split"], [])])
+    def test_accept_only_full_keeps_its_split_check_hosted(self):
+        full, split, unrelated = "vm:p0-full", "vm:p0-split", "vm:other"
+        checks = dict.fromkeys(("verify", full, split, unrelated), ["true"])
+        output = self.root / "acceptance"
+        output.mkdir(mode=0o700)
+        receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                   "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                   "requirements": {full: [split]},
+                   "checks": {name: m.OPTIONAL_VM_NOT_RUN.copy() for name in (full, split, unrelated)}}
+        receipt["checks"]["verify"] = {"status": "passed"}
+        calls = []
 
-    def test_accept_only_full_failure_never_runs_pending_hosted_split_checks_locally(self):
-        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
-            directory = Path(temporary)
-            output = directory / "acceptance"
-            output.mkdir(mode=0o700)
-            receipt = {"requirements": {"vm:p0-full": ["vm:p0-split"]},
-                       "checks": {name: m.OPTIONAL_VM_NOT_RUN.copy() for name in ("vm:p0-full", "vm:p0-split")}}
-            (output / "receipt.json").write_text(json.dumps(receipt))
-            calls = []
-            def run_checks(output, slots, only, rerun, exclude=(), **kwargs):
-                calls.append(("run", list(only), list(exclude)))
-                # The local full P0 fails while the hosted split job is still running.
-                (output / "receipt.json").write_text(json.dumps({**receipt, "result": "failed"}))
-                return 1
-            stdout = io.StringIO()
-            with patch.object(publication, "a", m), \
-                 patch.object(publication, "hosted_open", return_value=["vm:p0-split"]), \
-                 patch.object(publication, "wait_ci_hosted", side_effect=lambda *args: calls.append(("wait",))), \
-                 patch.object(publication, "collect_ci", side_effect=lambda *args: calls.append(("collect",))), \
-                 patch.object(m, "run_checks", side_effect=run_checks), redirect_stdout(stdout):
-                self.assertEqual(publication.accept_checks(None, directory, {}, [1], ["vm:p0-full"], False, [], 60), 1)
-            self.assertEqual(calls, [("run", ["vm:p0-full"], ["vm:p0-split"]), ("collect",)])
-            self.assertIn("not waiting for hosted jobs or running them locally", stdout.getvalue())
+        def execute(name, command, source, target, env, slot=None):
+            calls.append((name, slot))
+            return {"status": "failed", "exit_code": 1}
 
-    def test_accept_checks_hosted_fallback_honors_recorded_preflight_results(self):
+        with patch.object(publication, "a", m), \
+             patch.object(publication, "hosted_open", return_value=[split, unrelated]), \
+             patch.object(publication, "collect_ci", return_value=(set(), set(), "pending")) as collect, \
+             patch.object(m, "load_bound", return_value=(output, receipt)), \
+             patch.object(m, "commands", return_value=checks), \
+             patch.object(m, "source_fingerprint", return_value="a" * 64), \
+             patch.object(m, "execute", side_effect=execute), redirect_stdout(io.StringIO()):
+            self.assertEqual(publication.accept_checks(None, self.root, {}, [1], [full], False, [], 0), 1)
+        self.assertEqual(calls, [(full, 1)])
+        self.assertEqual(collect.call_args.kwargs["names"], {split})
+        invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+        self.assertEqual(invocation["selected"], [full, split])
+        self.assertEqual(invocation["attempted"], [full])
+        self.assertEqual(receipt["checks"][split]["status"], "pending")
+
+    def test_accept_stops_hosted_collection_when_profile_preflights_are_unready(self):
         for status in ("failed", "blocked", "interrupted", "running"):
             with self.subTest(status=status), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 directory = Path(temporary)
@@ -246,36 +233,27 @@ class ProfilePreflightTests(unittest.TestCase):
                            "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                            "checks": {name: {"status": "pending"} for name in checks}}
                 calls = []
+
                 def execute(name, *args, **kwargs):
                     calls.append(name)
                     return {"status": status, "exit_code": 1} if name in preflights else {"status": "passed", "exit_code": 0}
+
                 stdout = io.StringIO()
                 with patch.object(publication, "a", m), \
                      patch.object(publication, "hosted_open", return_value=[live]), \
-                     patch.object(publication, "wait_ci_hosted"), patch.object(publication, "collect_ci"), \
+                     patch.object(publication, "collect_ci") as collect, \
                      patch.object(m, "load_bound", return_value=(output, receipt)), \
                      patch.object(m, "commands", return_value=checks), \
                      patch.object(m, "execution_environment", return_value={}), \
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
-                     patch.object(m, "execute", side_effect=execute), \
-                     patch.object(m, "run_checks", wraps=m.run_checks) as collector, redirect_stdout(stdout):
+                     patch.object(m, "execute", side_effect=execute), redirect_stdout(stdout):
                     self.assertEqual(publication.accept_checks(None, directory, {}, [1], [], True, [], 60), 1)
-                # A failed first pass stops there; other recorded states reach the hosted fallback.
-                passes = 1 if status == "failed" else 2
-                self.assertEqual(collector.call_count, passes)
-                self.assertEqual(collector.call_args_list[0].args[2], [])
+                collect.assert_not_called()
                 self.assertEqual(calls, ["verify", *preflights])
                 label = "refused" if status in ("failed", "blocked") else "incomplete" if status == "running" else status
-                message = "INCOMPLETE: profile preflights " + label + ": " + ", ".join(preflights)
-                self.assertEqual(stdout.getvalue().count(message), passes)
-                invocations = [json.loads(path.read_text()) for path in (output / "runs").glob("*.json")]
-                self.assertEqual(len(invocations), passes)
-                if status == "failed":
-                    continue
-                self.assertEqual(collector.call_args_list[1].args[2], [live])
-                fallback = next(item for item in invocations if item["selected"] == [live])
-                self.assertEqual(fallback["attempted"], [])
-                self.assertEqual(fallback["not_started"], [{"check": live, "reason": "profile-preflight-stop"}])
+                self.assertIn("INCOMPLETE: profile preflights " + label + ": " + ", ".join(preflights), stdout.getvalue())
+                invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+                self.assertEqual(invocation["not_started"], [{"check": live, "reason": "profile-preflight-stop"}])
 
 
 unittest.main()

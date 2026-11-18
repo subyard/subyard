@@ -2490,6 +2490,17 @@ class HostedChecks(unittest.TestCase):
         self.assertFalse((self.directory / "ci-hosted-downloads/456-99/source").exists())
         self.assertEqual(self.collect()[1], "")
 
+    def test_historical_hosted_binding_survives_retired_check(self):
+        result, _ = self.collect()
+        _, receipt = m.a.load_bound(self.output)
+        _, manifest = m.a.original_attempt(self.output, receipt, "profile:sample", result)
+        result["ci_hosted"]["policy"] = "911e6588dded3367817a8c21c5a849dd5b945b2e"
+        name = "vm:published-upgrade/0.11.0-chain"
+        m.a.validate_hosted_binding(name, result, m.a.transfer_candidate(receipt), manifest)
+        result["ci_hosted"]["policy"] = "e1e7aa9e268532cf97f661792cc1adb54b6ff7c1"
+        with self.assertRaisesRegex(ValueError, "CI hosted result identity"):
+            m.a.validate_hosted_binding(name, result, m.a.transfer_candidate(receipt), manifest)
+
     def test_wrong_sha_failed_job_unknown_policy_foreign_candidate_missing_cleanup_and_stale_attempt_stay_open(self):
         def foreign(receipt):
             receipt["preparation"]["candidate_id"] = "r999-a1"
@@ -2849,6 +2860,46 @@ class HostedChecks(unittest.TestCase):
         result, _ = self.collect()
         self.assertEqual(result["execution"], "ci-hosted")
         m.publish_remote(self.github, self.prepared, m.attestation(self.output, self.identity), self.root)
+
+    def run_acceptance(self, artifacts_available=True, rerun=False):
+        _, receipt = m.a.load_bound(self.output)
+        name = "profile:sample"
+        slots = []
+        execute, pages = m.a.execute, self.github.pages
+
+        def local(check, command, source, output, env, slot=None):
+            slots.append(slot)
+            result = execute(check, ["bash", "-c", "exit 1"], source, output, env, slot)
+            result["command"] = m.a.command_identity(command, source)
+            return result
+
+        def hosted_pages(path, key=None):
+            if not artifacts_available and path == "actions/runs/456/artifacts":
+                return []
+            return pages(path, key)
+
+        with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m.a, "execute", side_effect=local), patch.object(self.github, "pages", side_effect=hosted_pages):
+            if rerun:
+                code = m.a.run_checks(self.output, [1], [name], True)
+            else:
+                code = m.accept_checks(self.github, self.directory, self.identity, [1], [name], False, [], 0)
+        return code, slots
+
+    def test_accept_polls_hosted_before_dispatching_locally(self):
+        self.assertEqual(self.run_acceptance(artifacts_available=True), (0, []))
+        self.assertEqual(m.a.load_bound(self.output)[1]["checks"]["profile:sample"]["execution"], "ci-hosted")
+
+    def test_terminal_success_without_evidence_falls_back_to_an_exact_slot(self):
+        self.assertEqual(self.run_acceptance(artifacts_available=False), (1, [1]))
+        self.assertEqual(m.a.load_bound(self.output)[1]["checks"]["profile:sample"]["status"], "failed")
+
+    def test_hosted_pass_cannot_replace_a_later_explicit_local_rerun(self):
+        self.assertEqual(self.run_acceptance(), (0, []))
+        self.assertEqual(self.run_acceptance(rerun=True), (1, [1]))
+        result, _ = self.collect()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(m.hosted_open(self.directory, self.output), [])
 
     def test_hosted_poll_releases_failed_jobs_and_keeps_running_jobs_hosted(self):
         self.run.update(status="in_progress", conclusion=None)

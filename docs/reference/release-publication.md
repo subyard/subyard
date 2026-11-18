@@ -59,14 +59,16 @@ limit. The matrix uses available CI runners and leaves sibling jobs running afte
 preparation discovers the durable request and keeps the existing run.
 
 Release acceptance always has priority on local broker slots and in CI. Give it the available
-capacity before starting Periodic E2E or other discretionary checks. Full acceptance defaults to all
-four local broker slots (1–4) and picks up newly admitted slots as the broker's memory and disk
-capacity changes. Use `--slots slot-1 slot-3` only to restrict execution to specific slots, or
+capacity before starting Periodic E2E or other discretionary checks. Periodic E2E checks for queued
+or active release preparation and Release VM workflows before preparation and again before matrix
+admission. Already admitted jobs keep running. Full acceptance defaults to all four local broker
+slots (1–4) and picks up newly admitted slots as the broker's memory and disk capacity changes.
+Use `--slots slot-1 slot-3` only to restrict execution to specific slots, or
 `--slot-count 2` to limit concurrent lanes while still considering all four slots.
 
 `accept` runs the local queue while it collects completed hosted jobs. It reuses verified passes and
-makes terminal hosted failures eligible for local execution when requested. Running and queued jobs
-remain hosted even after the wait expires. The default hosted wait is six hours. Set
+schedules local fallback for unsuccessful jobs and terminal runs with unusable evidence. Running and
+queued jobs remain hosted even after the wait expires. The default hosted wait is six hours. Set
 `--ci-wait-seconds 0` for one snapshot, or set a custom bound up to 86400 seconds.
 
 To rerun the failed hosted jobs in a completed run, use the same GitHub authorization as for
@@ -76,7 +78,9 @@ To rerun the failed hosted jobs in a completed run, use the same GitHub authoriz
 dev/release.sh retry-hosted --candidate rRUN_ID-aATTEMPT
 ```
 
-The next `accept` collects the new attempt and can still count successful jobs from earlier attempts.
+The next `accept` collects the new attempt and can still count successful jobs from earlier attempts
+for checks that have not started locally. Once a local attempt starts, its outcome is authoritative
+and any replacement must come from another local attempt.
 Choose the hosted retry between `accept` invocations to keep this decision serialized with local
 fallback. Collection reports `CI-HOSTED CHECK run=RUN job=JOB` or `CI-HOSTED-SKIP CHECK: REASON`.
 
@@ -488,9 +492,7 @@ candidate's catalog must still match. Selecting a check also runs its required c
 passed for the candidate, so `run --only vm:p0-full` runs the full P0 outside a release:
 `vm:p0-full --split-covered` plus its split checks; `--exclude` keeps a required check not run and the
 result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
-runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
-the next check; a refusal, interruption, timeout, cleanup failure or attempt without a lease stops the slot,
-so an unusable slot cannot turn later checks into failures. One collector owns a candidate's receipt
+runs per listed slot using the scheduling rules below. One collector owns a candidate's receipt
 at a time; run every check through it rather than separately, so the result is recorded. Once explicitly requested, a pending VM check remains required on
 continuation; interruption or exclusion cannot turn it back into optional passing acceptance.
 
@@ -527,10 +529,11 @@ Run the aggregator from the managed workspace checkout: it supplies that workspa
 attribution while executing controllers and guest payloads from the frozen candidate.
 
 A repeated `run` executes only checks without an applicable pass. Use `--only CHECK --rerun` to
-replace the result of one lane. When a collector already holds the candidate, this command queues an
-exact live lane for a subsequent scheduling pass in that selection. Use the active collector's slot
-settings for queued work. If the active selection does not cover the lane, target it once that
-collector exits. Every attempt keeps its own logs and immutable record. Capacity changes alone leave
+replace the result of one lane. An active collector accepts the request during live scheduling when
+the exact lane is selected for local execution and is queued or has finished. This includes lanes
+that have fallen back from hosted execution. Use the active collector's slot settings for queued
+work. For a refused request, target the lane once that collector exits. Every attempt keeps its own
+logs and immutable record. Capacity changes alone leave
 the candidate identity and its other passing results intact.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
 and ordered `lanes` entries containing `id` and runner `arguments`. A lane marked
@@ -547,7 +550,9 @@ periodic-only lane as an unknown check. Free slots take the next eligible check.
 or disk refusal returns the lane to the queue. The collector probes again as capacity changes and
 reports a persistent block after the bounded admission wait. A failed lane with confirmed lease
 cleanup gets one independent retry. Unconfirmed cleanup retires that slot and leaves other slots
-running. Restarting the collector after an interruption resumes outstanding work against the same
+running. A broker `invalid_slot` response retires a slot discovered by default and requeues its lane.
+For an explicit `--slots` selection it reports a refusal and leaves that attempt blocked. Restarting
+the collector after an interruption resumes outstanding work against the same
 candidate and reuses its passes.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per

@@ -2,10 +2,12 @@
 """Freeze a release candidate and run its acceptance checks with local reports."""
 import argparse
 import ast
+from collections import OrderedDict
 import copy
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
+from enum import Enum, auto
 import fcntl
 import hashlib
 import json
@@ -16,6 +18,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tarfile
@@ -37,8 +40,44 @@ class CollectorBusy(ValueError):
     pass
 
 
-def retry_path(output, name):
-    return output / ("retry-" + hashlib.sha256(name.encode()).hexdigest())
+@contextmanager
+def retry_socket(output):
+    # Use the private output directory even when its full path exceeds sun_path.
+    fd = os.open(output, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as channel:
+            yield channel, f"/proc/self/fd/{fd}/retry.sock"
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def retry_listener(output):
+    with retry_socket(output) as (listener, address):
+        path = Path(address)
+        path.unlink(missing_ok=True)
+        listener.bind(address)
+        try:
+            listener.listen()
+            listener.setblocking(False)
+            yield listener
+        finally:
+            path.unlink()
+
+
+def request_local_retry(output, name):
+    try:
+        with retry_socket(output) as (channel, address):
+            channel.settimeout(5)
+            channel.connect(address)
+            channel.sendall(name.encode())
+            response = channel.recv(32)
+    except OSError:
+        response = b""
+    if response != b"queued":
+        raise ValueError(f"active collector is not accepting a local retry for {name}")
+    print(f"QUEUED {name} for the active collector", flush=True)
+    return 0
 
 
 @contextmanager
@@ -308,6 +347,24 @@ CI_HOSTED_POLICIES = frozenset({
     "e1e7aa9e268532cf97f661792cc1adb54b6ff7c1",  # Attempt-specific artifact names.
 })
 
+# Retired commands remain eligible only under workflows that ran them.
+_BOUNDARY_HOSTED = frozenset({"vm:published-upgrade/0.11.0", "vm:published-upgrade/0.17.3",
+                             "vm:published-upgrade/0.27.0"})
+_CHAIN_HOSTED = frozenset({"vm:published-upgrade/0.11.0-chain", "vm:published-upgrade/0.27.0-chain"})
+HISTORICAL_HOSTED_CHECKS = {
+    "911e6588dded3367817a8c21c5a849dd5b945b2e": _BOUNDARY_HOSTED | _CHAIN_HOSTED | {
+        "vm:published-upgrade/0.17.1", "vm:published-upgrade/0.22.1", "vm:published-upgrade/0.23.0",
+        "vm:published-upgrade/0.24.0", "vm:published-upgrade/0.25.5", "vm:published-upgrade/0.26.0",
+        "vm:reliable-migrations", "vm:integration-legacy-upgrade",
+    },
+    "836bbd8229d65149c75731a2f9ea46f2aa45e241": _BOUNDARY_HOSTED | _CHAIN_HOSTED,
+    "14d5180368026f77db2f4890ec5b3d0fd9706a24": _BOUNDARY_HOSTED,
+}
+
+
+def hosted_policy_checks(policy):
+    return CI_HOSTED_CHECKS | HISTORICAL_HOSTED_CHECKS.get(policy, frozenset())
+
 
 def hosted_checks(root, version, inventory):
     declared = commands(root, version, inventory)
@@ -319,7 +376,9 @@ def hosted_checks(root, version, inventory):
             if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "CI_HOSTED_CHECKS"
                                                    for target in node.targets):
                 names = frozenset(ast.literal_eval(node.value.args[0]))
-                if not names <= CI_HOSTED_CHECKS:
+                workflow = root / ".github/workflows/release-vm.yml"
+                policy = git_blob_sha(workflow.read_bytes()) if workflow.is_file() else None
+                if not names <= hosted_policy_checks(policy):
                     raise ValueError("pinned candidate declares unreviewed hosted checks")
                 break
     unknown = sorted(names - {name for name, command in declared.items() if command})
@@ -330,11 +389,12 @@ def hosted_checks(root, version, inventory):
 
 def validate_hosted_binding(name, result, candidate, manifest):
     metadata = result.get("ci_hosted")
-    if (name not in CI_HOSTED_CHECKS or result.get("execution") != "ci-hosted"
+    if (result.get("execution") != "ci-hosted"
         or result.get("inherited") or "evidence_transfer" in result
         or not isinstance(metadata, dict) or set(metadata) != {"run_id", "run_attempt", "job_id", "policy", "head_sha", "candidate_sha256"}
         or any(type(metadata[key]) is not int or metadata[key] < 1 for key in ("run_id", "run_attempt", "job_id"))
         or metadata["policy"] not in CI_HOSTED_POLICIES
+        or name not in hosted_policy_checks(metadata["policy"])
         or not isinstance(metadata["head_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", metadata["head_sha"])
         or metadata["candidate_sha256"] != candidate["candidate_sha256"]
         or any(manifest["candidate"][key] != value for key, value in candidate.items() if key != "candidate_bundle_sha256")
@@ -635,6 +695,9 @@ class Invocation:
         print(f"INVOCATION id={self.id} result={self.path}", flush=True)
 
     def start(self, name):
+        self.pending.add(name)
+        self.reused = [item for item in self.reused if item != name]
+        self.outcomes.pop(name, None)
         self.attempted.add(name)
         try:
             self.write()
@@ -775,6 +838,8 @@ def execute(name, command, root, output, env, slot=None):
         result["reason"] = "capacity_" + blocked
     if cleanup_status:
         result["cleanup_status"] = cleanup_status
+    if result["status"] != "passed" and phases.get("leases_held"):
+        result["cleanup_status"] = "unconfirmed"
     if slot:
         result["slot"] = slot
     try:
@@ -839,7 +904,14 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
                 if phases is not None:
                     phases.setdefault("budgets", {})["lease-release"] = {"budget_seconds":180, "grace_seconds":5}
                     if release[1] == b"end":
-                        phases.setdefault("cleanup", {})["lease-release"] = {"exit_code":int(release[3]), "duration_seconds":int(release[2])}
+                        code = int(release[3])
+                        if code == 0:
+                            phases["leases_held"] = max(0, phases.get("leases_held", 0) - 1)
+                        cleanup = phases.setdefault("cleanup", {})
+                        if not cleanup.get("lease-release", {}).get("exit_code"):
+                            cleanup["lease-release"] = {"exit_code": code, "duration_seconds": int(release[2])}
+            if phases is not None and line.startswith(b"E2E lease:"):
+                phases["leases_held"] = phases.get("leases_held", 0) + 1
             environment = re.fullmatch(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n", line)
             if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
                 key = ("environment", environment[1].decode(), int(environment[2]), environment[3].decode())
@@ -1351,22 +1423,59 @@ def validate_slot_list(parser, slots):
         parser.error("slot IDs must be unique")
 
 
-def run_live(attempt, record, live, slots, slot_count, capacity_wait, hosted, poll_hosted, poll_retries):
+class Schedule(Enum):
+    HOSTED = auto()
+    DEFERRED = auto()
+    READY = auto()
+    RUNNING = auto()
+    DONE = auto()
+
+
+def poll_local_retry(listener, eligible):
+    if listener is None:
+        return
+    try:
+        channel, _ = listener.accept()
+    except BlockingIOError:
+        return
+    with channel:
+        try:
+            channel.settimeout(0.2)
+            name = channel.recv(4096).decode()
+            if eligible(name):
+                channel.sendall(b"queued")
+                return name
+            channel.sendall(b"refused")
+        except (OSError, UnicodeError):
+            pass
+
+
+def run_live(attempt, record, schedule, slots, slot_count, capacity_wait, poll_hosted,
+             *, listener=None, exact_slots=False):
     """Keep scheduling independent lanes while broker admission and hosted jobs change."""
     duration = re.fullmatch(r"([0-9]{1,6})([sm])", capacity_wait)
     if not duration:
         raise ValueError("SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s")
     budget = int(duration[1]) * (60 if duration[2] == "m" else 1)
-    ready, active, retired = list(live), {}, set()
+    active, retired, invalid = {}, set(), set()
     cooldown, deadlines, retried = {}, {}, set()
-    hosted = set(hosted)
     ci = None
     next_poll = 0
-    with ThreadPoolExecutor(max_workers=slot_count + bool(hosted)) as pool:
+
+    def ready(name, first=False):
+        schedule[name] = Schedule.READY
+        schedule.move_to_end(name, last=not first)
+
+    def retry_eligible(name):
+        return (not STOP.is_set() and len(retired) < len(slots)
+                and schedule.get(name) in (Schedule.READY, Schedule.DONE))
+
+    with ThreadPoolExecutor(max_workers=slot_count + (Schedule.HOSTED in schedule.values())) as pool:
         while not STOP.is_set():
             now = time.monotonic()
             for future in [job for job in active if job.done()]:
                 name, slot = active.pop(future)
+                schedule[name] = Schedule.DONE
                 result = future.result()
                 if result is None:
                     continue
@@ -1374,17 +1483,21 @@ def run_live(attempt, record, live, slots, slot_count, capacity_wait, hosted, po
                 reason = result.get("reason", "")
                 if result["status"] == "blocked" and reason == "capacity_slot_missing":
                     retired.add(slot)
-                    ready.append(name)
+                    if exact_slots:
+                        invalid.add(slot)
+                        print(f"REFUSED explicitly requested slot-{slot}: broker reported invalid_slot", flush=True)
+                    else:
+                        ready(name)
                 elif result["status"] == "blocked" and reason in ("capacity_slot", "capacity_memory", "capacity_disk"):
                     key = (slot, None if reason == "capacity_slot" else name)
                     cooldown[key] = now + ADMISSION_POLL_SECONDS
                     deadline = deadlines.setdefault(name, now + budget)
                     if now < deadline:
-                        ready.append(name)
+                        ready(name)
                 elif slot_continues_after(result):
                     if name not in retried:
                         retried.add(name)
-                        ready.append(name)
+                        ready(name)
                 elif result["status"] != "passed":
                     retired.add(slot)
                     print(f"SLOT slot-{slot} stopped after {name}: clean lease release unconfirmed", flush=True)
@@ -1393,30 +1506,39 @@ def run_live(attempt, record, live, slots, slot_count, capacity_wait, hosted, po
                     for candidate_slot in slots:
                         cooldown.pop((candidate_slot, name), None)
             if ci is not None and ci.done():
-                passed, fallback, waiting = ci.result()
-                ready.extend(sorted(hosted & fallback - passed))
-                hosted.intersection_update(waiting - passed - fallback)
+                states = ci.result()
+                for name, state in sorted(states.items()):
+                    if state == Schedule.READY:
+                        ready(name)
+                    else:
+                        schedule[name] = state
                 ci = None
                 next_poll = now + 20
-            for name in poll_retries():
-                if name not in ready and not any(name == running for running, _ in active.values()):
-                    deadlines.pop(name, None)
-                    retried.discard(name)
-                    ready.insert(0, name)
-            ready = [name for name in ready if deadlines.get(name, math.inf) > now]
+            for name, state in schedule.items():
+                if state == Schedule.READY and deadlines.get(name, math.inf) <= now:
+                    schedule[name] = Schedule.DONE
+            retry = poll_local_retry(listener, retry_eligible)
+            if retry is not None:
+                deadlines.pop(retry, None)
+                retried.discard(retry)
+                ready(retry, first=True)
+            if STOP.is_set():
+                break
             occupied = {slot for _, slot in active.values()}
             for slot in slots:
                 if len(active) >= slot_count:
                     break
                 if slot in occupied or slot in retired or cooldown.get((slot, None), 0) > now:
                     continue
-                name = next((name for name in ready if cooldown.get((slot, name), 0) <= now), None)
+                name = next((name for name, state in schedule.items()
+                             if state == Schedule.READY and cooldown.get((slot, name), 0) <= now), None)
                 if name is not None:
-                    ready.remove(name)
+                    schedule[name] = Schedule.RUNNING
                     active[pool.submit(attempt, name, slot)] = name, slot
+            hosted = {name for name, state in schedule.items() if state == Schedule.HOSTED}
             if hosted and ci is None and now >= next_poll:
-                ci = pool.submit(poll_hosted, hosted.copy())
-            if not (active or hosted or (ready and len(retired) < len(slots))):
+                ci = pool.submit(poll_hosted, hosted)
+            if not (active or hosted or (Schedule.READY in schedule.values() and len(retired) < len(slots))):
                 break
             futures = list(active) + ([ci] if ci is not None else [])
             if futures:
@@ -1428,6 +1550,7 @@ def run_live(attempt, record, live, slots, slot_count, capacity_wait, hosted, po
             result = future.result()
             if result is not None:
                 record(name, result)
+    return invalid
 
 
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=(),
@@ -1468,10 +1591,13 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     live = [name for name in pending if is_live(name)]
     durations = duration_estimates(receipt, previous)
     live.sort(key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
+    exact_slots = bool(slots)
     slots = slots or BROKER_SLOTS
     slot_count = slot_count or len(slots)
-    hosted = set(hosted) & set(live)
-    live = [name for name in live if name not in hosted]
+    schedule = OrderedDict((name, Schedule.HOSTED if name in hosted else Schedule.READY) for name in live)
+    for name in order:
+        if name in selected and is_live(name) and checks[name]:
+            schedule.setdefault(name, Schedule.DONE)
     try:
         invocation = Invocation(output, receipt, selected, pending, excluded, requested)
     except OSError:
@@ -1503,7 +1629,6 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                     invocation.cancel_start(name)
                 return None
             with lock:
-                retry_path(output, name).unlink(missing_ok=True)
                 receipt["checks"][name] = {"status": "running", "command": command_identity(checks[name], root)}
                 save(output, receipt)  # Invalidate a previous PASS before any child can start.
             check_env = dict(env, SUBYARD_E2E_LOCAL_EVIDENCE=str(output)) if name in preflights else env
@@ -1512,7 +1637,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             result["original_attempt"] = completed_attempt(output, root, receipt, name, result)
             return result
 
-        for name in [item for item in pending if item not in live and item not in preflights]:
+        for name in [item for item in pending if not is_live(item) and item not in preflights]:
             if STOP.is_set():
                 break
             result = attempt(name)
@@ -1545,17 +1670,17 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
         # Fresh targeted jobs may leave unselected preflights pending.
         stopped = [name for name in preflights
                    if (local_ready and name in selected and receipt["checks"][name]["status"] != "passed")
-                   or ((live or hosted) and receipt["checks"][name]["status"] in ("failed", "blocked", "interrupted", "incomplete", "running"))]
+                   or (live and receipt["checks"][name]["status"] in ("failed", "blocked", "interrupted", "incomplete", "running"))]
         if stopped:
             for label, states in (("refused", ("failed", "blocked")), ("interrupted", ("interrupted",)),
                                   ("incomplete", ("incomplete", "running")), ("not run", ("pending",))):
                 names = [name for name in stopped if receipt["checks"][name]["status"] in states]
                 if names:
                     print(f"INCOMPLETE: profile preflights {label}: " + ", ".join(names), flush=True)
-        waiting_local = not local_ready and (live or hosted or (only and failure_reason != "local-check-stop"
+        waiting_local = not local_ready and (live or (only and failure_reason != "local-check-stop"
                                                      and any(name in pending for name in preflights)))
         if waiting_local:
-            waiting = "live checks" if live or hosted else "profile preflights"
+            waiting = "live checks" if live else "profile preflights"
             print(f"INCOMPLETE: {waiting} await successful local gates", flush=True)
         if stopped or waiting_local:
             invocation.finish("interrupted" if STOP.is_set() else "finished",
@@ -1583,21 +1708,17 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                 invocation.write()
 
         def hosted_poll(names):
-            passed, fallback, waiting = poll_hosted(root, receipt, lock, names)
+            states = poll_hosted(root, receipt, lock, names)
             with lock:
-                invocation.pending.difference_update(passed)
-            return passed, fallback, waiting
+                invocation.pending.difference_update(name for name, state in states.items() if state == Schedule.DONE)
+            return states
 
-        def poll_retries():
-            names = [name for name in sorted(selected - hosted)
-                     if is_live(name) and checks[name] and retry_path(output, name).is_file()]
-            with lock:
-                invocation.pending.update(names)
-                invocation.reused = [name for name in invocation.reused if name not in names]
-            return names
-
-        if any(is_live(name) and checks[name] for name in selected):
-            run_live(attempt, record, live, slots, slot_count, capacity_wait, hosted, hosted_poll, poll_retries)
+        if live:
+            with retry_listener(output) as listener:
+                invalid = run_live(attempt, record, schedule, slots, slot_count, capacity_wait, hosted_poll,
+                                   listener=listener, exact_slots=exact_slots)
+            if invalid:
+                failure_reason = "invalid-slot"
         if source_fingerprint(root) != receipt["source_fingerprint"]:
             receipt["checks"]["verify"]["status"] = "failed"
             receipt["error"] = "source changed during acceptance"
@@ -1607,7 +1728,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
         invocation.finish("interrupted" if STOP.is_set() else "finished",
                           "interrupted-before-dispatch" if STOP.is_set() else failure_reason)
         print_acceptance_summary(output, receipt)
-        return 0 if receipt["result"] == "passed" and not STOP.is_set() else 1
+        return 0 if receipt["result"] == "passed" and failure_reason != "invalid-slot" and not STOP.is_set() else 1
     except Exception:
         # Keep the current identity even when capture fails; never fall back to another run.
         try:
@@ -3187,12 +3308,7 @@ def main():
             if not (args.rerun and len(args.only) == 1 and is_live(args.only[0])
                     and not (args.first or args.exclude or args.slots or args.slot_count)):
                 raise
-            name = args.only[0]
-            if name not in json.loads((output / "receipt.json").read_text())["checks"]:
-                raise ValueError("concurrent rerun requires one exact live check")
-            retry_path(output, name).touch(mode=0o600)
-            print(f"QUEUED {name} for the active collector", flush=True)
-            return 0
+            return request_local_retry(output, args.only[0])
         return run_checks(output, args.slots, args.only, args.rerun, args.first, args.exclude,
                           args.with_vms, slot_count=args.slot_count)
 
