@@ -835,7 +835,8 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			}()
 			if len(owners) == 0 {
 				finding := item.forReportedArtifact(integrationArtifact{Path: conflict.Path})
-				causes = append(causes, finding.refusal(cause))
+				finding.Message, finding.Recovery = unavailable, ""
+				causes = append(causes, integrationFailure{Finding: finding.Finding, cause: cause})
 				continue
 			}
 			finding := item.atDestination(path)

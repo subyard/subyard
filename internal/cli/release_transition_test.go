@@ -376,7 +376,7 @@ func TestMaterializedConfigActivationCollectsLegacyGitConfigRefusal(t *testing.T
 func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *testing.T) {
 	for _, test := range []struct{ path, detail, want, command string }{
 		{path: "/etc/subyard/agent-project-hooks", want: "unowned selected artifact", command: "namei"},
-		{path: "/home/dev/.claude/CLAUDE.md", want: "unowned selected artifact", command: "mv"},
+		{path: "/home/dev/.claude/CLAUDE.md", want: "unowned selected artifact", command: "mktemp -d"},
 		{path: "/untrusted-secret", detail: "unrecognized core content"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unrecognized core content", want: "contents do not match", command: "sha256sum"},
 		{path: "/usr/local/libexec/subyard/projects-changed", detail: "unsafe core metadata", want: "owned by root:root", command: "namei"},
@@ -433,11 +433,15 @@ func TestMaterializedConfigObservationReportsSourceManagedOwnershipConflict(t *t
 			}
 			message, retry := diagnostic.ActivationDiagnostic()
 			if test.want != "" {
+				command := "'incus' 'exec' 'yard' '--project' 'subyard' '--' '" + test.command + "'"
+				if test.command == "mktemp -d" {
+					command = `.subyard-preserved-XXXXXXXX`
+				}
 				if !strings.Contains(message, test.want) || !strings.Contains(message, path) ||
-					!strings.Contains(retry, "'incus' 'exec' 'yard' '--project' 'subyard' '--' '"+test.command+"'") {
+					!strings.Contains(retry, command) || !strings.Contains(retry, path) {
 					t.Fatalf("incomplete diagnostic: %q / %q", message, retry)
 				}
-			} else if message != "yard default: cannot inspect legacy integrations for release activation" ||
+			} else if message != "integration ownership conflict or unavailable evidence; managed artifacts were preserved" ||
 				retry != "run yard -Y default integration status" {
 				t.Fatalf("unsafe or unactionable fallback: %q / %q", message, retry)
 			}
