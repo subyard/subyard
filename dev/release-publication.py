@@ -726,6 +726,8 @@ def profile_deferrals(output, names, reason, authorization_reference, identity, 
 def attestation(output, identity, operator_acceptance_paths=(), profile_deferral_checks=(),
                 deferral_reason=None, deferral_authorization_reference=None):
     root, receipt = a.load_bound(output)
+    if retries := a.pending_retries(output, receipt):
+        raise ValueError("requested retries require fresh execution before publication: " + ", ".join(sorted(retries)))
     a.update_result(receipt)
     accepted = operator_acceptances(operator_acceptance_paths, identity, root, receipt)
     deferred_profiles = profile_deferrals(output, profile_deferral_checks, deferral_reason,
@@ -1397,8 +1399,10 @@ def hosted_open(directory, output):
     """Hosted checks of a dispatched request that are not yet passed in the local receipt."""
     if not (directory / "ci-hosted.json").exists():
         return []
-    checks = json.loads((output / "receipt.json").read_text())["checks"]
-    return sorted(name for name in a.CI_HOSTED_CHECKS if name in checks and checks[name].get("status") != "passed")
+    receipt = json.loads((output / "receipt.json").read_text())
+    checks, retries = receipt["checks"], a.pending_retries(output, receipt)
+    return sorted(name for name in a.CI_HOSTED_CHECKS
+                  if name in checks and name not in retries and checks[name].get("status") != "passed")
 
 
 def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds):
@@ -1494,7 +1498,6 @@ def collect_ci(github, directory, identity):
         return
     root, receipt = a.load_bound(output)
     commands = a.commands(root, identity["version"], receipt["profiles"])
-    a.consume_retries(output, receipt)
     unavailable_artifacts = set()
     for name in state["checks"]:
         if a.STOP.is_set():
@@ -1563,6 +1566,8 @@ def collect_ci(github, directory, identity):
                 raise ValueError("foreign candidate or incomplete hosted selection")
             record, manifest = a.original_attempt(cached, incoming, name, result)
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
+            if issue := a.capacity_reason(cached / result["log"], result.get("slot"), 0):
+                raise ValueError(issue)
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
             # Persist the immutable original evidence before publishing the result reference.
@@ -1841,7 +1846,7 @@ def main():
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result
-        with a.acceptance_lock(output, shared=True):
+        with a.acceptance_lock(output, shared=True), a.retry_lock(output):
             level = json.loads((output / "receipt.json").read_text()).get("release_level")
             if not level and a.source_declares(output / "source", "dev/release-publication.py", "release_level"):
                 raise ValueError("release level is not recorded; run accept for this candidate first")

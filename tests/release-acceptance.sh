@@ -172,18 +172,50 @@ class TestAcceptance(unittest.TestCase):
                 results = []
                 def run_lane(name, slot):
                     command = ["true"] if results else ["bash", "-c",
-                        "printf '%s\\n' 'agent-e2e: requested E2E slot slot-004 is unavailable: state=held reason=busy'; exit 2"]
+                        "printf '%s\\n' 'p0-acceptance: requested E2E slot slot-004 is unavailable: state=draining reason=draining'; exit 2"]
                     return m.execute(name, command, output, output, m.clean_environment(), slot)
                 def record(name, result):
                     results.append((result["slot"], result["status"], result.get("reason")))
                     return result
                 self.assertFalse(m.dispatch_live([name], (4,), {}, lambda _: True, run_lane, record, list, 1))
-            self.assertEqual(results, [(4, "blocked", "slot_held"), (4, "passed", None)])
+            self.assertEqual(results, [(4, "blocked", "slot_draining"), (4, "passed", None)])
             self.slots.side_effect = lambda env: {4: "quarantined"}
             with redirect_stdout(io.StringIO()) as printed:
                 self.assertTrue(m.dispatch_live([name], (4,), {}, lambda _: self.fail("acquired a quarantined slot"),
                                                 run_lane, record, list, 0))
             self.assertIn("slot-4=quarantined", printed.getvalue())
+
+    def test_dispatch_tries_runnable_work_after_slow_or_contended_acquire(self):
+        for slots, expected in (((2,), [("large", 2), ("small", 2)]),
+                                ((2, 4), [("large", 2), ("large", 4)])):
+            with self.subTest(slots=slots):
+                calls = []
+                def execute(name, slot):
+                    calls.append((name, slot))
+                    if name == "large" and slot == 2:
+                        time.sleep(0.03)
+                        return {"status": "blocked", "termination": "exit",
+                                "reason": "slot_draining" if len(slots) == 2 else "capacity_memory"}
+                    return {"status": "passed"}
+                work = ["large"] if len(slots) == 2 else ["large", "small"]
+                with redirect_stdout(io.StringIO()):
+                    expired = m.dispatch_live(work, slots, {}, lambda _: True, execute,
+                                              lambda name, result: result, list, 0.01)
+                self.assertEqual(calls[:2], expected)
+                self.assertEqual(expired, len(slots) == 1)
+
+    def test_persistent_slot_refusal_is_reported_during_sibling_progress(self):
+        self.slots.return_value = {2: "available", 4: "held"}
+        calls = []
+        def execute(name, slot):
+            calls.append((name, slot))
+            time.sleep(0.025)
+            return {"status": "passed"}
+        with redirect_stdout(io.StringIO()) as printed:
+            self.assertFalse(m.dispatch_live(["one", "two", "three"], (2, 4), {},
+                lambda _: True, execute, lambda name, result: result, list, 0.03))
+        self.assertEqual(calls, [(name, 2) for name in ("one", "two", "three")])
+        self.assertIn("slot-4=held persisted while checks queued", printed.getvalue())
 
     def test_shellcheck_command_preserves_historical_receipts(self):
         self.assertEqual(m.commands(root, "test", {})["shellcheck"], ["bash", "dev/shellcheck.sh"])
@@ -2440,6 +2472,42 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["reason"]), ("failed", "lease-cleanup-unconfirmed"))
 
+    def test_fresh_and_saved_pass_check_every_acquisition(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            directory = Path(temporary)
+            output = directory / "acceptance"
+            frozen, receipt = prepare_fixture(fixture_checkout(directory), output)
+            name, sibling = "profile:sample/one", "profile:sample/two"
+            commands = m.commands(frozen, "test", receipt["profiles"])
+            run_live(output, frozen, receipt, sibling)
+            log = output / receipt["checks"][sibling]["log"]
+            for check in commands:
+                if not m.is_live(check) and check != "process-coverage":
+                    receipt["checks"][check] = {"status": "passed", "log": log.name, "log_sha256": m.digest(log)}
+            lease = "E2E lease: yard=sample run=sample slot=slot-001\n"
+            release = "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+            clean = lease + release
+            refusal = "agent-e2e: retryable capacity refusal for slot-001: resource=memory; retry after resources become available\n"
+            for tail, reason in ((refusal, "lease-acquire-refused"), (refusal + clean, "lease-acquire-refused"),
+                                 (lease, "lease-cleanup-unconfirmed")):
+                with self.subTest(tail=tail):
+                    command = ["bash", "-c", "printf '%s' " + shlex.quote(clean + tail)]
+                    result = m.execute(name, command, frozen, output, m.clean_environment(), 1)
+                    self.assertEqual((result["status"], result["exit_code"], result.pop("reason")), ("failed", 0, reason))
+                    # Model an immutable PASS recorded before the stricter check.
+                    result.update(status="passed", command=m.command_identity(commands[name], frozen),
+                                  execution_environment=receipt["environment"])
+                    result["original_attempt"] = m.completed_attempt(output, frozen, receipt, name, result)
+                    receipt["checks"][name] = result
+                    m.save(output, receipt)
+                    self.assertEqual(m.load_bound(output)[1]["checks"][name], {"status": "incomplete", "reason": reason})
+                    with patch.object(m, "execution_environment", return_value=receipt["environment"]):
+                        m.run_checks(output, (1,), [name], False)
+                    saved = m.load_bound(output)[1]
+                    self.assertEqual(saved["checks"][name]["status"], "passed")
+                    self.assertNotEqual(saved["checks"][name]["original_attempt"]["id"], result["original_attempt"]["id"])
+                    self.assertEqual(saved["checks"][sibling], receipt["checks"][sibling])
+
     def test_retry_survives_restart_and_blocks_earlier_import(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
@@ -2465,14 +2533,30 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertEqual(m.request_retry(output, name, attempt), 0)
             with self.assertRaisesRegex(ValueError, "fresh execution required before importing"):
                 m.import_evidence(output, earlier, [name])
+            execute = m.execute
+            def fail_again(check, command, root, output, env, slot):
+                self.assertEqual(check, name)
+                result = execute(check, ["false"], root, output, env, slot)
+                result["command"] = m.command_identity(command, root)
+                return result
             with patch.object(m, "execution_environment", return_value=receipt["environment"]):
-                m.run_checks(output, (1,), [name], False)
+                with patch.object(m, "execute", side_effect=fail_again):
+                    m.run_checks(output, (1,), [sibling], False)
+                retried = m.load_bound(output)[1]["checks"][name]
+                self.assertEqual(retried["status"], "failed")
+                self.assertNotEqual(retried["original_attempt"]["id"], attempt)
+                with patch.object(m, "execute", side_effect=AssertionError("retry ran more than once")):
+                    for _ in range(2):
+                        m.run_checks(output, (1,), [], False)
+                self.assertEqual(m.load_bound(output)[1]["checks"][name], retried)
+                self.assertEqual(m.request_retry(output, name, retried["original_attempt"]["id"]), 0)
+                m.run_checks(output, (1,), [sibling], False)
             _, saved = m.load_bound(output)
             self.assertEqual(saved["checks"][name]["status"], "passed")
             self.assertNotEqual(saved["checks"][name]["original_attempt"]["id"], attempt)
             self.assertEqual(saved["checks"][sibling], receipt["checks"][sibling])
             self.assertEqual(m.request_retry(output, name, attempt), 0)
-            self.assertEqual(m.consume_retries(output, saved), [])
+            self.assertEqual(m.pending_retries(output, saved), {})
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3546,6 +3630,39 @@ class FullSplitRequirement(unittest.TestCase):
                     # Required, not run, and recorded as an operator exclusion that keeps the result incomplete.
                     self.assertEqual(receipt["checks"]["vm:p0-split"]["status"], "pending")
                     self.assertEqual(receipt["operator_exclusions"], ["vm:p0-split"])
+
+    def test_requested_full_retry_waits_for_running_split(self):
+        attempt = {"id": "a" * 32, "sha256": "b" * 64}
+        owner, split = "vm:p0-full", "vm:p0-split"
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            checks = {name: ["true"] for name in (owner, split)}
+            receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                       "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                       "requirements": {owner: [split]},
+                       "checks": {owner: {"status": "failed", "original_attempt": attempt}, split: {"status": "pending"}}}
+            observed = threading.Event()
+            calls = []
+            pending_retries = m.pending_retries
+            def requests(output, receipt):
+                pending = pending_retries(output, receipt)
+                if owner in pending and receipt["checks"][split]["status"] == "running":
+                    observed.set()
+                return pending
+            def execute(name, *args):
+                calls.append(name)
+                if name == split:
+                    self.assertEqual(m.request_retry(output, owner, attempt["id"]), 0)
+                    self.assertTrue(observed.wait(3))
+                return {"status": "passed", "exit_code": 0}
+            with patch.object(m, "load_bound", return_value=(output, receipt)), \
+                 patch.object(m, "commands", return_value=checks), \
+                 patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                 patch.object(m, "completed_attempt", return_value=attempt), \
+                 patch.object(m, "pending_retries", side_effect=requests), \
+                 patch.object(m, "execute", side_effect=execute):
+                self.assertEqual(m.run_checks(output, [1], [split], False), 0)
+            self.assertEqual(calls, [split, owner])
 
     def test_imported_full_requires_split_checks(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

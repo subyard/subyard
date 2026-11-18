@@ -525,8 +525,9 @@ For a failed or interrupted live lane, pass its `original_attempt.id` from `rece
 python3 dev/release-acceptance.py retry --output DIR --check CHECK --attempt ATTEMPT_ID
 ```
 
-A running local collector picks up the request when the lane is eligible to run. The request
-survives a restart and prevents earlier evidence from satisfying it. Repeating the same request is safe.
+A running local collector picks up the request when the lane is eligible to run. A continuation
+also selects requested retries alongside its explicit checks. The request survives a restart
+and requires fresh execution before publication. Repeating the same request is safe.
 With the collector idle, `run --output DIR --only CHECK --rerun` also reruns the selected lane.
 Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
 `capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
@@ -541,14 +542,12 @@ before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfi
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
 every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
-periodic-only lane as an unknown check. Available approved slots take the
-next queued check after their controller exits. A typed `blocked/capacity_memory` or
-`blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
-next independent check. After all first-pass controllers finish, capacity-blocked checks are
-retried once on slots whose workers drained the queue. Both attempts retain their logs and
-immutable records; a second capacity block leaves the candidate incomplete.
-Failures, interruptions, unknown refusals and attempts that
-reached a lease or guest start stop that worker's queue. Exit 4 alone does not permit continuation.
+periodic-only lane as an unknown check. Available approved slots take the next queued check
+after their controller exits. A typed capacity or exact-slot refusal puts the lane back in the
+queue with a backoff for that slot. Other lanes and selected slots can proceed. Each attempt
+retains its log and immutable record. The collector reports slots that stay unavailable while work
+waits and leaves the candidate incomplete if the queue stalls. A terminal lane failure leaves
+its result in the receipt and the slot can take another check.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
 attempt and include the controllers' source and environment evidence. The run checks its platform
@@ -598,10 +597,11 @@ projects only this bounded grammar into phase events, without copying fixture ou
 cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
-Exit 124 is a timeout; known signal exits retain the signal number. Any lease or guest-start
-marker rules out capacity classification for the entire attempt, even if a typed refusal follows it.
-Exit 4 then remains a failed check with its native exit. A typed refusal before any such marker is
-environment failure; otherwise cause stays unknown unless the fixture emits the bounded
+Exit 124 is a timeout and known signal exits retain the signal number. A final typed refusal is
+retryable when any earlier sequential leases have clean release evidence. An unexplained exit 4
+remains a failed check with its native exit. Fresh and saved passes both require a clean outcome
+for every logged acquisition. A retryable refusal is an environment failure. Other causes stay
+unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
 budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub

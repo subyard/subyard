@@ -696,6 +696,14 @@ func TestFacadeReleaseDistinguishesLostAndQuarantinedLeases(t *testing.T) {
 	if !strings.Contains(output.String(), `"code":"quarantined"`) {
 		t.Fatalf("retained lease response = %s", output.String())
 	}
+	facade.Store.Path = filepath.Join(store.Path, "unreadable")
+	output.Reset()
+	if err := facade.Run(command(grant.Capability)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"code":"unavailable"`) {
+		t.Fatalf("unreadable lease state response = %s", output.String())
+	}
 }
 
 func TestFacadeRejectsUnboundedInput(t *testing.T) {

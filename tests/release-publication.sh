@@ -1621,6 +1621,20 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "complete passing"):
             m.attestation(self.output, self.identity)
 
+        name = "profile:sample"
+        root, receipt = m.a.load_bound(self.output)
+        log = self.output / "requested-retry.log"
+        log.write_bytes(files["log"].read_bytes())
+        result = {"status": "failed", "exit_code": 1, "command": decision["command"],
+                  "log": log.name, "log_sha256": m.a.digest(log)}
+        result["original_attempt"] = m.a.completed_attempt(self.output, root, receipt, name, result)
+        receipt["checks"][name] = result
+        m.a.save(self.output, receipt)
+        self.assertEqual(m.attestation(self.output, self.identity, [path])["operator_acceptances"], [name])
+        m.a.request_retry(self.output, name, result["original_attempt"]["id"])
+        with self.assertRaisesRegex(ValueError, "requested retries require fresh execution.*profile:sample"):
+            m.attestation(self.output, self.identity, [path])
+
     def test_operator_declaration_unknown_core_wrong_candidate_version_command_and_tamper_refuse(self):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
