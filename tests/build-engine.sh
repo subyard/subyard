@@ -34,6 +34,20 @@ fi
 grep -Fq 'Go is required' "$TMP/stderr" \
   || { printf 'build-engine: missing-Go diagnostic regressed\n' >&2; exit 1; }
 
+# The standalone installer contract must consult freshness even with an executable cache.
+mkdir -p "$fixture/dev" "$fixture/tests/helpers"
+cp "$ROOT/tests/install-incus-data-home.sh" "$fixture/tests/"
+cp "$ROOT/tests/helpers/test-context.sh" "$fixture/tests/helpers/"
+cat > "$fixture/dev/build-engine.sh" <<'SH'
+printf 'installer consulted engine freshness\n' >&2
+exit 73
+SH
+installer_rc=0
+env -u YARD_ENGINE_PATH bash "$fixture/tests/install-incus-data-home.sh" \
+  >"$TMP/installer.log" 2>&1 || installer_rc=$?
+[ "$installer_rc" = 73 ] && grep -Fxq 'installer consulted engine freshness' "$TMP/installer.log" \
+  || { printf 'build-engine: standalone installer skipped the build helper\n' >&2; exit 1; }
+
 mkdir -p "$TMP/fake-go-bin"
 cat > "$TMP/fake-go-bin/go" <<'SH'
 #!/usr/bin/env bash

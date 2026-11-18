@@ -97,7 +97,7 @@ func TestNetworkGuardReportsConfigBridgeStateAndRouteTogether(t *testing.T) {
 	}
 }
 
-// The shell rule in scripts/lib-power.sh runs the same vectors in tests/lib-power-network.sh.
+// The shell dispatcher call runs the same vectors in tests/lib-power-network.sh.
 func TestNetworkManagerConfigViolationsSharedVectors(t *testing.T) {
 	root := filepath.Join("..", "..", "..", "tests", "fixtures", "nm-guard-vectors")
 	cases, err := os.ReadDir(root)
@@ -113,7 +113,7 @@ func TestNetworkManagerConfigViolationsSharedVectors(t *testing.T) {
 				}
 				return string(contents)
 			}
-			got := strings.Join(networkManagerConfigViolations(read("config"), strings.Fields(read("bridges"))), "\n")
+			got := strings.Join(NetworkManagerConfigViolations(read("config"), strings.Fields(read("bridges"))), "\n")
 			if want := strings.TrimSuffix(read("violations"), "\n"); got != want {
 				t.Fatalf("violations:\n%s\nwant:\n%s", got, want)
 			}
@@ -331,13 +331,13 @@ func TestNetworkManagerGuardCurrentTreatsADanglingGuardLinkAsReleased(t *testing
 	}
 }
 
-// Removing any one rendered entry fails the rule (the shell twin runs in tests/lib-power-network.sh).
+// Removing any one rendered entry fails the rule through Go and the shell dispatcher.
 func TestNetworkManagerGuardRuleRequiresEveryRenderedEntry(t *testing.T) {
 	entries := append(slices.Clone(NetworkManagerGuardStaticEntries), "interface-name:incusbr0")
 	for index := range entries {
 		kept := slices.Delete(slices.Clone(entries), index, index+1)
 		config := "[device-subyard]\nmatch-device=" + strings.Join(kept, ",") + "\nmanaged=0\n"
-		if violations := networkManagerConfigViolations(config, []string{"incusbr0"}); len(violations) == 0 {
+		if violations := NetworkManagerConfigViolations(config, []string{"incusbr0"}); len(violations) == 0 {
 			t.Errorf("a guard without %s passed", entries[index])
 		}
 	}

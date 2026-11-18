@@ -122,6 +122,7 @@ if ! incus_local info >/dev/null 2>&1 \
     # shellcheck source=config/host.env
     . "$ROOT/config/host.env"
     set +a
+    prepare_test_incus_dispatcher "$ROOT" || exit
     timeout --foreground --kill-after=10 300 bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
   )
 fi

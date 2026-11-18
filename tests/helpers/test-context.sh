@@ -55,6 +55,13 @@ setup_test_context() { # <temp-root> [incus-project] [instance-name]
   export SUBYARD_INSTALLATION_CONTEXT
 }
 
+# Standalone E2E platform bootstrap runs the installer outside the native dispatcher.
+prepare_test_incus_dispatcher() { # <source-root>
+  local source="${1:?}" engine="$1/.build/incus-bootstrap/yard"
+  "$source/dev/build-engine.sh" --output "$engine" || return
+  export SUBYARD_DISPATCHER_PATH="$engine"
+}
+
 # Serialize only the exact typed values supplied by a prepared fixture caller.
 test_installation_context() { # [yard-name]
   python3 - "${1:-default}" <<'PY_CONTEXT'

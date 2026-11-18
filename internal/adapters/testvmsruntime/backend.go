@@ -338,7 +338,7 @@ func (backend *Backend) state() (backendState, error) {
 	if err != nil {
 		return state, err
 	}
-	recipeHash, err := recipeBundleDigest(backend.RepositoryRoot)
+	recipeHash, err := recipeBundleDigest(backend.RepositoryRoot, backend.Dispatcher)
 	if err != nil {
 		return state, err
 	}

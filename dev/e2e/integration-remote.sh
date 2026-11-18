@@ -43,7 +43,7 @@ ensure_owner_incus() {
       . "$ROOT/config/host.env"
       set +a
       export STORAGE_PATH="$platform_root/incus/incus/storage"
-      bash "$ROOT/scripts/01-install-incus.sh" --yes
+      SUBYARD_DISPATCHER_PATH="$ROOT/.build/yard" bash "$ROOT/scripts/01-install-incus.sh" --yes
     )
   fi
   if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \

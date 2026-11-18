@@ -130,7 +130,8 @@ power_nm_print_config() {
 }
 
 # The entries every guard lists besides the Incus-managed bridges; scripts/lib/host.sh renders
-# them and both validators require them (hostruntime.NetworkManagerGuardStaticEntries).
+# them, and the Go validator requires them (hostruntime.NetworkManagerGuardStaticEntries).
+# shellcheck disable=SC2034 # consumed by scripts/lib/host.sh
 POWER_NM_GUARD_STATIC="type:veth driver:veth interface-name:tap????????"
 POWER_NM_GUARD_CONF=/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf
 # Which guard NetworkManager has read: boot ID, the guard file's identity (inode:ctime, compared
@@ -138,51 +139,11 @@ POWER_NM_GUARD_CONF=/etc/NetworkManager/conf.d/zz-subyard-unmanaged.conf
 # across boots, so losing it can only refuse starts.
 POWER_NM_GUARD_STATE=/var/lib/subyard/nm-guard-state
 
-# Guard rule, shared with internal/adapters/hostruntime and the vectors in
-# tests/fixtures/nm-guard-vectors: NetworkManager prints [device*] sections in priority order,
-# except the plain [device] section, which it always considers last. [device-subyard] must set
-# managed false and list every static entry and every bridge without except: entries (the
-# released `interface-name:tap*` also covers the tap entry), and no other [device*] section
-# printed before it may set managed or stop-match true. Each violation is printed on its own
-# line; nothing is printed when the configuration is safe.
+# Findings go to stdout, one per line. A failed invocation cannot validate the config.
 power_nm_config_violations() { # <bridge...>; stdin: NetworkManager --print-config
-  awk -v bridge_list="$*" -v static_list="$POWER_NM_GUARD_STATIC" '
-    function trim(value) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); return value }
-    function truthy(value) { value = tolower(value); return value == "1" || value == "true" || value == "yes" || value == "on" }
-    function falsy(value) { value = tolower(value); return value == "0" || value == "false" || value == "no" || value == "off" }
-    BEGIN { bridge_count = split(bridge_list, bridges, " "); current = 0 }
-    /^[[:space:]]*\[/ {
-      name = trim($0); gsub(/^\[|\]$/, "", name)
-      sections[++section_count] = name; current = section_count
-      next
-    }
-    current && /=/ {
-      key = trim(substr($0, 1, index($0, "=") - 1)); value = trim(substr($0, index($0, "=") + 1))
-      values[current, key] = value
-    }
-    END {
-      for (index_ = 1; index_ <= section_count; index_++) if (sections[index_] == "device-subyard") { guard = index_; break }
-      if (!guard) { print "NetworkManager has no [device-subyard] guard section"; exit }
-      if (!falsy(values[guard, "managed"])) print "[device-subyard] does not set managed=0"
-      list = values[guard, "match-device"]
-      count = split(list, entries, /[,;]/)
-      for (index_ = 1; index_ <= count; index_++) {
-        entry = trim(entries[index_]); if (entry != "") listed[entry] = 1
-        if (entry ~ /^except:/) print "[device-subyard] match-device has the exception " entry
-      }
-      if ("interface-name:tap*" in listed) listed["interface-name:tap????????"] = 1
-      required_count = split(static_list, required, " ")
-      for (index_ = 1; index_ <= bridge_count; index_++) required[++required_count] = "interface-name:" bridges[index_]
-      for (index_ = 1; index_ <= required_count; index_++)
-        if (!(required[index_] in listed)) print "[device-subyard] match-device lacks " required[index_]
-      for (index_ = 1; index_ < guard; index_++) {
-        name = sections[index_]
-        if (name !~ /^device/ || name == "device") continue
-        if (truthy(values[index_, "managed"])) print "[" name "] has priority over [device-subyard] and sets managed=1"
-        else if (truthy(values[index_, "stop-match"])) print "[" name "] has priority over [device-subyard] and sets stop-match"
-      }
-    }
-  '
+  local engine="${SUBYARD_DISPATCHER_PATH:-}"
+  [ -n "$engine" ] && [ -x "$engine" ] || return 1
+  "$engine" _nm-guard-violations "$@"
 }
 
 # Existing yard bridges that NetworkManager manages, one per line. A failed or empty nmcli
@@ -320,8 +281,9 @@ power_nm_guard_effective() { # <bridge...>: every independent finding, next step
       violations="cannot read NetworkManager's effective configuration as root"
       remedy="check that 'sudo -n NetworkManager --print-config' works, then "
     fi
+  elif ! violations="$(power_nm_config_violations "$@" <<< "$config")"; then
+    violations="cannot validate NetworkManager's effective configuration with the Subyard engine"
   else
-    violations="$(printf '%s\n' "$config" | power_nm_config_violations "$@")"
     if grep -Eq 'no \[device-subyard\]|match-device lacks' <<< "$violations"; then
       remedy="run yard init, then "
     elif [ -n "$violations" ]; then

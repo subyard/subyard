@@ -128,6 +128,7 @@ SH
 cat > "$tmp/bin/ip" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
+  '-4 -o address show scope global') printf '2: eth0 inet 192.0.2.5/24\n' ;;
   '-4 route show default') printf '%s' "${MOCK_DEFAULT_ROUTES:-}"; exit 0 ;;
   "-d -o link show dev "*)
     device="${*: -1}"
@@ -145,6 +146,7 @@ set -euo pipefail
 case "${1:-}" in
   list) printf '%s,STOPPED\n' "$2" ;;
   network)
+    [ "$*" != "network show incusbr0 --project default" ] || exit 0
     [ "${2:-}" = list ] || exit 90
     [ "${MOCK_INCUS_NETWORK_RC:-0}" = 0 ] || exit "$MOCK_INCUS_NETWORK_RC"
     printf '%s' "${MOCK_INCUS_NETWORKS:-[]}"
@@ -201,6 +203,18 @@ esac
 SH
 chmod +x "$tmp/bin/"*
 export PATH="$tmp/bin:$PATH"
+export TEST_NM_VALIDATOR="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
+[ -x "$TEST_NM_VALIDATOR" ] || fail "build the test engine before running this check"
+cat > "$tmp/bin/dispatcher" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  _nm-guard-violations) exec "$TEST_NM_VALIDATOR" "$@" ;;
+  _publications) exit 0 ;;
+  *) exit 90 ;;
+esac
+SH
+chmod 0755 "$tmp/bin/dispatcher"
+export SUBYARD_DISPATCHER_PATH="$tmp/bin/dispatcher"
 
 # shellcheck source=scripts/lib-power.sh
 # shellcheck disable=SC1091
@@ -258,6 +272,15 @@ MOCK_UID=0 MOCK_NM_DEVICES='incusbr0:bridge:connected (externally)'
 if power_nm_guard_effective incusbr0; then fail "a managed bridge passed the guard"; fi
 [ "$POWER_ERROR" = 'NetworkManager guard is not effective: NetworkManager manages yard bridge incusbr0 — rerun yard init' ] \
   || fail "bridge-only remedy: $POWER_ERROR"
+
+reset_case
+MOCK_UID=0 MOCK_NMCLI_READ_RC=1
+if SUBYARD_DISPATCHER_PATH='' power_nm_guard_effective incusbr0; then
+  fail "guard passed without a validator"
+fi
+case "$POWER_ERROR" in *"cannot validate NetworkManager's effective configuration"*"cannot read NetworkManager's devices"*) ;;
+  *) fail "validator failure hid an independent refusal: $POWER_ERROR" ;;
+esac
 
 reset_case
 power_nm_prepare_reader || fail "sudo credential preparation failed"
@@ -384,7 +407,8 @@ fi
 case "$POWER_ERROR" in *"engine is unavailable"*"FAILED to stop"*) ;; *)
   fail 'CPU scheduling stop failure was reported as success' ;;
 esac
-unset VM_CPU_WEIGHT SUBYARD_DISPATCHER_PATH
+unset VM_CPU_WEIGHT
+SUBYARD_DISPATCHER_PATH="$tmp/bin/dispatcher"
 
 # shellcheck disable=SC2034 # consumed by sourced config module
 SUBYARD_CONFIG_LOADED=1
@@ -587,6 +611,18 @@ grep -Fq 'NetworkManager is active but its binary is unavailable at a known path
  [ "$(hash_of "$guard_conf")" = "$before_hash" ] && [ ! -e "$POWER_NM_GUARD_STATE" ] \
    || fail "a failed preflight copy changed the guard")
 
+# A dispatcher that exits unsuccessfully must prevent publication.
+guard_case
+before_hash="$(hash_of "$guard_conf")"
+if (SUBYARD_DISPATCHER_PATH=/bin/false nm_unmanaged_guard_early "$guard_conf" >"$tmp/guard.out" 2>&1); then
+  fail "init published a guard without validation"
+fi
+grep -Fq 'cannot validate the proposed NetworkManager configuration' "$tmp/guard.out" \
+  || fail "validator execution failure: $(cat "$tmp/guard.out")"
+if [ "$(hash_of "$guard_conf")" != "$before_hash" ] || [ -e "$POWER_NM_GUARD_STATE" ]; then
+  fail "validator failure changed the guard"
+fi
+
 # First install with NetworkManager running: the early call writes the static section, records
 # `unread init` for this boot and stops; planning, starts and init refuse until the host reboots,
 # also without the record or with a record for other content.
@@ -648,6 +684,35 @@ nm_guard_write_file "$guard_conf" "$(render incusbr0)"
 if (nm_unmanaged_guard incusbr0 "$guard_conf" >/dev/null 2>&1); then fail "init continued after a hand edit"; fi
 reboot_host
 power_host_safe incusbr0 || fail "a start was refused after NetworkManager read the guard: $POWER_ERROR"
+# Run both standalone E2E assertions against the same loaded guard without an ambient dispatcher.
+(
+  unset SUBYARD_DISPATCHER_PATH
+  OPERATOR_HOME="$tmp/boot-operator"
+  runtime="$OPERATOR_HOME/.subyard/runtime"
+  release="$runtime/releases/candidate"
+  mkdir -p "$release/scripts" "$release/bin"
+  ln -s releases/candidate "$runtime/current"
+  ln -s "$TEST_NM_VALIDATOR" "$release/bin/yard-engine"
+  cp "$ROOT/scripts/lib-power.sh" "$release/scripts/lib-power.sh"
+  {
+    printf 'tmp=%q\n' "$tmp"
+    declare -f power_nm_binary power_nm_boot_id
+    printf 'POWER_NM_GUARD_CONF=%q POWER_NM_GUARD_STATE=%q\n' "$POWER_NM_GUARD_CONF" "$POWER_NM_GUARD_STATE"
+  } >> "$release/scripts/lib-power.sh"
+  operator_env() { "$@"; }
+  eval "$(sed -n '/^assert_guards() {/,/^}/p' "$ROOT/dev/e2e/proxy-address-boot.sh")"
+  assert_guards
+
+  cp "$ROOT/bin/yard" "$release/bin/yard"
+  YARD_BIN="$runtime/current/bin/yard"
+  export YARD_RUNTIME_ROOT="$runtime" YARD_ENGINE_PATH=/bin/false
+  BASELINE_BRIDGE=incusbr0
+  HOST_DEFAULT_ROUTE_BEFORE="$(ip -4 route show default | sort)"
+  HOST_GLOBAL_IPV4_BEFORE="$(ip -4 -o address show scope global | awk '{print $2, $4}' | sort)"
+  export YARD_BIN BASELINE_BRIDGE HOST_DEFAULT_ROUTE_BEFORE HOST_GLOBAL_IPV4_BEFORE
+  eval "$(sed -n '/^assert_host_network_unchanged() {/,/^}/p' "$ROOT/dev/e2e/nested-teardown-data-boundary.sh")"
+  assert_host_network_unchanged
+)
 inode_before="$(stat -c '%i:%Z' "$guard_conf")"
 nm_unmanaged_guard incusbr0 "$guard_conf" >"$tmp/guard.out"
 grep -Fq 'already current' "$tmp/guard.out" && [ "$(stat -c '%i:%Z' "$guard_conf")" = "$inode_before" ] \

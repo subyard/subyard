@@ -119,7 +119,7 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 			if err != nil {
 				return nil, nil, err
 			}
-			expected, _, err := RecipeBundle(backend.RepositoryRoot)
+			expected, _, err := RecipeBundle(backend.RepositoryRoot, backend.Dispatcher)
 			if err != nil || !bytes.Equal(archive, expected) {
 				return nil, nil, fmt.Errorf("wrong recipe payload: %v", err)
 			}

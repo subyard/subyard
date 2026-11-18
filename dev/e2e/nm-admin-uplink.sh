@@ -82,6 +82,7 @@ controller_main() {
 
 if [ "${1:-}" = --preflight ]; then
   bash -n "$0"
+  TMPDIR=/tmp bash "$ROOT/dev/build-engine.sh"
   bash "$ROOT/tests/lib-power-network.sh"
   bash "$ROOT/tests/init-network-convergence.sh"
   TMPDIR=/tmp go test ./internal/adapters/hostruntime ./internal/adapters/reconcileruntime \

@@ -97,6 +97,7 @@ ensure_incus_platform() {
       # shellcheck source=config/host.env
       . "$ROOT/config/host.env"
       set +a
+      prepare_test_incus_dispatcher "$ROOT" || exit
       bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
     )
   fi
@@ -352,6 +353,7 @@ run_create_stage_failed_probe() {
     SUBYARD_CONFIG_HOME="$SUBYARD_CONFIG_HOME" \
     SUBYARD_HOME="$SUBYARD_HOME" \
     SUBYARD_STATE_DIR="$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/projects" \
+    SUBYARD_DISPATCHER_PATH="$STATE/candidate/runtime/current/bin/yard-engine" \
     SUBYARD_ENGINE_CONTEXT=1 \
     SUBYARD_ENGINE_CONTEXT_SCHEMA=1 \
     SUBYARD_CONFIG_LOADED=1 \

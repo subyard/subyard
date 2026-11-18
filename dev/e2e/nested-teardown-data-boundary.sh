@@ -110,7 +110,7 @@ assert_host_network_unchanged() {
     || die "candidate teardown removed surviving bridge $BASELINE_BRIDGE"
   power_nm_prepare_reader \
     || die "cannot prepare NetworkManager safety check: $POWER_ERROR"
-  power_host_safe "$BASELINE_BRIDGE" \
+  SUBYARD_DISPATCHER_PATH="$YARD_RUNTIME_ROOT/current/bin/yard-engine" power_host_safe "$BASELINE_BRIDGE" \
     || die "allocated host is unsafe after candidate teardown: $POWER_ERROR"
 }
 

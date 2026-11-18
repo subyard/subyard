@@ -42,7 +42,8 @@ base_main() {
   export HOST_BASE=/srv/subyard RESTRICTED_DISK_PATHS='' ACCESS_KIND=local YARD_KIND=container
   export YARD_INSTANCE_NAME=base INCUS_PROJECT=default INCUS_BRIDGE=incusbr0 SSH_HOST=''
   export DEV_USER=dev DEV_UID=1000 DEV_SUDO=1 FORWARD_SSH_AGENT=0 NESTED_E2E_VMS=0
-  MIN_INCUS_VER=6.0.7 bash "$recipe_root/scripts/01-install-incus.sh" --upgrade-only --yes --zabbly
+  SUBYARD_DISPATCHER_PATH="$recipe_root/bin/yard-engine" MIN_INCUS_VER=6.0.7 \
+    bash "$recipe_root/scripts/01-install-incus.sh" --upgrade-only --yes --zabbly
   incus --version >/dev/null
   base_finalize_image
 }

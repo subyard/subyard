@@ -24,11 +24,15 @@ func TestRecipeBundleIsDeterministicAndExcludesLocalData(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "operator-private.env"), []byte("must never enter image"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	first, manifest, err := RecipeBundle(root)
+	dispatcher := filepath.Join(root, "dispatcher")
+	if err := os.WriteFile(dispatcher, []byte("trusted engine"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	first, manifest, err := RecipeBundle(root, dispatcher)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := RecipeBundle(root)
+	second, _, err := RecipeBundle(root, dispatcher)
 	if err != nil || !bytes.Equal(first, second) {
 		t.Fatalf("nondeterministic archive: %v", err)
 	}
@@ -37,7 +41,7 @@ func TestRecipeBundleIsDeterministicAndExcludesLocalData(t *testing.T) {
 		t.Fatal(err)
 	}
 	reader := tar.NewReader(gzipReader)
-	allowed := map[string]bool{"manifest.sha256": true}
+	allowed := map[string]bool{"manifest.sha256": true, recipeEngine: true}
 	for _, name := range recipeFiles {
 		allowed[name] = true
 	}
@@ -64,7 +68,7 @@ func TestRecipeBundleIsDeterministicAndExcludesLocalData(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "operator-private.env"), path); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := RecipeBundle(root); err == nil {
+	if _, _, err := RecipeBundle(root, dispatcher); err == nil {
 		t.Fatal("accepted symlink into local data")
 	}
 }

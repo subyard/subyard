@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -134,6 +135,20 @@ func main() {
 				os.Exit(ports.TeardownPlanStaleExitCode)
 			}
 			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "_nm-guard-violations" {
+		config, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read NetworkManager configuration: %v\n", err)
+			os.Exit(1)
+		}
+		for _, finding := range hostruntime.NetworkManagerConfigViolations(string(config), os.Args[2:]) {
+			if _, err := fmt.Fprintln(os.Stdout, finding); err != nil {
+				fmt.Fprintf(os.Stderr, "write NetworkManager guard finding: %v\n", err)
+				os.Exit(1)
+			}
 		}
 		return
 	}

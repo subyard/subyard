@@ -25,6 +25,7 @@ ensure_platform() {
       # shellcheck source=config/host.env
       . "$ROOT/config/host.env"
       set +a
+      prepare_test_incus_dispatcher "$ROOT" || exit
       timeout --signal=TERM --kill-after=10 900 bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
     )
   fi

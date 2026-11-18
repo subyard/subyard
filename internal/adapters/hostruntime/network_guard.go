@@ -60,7 +60,7 @@ func (guard NetworkGuard) networkManagerGuard(ctx context.Context, bridges []str
 	if output, err := guard.run(ctx, binary, "--print-config"); err != nil {
 		violations = append(violations, fmt.Sprintf("cannot read NetworkManager's effective configuration (%v)", err))
 		remedies = append(remedies, "fix 'NetworkManager --print-config' (run 'sudo -v' when it needs root)")
-	} else if violations = networkManagerConfigViolations(string(output), bridges); len(violations) > 0 {
+	} else if violations = NetworkManagerConfigViolations(string(output), bridges); len(violations) > 0 {
 		remedies = append(remedies, "correct the NetworkManager configuration")
 		reboot = true
 		for _, violation := range violations {
@@ -203,12 +203,12 @@ func (guard NetworkGuard) run(ctx context.Context, name string, arguments ...str
 	return exec.CommandContext(ctx, name, arguments...).CombinedOutput()
 }
 
-// networkManagerConfigViolations applies the guard rule shared with scripts/lib-power.sh and
-// tests/fixtures/nm-guard-vectors. NetworkManager prints [device*] sections in priority order,
+// NetworkManagerConfigViolations checks effective or proposed NetworkManager configuration.
+// NetworkManager prints [device*] sections in priority order,
 // except the plain [device] section, which it always considers last. [device-subyard] must set
 // managed=0 for type:veth, driver:veth and every bridge without except: entries, and no section
 // printed before it may set managed=1 or stop-match for devices the guard covers.
-func networkManagerConfigViolations(contents string, bridges []string) []string {
+func NetworkManagerConfigViolations(contents string, bridges []string) []string {
 	type section struct {
 		name   string
 		values map[string]string

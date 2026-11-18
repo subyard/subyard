@@ -205,6 +205,7 @@ ensure_platform() {
       # shellcheck source=config/host.env
       . "$ROOT/config/host.env"
       set +a
+      prepare_test_incus_dispatcher "$ROOT" || exit
       timeout --foreground --kill-after=10 300 bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
     )
   fi
@@ -224,7 +225,9 @@ assert_guards() {
   # Use the installed candidate's read-only guard implementation.
   operator_env env SUBYARD_SUDO_PREAUTHORIZED=1 bash -c '
     set -euo pipefail
-    . "$1/scripts/lib-power.sh"
+    candidate="$(cd "$1" && pwd -P)"
+    export SUBYARD_DISPATCHER_PATH="$candidate/bin/yard-engine"
+    . "$candidate/scripts/lib-power.sh"
     power_nm_prepare_reader
     power_host_safe incusbr0 || { printf "%s\n" "$POWER_ERROR" >&2; exit 1; }
   ' _ "$OPERATOR_HOME/.subyard/runtime/current"

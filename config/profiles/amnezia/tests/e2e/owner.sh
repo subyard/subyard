@@ -56,7 +56,7 @@ else
       # shellcheck source=config/host.env
       . "$runtime_source/config/host.env"
       set +a
-      bash "$runtime_source/scripts/01-install-incus.sh" --yes
+      SUBYARD_DISPATCHER_PATH="$YARD_BIN" bash "$runtime_source/scripts/01-install-incus.sh" --yes
     )
     refresh_operator_session "$@"
   fi
