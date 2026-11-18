@@ -703,7 +703,9 @@ power_host_safe incusbr0 || fail "a start was refused after NetworkManager read 
   eval "$(sed -n '/^assert_guards() {/,/^}/p' "$ROOT/dev/e2e/proxy-address-boot.sh")"
   assert_guards
 
-  YARD_BIN="$TEST_NM_VALIDATOR"
+  cp "$ROOT/bin/yard" "$release/bin/yard"
+  YARD_BIN="$runtime/current/bin/yard"
+  export YARD_RUNTIME_ROOT="$runtime" YARD_ENGINE_PATH=/bin/false
   BASELINE_BRIDGE=incusbr0
   HOST_DEFAULT_ROUTE_BEFORE="$(ip -4 route show default | sort)"
   HOST_GLOBAL_IPV4_BEFORE="$(ip -4 -o address show scope global | awk '{print $2, $4}' | sort)"
