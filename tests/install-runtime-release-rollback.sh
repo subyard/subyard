@@ -64,3 +64,26 @@ fi
 grep -Fxq 'install-runtime-release: bundle contains an unsafe path' "$TMP/stderr" \
   || { cat "$TMP/stderr" >&2; exit 1; }
 printf 'ok: runtime installer rejects an early unsafe path in a long archive\n'
+
+mkdir "$TMP/fake-bin"
+cat > "$TMP/fake-bin/tar" <<'TAR'
+#!/usr/bin/env bash
+case "$1" in
+  -tzf) printf 'file\n' ;;
+  -tvzf) printf '%s\n' '-rw-r--r-- user/group 0 2026-01-01 00:00 file'; exit 2 ;;
+  -xzf) touch "$EXTRACTION_CAPTURE"; exit 99 ;;
+  *) exit 98 ;;
+esac
+TAR
+chmod +x "$TMP/fake-bin/tar"
+if PATH="$TMP/fake-bin:$PATH" EXTRACTION_CAPTURE="$TMP/extracted" \
+  "$ROOT/scripts/install-runtime-release.sh" --check --runtime-root "$runtime_root" \
+  --bundle "$archive" --checksum "$TMP/checksum" --manifest "$TMP/manifest" \
+  --provenance "$TMP/provenance" >"$TMP/stdout" 2>"$TMP/stderr"; then
+  printf 'runtime installer accepted a failed verbose listing\n' >&2
+  exit 1
+fi
+grep -Fxq 'install-runtime-release: could not list bundle member types' "$TMP/stderr" \
+  || { cat "$TMP/stderr" >&2; exit 1; }
+[ ! -e "$TMP/extracted" ]
+printf 'ok: runtime installer rejects a failed verbose listing before extraction\n'

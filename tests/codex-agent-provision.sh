@@ -87,7 +87,8 @@ with tarfile.open(sys.argv[1], 'w:gz') as archive:
     info.type = tarfile.SYMTYPE
     info.linkname = '/etc'
     archive.addfile(info)
-    for i in range(16384):
+    # The old type-only stream used two bytes per member. Exceed 1 MiB.
+    for i in range(524288):
         archive.addfile(tarfile.TarInfo(f'benign-{i:05d}'))
 PY
 }
@@ -327,6 +328,27 @@ if run_hook amd64 "$root" >/dev/null 2>"$tmp/version.err"; then
   fail "staged version mismatch unexpectedly succeeded"
 fi
 [ "$(sha256sum "$runtime" | cut -d' ' -f1)" = "$before" ] || fail "version failure replaced the runtime"
+# Exercise each scan against an otherwise valid upgrade.
+mkdir "$tmp/failing-grep"
+cat > "$tmp/failing-grep/grep" <<'GREP'
+#!/usr/bin/env bash
+if [ "$1" = -Eq ] && [ "${3##*/}" = "$CODEX_TEST_FAILED_SCAN" ]; then
+  exit 2
+fi
+exec "$CODEX_TEST_REAL_GREP" "$@"
+GREP
+chmod +x "$tmp/failing-grep/grep"
+set_latest 0.149.0 "$sha_149_amd64" "$sha_147_arm64"
+for scan in members names; do
+  if run_hook amd64 "$root" PATH="$tmp/failing-grep:$fake_bin:$original_path" \
+    CODEX_TEST_REAL_GREP="$(command -v grep)" CODEX_TEST_FAILED_SCAN="$scan" \
+    >/dev/null 2>"$tmp/archive.err"; then
+    fail "accepted an archive after the $scan scan failed"
+  fi
+  grep -Fq 'Codex archive listing could not be scanned' "$tmp/archive.err" \
+    || fail "missing diagnostic for failed $scan scan"
+done
+
 set_latest 8.8.8 "$sha_bad_archive" "$sha_147_arm64"
 if run_hook amd64 "$root" >/dev/null 2>"$tmp/archive.err"; then
   fail "corrupt archive unexpectedly succeeded"

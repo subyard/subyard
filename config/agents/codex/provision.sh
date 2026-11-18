@@ -651,9 +651,15 @@ actual_sha256="$(sha256sum "$archive" | cut -d' ' -f1)"
   || die "checksum mismatch for Codex $VERSION ($ARCH)"
 tar -tvzf "$archive" > "$tmp/members" 2>/dev/null || die "Codex archive is invalid"
 tar -tzf "$archive" > "$tmp/names" 2>/dev/null || die "Codex archive is invalid"
-if grep -Eq '^[^-d]' "$tmp/members" || grep -Eq '^/|(^|/)\.\.(/|$)' "$tmp/names"; then
-  die "Codex archive has a member that is not a contained file or directory"
-fi
+reject_archive_match() {
+  if grep -Eq "$1" "$2"; then
+    die "Codex archive has a member that is not a contained file or directory"
+  elif [ "$?" -ne 1 ]; then
+    die "Codex archive listing could not be scanned"
+  fi
+}
+reject_archive_match '^[^-d]' "$tmp/members"
+reject_archive_match '^/|(^|/)\.\.(/|$)' "$tmp/names"
 
 # Validate fully before the atomic rename so a bad release cannot break the old CLI.
 stage="$(mktemp -d "$RELEASES_ROOT/.stage.XXXXXX")"

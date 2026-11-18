@@ -171,10 +171,11 @@ if [ "$unsafe_path" = yes ]; then
   printf 'install-runtime-release: bundle contains an unsafe path\n' >&2
   exit 1
 fi
-if tar -tvzf "$BUNDLE" | awk '
+unsafe_type="$(tar -tvzf "$BUNDLE" | awk '
   substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" { invalid=1 }
-  END { exit invalid ? 0 : 1 }
-'; then
+  END { if (invalid) print "yes" }
+')" || { printf 'install-runtime-release: could not list bundle member types\n' >&2; exit 1; }
+if [ "$unsafe_type" = yes ]; then
   printf 'install-runtime-release: bundle contains a non-regular entry\n' >&2
   exit 1
 fi
