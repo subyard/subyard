@@ -90,6 +90,8 @@ for workflow in "$CI_WORKFLOW" "$RELEASE_WORKFLOW"; do
   done
   grep -Fq 'make verify' "$workflow" \
     || fail "$(basename "$workflow") must verify core and shipped profiles"
+  grep -Fq 'bash dev/shellcheck.sh' "$workflow" \
+    || fail "$(basename "$workflow") must invoke the shared ShellCheck runner"
   grep -Fq 'run: make cli-docs-check' "$workflow" \
     && grep -Fq 'bash dev/test-profiles.sh --e2e --list' "$workflow" \
     || fail "$(basename "$workflow") must check CLI docs and shipped profile E2E inventory"
@@ -105,9 +107,6 @@ done
 grep -Fxq '    needs: [host-free-verify, native-engine-arm64]' "$RELEASE_WORKFLOW" \
   || fail 'Release publication must require host-free and native ARM64 engine checks'
 
-grep -Fq 'make verify 2>&1 | tee .build/ci-logs/verify.log' "$CI_WORKFLOW" \
-  && grep -Fq 'shellcheck -x -S warning' "$CI_WORKFLOW" \
-  || fail 'CI must run the core and ShellCheck gates'
 verify_recipe="$(awk '/^verify:/ {inside=1; next} inside && /^[^[:space:]]/ {exit} inside {print}' "$ROOT/Makefile")"
 [[ "$verify_recipe" == *'./tests/run.sh'* && "$verify_recipe" == *'bash dev/test-profiles.sh'* ]] \
   || fail 'shared verification gate must include core and profile checks'

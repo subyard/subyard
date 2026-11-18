@@ -21,6 +21,7 @@ release-candidate.sh
 release-acceptance.sh
 release-acceptance-preflight.sh
 lint-tools.sh
+shellcheck.sh
 release-publication.sh
 provision-profile-check.sh
 proxy-address-boot-controller.sh

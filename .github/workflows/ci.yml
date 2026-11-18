@@ -98,20 +98,7 @@ jobs:
           fi
           unshare --user --map-root-user --mount --pid --fork --kill-child=SIGKILL true
       - name: ShellCheck
-        run: |
-          mapfile -t shell_files < <(find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print | sort)
-          files=(bin/yard completions/yard.bash "${shell_files[@]}")
-          # One process per file on every CPU; findings print afterwards in file order.
-          SHELLCHECK_LOGS="$(mktemp -d)"
-          export SHELLCHECK_LOGS
-          status=0
-          # shellcheck disable=SC2016 # The child shell expands its own arguments.
-          for i in "${!files[@]}"; do printf '%s\0%s\0' "$i" "${files[$i]}"; done \
-            | xargs -0 -n 2 -P "$(nproc)" bash -c \
-              'shellcheck -x -S warning "$2" > "$SHELLCHECK_LOGS/$1.log" 2>&1' shellcheck \
-            || status=$?
-          for i in "${!files[@]}"; do cat "$SHELLCHECK_LOGS/$i.log"; done
-          exit "$status"
+        run: bash dev/shellcheck.sh
       - name: Complete shipped profile acceptance inventory
         run: bash dev/test-profiles.sh --e2e --list
       - name: Yard-safe verification gate

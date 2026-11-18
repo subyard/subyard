@@ -93,8 +93,7 @@ jobs:
       - name: Verify release candidate
         run: |
           set -o pipefail
-          mapfile -t shell_files < <(find scripts dev config/profiles config/agents tests -type f -name '*.sh' -print | sort)
-          shellcheck -x -S warning bin/yard completions/yard.bash "${shell_files[@]}"
+          bash dev/shellcheck.sh
           mkdir -p .build/ci-logs
           make verify 2>&1 | tee .build/ci-logs/verify.log
       - name: CLI reference freshness

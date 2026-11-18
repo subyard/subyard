@@ -144,6 +144,13 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def test_shellcheck_command_preserves_historical_receipts(self):
+        self.assertEqual(m.commands(root, "test", {})["shellcheck"], ["bash", "dev/shellcheck.sh"])
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            self.assertEqual(m.commands(Path(temporary), "test", {})["shellcheck"], [
+                "bash", "-c", 'mapfile -t files < <(find scripts dev config/profiles config/agents tests -type f -name "*.sh" -print | sort); shellcheck -x -S warning bin/yard completions/yard.bash "${files[@]}"',
+            ])
+
     def test_hosted_acceptance_installs_collector_tools_before_verification(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary)
