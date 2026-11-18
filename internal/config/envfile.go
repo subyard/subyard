@@ -106,7 +106,7 @@ func (policy discardPolicy) ignores(name string) bool {
 func operatorDiscardPolicy(report func(name, value string), catalogs ...Catalog) discardPolicy {
 	return discardPolicy{ignored: IsProfileOnlySetting, report: report, retired: func(name string) bool {
 		for _, settings := range catalogs {
-			if settings.retiredSetting(name) {
+			if settings.RetiredSetting(name) {
 				return true
 			}
 		}

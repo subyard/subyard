@@ -147,7 +147,7 @@ func load(
 	}
 	values := environmentFrom(options.Environment)
 	for name := range values {
-		if tracker.catalog.retiredSetting(name) {
+		if tracker.catalog.RetiredSetting(name) {
 			delete(values, name)
 		}
 	}
@@ -1177,7 +1177,7 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	var assignments []observedAssignment
 	var discarded []observedAssignment
 	var content bytes.Buffer
-	policy := discardPolicy{retired: settings.retiredSetting, batch: batch}
+	policy := discardPolicy{retired: settings.RetiredSetting, batch: batch}
 	if scope != ScopeShipped {
 		policy.ignored = IsProfileOnlySetting
 	}
@@ -1207,11 +1207,11 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	}
 	seen := make(map[string]layerValue)
 	for _, assignment := range assignments {
-		if settings.retiredSetting(assignment.name) {
+		if settings.RetiredSetting(assignment.name) {
 			delete(probe, assignment.name)
 			continue
 		}
-		canonical := canonicalSettingName(assignment.name)
+		canonical := CanonicalSettingName(assignment.name)
 		assignment.value = normalizeLegacySelection(assignment.name, assignment.value)
 		if previous, exists := seen[canonical]; exists && previous.input != assignment.name &&
 			previous.value != assignment.value {
@@ -1309,7 +1309,8 @@ func AddLegacySettingAliases(values map[string]string) {
 	}
 }
 
-func canonicalSettingName(name string) string {
+// CanonicalSettingName identifies the setting addressed by a persisted spelling.
+func CanonicalSettingName(name string) string {
 	if canonical, legacy := legacySettingNames[name]; legacy {
 		return canonical
 	}

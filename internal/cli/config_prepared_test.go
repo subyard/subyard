@@ -999,7 +999,7 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 	}
 }
 
-func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
+func TestConfigSetLocalBatchRefusals(t *testing.T) {
 	const (
 		unknownTemplate = "unknown YARD_TEMPLATE"
 		duplicate       = `duplicate agent "codex"`
@@ -1013,15 +1013,53 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 		unknownSetting  = "UNKNOWN_SETTING: configuration (scalar settings): unknown setting"
 		hardLinks       = "target has hard links"
 		interrupted     = "an interrupted configuration transaction requires recovery"
+		retiredSetting  = "setting is retired and can no longer be set"
+		preservedRecord = "a preserved record changes the requested setting"
+		unavailable     = "an input is invalid or unavailable"
 	)
+	longName := "AGENT_" + strings.Repeat("a", 120) + "_COMMAND"
 	for _, test := range []struct {
-		name, yardConfig, scope string
-		assignments             []string
-		code                    int
-		refusals                []string
-		manifest, link, pending bool
-		namedConfig             string
+		name, yardConfig, scope                  string
+		assignments                              []string
+		code                                     int
+		refusals                                 []string
+		manifest, link, pending                  bool
+		namedConfig                              string
+		hostLink, badSibling, dedicated, retired bool
+		otherConfig                              string
+		forbidden                                []string
 	}{
+		{name: "unprintable duplicate", scope: "yard",
+			assignments: []string{longName, "foo", longName, "foo"}, code: 2,
+			refusals: []string{"multiple arguments assign the same setting"}, forbidden: []string{longName}},
+		{name: "retired singleton", scope: "yard", retired: true,
+			assignments: []string{"AGENT_old_COMMAND", "foo"}, code: 2, refusals: []string{retiredSetting}},
+		{name: "retired batch pair", scope: "yard", retired: true,
+			assignments: []string{"AGENT_old_COMMAND", "foo", "SSH_PORT", "2390"}, code: 2, refusals: []string{retiredSetting}},
+		{name: "alias ambiguity", scope: "yard",
+			assignments: []string{"AGENTS", "codex", "CODING_TOOL_INTEGRATIONS", "claude"}, code: 2,
+			refusals: []string{"AGENTS: configuration (scalar settings): unknown setting", "AGENTS and CODING_TOOL_INTEGRATIONS assign the same setting"}},
+		{name: "bad pair and editor refusal", scope: "yard", yardConfig: "GIT_USER_NAME=original\n: \"${GIT_USER_NAME:=preserved}\"\n",
+			assignments: []string{"GIT_USER_NAME", "", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{unknownSetting, preservedRecord}},
+		{name: "bad value and editor refusal", scope: "yard", yardConfig: "GIT_USER_NAME=original\n: \"${GIT_USER_NAME:=preserved}\"\n",
+			assignments: []string{"GIT_USER_NAME", "", "SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort, preservedRecord}},
+		{name: "bad pair and dependency refusal", scope: "yard", hostLink: true,
+			assignments: []string{"GIT_USER_NAME", "", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{unknownSetting, hardLinks}},
+		{name: "sibling discovery failure and default collision", scope: "host", namedConfig: "# sibling\n", badSibling: true,
+			assignments: []string{"SSH_PORT", "2390", "WEB_PREVIEW_HOST_PORT", "2390"}, code: 1, refusals: []string{portCollision, unavailable}},
+		{name: "malformed profile and known profile placement", scope: "yard", dedicated: true,
+			assignments: []string{"ENVIRONMENT_PROFILES", "fixture bad,name", "SSH_PORT", "2390"}, code: 2,
+			refusals: []string{"invalid name value", `profile "fixture" requires its dedicated named-yard preset`}, forbidden: []string{"bad,name"}},
+		{name: "unknown integration and known integration dependency", scope: "yard",
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "relay absent", "AGENT_relay_DEPENDS", "relay"}, code: 1,
+			refusals: []string{unknown, unavailable}, forbidden: []string{"relay", "absent"}},
+		{name: "malformed integration and known integration dependency", scope: "yard",
+			assignments: []string{"CODING_TOOL_INTEGRATIONS", "relay bad,name", "AGENT_relay_DEPENDS", "relay"}, code: 2,
+			refusals: []string{invalidName, unknown, unavailable}, forbidden: []string{"relay", "bad,name"}},
+		{name: "singleton stops at first affected yard", scope: "host", namedConfig: "SSH_PORT=invalid\n", otherConfig: "DEV_SUDO=invalid\n",
+			assignments: []string{"GIT_USER_NAME", "new"}, code: 1,
+			refusals: []string{"yards/named/config.env:1: SSH_PORT (local scalar settings): invalid port value"}, forbidden: []string{"DEV_SUDO"}},
+
 		{name: "masked integration", yardConfig: "CODING_TOOL_INTEGRATIONS=codex\n", scope: "host",
 			assignments: []string{"CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "2390"}, code: 1, refusals: []string{unknown}},
 		{name: "masked custom metadata is resolved for each yard", yardConfig: "CODING_TOOL_INTEGRATIONS=codex\nAGENT_testhelper_COMMAND=testhelper\n",
@@ -1065,8 +1103,17 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 			assignments: []string{"SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
+			root, home, configHome, environment := configCommandFixture(t)
 			withSyntheticYardTemplate(t, root, environment)
+			source := filepath.Join(filepath.Dir(home), "source")
+			if test.dedicated {
+				writeConfigCommandFile(t, filepath.Join(source, "config", "profiles", "fixture", "profile.conf"), "PROVISION_SCOPE=dedicated\n")
+			}
+			if test.retired {
+				writeConfigCommandFile(t, filepath.Join(source, "config", "retired-components.json"),
+					`{"schema_version":1,"components":[{"kind":"integration","id":"old","settings":["AGENT_old_COMMAND"]}]}`)
+				root = source
+			}
 			yardPath := filepath.Join(configHome, "yards", "default", "config.env")
 			writeConfigCommandFile(t, yardPath, test.yardConfig)
 			files := map[string]string{filepath.Join(configHome, "config.env"): "", yardPath: test.yardConfig}
@@ -1075,6 +1122,24 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 				writeConfigCommandFile(t, path, test.namedConfig)
 				files[path] = test.namedConfig
 			}
+			if test.badSibling {
+				path := config.YardResetMarkerPath(configHome, "named")
+				writeConfigCommandFile(t, path, "malformed\n")
+				files[path] = "malformed\n"
+			}
+			if test.otherConfig != "" {
+				path := filepath.Join(configHome, "yards", "other", "config.env")
+				writeConfigCommandFile(t, path, test.otherConfig)
+				files[path] = test.otherConfig
+			}
+			if test.hostLink {
+				path := filepath.Join(configHome, "host-link.env")
+				if err := os.Link(filepath.Join(configHome, "config.env"), path); err != nil {
+					t.Fatal(err)
+				}
+				files[path] = ""
+			}
+
 			if test.manifest {
 				path, content := filepath.Join(configHome, ".sync", "manifest.json"), `{"schemaVersion":3}`
 				writeConfigCommandFile(t, path, content)
@@ -1103,6 +1168,11 @@ func TestConfigSetLocalBatchIntegrationRefusals(t *testing.T) {
 				t.Errorf("exit = %d, want %d: %s", code, test.code, &stderr)
 			}
 			output := stderr.String()
+			for _, forbidden := range append(test.forbidden, configHome) {
+				if strings.Contains(output, forbidden) {
+					t.Errorf("unexpected diagnostic detail %q: %s", forbidden, output)
+				}
+			}
 			if strings.Contains(output, "missing-template") || strings.Contains(output, "missing-one") || strings.Contains(output, "claude,codex") {
 				t.Errorf("refusal disclosed an input value: %s", output)
 			}

@@ -60,8 +60,88 @@ func (settings Catalog) CheckLocalBatchConstraints(options LoadOptions, scope Se
 	}
 	tracker := newSettingTracker()
 	tracker.catalog, tracker.batch = settings, batch
-	_, _, err := load(options, tracker)
-	return batch.assignmentRefusals, err
+	editErr := batch.checkTargetEdits()
+	_, values, err := load(options, tracker)
+	return batch.assignmentRefusals, domain.CollectRefusals(editErr, err, batch.checkDependencies(options, tracker, values))
+}
+
+// Check known persistent inputs even when the draft cannot reach prospective
+// binding. The final prospective inspection also binds their snapshots.
+func (batch *localBatch) checkDependencies(options LoadOptions, tracker *settingTracker, values environment) error {
+	home := options.Environment["SUBYARD_CONFIG_HOME"]
+	seen := map[string]bool{}
+	var refusals []error
+	check := func(path string) {
+		if path == batch.path || seen[path] {
+			return
+		}
+		if relative, err := filepath.Rel(home, path); err != nil || !filepath.IsLocal(relative) || relative == "." {
+			return
+		}
+		seen[path] = true
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return
+		}
+		_, err := ReadPersistentFileSnapshot(home, path)
+		if !errors.Is(err, os.ErrNotExist) {
+			refusals = append(refusals, err)
+		}
+	}
+	configDir := options.Environment["SUBYARD_CONFIG_DIR"]
+	traces := tracker.traces(values)
+	mappings := SyncableFileMappings(Loaded{Catalog: batch.catalog, Settings: traces,
+		Context: domain.Context{Paths: domain.RuntimePaths{ConfigDir: configDir}}})
+	for _, setting := range traces {
+		for _, resolution := range setting.Resolutions {
+			check(resolution.Path)
+		}
+	}
+	for _, layer := range tracker.configurationLayers() {
+		switch layer.Role {
+		case "scalar settings", "Git scalar settings", "shipped profile":
+			check(layer.Path)
+		case "file settings", "Git file settings":
+			for _, mapping := range mappings {
+				check(filepath.Join(layer.Path, filepath.FromSlash(mapping.Relative)))
+			}
+		}
+	}
+	for _, path := range tracker.assetValidationInputs {
+		check(path)
+	}
+	for _, path := range YardFileCandidates(configDir, home, options.YardName) {
+		check(path)
+	}
+	check(YardResetMarkerPath(home, options.YardName))
+	check(filepath.Join(home, SourceRecordRelativePath))
+	return domain.CollectRefusals(refusals...)
+}
+
+// Use the editor's empty environment and record order. Invalid replacements
+// stay in their slots, so expansions that depend on them remain unavailable.
+func (batch *localBatch) checkTargetEdits() error {
+	if batch.baseline == nil || len(batch.replacements) == 0 {
+		return nil
+	}
+	probe := batch.fork()
+	observed := map[string]PersistentAssignment{}
+	var refusals []error
+	observe := func(name, value string, line int) {
+		canonical := CanonicalSettingName(name)
+		if canonical != name && batch.valid[canonical] && probe.available(name) {
+			refusals = append(refusals, persistentAssignmentPreserved(batch.path, canonical, line))
+		}
+		observed[canonical] = PersistentAssignment{Name: name, Value: value, Line: line}
+	}
+	if err := probe.applyTarget(bytes.NewReader(batch.baseline.Content), environment{}, observe, observe, operatorDiscardPolicy(nil, batch.catalog)); err != nil {
+		return err
+	}
+	for _, edit := range batch.replacements {
+		if actual := observed[edit.Name]; batch.valid[edit.Name] && probe.available(actual.Name) {
+			refusals = append(refusals, persistentAssignmentChanged(batch.path, edit.Name, edit.Value, actual))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }
 
 func (batch *localBatch) fork() *localBatch {
@@ -72,7 +152,7 @@ func (batch *localBatch) fork() *localBatch {
 
 func (batch *localBatch) available(names ...string) bool {
 	for _, name := range names {
-		name = canonicalSettingName(name)
+		name = CanonicalSettingName(name)
 		if unavailable, tracked := batch.unavailable[name]; tracked {
 			if unavailable {
 				return false
@@ -87,7 +167,7 @@ func (batch *localBatch) available(names ...string) bool {
 }
 
 func (batch *localBatch) setAvailable(name string, available bool) {
-	batch.unavailable[canonicalSettingName(name)] = !available
+	batch.unavailable[CanonicalSettingName(name)] = !available
 }
 
 func (tracker *settingTracker) applyScalarSource(path, source string, values environment, scope SettingScope, syncable bool, observe assignmentObserver, ignore ignoredObserver) error {
@@ -148,6 +228,7 @@ func (batch *localBatch) applyTarget(reader io.Reader, values environment, obser
 	if err != nil {
 		return err
 	}
+	policy.batch = batch
 	line := 1
 	for _, record := range records {
 		if record.replacement != nil {
@@ -195,14 +276,18 @@ func (batch *localBatch) checkConstraints(options LoadOptions, root, configDir, 
 				len(requested) != 0 && batch.scope == ScopeYard {
 				refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools))
 			}
-			if assignment.Valid && names == nil && batch.integrationDependenciesAvailable(values, requested) {
-				_, err := batch.catalog.ResolveIntegrationSelection(values, requested)
-				refusals = append(refusals, err)
+			for _, id := range requested {
+				if knownIntegration(values, id) && !batch.catalog.RetiredIntegration(id) &&
+					batch.integrationDependenciesAvailable(values, []string{id}) {
+					_, err := batch.catalog.ResolveIntegrationSelection(values, []string{id})
+					refusals = append(refusals, err)
+				}
 			}
 		case "ENVIRONMENT_PROFILES":
-			if assignment.Valid && values[assignment.Name] != assignment.Value {
+			if !assignment.Valid || values[assignment.Name] != assignment.Value {
 				authored := cloneEnvironment(values)
-				authored[assignment.Name] = assignment.Value
+				profiles := slices.DeleteFunc(strings.Fields(assignment.Value), func(name string) bool { return !domain.SafeName(name) })
+				authored[assignment.Name] = strings.Join(profiles, " ")
 				refusals = append(refusals, checkProfileConstraints(configDir, yard, authored, batch.available, true))
 			}
 		}

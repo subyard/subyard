@@ -224,33 +224,23 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		inputs[path] = snapshot
 		return nil
 	}
-	var refusals []error
 	for _, name := range names {
 		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
 			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked})
 		if err != nil {
-			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
-			continue
+			return "", "", fmt.Errorf("yard %s: %w", name, err)
 		}
 		if draft && plan.request.action == "selection-repair" {
 			before, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
 				OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, ConfigLocked: locked})
 			if err != nil {
-				refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
-				continue
+				return "", "", err
 			}
 			if err := plan.cli.checkSelectionReduction(before, loaded, plan.request.name); err != nil {
-				refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
-				continue
+				return "", "", err
 			}
 		}
 		contexts = append(contexts, loaded)
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return "", "", err
-	}
-	for _, loaded := range contexts {
-		name := loaded.Context.YardName
 		for _, path := range loaded.AssetValidationInputs() {
 			if err := observe(path); err != nil {
 				return "", "", err

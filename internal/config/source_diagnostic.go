@@ -223,7 +223,7 @@ func sourceContext(path string, line int, key, role string, cause error) error {
 }
 
 func recognizedSettingKey(settings Catalog, name string) string {
-	name = canonicalSettingName(name)
+	name = CanonicalSettingName(name)
 	if len(name) <= 128 && ValidVariable(name) {
 		if _, ok := settings.LookupSetting(name); ok {
 			return name

@@ -44,7 +44,7 @@ func (prepared *preparedCommand) prepareLocalConfigBatch(ctx context.Context, re
 	}
 	content, err := loaded.Catalog.EditPersistentAssignmentsContent(path, baseline.Content, edits)
 	if err != nil {
-		return err
+		return configAuthoringFailure{home, err}
 	}
 	desired := config.PersistentFileSnapshot{Exists: true, Content: content}
 	prospective, err := cli.prepareConfigProspective(loaded, canonical[0], path, desired)
@@ -80,18 +80,21 @@ func checkLocalBatchAssignments(catalog config.Catalog, requests []configAuthori
 	assignments := make([]config.LocalBatchAssignment, len(requests))
 	refusals := make([]error, len(requests))
 	for index, request := range requests {
-		name := request.name
-		if definition, ok := catalog.LookupSetting(name); ok {
-			name = definition.Name
-		}
+		name := config.CanonicalSettingName(request.name)
 		first, repeated := seen[name]
-		if _, safe := domain.ConfigSettingName(name); safe && !repeated {
+		if !repeated {
 			seen[name] = index
 		}
 		var checks []error
 		var repeatedIDs error
 		if repeated {
-			checks = append(checks, configPublicRefusal(requests[first].name+" and "+request.name+" assign the same setting"))
+			message := "multiple arguments assign the same setting"
+			_, firstSafe := domain.ConfigSettingName(requests[first].name)
+			_, currentSafe := domain.ConfigSettingName(request.name)
+			if firstSafe && currentSafe {
+				message = requests[first].name + " and " + request.name + " assign the same setting"
+			}
+			checks = append(checks, configPublicRefusal(message))
 			assignments[first].Valid = false
 		}
 		assignment := &assignments[index]
@@ -123,15 +126,13 @@ func (cli *CLI) checkLocalBatchConstraints(loaded config.Loaded, scope config.Se
 	paths := loaded.Context.Paths
 	refusals := make([]error, len(assignments))
 	names := []string{loaded.Context.YardName}
+	var constraints []error
 	if scope != config.ScopeYard {
 		var err error
-		names, err = config.YardNames(paths.ConfigDir, paths.ConfigHome)
-		if err != nil {
-			return refusals, err
-		}
+		names, err = config.LocalBatchYardNames(paths.ConfigDir, paths.ConfigHome)
+		constraints = append(constraints, err)
 	}
 	environment := cli.configProspectiveEnvironment(loaded)
-	var constraints []error
 	for _, name := range names {
 		perAssignment, err := loaded.Catalog.CheckLocalBatchConstraints(config.LoadOptions{
 			Resources: cli.operationResourceRegistry, RepositoryRoot: cli.options.RepositoryRoot,

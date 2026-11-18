@@ -34,6 +34,9 @@ type configAuthoringRequest struct {
 // scopes may only remove a profile-only setting, which the loader ignores,
 // never assign it.
 func configAuthoringDefinition(catalog config.Catalog, action string, scope config.SettingScope, name string, syncable bool) (config.SettingDefinition, error) {
+	if action == "set" && catalog.RetiredSetting(name) {
+		return config.SettingDefinition{}, configPublicRefusal("setting is retired and can no longer be set")
+	}
 	if !config.IsProfileOnlySetting(name) || scope == config.ScopeShipped {
 		return catalog.ValidateSettingName(scope, name, syncable)
 	}
