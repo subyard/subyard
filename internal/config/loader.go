@@ -1217,7 +1217,13 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 		}
 		// Legacy Git SSH ports are read for migration, while new Git authoring
 		// still requires every selected setting to be syncable.
-		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, requireSyncable && assignment.name != "SSH_PORT"); err != nil {
+		err := settings.ValidateSetting(scope, assignment.name, assignment.value, requireSyncable && assignment.name != "SSH_PORT")
+		if err == nil && requireSyncable {
+			if definition, ok := settings.LookupSetting(assignment.name); ok && definition.Kind == SettingFile {
+				err = sourceError("", 0, assignment.name, "scalar settings", "store file settings under overrides/agents", nil)
+			}
+		}
+		if err != nil {
 			refusals = append(refusals, sourceContext(path, assignment.line, recognizedSettingKey(settings, assignment.name), "scalar settings", err))
 		}
 	}

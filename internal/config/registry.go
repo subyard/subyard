@@ -17,8 +17,8 @@ func YardNames(configHome string) ([]string, error) {
 	return discoverYardNames(configHome, false)
 }
 
-// LocalBatchYardNames includes the default and any other discoverable yards
-// even when a registration or enumeration fails.
+// LocalBatchYardNames includes discoverable yards with registration errors so
+// callers can load each yard and report the error against its name.
 func LocalBatchYardNames(configHome string) ([]string, error) {
 	return discoverYardNames(configHome, true)
 }
@@ -63,15 +63,19 @@ func discoverYardNames(configHome string, collect bool) ([]string, error) {
 	}
 	sort.Strings(discovered)
 	names := []string{"default"}
-	_, defaultErr := LocalYardSettingsFile(filepath.Join(configHome, "yards"), "default")
-	refusals = append(refusals, defaultErr)
+	if !collect {
+		_, err := LocalYardSettingsFile(filepath.Join(configHome, "yards"), "default")
+		refusals = append(refusals, err)
+	}
 	for _, name := range discovered {
 		if _, err := FindYardRegistrationFile(configHome, name); err != nil {
 			if errors.Is(err, ErrUnknownYard) {
 				continue
 			}
-			refusals = append(refusals, err)
-			continue
+			if !collect {
+				refusals = append(refusals, err)
+				continue
+			}
 		}
 		names = append(names, name)
 	}

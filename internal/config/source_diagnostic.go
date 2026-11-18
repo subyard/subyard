@@ -41,12 +41,14 @@ func (err *SourceError) Unwrap() error { return err.cause }
 // identified without exposing an absolute operator or repository path.
 func SourceDiagnostic(configHome string, err error) (string, bool) {
 	var messages []string
+	seen := map[string]bool{}
 	for _, source := range sourceErrors(err) {
 		message := source.diagnostic(configHome)
 		if source.ownerLocal && configHome == "" {
 			message = source.Error()
 		}
-		if !slices.Contains(messages, message) {
+		if !seen[message] {
+			seen[message] = true
 			messages = append(messages, message)
 		}
 	}

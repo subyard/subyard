@@ -165,11 +165,6 @@ func (cli *CLI) prepareConfigSyncPush(
 	if err != nil {
 		return nil, err
 	}
-	scalarEdit := len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset")
-	if scalarEdit && repository.ahead != 0 {
-		repository.cleanup()
-		return nil, errors.New("checkout contains unpublished commits; publish or reconcile them separately before editing a Git setting")
-	}
 	if repository.behind != 0 {
 		relation := configGitRelation(repository.ahead, repository.behind)
 		repository.cleanup()
@@ -177,6 +172,11 @@ func (cli *CLI) prepareConfigSyncPush(
 			"upstream is %s; run %s config sync pull before pushing",
 			relation, cli.options.Program,
 		)
+	}
+	scalarEdit := len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset")
+	if scalarEdit && repository.ahead != 0 {
+		repository.cleanup()
+		return nil, errors.New("checkout contains unpublished commits; publish or reconcile them separately before editing a Git setting")
 	}
 	options := configsync.Options{
 		SourceRoot:     record.Checkout,

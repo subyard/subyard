@@ -54,6 +54,9 @@ func (f *configGitAuthoringFixture) assertSetting(name, value string) {
 
 func TestConfigGitAuthoringPreservesLocalOverridesAndUnrelatedSourceRecords(t *testing.T) {
 	f := newConfigGitAuthoringFixture(t)
+	flat := filepath.Join(f.configHome, "yards/demo.env")
+	const flatContent = "DEV_UID=2296\nSSH_PORT=2399\n"
+	writeConfigCommandFile(t, flat, flatContent)
 	f.run(0, "config", "set", "DEV_UID", "2298", "--scope", "host", "--local", "--yes")
 	f.run(0, "config", "set", "E2E_VM_CPU", "3", "--scope", "shared", "--yes")
 	localPath := filepath.Join(f.configHome, "config.env")
@@ -76,6 +79,10 @@ func TestConfigGitAuthoringPreservesLocalOverridesAndUnrelatedSourceRecords(t *t
 	}
 	f.run(0, "config", "sync", "pull", "--yes")
 	f.assertSetting("DEV_UID", "2298")
+	if demo := loadConfigCommandContext(t, f.root, f.environment, "demo"); demo.Environment["DEV_UID"] != "2296" ||
+		string(mustReadConfigFixture(t, flat)) != flatContent {
+		t.Fatal("Git authoring or pull changed the flat local registration")
+	}
 	f.run(0, "config", "unset", "DEV_UID", "--scope", "host", "--yes")
 	f.assertSetting("DEV_UID", "2299")
 	f.run(0, "config", "unset", "DEV_UID", "--scope", "host", "--git", "--yes")

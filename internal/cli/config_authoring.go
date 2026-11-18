@@ -397,22 +397,27 @@ func parseConfigAuthoringRequests(
 	return []configAuthoringRequest{request}, nil
 }
 
-// A failed selected-yard load still permits inspection of other yards affected
-// by a shared or host edit. Keep the original refusal and inspect read-only.
+// A failed selected-yard load still permits checking arguments and inspecting
+// other yards affected by a shared or host edit.
 func (cli *CLI) collectConfigAuthoringRefusals(home, yard string, arguments []string, loadErr error) error {
-	if home == "" || !domain.SafeName(yard) {
-		return loadErr
-	}
 	args := configArguments(arguments)
 	if len(args) == 0 || !slices.Contains([]string{"set", "unset", "import", "edit"}, args[0]) {
 		return loadErr
 	}
 	requests, err := parseConfigAuthoringRequests(args[0], args[1:], false)
-	if err != nil || requests[0].scope == config.ScopeYard {
+	if err != nil {
 		return loadErr
 	}
+	refusals := []error{loadErr}
+	if args[0] == "set" || args[0] == "unset" {
+		_, argumentErrs := checkLocalBatchAssignments(cli.catalog, requests)
+		refusals = append(refusals, argumentErrs...)
+	}
+	if requests[0].scope == config.ScopeYard || home == "" || !domain.SafeName(yard) {
+		return domain.CollectRefusals(refusals...)
+	}
 	names, err := config.LocalBatchYardNames(home)
-	refusals := []error{loadErr, err}
+	refusals = append(refusals, err)
 	for _, name := range names {
 		if name == yard {
 			continue

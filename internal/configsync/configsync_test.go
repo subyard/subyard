@@ -390,6 +390,24 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 		!strings.Contains(err.Error(), "secret material") {
 		t.Fatalf("secret-like file setting was accepted: %v", err)
 	}
+
+	invalid := newSyncFixture(t, "owner-a")
+	invalid.writeSource("shared/config.env", "E2E_VM_CPU=invalid\n")
+	invalid.writeSource("hosts/owner-a/config.env", "GIT_USER_EMAIL=$PRIVATE_INPUT_MARKER\nDEV_SUDO=invalid\nAGENT_codex_RULES=/tmp/rules\n")
+	invalid.commit("independent source refusals")
+	_, err := BuildPlan(invalid.options(false))
+	if err == nil || strings.Contains(err.Error(), "PRIVATE_INPUT_MARKER") {
+		t.Fatalf("invalid inputs accepted or exposed: %v", err)
+	}
+	for _, want := range []string{
+		"shared/config.env:1: E2E_VM_CPU", "hosts/owner-a/config.env:1: GIT_USER_EMAIL",
+		"hosts/owner-a/config.env:2: DEV_SUDO", "hosts/owner-a/config.env:3: AGENT_codex_RULES",
+		"invalid boolean value", "store file settings under overrides/agents",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in %v", want, err)
+		}
+	}
 }
 
 func TestVersionedConfigSyncRequiresCacheAdoptionAndRestoresCacheDrift(t *testing.T) {
@@ -1052,12 +1070,9 @@ func TestVersionedConfigSyncUsesOperationLocalProfileCatalog(t *testing.T) {
 
 	fixture.writeSource("hosts/owner-a/config.env", "FIXTURE_PORT=invalid\n")
 	fixture.commit("invalid profile setting")
-	invalid, err := readSource(fixture.options(false), fixture.hostID, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateCandidate(fixture.options(false), invalid, Manifest{}, catalog); err == nil ||
-		!strings.Contains(err.Error(), "FIXTURE_PORT") {
+	if _, err := readSource(fixture.options(false), fixture.hostID, catalog); err == nil ||
+		!strings.Contains(err.Error(), "hosts/owner-a/config.env:1: FIXTURE_PORT") ||
+		!strings.Contains(err.Error(), "invalid port value") {
 		t.Fatalf("invalid profile setting error = %v", err)
 	}
 }

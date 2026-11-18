@@ -422,8 +422,8 @@ named in the loader code:
 
 - D1: the bootstrap chain, including command alias conflicts, stops at its first failed step.
 - D2: yard identity (name, registration, template) resolves before sources are selected.
-- D3: source files apply in precedence order. The first refused file stops evaluation after its
-  independent findings have been collected.
+- D3: source files apply in precedence order. A refused file contributes its independent findings
+  and leaves its values unapplied. Evaluation continues through the remaining source files.
 - D4: native target discovery covers source and command-override refusals only.
 - D5: unresolved integration roots select nothing for later checks.
 - D6: any earlier refusal (command override, asset source, integration, role or profile

@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -360,26 +362,23 @@ func validateCandidate(
 		}
 		return ""
 	}
-	shared, err := selectLocal("overrides/shared/config.env")
-	if err != nil {
+	shared, sharedErr := selectLocal("overrides/shared/config.env")
+	host, hostErr := selectLocal("config.env")
+	localYards, yardErr := candidateLocalYards(options.ConfigHome, source, excluded)
+	if err := domain.CollectRefusals(sharedErr, hostErr, yardErr); err != nil {
 		return err
 	}
-	host, err := selectLocal("config.env")
-	if err != nil {
-		return err
-	}
-	yardNames, err := candidateYardNames(options.ConfigHome, source, previous)
-	if err != nil {
-		return err
-	}
-	localYards := map[string]string{}
 	gitYards := map[string]string{}
+	yardNames := slices.DeleteFunc(slices.Sorted(maps.Keys(localYards)), func(name string) bool { return name == "default" })
 	assetYards := append([]string{"default"}, yardNames...)
 	for _, name := range assetYards {
 		target := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
-		localYards[name], err = selectLocal(target)
-		if err != nil {
-			return err
+		// SSH port migration may stage a new registration for a Git-only yard.
+		if localYards[name] == "" {
+			path := filepath.Join(options.ConfigHome, filepath.FromSlash(target))
+			if _, overridden := options.validationOverrides[path]; overridden {
+				localYards[name] = path
+			}
 		}
 		gitYards[name] = selectGit(target)
 	}

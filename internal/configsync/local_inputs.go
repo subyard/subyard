@@ -3,8 +3,10 @@ package configsync
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -107,14 +109,27 @@ func legacyLocalExclusions(configHome string, previous Manifest) (map[string]boo
 	return excluded, nil
 }
 
-func candidateYardNames(configHome string, source sourceSnapshot, previous Manifest) ([]string, error) {
-	seen := map[string]bool{}
+func observeLocalYardInput(configHome, name string) (localInputObservation, error) {
+	var selected localInputObservation
+	_, err := config.LocalYardSettingsFile(filepath.Join(configHome, "yards"), name, func(path string) (bool, error) {
+		relative, err := filepath.Rel(configHome, path)
+		if err != nil {
+			return false, err
+		}
+		observed, err := observeLocalInput(configHome, filepath.ToSlash(relative))
+		if observed.Exists {
+			selected = observed
+		}
+		return observed.Exists, err
+	})
+	return selected, err
+}
+
+func candidateLocalYards(configHome string, source sourceSnapshot, excluded map[string]bool) (map[string]string, error) {
+	names := map[string]bool{"default": true}
+	required := map[string]bool{"default": true}
 	for _, name := range source.yardNames {
-		seen[name] = true
-	}
-	excluded, err := legacyLocalExclusions(configHome, previous)
-	if err != nil {
-		return nil, err
+		names[name], required[name] = true, true
 	}
 	entries, err := os.ReadDir(filepath.Join(configHome, "yards"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -124,52 +139,46 @@ func candidateYardNames(configHome string, source sourceSnapshot, previous Manif
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() {
-			if strings.HasSuffix(name, ".env") {
-				yard := strings.TrimSuffix(name, ".env")
-				if domain.SafeName(yard) {
-					if _, err := config.LocalYardSettingsFile(filepath.Join(configHome, "yards"), yard); err != nil {
-						refusals = append(refusals, err)
-						continue
-					}
-				}
-				refusals = append(refusals, fmt.Errorf("legacy yard input %s must be migrated before versioned sync", name))
+			var flat bool
+			name, flat = strings.CutSuffix(name, ".env")
+			if !flat {
+				continue
 			}
-			continue
 		}
 		if !domain.SafeName(name) {
-			refusals = append(refusals, fmt.Errorf("invalid live yard directory %q", name))
+			refusals = append(refusals, fmt.Errorf("invalid live yard name %q", name))
 			continue
 		}
-		relative := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
-		observed, err := observeLocalInput(configHome, relative)
+		names[name] = true
+	}
+	localYards := make(map[string]string, len(names))
+	for _, name := range slices.Sorted(maps.Keys(names)) {
+		observed, err := observeLocalYardInput(configHome, name)
 		if err != nil {
 			refusals = append(refusals, err)
 			continue
 		}
-		if name != "default" && observed.Exists && !excluded[filepath.Join(configHome, filepath.FromSlash(relative))] {
-			seen[name] = true
+		path := filepath.Join(configHome, filepath.FromSlash(observed.Path))
+		if observed.Exists && !excluded[path] {
+			localYards[name] = path
+		} else if required[name] {
+			localYards[name] = ""
 		}
 	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return nil, err
-	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
+	return localYards, domain.CollectRefusals(refusals...)
 }
 
 func observeLocalInputs(configHome string, source sourceSnapshot, previous Manifest) ([]localInputObservation, error) {
-	paths := map[string]bool{"config.env": true, "overrides/shared/config.env": true, "yards/default/config.env": true}
-	paths[filepath.Base(config.YardResetMarkerPath(configHome, "default"))] = true
-	yards, err := candidateYardNames(configHome, source, previous)
+	paths := map[string]bool{"config.env": true, "overrides/shared/config.env": true}
+	excluded, err := legacyLocalExclusions(configHome, previous)
 	if err != nil {
 		return nil, err
 	}
-	for _, name := range yards {
-		paths[filepath.ToSlash(filepath.Join("yards", name, "config.env"))] = true
+	yards, yardErr := candidateLocalYards(configHome, source, excluded)
+	for name := range yards {
+		for _, path := range config.LocalYardSettingsCandidates("yards", name) {
+			paths[filepath.ToSlash(path)] = true
+		}
 		paths[filepath.Base(config.YardResetMarkerPath(configHome, name))] = true
 	}
 	for path := range source.files {
@@ -195,14 +204,16 @@ func observeLocalInputs(configHome string, source sourceSnapshot, previous Manif
 	}
 	sort.Strings(names)
 	observations := make([]localInputObservation, 0, len(names))
+	refusals := []error{yardErr}
 	for _, path := range names {
 		observed, err := observeLocalInput(configHome, path)
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
 		observations = append(observations, observed)
 	}
-	return observations, nil
+	return observations, domain.CollectRefusals(refusals...)
 }
 
 func guardDeletedGitYard(options Options, source sourceSnapshot, previous Manifest, path string) error {
@@ -214,7 +225,7 @@ func guardDeletedGitYard(options Options, source sourceSnapshot, previous Manife
 	if _, present := source.files[gitSettingsPath(localPath)]; present {
 		return nil
 	}
-	local, err := observeLocalInput(options.ConfigHome, localPath)
+	local, err := observeLocalYardInput(options.ConfigHome, name)
 	if err != nil {
 		return err
 	}
@@ -222,7 +233,7 @@ func guardDeletedGitYard(options Options, source sourceSnapshot, previous Manife
 	if err != nil {
 		return err
 	}
-	if local.Exists && !excluded[filepath.Join(options.ConfigHome, filepath.FromSlash(localPath))] {
+	if local.Exists && !excluded[filepath.Join(options.ConfigHome, filepath.FromSlash(local.Path))] {
 		return nil
 	}
 	return guardDeletedYardDefinition(options, path)

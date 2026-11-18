@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -3255,6 +3256,7 @@ func TestConfigReadsRefuseExpansionsInUserLayers(t *testing.T) {
 			for _, args := range [][]string{
 				{"config", "show", "GIT_USER_EMAIL"},
 				{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "yard", "--yes"},
+				{"config", "set", "GIT_USER_NAME", "Jane", "SSH_PORT", "BAD_PORT_MARKER", "--scope", "yard", "--yes"},
 			} {
 				var output bytes.Buffer
 				code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
@@ -3263,6 +3265,11 @@ func TestConfigReadsRefuseExpansionsInUserLayers(t *testing.T) {
 					!strings.Contains(output.String(), "Replace the parameter expansion or setting reference with its value") ||
 					strings.Contains(output.String(), "original") {
 					t.Fatalf("%v: exit=%d output=%s", args, code, &output)
+				}
+				if slices.Contains(args, "BAD_PORT_MARKER") &&
+					(!strings.Contains(output.String(), "SSH_PORT (scalar settings): invalid port value") ||
+						strings.Contains(output.String(), "BAD_PORT_MARKER")) {
+					t.Fatalf("batch diagnostics lost the invalid argument or exposed its value: %s", &output)
 				}
 			}
 			after, err := os.Stat(path)
@@ -3344,7 +3351,7 @@ func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
 
 func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
-	remote, _ := configBareSourceRepository(
+	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "DEV_UID=2297\nDEV_SUDO=1\n",
 	)
 	environment = append(environment,
@@ -3520,6 +3527,20 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 			!bytes.Equal(mustReadConfigFixture(t, configsync.ManifestPath(configHome)), cacheBefore) {
 			t.Fatal("refused edit changed the checkout, upstream or cache")
 		}
+	}
+	runConfigSyncGit(t, publisher, "pull", "-q", "--ff-only")
+	writeConfigCommandFile(t, filepath.Join(publisher, "shared/config.env"), "GIT_USER_NAME='Upstream'\n")
+	commitConfigSource(t, publisher, "Advance upstream independently")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	upstreamBefore = configSourceGitOutput(t, remote, "rev-parse", "HEAD")
+	if code := run("config", "set", "GIT_USER_NAME", "Jane", "--scope", "shared", "--git", "--yes"); code != 1 ||
+		!strings.Contains(stderr.String(), "upstream is diverged") {
+		t.Fatalf("diverged checkout: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if configSourceGitOutput(t, remote, "rev-parse", "HEAD") != upstreamBefore ||
+		!reflect.DeepEqual(snapshotConfigCheckout(t, checkout), localBefore) ||
+		!bytes.Equal(mustReadConfigFixture(t, configsync.ManifestPath(configHome)), cacheBefore) {
+		t.Fatal("diverged refusal changed the checkout, upstream or cache")
 	}
 	gone := remote + ".temporarily-unavailable"
 	if err := os.Rename(remote, gone); err != nil {

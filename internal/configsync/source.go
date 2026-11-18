@@ -103,16 +103,17 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	if err := validateTopLevelRoles(root); err != nil {
 		return sourceSnapshot{}, err
 	}
+	var refusals []error
 	if err := snapshot.readScope(
 		filepath.Join(root, "shared"), "overrides/shared/config.env",
 		"overrides/shared/agents", config.ScopeShared, allowedFiles, false,
 	); err != nil {
-		return sourceSnapshot{}, fmt.Errorf("shared source: %w", err)
+		refusals = append(refusals, fmt.Errorf("shared source: %w", err))
 	}
 	hostsRoot := filepath.Join(root, "hosts")
 	hostEntries, err := readOptionalDirectory(root, hostsRoot)
 	if err != nil {
-		return sourceSnapshot{}, fmt.Errorf("owner hosts: %w", err)
+		return sourceSnapshot{}, domain.CollectRefusals(append(refusals, fmt.Errorf("owner hosts: %w", err))...)
 	}
 	hostRoot := filepath.Join(root, "hosts", hostID)
 	hostPresent := false
@@ -124,22 +125,22 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	}
 	if hostPresent {
 		if _, err := readOptionalDirectory(root, hostRoot); err != nil {
-			return sourceSnapshot{}, fmt.Errorf("owner host %q: %w", hostID, err)
+			return sourceSnapshot{}, domain.CollectRefusals(append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))...)
 		}
 		if err := validateChildren(hostRoot, map[string]bool{
 			"config.env": false, "overrides": true, "yards": true,
 		}); err != nil {
-			return sourceSnapshot{}, fmt.Errorf("owner host %q: %w", hostID, err)
+			refusals = append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))
 		}
 		if err := snapshot.readConfig(
 			filepath.Join(hostRoot, "config.env"), "config.env", config.ScopeHost, false,
 		); err != nil {
-			return sourceSnapshot{}, fmt.Errorf("owner host %q: %w", hostID, err)
+			refusals = append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))
 		}
 		if err := snapshot.readOverrides(
 			filepath.Join(hostRoot, "overrides"), "overrides/host/agents", allowedFiles,
 		); err != nil {
-			return sourceSnapshot{}, fmt.Errorf("owner host %q overrides: %w", hostID, err)
+			refusals = append(refusals, fmt.Errorf("owner host %q overrides: %w", hostID, err))
 		}
 	}
 	yardsRoot := filepath.Join(hostRoot, "yards")
@@ -147,40 +148,38 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	if hostPresent {
 		entries, err = readOptionalDirectory(root, yardsRoot)
 		if err != nil {
-			return sourceSnapshot{}, fmt.Errorf("owner host %q yards: %w", hostID, err)
+			refusals = append(refusals, fmt.Errorf("owner host %q yards: %w", hostID, err))
 		}
 	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !domain.SafeName(name) {
-			return sourceSnapshot{}, fmt.Errorf("invalid versioned yard entry %q for host %s", name, hostID)
+			refusals = append(refusals, fmt.Errorf("invalid versioned yard entry %q for host %s", name, hostID))
+			continue
 		}
 		yardRoot := filepath.Join(yardsRoot, name)
 		if err := validateChildren(yardRoot, map[string]bool{
 			"config.env": false, "overrides": true,
 		}); err != nil {
-			return sourceSnapshot{}, fmt.Errorf("yard %s: %w", name, err)
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 		}
 		sourceConfig := filepath.Join(yardRoot, "config.env")
-		if _, err := os.Lstat(sourceConfig); err != nil && name != "default" {
-			if errors.Is(err, os.ErrNotExist) {
-				return sourceSnapshot{}, fmt.Errorf("yard %s has no config.env definition", name)
-			}
-			return sourceSnapshot{}, err
-		}
 		targetConfig := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
 		if err := snapshot.readConfig(sourceConfig, targetConfig, config.ScopeYard, name != "default"); err != nil {
-			return sourceSnapshot{}, fmt.Errorf("yard %s: %w", name, err)
+			refusals = append(refusals, err)
 		}
 		targetAssets := filepath.ToSlash(filepath.Join("yards", name, "overrides", "agents"))
 		if err := snapshot.readOverrides(
 			filepath.Join(yardRoot, "overrides"), targetAssets, allowedFiles,
 		); err != nil {
-			return sourceSnapshot{}, fmt.Errorf("yard %s overrides: %w", name, err)
+			refusals = append(refusals, fmt.Errorf("yard %s overrides: %w", name, err))
 		}
 		if name != "default" {
 			snapshot.yardNames = append(snapshot.yardNames, name)
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return sourceSnapshot{}, err
 	}
 	sort.Strings(snapshot.yardNames)
 	if err := snapshot.ensureTracked(); err != nil {
@@ -206,19 +205,16 @@ func (snapshot *sourceSnapshot) readScope(
 		}
 		return nil
 	}
-	if err := validateChildren(sourceRoot, map[string]bool{
+	childrenErr := validateChildren(sourceRoot, map[string]bool{
 		"config.env": false, "overrides": true,
-	}); err != nil {
-		return err
-	}
-	if err := snapshot.readConfig(
+	})
+	configErr := snapshot.readConfig(
 		filepath.Join(sourceRoot, "config.env"), targetConfig, scope, false,
-	); err != nil {
-		return err
-	}
-	return snapshot.readOverrides(
+	)
+	overrideErr := snapshot.readOverrides(
 		filepath.Join(sourceRoot, "overrides"), targetAssets, allowed,
 	)
+	return domain.CollectRefusals(childrenErr, configErr, overrideErr)
 }
 
 func (snapshot *sourceSnapshot) readConfig(
@@ -232,7 +228,7 @@ func (snapshot *sourceSnapshot) readConfig(
 	}
 	if content == nil {
 		if required {
-			return fmt.Errorf("%s is required", filepath.Base(source))
+			return fmt.Errorf("yard %s has no config.env definition", filepath.Base(filepath.Dir(source)))
 		}
 		return nil
 	}
@@ -240,21 +236,13 @@ func (snapshot *sourceSnapshot) readConfig(
 	if err != nil {
 		return err
 	}
-	names, err := config.AssignedSettingNames(filepath.ToSlash(label), content)
+	layer, err := snapshot.catalog.EvaluateLayer(bytes.NewReader(content), filepath.ToSlash(label), nil, scope, true)
 	if err != nil {
 		return err
 	}
-	for _, name := range names {
-		requireSyncable := name != "SSH_PORT"
-		definition, err := snapshot.catalog.ValidateSettingName(scope, name, requireSyncable)
-		if err != nil {
-			return err
-		}
-		if definition.Kind != config.SettingScalar {
-			return fmt.Errorf(
-				"file setting %s must be represented under overrides/agents, not config.env", name,
-			)
-		}
+	names := make([]string, 0, len(layer.Assignments))
+	for _, assignment := range layer.Assignments {
+		names = append(names, assignment.Name)
 	}
 	target = filepath.ToSlash(filepath.Join(config.GitSettingsRelativePath, target))
 	snapshot.files[target] = candidateFile{
