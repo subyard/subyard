@@ -11,7 +11,8 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func TestBubblewrapPolicyResumesPendingRecordWithoutDirectory(t *testing.T) {
+func bubblewrapPolicyFixture(t *testing.T) (string, string) {
+	t.Helper()
 	root := testkit.TempDir(t)
 	for _, dir := range []string{"records", "systemd/wants", "apparmor/policy/profiles", "run"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0755); err != nil {
@@ -21,12 +22,6 @@ func TestBubblewrapPolicyResumesPendingRecordWithoutDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	const receipt = "records/bwrap-apparmor-ownership"
-	testkit.WriteFile(t, filepath.Join(root, receipt+".pending"), []byte(fmt.Sprintf("%064d  unpriv_bwrap\n%064d  bwrap\n", 0, 0)), 0644)
-	for _, path := range []string{"apparmor/.ns_level", "restricted", "apparmor/.load"} {
-		testkit.WriteFile(t, filepath.Join(root, path), []byte("1\n"), 0644)
-	}
-	testkit.WriteFile(t, filepath.Join(root, "bwrap"), nil, 0755)
 	// Use ordinary files for the AppArmor and systemd endpoints. Keep the real
 	// ownership checks, pending cleanup, publication and post-publication check.
 	const lock = "if [ \"$mode\" != observe ]; then\n  exec"
@@ -44,6 +39,7 @@ func TestBubblewrapPolicyResumesPendingRecordWithoutDirectory(t *testing.T) {
 		"/proc/sys/kernel/apparmor_restrict_unprivileged_userns", `"$fixture/restricted"`,
 		"/run/subyard-bwrap-apparmor.lock", `"$fixture/run/lock"`,
 		"/usr/bin/bwrap", `"$fixture/bwrap"`,
+		"/usr/bin/socat", `"$fixture/socat"`,
 		`"0:0:$2"`, fmt.Sprintf(`"%d:%d:$2"`, os.Getuid(), os.Getgid()),
 		lock, `systemctl() {
   case "$1" in
@@ -61,11 +57,100 @@ load_missing() {
   cmp -s "$record" <(cd "$policy" && sha256sum "${names[@]}")
   touch "$fixture/loaded"
 }
-runuser() { test -f "$fixture/loaded"; }
+runuser() {
+  touch "$fixture/probed"
+  test -f "$fixture/loaded"
+}
+apt-get() { printf 'unexpected apt-get\n' >&2; return 1; }
 
 if [ "$mode" != observe ]; then
   exec`,
 	).Replace(bubblewrapPolicy)
+	return root, script
+}
+
+func TestBubblewrapPolicySkipsUnusedFreshPolicy(t *testing.T) {
+	root, script := bubblewrapPolicyFixture(t)
+	testkit.WriteFile(t, filepath.Join(root, "restricted"), []byte("1\n"), 0644)
+	testkit.WriteFile(t, filepath.Join(root, "apparmor/.ns_level"), []byte("0\n"), 0644)
+	for _, installed := range []bool{false, true} {
+		if installed {
+			testkit.WriteFile(t, filepath.Join(root, "bwrap"), nil, 0755)
+		}
+		for _, mode := range []string{"observe", "apply"} {
+			command := exec.Command("bash", "-c", script, "subyard", mode, "on", "dev", "0", "container", "0", root)
+			command.Env = append(os.Environ(), "BASH_ENV=/dev/null")
+			output, err := command.CombinedOutput()
+			if err != nil || len(output) != 0 {
+				t.Fatalf("%s with Bubblewrap installed=%t: %v\n%s", mode, installed, err, output)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "probed")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected Bubblewrap probe: %v", err)
+	}
+	command := exec.Command("bash", "-c", script, "subyard", "apply", "on", "dev", "0", "container", "1", root)
+	command.Env = append(os.Environ(), "BASH_ENV=/dev/null")
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "AppArmor is not in a yard policy namespace") ||
+		!strings.Contains(string(output), "the yard cannot load AppArmor profiles") {
+		t.Fatalf("selected Bubblewrap did not report both namespace and load endpoint refusals: %v\n%s", err, output)
+	}
+	if _, err := os.Stat(filepath.Join(root, "payload")); !os.IsNotExist(err) {
+		t.Fatalf("policy directory after refusal: %v", err)
+	}
+}
+
+func TestBubblewrapPolicyCollectsLegacyAndFreshRefusals(t *testing.T) {
+	root, script := bubblewrapPolicyFixture(t)
+	testkit.WriteFile(t, filepath.Join(root, "restricted"), []byte("1\n"), 0644)
+	testkit.WriteFile(t, filepath.Join(root, "apparmor/.ns_level"), []byte("0\n"), 0644)
+	testkit.WriteFile(t, filepath.Join(root, "bwrap"), nil, 0755)
+	legacy := filepath.Join(root, "payload/codex/apparmor")
+	if err := os.MkdirAll(legacy, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(root, "payload"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"legacy policy at " + legacy + " has no ownership record",
+		"AppArmor is not in a yard policy namespace",
+		"the yard cannot load AppArmor profiles",
+	}
+	for _, mode := range []string{"observe", "apply"} {
+		command := exec.Command("bash", "-c", script, "subyard", mode, "on", "dev", "1", "container", "1", root)
+		command.Env = append(os.Environ(), "BASH_ENV=/dev/null")
+		output, err := command.CombinedOutput()
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		if err == nil || len(lines) != len(want) {
+			t.Fatalf("%s did not report all refusals: %v\n%s", mode, err, output)
+		}
+		for i, refusal := range want {
+			if !strings.HasPrefix(lines[i], "Bubblewrap AppArmor: "+refusal+".") {
+				t.Fatalf("%s refusal %d: %q, want %q", mode, i+1, lines[i], refusal)
+			}
+		}
+	}
+	for _, path := range []string{"records/bwrap-apparmor-ownership", "records/bwrap-apparmor-ownership.pending",
+		"payload/bwrap-apparmor", "systemd/subyard-bwrap-apparmor.service", "loaded"} {
+		if _, err := os.Lstat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("unexpected policy change at %s: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		t.Fatalf("legacy policy was not preserved: %v", err)
+	}
+}
+
+func TestBubblewrapPolicyResumesPendingRecordWithoutDirectory(t *testing.T) {
+	root, script := bubblewrapPolicyFixture(t)
+	const receipt = "records/bwrap-apparmor-ownership"
+	testkit.WriteFile(t, filepath.Join(root, receipt+".pending"), []byte(fmt.Sprintf("%064d  unpriv_bwrap\n%064d  bwrap\n", 0, 0)), 0644)
+	for _, path := range []string{"apparmor/.ns_level", "restricted", "apparmor/.load"} {
+		testkit.WriteFile(t, filepath.Join(root, path), []byte("1\n"), 0644)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "bwrap"), nil, 0755)
 	command := exec.Command("bash", "-c", script, "subyard", "apply", "on", "dev", "0", "container", "1", root)
 	command.Env = append(os.Environ(), "BASH_ENV=/dev/null")
 	if output, err := command.CombinedOutput(); err != nil {

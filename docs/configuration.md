@@ -616,11 +616,12 @@ An interactive `codex` from an SSH or VS Code shell prefers upstream's shared ap
 - **Disconnects:** when a plain client's terminal dies during a slow tool, the tool finishes on the daemon
   and its result reaches the model. Under `--no-daemon` the tool stops with the client.
 
-On hosts with AppArmor user namespace restrictions, yard setup runs Bubblewrap as the yard
-developer and checks that it can create user and network namespaces. If the probe fails in a
-container yard, provisioning loads the distribution's `bwrap` and `unpriv_bwrap` profiles in the
-yard's own AppArmor namespace. The host-wide restriction stays enabled. This yard policy applies
-independently of which coding tools are selected, including Codex and Claude Code.
+When Codex or Claude Code is selected, yard setup runs Bubblewrap as the yard developer and checks
+that it can create user and network namespaces. If the probe fails in a container yard on a host
+with AppArmor user namespace restrictions, provisioning loads the distribution's `bwrap` and
+`unpriv_bwrap` profiles in the yard's verified AppArmor namespace. The host-wide restriction stays
+enabled. Setup only creates this policy for a selected Bubblewrap consumer and continues to
+reconcile any existing Subyard-owned policy after that consumer is deselected.
 
 The boot loader verifies the two profiles against the Subyard ownership record in
 `/var/lib/subyard/bwrap-apparmor-ownership` before loading either one. Setup repairs missing boot
