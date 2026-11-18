@@ -202,7 +202,7 @@ func TestTraceLinksAndPolicy(t *testing.T) {
 
 func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	r := pmetricotlp.NewExportRequest()
-	err := r.UnmarshalJSON([]byte(`{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"gauge","gauge":{"dataPoints":[{"asDouble":"NaN","attributes":[{"key":"numeric.value","value":{"doubleValue":"NaN"}}]}]}},{"name":"histogram","histogram":{"dataPoints":[{"count":"1","sum":"Infinity","min":"-Infinity","max":"Infinity","explicitBounds":["Infinity"],"bucketCounts":["1","0"]}]}},{"name":"exponential","exponentialHistogram":{"dataPoints":[{"count":"1","zeroThreshold":"NaN"}]}},{"name":"summary","summary":{"dataPoints":[{"count":"1","sum":1,"quantileValues":[{"quantile":0.5,"value":"NaN"}]}]}}]}]}]}`))
+	err := r.UnmarshalJSON([]byte(`{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"gauge","gauge":{"dataPoints":[{"asDouble":"NaN","attributes":[{"key":"gen_ai.usage.input_tokens","value":{"doubleValue":"NaN"}}]}]}},{"name":"histogram","histogram":{"dataPoints":[{"count":"1","sum":"Infinity","min":"-Infinity","max":"Infinity","explicitBounds":["Infinity"],"bucketCounts":["1","0"]}]}},{"name":"exponential","exponentialHistogram":{"dataPoints":[{"count":"1","zeroThreshold":"NaN"}]}},{"name":"summary","summary":{"dataPoints":[{"count":"1","sum":1,"quantileValues":[{"quantile":0.5,"value":"NaN"}]}]}}]}]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +211,10 @@ func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	attrs.PutDouble("private double key", 2)
 	attrs.PutBool("private boolean key", true)
 	attrs.PutInt("", 3)
+	attrs.PutInt("/home/fixture/private-notes", 4)
+	attrs.PutDouble("fixture.unlisted", 5)
+	attrs.PutBool("fixture.unlisted.flag", true)
+	attrs.PutBool("gen_ai.usage.output_tokens", true)
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: raw}
 	if err = SanitizeEnvelope(&e, DefaultPolicy()); err != nil {
@@ -222,11 +226,11 @@ func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	}
 	metrics := clean.Metrics().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
 	gauge := metrics.At(0).Gauge().DataPoints().At(0)
-	attribute, ok := gauge.Attributes().Get("numeric.value")
+	attribute, ok := gauge.Attributes().Get("gen_ai.usage.input_tokens")
 	if !math.IsNaN(gauge.DoubleValue()) || !ok || !math.IsNaN(attribute.Double()) {
 		t.Fatal("numeric special attribute or gauge changed")
 	}
-	if gauge.Attributes().Len() != 1 || e.Redactions != 4 {
+	if gauge.Attributes().Len() != 2 || e.Redactions != 7 || bytes.Contains(e.Protobuf, []byte("/home/fixture/private-notes")) {
 		t.Fatal("unsafe numeric attribute keys survived sanitization")
 	}
 	histogram := metrics.At(1).Histogram().DataPoints().At(0)

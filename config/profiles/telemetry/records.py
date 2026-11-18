@@ -32,6 +32,13 @@ selector phase final_complete acquired_at ready_at expires_at stopped_at last_se
 requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_memory_bytes
 vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes
 read_bytes write_bytes read_ops write_ops populated attribution_id'''.split())
+GAP_REASONS = set('''boot_changed_before_final correlation_generation_mismatch correlation_registration_capacity
+correlation_registration_conflict correlation_registration_invalid correlation_registration_unavailable
+cursor_retention_or_reset delegation_unavailable final_tail_missing managed_scope_unavailable observer_capacity
+process_final_counter_unavailable process_left_managed_scope producer_outbox_capacity run_manifest_capacity
+run_manifest_unavailable run_reservation_interrupted run_startup_unavailable scope_baseline_unavailable
+scope_manifest_missing scope_observation_unavailable scope_placement_unavailable scope_removed_before_final
+source_offline'''.split())
 IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}\Z')
 BODY_ID = re.compile(r'[A-Za-z0-9_.:/-]{1,512}')
 LABEL = re.compile(r'[A-Za-z0-9_.:/+@#-]{1,512}')
@@ -59,6 +66,8 @@ def clean(body):
     result = {}
     for key, value in body.items():
         if key not in FIELDS:
+            continue
+        if key == 'status' or (key == 'reason' and (not isinstance(value, str) or value not in GAP_REASONS)):
             continue
         if isinstance(value, str) and value:
             if key.endswith(('_time', '_at')) or key in ('coverage_start', 'coverage_end', 'last_seen'):

@@ -56,6 +56,9 @@ type Store struct {
 	closed          bool
 	queue           chan writeRequest
 	done            chan struct{}
+	outboxMu        sync.Mutex
+	outboxPath      string
+	outboxAfter     string
 }
 
 func privateDir(path string) error {
@@ -412,7 +415,10 @@ func (s *Store) commit(batch []writeRequest) error {
 }
 
 func samePayload(a, b Envelope) bool {
-	return a.SourceVersion == b.SourceVersion && a.SourceTime == b.SourceTime &&
+	// A stable producer event may acquire an unknown time on retry after an upgrade.
+	producerRetry := b.Encoding == "json" && b.ImportPolicyVersion == "" && b.OriginID == "producer:"+b.SourceID
+	sameTime := a.SourceTime == b.SourceTime || (producerRetry && b.SourceTime == unknownSourceTime)
+	return a.SourceVersion == b.SourceVersion && sameTime &&
 		bytes.Equal(a.Body, b.Body) && bytes.Equal(a.Protobuf, b.Protobuf)
 }
 func (s *Store) prune() error {
@@ -630,6 +636,11 @@ func sanitizeReplayPayload(e *Envelope) error {
 		body, decodeErr := decodeBody(e.Body)
 		if decodeErr != nil {
 			return decodeErr
+		}
+		if canonicalTimestamp(e.SourceTime) == "" {
+			// Older writers could format UTC years outside the RFC3339 range.
+			e.SourceTime = unknownSourceTime
+			e.Redactions++
 		}
 		clean, n, err := sanitizeRecord(Record{Schema: RecordSchema, SourceID: e.SourceID, EventID: e.EventID, SourceVersion: e.SourceVersion, SourceTime: e.SourceTime, Kind: e.Kind, Body: body})
 		if err != nil {

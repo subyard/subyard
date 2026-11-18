@@ -112,6 +112,15 @@ class OutboxTest(unittest.TestCase):
                 self.assertTrue(records.emit(root, 'run', body, 'source', 'PRIVATE timestamp', '.event-1'))
             self.assertEqual(records.read_private(files[0]), value)
 
+    def test_outbox_uses_closed_gap_reasons(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            self.assertTrue(records.emit(root, 'gap', {'reason': '/home/fixture/private-notes',
+                                                      'status': 'fixture@example.invalid'}, event_id='private'))
+            self.assertTrue(records.emit(root, 'gap', {'reason': 'source_offline'}, event_id='known'))
+            self.assertEqual(records.read_private(root/'outbox/private.json')['body'], {})
+            self.assertEqual(records.read_private(root/'outbox/known.json')['body'], {'reason': 'source_offline'})
+
     def test_invalid_sample_does_not_poison_outbox(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)

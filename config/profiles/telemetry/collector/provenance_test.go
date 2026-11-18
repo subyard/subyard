@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/testkit"
 	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
@@ -180,7 +181,7 @@ func TestCapturePolicyV1MigrationAndLegacyExport(t *testing.T) {
 func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := fixtureStore(t)
-	r := record("gap", map[string]any{"reason": "private body text", "observed_time": "not a timestamp"})
+	r := record("gap", map[string]any{"reason": "/home/fixture/private-notes", "status": "fixture@example.invalid", "observed_time": "not a timestamp"})
 	r.SourceID = strings.Repeat("s", 512)
 	r.SourceVersion = "private version text"
 	if err := store.Ingest(ctx, []Record{r}); err != nil {
@@ -215,7 +216,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(exported.Bytes()))
 	var producer Envelope
-	if err := decoder.Decode(&producer); err != nil || producer.SourceVersion != "" || producer.Redactions != 3 {
+	if err := decoder.Decode(&producer); err != nil || producer.SourceVersion != "" || producer.Redactions != 4 || string(producer.Body) != "{}" {
 		t.Fatalf("producer version and body were not removed: redactions=%d, err=%v", producer.Redactions, err)
 	}
 	for i, want := range []string{"", "2026-01-01T00:00:00.000000000Z", ""} {
@@ -255,5 +256,40 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	var count int
 	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 4 {
 		t.Fatalf("replay count=%d, err=%v", count, err)
+	}
+}
+
+func TestReplayLegacyOutOfRangeSourceTime(t *testing.T) {
+	ctx := context.Background()
+	store := fixtureStore(t)
+	r := record("gap", map[string]any{"reason": "source_offline"})
+	legacyTime, err := time.Parse(time.RFC3339Nano, "9999-12-31T23:59:59-01:00")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
+		SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: legacyTime.UTC().Format(timestampLayout),
+		Kind: r.Kind, Encoding: "json", PolicyVersion: PolicyVersion, Body: json.RawMessage(`{"reason":"source_offline"}`)}
+	if err := store.submit(ctx, []Envelope{legacy}); err != nil {
+		t.Fatal(err)
+	}
+	r.EventID = newID()
+	if err := store.Ingest(ctx, []Record{r}); err != nil {
+		t.Fatal(err)
+	}
+	var exported bytes.Buffer
+	if _, err := Export(ctx, store.db, &exported, 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	destination := fixtureStore(t)
+	for _, target := range []*Store{destination, store} {
+		if err := target.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	var sourceTime string
+	if err := destination.db.QueryRow("SELECT count(*), min(source_time) FROM records").Scan(&count, &sourceTime); err != nil || count != 2 || sourceTime != unknownSourceTime {
+		t.Fatalf("replayed count=%d, source time=%s, err=%v", count, sourceTime, err)
 	}
 }

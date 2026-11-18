@@ -329,8 +329,8 @@ The default policy excludes log bodies, prompt/response/tool content, arbitrary
 span/event/status text, command lines, environment and authentication data before
 any SQLite or spool write. Safe identifiers, schema URLs, timestamps, trace/span
 IDs, links and complete supported metric structures survive within that policy.
-Unknown arbitrary string attributes are removed; safe numeric usage attributes
-can remain. The exact policy identity and redaction count accompany every record.
+The attribute key allowlist applies to all value types. The exact policy identity
+and redaction count accompany every record.
 
 An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with explicit
 `attributes`, `span_names` and `event_names` allowlists. Sensitive attribute names

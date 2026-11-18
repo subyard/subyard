@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func Serve(ctx context.Context, s *Store, options Options) error {
@@ -168,6 +169,11 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 }
 
 func (s *Store) IngestOutbox(ctx context.Context, path string) error {
+	s.outboxMu.Lock()
+	defer s.outboxMu.Unlock()
+	if s.outboxPath != path {
+		s.outboxPath, s.outboxAfter = path, ""
+	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return err
@@ -175,68 +181,84 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 	count := 0
 	var invalid error
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") {
+		name := entry.Name()
+		if name <= s.outboxAfter || !strings.HasSuffix(name, ".json") {
 			continue
 		}
 		if count == 256 {
-			break
+			return invalid
 		}
-		target := filepath.Join(path, entry.Name())
-		info, err := os.Lstat(target)
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > s.limits.RequestBytes {
-			return errors.New("invalid outbox file")
-		}
-		f, err := os.OpenFile(target, os.O_RDONLY|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			return err
-		}
-		data, err := io.ReadAll(io.LimitReader(f, s.limits.RequestBytes+1))
-		f.Close()
-		if err != nil {
-			return err
-		}
-		var r Record
-		dec := json.NewDecoder(bytes.NewReader(data))
-		dec.UseNumber()
-		if err = dec.Decode(&r); err != nil {
-			invalid = errInvalidRecord
-			continue
-		}
-		if canonicalTimestamp(r.SourceTime) == "" {
-			// Match the producer's sentinel so a retry deduplicates even
-			// after the original spool file has been removed.
-			r.SourceTime = "0001-01-01T00:00:00Z"
-		}
-		if err = s.Ingest(ctx, []Record{r}); err != nil {
-			if errors.Is(err, errInvalidRecord) || errors.Is(err, errEventCollision) {
-				invalid = err
-				continue
-			}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		count++
-		current, err := os.Lstat(target)
-		if err != nil {
-			return err
-		}
-		if !os.SameFile(info, current) {
-			return errors.New("outbox changed during commit")
-		}
-		if err = os.Remove(target); err != nil {
-			return err
-		}
-		dir, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		err = dir.Sync()
-		dir.Close()
-		if err != nil {
-			return err
+		s.outboxAfter = name
+		if err := s.ingestOutboxFile(ctx, path, name); err != nil {
+			if errors.Is(err, ErrStorage) || errors.Is(err, ErrCapacity) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			invalid = err
 		}
 	}
+	s.outboxAfter = ""
 	return invalid
+}
+
+func (s *Store) ingestOutboxFile(ctx context.Context, dir, name string) error {
+	target := filepath.Join(dir, name)
+	before, err := os.Lstat(target)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() || before.Mode().Perm() != 0600 || before.Size() > s.limits.RequestBytes {
+		return errors.New("invalid outbox file")
+	}
+	f, err := os.OpenFile(target, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(before, info) || info.Mode().Perm() != 0600 || info.Size() > s.limits.RequestBytes {
+		return errors.New("invalid outbox file")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, s.limits.RequestBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > s.limits.RequestBytes {
+		return errors.New("invalid outbox file")
+	}
+	var r Record
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err = dec.Decode(&r); err != nil {
+		return errInvalidRecord
+	}
+	if canonicalTimestamp(r.SourceTime) == "" {
+		// Match the producer's sentinel for legacy spool files.
+		r.SourceTime = unknownSourceTime
+	}
+	if err = s.Ingest(ctx, []Record{r}); err != nil {
+		return err
+	}
+	current, err := os.Lstat(target)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(info, current) {
+		return errors.New("outbox changed during commit")
+	}
+	if err = os.Remove(target); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

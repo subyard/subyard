@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -17,6 +18,7 @@ import (
 const RecordSchema = "subyard.telemetry.record/v1"
 const ExportSchema = "subyard.telemetry.export/v1"
 const timestampLayout = "2006-01-02T15:04:05.000000000Z"
+const unknownSourceTime = "0001-01-01T00:00:00.000000000Z"
 
 type Record struct {
 	Schema        string         `json:"schema,omitempty"`
@@ -95,6 +97,13 @@ var allowedBodies = func() map[string]bool {
 	}
 	return m
 }()
+var gapReasons = strings.Fields(`boot_changed_before_final correlation_generation_mismatch correlation_registration_capacity
+correlation_registration_conflict correlation_registration_invalid correlation_registration_unavailable
+cursor_retention_or_reset delegation_unavailable final_tail_missing managed_scope_unavailable observer_capacity
+process_final_counter_unavailable process_left_managed_scope producer_outbox_capacity run_manifest_capacity
+run_manifest_unavailable run_reservation_interrupted run_startup_unavailable scope_baseline_unavailable
+scope_manifest_missing scope_observation_unavailable scope_placement_unavailable scope_removed_before_final
+source_offline`)
 var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true}
 
 func sanitizeRecord(r Record) (Record, int64, error) {
@@ -114,7 +123,7 @@ func sanitizeRecord(r Record) (Record, int64, error) {
 	r.SchemaVersion = 0
 	body := make(map[string]any, len(r.Body))
 	for key, value := range r.Body {
-		if !allowedBodies[key] {
+		if !allowedBodies[key] || key == "status" || (key == "reason" && !slices.Contains(gapReasons, stringValue(r.Body, key))) {
 			removed++
 			continue
 		}
