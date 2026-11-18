@@ -3,11 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -83,93 +81,21 @@ type projectExecution struct {
 	RequiresActiveTarget  bool
 }
 
-type projectRemovalObservation struct {
-	WorkspaceChecked         bool
-	WorkspacePresent         bool
-	EnvironmentChecked       bool
-	EnvironmentPresent       bool
-	EnvironmentID            string
-	StagedEnvironmentChecked bool
-	StagedEnvironmentPresent bool
-	DeviceChecked            bool
-	DevicePresent            bool
-}
+type projectRemovalObservation = application.ProjectRemovalObservation
 
-func (execution *projectExecution) removeActionPlan() (
-	domain.ActionID,
-	domain.ActionDelta,
-	error,
-) {
+func (execution *projectExecution) removeActionPlan() (domain.ActionID, domain.ActionDelta, error) {
 	if execution == nil || execution.Commit != projectCommitDelete {
 		return "", domain.ActionDelta{}, errors.New("project removal execution is required")
 	}
-	if err := execution.Record.Validate(execution.Record.ProjectID); err != nil {
-		return "", domain.ActionDelta{}, fmt.Errorf("validate project removal record: %w", err)
-	}
-	soft := execution.Environment["SUBYARD_PROJECT_REMOVE_SOFT"] == "1"
-	action := domain.ActionID("project.remove-workspace")
-	if execution.Record.Mode == domain.ProjectBind {
-		action = "project.bind-detach"
-	} else if soft {
-		action = "project.remove-soft"
-	}
-	consequences := application.ProjectConsequences("remove", execution.Record, soft)
-	if execution.Record.Target != "" && execution.Record.Target != "yard" {
-		consequences = append(consequences, "remove the project environment and staged environment data")
-	}
-	consequences = append(consequences, "delete project state only after physical cleanup succeeds")
-	return action, domain.ActionDelta{Changed: true, Consequences: consequences}, nil
+	return application.PlanProjectRemoval(execution.Record, execution.Environment["SUBYARD_PROJECT_REMOVE_SOFT"] == "1")
 }
 
-func (execution *projectExecution) actionPlan(commandName string) (
-	domain.ActionID,
-	domain.ActionDelta,
-	error,
-) {
+func (execution *projectExecution) actionPlan(commandName string) (domain.ActionID, domain.ActionDelta, error) {
 	if execution == nil {
 		return "", domain.ActionDelta{}, errors.New("project execution is required")
 	}
-	var action domain.ActionID
-	switch commandName {
-	case "sync":
-		action = "project.sync"
-	case "bind":
-		action = "project.bind"
-	case "clone":
-		action = "project.clone"
-	case "export":
-		action = "project.export-patch"
-	case "up":
-		action = "project.environment.up"
-		if execution.Environment["SUBYARD_PROJECT_REBUILD"] == "1" {
-			action = "project.environment.rebuild"
-		}
-	case "down":
-		action = "project.environment.down"
-	default:
-		return "", domain.ActionDelta{}, fmt.Errorf("command %q has no project action assessment", commandName)
-	}
-	delta := domain.ActionDelta{Changed: execution.ActionChanged}
-	if !delta.Changed {
-		return action, delta, nil
-	}
-	delta.Consequences = application.ProjectConsequences(commandName, execution.Record, false)
-	if execution.automaticCopy() && (commandName == "sync" || commandName == "clone") {
-		delta.Consequences = []string{fmt.Sprintf(
-			"%s %s to a new yard-owned copy with an available name based on %s",
-			commandName, execution.Record.HostPath, execution.RequestedName,
-		)}
-	}
-	if commandName == "down" {
-		delta.Consequences = []string{"stop the project environment"}
-	}
-	if commandName == "up" && action == "project.environment.rebuild" {
-		delta.Consequences = []string{"rebuild and recreate the owned project environment"}
-	}
-	if len(delta.Consequences) == 0 {
-		delta.Consequences = []string{"apply the prepared project action"}
-	}
-	return action, delta, nil
+	return application.PlanProjectAction(commandName, execution.Record, execution.ActionChanged,
+		execution.Environment["SUBYARD_PROJECT_REBUILD"] == "1", execution.automaticCopy(), execution.RequestedName)
 }
 
 func (cli *CLI) observeProjectAction(
@@ -187,38 +113,13 @@ func (cli *CLI) observeProjectAction(
 	case "sync", "clone":
 		return cli.observeProjectCopy(ctx, execution)
 	case "bind":
-		if execution.Loaded.Context.AccessKind == domain.AccessRemote {
-			return errors.New("bind is host-local; use sync or clone")
-		}
-		incusPort, _ := cli.statusPorts()
-		instance, err := incusPort.Instance(
-			ctx, execution.Loaded.Context.IncusProject, execution.Loaded.Context.YardInstanceName,
-		)
-		if err != nil {
-			return fmt.Errorf("inspect bind device: %w", err)
-		}
-		deviceName := state.WorkspaceDeviceFor(execution.Record)
-		current, exists := instance.LocalDevices[deviceName]
-		execution.bindDeviceConverged = exists
-		execution.bindMetadataConverged = false
-		if !exists {
-			execution.ActionChanged = true
-			return nil
-		}
-		desired := map[string]string{
-			"type": "disk", "source": execution.Record.HostPath,
-			"path": execution.Record.YardPath, "shift": "true",
-		}
-		if !maps.Equal(current, desired) {
-			return fmt.Errorf("instance device %q already exists with different configuration", deviceName)
-		}
-		converged, err := cli.projectMetadataConverged(ctx, execution)
-		if err != nil {
-			return err
-		}
-		execution.bindMetadataConverged = converged
-		execution.ActionChanged = !converged
-		return nil
+		instances, _ := cli.statusPorts()
+		runner := application.ProjectActionRunner{Yard: execution.Loaded.Context, Project: execution.Record,
+			Instances: instances, Data: cli.projectDataPlane()}
+		var err error
+		execution.ActionChanged, execution.bindDeviceConverged, execution.bindMetadataConverged, err =
+			runner.ObserveBind(ctx, execution.ActionChanged, execution.bindDeviceConverged, execution.bindMetadataConverged)
+		return err
 	case "export":
 		if execution.Record.Mode != domain.ProjectSync {
 			return fmt.Errorf("%s projects cannot be exported", execution.Record.Mode)
@@ -229,139 +130,29 @@ func (cli *CLI) observeProjectAction(
 		if err := execution.prepareSource(ctx, cli); err != nil {
 			return err
 		}
-		archive, err := execution.preparedArchive.Open(ctx, execution.Record.HostPath)
+		runner := application.ProjectActionRunner{Yard: execution.Loaded.Context, Project: execution.Record,
+			Data: cli.projectDataPlane(), PreparedArchive: execution.preparedArchive}
+		changed, live, source, err := runner.ObserveExport(ctx, execution.exportObservedTree)
 		if err != nil {
 			return err
-		}
-		source, err := application.ProjectArchiveTreeDigest(archive)
-		if err := errors.Join(err, archive.Close()); err != nil {
-			return err
-		}
-		live, err := application.ObserveProjectTree(ctx, cli.projectDataPlane(), execution.Loaded.Context, execution.Record.YardPath)
-		if err != nil {
-			return err
-		}
-		if execution.exportObservedTree != "" && live != execution.exportObservedTree && live != source {
-			return fmt.Errorf("%w: project export source changed after assessment", domain.ErrPlanStale)
 		}
 		if execution.exportObservedTree == "" {
 			execution.exportObservedTree = live
 			execution.exportSourceTree = source
 		}
-		execution.ActionChanged = live != source
+		execution.ActionChanged = changed
 		return nil
 	case "up", "down":
-		if execution.Record.Target == "" || execution.Record.Target == "yard" {
-			return fmt.Errorf("project %q has no project environment", execution.Record.Name)
-		}
-		box := "subyard-box-" + state.ProjectTechnicalID(execution.Record)
-		result, err := cli.projectDataPlane().Execute(
-			ctx, execution.Loaded.Context, ports.InstanceExecRequest{Command: []string{
-				"sh", "-c",
-				`if ! docker inspect "$1" >/dev/null 2>&1; then printf missing; else docker inspect -f '{{if .State.Running}}running{{else}}stopped{{end}}{{ "\t" }}{{ .Id }}{{ "\t" }}{{ index .Config.Labels "subyard.env" }}{{ "\t" }}{{ index .Config.Labels "subyard.project" }}{{ "\t" }}{{ index .Config.Labels "subyard.profile" }}' "$1"; fi`,
-				"subyard", box,
-			}},
-		)
-		if err != nil || result.ExitCode != 0 {
-			return fmt.Errorf("inspect project environment: %w", err)
-		}
-		observation := strings.TrimRight(string(result.Stdout), "\r\n")
-		execution.environmentObserved = observation
-		if execution.approvedEnvironment == "" {
-			execution.approvedEnvironment = observation
-		}
-		if observation == "missing" {
-			if commandName == "down" {
-				return fmt.Errorf("no box for %q", execution.Record.Name)
-			}
-			execution.ActionChanged = true
-			return nil
-		}
-		fields := strings.Split(observation, "\t")
-		if len(fields) != 5 || fields[1] == "" || fields[0] != "stopped" && fields[0] != "running" {
-			return errors.New("project environment probe returned invalid state")
-		}
-		if fields[2] != "1" || fields[3] != execution.Record.ProjectID ||
-			fields[4] != execution.Record.Target {
-			return fmt.Errorf("project environment %q is not owned by project %q and profile %q",
-				box, execution.Record.ProjectID, execution.Record.Target)
-		}
-		if execution.approvedEnvironment != "missing" {
-			before := strings.Split(execution.approvedEnvironment, "\t")
-			if len(before) != 5 || before[1] != fields[1] {
-				return fmt.Errorf("%w: project environment identity changed", domain.ErrPlanStale)
-			}
-		}
-		if commandName == "down" {
-			execution.ActionChanged = fields[0] == "running"
-			return nil
-		}
-		if execution.Environment["SUBYARD_PROJECT_REBUILD"] == "1" {
-			execution.ActionChanged = true
-			return nil
-		}
-		manifest, err := application.ProjectEnvironmentManifest(
-			execution.Record, execution.Profile, execution.SecretPath != "",
-		)
-		if err != nil {
-			return fmt.Errorf("build project environment manifest: %w", err)
-		}
-		manifest = append(manifest, '\n')
-		converged, err := cli.yardFileConverged(
-			ctx, execution, "/srv/env-meta/"+execution.Record.ProjectID+"/profile.json", manifest,
-		)
-		if err != nil {
-			return err
-		}
-		if !converged {
-			return errors.New("project environment manifest differs; run up --rebuild")
-		}
-		execution.ActionChanged = fields[0] != "running"
-		return nil
+		runner := application.ProjectActionRunner{Yard: execution.Loaded.Context, Project: execution.Record,
+			Data: cli.projectDataPlane()}
+		var err error
+		execution.ActionChanged, execution.environmentObserved, execution.approvedEnvironment, err =
+			runner.ObserveEnvironment(ctx, commandName, execution.Profile, execution.SecretPath != "",
+				execution.Environment["SUBYARD_PROJECT_REBUILD"] == "1", execution.ActionChanged,
+				execution.environmentObserved, execution.approvedEnvironment)
+		return err
 	default:
 		return nil
-	}
-}
-
-func (cli *CLI) projectMetadataConverged(
-	ctx context.Context,
-	execution *projectExecution,
-) (bool, error) {
-	payload, err := application.ProjectMetadata(execution.Record, execution.Loaded.Context.YardName)
-	if err != nil {
-		return false, fmt.Errorf("build project metadata: %w", err)
-	}
-	metadataPath := filepath.Join(filepath.Dir(execution.Record.YardPath), ".subyard-meta.json")
-	return cli.yardFileConverged(ctx, execution, metadataPath, payload)
-}
-
-func (cli *CLI) yardFileConverged(
-	ctx context.Context,
-	execution *projectExecution,
-	path string,
-	payload []byte,
-) (bool, error) {
-	digest := fmt.Sprintf("%x", sha256.Sum256(payload))
-	result, err := cli.projectDataPlane().Execute(
-		ctx, execution.Loaded.Context, ports.InstanceExecRequest{Command: []string{
-			"sh", "-c",
-			`if [ ! -f "$2" ]; then printf missing; exit 0; fi; actual=$(sha256sum -- "$2") || exit; actual=${actual%% *}; if [ "$actual" = "$1" ]; then printf match; else printf different; fi`,
-			"subyard", digest, path,
-		}},
-	)
-	if err != nil || result.ExitCode != 0 {
-		if err == nil {
-			err = fmt.Errorf("exit status %d", result.ExitCode)
-		}
-		return false, fmt.Errorf("inspect yard file %s: %w", path, err)
-	}
-	switch strings.TrimSpace(string(result.Stdout)) {
-	case "match":
-		return true, nil
-	case "missing", "different":
-		return false, nil
-	default:
-		return false, errors.New("yard file probe returned invalid state")
 	}
 }
 
@@ -376,127 +167,10 @@ func (cli *CLI) prepareProjectRemoval(
 	if err != nil {
 		return err
 	}
-	if execution.Record.Mode == domain.ProjectBind &&
-		execution.Loaded.Context.AccessKind == domain.AccessRemote {
-		return errors.New("remote yards cannot own bind projects")
-	}
-
-	needsRuntime := action == "project.remove-workspace" ||
-		(execution.Record.Target != "" && execution.Record.Target != "yard")
-	needsInstance := needsRuntime || action == "project.bind-detach"
-	if execution.Loaded.Context.AccessKind != domain.AccessRemote && needsInstance {
-		incusPort, _ := cli.statusPorts()
-		instance, instanceErr := incusPort.Instance(
-			ctx, execution.Loaded.Context.IncusProject, execution.Loaded.Context.YardInstanceName,
-		)
-		if instanceErr != nil {
-			return instanceErr
-		}
-		if needsRuntime && !strings.EqualFold(instance.Status, "running") {
-			return fmt.Errorf("yard %q must be running", execution.Loaded.Context.YardInstanceName)
-		}
-		if action == "project.bind-detach" {
-			execution.Removal.DeviceChecked = true
-			_, execution.Removal.DevicePresent = instance.Devices[state.WorkspaceDeviceFor(execution.Record)]
-		}
-	}
-
-	data := cli.projectDataPlane()
-	if execution.Record.Target != "" && execution.Record.Target != "yard" {
-		result, probeErr := data.Execute(ctx, execution.Loaded.Context, ports.InstanceExecRequest{
-			Command: []string{"docker", "info"},
-		})
-		if probeErr != nil || result.ExitCode != 0 {
-			if probeErr == nil {
-				probeErr = fmt.Errorf("exit status %d", result.ExitCode)
-			}
-			return fmt.Errorf("reach project environment before removal: %w", probeErr)
-		}
-		box := "subyard-box-" + state.ProjectTechnicalID(execution.Record)
-		present, probeErr := probeProjectRemovalPresence(
-			ctx, data, execution.Loaded.Context,
-			[]string{
-				"sh", "-c",
-				`if docker inspect "$1" >/dev/null 2>&1; then printf present; else printf missing; fi`,
-				"subyard", box,
-			},
-		)
-		if probeErr != nil {
-			return fmt.Errorf("inspect project environment before removal: %w", probeErr)
-		}
-		execution.Removal.EnvironmentChecked = true
-		execution.Removal.EnvironmentPresent = present
-		if present {
-			identity, err := data.Execute(ctx, execution.Loaded.Context, ports.InstanceExecRequest{Command: []string{"docker", "inspect", "-f", `{{ .Id }}{{ "\t" }}{{ index .Config.Labels "subyard.env" }}{{ "\t" }}{{ index .Config.Labels "subyard.project" }}{{ "\t" }}{{ index .Config.Labels "subyard.profile" }}`, box}})
-			if err != nil || identity.ExitCode != 0 {
-				return errors.New("cannot inspect removal environment identity")
-			}
-			fields := strings.Split(strings.TrimRight(string(identity.Stdout), "\r\n"), "\t")
-			if len(fields) != 4 || fields[0] == "" || fields[1] != "1" || fields[2] != execution.Record.ProjectID || fields[3] != execution.Record.Target {
-				return errors.New("removal environment ownership differs from prepared project")
-			}
-			execution.Removal.EnvironmentID = fields[0]
-		}
-		staged, err := probeProjectRemovalPresence(ctx, data, execution.Loaded.Context, []string{"sh", "-c", `if [ -e "$1" ] || [ -L "$1" ] || [ -e "$2" ] || [ -L "$2" ]; then printf present; else printf missing; fi`, "subyard", "/srv/env-secrets/" + execution.Record.ProjectID, "/srv/env-meta/" + execution.Record.ProjectID})
-		if err != nil {
-			return err
-		}
-		execution.Removal.StagedEnvironmentChecked, execution.Removal.StagedEnvironmentPresent = true, staged
-	}
-	if action == "project.remove-workspace" {
-		present, probeErr := probeProjectRemovalPresence(
-			ctx, data, execution.Loaded.Context,
-			[]string{
-				"sh", "-c", `if [ -d "$1" ]; then printf present; else printf missing; fi`,
-				"subyard", filepath.Dir(execution.Record.YardPath),
-			},
-		)
-		if probeErr != nil {
-			return fmt.Errorf("inspect project workspace before removal: %w", probeErr)
-		}
-		execution.Removal.WorkspaceChecked = true
-		execution.Removal.WorkspacePresent = present
-	}
-	if execution.approvedRemoval != nil {
-		before, after := *execution.approvedRemoval, execution.Removal
-		if before.WorkspaceChecked && !before.WorkspacePresent && after.WorkspacePresent ||
-			before.EnvironmentChecked && !before.EnvironmentPresent && after.EnvironmentPresent ||
-			before.DeviceChecked && !before.DevicePresent && after.DevicePresent ||
-			before.StagedEnvironmentChecked && !before.StagedEnvironmentPresent && after.StagedEnvironmentPresent ||
-			before.EnvironmentPresent && after.EnvironmentPresent && before.EnvironmentID != after.EnvironmentID {
-			return fmt.Errorf("%w: project removal now includes an unapproved target", domain.ErrPlanStale)
-		}
-	} else {
-		approved := execution.Removal
-		execution.approvedRemoval = &approved
-	}
-	return nil
-}
-
-func probeProjectRemovalPresence(
-	ctx context.Context,
-	data ports.YardExecutor,
-	yard domain.Context,
-	command []string,
-) (bool, error) {
-	if data == nil {
-		return false, errors.New("project data plane is required")
-	}
-	result, err := data.Execute(ctx, yard, ports.InstanceExecRequest{Command: command})
-	if err != nil {
-		return false, err
-	}
-	if result.ExitCode != 0 {
-		return false, fmt.Errorf("exit status %d", result.ExitCode)
-	}
-	switch strings.TrimSpace(string(result.Stdout)) {
-	case "present":
-		return true, nil
-	case "missing":
-		return false, nil
-	default:
-		return false, errors.New("presence probe returned invalid output")
-	}
+	instances, _ := cli.statusPorts()
+	runner := application.ProjectActionRunner{Yard: execution.Loaded.Context, Project: execution.Record,
+		Data: cli.projectDataPlane(), Instances: instances}
+	return runner.ObserveRemoval(ctx, action, &execution.Removal, &execution.approvedRemoval)
 }
 
 func (cli *CLI) prepareProjectExecution(

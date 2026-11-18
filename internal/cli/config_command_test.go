@@ -3242,34 +3242,33 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 	}
 }
 
-func TestConfigSetPreservesLayeredSettings(t *testing.T) {
+func TestConfigSetRefusesDynamicLayeredSettings(t *testing.T) {
 	const layered = `GIT_USER_NAME=Jane
 GIT_USER_EMAIL="${GIT_USER_NAME:-${DEV_USER:-Jane}}@example.invalid"
 GIT_USER_NAME=Jane
 `
 	for _, test := range []struct {
-		name, shared, host, yard, setting, value, refusal, want string
+		name, scope, shared, host, yard, setting, value, refusal string
 	}{
-		{name: "same value keeps duplicate records", shared: "DEV_USER=alice\n", host: layered,
-			setting: "GIT_USER_NAME", value: "Jane", want: layered},
+		{name: "same value with duplicate records", shared: "DEV_USER=alice\n", host: layered,
+			setting: "GIT_USER_NAME", value: "Jane", refusal: "config.env:2: GIT_USER_EMAIL"},
 		{name: "earlier layer changes fallback", shared: "DEV_USER=alice\n", host: layered,
-			setting: "GIT_USER_NAME", value: "Janet", refusal: "GIT_USER_EMAIL in yard default", want: layered},
+			setting: "GIT_USER_NAME", value: "Janet", refusal: "config.env:2: GIT_USER_EMAIL"},
 		{name: "earlier layer prevents conditional assignment", shared: "GIT_USER_NAME=Jane\n",
 			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:=fallback}@example.invalid"` + "\n",
-			setting: "GIT_USER_EMAIL", value: "new@example.invalid", want: "GIT_USER_EMAIL='new@example.invalid'\n"},
+			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "config.env:1: GIT_USER_EMAIL"},
 		{name: "earlier layer satisfies required parameter", shared: "GIT_USER_NAME=Jane\n",
 			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:?required}@example.invalid"` + "\n",
-			setting: "GIT_USER_EMAIL", value: "new@example.invalid", want: "GIT_USER_EMAIL='new@example.invalid'\n"},
+			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "config.env:1: GIT_USER_EMAIL"},
 		{name: "later named yard reads the setting", host: "GIT_USER_NAME=Jane\n",
 			yard:    `GIT_USER_EMAIL="${GIT_USER_NAME}@example.invalid"` + "\n",
-			setting: "GIT_USER_NAME", value: "Janet", refusal: "GIT_USER_EMAIL in yard neighbor", want: "GIT_USER_NAME=Jane\n"},
+			setting: "GIT_USER_NAME", value: "Janet", refusal: "yards/neighbor/config.env:1: GIT_USER_EMAIL"},
 		{name: "later yard introduces an empty setting", host: "GIT_USER_NAME=Jane\n",
 			yard:    `: "${GIT_USER_NAME:-${GIT_USER_EMAIL:=}}"` + "\n",
-			setting: "GIT_USER_NAME", refusal: "GIT_USER_EMAIL in yard neighbor", want: "GIT_USER_NAME=Jane\n"},
-		{name: "active shared assignment record",
-			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n",
-			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "GIT_USER_NAME in yard default",
-			want: `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n"},
+			setting: "GIT_USER_NAME", refusal: "yards/neighbor/config.env:1"},
+		{name: "masked shared assignment record", scope: "shared", host: "GIT_USER_NAME=local\n",
+			shared:  `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n",
+			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "overrides/shared/config.env:1: GIT_USER_EMAIL"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
@@ -3289,7 +3288,8 @@ GIT_USER_NAME=Jane
 			if test.value == "" {
 				args = []string{"config", "unset", test.setting}
 			}
-			args = append(args, "--scope", "host", "--yes")
+			scope := firstNonempty(test.scope, "host")
+			args = append(args, "--scope", scope, "--yes")
 			var stdout, stderr bytes.Buffer
 			program, err := New(Options{RepositoryRoot: root, Program: "yard", WorkingDir: root,
 				Arguments: args, Environment: environment, Stdout: &stdout, Stderr: &stderr})
@@ -3297,17 +3297,19 @@ GIT_USER_NAME=Jane
 				t.Fatal(err)
 			}
 			code := program.Run(context.Background())
-			if (test.refusal == "" && code != 0) || (test.refusal != "" &&
-				(code != 1 || !strings.Contains(stderr.String(), "edit changes effective setting "+test.refusal))) {
+			if code != 1 || !strings.Contains(stderr.String(), test.refusal) || !strings.Contains(stderr.String(), "edit the file manually") {
 				t.Fatalf("config authoring: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 			}
-			if stored, err := os.ReadFile(path); err != nil || string(stored) != test.want {
-				t.Fatalf("stored settings = %q, %v; want %q", stored, err, test.want)
+			if stored, err := os.ReadFile(path); err != nil || string(stored) != test.host {
+				t.Fatalf("stored host settings = %q, %v; want %q", stored, err, test.host)
 			}
-			if test.want == test.host {
-				after, err := os.Stat(path)
-				if err != nil || !os.SameFile(before, after) {
-					t.Fatalf("configuration file was replaced: %v", err)
+			after, err := os.Stat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("configuration file was replaced: %v", err)
+			}
+			if test.shared != "" {
+				if stored := mustReadConfigFixture(t, filepath.Join(configHome, "overrides/shared/config.env")); string(stored) != test.shared {
+					t.Fatalf("refusal changed shared settings: %q", stored)
 				}
 			}
 		})

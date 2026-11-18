@@ -8,7 +8,7 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-// Only the non-default approval mode enters provisioned package identity.
+// The implicit mode shares the same provisioned package identity as explicit off.
 func TestGitApprovalModeBindsOnlyProvisionedPackages(t *testing.T) {
 	root := testkit.TempDir(t)
 	provision := filepath.Join(root, "provision.sh")
@@ -27,8 +27,8 @@ func TestGitApprovalModeBindsOnlyProvisionedPackages(t *testing.T) {
 		return map[string]string{entries[0].ID: entries[0].Digest, entries[1].ID: entries[1].Digest}
 	}
 	unset, prompt, off := digests("unset"), digests("prompt"), digests("off")
-	if unset["hooked"] != prompt["hooked"] || unset["plain"] != prompt["plain"] {
-		t.Fatalf("default mode changed package identity: %v %v", unset, prompt)
+	if unset["hooked"] != off["hooked"] || unset["plain"] != off["plain"] {
+		t.Fatalf("default mode changed package identity: %v %v", unset, off)
 	}
 	if off["hooked"] == prompt["hooked"] {
 		t.Fatal("off mode did not change the provisioned package identity")

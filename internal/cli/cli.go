@@ -718,6 +718,20 @@ func (cli *CLI) Run(ctx context.Context) int {
 		loaded, err = cli.resolveContextAllowPending(yard)
 	} else {
 		loaded, err = cli.loadContext(yard)
+		var refusal *domain.ConfigRefusal
+		configArgs := configArguments(commandArguments)
+		if core && definition.Handler == "@config" && cli.activation == nil &&
+			errors.As(err, &refusal) && refusal.Code() == domain.ConfigTransactionInterrupted &&
+			len(configArgs) > 0 && configArgs[0] == "set" {
+			requests, parseErr := parseConfigAuthoringRequests("set", configArgs[1:], false)
+			if parseErr == nil && len(requests) > 1 && !requests[0].git {
+				// The batch must collect the storage refusal alongside its
+				// assignment refusals before it can prepare any write.
+				if pending, pendingErr := cli.resolveContextAllowPending(yard); pendingErr == nil && pending.Context.AccessKind == domain.AccessLocal {
+					loaded, err = pending, nil
+				}
+			}
+		}
 	}
 	if err == nil && loaded.Context.AccessKind == domain.AccessLocal && !readOnlyInvocation && definition.Handler != "@cleanup" && !commandHelpRequested(commandArguments) {
 		if err := pendingHardCleanup(loaded.Context); err != nil {

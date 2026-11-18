@@ -87,7 +87,9 @@ class Cleanup(unittest.TestCase):
         subprocess.run(['git', 'init', '-q', str(source)], check=True)
         (source / 'tracked').write_text('committed')
         subprocess.run(['git', '-C', str(source), 'add', 'tracked'], check=True)
-        subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@invalid', 'commit', '-qm', 'baseline'], check=True)
+        # Keep background maintenance from changing the tree during inspection.
+        subprocess.run(['git', '-C', str(source), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@invalid',
+                        '-c', 'maintenance.auto=false', 'commit', '-qm', 'baseline'], check=True)
         (source / 'tracked').write_text('dirty')
         (source / 'untracked').write_text('private task data')
         (source / 'untracked').chmod(0o600)

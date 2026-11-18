@@ -104,7 +104,10 @@ func BuildPlan(options Options) (Plan, error) {
 		SourceDigest: source.digest, HostID: hostID, InitializeHostID: initializeHostID,
 		PreviousGeneration: previous.Generation, Generation: previous.Generation + 1,
 		Adopt: options.Adopt, options: options, desired: source.files, previous: previous,
-		localDesired: localDesired,
+		localDesired: localDesired, scalarLayers: make(map[string][]config.ConfigurationLayer, len(legacyContexts)),
+	}
+	for _, loaded := range legacyContexts {
+		plan.scalarLayers[loaded.Context.YardName] = loaded.ConfigurationLayers
 	}
 	plan.localInputs, err = observeLocalInputs(options.ConfigHome, source, previous)
 	if err != nil {
@@ -384,7 +387,7 @@ func validateCandidate(
 		loaded, err := config.Load(config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
 			YardName: name, Environment: environment, DisablePrivate: true,
-			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides, ScalarEditPath: options.scalarEditPath,
+			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides,
 		})
 		if err != nil {
 			return fmt.Errorf("yard %s: %w", name, err)

@@ -1158,6 +1158,9 @@ EOF
     > "$SUBYARD_CONFIG_HOME/yards/default/config.env"
   chmod 0600 "$SUBYARD_CONFIG_HOME/config.env" \
     "$SUBYARD_CONFIG_HOME/yards/default/config.env"
+  if [ "$CODEX_PERMISSIONS" = 1 ]; then
+    printf 'CODING_TOOL_GIT_APPROVAL=prompt\n' >> "$SUBYARD_CONFIG_HOME/config.env"
+  fi
   if [ "$MANAGED_AGENTS" = 1 ]; then
     printf 'Managed fixture Claude instructions.\n' >"$STATE/claude-instructions.md"
     chmod 0600 "$STATE/claude-instructions.md"

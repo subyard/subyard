@@ -91,6 +91,8 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 type discardPolicy struct {
 	retired, ignored func(string) bool
 	report           func(name, value string)
+	batch            *localBatch
+	unavailable      *bool
 }
 
 func (policy discardPolicy) discards(name string) bool {
@@ -106,7 +108,7 @@ func (policy discardPolicy) ignores(name string) bool {
 func operatorDiscardPolicy(report func(name, value string), catalogs ...Catalog) discardPolicy {
 	return discardPolicy{ignored: IsProfileOnlySetting, report: report, retired: func(name string) bool {
 		for _, settings := range catalogs {
-			if settings.retiredSetting(name) {
+			if settings.RetiredSetting(name) {
 				return true
 			}
 		}
@@ -127,14 +129,15 @@ func applyEnvReaderObservedRetired(reader io.Reader, source string, values envir
 		if record.text == "" {
 			return nil
 		}
-		evaluation := envEvaluation{values: values, policy: policy}
-		if observer != nil {
-			evaluation.observe = func(name, value string) { observer(name, value, record.line) }
-		}
+		recordPolicy := policy
 		if discarded != nil {
-			evaluation.policy.report = func(name, value string) { discarded(name, value, record.line) }
+			recordPolicy.report = func(name, value string) { discarded(name, value, record.line) }
 		}
-		return evaluation.applyRecord(record.text)
+		return applyRecordRetired(record.text, values, func(name, value string) {
+			if observer != nil {
+				observer(name, value, record.line)
+			}
+		}, recordPolicy)
 	})
 }
 
@@ -219,20 +222,17 @@ func scanQuote(line string, quote byte) byte {
 	return quote
 }
 
-type envEvaluation struct {
-	values  environment
-	observe func(name, value string)
-	policy  discardPolicy
-}
-
-func (evaluation envEvaluation) applyRecord(record string) error {
+func applyRecordRetired(record string, values environment, observer func(name, value string), policy discardPolicy) error {
+	unavailable := false
+	policy.unavailable = &unavailable
+	record = strings.TrimSpace(record)
 	if strings.HasPrefix(record, ":") {
 		expression := strings.TrimSpace(strings.TrimPrefix(record, ":"))
 		value, expand := decodeValue(expression)
 		if !expand {
 			return nil
 		}
-		_, err := evaluation.expandValue(value)
+		_, err := expandValue(value, values, observer, policy)
 		return err
 	}
 	if strings.HasPrefix(record, "export ") {
@@ -246,18 +246,19 @@ func (evaluation envEvaluation) applyRecord(record string) error {
 	if !ValidVariable(name) {
 		return sourceError("", 0, "", "scalar settings", "invalid variable name", nil)
 	}
-	discard := evaluation.policy.discards(name)
+	discard := policy.discards(name)
 	if discard {
 		// Validate the old expression without allowing its assignments or nested
 		// defaults to affect current settings, provenance, or sync exports.
-		evaluation.values = cloneEnvironment(evaluation.values)
-		evaluation.observe = nil
+		values = cloneEnvironment(values)
+		observer = nil
+		policy.batch = nil
 	}
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
 	if expand {
-		expanded, err := evaluation.expandValue(value)
-		if err != nil && !(discard && evaluation.policy.ignores(name)) {
+		expanded, err := expandValue(value, values, observer, policy)
+		if err != nil && !(discard && policy.ignores(name)) {
 			return err
 		}
 		if err == nil {
@@ -265,20 +266,19 @@ func (evaluation envEvaluation) applyRecord(record string) error {
 		}
 	}
 	if discard {
-		if evaluation.policy.report != nil {
-			evaluation.policy.report(name, value)
+		if policy.report != nil {
+			policy.report(name, value)
 		}
 		return nil
 	}
-	evaluation.assign(name, value)
-	return nil
-}
-
-func (evaluation envEvaluation) assign(name, value string) {
-	evaluation.values[name] = value
-	if evaluation.observe != nil {
-		evaluation.observe(name, value)
+	values[name] = value
+	if policy.batch != nil {
+		policy.batch.setAvailable(name, !unavailable)
 	}
+	if observer != nil {
+		observer(name, value)
+	}
+	return nil
 }
 
 func decodeValue(value string) (string, bool) {
@@ -294,7 +294,12 @@ func decodeValue(value string) (string, bool) {
 	return value, true
 }
 
-func (evaluation envEvaluation) expandValue(value string) (string, error) {
+func expandValue(
+	value string,
+	values environment,
+	observer func(name, value string),
+	policy discardPolicy,
+) (string, error) {
 	if strings.Contains(value, "$(") || strings.ContainsRune(value, '`') {
 		return "", sourceError("", 0, "", "scalar settings", "command substitution is not allowed in config", nil)
 	}
@@ -320,7 +325,7 @@ func (evaluation envEvaluation) expandValue(value string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			expanded, err := evaluation.expandParameter(value[index+2 : end])
+			expanded, err := expandParameter(value[index+2:end], values, observer, policy)
 			if err != nil {
 				return "", err
 			}
@@ -337,7 +342,11 @@ func (evaluation envEvaluation) expandValue(value string) (string, error) {
 			index++
 			continue
 		}
-		result.WriteString(evaluation.values[value[index+1:end]])
+		name := value[index+1 : end]
+		if policy.batch != nil && !policy.batch.available(name) {
+			*policy.unavailable = true
+		}
+		result.WriteString(values[name])
 		index = end
 	}
 	return result.String(), nil
@@ -361,18 +370,28 @@ func parameterEnd(value string, start int) (int, error) {
 	return 0, sourceError("", 0, "", "scalar settings", "unterminated parameter expansion", nil)
 }
 
-func (evaluation envEvaluation) expandParameter(expression string) (string, error) {
+func expandParameter(
+	expression string,
+	values environment,
+	observer func(name, value string),
+	policy discardPolicy,
+) (string, error) {
 	name, operator, fallback := splitParameter(expression)
 	if !ValidVariable(name) {
 		return "", sourceError("", 0, "", "scalar settings", "invalid parameter name", nil)
 	}
-	discard := evaluation.policy.discards(name)
+	discard := policy.discards(name)
 	if discard {
 		// A default of a discarded name stays inside this expansion.
-		evaluation.values = cloneEnvironment(evaluation.values)
-		evaluation.observe = nil
+		values = cloneEnvironment(values)
+		observer = nil
+		policy.batch = nil
 	}
-	current := evaluation.values[name]
+	current := values[name]
+	if policy.batch != nil && !policy.batch.available(name) {
+		*policy.unavailable = true
+		return current, nil
+	}
 	switch operator {
 	case "":
 		return current, nil
@@ -380,23 +399,36 @@ func (evaluation envEvaluation) expandParameter(expression string) (string, erro
 		if current != "" {
 			return current, nil
 		}
-		if operator == ":?" && evaluation.policy.ignores(name) {
-			// A required check evaluates its message only on failure.
-			// For an ignored name the check itself is skipped.
+		if operator == ":?" && policy.ignores(name) {
+			// Operators never assign an ignored name, so a required check of
+			// it is ignored too, without evaluating its message.
 			return "", nil
 		}
-		expanded, err := evaluation.expandValue(fallback)
+		unavailable := false
+		fallbackPolicy := policy
+		fallbackPolicy.unavailable = &unavailable
+		expanded, err := expandValue(fallback, values, observer, fallbackPolicy)
 		if err != nil {
 			return "", err
 		}
+		*policy.unavailable = *policy.unavailable || unavailable
 		if operator == ":?" {
+			if unavailable {
+				return expanded, nil
+			}
 			if expanded == "" {
 				expanded = name + " is required"
 			}
 			return "", sourceError("", 0, recognizedSettingKey(Catalog{}, name), "scalar settings", "required parameter is unset", errors.New(expanded))
 		}
 		if operator == ":=" {
-			evaluation.assign(name, expanded)
+			values[name] = expanded
+			if policy.batch != nil {
+				policy.batch.setAvailable(name, !unavailable)
+			}
+			if observer != nil {
+				observer(name, expanded)
+			}
 		}
 		return expanded, nil
 	default:

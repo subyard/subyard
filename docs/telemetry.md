@@ -71,8 +71,9 @@ can register the same managed run without changing native lease requests.
 Direct Android broker invocations inherit the same context from the launcher.
 
 On GNU/Linux, the shipped Codex provisioning hook also reconciles the system
-`bubblewrap` dependency used by Codex's tool sandbox. Its readiness check runs
-`bwrap --version` as the developer account before accepting the installation.
+`bubblewrap` dependency used by Codex's tool sandbox. Codex readiness runs
+`bwrap --version` as the developer account before accepting the installation. On
+affected hosts, yard provisioning also probes actual user and network namespace creation.
 
 `--agent-version` can record a known version. Task, project, worktree, yard and host
 identifiers are optional explicit metadata. Nested managed launches inherit their

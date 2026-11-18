@@ -14,7 +14,18 @@ import (
 // YardNames returns the configured yard names without evaluating their files.
 // The default context is always first; duplicate private/installed entries collapse.
 func YardNames(configDir, configHome string) ([]string, error) {
+	return discoverYardNames(configDir, configHome, false)
+}
+
+// LocalBatchYardNames includes the default and any other discoverable yards
+// even when a registration or enumeration fails.
+func LocalBatchYardNames(configDir, configHome string) ([]string, error) {
+	return discoverYardNames(configDir, configHome, true)
+}
+
+func discoverYardNames(configDir, configHome string, collect bool) ([]string, error) {
 	seen := map[string]struct{}{}
+	var refusals []error
 	for _, root := range []struct {
 		directory   string
 		allowNested bool
@@ -28,7 +39,11 @@ func YardNames(configDir, configHome string) ([]string, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			if !collect {
+				return nil, err
+			}
+			refusals = append(refusals, err)
+			continue
 		}
 		for _, entry := range entries {
 			name := ""
@@ -57,11 +72,15 @@ func YardNames(configDir, configHome string) ([]string, error) {
 			if errors.Is(err, ErrUnknownYard) {
 				continue
 			}
-			return nil, err
+			if !collect {
+				return nil, err
+			}
+			refusals = append(refusals, err)
+			continue
 		}
 		names = append(names, name)
 	}
-	return names, nil
+	return names, domain.CollectRefusals(refusals...)
 }
 
 func YardFileCandidates(configDir, configHome, name string) []string {

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -102,22 +101,16 @@ func TestRetiredSettingsStayIsolatedDuringCatalogAuthoring(t *testing.T) {
 		t.Fatal(err)
 	}
 	value := ""
-	edited, err := catalog.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value)
-	if err != nil || string(edited) != "ENVIRONMENT_PROFILES=''\nREMOVED_PORT=${ENVIRONMENT_PROFILES:=removed-profile}\n" {
-		t.Fatalf("discarded default recaptured selection: %s %v", edited, err)
+	_, err = catalog.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value)
+	if err == nil || !strings.Contains(err.Error(), "edit the file manually") {
+		t.Fatalf("preview accepted the retired record: %v", err)
 	}
-	if err := catalog.WritePersistentAssignmentIfUnchanged(home, path, "ENVIRONMENT_PROFILES", &value, before, func() error { return fmt.Errorf("guard refused") }); err == nil {
-		t.Fatal("catalog authoring skipped its locked guard")
+	err = catalog.WritePersistentAssignmentIfUnchanged(home, path, "ENVIRONMENT_PROFILES", &value, before)
+	if err == nil || !strings.Contains(err.Error(), "edit the file manually") {
+		t.Fatalf("write accepted the retired record: %v", err)
 	}
 	unchanged, err := os.ReadFile(path)
 	if err != nil || string(unchanged) != content {
-		t.Fatal("refused authoring changed settings")
-	}
-	if err := catalog.WritePersistentAssignmentIfUnchanged(home, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil || string(after) != string(edited) {
-		t.Fatal("catalog authoring differs from its approved preview")
+		t.Fatalf("refused authoring changed settings: %q, %v", unchanged, err)
 	}
 }

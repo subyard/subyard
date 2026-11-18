@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,6 +22,22 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestProjectMetadataRequestRejectsOutOfRangeUID(t *testing.T) {
+	uids := []int{-1}
+	if strconv.IntSize == 64 {
+		overflow := int64(math.MaxUint32) + 1
+		uids = append(uids, int(overflow))
+	}
+	for _, uid := range uids {
+		executor := &testkit.Incus{}
+		runtime := Runtime{Executor: executor, Yard: domain.Context{DevUID: uid}}
+		_, err := runtime.metadataRequest(context.Background(), "inspect", &projectMetadataPlan{})
+		if err == nil || len(executor.ExecCalls) != 0 {
+			t.Fatalf("out-of-range UID %d: got %d guest calls and error %v", uid, len(executor.ExecCalls), err)
+		}
+	}
+}
 
 type metadataFileExecutor struct{ root string }
 

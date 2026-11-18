@@ -167,7 +167,7 @@ func FileMetadata(info os.FileInfo) string {
 func (err *SourceError) diagnostic(configHome string) string {
 	path := err.Path
 	role := err.Role
-	if configHome != "" && path != "" {
+	if configHome != "" && filepath.IsAbs(path) {
 		relative, relErr := filepath.Rel(filepath.Clean(configHome), filepath.Clean(path))
 		if relErr == nil && relative != ".." && !filepath.IsAbs(relative) &&
 			!strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
@@ -223,7 +223,7 @@ func sourceContext(path string, line int, key, role string, cause error) error {
 }
 
 func recognizedSettingKey(settings Catalog, name string) string {
-	name = canonicalSettingName(name)
+	name = CanonicalSettingName(name)
 	if len(name) <= 128 && ValidVariable(name) {
 		if _, ok := settings.LookupSetting(name); ok {
 			return name

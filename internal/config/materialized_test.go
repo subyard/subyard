@@ -19,8 +19,8 @@ func TestMaterializationUsesGitApprovalVariantForShippedSource(t *testing.T) {
 	for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
 		values := map[string]string{"CODING_TOOL_INTEGRATIONS": "sample"}
 		for _, test := range []struct{ mode, source, want string }{
-			{"", prompt, prompt}, {"prompt", prompt, prompt}, {"off", prompt, off},
-			{"prompt", prompt, prompt}, {"off", "/override.json", "/override.json"}, {"off", "", ""},
+			{"", prompt, off}, {"prompt", prompt, prompt}, {"off", prompt, off},
+			{"off", "/override.json", "/override.json"}, {"off", "", ""},
 		} {
 			values["CODING_TOOL_GIT_APPROVAL"] = test.mode
 			values["AGENT_sample_CONFIG"] = test.source

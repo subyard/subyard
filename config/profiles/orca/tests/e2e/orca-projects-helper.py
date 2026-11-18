@@ -247,10 +247,13 @@ def stock_probe(arguments):
 
         with tempfile.TemporaryDirectory(prefix="subyard-orca-stock-probe.") as directory:
             root = Path(directory)
+            # Both serve and offline profile recovery can launch Electron. The
+            # disposable profile and its loopback server need no Chromium sandbox.
             environment = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": str(root / "home"),
                            "XDG_CONFIG_HOME": str(root / "config"),
                            "XDG_DATA_HOME": str(root / "data"),
-                           "XDG_STATE_HOME": str(root / "state")}
+                           "XDG_STATE_HOME": str(root / "state"),
+                           "ORCA_ELECTRON_NO_SANDBOX": "1"}
             for path in environment.values():
                 if path.startswith(directory):
                     Path(path).mkdir(mode=0o700)
@@ -299,7 +302,7 @@ def stock_probe(arguments):
                 log = os.open(server_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
                 try:
                     server = subprocess.Popen(
-                        [arguments.binary, "serve", "--no-pairing", "--port", str(port)],
+                        [arguments.binary, "serve", "--no-pairing", "--bind", "127.0.0.1", "--port", str(port)],
                         env=environment, stdout=log, stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
@@ -381,6 +384,9 @@ def stock_probe(arguments):
         return 0
     except SafeRpcError as error:
         print(f"orca-stock-probe: {phase}: {error}", file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as error:
+        print(f"orca-stock-probe: {phase}: stock CLI exited with status {error.returncode}", file=sys.stderr)
         return 1
     except Exception:
         # CLI output, profile exports and upstream exceptions may contain private state.

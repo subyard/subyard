@@ -261,6 +261,28 @@ func (runtime Runtime) AppliedIntegrationConfiguration(ctx context.Context) (App
 	return AppliedIntegrationConfiguration{Selected: observed.Selected, Settings: settings, Installed: observed.Installed, Identity: identity, Diagnostics: observed.Diagnostics}, nil
 }
 
+// withAppliedIntegrationSettings builds the runtime view of installed inputs.
+func (runtime Runtime) withAppliedIntegrationSettings(settings, identity map[string]string) (Runtime, error) {
+	catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
+	if err != nil {
+		return Runtime{}, err
+	}
+	environment := catalog.WithAppliedIntegrationInitSettings(runtimeEnvironment(runtime.Environment), settings)
+	if user, ok := identity["DEV_USER"]; ok {
+		uid, err := strconv.Atoi(identity["DEV_UID"])
+		if err != nil {
+			return Runtime{}, errors.New("invalid applied developer UID")
+		}
+		runtime.Yard.DevUser, runtime.Yard.DevUID = user, uid
+		maps.Copy(environment, identity)
+	}
+	runtime.Environment = make([]string, 0, len(environment))
+	for name, value := range environment {
+		runtime.Environment = append(runtime.Environment, name+"="+value)
+	}
+	return runtime, nil
+}
+
 // CheckAppliedGuestIdentity refuses identity authoring when no independent owner
 // can keep the installed consumers observable until ordinary init applies it.
 func (runtime Runtime) CheckAppliedGuestIdentity(ctx context.Context) error {
@@ -321,11 +343,13 @@ func (runtime Runtime) integrationScopeFromInputs(entries []integrationArtifact,
 		uid = 1000
 	}
 	payload, err := json.Marshal(struct {
-		UID       int                   `json:"uid"`
-		Allows    string                `json:"allows"`
-		Sources   string                `json:"sources,omitempty"`
-		Artifacts []integrationArtifact `json:"artifacts"`
-	}{UID: uid, Sources: sourceBinding, Allows: runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), Artifacts: entries})
+		UID        int                   `json:"uid"`
+		Allows     string                `json:"allows"`
+		Bubblewrap string                `json:"bubblewrap,omitempty"`
+		Sources    string                `json:"sources,omitempty"`
+		Artifacts  []integrationArtifact `json:"artifacts"`
+	}{UID: uid, Sources: sourceBinding, Allows: runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"),
+		Bubblewrap: runtime.environmentValue("BWRAP_APPARMOR"), Artifacts: entries})
 	if err != nil {
 		return "", nil, err
 	}
@@ -408,9 +432,6 @@ func (runtime Runtime) integrationPrecondition(ctx context.Context) (ports.Insta
 	}
 	if runtime.Executor == nil {
 		return ports.InstanceInfo{}, errors.New("Incus executor is required")
-	}
-	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
-		return ports.InstanceInfo{}, firstError(err, errIntegrationSubstrateUnavailable)
 	}
 	return state.Instance, nil
 }
@@ -531,9 +552,9 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 				return nil, err
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
-			// Only off adds a package digest input, preserving the default identity.
+			// Preserve both installed mode identities across the default change.
 			// Home template changes are also tracked by their file artifact digest.
-			if runtime.environmentValue("CODING_TOOL_GIT_APPROVAL") == "off" {
+			if config.GitApprovalOff(runtime.environmentValue("CODING_TOOL_GIT_APPROVAL")) {
 				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
 			}
 		}
@@ -765,10 +786,22 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase string) (IntegrationPlan, integrationObservation, error) {
 	return runtime.observeIntegrationsWithSourceReader(ctx, phase, runtime.SourceReader)
 }
-func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (IntegrationPlan, integrationObservation, error) {
+func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (_ IntegrationPlan, _ integrationObservation, refusal error) {
 	instance, err := runtime.integrationPrecondition(ctx)
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
+	}
+	// Service ownership is independent of the structured documents and integration
+	// inventory. A refusal in any of those checks must still report service refusals.
+	servicesObserved := false
+	defer func() {
+		if refusal != nil && !servicesObserved {
+			_, _, serviceErr := runtime.integrationServices(ctx, "observe")
+			refusal = domain.CollectRefusals(refusal, serviceErr)
+		}
+	}()
+	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
+		return IntegrationPlan{}, integrationObservation{}, firstError(err, errIntegrationSubstrateUnavailable)
 	}
 	entries, err := runtime.integrationArtifactsWithSourceReader(phase, reader)
 	if err != nil {
@@ -917,19 +950,31 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	plan.Changed = plan.Changed || !ready
 	fingerprints = append(fingerprints, fmt.Sprint(ready))
 	plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	servicesObserved = true
 	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
 	if err != nil {
 		return plan, observed, err
 	}
 	plan.Changed = plan.Changed || servicesChanged
 	fingerprints = append(fingerprints, serviceFingerprint)
-	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "deselected managed services inactive; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
+	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
 	plan.fingerprints = slices.Clone(fingerprints)
 	plan.pendingOnly = observed.Pending && !plan.Changed
 	plan.Changed = plan.Changed || observed.Pending
 	if plan.Changed {
 		plan.Steps = []string{reconcileIntegrationsStep(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))}
+		switch {
+		case strings.Contains(serviceFingerprint, "bwrap=retire\n"):
+			plan.Steps = append(plan.Steps, "disable the yard's Bubblewrap boot loader and unload its two verified AppArmor profiles")
+		case strings.Contains(serviceFingerprint, "bwrap=enable\n"), strings.Contains(serviceFingerprint, "bwrap=repair\n"):
+			plan.Steps = append(plan.Steps, "load the two verified Bubblewrap AppArmor profiles inside this yard and enable their boot loader as needed")
+		case strings.Contains(serviceFingerprint, "bwrap=conditional\n"):
+			plan.Steps = append(plan.Steps, "if Bubblewrap still fails after package installation, load the two distribution AppArmor profiles inside this yard and enable their boot loader")
+		}
+		if strings.Contains(serviceFingerprint, "bwrap=cleanup\n") {
+			plan.Steps = append(plan.Steps, "clear the interrupted Bubblewrap policy ownership record")
+		}
 		for _, step := range plan.PersistOperationSteps(runtime.Yard.IncusProject + "/" + runtime.Yard.YardInstanceName) {
 			plan.Steps = append(plan.Steps, step.Consequence)
 		}
@@ -1480,7 +1525,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 		return runtime.storeAppliedIntegrationSettings(ctx)
 	}
 	execution := runtime
-	if err := runtime.retireIntegrationServices(ctx); err != nil {
+	if err := runtime.reconcileIntegrationServices(ctx); err != nil {
 		return err
 	}
 	entries, err := runtime.integrationArtifactsPhase("apply")
@@ -1577,6 +1622,11 @@ func (runtime Runtime) PrepareAppliedIntegrationSettings(ctx context.Context) (p
 	}
 	if !configuration.Installed || configuration.Settings != nil {
 		return nil, nil
+	}
+	// Retain the installed projection for revalidation and publication as well.
+	runtime, err = runtime.withAppliedIntegrationSettings(configuration.Settings, configuration.Identity)
+	if err != nil {
+		return nil, err
 	}
 	plan, observed, err := runtime.observeIntegrations(ctx)
 	if err != nil {

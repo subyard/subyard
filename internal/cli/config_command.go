@@ -111,14 +111,15 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 				"  validate  check selected or all local configuration schemas without a successful base load (read-only)\n"+
 				"  reduce-selection  during unfinished activation, store only a reduced persistent optional selection; sealed-owner recovery requires separate consent\n"+
 				"  repair-alias  canonicalize one to four explicit non-sensitive alias choices in one local scalar file; release readiness requires a separate assessment\n"+
-				"  set     save a typed scalar locally (default/--local) or commit/push it (--git); with --git, several SETTING VALUE pairs share one commit\n"+
+				"  set     save SETTING VALUE pairs in one atomic local write (default/--local) or one commit and push (--git)\n"+
 				"  unset   remove a local scalar override or a Git assignment (--git)\n"+
 				"  import  save a typed file locally or commit/push it (--git)\n"+
 				"  edit    edit a typed file with VISUAL/EDITOR; --git commits and pushes\n"+
 				"  repair-registration <yard> [--check] [--yes]  preserve a shadowed flat registration in recovery\n"+
 				"  status  check materialized file settings in running local yards (read-only)\n"+
 				"  apply   refresh materialized file settings in running local yards\n"+
-				"  sync    connect, inspect, pull, push committed changes or cache Git settings\n",
+				"  sync    connect, inspect, pull, push committed changes or cache Git settings\n"+
+				"  CODING_TOOL_GIT_APPROVAL defaults to off; set prompt to enable managed commit and push prompts after yard init\n",
 			cli.options.Program)
 		return 0
 	}

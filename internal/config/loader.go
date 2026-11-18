@@ -41,9 +41,8 @@ type LoadOptions struct {
 	// An empty source marks a logical file absent.
 	ProspectiveFiles *ProspectiveFiles
 	FileOverrides    map[string]string
+	ScalarEdits      PersistentScalarEdits
 	YardDirs         []string
-	// ScalarEditPath retains assignments from one scalar layer for authoring.
-	ScalarEditPath string
 }
 
 const GitSettingsRelativePath = ".sync/settings"
@@ -75,8 +74,6 @@ type Loaded struct {
 	assetValidationInputs []string
 	ProspectiveFiles      *ProspectiveFiles
 	ignored               []IgnoredAssignment
-	scalarEditAssignments []observedAssignment
-	scalarEditValues      environment
 }
 
 // AssetValidationInputs returns the logical file sources opened while validating
@@ -114,7 +111,6 @@ func Load(options LoadOptions) (Loaded, error) {
 	tracker := newSettingTracker()
 	tracker.fileOverrides = options.FileOverrides
 	tracker.prospectiveFiles = options.ProspectiveFiles
-	tracker.scalarEditPath = options.ScalarEditPath
 	if options.Catalog != nil {
 		tracker.catalog = *options.Catalog
 	} else {
@@ -139,8 +135,6 @@ func Load(options LoadOptions) (Loaded, error) {
 		assetValidationInputs: tracker.assetValidationInputs,
 		ProspectiveFiles:      options.ProspectiveFiles,
 		ignored:               tracker.ignoredAssignments(ctx.YardName, ctx.Paths.ConfigHome),
-		scalarEditAssignments: tracker.scalarEditAssignments,
-		scalarEditValues:      tracker.scalarEditValues,
 	}, nil
 }
 
@@ -154,7 +148,7 @@ func load(
 	}
 	values := environmentFrom(options.Environment)
 	for name := range values {
-		if tracker.catalog.retiredSetting(name) {
+		if tracker.catalog.RetiredSetting(name) {
 			delete(values, name)
 		}
 	}
@@ -195,12 +189,15 @@ func load(
 		}
 		defer unlock()
 	}
-	pending, err := options.ProspectiveFiles.pendingTransaction(configHome)
-	if err != nil {
-		return domain.Context{}, nil, err
-	}
-	if pending && !options.AllowPendingTransaction {
-		return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
+	// Batch storage is checked separately, alongside target and assignment refusals.
+	if tracker.batch == nil {
+		pending, err := options.ProspectiveFiles.pendingTransaction(configHome)
+		if err != nil {
+			return domain.Context{}, nil, err
+		}
+		if pending && !options.AllowPendingTransaction {
+			return domain.Context{}, nil, domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
+		}
 	}
 	dataHome := values["SUBYARD_HOME"]
 	if dataHome == "" {
@@ -311,7 +308,7 @@ func load(
 			}
 		}
 		if yardName != "default" && options.YardSettingsFile == "" {
-			if (len(options.FileOverrides) != 0 || options.ProspectiveFiles != nil) && len(options.YardDirs) == 0 {
+			if (len(options.FileOverrides) != 0 || options.ProspectiveFiles != nil || tracker.batch != nil) && len(options.YardDirs) == 0 {
 				candidates := append(YardFileCandidates(configDir, configHome, yardName), gitYard)
 				if resetFallback {
 					candidates = []string{localYard, filepath.Join(configHome, "yards", yardName+".env")}
@@ -340,6 +337,11 @@ func load(
 	if yardName != "default" && localYard == "" && gitYard == "" && !(options.AllowResetYard && resetFallback) {
 		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
 	}
+	if len(options.ScalarEdits) != 0 {
+		if err := tracker.checkScalarEditLayers(options.ScalarEdits, gitShared, gitHost, gitYard, localShared, localHost, localYard); err != nil {
+			return domain.Context{}, nil, err
+		}
+	}
 	if yardName != "default" {
 		yardDerivationLayer := tracker.addLayer("yard", "derived", "yard name "+yardName, true, settingScalar,
 			"HOST_BASE", "INCUS_PROJECT", "YARD_INSTANCE_NAME", "RESTRICTED_DISK_PATHS", "SRV_VOLUME", "SSH_HOST")
@@ -351,6 +353,10 @@ func load(
 	delete(probe, "YARD_TEMPLATE")
 	yardPresent := false
 	templateSource := gitYard
+	batch := tracker.batch
+	if batch != nil {
+		tracker.batch = batch.fork()
+	}
 	for _, path := range []string{gitYard, localYard} {
 		if options.LayerPaths != nil && path == localYard && options.LayerPaths.ExcludedLocalPaths[path] {
 			continue
@@ -366,7 +372,7 @@ func load(
 			yardPresent = true
 			templateSource = path
 			source := tracker.fileSource(path)
-			if err := tracker.catalog.applyEnvFileValidatedFrom(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, nil, tracker.prospectiveReader()); err != nil {
+			if err := tracker.applyScalarSource(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, nil); err != nil {
 				return domain.Context{}, nil, err
 			}
 		}
@@ -374,7 +380,20 @@ func load(
 	if yardName != "default" && !yardPresent && !(options.AllowResetYard && resetFallback) {
 		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
 	}
-	if err := applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], templateSource, values, tracker); err != nil {
+	templateAvailable := tracker.batch == nil || tracker.batch.available("YARD_TEMPLATE")
+	tracker.batch = batch
+	err = nil
+	if templateAvailable {
+		err = applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], templateSource, values, tracker)
+	}
+	if batch != nil {
+		batch.templateUnavailable = !templateAvailable || err != nil
+		if err != nil {
+			// The failed source did not apply any values or declarations.
+			clear(batch.unavailable)
+			batch.templateRefusal = err
+		}
+	} else if err != nil {
 		return domain.Context{}, nil, err
 	}
 	logicalAssets := agentAssetMappings(values, configDir)
@@ -471,6 +490,9 @@ func load(
 			}
 		}
 		values[name] = value
+		if batch != nil {
+			batch.setAvailable(name, true)
+		}
 		tracker.record(commandLayer, name, value, "environment", 0, "")
 	}
 	// A refused override is not applied; later independent checks still run on
@@ -481,6 +503,9 @@ func load(
 	for _, owner := range tracker.catalog.Integrations() {
 		for _, input := range owner.Inputs {
 			values[input.Name] = input.Value
+			if batch != nil {
+				batch.setAvailable(input.Name, true)
+			}
 			tracker.record(defaultLayer, input.Name, input.Value, filepath.Join(owner.Root, "integration.json"), 0, "immutable shipped input")
 		}
 	}
@@ -488,9 +513,6 @@ func load(
 	setConfigurationRolePaths(values, configHome, yardName)
 	if yardName != "default" {
 		values["YARD_NAME"] = yardName
-	}
-	if tracker.scalarEditPath != "" {
-		tracker.scalarEditValues = cloneEnvironment(values)
 	}
 	normalizationLayer := tracker.addLayer(
 		"derived", "derived", "resolver normalization", true, settingScalar, "E2E_VM_CPU",
@@ -507,6 +529,9 @@ func load(
 			return domain.Context{}, nil, err
 		}
 		return domain.Context{YardName: yardName, AccessKind: domain.AccessKind(values["ACCESS_KIND"]), IncusProject: values["INCUS_PROJECT"], YardInstanceName: values["YARD_INSTANCE_NAME"], SSHHost: values["SSH_HOST"], Paths: domain.RuntimePaths{RepositoryRoot: root, ConfigDir: configDir, ConfigHome: configHome, OperatorHome: values["SUBYARD_OPERATOR_HOME"], DataHome: values["SUBYARD_HOME"], HostBase: values["HOST_BASE"]}}, values, nil
+	}
+	if batch != nil {
+		return domain.Context{}, values, batch.checkConstraints(options, root, configDir, yardName, values, tracker, defaultLayer, normalizationLayer, commandRefusals)
 	}
 	// One collection point: command overrides, asset sources, integration
 	// selection, role, profile and context refusals are reported together.
@@ -622,17 +647,35 @@ func normalizeWebPreviewPort(values environment, tracker *settingTracker, sshPor
 // normalizeDerivedPorts returns only a derived-source failure; collisions are
 // recorded in collisions.
 func normalizeDerivedPorts(values environment, tracker *settingTracker, collisions *portCollisions) error {
+	if err := normalizeDerivedPortValues(values, tracker, func(string) bool { return true }); err != nil {
+		return err
+	}
+	addDerivedPortCollisions(values, tracker, collisions)
+	return nil
+}
+
+func normalizeDerivedPortValues(values environment, tracker *settingTracker, available func(string) bool) error {
 	var derive func(string) error
 	derive = func(name string) error {
 		definition, ok := tracker.catalog.LookupSetting(name)
-		if !ok || definition.DefaultFrom == nil || values[name] != "" {
+		if !ok || definition.DefaultFrom == nil || values[name] != "" || !available(name) {
 			return nil
 		}
-		if err := derive(definition.DefaultFrom.Setting); err != nil {
+		sourceName := definition.DefaultFrom.Setting
+		if err := derive(sourceName); err != nil {
 			return err
 		}
-		source, err := strconv.Atoi(values[definition.DefaultFrom.Setting])
+		if !available(sourceName) {
+			if tracker.batch != nil {
+				tracker.batch.setAvailable(name, false)
+			}
+			return nil
+		}
+		source, err := strconv.Atoi(values[sourceName])
 		if err != nil {
+			if tracker.batch != nil {
+				tracker.batch.setAvailable(name, false)
+			}
 			return domain.SettingRefusal(domain.ConfigDerivedPortSource, name)
 		}
 		width := definition.Maximum - definition.Minimum + 1
@@ -641,16 +684,17 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker, collisio
 			value += width
 		}
 		values[name] = strconv.Itoa(definition.Minimum + value)
-		tracker.normalize(name, values[name], "derived from "+definition.DefaultFrom.Setting)
+		tracker.normalize(name, values[name], "derived from "+sourceName)
 		return nil
 	}
 	var sources []error
 	for _, definition := range tracker.catalog.SettingCatalog() {
 		sources = append(sources, derive(definition.Name))
 	}
-	if err := domain.CollectRefusals(sources...); err != nil {
-		return err
-	}
+	return domain.CollectRefusals(sources...)
+}
+
+func addDerivedPortCollisions(values environment, tracker *settingTracker, collisions *portCollisions) {
 	// Integration listeners preserve reservations against configured peer listeners,
 	// including packages whose service is stopped or not yet initialized.
 	for _, definition := range tracker.catalog.SettingCatalog() {
@@ -671,7 +715,6 @@ func normalizeDerivedPorts(values environment, tracker *settingTracker, collisio
 		}
 	}
 	addHostListenerCollisions(values, tracker.catalog, collisions)
-	return nil
 }
 
 func validateHostListenerCollisions(values map[string]string, settings Catalog) error {
@@ -921,7 +964,7 @@ func normalizeAgentAssetPaths(
 	}
 	var refusals []error
 	for _, name := range slices.Sorted(maps.Keys(values)) {
-		if value := values[name]; sourceValuedAgentSetting(name) && value != "" {
+		if value := values[name]; sourceValuedAgentSetting(name) && value != "" && tracker.inputsAvailable(name) {
 			refusals = append(refusals, normalize(name, value))
 		}
 	}
@@ -1002,24 +1045,32 @@ func applyYardConfigTracked(
 	)
 }
 
+func yardTemplateFile(configDir, yardName, template, yardFile string) (string, error) {
+	if !domain.SafeName(template) {
+		return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
+	}
+	if template == "e2e-vms" {
+		return "", retiredE2EVMTemplateError(yardName, yardFile)
+	}
+	templateFile := filepath.Join(configDir, "yards", "profiles", template+".env")
+	info, err := os.Stat(templateFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
+		}
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
+	}
+	return templateFile, nil
+}
+
 func applyYardTemplateTracked(configDir, yardName, template, yardFile string, values environment, tracker *settingTracker) error {
 	if template != "" {
-		if !domain.SafeName(template) {
-			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
-		}
-		if template == "e2e-vms" {
-			return retiredE2EVMTemplateError(yardName, yardFile)
-		}
-		templateFile := filepath.Join(configDir, "yards", "profiles", template+".env")
-		info, err := os.Stat(templateFile)
+		templateFile, err := yardTemplateFile(configDir, yardName, template, yardFile)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
-			}
 			return err
-		}
-		if info.IsDir() {
-			return fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigUnknownYardTemplate), template, yardFile)
 		}
 		settings := Catalog{}
 		if tracker != nil {
@@ -1063,9 +1114,10 @@ func applyEnvFileTracked(
 }
 
 type observedAssignment struct {
-	name  string
-	value string
-	line  int
+	name        string
+	value       string
+	line        int
+	unavailable bool
 }
 
 func applyEnvFileTrackedValidated(
@@ -1077,19 +1129,12 @@ func applyEnvFileTrackedValidated(
 	requireSyncable bool,
 ) error {
 	source := tracker.fileSource(path)
-	observeEdit := func(name, value string, line int) {
-		if path == tracker.scalarEditPath {
-			tracker.scalarEditAssignments = append(tracker.scalarEditAssignments, observedAssignment{name: name, value: value, line: line})
-		}
-	}
-	return tracker.catalog.applyEnvFileValidatedFrom(path, source, values, scope, requireSyncable,
+	return tracker.applyScalarSource(path, source, values, scope, requireSyncable,
 		func(name, value string, line int) {
-			observeEdit(name, value, line)
 			tracker.record(layer, name, value, path, line, "")
 		}, func(name, value string, line int) {
-			observeEdit(name, value, line)
 			tracker.observeProfileOnly(layer, name, value, path, line)
-		}, tracker.prospectiveReader())
+		})
 }
 
 func (settings Catalog) applyEnvFileValidated(
@@ -1130,21 +1175,34 @@ type ignoredObserver func(name, value string, line int)
 // setting while the file is read (see discardPolicy). It is reported to
 // ignored, never validated, applied or observed as a setting.
 func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver) error {
+	return settings.evaluateScalarSource(reader, path, values, scope, requireSyncable, observer, ignored, nil)
+}
+
+func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, values environment, scope SettingScope, requireSyncable bool, observer assignmentObserver, ignored ignoredObserver, batch *localBatch) error {
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
 	var discarded []observedAssignment
 	var content bytes.Buffer
-	policy := discardPolicy{retired: settings.retiredSetting}
+	policy := discardPolicy{retired: settings.RetiredSetting, batch: batch}
 	if scope != ScopeShipped {
 		policy.ignored = IsProfileOnlySetting
 	}
-	if err := applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, func(name, value string, line int) {
-		assignments = append(assignments, observedAssignment{name: name, value: value, line: line})
-	}, policy, func(name, value string, line int) {
+	observe := func(name, value string, line int) {
+		unknown := batch != nil && !batch.available(name)
+		assignments = append(assignments, observedAssignment{name: name, value: value, line: line, unavailable: unknown})
+	}
+	discard := func(name, value string, line int) {
 		if policy.ignores(name) {
 			discarded = append(discarded, observedAssignment{name: name, value: value, line: line})
 		}
-	}); err != nil {
+	}
+	var err error
+	if batch != nil && path == batch.path {
+		err = batch.applyTarget(reader, probe, observe, discard, policy)
+	} else {
+		err = applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, observe, policy, discard)
+	}
+	if err != nil {
 		return err
 	}
 	normalized := make([]observedAssignment, 0, len(assignments))
@@ -1155,11 +1213,11 @@ func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path s
 	}
 	seen := make(map[string]layerValue)
 	for _, assignment := range assignments {
-		if settings.retiredSetting(assignment.name) {
+		if settings.RetiredSetting(assignment.name) {
 			delete(probe, assignment.name)
 			continue
 		}
-		canonical := canonicalSettingName(assignment.name)
+		canonical := CanonicalSettingName(assignment.name)
 		assignment.value = normalizeLegacySelection(assignment.name, assignment.value)
 		if previous, exists := seen[canonical]; exists && previous.input != assignment.name &&
 			previous.value != assignment.value {
@@ -1178,6 +1236,9 @@ func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path s
 		delete(probe, legacy)
 	}
 	for _, assignment := range assignments {
+		if assignment.unavailable {
+			continue
+		}
 		syncable := requireSyncable
 		if syncable && assignment.name == "SSH_PORT" {
 			if err := LegacyGitSSHPort(path, content.Bytes()); err != nil {
@@ -1197,7 +1258,9 @@ func (settings Catalog) applyEnvReaderValidatedIgnoring(reader io.Reader, path s
 	}
 	if observer != nil {
 		for _, assignment := range assignments {
-			observer(assignment.name, assignment.value, assignment.line)
+			if !assignment.unavailable {
+				observer(assignment.name, assignment.value, assignment.line)
+			}
 		}
 	}
 	if ignored != nil {
@@ -1252,7 +1315,8 @@ func AddLegacySettingAliases(values map[string]string) {
 	}
 }
 
-func canonicalSettingName(name string) string {
+// CanonicalSettingName identifies the setting addressed by a persisted spelling.
+func CanonicalSettingName(name string) string {
 	if canonical, legacy := legacySettingNames[name]; legacy {
 		return canonical
 	}
@@ -1388,7 +1452,7 @@ func setYardDefault(
 			}
 		}
 	}
-	if values[name] == "" || values[name] == generic {
+	if (tracker == nil || tracker.inputsAvailable(name)) && (values[name] == "" || values[name] == generic) {
 		values[name] = derived
 		tracker.record(layer, name, derived, "", 0, "derived from yard name")
 	}
@@ -1445,7 +1509,7 @@ func contextFrom(
 	restrictedBase := values["RESTRICTED_DISK_PATHS"]
 	// Each check reads only its own settings, so every refusal is reported.
 	var refusals []error
-	if hostBase != restrictedBase {
+	if tracker.inputsAvailable("HOST_BASE", "RESTRICTED_DISK_PATHS") && hostBase != restrictedBase {
 		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigHostBaseMismatch))
 	}
 	stateDir := values["SUBYARD_STATE_DIR"]
@@ -1453,30 +1517,37 @@ func contextFrom(
 		stateDir = filepath.Join(configHome, "projects")
 	}
 	sshPort, err := optionalInt(values["SSH_PORT"])
-	sshPortRefused := err != nil // Edge D7: the SSH port range is checked only after it parses.
-	if err != nil {
+	sshPortRefused := err != nil || !tracker.inputsAvailable("SSH_PORT") // Edge D7: the SSH port range is checked only after it parses.
+	if err != nil && tracker.inputsAvailable("SSH_PORT") {
 		refusals = append(refusals, domain.WithRefusalCause(domain.SettingRefusal(domain.ConfigSettingNumeric, "SSH_PORT"), err))
 	}
 	devUID, err := strconv.Atoi(values["DEV_UID"])
-	if err != nil {
+	if err != nil && tracker.inputsAvailable("DEV_UID") {
 		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingNumeric, "DEV_UID"))
 	}
-	forwardAgent, devSudo, nestedE2EVMs := zeroOne(values, "FORWARD_SSH_AGENT", &refusals), zeroOne(values, "DEV_SUDO", &refusals), zeroOne(values, "NESTED_E2E_VMS", &refusals)
-	rawE2EVMCPU := values["E2E_VM_CPU"]
-	e2eVMCPU, err := resolveE2EVMCPU(rawE2EVMCPU, runtime.NumCPU())
-	if err != nil {
-		refusals = append(refusals, err)
-	} else {
-		values["E2E_VM_CPU"] = e2eVMCPU
-		if e2eVMCPU != rawE2EVMCPU {
-			tracker.record(
-				normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
-				"resolved from "+rawE2EVMCPU,
-			)
+	boolSetting := func(name string) bool {
+		return tracker.inputsAvailable(name) && zeroOne(values, name, &refusals)
+	}
+	forwardAgent, devSudo, nestedE2EVMs := boolSetting("FORWARD_SSH_AGENT"), boolSetting("DEV_SUDO"), boolSetting("NESTED_E2E_VMS")
+	e2eVMCPUResolved := false
+	if tracker.inputsAvailable("E2E_VM_CPU") {
+		rawE2EVMCPU := values["E2E_VM_CPU"]
+		e2eVMCPU, err := resolveE2EVMCPU(rawE2EVMCPU, runtime.NumCPU())
+		if err != nil {
+			refusals = append(refusals, err)
+		} else {
+			e2eVMCPUResolved = true
+			values["E2E_VM_CPU"] = e2eVMCPU
+			if e2eVMCPU != rawE2EVMCPU {
+				tracker.record(
+					normalizationLayer, "E2E_VM_CPU", e2eVMCPU, "", 0,
+					"resolved from "+rawE2EVMCPU,
+				)
+			}
 		}
 	}
 	// Edge D7: the CPU count is validated only after it resolves.
-	refusals = append(refusals, refusalCauses(validateE2EConfig(values, err == nil))...)
+	refusals = append(refusals, refusalCauses(validateE2EConfigAvailable(values, e2eVMCPUResolved, tracker.inputsAvailable))...)
 	ctx := domain.Context{
 		YardName:         yardName,
 		AccessKind:       domain.AccessKind(values["ACCESS_KIND"]),
@@ -1510,18 +1581,33 @@ func contextFrom(
 		ctx.OwnerYardName = "default"
 	}
 	normalized, err := domain.NormalizeContext(ctx)
+	if tracker.batch != nil {
+		for _, cause := range refusalCauses(err) {
+			if tracker.batch.contextRefusalAvailable(cause) && !sshPortRefusedFor(cause, sshPortRefused) {
+				refusals = append(refusals, cause)
+			}
+		}
+		if err == nil {
+			ctx = normalized
+		}
+		return ctx, domain.CollectRefusals(refusals...)
+	}
 	if len(refusals) == 0 {
 		return normalized, err
 	}
 	// Context validation is independent of the setting checks above, except that
 	// an unparsed SSH_PORT already explains the port range refusal.
 	for _, cause := range refusalCauses(err) {
-		var typed *domain.ConfigRefusal
-		if !(sshPortRefused && errors.As(cause, &typed) && typed.Code() == domain.ConfigSSHPortRange) {
+		if !sshPortRefusedFor(cause, sshPortRefused) {
 			refusals = append(refusals, cause)
 		}
 	}
 	return domain.Context{}, domain.CollectRefusals(refusals...)
+}
+
+func sshPortRefusedFor(cause error, sshPortRefused bool) bool {
+	var typed *domain.ConfigRefusal
+	return sshPortRefused && errors.As(cause, &typed) && typed.Code() == domain.ConfigSSHPortRange
 }
 
 func resolveE2EVMCPU(value string, hostCPUs int) (string, error) {
@@ -1570,11 +1656,18 @@ func zeroOne(values environment, name string, refusals *[]error) bool {
 // validateE2EConfig reports every independent E2E setting refusal; checkCPU is
 // false when E2E_VM_CPU already failed to resolve.
 func validateE2EConfig(values environment, checkCPU bool) error {
+	return validateE2EConfigAvailable(values, checkCPU, func(...string) bool { return true })
+}
+
+func validateE2EConfigAvailable(values environment, checkCPU bool, available func(...string) bool) error {
 	var refusals []error
 	if value, err := strconv.Atoi(values["E2E_VM_CPU"]); checkCPU && (err != nil || value < 1) {
 		refusals = append(refusals, domain.SettingRefusal(domain.ConfigSettingPositiveInteger, "E2E_VM_CPU"))
 	}
 	sizeMiB := func(name string) (int, bool) {
+		if !available(name) {
+			return 0, false
+		}
 		value := values[name]
 		factor, raw := 1, strings.TrimSuffix(value, "MiB")
 		if strings.HasSuffix(value, "GiB") {
@@ -1601,14 +1694,14 @@ func validateE2EConfig(values environment, checkCPU bool) error {
 		min, max int
 		code     domain.ConfigRefusalCode
 	}{{"E2E_VM_SLOT_COUNT", 1, 1<<20 - 1, domain.ConfigE2EVMSlotCountRange}, {"E2E_VM_BOOT_TIMEOUT", 30, 1800, domain.ConfigE2EVMBootTimeoutRange}} {
-		if value, err := strconv.Atoi(values[bound.name]); err != nil || value < bound.min || value > bound.max {
+		if value, err := strconv.Atoi(values[bound.name]); available(bound.name) && (err != nil || value < bound.min || value > bound.max) {
 			refusals = append(refusals, domain.NewConfigRefusal(bound.code))
 		}
 	}
 	image := values["E2E_VM_IMAGE"]
-	if image == "" || strings.HasPrefix(image, "-") || strings.ContainsFunc(image, func(char rune) bool {
+	if available("E2E_VM_IMAGE") && (image == "" || strings.HasPrefix(image, "-") || strings.ContainsFunc(image, func(char rune) bool {
 		return !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/@+-", char)
-	}) {
+	})) {
 		refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigE2EVMImageUnsafe))
 	}
 	return domain.CollectRefusals(refusals...)

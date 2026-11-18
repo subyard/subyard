@@ -88,3 +88,28 @@ func TestLegacySSHSourceCleanupUsesPreparedConsentAndRejectsNewGitAuthoring(t *t
 		t.Fatalf("new Git SSH authoring lacks policy diagnostic: %s", f.stderr.String())
 	}
 }
+
+func TestGitScalarEditKeepsValueAfterLegacySSHPort(t *testing.T) {
+	f := newConfigGitAuthoringFixture(t)
+	checkout := filepath.Join(f.home, ".local/share/subyard-config")
+	source := filepath.Join(checkout, "hosts/owner-a/config.env")
+	writeConfigCommandFile(t, source, "SSH_PORT=2300\nGIT_USER_NAME=Jane\n", 0o600)
+	commitConfigSource(t, checkout, "Legacy owner transport setting")
+	writeConfigCommandFile(t, filepath.Join(f.configHome, "config.env"), "SSH_PORT=2299\n", 0o640)
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	args := []string{"config", "set", "GIT_USER_NAME", "Janet", "--scope", "host", "--git"}
+	program, err := New(Options{RepositoryRoot: f.root, Environment: f.environment, Arguments: args, Prompt: prompt, Stdout: &f.stdout, Stderr: &f.stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || len(prompt.Requests) != 1 {
+		t.Fatalf("Git scalar edit: %d %s", code, f.stderr.String())
+	}
+	if !strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "remove SSH_PORT from hosts/owner-a/config.env") {
+		t.Fatal("Git scalar consent omitted legacy port cleanup")
+	}
+	if after := configSourceGitOutput(t, f.remote, "show", "HEAD:hosts/owner-a/config.env"); after != "GIT_USER_NAME='Janet'\n" {
+		t.Fatalf("source after edit: %q", after)
+	}
+	f.assertSetting("SSH_PORT", "2299")
+}

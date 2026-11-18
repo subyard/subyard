@@ -162,8 +162,12 @@ chmod +x "$fake_bin/curl"
 cat > "$fake_bin/bwrap" <<'BWRAP'
 #!/usr/bin/env bash
 [ -f "$CODEX_TEST_BWRAP_READY" ] || exit 1
-[ "$*" = --version ] || exit 2
-printf 'bubblewrap 0.11.0\n'
+case "$*" in
+  --version) printf 'bubblewrap 0.11.0\n' ;;
+  '--unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/true')
+    [ "${CODEX_TEST_BWRAP_PROBE_FAIL:-0}" = 0 ] ;;
+  *) exit 2 ;;
+esac
 BWRAP
 cat > "$fake_bin/apt-get" <<'APT'
 #!/usr/bin/env bash
@@ -194,6 +198,7 @@ set_latest() { # <version> <amd64-sha> <arm64-sha>
     "$2" "$3" > "$releases/rust-v$1/codex-package_SHA256SUMS"
 }
 
+export CODING_TOOL_GIT_APPROVAL=prompt
 run_hook() { # <arch> <root> [environment assignments...]
   local arch="$1" install_root="$2"
   shift 2
@@ -282,7 +287,7 @@ run_hook amd64 "$root" >/dev/null
 [ "$(fetch_count)" -eq 8 ] || fail "older release metadata downloaded an artifact"
 [ "$("$link" --version)" = 'codex-cli 0.148.0' ] || fail "older release metadata downgraded a working runtime"
 
-# The approval mode converges on -> off -> on; other requirements stay mandatory.
+# Apply off to a previously managed prompt policy, then restore prompt.
 cp "$check" "$tmp/prompt-check"
 run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=off >/dev/null
 python3 - "$requirements" <<'PY'
@@ -668,6 +673,10 @@ shadow="$dev_home/.local/bin/codex"
 standalone="$dev_home/.codex/packages/standalone"
 run_dev_hook() { run_hook amd64 "$root" CODEX_DEV_HOME="$dev_home" >/dev/null; }
 dev_check() { CODEX_CHECK_DEV_USER="$(id -un)" "$check"; }
+if CODEX_TEST_BWRAP_PROBE_FAIL=1 dev_check >"$tmp/bwrap.out" 2>"$tmp/bwrap.err"; then
+  fail "bubblewrap version passed readiness with a broken sandbox"
+fi
+grep -Fq 'bubblewrap could not create the developer sandbox' "$tmp/bwrap.err"
 mkdir -p "$dev_home/.local/bin" "$standalone/releases/0.100.0/bin"
 printf 'old\n' > "$standalone/releases/0.100.0/bin/codex"
 ln -s releases/0.100.0 "$standalone/current"

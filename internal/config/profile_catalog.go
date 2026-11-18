@@ -233,7 +233,11 @@ func (settings Catalog) RetiredProfile(name string) bool {
 	})
 }
 
-func (settings Catalog) retiredSetting(name string) bool {
+// RetiredSetting reports whether the catalog discards a removed setting.
+func (settings Catalog) RetiredSetting(name string) bool {
+	if isRetiredSetting(name) {
+		return true
+	}
 	for _, component := range settings.retired {
 		if slices.Contains(component.Settings, name) {
 			return true
@@ -249,5 +253,6 @@ func (settings Catalog) retiredSetting(name string) bool {
 
 // IsLegacySetting includes removed declarations when filtering inherited contexts.
 func (settings Catalog) IsLegacySetting(name string) bool {
-	return IsLegacySetting(name) || settings.retiredSetting(name)
+	_, alias := legacySettingNames[name]
+	return alias || settings.RetiredSetting(name)
 }

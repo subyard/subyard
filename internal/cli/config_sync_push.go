@@ -198,7 +198,7 @@ func (cli *CLI) prepareConfigSyncPush(
 	candidateOptions.SourceRoot = repository.checkout
 	candidateOptions.SourceIdentityRoot = record.Checkout
 	if len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset") {
-		// Keep the layered comparison and the sync plan's local input bindings
+		// Keep the record check and the sync plan's local input bindings
 		// on the same observation of the configuration root.
 		unlock, err := config.LockRoot(options.ConfigHome, false)
 		if err != nil {

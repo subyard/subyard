@@ -24,6 +24,20 @@ func CheckLocalSettingsWritable(configHome string) error {
 	if pending {
 		return domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
 	}
+	return checkLocalSettingsManifest(configHome)
+}
+
+// CheckLocalBatchStorage collects the independent storage refusals for a batch.
+func CheckLocalBatchStorage(configHome string) error {
+	pending, err := PendingConfigurationTransaction(configHome)
+	var transaction error
+	if pending {
+		transaction = domain.NewConfigRefusal(domain.ConfigTransactionInterrupted)
+	}
+	return domain.CollectOrderedRefusals(domain.CollectRefusals(err, transaction), checkLocalSettingsManifest(configHome))
+}
+
+func checkLocalSettingsManifest(configHome string) error {
 	path := filepath.Join(configHome, ".sync", "manifest.json")
 	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 		return nil

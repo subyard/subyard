@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -336,20 +335,9 @@ func (runtime Runtime) prepareDeveloperIdentity(ctx context.Context, source stri
 	if user == runtime.devUser() && observed.Plan == nil {
 		return nil, nil
 	}
-	old := runtime
-	old.Yard.DevUser, old.Yard.DevUID = user, uid
-	environment := runtimeEnvironment(runtime.Environment)
-	if applied.Settings != nil {
-		catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
-		if err != nil {
-			return nil, err
-		}
-		environment = catalog.WithAppliedIntegrationInitSettings(environment, applied.Settings)
-	}
-	environment["DEV_USER"], environment["DEV_UID"] = user, strconv.Itoa(uid)
-	old.Environment = nil
-	for name, value := range environment {
-		old.Environment = append(old.Environment, name+"="+value)
+	old, err := runtime.withAppliedIntegrationSettings(applied.Settings, applied.Identity)
+	if err != nil {
+		return nil, err
 	}
 	packages, err := old.developerIdentityPackages(runtime.devUser())
 	if err != nil {

@@ -59,16 +59,8 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 	}
 	// The role prohibition reads only authored assignments, so it is checked
 	// before and independently of resolving the requested selection.
+	refusal = integrationRoleRefusal(values, tracker)
 	assignments := tracker.assignments["CODING_TOOL_INTEGRATIONS"]
-	if values["ALLOWS_CODING_TOOLS"] == "false" || values["ALLOWS_CODING_TOOLS"] == "0" {
-		// An inherited default can be suppressed; a concrete forbidden request cannot.
-		for _, assignment := range assignments {
-			layer := tracker.layers[assignment.Layer]
-			if refusal == nil && (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
-				refusal = fmt.Errorf("%w in %s", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools), assignment.Path)
-			}
-		}
-	}
 	selection, err := tracker.catalog.ResolveIntegrationSelection(values, requested)
 	if err != nil {
 		return refusal, err
@@ -94,6 +86,22 @@ func resolveLoadedIntegrations(values environment, tracker *settingTracker) (ref
 	return refusal, nil
 }
 
+func codingToolsForbidden(values environment) bool {
+	return values["ALLOWS_CODING_TOOLS"] == "false" || values["ALLOWS_CODING_TOOLS"] == "0"
+}
+
+func integrationRoleRefusal(values environment, tracker *settingTracker) error {
+	if codingToolsForbidden(values) {
+		for _, assignment := range tracker.assignments["CODING_TOOL_INTEGRATIONS"] {
+			layer := tracker.layers[assignment.Layer]
+			if (layer.Scope == "command" || (layer.Scope == "yard" && layer.Role == "scalar settings")) && len(strings.Fields(assignment.Value)) != 0 {
+				return fmt.Errorf("%w in %s", domain.NewConfigRefusal(domain.ConfigRoleForbidsCodingTools), assignment.Path)
+			}
+		}
+	}
+	return nil
+}
+
 // ResolveIntegrationSelection validates roots and computes the existing ordered
 // dependency closure. DependencyReasons records direct dependents for disable
 // guards and status explanations; it is not another desired-state store.
@@ -113,39 +121,18 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 		Requested: append([]string{}, requested...), Effective: []string{}, Present: true,
 		DependencyReasons: map[string][]string{}, AllowsCodingTools: values["ALLOWS_CODING_TOOLS"] != "false" && values["ALLOWS_CODING_TOOLS"] != "0",
 	}
-	knownAgent := func(agent string) bool {
-		if !domain.SafeName(agent) {
-			return false
-		}
-		for _, suffix := range integrationMetadataSuffixes {
-			if _, found := values["AGENT_"+agent+"_"+suffix]; found {
-				return true
-			}
-		}
-		return false
-	}
-	// Only a shipped integration is named in the rendered diagnostic; the
-	// supplied text of any other request stays in the Go error only.
-	refusal := func(known, unknown domain.ConfigRefusalCode, agent string) error {
-		if name, ok := domain.ConfigIntegrationName(agent); ok && knownAgent(agent) && shipped(agent) {
-			return domain.NewConfigRefusal(known, name)
-		}
-		return fmt.Errorf("%w %q", domain.NewConfigRefusal(unknown), agent)
-	}
-	var refusals []error
-	selected := make(map[string]int, len(requested))
-	for _, agent := range requested {
-		if selected[agent]++; selected[agent] == 2 {
-			refusals = append(refusals, refusal(domain.ConfigDuplicateIntegration, domain.ConfigDuplicateUnknownIntegration, agent))
-		}
-		// A retired integration has its own refusal; it is not also unknown.
-		if selected[agent] == 1 && !knownAgent(agent) && !retired(agent) {
-			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownIntegration), agent))
-		}
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
+	if err := checkIntegrationNames(values, requested, shipped, retired); err != nil {
 		return result, err
 	}
+	_, err := walkIntegrationDependencies(values, requested, &result, nil)
+	return result, err
+}
+
+// A batch can have unavailable metadata. Skip only the branch that needs it
+// and continue checking the remaining edges. A regular load stops on error.
+func walkIntegrationDependencies(values map[string]string, requested []string, result *IntegrationSelection, batch *localBatch) (bool, error) {
+	available := true
+	var refusals []error
 	visiting := make(map[string]bool)
 	visited := make(map[string]bool)
 	var visit func(string) error
@@ -156,33 +143,111 @@ func resolveIntegrationSelection(values map[string]string, requested []string, s
 		if visiting[agent] {
 			return fmt.Errorf("agent dependency cycle at %q", agent)
 		}
+		key := "AGENT_" + agent + "_DEPENDS"
+		if batch != nil && !batch.available(key) {
+			available = false
+			return nil
+		}
 		visiting[agent] = true
-		dependencies := strings.Fields(values["AGENT_"+agent+"_DEPENDS"])
+		dependencies := strings.Fields(values[key])
 		seenDependencies := make(map[string]bool, len(dependencies))
 		for _, dependency := range dependencies {
+			var err error
 			if seenDependencies[dependency] {
-				return fmt.Errorf("duplicate dependency %q for agent %q", dependency, agent)
+				err = fmt.Errorf("duplicate dependency %q for agent %q", dependency, agent)
+			} else if batch != nil && !batch.integrationMetadataKnown(values, dependency) {
+				available = false
+			} else if !knownIntegration(values, dependency) {
+				err = fmt.Errorf("unknown dependency %q for agent %q", dependency, agent)
+			} else {
+				if result != nil {
+					result.DependencyReasons[dependency] = append(result.DependencyReasons[dependency], agent)
+				}
+				err = visit(dependency)
 			}
 			seenDependencies[dependency] = true
-			if !domain.SafeName(dependency) || !knownAgent(dependency) {
-				return fmt.Errorf("unknown dependency %q for agent %q", dependency, agent)
-			}
-			result.DependencyReasons[dependency] = append(result.DependencyReasons[dependency], agent)
-			if err := visit(dependency); err != nil {
-				return err
+			if err != nil {
+				if batch == nil {
+					return err
+				}
+				refusals = append(refusals, err)
 			}
 		}
 		delete(visiting, agent)
 		visited[agent] = true
-		result.Effective = append(result.Effective, agent)
+		if result != nil {
+			result.Effective = append(result.Effective, agent)
+		}
 		return nil
 	}
 	for _, agent := range requested {
+		if batch != nil {
+			if batch.catalog.RetiredIntegration(agent) {
+				continue
+			}
+			if !batch.integrationMetadataKnown(values, agent) {
+				available = false
+				continue
+			}
+			if !knownIntegration(values, agent) {
+				continue
+			}
+		}
 		if err := visit(agent); err != nil {
-			return result, err
+			return false, err
 		}
 	}
-	return result, nil
+	return available, domain.CollectRefusals(refusals...)
+}
+
+func knownIntegration(values map[string]string, agent string) bool {
+	if !domain.SafeName(agent) {
+		return false
+	}
+	for _, suffix := range integrationMetadataSuffixes {
+		if _, found := values["AGENT_"+agent+"_"+suffix]; found {
+			return true
+		}
+	}
+	return false
+}
+
+func checkIntegrationNames(values map[string]string, requested []string, shipped, retired func(string) bool) error {
+	repeated := checkRepeatedIntegrations(requested, func(id string) bool { return shipped(id) && knownIntegration(values, id) })
+	unknown := checkUnknownIntegrations(values, requested, retired, func(map[string]string, string) bool { return true })
+	return domain.CollectRefusals(append(refusalCauses(repeated), refusalCauses(unknown)...)...)
+}
+
+// CheckRepeatedIntegrations checks list structure without reading metadata layers.
+func (settings Catalog) CheckRepeatedIntegrations(requested []string) error {
+	return checkRepeatedIntegrations(requested, settings.ShippedIntegration)
+}
+
+func checkRepeatedIntegrations(requested []string, shipped func(string) bool) error {
+	var refusals []error
+	selected := make(map[string]int, len(requested))
+	for _, agent := range requested {
+		if selected[agent]++; selected[agent] != 2 {
+			continue
+		}
+		// Only shipped IDs may appear in the rendered diagnostic.
+		if name, ok := domain.ConfigIntegrationName(agent); ok && shipped(agent) {
+			refusals = append(refusals, domain.NewConfigRefusal(domain.ConfigDuplicateIntegration, name))
+		} else {
+			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigDuplicateUnknownIntegration), agent))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
+func checkUnknownIntegrations(values map[string]string, requested []string, retired func(string) bool, metadataKnown func(map[string]string, string) bool) error {
+	var refusals []error
+	for _, agent := range requested {
+		if !knownIntegration(values, agent) && !retired(agent) && metadataKnown(values, agent) {
+			refusals = append(refusals, fmt.Errorf("%w %q", domain.NewConfigRefusal(domain.ConfigUnknownIntegration), agent))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
 }
 
 // WithIntegrationSelection prepares consumers for a planned requested set without

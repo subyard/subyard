@@ -621,6 +621,23 @@ An interactive `codex` from an SSH or VS Code shell prefers upstream's shared ap
 - **Disconnects:** when a plain client's terminal dies during a slow tool, the tool finishes on the daemon
   and its result reaches the model. Under `--no-daemon` the tool stops with the client.
 
+On hosts with AppArmor user namespace restrictions, yard setup runs Bubblewrap as the yard
+developer and checks that it can create user and network namespaces. If the probe fails in a
+container yard, provisioning loads the distribution's `bwrap` and `unpriv_bwrap` profiles in the
+yard's own AppArmor namespace. The host-wide restriction stays enabled. This yard policy applies
+independently of which coding tools are selected, including Codex and Claude Code.
+
+The boot loader verifies the two profiles against the Subyard ownership record in
+`/var/lib/subyard/bwrap-apparmor-ownership` before loading either one. Setup repairs missing boot
+registration and missing live profiles. Administrator overrides, unrecorded policy installations,
+and missing or changed owned files require operator review.
+
+To opt out, remove `codex` from the yard's `CODING_TOOL_INTEGRATIONS`, set `BWRAP_APPARMOR=off`
+in the yard's settings, and run `yard setup` for that yard. Setup refuses this setting before
+changing the yard if Codex is still selected. With the opt-out approved, setup disables the boot
+loader and unloads the two verified profiles, attachment first. Stop any affected sandbox jobs
+before opting out.
+
 #### Codex version drift
 
 The daemon and the command can run different versions. `codex app-server daemon version` reports both, as
@@ -706,22 +723,23 @@ provision prints none.
 
 ### Commit and push approval prompts
 
-`CODING_TOOL_GIT_APPROVAL` is a syncable setting with the values `prompt` (default) and `off`.
+`CODING_TOOL_GIT_APPROVAL` is a syncable setting with the values `off` (default) and `prompt`.
 It governs Claude, Codex and OpenCode. Provisioning writes the Git prompt rules and hook
 registrations for Claude and Codex to their root-owned managed drop-in and managed requirements,
 respectively. Their home defaults carry no Git rules. OpenCode uses the shipped
-`~/.config/opencode/opencode.jsonc` home template. To turn the prompts off for one yard:
+`~/.config/opencode/opencode.jsonc` home template. To enable prompts for one yard:
 
 ```sh
-yard -Y <yard> config set CODING_TOOL_GIT_APPROVAL off --scope yard
+yard -Y <yard> config set CODING_TOOL_GIT_APPROVAL prompt --scope yard
 yard -Y <yard> init
 ```
 
-Set `prompt` the same way to restore them; shared or host scope applies the choice to more yards.
+Shared or host scope applies the choice to more yards. After an upgrade, the next
+`yard init` removes the managed prompts on yards without an explicit `prompt` setting.
 Until `yard init` applies a change, it is listed as a pending init-owned setting.
 `off` removes the Git prompt rules and disables the Claude and Codex Git hook. The Claude update lock and the Codex
 approval policy, reviewer and `rm` rule stay. `claude-policy-check`, `codex-policy-check` and `yard status` verify the installed
-mode, so `off` is expected state, not drift. Existing sessions keep their loaded policy until restarted.
+mode and accept either correctly installed policy. Existing sessions keep their loaded policy until restarted.
 With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
 
 In `prompt` mode, Claude and Codex use a managed Bash `PreToolUse` hook that rejects alternate literal spellings of
@@ -749,7 +767,9 @@ Limits:
 - A release without this setting refuses it wherever it is set, and refuses an installed snapshot
   that records `off`. Before switching to such a release, run
   `yard -Y <yard> config unset CODING_TOOL_GIT_APPROVAL --scope <scope>` at every scope that sets it
-  (add `--git` for a synced assignment), then `yard init`.
+  (add `--git` for a synced assignment). Apply `prompt` with a command-scoped override
+  for the final init (`CODING_TOOL_GIT_APPROVAL=prompt yard -Y <yard> init`) to clear the
+  recorded `off` without leaving a persistent assignment.
 - Updating an installation older than v0.14.0 (Codex) or v0.23.0 (Claude): agent sessions started
   after the home defaults are refreshed and before that agent's provision hook writes the managed
   policy get no commit/push prompt. Hooks run in the yard's agent order and stop at the first
@@ -758,7 +778,8 @@ Limits:
 ### Codex permissions across projects
 
 The default yard configuration permits local edits, builds, tests and network access without
-approval. In `prompt` mode, managed rules classify canonical direct `git commit` (including
+approval, including ordinary Git commits and pushes. In `prompt` mode, managed rules classify
+canonical direct `git commit` (including
 `--amend`) and `git push` as requiring user approval across projects. Repeated single-use approval also depends
 on the client's response behavior:
 
@@ -786,7 +807,8 @@ filesystem access and mandatory command approval are separate settings.
 The home rules explicitly allow `rm`, including recursive cleanup of build fixtures. Without a
 matching allow rule, Codex can still request approval for removal commands under `on-request`,
 even with `danger-full-access`. The allow rule relies on the yard as the isolation boundary;
-it does not limit removal to the current project. Managed commit/push prompts remain in force.
+it does not limit removal to the current project. In `prompt` mode, the managed Git rules apply
+independently.
 
 After updating Subyard, run `yard init` to reconcile existing yards, then start new Codex sessions.
 Existing sessions must be restarted to load the policy. `codex-policy-check` verifies the contents,
@@ -839,8 +861,8 @@ sessions. Installation checks do not certify an interactive approval UI:
 
 | Backend | Shipped yard setting | Limit of the evidence |
 | --- | --- | --- |
-| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and, in `prompt` mode, native managed commit/push ask rules. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. Those checks also cover `auto` with a synthetic classifier and the installed managed binary; they use the client's own classifier requests, so server-side auto-mode review is not covered. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. The Orca `managed-agents` lane covers stock Orca terminal arguments and Orca's built-in Claude chat with a synthetic model. Other IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
-| OpenCode V1 | Global allow, with commit/push ask patterns under `permission.bash` in `prompt` mode. | **Unsupported for the strict single-use contract.** Native `once` prompts again; `always` permits a later matching command without another prompt. Project/agent/UI overrides can weaken the defaults. Direct launch remains available. |
+| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow. Native managed commit/push ask rules are enabled only in `prompt` mode. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. Those checks also cover `auto` with a synthetic classifier and the installed managed binary; they use the client's own classifier requests, so server-side auto-mode review is not covered. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. The Orca `managed-agents` lane covers stock Orca terminal arguments and Orca's built-in Claude chat with a synthetic model. Other IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
+| OpenCode V1 | Global allow by default. In `prompt` mode, `permission.bash` adds commit/push ask patterns. | **Unsupported for the strict single-use contract.** Native `once` prompts again; `always` permits a later matching command without another prompt. Project/agent/UI overrides can weaken the defaults. Direct launch remains available. |
 | pi | `defaultProjectTrust = "always"`. | Project trust is not a per-command approval gate; Subyard supplies no verified outer gate. |
 
 `bypassPermissions` is the standard Claude mode in a yard, with `autoCompactEnabled: true`. Claude Code can offer on first launch to make
@@ -1015,7 +1037,7 @@ perform unrelated activation work. When several yards drift, use `--all-local` t
 Use the typed persistent writers to save locally or in Git:
 
 ```sh
-yard config set <SETTING> <VALUE> --scope shared|host|yard [--local | --git]
+yard config set <SETTING> <VALUE> [<SETTING> <VALUE> ...] --scope shared|host|yard [--local | --git]
 yard config unset <SETTING> --scope shared|host|yard [--local | --git]
 yard config import <FILE_SETTING> <path> --scope shared|host|yard [--local | --git]
 yard config edit <FILE_SETTING> --scope shared|host|yard [--local | --git]
@@ -1027,7 +1049,9 @@ configuration. `config edit` requires `VISUAL` or `EDITOR` to name one executabl
 
 Persistent set/unset writers canonicalize every member of the selected legacy alias family,
 including removal of all aliases on unset. They preserve unrelated records, comments and existing
-permissions. Before consent they load the prospective scoped configuration through the normal
+permissions. If a record assigns a selected setting using an expansion, or reads a selected setting
+through a reference, the writer identifies the record and asks you to edit the file manually.
+This applies to single writes, batches and Git writes. Before consent they load the prospective scoped configuration through the normal
 resolver, including every affected local registration for host/shared changes. Relevant source,
 profile and asset dependencies are bound by content and filesystem identity and rechecked before
 publication; changed inputs require a fresh assessment. Transient selection overrides cannot hide
@@ -1115,14 +1139,14 @@ for other listeners remain with their declaring core or profile settings; listen
 alone does not make a setting portable.
 
 The default is local storage; `--local` makes that choice explicit and needs no Git source.
-`--git` saves only the selected assignment or file in the registered source, creates one commit
-with an automatic message that omits the value, and pushes the exact upstream immediately.
-`config set` with `--git` accepts several `SETTING VALUE` pairs in one scope and saves them in
-one commit and push, for example
-`yard config set GIT_USER_NAME 'Jane Doe' GIT_USER_EMAIL jane@example.com --scope shared --git`.
+`config set` accepts several `SETTING VALUE` pairs in one scope and saves them in one atomic
+local write or, with `--git`, one commit and push. For example,
+`yard config set GIT_USER_NAME 'Jane Doe' GIT_USER_EMAIL jane@example.com --scope shared`.
 Every pair is validated before planning, and each setting may appear once. Constraints between
-settings, such as a yard template that forbids coding tools, apply to the combined result. It
-does not publish unrelated local overrides. Local values still take precedence: an explicit empty
+settings, such as a yard template that forbids coding tools, apply to the combined result.
+Git commits use an automatic message that omits setting values and push to the exact upstream
+immediately. Git authoring leaves unrelated local overrides private.
+Local values still take precedence: an explicit empty
 assignment is a value, while `config unset` removes the local assignment and reveals the Git
 fallback. `config unset --git` removes the Git assignment and leaves any local value intact.
 File settings have no `unset` command; removing a local file override requires an explicit file

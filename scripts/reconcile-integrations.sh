@@ -47,6 +47,7 @@ fi
 
 # --- 3. provision enabled agent CLIs ----------------------------------------
 # Hooks live under config/agents/<name> and run as root in the yard.
+# Resolve the Git approval default here so installed prompt package hashes stay valid.
 echo "Coding integrations:"
 for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   _provision_var="AGENT_${_agent}_PROVISION"
@@ -57,7 +58,7 @@ for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   _agent_env=(
     --env DEV_USER="$DEV_USER"
     --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}"
-    --env CODING_TOOL_GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
+    --env CODING_TOOL_GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-off}"
     --env YARD_VERSION="${YARD_VERSION:-}"
   )
   incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" "${_agent_env[@]}" \

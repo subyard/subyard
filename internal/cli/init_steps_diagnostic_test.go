@@ -69,3 +69,20 @@ func TestInitPlanDisclosesNetworkManagerRebootBeforeApproval(t *testing.T) {
 		}
 	}
 }
+
+func TestInitPlanDisclosesConditionalBubblewrapPolicyBeforeApproval(t *testing.T) {
+	execution := &initExecution{
+		loaded: config.Loaded{Context: domain.Context{YardKind: domain.YardContainer, IncusProject: "subyard", YardInstanceName: "yard"}},
+		plan: application.ReconcilePlan{Steps: []application.ReconcileStep{{
+			Stage: application.ReconcileStage{ID: ports.ReconcileStageProvision, Label: "Provision the yard"}, Conditional: true,
+		}}},
+	}
+	steps := execution.operationSteps()
+	var output bytes.Buffer
+	(&CLI{options: Options{Stdout: &output}}).printOperationSteps(domain.OperationPlan{OperationID: "operation", Steps: steps})
+	const disclosure = "If the developer sandbox needs AppArmor policy or the yard's managed policy needs repair, load the two distribution Bubblewrap AppArmor profiles and enable their boot loader as needed"
+	if !strings.Contains(output.String(), "[conditional] init.stage.provision:") || !strings.Contains(output.String(), disclosure) ||
+		!strings.Contains(strings.Join(domain.OperationStepConsequences(steps), "\n"), disclosure) {
+		t.Fatalf("setup approval plan omitted the conditional policy change:\n%s", output.String())
+	}
+}

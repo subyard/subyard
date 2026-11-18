@@ -60,63 +60,37 @@ func TestWritePersistentAssignmentPreservesUnrelatedRecords(t *testing.T) {
 	}
 }
 
-func TestPersistentAssignmentChecksWhetherRecordsShareAssignments(t *testing.T) {
-	const shared = "GIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
-	for _, name := range []string{"GIT_USER_EMAIL", "GIT_USER_NAME"} {
-		value := "replacement"
-		_, err := EditPersistentAssignmentContent("config.env", []byte(shared), name, &value)
-		var source *SourceError
-		if !errors.As(err, &source) || source.Key != name || !strings.Contains(source.Reason, "edit changes effective setting") {
-			t.Fatalf("editing %s in %q: %v", name, shared, err)
-		}
-	}
-	value := "new@example.invalid"
-	content, err := EditPersistentAssignmentContent("config.env", []byte("GIT_USER_NAME=earlier\n"+shared), "GIT_USER_EMAIL", &value)
-	if want := "GIT_USER_NAME=earlier\nGIT_USER_EMAIL='new@example.invalid'\n"; err != nil || string(content) != want {
-		t.Fatalf("safe edit = %q, %v; want %q", content, err, want)
-	}
-}
-
-func TestPersistentAssignmentLeavesDormantDefaults(t *testing.T) {
-	const initial = "GATE=earlier\n: \"${GATE:-${GIT_USER_NAME:=original}${GIT_USER_EMAIL:=old@example.invalid}}\"\n"
-	for _, name := range []string{"GIT_USER_NAME", "GIT_USER_EMAIL"} {
-		t.Run(name, func(t *testing.T) {
-			content, err := EditPersistentAssignmentContent("config.env", []byte(initial), name, nil)
-			if err != nil || string(content) != initial {
-				t.Fatalf("unsetting an unassigned setting produced %q, %v", content, err)
+func TestPersistentAssignmentRefusesDynamicRecords(t *testing.T) {
+	const shared = `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"`
+	for _, test := range []struct {
+		name, content, setting, key string
+		line                        int
+	}{
+		{"target", shared, "GIT_USER_EMAIL", "GIT_USER_EMAIL", 1},
+		{"implicit assignment", shared, "GIT_USER_NAME", "GIT_USER_EMAIL", 1},
+		{"bare reference", "GIT_USER_EMAIL=$GIT_USER_NAME@example.invalid", "GIT_USER_NAME", "GIT_USER_EMAIL", 1},
+		{"masked default", "GIT_USER_NAME=earlier\n" + shared, "GIT_USER_EMAIL", "GIT_USER_EMAIL", 2},
+		{"dormant default", "GATE=earlier\n: ${GATE:-${GIT_USER_NAME:=original}}\n", "GIT_USER_NAME", "", 2},
+		{"unreachable default", ": ${GIT_USER_NAME:=Jane}${GIT_USER_NAME:-${SSH_PORT:=2222}}\n", "GIT_USER_NAME", "", 1},
+		{"same value", "GIT_USER_NAME=Jane\n: ${GIT_USER_NAME:-${SSH_PORT:=2222}}\nGIT_USER_NAME=Jane\n", "GIT_USER_NAME", "", 2},
+		{"discarded expansion", `GIT_USER_EMAIL="${CODEX_VERSION:-${GIT_USER_NAME:=original}}@example.invalid"`, "GIT_USER_EMAIL", "GIT_USER_EMAIL", 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := "Jane"
+			path := filepath.Join(testkit.TempDir(t), "config.env")
+			testkit.WriteFile(t, path, []byte(test.content), 0o600)
+			for _, requested := range []*string{&value, nil} {
+				err := WritePersistentAssignment(filepath.Dir(path), path, test.setting, requested)
+				var source *SourceError
+				if !errors.As(err, &source) || source.Path != path || source.Line != test.line || source.Key != test.key ||
+					!strings.Contains(source.Reason, "edit the file manually") {
+					t.Fatalf("expected record refusal, got %v", err)
+				}
+				if stored, err := os.ReadFile(path); err != nil || string(stored) != test.content {
+					t.Fatalf("refused edit changed content: %q, %v", stored, err)
+				}
 			}
 		})
-	}
-}
-
-func TestPersistentAssignmentRefusesSameValueEditWithCollateralChanges(t *testing.T) {
-	const initial = "GIT_USER_NAME=Jane\n" +
-		": ${GIT_USER_NAME:-${GIT_USER_EMAIL:=x@example.invalid}}\n" +
-		": ${GIT_USER_EMAIL:-${SSH_PORT:=2222}}\n" +
-		"GIT_USER_NAME=Jane\n"
-	root := testkit.TempDir(t)
-	path := filepath.Join(root, "config.env")
-	testkit.WriteFile(t, path, []byte(initial), 0o600)
-
-	value := "Jane"
-	err := WritePersistentAssignment(root, path, "GIT_USER_NAME", &value)
-	var source *SourceError
-	if !errors.As(err, &source) || source.Key != "GIT_USER_NAME" ||
-		!strings.Contains(err.Error(), "edit changes effective setting GIT_USER_EMAIL") ||
-		!strings.Contains(err.Error(), "edit changes effective setting SSH_PORT") {
-		t.Fatalf("expected typed refusal for both collateral changes, got %v", err)
-	}
-	if stored, err := os.ReadFile(path); err != nil || string(stored) != initial {
-		t.Fatalf("refused edit changed content: %q, %v", stored, err)
-	}
-}
-
-func TestPersistentAssignmentCanReplaceRecordWithUnreachableDefault(t *testing.T) {
-	const initial = `: "${GIT_USER_NAME:=Jane}${GIT_USER_NAME:-${SSH_PORT:=2222}}"` + "\n"
-	value := "replacement"
-	content, err := EditPersistentAssignmentContent("config.env", []byte(initial), "GIT_USER_NAME", &value)
-	if err != nil || string(content) != "GIT_USER_NAME='replacement'\n" {
-		t.Fatalf("edited content = %q, %v", content, err)
 	}
 }
 
@@ -146,16 +120,13 @@ SSH_PORT=2222
 	}
 }
 
-func TestPersistentAssignmentCanEditDefaultInsideDiscardedExpansion(t *testing.T) {
-	for _, discarded := range []string{"YARD_CAPS", "CODEX_VERSION"} {
-		t.Run(discarded, func(t *testing.T) {
-			initial := "GIT_USER_EMAIL=\"${" + discarded + ":-${GIT_USER_NAME:=original}}@example.invalid\"\n"
-			value := "new@example.invalid"
-			content, err := EditPersistentAssignmentContent("config.env", []byte(initial), "GIT_USER_EMAIL", &value)
-			if err != nil || string(content) != "GIT_USER_EMAIL='new@example.invalid'\n" {
-				t.Fatalf("edited content = %q, %v", content, err)
-			}
-		})
+func TestPersistentAssignmentRewritesLiteralAliasWithSameValue(t *testing.T) {
+	const initial = "# retained comment\r\nBASE_IMAGE=images:debian/12\r\nYARD_IMAGE=images:debian/12\r\n"
+	const want = "# retained comment\r\nYARD_IMAGE='images:debian/12'\r\n"
+	value := "images:debian/12"
+	content, err := EditPersistentAssignmentContent("config.env", []byte(initial), "YARD_IMAGE", &value)
+	if err != nil || string(content) != want {
+		t.Fatalf("same-value alias rewrite = %q, %v; want %q", content, err, want)
 	}
 }
 
@@ -696,10 +667,10 @@ func TestWritePersistentAssignmentRejectsPreservedConditionalAlias(t *testing.T)
 		values  []*string
 		reason  string
 	}{
-		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "preserved record"},
-		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "preserved record"},
-		{"ENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{nil, &empty}, "preserved record"},
-		{"YARD_PROFILES=neighbor\nENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{&empty}, "preserved record"},
+		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "edit the file manually"},
+		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "edit the file manually"},
+		{"ENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{nil, &empty}, "edit the file manually"},
+		{"YARD_PROFILES=neighbor\nENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{&empty}, "edit the file manually"},
 	} {
 		for _, value := range setting.values {
 			configHome := testkit.TempDir(t)

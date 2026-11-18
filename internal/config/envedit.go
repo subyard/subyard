@@ -214,8 +214,7 @@ func (settings Catalog) ParsePersistentAssignments(path string, content []byte) 
 			})
 		}
 		// Report discarded direct assignments so config unset can remove them.
-		evaluation := envEvaluation{values: values, observe: observe, policy: operatorDiscardPolicy(observe, settings)}
-		return evaluation.applyRecord(record.text)
+		return applyRecordRetired(record.text, values, observe, operatorDiscardPolicy(observe, settings))
 	})
 	if err != nil {
 		return nil, err
@@ -224,21 +223,9 @@ func (settings Catalog) ParsePersistentAssignments(path string, content []byte) 
 }
 
 func persistentDirectAssignment(record string) (string, bool) {
-	record = strings.TrimSpace(record)
-	if strings.HasPrefix(record, ":") {
-		return "", true
-	}
-	if strings.HasPrefix(record, "export ") {
-		record = strings.TrimSpace(strings.TrimPrefix(record, "export "))
-	}
-	separator := strings.IndexByte(record, '=')
-	if separator < 1 {
-		return "", true
-	}
-	name := strings.TrimSpace(record[:separator])
-	raw := strings.TrimSpace(record[separator+1:])
+	name, raw := envRecordAssignment(record)
 	_, expands := decodeValue(raw)
-	return name, expands && strings.ContainsRune(raw, '$')
+	return name, name == "" || expands && strings.ContainsRune(raw, '$')
 }
 
 // WritePersistentAssignment updates one assignment without rewriting unrelated
@@ -349,7 +336,7 @@ func EditPersistentAssignmentContent(
 
 // EditPersistentAssignmentContent uses the catalog without reading or writing native state.
 func (settings Catalog) EditPersistentAssignmentContent(path string, content []byte, name string, value *string) ([]byte, error) {
-	return editAssignmentContent(path, content, name, value, settings)
+	return (PersistentScalarEdits{{Name: name, Value: value}}).LayerContent(path, content)
 }
 
 // WritePersistentFile atomically stores a validated persistent file setting.
@@ -480,66 +467,71 @@ func CreatePersistentFile(configHome, path string, content []byte, guards ...fun
 	return persistFile(configHome, path, content, false)
 }
 
-func editAssignmentContent(
-	path string,
-	content []byte,
-	name string,
-	value *string,
-	settings Catalog,
-) ([]byte, error) {
-	name = canonicalSettingName(name)
-	policy := operatorDiscardPolicy(nil, settings)
-	before := environment{}
-	var assignments []observedAssignment
-	observe := func(key, value string, line int) {
-		assignments = append(assignments, observedAssignment{name: key, value: value, line: line})
-	}
-	if err := applyEnvReaderObservedRetired(bytes.NewReader(content), path, before, observe, policy, observe); err != nil {
-		return nil, err
-	}
-	updated, err := (PersistentScalarEdits{{Name: name, Value: value}}).editContent(path, content, [][]observedAssignment{assignments}, false)
+// EditProfileSelectionContent preserves the profile command's handling of
+// standalone defaults and discarded profile settings.
+func (settings Catalog) EditProfileSelectionContent(path string, content []byte, value string) ([]byte, error) {
+	const name = "ENVIRONMENT_PROFILES"
+	const role = "persistent settings"
+	assignments, err := settings.ParsePersistentAssignments(path, content)
 	if err != nil {
 		return nil, err
 	}
+	defaults := map[int]bool{}
+	for _, assignment := range assignments {
+		if !assignment.Direct && assignment.Name == name {
+			defaults[assignment.Line] = true
+		}
+	}
+	var records []scalarEditRecord
+	err = scanEnvRecords(bytes.NewReader(content), path, role, func(record envRecord) error {
+		direct, dynamic := persistentDirectAssignment(record.text)
+		if direct == "" && defaults[record.line] {
+			_, raw := envRecordAssignment(record.text)
+			expression, _ := decodeValue(raw)
+			fallback, prefix := strings.CutPrefix(expression, "${ENVIRONMENT_PROFILES:=")
+			fallback, suffix := strings.CutSuffix(fallback, "}")
+			if prefix && suffix && !strings.ContainsAny(fallback, "$}") {
+				direct, dynamic = name, false
+			}
+		}
+		if dynamic && CanonicalSettingName(direct) == name {
+			return sourceError(path, record.line, recordSettingKey(record.text), role, ErrDynamicScalarRecord.Error(), ErrDynamicScalarRecord)
+		}
+		records = append(records, scalarEditRecord{envRecord: record, name: direct})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	edits := PersistentScalarEdits{{Name: name, Value: &value}}
+	draft, err := renderScalarEditRecords(path, edits.placeRecords(records))
+	if err != nil {
+		return nil, err
+	}
+	assignments, err = settings.ParsePersistentAssignments(path, draft)
+	if err != nil {
+		return nil, err
+	}
+	var last PersistentAssignment
 	var refusals []error
-
-	after := environment{}
-	var effective PersistentAssignment
-	observe = func(key, assignedValue string, line int) {
-		if canonicalSettingName(key) != name {
-			return
+	for _, assignment := range assignments {
+		if CanonicalSettingName(assignment.Name) != name {
+			continue
 		}
-		if value == nil || key != name {
-			refusals = append(refusals, sourceError(path, line, name, "persistent settings", "setting is still assigned by a preserved record; simplify conditional assignments before authoring", nil))
+		if assignment.Name != name || !assignment.Direct {
+			refusals = append(refusals, sourceError(path, assignment.Line, name, role,
+				"setting is still assigned by a preserved record; edit the file manually", nil))
 		}
-		effective = PersistentAssignment{Name: key, Value: assignedValue, Line: line}
+		last = assignment
 	}
-	if err := applyEnvReaderObservedRetired(bytes.NewReader(updated), path, after, observe, policy, observe); err != nil {
-		return nil, domain.CollectRefusals(append(refusals, err)...)
-	}
-	if value != nil && (effective.Name == "" || effective.Value != *value) {
-		refusals = append(refusals, sourceError(path, effective.Line, name, "persistent settings", "a preserved record changes the requested setting; simplify conditional assignments before authoring", nil))
-	}
-
-	changed := func(key string) {
-		if canonicalSettingName(key) != name {
-			refusals = append(refusals, sourceError(path, 0, name, "persistent settings", "edit changes effective setting "+key+"; simplify dependent assignments before authoring", nil))
-		}
-	}
-	for key, previous := range before {
-		if current, exists := after[key]; !exists || current != previous {
-			changed(key)
-		}
-	}
-	for key := range after {
-		if _, existed := before[key]; !existed {
-			changed(key)
-		}
+	if last.Value != value || last.Name == "" {
+		refusals = append(refusals, sourceError(path, last.Line, name, role,
+			"a preserved record changes the requested setting; edit the file manually", nil))
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return nil, err
 	}
-	return updated, nil
+	return draft, nil
 }
 
 func quotePersistentValue(value string) string {

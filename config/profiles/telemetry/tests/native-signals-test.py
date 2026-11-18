@@ -25,6 +25,21 @@ spec.loader.exec_module(fixture)
 
 
 class NativeSignalsTest(unittest.TestCase):
+    def test_fixture_thread_requests_and_checks_effective_permissions(self):
+        class App:
+            def request(self, method, params):
+                request.append((method, params))
+                return {'thread': {'id': 'fixture'}, 'sandbox': {'type': sandbox}}
+
+        request = []
+        app = fixture.codex_app_class(App)()
+        sandbox = 'dangerFullAccess'
+        self.assertEqual(app.start_fixture_thread(Path('/tmp/fixture')), 'fixture')
+        self.assertEqual(request, [('thread/start', {'cwd': '/tmp/fixture', 'sandbox': 'danger-full-access'})])
+        sandbox = 'readOnly'
+        with self.assertRaisesRegex(AssertionError, 'fixture tool permissions were not applied'):
+            app.start_fixture_thread(Path('/tmp/fixture'))
+
     def test_missing_bubblewrap_tool_error_fails_before_the_completion_deadline(self):
         provider = fixture.load(Path(__file__).parents[2]/'orca/tests/e2e/codex-permissions.py', 'codex_missing_sandbox_fixture')
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.codex_provider_class(provider.Provider))

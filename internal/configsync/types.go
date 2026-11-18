@@ -66,6 +66,7 @@ type Plan struct {
 	options      Options
 	desired      map[string]candidateFile
 	localDesired map[string]candidateFile
+	scalarLayers map[string][]config.ConfigurationLayer
 	previous     Manifest
 	localInputs  []localInputObservation
 }
@@ -93,7 +94,6 @@ type Options struct {
 	YardInUse           YardUseProbe
 	validationOverrides map[string]string
 	inspectionOnly      bool
-	scalarEditPath      string
 }
 
 func (plan Plan) candidate(path string) (candidateFile, bool) {

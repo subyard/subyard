@@ -141,7 +141,7 @@ func configInventoryEntry(home, kind, content string) map[string]any {
 	return entry
 }
 
-func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
+func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.T) {
 	f := newConfigInventoryFixture(t)
 	root := testkit.TempDir(t)
 	prompt := root + "/prompt.jsonc"
@@ -157,12 +157,27 @@ func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "AGENT_fixture_CONFIG=" + prompt, ""},
 	}
 	ctx := context.Background()
-	for _, step := range []struct{ mode, want string }{
-		{"prompt", "{\"approval\":\"ask\"}\n"},
-		{"off", "{\"approval\":\"allow\"}\n"},
-		{"prompt", "{\"approval\":\"ask\"}\n"},
+	for _, step := range []struct {
+		mode, want string
+		applied    bool
+		settings   map[string]string
+	}{
+		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
+		{mode: "", want: "{\"approval\":\"ask\"}\n", applied: true},
+		{mode: "", want: "{\"approval\":\"ask\"}\n", applied: true, settings: map[string]string{}},
+		{mode: "", want: "{\"approval\":\"allow\"}\n"},
+		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
 	} {
-		runtime.Environment[2] = "CODING_TOOL_GIT_APPROVAL=" + step.mode
+		mode := step.mode
+		if step.applied {
+			// The older inventory snapshot omitted its implicit prompt mode.
+			projected := (config.Catalog{}).WithAppliedIntegrationInitSettings(
+				map[string]string{"CODING_TOOL_GIT_APPROVAL": "off"}, step.settings,
+			)
+			mode = projected["CODING_TOOL_GIT_APPROVAL"]
+		}
+		runtime.Environment[2] = "CODING_TOOL_GIT_APPROVAL=" + mode
+		runtime.appliedIntegrationInspection = step.applied
 		files, err := runtime.guestConfigFiles()
 		if err != nil {
 			t.Fatal(err)
@@ -176,6 +191,13 @@ func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
 		}
 		entry := inventoryFileEntry(f.home, "fixture", "settings", string(payload))
 		entries := inventoryArtifacts(t, []map[string]any{entry})
+		if step.applied {
+			observed, err := runtime.integrationInventory(ctx, "observe", entries, "")
+			if err != nil || observed.Changed {
+				t.Fatalf("legacy installed policy drifted before init: changed=%t, error=%v", observed.Changed, err)
+			}
+			continue
+		}
 		for _, operation := range []string{"apply", "commit"} {
 			if _, err := runtime.integrationInventory(ctx, operation, entries, ""); err != nil {
 				t.Fatalf("%s %s: %v", step.mode, operation, err)
@@ -184,6 +206,37 @@ func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
 		got, err := os.ReadFile(f.home + "/settings")
 		if err != nil || string(got) != step.want {
 			t.Fatalf("%s: installed %q, want %q, read error: %v", step.mode, got, step.want, err)
+		}
+	}
+}
+
+func TestInstalledGitApprovalPackageRecordsSurviveDefaultChange(t *testing.T) {
+	provision := testkit.TempDir(t) + "/provision.sh"
+	testkit.WriteFile(t, provision, []byte("#!/bin/sh\nexit 0\n"), 0755)
+
+	// The predecessor's receipts were generated with these fixed provision bytes.
+	const promptReceipt = "e6cc90fce6371301d8cb40a272df8ce7e80a792279a24b9b43f0f686d09dd971"
+	const offReceipt = "32e8bcb8d3a44a0de61d405e8650d6a09e85732aebaea0eeb7e0e077356e86b6"
+	for _, test := range []struct{ setting, receipt string }{
+		{"prompt", promptReceipt},
+		{"off", offReceipt},
+		{"", offReceipt},
+	} {
+		runtime := Runtime{
+			Integrations: []profile.IntegrationDefinition{},
+			Yard:         domain.Context{DevUser: "dev"},
+			Environment: []string{
+				"CODING_TOOL_INTEGRATIONS=fixture",
+				"AGENT_fixture_PROVISION=" + provision,
+				"CODING_TOOL_GIT_APPROVAL=" + test.setting,
+			},
+		}
+		entries, err := runtime.integrationPackageArtifacts("observe", nil)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("package receipt for %q: %#v, error: %v", test.setting, entries, err)
+		}
+		if entries[0].Digest != test.receipt {
+			t.Fatalf("package receipt for %q: %s, want %s", test.setting, entries[0].Digest, test.receipt)
 		}
 	}
 }

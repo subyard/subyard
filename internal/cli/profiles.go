@@ -351,8 +351,10 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 		return err
 	}
 	value := strings.Join(requested, " ")
+	var content []byte
 	if selectionChanged {
-		if _, err := cli.catalog.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value); err != nil {
+		content, err = cli.catalog.EditProfileSelectionContent(path, before.Content, value)
+		if err != nil {
 			return err
 		}
 	}
@@ -523,7 +525,7 @@ func (prepared *preparedCommand) prepareProfile(ctx context.Context, _ *initBoot
 			}
 		}
 		if selectionChanged {
-			if err := cli.catalog.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
+			if err := config.WritePersistentFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, before, content); err != nil {
 				return result, err
 			}
 		}

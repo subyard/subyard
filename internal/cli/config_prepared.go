@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
@@ -142,6 +143,9 @@ func (prepared *preparedCommand) prepareConfigScalar(ctx context.Context, action
 	}
 	defer prepared.setGateSubject(configAuthoringSubject(prepared.Loaded.Context.YardName, requests))
 	if len(requests) > 1 {
+		if !requests[0].git {
+			return prepared.prepareLocalConfigBatch(ctx, requests)
+		}
 		if err := prepared.CLI.configGitScalarsRefusal(prepared.Loaded, requests); err != nil {
 			return configUsage(err)
 		}
@@ -210,8 +214,26 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 			return err
 		}
 	}
+	return prepared.attachLocalConfigScalars(ctx, []configAuthoringRequest{request}, prospective, baseline, desired, func(guard func() error) error {
+		return config.ApplyPersistentFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, desired, guard)
+	})
+}
+
+func (prepared *preparedCommand) attachLocalConfigScalars(ctx context.Context, requests []configAuthoringRequest, prospective *configProspective, baseline, desired config.PersistentFileSnapshot, write func(func() error) error) error {
+	cli, loaded := prepared.CLI, prepared.Loaded
+	request := requests[0]
+	action, path := request.action, prospective.path
+	changed := !sameConfigAuthoringSnapshot(baseline, desired)
+	names := make([]string, 0, len(requests))
+	for _, request := range requests {
+		names = append(names, request.name)
+	}
+	settingNames := strings.Join(names, ", ")
+	var err error
 	var captures []integrationSettingsCapture
-	if changed && loaded.Catalog.IntegrationInitSetting(request.name) {
+	if changed && slices.ContainsFunc(requests, func(assignment configAuthoringRequest) bool {
+		return loaded.Catalog.IntegrationInitSetting(assignment.name)
+	}) {
 		// Config-only and cold installations have no installed release contract.
 		// Preserve their offline authoring without contacting a guest daemon.
 		options, available, readErr := cli.mutationGateReleaseOptions()
@@ -233,7 +255,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 					return readErr
 				}
 				if journal.Checkpoint == releasetransition.JournalComplete {
-					captures, err = cli.prepareIntegrationSettingsCaptures(ctx, loaded, request, prospective)
+					captures, err = cli.prepareIntegrationSettingsCaptures(ctx, loaded, prospective, requests...)
 					if err != nil {
 						return err
 					}
@@ -247,19 +269,33 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 			captureBindings = append(captureBindings, capture.loaded.Context.YardName+":"+capture.prepared.Binding())
 		}
 	}
-	step := domain.OperationStep{ID: "config." + action, Target: string(request.scope) + " setting " + request.name,
+	target := string(request.scope) + " setting " + settingNames
+	if len(requests) > 1 {
+		target = string(request.scope) + " settings " + settingNames
+	}
+	step := domain.OperationStep{ID: "config." + action, Target: target,
 		Observed: "fingerprint:" + operationStateDigest(baseline), Desired: "fingerprint:" + operationStateDigest(desired),
 		Decision: domain.StepSkip, Preconditions: []string{"persistent setting scope, permissions and ownership are valid", "the authored target matches the captured baseline or desired content"},
-		Verify: "read the persistent target and compare the approved content fingerprint", Consequence: action + " " + request.name + " in persistent " + string(request.scope) + " settings"}
+		Verify: "read the persistent target and compare the approved content fingerprint", Consequence: action + " " + settingNames + " in persistent " + string(request.scope) + " settings"}
 	if changed {
 		step.Decision = domain.StepApply
 	}
-	prepared.exactState = operationStateDigest(struct {
-		Action, Name, Value, Scope, Path string
-		Before, Desired                  config.PersistentFileSnapshot
-		Dependencies, Semantics, Source  string
-		Captures                         []string
-	}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding, captureBindings})
+	if len(requests) == 1 {
+		prepared.exactState = operationStateDigest(struct {
+			Action, Name, Value, Scope, Path string
+			Before, Desired                  config.PersistentFileSnapshot
+			Dependencies, Semantics, Source  string
+			Captures                         []string
+		}{action, request.name, request.value, string(request.scope), path, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding, captureBindings})
+	} else {
+		prepared.exactState = operationStateDigest(struct {
+			Action, Scope, Path             string
+			Names                           []string
+			Before, Desired                 config.PersistentFileSnapshot
+			Dependencies, Semantics, Source string
+			Captures                        []string
+		}{action, string(request.scope), path, names, baseline, desired, prospective.binding, prospective.semantics, request.sourceBinding, captureBindings})
+	}
 	prepared.assess = func(context.Context) (domain.ActionID, domain.ActionDelta, error) {
 		return domain.ActionID("config." + action), domain.ActionDelta{Changed: changed, Consequences: []string{step.Consequence}}, nil
 	}
@@ -324,15 +360,15 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		if !changed || !sameConfigAuthoringSnapshot(current, baseline) {
 			return domain.AdapterResult{}, fmt.Errorf("%w: persistent configuration changed after confirmation", domain.ErrPlanStale)
 		}
-		if err := cli.checkResourceConfigChange(ctx, loaded, request); err != nil {
+		if err := cli.checkResourceConfigChanges(ctx, loaded, requests); err != nil {
 			return domain.AdapterResult{}, err
 		}
-		if request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
+		if len(requests) == 1 && request.scope == config.ScopeYard && request.name == "YARD_TEMPLATE" {
 			if err := config.ValidateYardTemplateIntegrations(loaded, request.value); err != nil {
 				return domain.AdapterResult{}, err
 			}
 		}
-		if err := config.ApplyPersistentFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, desired, func() error {
+		guard := func() error {
 			if err := prospective.checkLocked(true); err != nil {
 				return err
 			}
@@ -347,14 +383,15 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 				}
 			}
 			return nil
-		}); err != nil {
+		}
+		if err := write(guard); err != nil {
 			if errors.Is(err, config.ErrPersistentTargetStale) {
 				return domain.AdapterResult{}, fmt.Errorf("%w: %w", domain.ErrPlanStale, err)
 			}
 			return domain.AdapterResult{}, err
 		}
-		if request.name == "DEV_USER" || request.name == "DEV_UID" {
-			for _, capture := range captures {
+		for _, capture := range captures {
+			if capture.identityChanged {
 				if err := cli.publishAppliedIdentityHint(ctx, capture.loaded); err != nil {
 					return domain.AdapterResult{}, err
 				}

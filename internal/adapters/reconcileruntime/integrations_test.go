@@ -371,10 +371,11 @@ type retryableIntegrationExecutor struct {
 
 type appliedSettingsExecutor struct {
 	*retryableIntegrationExecutor
-	settings    map[string]string
-	captures    int
-	failCapture bool
-	diagnostics *IntegrationDiagnosticEvidence
+	settings         map[string]string
+	captures         int
+	installedPackage string
+	failCapture      bool
+	diagnostics      *IntegrationDiagnosticEvidence
 }
 
 func (fixture *appliedSettingsExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
@@ -382,6 +383,19 @@ func (fixture *appliedSettingsExecutor) Exec(ctx context.Context, project, insta
 		switch request.Command[4] {
 		case "selection", "settings":
 			payload, _ := json.Marshal(integrationObservation{Installed: true, AppliedSettings: fixture.settings})
+			return ports.InstanceExecResult{Stdout: payload}, nil
+		case "observe":
+			if fixture.installedPackage == "" {
+				break
+			}
+			var input struct{ Entries []integrationArtifact }
+			if err := json.Unmarshal(request.Stdin, &input); err != nil {
+				return ports.InstanceExecResult{}, err
+			}
+			matched := slices.ContainsFunc(input.Entries, func(entry integrationArtifact) bool {
+				return entry.Kind == "package" && entry.Digest == fixture.installedPackage
+			})
+			payload, _ := json.Marshal(integrationObservation{Fingerprint: strings.Repeat("a", 64), Changed: !matched || fixture.pending})
 			return ports.InstanceExecResult{Stdout: payload}, nil
 		case "capture-settings":
 			if fixture.failCapture {
@@ -475,7 +489,7 @@ func TestIntegrationSettingsPublicationRetry(t *testing.T) {
 	}
 }
 func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T) {
-	for _, scenario := range []string{"ready", "source-drift", "runtime-drift"} {
+	for _, scenario := range []string{"ready", "legacy-prompt", "source-drift", "runtime-drift"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			if err := os.MkdirAll(filepath.Join(root, "config"), 0o700); err != nil {
@@ -486,6 +500,17 @@ func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T)
 			executor := &appliedSettingsExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}}
 			incus := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running", Config: map[string]string{}, Devices: map[string]map[string]string{}}}}
 			runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: executor, Integrations: []profile.IntegrationDefinition{}, Profiles: []profile.Definition{}, Yard: domain.Context{IncusProject: "p", YardInstanceName: "i", DevUser: "dev", DevUID: os.Getuid()}, Environment: []string{"AGENT_sample_COMMAND=old-command"}}
+			if scenario == "legacy-prompt" {
+				runtime.Environment = append(runtime.Environment, "CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_PROVISION="+source)
+				installed := runtime
+				installed.Environment = append(slices.Clone(runtime.Environment), "CODING_TOOL_GIT_APPROVAL=prompt")
+				entries, err := installed.integrationPackageArtifacts("observe", nil)
+				if err != nil || len(entries) != 1 {
+					t.Fatalf("legacy package receipt: %#v, error: %v", entries, err)
+				}
+				executor.installedPackage = entries[0].Digest
+				runtime.Environment = append(runtime.Environment, "CODING_TOOL_GIT_APPROVAL=off")
+			}
 			capture, err := runtime.PrepareAppliedIntegrationSettings(context.Background())
 			if err != nil || capture == nil {
 				t.Fatalf("legacy capture preparation: %v", err)
@@ -500,7 +525,7 @@ func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T)
 				executor.pending = true
 			}
 			err = capture.Apply(context.Background())
-			if scenario != "ready" {
+			if scenario == "source-drift" || scenario == "runtime-drift" {
 				if !errors.Is(err, domain.ErrPlanStale) || executor.captures != 0 {
 					t.Fatalf("unapproved capture: %v calls=%d", err, executor.captures)
 				}
@@ -508,6 +533,9 @@ func TestNativeAppliedIntegrationCaptureRechecksSourceAndReadiness(t *testing.T)
 			}
 			if err != nil || executor.captures != 1 || executor.settings["AGENT_sample_COMMAND"] != "old-command" {
 				t.Fatalf("ready capture: %v %#v", err, executor.settings)
+			}
+			if _, recorded := executor.settings["CODING_TOOL_GIT_APPROVAL"]; recorded {
+				t.Fatal("legacy capture must retain the implicit prompt encoding")
 			}
 		})
 	}
@@ -550,6 +578,25 @@ func TestPrepareLegacyIntegrationAdoptionSkipsUnavailableIncus(t *testing.T) {
 	}
 	if len(incus.ExecCalls) != 0 || len(incus.ConfigUpdates) != 0 || len(incus.PowerUpdates) != 0 {
 		t.Fatal("unavailable Incus triggered guest access or mutations")
+	}
+}
+
+func TestIntegrationPlanReportsServiceConflictWithoutSubstrate(t *testing.T) {
+	const conflict = "Bubblewrap AppArmor: modified policy loader"
+	incus := &testkit.Incus{
+		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
+		ExecSteps: []testkit.IncusExecStep{
+			{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing /srv/agents")},
+			{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}},
+		},
+	}
+	runtime := Runtime{Incus: incus, Executor: incus}
+	_, err := runtime.IntegrationPlan(context.Background())
+	if !errors.Is(err, errIntegrationSubstrateUnavailable) || !strings.Contains(err.Error(), conflict) {
+		t.Fatalf("expected substrate and service refusals, got %v", err)
+	}
+	if len(incus.ExecCalls) != 2 || incus.ExecCalls[1].Request.Command[5] != "observe" {
+		t.Fatalf("expected substrate probe and read-only service observation, got %d guest calls", len(incus.ExecCalls))
 	}
 }
 

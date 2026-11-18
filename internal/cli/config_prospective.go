@@ -26,54 +26,16 @@ type configProspective struct {
 	binding         string
 	semantics       string
 	directoryInputs map[string]bool
+	checkBatch      func(locked bool) error
 	scalarEdits     config.PersistentScalarEdits
 }
 
-func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot) (*configProspective, error) {
-	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path}
-	if err := plan.prepare(desired); err != nil {
-		return nil, err
-	}
-	return plan, nil
-}
-
-func (cli *CLI) prepareConfigScalarDraft(loaded config.Loaded, request configAuthoringRequest, path string, baseline config.PersistentFileSnapshot, edits config.PersistentScalarEdits) (*configProspective, config.PersistentFileSnapshot, error) {
+func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot, edits ...config.PersistentScalarEdit) (*configProspective, error) {
 	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path, scalarEdits: edits}
-	options := plan.loadOptions()
-	names, err := plan.yardNames()
-	if err != nil {
-		return nil, config.PersistentFileSnapshot{}, configProspectiveError{loaded.Context.Paths.ConfigHome, err}
-	}
-	var before []config.Loaded
-	var refusals []error
-	for _, name := range names {
-		options.YardName = name
-		current, err := config.Load(options)
-		if err != nil {
-			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
-			continue
-		}
-		before = append(before, current)
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return nil, config.PersistentFileSnapshot{}, configProspectiveError{loaded.Context.Paths.ConfigHome, err}
-	}
-	content, err := edits.LayerContent(path, baseline.Content, before)
-	if err != nil {
-		return nil, config.PersistentFileSnapshot{}, err
-	}
-	desired := config.PersistentFileSnapshot{Exists: request.action != "unset" || len(content) != 0, Content: content}
-	if err := plan.prepare(desired); err != nil {
-		return nil, config.PersistentFileSnapshot{}, err
-	}
-	return plan, desired, nil
-}
-
-func (plan *configProspective) prepare(desired config.PersistentFileSnapshot) error {
 	if desired.Exists {
 		file, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		plan.draft = file.Name()
 		err = file.Chmod(0o600)
@@ -86,15 +48,26 @@ func (plan *configProspective) prepare(desired config.PersistentFileSnapshot) er
 		}
 		if err != nil {
 			plan.close()
-			return err
+			return nil, err
 		}
 	}
 	var err error
 	plan.binding, plan.semantics, err = plan.inspect(true, false)
 	if err != nil {
 		plan.close()
+		return nil, err
 	}
-	return err
+	return plan, nil
+}
+
+func (cli *CLI) prepareConfigScalarDraft(loaded config.Loaded, request configAuthoringRequest, path string, baseline config.PersistentFileSnapshot, edits config.PersistentScalarEdits) (*configProspective, config.PersistentFileSnapshot, error) {
+	content, err := edits.LayerContent(path, baseline.Content)
+	if err != nil {
+		return nil, config.PersistentFileSnapshot{}, err
+	}
+	desired := config.PersistentFileSnapshot{Exists: edits[0].Value != nil || len(content) != 0, Content: content}
+	plan, err := cli.prepareConfigProspective(loaded, request, path, desired, edits...)
+	return plan, desired, err
 }
 
 func (plan *configProspective) close() {
@@ -106,6 +79,11 @@ func (plan *configProspective) close() {
 func (plan *configProspective) check() error { return plan.checkLocked(false) }
 
 func (plan *configProspective) checkLocked(locked bool) error {
+	if plan.checkBatch != nil {
+		if err := plan.checkBatch(locked); err != nil {
+			return fmt.Errorf("%w: %w", domain.ErrPlanStale, configProspectiveError{plan.loaded.Context.Paths.ConfigHome, err})
+		}
+	}
 	binding, semantics, err := plan.inspect(true, locked)
 	if err != nil {
 		return fmt.Errorf("%w: prospective configuration can no longer be validated: %w", domain.ErrPlanStale, err)
@@ -161,19 +139,11 @@ func (cli *CLI) reportConfigNext(err error) {
 	}
 }
 
-func (plan *configProspective) yardNames() ([]string, error) {
-	paths := plan.loaded.Context.Paths
-	if plan.request.scope != config.ScopeYard {
-		return config.YardNames(paths.ConfigDir, paths.ConfigHome)
-	}
-	return []string{plan.loaded.Context.YardName}, nil
-}
-
-func (plan *configProspective) loadOptions() config.LoadOptions {
-	paths := plan.loaded.Context.Paths
+func (cli *CLI) configProspectiveEnvironment(loaded config.Loaded) map[string]string {
+	paths := loaded.Context.Paths
 	environment := make(map[string]string)
-	for name, value := range plan.cli.baseEnv {
-		if _, setting := plan.loaded.Catalog.LookupSetting(name); setting || plan.loaded.Catalog.IsLegacySetting(name) {
+	for name, value := range cli.baseEnv {
+		if _, setting := loaded.Catalog.LookupSetting(name); setting || loaded.Catalog.IsLegacySetting(name) {
 			continue
 		}
 		environment[name] = value
@@ -182,12 +152,7 @@ func (plan *configProspective) loadOptions() config.LoadOptions {
 	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
 	environment["SUBYARD_HOME"] = paths.DataHome
 	delete(environment, "SUBYARD_YARD")
-	options := config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
-		OperatorHome: paths.OperatorHome, Environment: environment}
-	if plan.scalarEdits != nil {
-		options.ScalarEditPath = plan.path
-	}
-	return options
+	return environment
 }
 
 func (plan *configProspective) inspect(draft, locked bool) (binding, semantics string, result error) {
@@ -197,15 +162,18 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		}
 	}()
 	paths := plan.loaded.Context.Paths
-	names, err := plan.yardNames()
-	if err != nil {
-		return "", "", err
+	names := []string{plan.loaded.Context.YardName}
+	if plan.request.scope != config.ScopeYard {
+		var err error
+		names, err = config.YardNames(paths.ConfigDir, paths.ConfigHome)
+		if err != nil {
+			return "", "", err
+		}
 	}
-	options := plan.loadOptions()
-	options.ConfigLocked = locked
-	candidateOptions := options
+	environment := plan.cli.configProspectiveEnvironment(plan.loaded)
+	var overrides map[string]string
 	if draft {
-		candidateOptions.FileOverrides = map[string]string{plan.path: plan.draft}
+		overrides = map[string]string{plan.path: plan.draft}
 	}
 	var contexts []config.Loaded
 	inputs := map[string]config.PersistentFileSnapshot{}
@@ -269,23 +237,20 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	}
 	var refusals []error
 	for _, name := range names {
-		options.YardName, candidateOptions.YardName = name, name
-		loaded, err := config.Load(candidateOptions)
+		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
+			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked, ScalarEdits: plan.scalarEdits})
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 			continue
 		}
-		if draft && (plan.scalarEdits != nil || plan.request.action == "selection-repair") {
-			before, err := config.Load(options)
+		if draft && plan.request.action == "selection-repair" {
+			before, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
+				OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, ConfigLocked: locked})
 			if err != nil {
-				refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
-				continue
+				return "", "", err
 			}
-			if plan.scalarEdits != nil {
-				refusals = append(refusals, plan.scalarEdits.CheckLayer(plan.path, before, loaded))
-			}
-			if plan.request.action == "selection-repair" {
-				refusals = append(refusals, plan.cli.checkSelectionReduction(before, loaded, plan.request.name))
+			if err := plan.cli.checkSelectionReduction(before, loaded, plan.request.name); err != nil {
+				return "", "", err
 			}
 		}
 		contexts = append(contexts, loaded)

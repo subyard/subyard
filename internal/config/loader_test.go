@@ -259,6 +259,43 @@ func TestLoadHostSettingsAndMigratedPrivateAssets(t *testing.T) {
 	}
 }
 
+func TestGitApprovalDefaultAndExplicitPromptScopes(t *testing.T) {
+	const setting = "CODING_TOOL_GIT_APPROVAL"
+	root := filepath.Clean(filepath.Join("..", ".."))
+	for _, scope := range []string{"default", "shared", "host", "yard", "command"} {
+		t.Run(scope, func(t *testing.T) {
+			home := t.TempDir()
+			configHome := filepath.Join(home, ".config", "subyard")
+			options := LoadOptions{
+				RepositoryRoot: root, OperatorHome: home, YardName: "named", DisablePrivate: true,
+				Environment: map[string]string{"HOME": home, "SUBYARD_CONFIG_HOME": configHome},
+			}
+			yardConfig := filepath.Join(configHome, "yards", "named", "config.env")
+			writeFixture(t, yardConfig, "")
+			want := "prompt"
+			switch scope {
+			case "default":
+				want = "off"
+			case "shared":
+				writeFixture(t, filepath.Join(configHome, "overrides", "shared", "config.env"), setting+"=prompt\n")
+			case "host":
+				writeFixture(t, filepath.Join(configHome, "config.env"), setting+"=prompt\n")
+			case "yard":
+				writeFixture(t, yardConfig, setting+"=prompt\n")
+			case "command":
+				options.Environment[setting] = "prompt"
+			}
+			loaded, err := Load(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := loaded.Environment[setting]; got != want {
+				t.Fatalf("%s = %q, want %q", setting, got, want)
+			}
+		})
+	}
+}
+
 func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	root := filepath.Clean(filepath.Join("..", ".."))
 	temp := t.TempDir()

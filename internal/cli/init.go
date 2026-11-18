@@ -569,6 +569,15 @@ func (cli *CLI) prepareInitExecutionPlan(ctx context.Context, loaded config.Load
 			return nil, err
 		}
 	}
+	if mode != initConfigs {
+		if selectionErr := reconcileruntime.ValidateBubblewrapSelection(loaded.Environment["BWRAP_APPARMOR"], loaded.Environment["CODING_TOOL_INTEGRATIONS"]); selectionErr != nil {
+			_, provisionErr := cli.initPlatform(loaded, nil).CheckStage(ctx, ports.ReconcileStageProvision)
+			if errors.Is(provisionErr, selectionErr) {
+				return nil, provisionErr
+			}
+			return nil, domain.CollectRefusals(selectionErr, provisionErr)
+		}
+	}
 	var platform ports.InitPlatform
 	var powerYards []domain.Context
 	if cli.options.InitPlatform != nil {
@@ -757,6 +766,11 @@ func (execution *initExecution) appendStageConsequences(
 	step application.ReconcileStep,
 ) []string {
 	result = append(result, step.Stage.Label)
+	if step.Stage.ID == ports.ReconcileStageProvision {
+		if disclosure := execution.bubblewrapProvisionConsequence(); disclosure != "" {
+			result = append(result, disclosure)
+		}
+	}
 	if step.Stage.ID == ports.ReconcileStageSSH && execution.loaded.Context.ForwardSSHAgent {
 		result = append(result, forwardedSSHAgentConsequence)
 	}
