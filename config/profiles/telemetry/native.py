@@ -105,7 +105,50 @@ class AgentConfigRefusals(ValueError):
         super().__init__('multiple agent configuration refusals')
 
 
+def read_baseline(state):
+    original = snapshot(state)
+    if original is not None:
+        info = state.stat()
+        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError('private ownership required')
+        baseline = json.loads(original, parse_float=Decimal, parse_constant=Decimal)
+        if not isinstance(baseline, dict) or baseline.get('schema') != 1 or not isinstance(baseline.get('agents'), dict):
+            raise ValueError('invalid native ownership')
+        if set(baseline['agents'])-{'claude', 'codex'}:
+            raise ValueError('unknown native ownership')
+    else:
+        baseline = {'schema': 1, 'agents': {}}
+    return original, baseline
+
+
+def repair_modes(home, state, agents, uid):
+    scope = set(agents)
+    try:
+        _, baseline = read_baseline(state)
+        scope.update(baseline['agents'])
+    except (OSError, ValueError):
+        # An unreadable receipt cannot tell us which options hold a token.
+        scope.update(('claude', 'codex'))
+    failures = []
+    for agent in ('claude', 'codex'):
+        if agent in scope:
+            try:
+                materializer.repair_document_mode(str(agent_path(home, agent)), str(home), uid)
+            except (OSError, ValueError) as error:
+                failures.append((agent, error))
+    raise_refusals(failures)
+
+
+def raise_refusals(failures):
+    if len(failures) == 1:
+        raise failures[0][1]
+    if failures:
+        raise AgentConfigRefusals(failures)
+
+
 def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=False, templates=None, developer=None):
+    if not check:
+        repair_modes(home, state, agents, uid)
     if token is None and not check:
         raise ValueError('collector token required')
     templates = templates or {}
@@ -115,18 +158,7 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
 
 
 def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, check, templates, developer, locks):
-    original = snapshot(state)
-    if original is not None:
-        info = state.stat()
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-            raise ValueError('private ownership required')
-        baseline = json.loads(original, parse_float=Decimal, parse_constant=Decimal)
-        if baseline.get('schema') != 1 or not isinstance(baseline.get('agents'), dict):
-            raise ValueError('invalid native ownership')
-        if set(baseline['agents'])-{'claude', 'codex'}:
-            raise ValueError('unknown native ownership')
-    else:
-        baseline = {'schema': 1, 'agents': {}}
+    original, baseline = read_baseline(state)
     next_state = {**baseline, 'agents': baseline['agents'].copy()}
     pending = {**baseline, 'agents': baseline['agents'].copy()}
     edits = []
@@ -158,23 +190,20 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
             failures.append((agent, AgentConfigRefusal(agent, path)))
         except (OSError, ValueError, KeyError) as error:
             failures.append((agent, error))
-    if len(failures) == 1:
-        raise failures[0][1]
-    if failures:
-        raise AgentConfigRefusals(failures)
+    raise_refusals(failures)
 
     def receipt(value):
         try:
-            payload = materializer.semantic_payload(value, compact_numbers=True) + b'\n'
+            payload = materializer.semantic_payload(value, compact_numbers=True, typed_floats=True) + b'\n'
         except (TypeError, ValueError):
             raise ValueError('invalid native ownership value') from None
         if len(payload) > CONFIG_LIMIT:
             raise ValueError('native ownership exceeds size bound')
         return payload
 
-    if check:
-        return not edits and not references and receipt(baseline) == receipt(next_state)
     intent, final = receipt(pending), receipt(next_state)
+    if check:
+        return not edits and not references and receipt(baseline) == final
     for register in references:
         register()
     publish(state, intent, original)

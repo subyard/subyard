@@ -32,8 +32,18 @@ workloads.
 
 The telemetry owner records existing native exporter fields before applying its own
 settings through the agent config materializer. Both agent configuration formats use mode
-`0600` while they contain telemetry settings. An agent template that specifies a different
-value for the same field is refused with the field path.
+`0600` while they contain telemetry settings. Current writers tighten permissions before
+returning a template refusal or changing document contents. Readiness checks are read-only.
+An agent template that specifies a different value for the same field is refused with the
+field path. If an editor saves during publication, reconciliation can refuse. When it needs
+to preserve a second version, it leaves a `.subyard-config-recovery.*` file beside the agent
+configuration. Treat that file as sensitive.
+
+Rolling back to v0.28–v0.30 carries a known risk. A retained template writer can
+change agent config permissions to `0644` while the file still contains the collector
+credential, and retained telemetry may report it current. Disabling telemetry under a
+retained writer can also leave the collector authorization header in place or lose prior
+Codex headers when the exporter was edited.
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection
 should begin. No running agent is killed to reload exporter settings.

@@ -66,7 +66,10 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
                 observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
             return observation
         def startup(self): return {'state':'ready' if marker.exists() else 'drift'}
-        def apply(self): marker.write_text(str(int(self.selected)))
+        def repair_native_modes(self): self.repaired = True
+        def apply(self):
+            assert self.repaired
+            marker.write_text(str(int(self.selected)))
     guest.Runtime=Runtime
     guest.os.getuid=lambda:0
     guest.sys.argv=['guest.py',*arguments]

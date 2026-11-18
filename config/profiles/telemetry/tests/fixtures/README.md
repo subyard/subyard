@@ -1,7 +1,7 @@
 # Retained agent writers
 
 `v0.30.0-agent-writers.tar.gz` contains the unmodified telemetry and template
-writers from Subyard v0.30.0 (commit `d153d7d60dd0441c02461d888296077403b4124d`).
+writers from Subyard v0.30.0 (commit `e2b31943dac13e05837e1b392416d023911abfd0`).
 The native tests execute both released writers to exercise upgrade and rollback
 without fetching history in shallow or offline test checkouts.
 

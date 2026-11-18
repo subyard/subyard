@@ -48,7 +48,7 @@ class Runtime:
         # stay known so that leftovers are detected and kept unchanged.
         self.retained = {}
         for name in ('native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
-                     'resources.py', 'sources.py', 'broker-correlation.py', 'tomli_w.py', 'subyard-telemetry'):
+                     'resources.py', 'sources.py', 'broker-correlation.py', 'guest_json.py', 'tomli_w.py', 'subyard-telemetry'):
             mode = 0o755 if name in ('subyard-telemetry', 'broker-correlation.py') else 0o644
             if name == 'subyard-telemetry' and not selected:
                 self.retained[library/name] = mode
@@ -322,7 +322,11 @@ class Runtime:
             value['retained'] = {str(path): mode for path, mode in self.retained.items()}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
+    def repair_native_modes(self):
+        native.repair_modes(self.home, self.control/'native.json', self.agents if self.selected else [], self.uid)
+
     def apply(self):
+        self.repair_native_modes()
         installed = self.owned()
         if not self.selected and not installed:
             return
@@ -354,7 +358,9 @@ class Runtime:
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
             if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
-                raise ValueError('managed asset changed')
+                # Retained releases omit this dependency from their inventory.
+                if path != self.library/'guest_json.py' or str(path) in saved or before != self.assets[path][0]:
+                    raise ValueError('managed asset changed')
             if path in (self.units/COLLECTOR, self.units/MANAGER) and before != self.assets[path][0] and before is not None:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
@@ -419,7 +425,13 @@ def main():
     if mode == 'startup':
         print(json.dumps(runtime.startup()))
         return
-    observation = runtime.observe()
+    try:
+        observation = runtime.observe()
+    finally:
+        # Refresh compares the pre-repair observation to its binding. Mutating
+        # entry points still tighten permissions before returning any refusal.
+        if mode in ('apply', 'refresh'):
+            runtime.repair_native_modes()
     if mode == 'observe':
         print(json.dumps(observation))
         return

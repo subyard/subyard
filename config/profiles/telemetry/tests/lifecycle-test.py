@@ -68,6 +68,20 @@ class LifecycleTest(unittest.TestCase):
                 self.assertFalse(runtime.data.exists())
                 self.assertTrue(path.read_bytes() == original)
 
+            # Each agent document and its resulting output fit. Their combined
+            # prior values must also fit the shared receipt before installation.
+            runtime.agents = ['claude', 'codex']
+            prior = b'x'*(2*1024*1024)
+            path.write_bytes(b'{"env":{"OTEL_LOGS_EXPORTER":"' + prior + b'"}}')
+            codex = guest.native.agent_path(root, 'codex')
+            codex.parent.mkdir()
+            codex.write_bytes(b'[otel]\nlog_user_prompt = "' + prior + b'"\n')
+            for operation in (runtime.observe, runtime.apply):
+                with self.assertRaisesRegex(ValueError, 'native ownership exceeds size bound'):
+                    operation()
+                self.assertFalse(runtime.control.exists())
+                self.assertFalse(runtime.data.exists())
+
     def test_disable_does_not_require_missing_owned_agent_documents_or_valid_templates(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
@@ -306,6 +320,35 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     self.assertEqual(actual.strip(),b'1')
                 self.assertEqual(runtime.observe()['state'], 'stale')
                 runtime.apply()
+                subprocess.run([sys.executable, '-BI', '-c',
+                                'import sys; sys.path.insert(0, sys.argv[1]); import native',
+                                str(runtime.library)], check=True)
+                codex = guest.native.agent_path(runtime.home, 'codex')
+                before = codex.read_bytes()
+                runtime.templates['codex'] = b'[otel]\nlog_user_prompt = true\n'
+                for mode in ('direct', 'apply', 'refresh'):
+                    codex.chmod(0o644)
+                    with self.assertRaises(guest.native.materializer.ContributionConflict):
+                        if mode == 'direct':
+                            runtime.apply()
+                        else:
+                            arguments = ['guest.py', mode, '1', 'dev', 'codex']
+                            if mode == 'refresh':
+                                arguments.extend(['before', 'after'])
+                            with patch.object(guest, 'Runtime', return_value=runtime), \
+                                 patch.object(runtime, 'owned', return_value=True), \
+                                 patch.object(guest, 'os', wraps=os) as guest_os, patch.object(sys, 'argv', arguments):
+                                guest_os.getuid.return_value = 0
+                                guest.main()
+                    self.assertEqual(codex.stat().st_mode & 0o777, 0o600)
+                    self.assertEqual(codex.read_bytes(), before)
+                runtime.templates.clear()
+                asset = runtime.library/'guest_json.py'
+                saved = runtime.saved_inventory()
+                del saved[str(asset)]
+                (runtime.control/'assets.json').write_text(json.dumps(saved))
+                runtime.apply()
+                self.assertEqual(runtime.saved_inventory()[str(asset)], hashlib.sha256(asset.read_bytes()).hexdigest())
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'],'current runtime must satisfy the generic activation digest contract')

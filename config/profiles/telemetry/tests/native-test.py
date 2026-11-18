@@ -99,7 +99,7 @@ class NativeTest(unittest.TestCase):
                         self.assertEqual(values['env' if agent == 'claude' else 'otel'],
                                          native.desired(agent, args[3], args[4]))
 
-    def test_template_conflict_refuses_before_document_write(self):
+    def test_template_conflict_repairs_mode_without_changing_document(self):
         for agent, field, payload in [
             ('claude', '/env/OTEL_LOG_USER_PROMPTS', b'{"env":{"OTEL_LOG_USER_PROMPTS":"template-value"}}'),
             ('codex', '/otel/log_user_prompt', b'[otel]\nlog_user_prompt = "template-value"\n'),
@@ -114,12 +114,28 @@ class NativeTest(unittest.TestCase):
                 self.assertFalse(path.exists())
                 native.reconcile(*args)
                 before = path.read_bytes()
-                for mode in ('observe', 'apply'):
+                path.chmod(0o644)
+                refused = self.materialize(agent, path, b'{}' if agent == 'claude' else b'', 'retire')
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn(b'retirement ownership evidence unavailable', refused.stderr)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.read_bytes(), before)
+                for mode in ('observe', 'apply', 'apply-installed'):
+                    if mode == 'apply-installed':
+                        self.assertEqual(self.materialize(agent, path, b'{}' if agent == 'claude' else b'').returncode, 0)
+                        before = path.read_bytes()
+                    path.chmod(0o644)
                     refused = self.materialize(agent, path, payload, mode)
                     self.assertEqual(refused.returncode, 2)
                     self.assertIn(field.encode(), refused.stderr)
                     self.assertNotIn(b'template-value', refused.stderr)
                     self.assertEqual(path.read_bytes(), before)
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o644 if mode == 'observe' else 0o600)
+                path.chmod(0o644)
+                with self.assertRaisesRegex(native.materializer.ContributionConflict, field):
+                    native.reconcile(*args, templates={agent: payload})
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(path.read_bytes(), before)
 
     def test_migrate_legacy_ownership_and_retry_interrupted_registration(self):
         archive = Path(__file__).with_name('fixtures')/'v0.30.0-agent-writers.tar.gz'
@@ -162,18 +178,19 @@ class NativeTest(unittest.TestCase):
                 template(templates[2])
                 assert_mode(0o600)
                 self.assertEqual(decode(path.read_text())[section], native.desired(agent, endpoint, token))
-                with patch.object(native.materializer, 'replace_destination', side_effect=OSError('synthetic interruption')):
+                with patch.object(native, 'publish', side_effect=OSError('synthetic interruption')):
                     # A retained write can also race the handoff before registration.
                     template(templates[2], retained=True)
                     with self.assertRaises(OSError):
                         native.reconcile(*args)
-                self.assertFalse(native.reconcile(*args, check=True))
+                assert_mode(0o600)
                 native.reconcile(*args)
                 self.assertTrue(native.reconcile(*args, check=True))
                 assert_mode(0o600)
                 self.assertEqual(json.loads(state.read_bytes())['agents'][agent], owned)
+                # Accepted rollback risk: the retained writer may widen the
+                # credential-bearing file while retained telemetry reports current.
                 template(templates[3], retained=True)
-                assert_mode(0o644)
                 self.assertTrue(retained_native.reconcile(*args, check=True))
                 self.assertFalse(native.reconcile(*args, check=True))
                 self.assertFalse(template(templates[3], mode='observe')['converged'])
@@ -182,7 +199,6 @@ class NativeTest(unittest.TestCase):
                 self.assertTrue(template(templates[3], mode='observe')['converged'])
 
                 template(templates[3], retained=True)
-                assert_mode(0o644)
                 retained_native.reconcile(*args[:2], [], *args[3:])
                 self.assertEqual(decode(path.read_text()), {'unrelated': 3, section: {field: prior}})
                 self.assertEqual(json.loads(state.read_bytes())['agents'], {})
@@ -420,7 +436,7 @@ class NativeTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertTrue(json.loads(result.stdout)['converged'])
 
-    def test_concurrent_edit_during_staging_is_preserved(self):
+    def test_concurrent_edit_during_publication_is_preserved(self):
         for agent, edit in [('claude', b'{"unrelated":"editor"}'), ('codex', b'unrelated = "editor"\n')]:
             with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
                 root = Path(name)
@@ -440,6 +456,19 @@ class NativeTest(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, 'concurrent destination change'):
                         native.reconcile(*args)
                 self.assertEqual(path.read_bytes(), edit)
+                exchange = native.materializer.exchange_destination
+
+                # The second exchange restores the editor's save.
+                def save_at_exchange(*arguments):
+                    if swap.call_count == 1:
+                        path.write_bytes(edit + b'\n')
+                    exchange(*arguments)
+
+                with patch.object(native.materializer, 'exchange_destination', side_effect=save_at_exchange) as swap:
+                    with self.assertRaisesRegex(ValueError, 'concurrent destination change'):
+                        native.reconcile(*args)
+                self.assertEqual(path.read_bytes(), edit + b'\n')
+                self.assertFalse(list(path.parent.glob('.subyard-config-recovery.*')))
                 native.reconcile(*args)
                 decode = json.loads if agent == 'claude' else tomllib.loads
                 self.assertEqual(decode(path.read_text())['unrelated'], 'editor')
@@ -464,6 +493,34 @@ class NativeTest(unittest.TestCase):
             values = json.loads(path.read_bytes(), parse_float=Decimal)
             self.assertEqual(values['unrelated'], number)
 
+    def test_opt_out_restores_empty_sections_and_float_types(self):
+        state = self.root/'native.json'
+        for agent, original, section, expected in [
+            ('claude', b'{"env":{}}', 'env', {}),
+            ('codex', b'[otel]\n', 'otel', {}),
+            ('codex', b'[otel]\nlog_user_prompt = 2e0\n', 'otel', {'log_user_prompt': 2.0}),
+        ]:
+            with self.subTest(agent=agent, original=original):
+                path = native.agent_path(self.root, agent)
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes(original)
+                args = ('http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                native.reconcile(self.root, state, [agent], *args)
+                native.reconcile(self.root, state, [], *args)
+                decode = json.loads if agent == 'claude' else tomllib.loads
+                restored = decode(path.read_text())[section]
+                self.assertEqual(restored, expected)
+                if expected:
+                    self.assertIs(type(restored['log_user_prompt']), float)
+                if agent == 'claude':
+                    adopted = self.materialize(agent, path, b'{"other":true}', 'assess-adopt')
+                    self.assertEqual(adopted.returncode, 0, adopted.stderr)
+                    self.assertTrue(json.loads(adopted.stdout)['adoptable'])
+                    native.reconcile(self.root, state, [agent], *args)
+                    path.write_bytes(b'{"other":true}')
+                    native.reconcile(self.root, state, [], *args)
+                    self.assertEqual(path.read_bytes(), b'{"other":true}')
+
     def test_oversize_output_is_refused_before_replacement(self):
         state = self.root/'native.json'
         path = native.agent_path(self.root, 'claude')
@@ -473,13 +530,18 @@ class NativeTest(unittest.TestCase):
         path.write_bytes(original)
         path.chmod(0o644)
         args = (self.root, state, ['claude'], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-        for check in (False, True):
+        for check in (True, False):
             with self.assertRaisesRegex(ValueError, 'destination exceeds size bound'):
                 native.reconcile(*args, check=check)
             self.assertTrue(path.read_bytes() == original)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644 if check else 0o600)
             self.assertFalse(state.exists())
             self.assertFalse(list(self.state_root.glob('*.contribution')))
+        # The template writer has the same bound before contribution registration.
+        refused = self.materialize('claude', path, b'{"template":true}')
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn(b'destination exceeds size bound', refused.stderr)
+        self.assertEqual(path.read_bytes(), original)
 
 
 if __name__ == '__main__':

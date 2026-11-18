@@ -1665,7 +1665,7 @@ func TestStaleReleaseRecordDoesNotChangeOrdinaryRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, 0o600, gid, verify)"
+	needle := "    atomic_write(destination, payload, uid, 0o600, gid, publish)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1691,7 +1691,7 @@ func TestInterruptedRetirementStillRefusesChangedOwnedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, 0o600, gid, verify)"
+	needle := "    atomic_write(destination, payload, uid, 0o600, gid, publish)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1732,7 +1732,7 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			needle := "    atomic_write(destination, payload, uid, 0o600, gid, verify)"
+			needle := "    atomic_write(destination, payload, uid, 0o600, gid, publish)"
 			injected := "    raise MaterializationError(\"synthetic interruption\")\n" + needle
 			if stage == "after" {
 				injected = needle + "\n    raise MaterializationError(\"synthetic interruption\")"
