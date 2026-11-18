@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -124,7 +125,7 @@ func TestDeveloperIdentityDeferredProfileAndHookFactsPassOperationPolicy(t *test
 }
 
 func TestDeveloperIdentityNativePlanAndBeginTransport(t *testing.T) {
-	for _, scenario := range []string{"owner-refusals", "begin", "changed-source", "foreign-home", "advance", "package-receipt", "package-hash", "package-pending", "package-source", "package-check-fails", "host-boot-cut", "cut-reboot-home", "cut-home", "cut-account", "cut-subuid", "cut-listener-restored", "owner-failure"} {
+	for _, scenario := range []string{"owner-refusals", "begin", "changed-source", "foreign-home", "advance", "package-receipt", "package-legacy-prompt", "package-hash", "package-pending", "package-source", "package-check-fails", "host-boot-cut", "cut-reboot-home", "cut-home", "cut-account", "cut-subuid", "cut-listener-restored", "owner-failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			base := testkit.TempDir(t)
 			repository, guest := filepath.Join(base, "repository"), filepath.Join(base, "guest")
@@ -187,6 +188,16 @@ func TestDeveloperIdentityNativePlanAndBeginTransport(t *testing.T) {
 				runtime.Environment = append(runtime.Environment, "CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_CHECK=identity-package-check")
 				original := runtime
 				original.Yard.DevUser = "dev"
+				if scenario == "package-legacy-prompt" {
+					if err := os.Mkdir(filepath.Join(guest, "var/lib/subyard/agent-skills"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					write("var/lib/subyard/agent-skills/core.json", `{"schema":1,"home":"/home/dev","extra":false,"skills":{"sample":"installed"}}`, 0o600)
+					provision := filepath.Join(repository, "config/provision.sh")
+					testkit.WriteFile(t, provision, []byte("#!/bin/sh\nexit 0\n"), 0o700)
+					runtime.Environment = append(runtime.Environment, "AGENT_sample_PROVISION="+provision)
+					original.Environment = append(slices.Clone(runtime.Environment), "CODING_TOOL_GIT_APPROVAL=prompt")
+				}
 				before, err := original.integrationPackageArtifacts("inspect", nil)
 				if err != nil || len(before) != 1 {
 					t.Fatalf("package baseline: %v", err)
@@ -197,7 +208,11 @@ func TestDeveloperIdentityNativePlanAndBeginTransport(t *testing.T) {
 				}
 				wantedPackage = after[0]
 				entries := []integrationArtifact{before[0], {ID: "sample", Kind: "file", Path: "/home/dev/data", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte("preserved"))), Mode: 0600}}
-				payload, _ := json.Marshal(map[string]any{"schema": 1, "entries": entries, "applied_settings": map[string]string{"DEV_USER": "dev", "DEV_UID": strconv.Itoa(uid), "DEV_SUDO": "1", "AGENT_claude_COMMAND": "old-command"}})
+				inventory := map[string]any{"schema": 1, "entries": entries}
+				if scenario != "package-legacy-prompt" {
+					inventory["applied_settings"] = map[string]string{"DEV_USER": "dev", "DEV_UID": strconv.Itoa(uid), "DEV_SUDO": "1", "AGENT_claude_COMMAND": "old-command"}
+				}
+				payload, _ := json.Marshal(inventory)
 				write("var/lib/subyard/integrations/inventory.json", string(payload), 0600)
 				if scenario == "package-hash" || scenario == "package-pending" || scenario == "package-source" {
 					var inventory map[string]any
@@ -292,6 +307,12 @@ else: raise ValueError('unexpected owner phase')
 			}
 			if err != nil || plan == nil || plan.Binding() == "" || len(plan.core.Owners) != 1 {
 				t.Fatalf("prepare identity: %v", err)
+			}
+			if scenario == "package-legacy-prompt" {
+				if plan.core.Settings != nil || len(plan.core.Packages) != 1 {
+					t.Fatalf("expected a legacy rename plan with a package receipt: %#v", plan.core)
+				}
+				return
 			}
 			journal := filepath.Join(guest, "var/lib/subyard/developer-identity/transition.json")
 			if _, err := os.Lstat(journal); !os.IsNotExist(err) {

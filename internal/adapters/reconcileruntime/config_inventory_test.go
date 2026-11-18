@@ -222,30 +222,27 @@ func TestInstalledGitApprovalPackageRecordsSurviveDefaultChange(t *testing.T) {
 			"CODING_TOOL_GIT_APPROVAL=prompt",
 		},
 	}
-	// Reconstruct the historical fallback line in the actual package sources.
-	// The default must change at the runtime handoff without replacing the
-	// provision bytes that participate in installed prompt package identity.
-	previous := func(asset config.MaterializedAsset) ([]byte, error) {
-		payload, err := asset.ReadSource()
-		return []byte(strings.ReplaceAll(string(payload),
-			`GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-off}"`,
-			`GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"`)), err
-	}
-	historical, err := runtime.integrationPackageArtifacts("observe", previous)
-	if err != nil || len(historical) != 2 {
-		t.Fatalf("historical packages: %#v, %v", historical, err)
+	// Receipts produced by the predecessor, 5fb5bd17, for the inputs above.
+	historical := map[string]string{
+		"claude": "a38c41425a72dbc9c4062dd2deb1dd15aa0d64b725474a83d53f4cc933f7b68b",
+		"codex":  "e32388e7c869e34350bade6e695e21ca2753636b24c6c5e4e542a9136f2ff32b",
 	}
 	current, err := runtime.integrationPackageArtifacts("observe", nil)
-	if err != nil || !reflect.DeepEqual(current, historical) {
-		t.Fatalf("installed prompt package identity changed: %#v, want %#v, error: %v", current, historical, err)
+	if err != nil || len(current) != len(historical) {
+		t.Fatalf("installed prompt packages: %#v, error: %v", current, err)
+	}
+	for _, entry := range current {
+		if entry.Digest != historical[entry.ID] {
+			t.Fatalf("%s prompt package receipt changed: %s, want %s", entry.ID, entry.Digest, historical[entry.ID])
+		}
 	}
 	runtime.Environment[3] = "CODING_TOOL_GIT_APPROVAL=off"
 	desired, err := runtime.integrationPackageArtifacts("observe", nil)
 	if err != nil || len(desired) != len(historical) {
 		t.Fatalf("desired packages: %#v, %v", desired, err)
 	}
-	for index, entry := range desired {
-		if entry.Digest == historical[index].Digest {
+	for _, entry := range desired {
+		if entry.Digest == historical[entry.ID] {
 			t.Fatalf("%s package did not need reconciliation for off", entry.ID)
 		}
 	}
