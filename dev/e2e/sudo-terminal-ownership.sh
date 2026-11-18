@@ -62,8 +62,8 @@ cleanup() {
   exit "$rc"
 }
 if [ "${1:-}" = --check-fixture ]; then
-  [ "$#" -le 2 ] || die 'usage: --check-fixture [engine]'
-  engine="${2:-$ROOT/.build/yard}"
+  [ "$#" -le 2 ] || die 'usage: --check-fixture [runtime-directory]'
+  runtime="${2:-$ROOT/.build/runtime/current}"
 else
   [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
   for command in sg sudo script runuser useradd userdel visudo; do
@@ -78,8 +78,8 @@ else
     if engine="$(release_candidate_prepare "$ROOT")"; then
       :
     elif [ "$?" = 1 ]; then
-      "$ROOT/dev/build-engine.sh"
-      engine="$ROOT/.build/yard"
+      make -C "$ROOT" build
+      engine="$ROOT/.build/runtime/current/bin/yard-engine"
     else
       die 'could not verify frozen candidate'
     fi
@@ -88,27 +88,30 @@ else
 
   engine="${1:-}"
   case "$engine" in
-    "$ROOT/.subyard-acceptance/runtime/bin/yard-engine"|"$ROOT/.build/yard") ;;
+    "$ROOT/.subyard-acceptance/runtime/bin/yard-engine"|"$ROOT/.build/runtime/current/bin/yard-engine") ;;
     *) die 'candidate engine path is required' ;;
   esac
+  runtime="${engine%/bin/yard-engine}"
 fi
-[ -x "$engine" ] || die 'candidate engine is missing'
+[ -x "$runtime/bin/yard-engine" ] || die 'candidate engine is missing'
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 TMP="$(mktemp -d /tmp/subyard-sudo-terminal.XXXXXX)"
-chmod 0711 "$TMP"
+chmod 0750 "$TMP"
 fixture_repo="$TMP/repository"
+real_repo="$TMP/real-repository"
 fixture_home="$TMP/home"
-install -d -m 0755 "$fixture_repo/config/profiles" "$fixture_repo/scripts/lib" "$fixture_home"
-for config in commands.registry incus.project.env subyard.env host.env agents.env ports.env; do
-  install -m 0644 "$ROOT/config/$config" "$fixture_repo/config/$config"
-done
-install -m 0755 "$engine" "$fixture_repo/yard"
-install -m 0644 "$ROOT/scripts/lib-power.sh" "$fixture_repo/scripts/lib-power.sh"
-for library in runtime.sh engine-context.sh ui.sh download.sh host.sh teardown-plan.py; do
-  install -m 0644 "$ROOT/scripts/lib/$library" "$fixture_repo/scripts/lib/$library"
-done
+
+stage_runtime() {
+  local destination="$1"
+  cp -a --no-preserve=ownership "$runtime/." "$destination"
+  (cd "$destination" && sha256sum --check --quiet --strict runtime-files.sha256) \
+    || die 'staged candidate runtime is incomplete or changed'
+}
+
+stage_runtime "$fixture_repo"
+install -d -m 0755 "$fixture_home"
 
 cat > "$fixture_repo/scripts/teardown-physical.sh" <<'SH'
 #!/usr/bin/env bash
@@ -125,7 +128,6 @@ printf 'root-step=%s\n' "$(id -u)"
 SH
 chmod 0755 "$fixture_repo/scripts/teardown-physical.sh"
 
-# The sparse repository omits the catalog for the integrations in agents.env.
 cat > "$TMP/run-teardown" <<SH
 #!/usr/bin/env bash
 set -e
@@ -153,7 +155,7 @@ exec env -i PATH="\$PATH" LANG=C.UTF-8 TERM="\${TERM:-dumb}" \\
   DEV_UID=1000 \\
   DEV_USER=dev \\
   SSH_PORT=2222 \\
-  '$fixture_repo/yard' "\$@"
+  '$fixture_repo/bin/yard-engine' "\$@"
 SH
 chmod 0755 "$TMP/run-teardown"
 
@@ -163,7 +165,7 @@ if [ "${1:-}" = --check-fixture ]; then
   printf '{"Path":"%s"}\n' "$fixture_home" \
     | python3 -B "$fixture_repo/scripts/lib/teardown-plan.py" capture-artifact \
     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["Binding"] else 1)'
-  printf 'ok: sparse sudo fixture configuration loads and its teardown guard captures an artifact\n'
+  printf 'ok: complete candidate runtime verified and its teardown guard captures an artifact\n'
   exit 0
 fi
 
@@ -176,6 +178,8 @@ getent passwd "$fixture_user" >/dev/null 2>&1 \
 FIXTURE_USER="$fixture_user"
 SUDOERS="$sudoers"
 useradd --user-group --groups incus-admin --home-dir "$fixture_home" --shell /bin/bash "$FIXTURE_USER"
+# The artifact guard opens each ancestor O_RDONLY before inspecting state.
+chgrp "$FIXTURE_USER" "$TMP"
 chown -R "$FIXTURE_USER:$FIXTURE_USER" "$fixture_home"
 password="$(dd if=/dev/urandom bs=32 count=1 status=none | sha256sum | cut -c1-24)"
 printf '%s:%s\n' "$FIXTURE_USER" "$password" | chpasswd
@@ -290,11 +294,7 @@ incus project show "$real_project" >/dev/null 2>&1 \
 REAL_PROJECT="$real_project"
 REAL_INSTANCE="yard-$real_yard"
 REAL_VOLUME="yard-srv-$real_yard"
-real_repo="$TMP/real-repository"
-install -d -m 0755 "$real_repo"
-cp -a "$ROOT/config" "$ROOT/scripts" "$real_repo/"
-install -m 0755 "$engine" "$real_repo/yard"
-chmod -R o+rX "$real_repo"
+stage_runtime "$real_repo"
 install -d -m 0755 "$real_repo/config/profiles/sudo-smoke"
 cat > "$real_repo/config/profiles/sudo-smoke/profile.conf" <<'EOF'
 # Empty smoke profile: the provision hook only proves lifecycle and adapter continuation.
@@ -412,7 +412,7 @@ exec env -i \\
   DEV_UID=1001 \\
   DEV_USER=dev \\
   NESTED_E2E_VMS=0 \\
-  '$real_repo/yard' -Y '$real_yard' "\$@"
+  '$real_repo/bin/yard-engine' -Y '$real_yard' "\$@"
 SH
 cat > "$TMP/run-real-yard" <<SH
 #!/usr/bin/env bash
