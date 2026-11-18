@@ -60,6 +60,38 @@ func TestWritePersistentAssignmentPreservesUnrelatedRecords(t *testing.T) {
 	}
 }
 
+func TestPersistentAssignmentRefusesSharedRecords(t *testing.T) {
+	for _, initial := range []string{
+		"GIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n",
+		"GIT_USER_NAME=earlier\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n",
+	} {
+		for _, name := range []string{"GIT_USER_EMAIL", "GIT_USER_NAME"} {
+			if name == "GIT_USER_NAME" && strings.HasPrefix(initial, "GIT_USER_NAME=") {
+				continue
+			}
+			value := "replacement"
+			_, err := EditPersistentAssignmentContent("config.env", []byte(initial), name, &value)
+			var source *SourceError
+			if !errors.As(err, &source) || source.Key != name || !strings.Contains(source.Reason, "record can also assign") {
+				t.Fatalf("editing %s in %q: %v", name, initial, err)
+			}
+		}
+	}
+}
+
+func TestPersistentAssignmentValueRoundTrip(t *testing.T) {
+	configHome := testkit.TempDir(t)
+	path := filepath.Join(configHome, "config.env")
+	value := " O'Connor \\\" $HOME ${X:=default} $(literal) `literal` #\r\nsecond line\n "
+	if err := WritePersistentAssignment(configHome, path, "GIT_USER_NAME", &value); err != nil {
+		t.Fatal(err)
+	}
+	values, err := ReadAssignments(path)
+	if err != nil || len(values) != 1 || values["GIT_USER_NAME"] != value {
+		t.Fatalf("read assignments = %q, %v", values, err)
+	}
+}
+
 func TestCreatePersistentFileRefusesExistingTarget(t *testing.T) {
 	configHome := filepath.Join(t.TempDir(), "config")
 	if err := os.MkdirAll(configHome, 0o700); err != nil {

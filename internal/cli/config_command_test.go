@@ -3242,6 +3242,37 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 	}
 }
 
+func TestConfigSetRefusesSharedAssignmentRecord(t *testing.T) {
+	for _, mode := range []string{"local", "git"} {
+		t.Run(mode, func(t *testing.T) {
+			root, _, configHome, environment := configCommandFixture(t)
+			path := filepath.Join(configHome, "config.env")
+			args := []string{"config", "set", "GIT_USER_EMAIL", "new@example.invalid", "--scope", "host", "--yes"}
+			if mode == "git" {
+				path = filepath.Join(configHome, filepath.FromSlash(config.GitSettingsRelativePath), "config.env")
+				args = append(args, "DEV_UID", "2298", "--git")
+			}
+			initial := "GIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
+			writeConfigCommandFile(t, path, initial, 0o600)
+			var stdout, stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", WorkingDir: root,
+				Arguments: args, Environment: environment, Stdout: &stdout, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code == 0 ||
+				!strings.Contains(stderr.String(), "record can also assign GIT_USER_NAME") {
+				t.Fatalf("config set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if stored, err := os.ReadFile(path); err != nil || string(stored) != initial {
+				t.Fatalf("refused set changed settings: %q, %v", stored, err)
+			}
+		})
+	}
+}
+
 func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
 	remote, _ := configBareSourceRepository(
@@ -3353,6 +3384,15 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	)
 	if strings.TrimSpace(versioned) != "DEV_UID='2298'\nDEV_SUDO=1" {
 		t.Fatalf("pushed host config = %q", versioned)
+	}
+	name, email := "O'Connor $HOME \\ \" #", "new@example.invalid"
+	if code := run("config", "set", "GIT_USER_NAME", name, "GIT_USER_EMAIL", email, "--scope", "host", "--git", "--yes"); code != 0 {
+		t.Fatalf("multi-pair set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	versioned = configSourceGitOutput(t, remote, "show", "HEAD:hosts/owner-a/config.env")
+	values, err := config.EvaluateAssignments(strings.NewReader(versioned), "config.env", nil)
+	if err != nil || values["GIT_USER_NAME"] != name || values["GIT_USER_EMAIL"] != email || values["DEV_UID"] != "2298" {
+		t.Fatalf("multi-pair set persisted %q, %v", values, err)
 	}
 	treeBeforeShared := configSourceGitOutput(t, remote, "ls-tree", "-r", "--name-only", "HEAD")
 	if strings.Contains(treeBeforeShared, "shared/config.env") {

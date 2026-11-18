@@ -12,6 +12,8 @@ import (
 
 type environment map[string]string
 
+const escapedEnvApostrophe = `'\''`
+
 type assignmentObserver func(name, value string, line int)
 
 func ReadAssignments(path string) (map[string]string, error) {
@@ -123,6 +125,15 @@ func applyEnvReaderObservedRetired(reader io.Reader, source string, values envir
 
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		advance, line, err := bufio.ScanLines(data, atEOF)
+		// Keep carriage returns inside multiline values. Record trimming
+		// still handles CRLF at the end of an assignment.
+		if line != nil && advance > len(line)+1 {
+			line = data[:advance-1]
+		}
+		return advance, line, err
+	})
 	var record strings.Builder
 	quote := byte(0)
 	lineNumber := 0
@@ -247,7 +258,7 @@ func decodeValue(value string) (string, bool) {
 		return value, true
 	}
 	if value[0] == '\'' && value[len(value)-1] == '\'' {
-		return value[1 : len(value)-1], false
+		return strings.ReplaceAll(value[1:len(value)-1], escapedEnvApostrophe, "'"), false
 	}
 	if value[0] == '"' && value[len(value)-1] == '"' {
 		return value[1 : len(value)-1], true

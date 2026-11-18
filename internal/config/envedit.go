@@ -7,8 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"syscall"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 var ErrPersistentTargetStale = errors.New("persistent configuration target is stale")
@@ -484,8 +488,12 @@ func CreatePersistentFile(configHome, path string, content []byte, guards ...fun
 
 type envEditRecord struct {
 	content []byte
-	name    string
+	names   []string
+	line    int
 }
+
+// The first alternative skips escaped bytes, including escaped dollars.
+var envEditDefault = regexp.MustCompile(`\\[\s\S]|\$\{([A-Za-z_][A-Za-z0-9_]*):=`)
 
 func editAssignmentContent(
 	path string,
@@ -499,19 +507,46 @@ func editAssignmentContent(
 		return nil, err
 	}
 	name = canonicalSettingName(name)
-	for index := range records {
-		records[index].name = canonicalSettingName(records[index].name)
-	}
 	replacement := []byte(name + "=" + quotePersistentValue(dereference(value)) + "\n")
 	last := -1
+	var refusals []error
 	for index := range records {
-		if records[index].name == name {
-			last = index
+		record := records[index]
+		if !slices.Contains(record.names, name) {
+			continue
 		}
+		last = index
+		others := record.names
+		raw := strings.TrimSpace(string(record.content))
+		direct, _ := persistentDirectAssignment(raw)
+		policy := operatorDiscardPolicy(nil, settings)
+		if !policy.discards(direct) {
+			expression, conditional := strings.CutPrefix(raw, ":")
+			if !conditional {
+				_, expression, _ = strings.Cut(raw, "=")
+			}
+			// A default skipped in the isolated edit parse can still run
+			// when this file is loaded over another layer.
+			if expression, expands := decodeValue(strings.TrimSpace(expression)); expands {
+				for _, match := range envEditDefault.FindAllStringSubmatch(expression, -1) {
+					if match[1] != "" && !policy.discards(match[1]) {
+						others = append(others, canonicalSettingName(match[1]))
+					}
+				}
+			}
+		}
+		for _, other := range others {
+			if other != name {
+				refusals = append(refusals, sourceError(path, record.line, name, "persistent settings", "record can also assign "+other+"; split the assignments before editing", nil))
+			}
+		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
 	}
 	var result bytes.Buffer
 	for index, record := range records {
-		if record.name != name {
+		if !slices.Contains(record.names, name) {
 			result.Write(record.content)
 			continue
 		}
@@ -572,17 +607,14 @@ func parseEnvEditRecords(path string, content []byte, settings Catalog) ([]envEd
 		}
 		raw := append([]byte(nil), current.Bytes()...)
 		trimmed := strings.TrimSpace(string(raw))
-		record := envEditRecord{content: raw}
+		record := envEditRecord{content: raw, line: recordLine}
 		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			var assigned string
-			if err := applyRecordRetired(trimmed, values, func(name, _ string) {
-				assigned = name
-			}, operatorDiscardPolicy(func(name, _ string) {
-				assigned = name
-			}, settings)); err != nil {
+			observe := func(name, _ string) {
+				record.names = append(record.names, canonicalSettingName(name))
+			}
+			if err := applyRecordRetired(trimmed, values, observe, operatorDiscardPolicy(observe, settings)); err != nil {
 				return nil, sourceContext(path, recordLine, recordSettingKey(trimmed), "persistent settings", err)
 			}
-			record.name = assigned
 		}
 		records = append(records, record)
 		current.Reset()
@@ -594,7 +626,7 @@ func parseEnvEditRecords(path string, content []byte, settings Catalog) ([]envEd
 }
 
 func quotePersistentValue(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	return "'" + strings.ReplaceAll(value, "'", escapedEnvApostrophe) + "'"
 }
 
 func dereference(value *string) string {
