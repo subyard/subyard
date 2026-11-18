@@ -120,10 +120,8 @@ def plan(root=ROOT, image=IMAGES[0]):
     # Unsupported-source VM coverage is diagnostic: retain Periodic and on-demand execution.
     include.append({"id": "p0:source-upgrade", "optional": True,
                     "command": ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "source-upgrade", *SLOT]})
-    # The archived anchor's Codex metadata lookup can hit GitHub's anonymous REST quota.
     for check in include:
-        if check["id"] in {"published:0.11.0", "published:0.17.3", "published:0.27.0",
-                           "vm:published-upgrade/anchor"}:
+        if check["id"] in {"published:0.11.0", "published:0.17.3", "published:0.27.0"}:
             check["optional"] = True
     include += PERIODIC_ONLY
     include += [veranda_short(name, options) for name, options in VERANDA.items()]

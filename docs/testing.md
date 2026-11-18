@@ -769,12 +769,6 @@ still verifies update/check refusal with all three pinned released callers. Conf
 with a guest file hash and the historical source lane's authorization/journal/data checks remain
 optional physical coverage; host-free checks and other required physical lanes keep their existing scope.
 
-`vm:published-upgrade/anchor` is also optional in Periodic E2E. The published v0.28.0 Codex
-provisioner can receive HTTP 403 from GitHub's anonymous release metadata endpoint. The job
-still runs by default and on demand, and its output is retained in the job log and the uploaded
-`runner/check.log` diagnostic. The all-agent anchor upgrade remains in the release acceptance
-catalog and is required for full release acceptance.
-
 Checks that boot a VM inside the leased VM run only on Intel runners. Hosted runners are Azure
 Hyper-V VMs on Intel or AMD CPUs, and the runner label cannot choose one. On AMD, virtualization
 nested this deep is so slow that these checks cannot finish. On an AMD runner the job explains the

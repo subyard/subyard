@@ -447,10 +447,9 @@ assert {kind: {"include": [entry for entry in group["include"] if entry["id"] no
         for kind, group in default_plan.items()} == p.plan(root)
 # Execute the workflow's actual default/dispatch filtering, without running any VM commands.
 plan = default_plan
-anchor = "vm:published-upgrade/anchor"
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py --image "$LEASE_IMAGE")"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
-for only in ("", config_sync["id"], anchor, "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
+for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
              *optional_vm, *(entry["id"] for entry in nm_checks)):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
@@ -475,12 +474,9 @@ baselines = [(fields[0], fields[3]) for line in (root / "dev/e2e/published-upgra
 assert {name for name in entries if name.startswith("published:")} == {
     "published:" + version for version, role in baselines
     if "vm:published-upgrade/" + (role if role in ("anchor", "hop") else version) not in commands}
-# Optional Periodic checks run by default; the anchor remains in the separate release collector.
+# Unsupported-source VM checks run by default and remain nonblocking on release and PR paths.
 optional = {entry["id"] for group in plan.values() for entry in group["include"] if entry.get("optional")}
-assert optional == {anchor, "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
-                    *optional_vm, *(entry["id"] for entry in nm_checks)}
-assert anchor in commands and anchor in a.CI_HOSTED_CHECKS
-assert any(entry["id"] == anchor for entry in plan["checks"]["include"])
+assert optional == {"p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0", *optional_vm, *(entry["id"] for entry in nm_checks)}
 assert not {"vm:p0-source-upgrade", *("vm:published-upgrade/" + v for v in ("0.11.0", "0.17.3", "0.27.0"))} & set(commands)
 assert entries["p0:source-upgrade"] == ["bash", "dev/e2e/p0-acceptance.sh", "--lane", "source-upgrade", "--slot", "1"]
 assert "    continue-on-error: ${{ matrix.optional || false }}\n" in workflow.split("  check:\n", 1)[1].split("    steps:", 1)[0]
