@@ -30,6 +30,10 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
+LEASE_GRANT = "E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
+LEASE_RELEASE = "E2E lease released: slot=slot-001 run=sample\n"
+
+
 def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
             manifest_sources=False, split_catalog=False):
     root = directory / "source"
@@ -54,7 +58,7 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
     (root / "dev/test-profiles.sh").write_text("#!/bin/bash\nprintf 'runner\\tsample\\tconfig/profiles/sample/tests/e2e/acceptance.sh\\n'\n")
     profile = root / "config/profiles/sample/tests/e2e"
     profile.mkdir(parents=True)
-    (profile / "acceptance.sh").write_text("#!/bin/bash\nexit 0\n")
+    (profile / "acceptance.sh").write_text("#!/bin/bash\nprintf '%s' '" + LEASE_GRANT + LEASE_RELEASE + "'\n")
     if lanes:
         (profile / "acceptance-lanes.json").write_text(json.dumps({"schema_version": 1, "lanes": [
             {"id": lane, "arguments": ["--lane", lane]} for lane in lanes]}))
@@ -115,7 +119,7 @@ def accepted(directory, prepared, identity, external_passed=True, with_vms=True)
     for name, command in m.a.commands(root, identity["version"], receipt["profiles"]).items():
         if command and (with_vms or name == "p0-release-smoke" or not m.a.is_live(name)):
             log = output / (name.replace(":", "-").replace("/", "-") + ".log")
-            log.write_text("synthetic passing evidence fixture\n")
+            log.write_text(LEASE_GRANT + LEASE_RELEASE if m.a.is_live(name) else "synthetic passing evidence fixture\n")
             receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name,
                 "log_sha256": m.a.digest(log), "command": m.a.command_identity(command, root),
                 "execution_environment": receipt["environment"]}
@@ -324,7 +328,7 @@ class Contracts(unittest.TestCase):
                 self.assertEqual((result["status"], result["command"]), ("passed", ["ci-prepared", "r123-a1", m.a.CI_PREPARED_CHECKS[name]]))
             elif name != "package" and result["status"] == "pending":
                 log = output / (name.replace(":", "-").replace("/", "-") + ".log")
-                log.write_text("synthetic passing evidence fixture\n")
+                log.write_text(LEASE_GRANT + LEASE_RELEASE if m.a.is_live(name) else "synthetic passing evidence fixture\n")
                 receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
                     "command": m.a.command_identity(m.a.commands(root, receipt["version"], receipt["profiles"])[name], root),
                     "execution_environment": receipt["environment"],
@@ -509,7 +513,7 @@ class Contracts(unittest.TestCase):
                 local = state_dir / identity["candidate_id"] / "prepared"
                 self.assertEqual((local / "identity.json").read_bytes(), original_identity)
                 github.repository = argv[4] = "SUBYARD/Subyard"
-                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "1"]
+                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "slot-1"]
                 with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1) as run, \
                      patch.object(m.a, "reuse_isolated_tests", wraps=m.a.reuse_isolated_tests) as reuse:
                     self.assertEqual(m.main(), 1)
@@ -592,7 +596,7 @@ class Contracts(unittest.TestCase):
             output, root, identity = self.split_candidate(Path(temporary), with_vms=False)
             _, receipt = m.a.load_bound(output)
             log = output / "vm-p0-full.log"
-            log.write_text("synthetic passing evidence fixture\n")
+            log.write_text(LEASE_GRANT + LEASE_RELEASE)
             receipt["checks"]["vm:p0-full"] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
                 "command": m.a.command_identity(m.a.commands(root, identity["version"], receipt["profiles"])["vm:p0-full"], root),
                 "execution_environment": receipt["environment"],
@@ -766,7 +770,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(document["schema_version"], 1)
         github = FakeGitHub(identity)
         captured = io.StringIO()
-        for slots in ([], ["--slots", "1"]):
+        for slots in ([], ["--slots", "slot-1"]):
             with patch.object(m, "GitHub", return_value=github), \
                  patch.object(m.a, "execution_environment", return_value=document["environment"]), \
                  patch.object(m.a, "execute", side_effect=AssertionError("default accept dispatched a VM")), \
@@ -809,10 +813,11 @@ class Contracts(unittest.TestCase):
             with patch.object(m, "GitHub", return_value=github), \
                  patch.object(m.a, "execution_environment", return_value=document["environment"]), \
                  patch.object(m.signal, "signal"), \
+                 patch.object(m.a, "run_live", return_value=False) as schedule, \
                  patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
                                            "accept", "--candidate", identity["candidate_id"], *option]):
-                with self.assertRaisesRegex(ValueError, "require --slots"):
-                    m.main()
+                self.assertEqual(m.main(), 1)
+                self.assertEqual(schedule.call_args.args[3], None)
 
     def test_release_scope_uses_previous_merged_tag_and_product_migration_paths(self):
         repository = self.directory / "scope-repository"
@@ -961,9 +966,9 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full release required"):
             run("accept", "--level", "ordinary", scope=migration)
         self.assertEqual((output / "receipt.json").read_bytes(), before)
-        with_vms, level, _ = run("accept", "--level", "full", "--slots", "1", scope=migration)
+        with_vms, level, _ = run("accept", "--level", "full", "--slots", "slot-1", scope=migration)
         self.assertEqual((with_vms, level["level"], level["migration_changes"]), (True, "full", ["internal/migration/a.go"]))
-        with_vms, recorded, _ = run("accept", "--slots", "1")  # The recorded level persists.
+        with_vms, recorded, _ = run("accept", "--slots", "slot-1")  # The recorded level persists.
         self.assertEqual((with_vms, recorded), (True, level))
         with self.assertRaisesRegex(ValueError, "full release requires every VM check; not run: profile:sample"):
             m.attestation(output, identity)
@@ -1032,7 +1037,7 @@ class Contracts(unittest.TestCase):
              patch.object(m.a, "execute", side_effect=AssertionError("already passed")), \
              patch.object(m.signal, "signal"), redirect_stdout(captured), \
              patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
-                                       "accept", "--candidate", identity["candidate_id"], "--slots", "1"]):
+                                       "accept", "--candidate", identity["candidate_id"], "--slots", "slot-1"]):
             self.assertEqual(m.main(), 0)
         self.assertIn("external_optional_not_run=" + name, captured.getvalue())
         self.assertEqual(json.loads((directory / "attestation.json").read_text())["external_obligations"],
@@ -2482,6 +2487,41 @@ class HostedChecks(unittest.TestCase):
         self.assertTrue(m.publish_remote(self.github, self.prepared, document, self.root)["immutable"])
         self.assertFalse((self.directory / "ci-hosted-downloads/456-1-99/source").exists())
         self.assertEqual(self.collect()[1], "")
+
+    def test_hash_bound_historical_pass_with_outstanding_lease_reruns(self):
+        name = "profile:sample"
+        receipt = json.loads((self.remote / "receipt.json").read_text())
+        result = receipt["checks"][name]
+        second = LEASE_GRANT.replace("run=sample", "run=second")
+        trace = LEASE_GRANT + second + (
+            "E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0\n"
+            "broker diagnostics\n" + LEASE_RELEASE.replace("run=sample", "run=second"))
+        log = self.remote / result["log"]
+        log.write_text(trace)
+        result["log_sha256"] = m.a.digest(log)
+        result["original_attempt"] = m.a.completed_attempt(self.remote, self.root, receipt, name, result)
+        m.a.save(self.remote, receipt)
+        fresh = m.a.execute(name, ["bash", "-c", 'cat "$1"', "fixture", str(log)], self.root, self.output, m.a.clean_environment(), 1)
+        self.assertEqual((fresh["status"], fresh["exit_code"], fresh["cleanup_status"]), ("failed", 0, "unconfirmed"))
+        counted, report = self.collect()
+        self.assertEqual(counted, {"status": "pending"})
+        self.assertIn("PASS lacks confirmed lease cleanup", report)
+        # The local collector also treats the historical result as incomplete and reruns just this lane.
+        self.assertEqual(m.a.load_bound(self.remote)[1]["checks"][name]["status"], "incomplete")
+        with patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m.a, "execute", wraps=m.a.execute) as execute:
+            m.a.run_checks(self.remote, [1], [name], False)
+        self.assertEqual([call.args[0] for call in execute.call_args_list], [name])
+        self.assertEqual(m.a.load_bound(self.remote)[1]["checks"][name]["status"], "passed")
+
+    def test_hosted_pass_does_not_replace_newer_local_failure(self):
+        self.collect()
+        _, receipt = m.a.load_bound(self.output)
+        failure = {"status": "failed", "exit_code": 23}
+        receipt["checks"]["profile:sample"] = failure
+        m.a.save(self.output, receipt)
+        self.assertEqual(m.hosted_open(self.directory, self.output), [])
+        self.assertEqual(self.collect()[0], failure)
 
     def test_wrong_sha_failed_job_unknown_policy_foreign_candidate_missing_cleanup_and_stale_attempt_stay_open(self):
         def foreign(receipt):

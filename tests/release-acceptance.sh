@@ -92,6 +92,12 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
+LEASE_PASS = ("E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=" + "a" * 64 + "\n"
+              "E2E lease released: slot=slot-001 run=sample\n"
+              "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n")
+PASS_CONTROLLER = ["bash", "-c", "printf '%s' " + shlex.quote(LEASE_PASS)]
+
+
 def fixture_checkout(directory, optional_vms=False):
     checkout = directory / "checkout"
     for name in ("dev/agent-e2e.sh", "config/profiles/test-vms-client/skills/subyard-test-vms/client.sh", "dev/e2e/p0-acceptance.sh", "scripts/lib/runtime.sh", "tests/helpers/source-files.sh"):
@@ -106,7 +112,7 @@ def fixture_checkout(directory, optional_vms=False):
     for profile in ("sample", "peer"):
         runner = checkout / f"config/profiles/{profile}/tests/e2e/acceptance.sh"
         runner.parent.mkdir(parents=True)
-        runner.write_text("#!/bin/bash\nexit 0\n")
+        runner.write_text("#!/bin/bash\n" + PASS_CONTROLLER[2] + "\n")
     (checkout / "config/profiles/sample/tests/e2e/acceptance-lanes.json").write_text(json.dumps({
         "schema_version": 1, "lanes": [{"id": name, "arguments": ["--lane", name]} for name in ("one", "two")]}))
     (checkout / "dev/package-engine.sh").write_text('''#!/usr/bin/env bash
@@ -784,8 +790,7 @@ exit "$COLLECTOR_EXIT"
             directory = Path(temporary)
             checkout = fixture_checkout(directory, optional_vms=True)
             (checkout / "config/profiles/sample/tests/e2e/acceptance.sh").write_text(
-                "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
-                "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
+                "#!/bin/bash\n" + PASS_CONTROLLER[2] + "\n")
             source, target = directory / "source-candidate", directory / "target-candidate"
             source_root, old = prepare_fixture(checkout, source)
             name = "profile:sample/one"
@@ -835,8 +840,7 @@ exit "$COLLECTOR_EXIT"
     def live_profile_candidates(self, directory, change, shared_reference=False, revisions=None, extra_checks=(), content=None):
         checkout = fixture_checkout(directory, optional_vms=True)
         controller = (
-            "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
-            "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
+            "#!/bin/bash\n" + PASS_CONTROLLER[2] + "\n")
         (checkout / "config/profiles/sample/tests/e2e/acceptance.sh").write_text(controller)
         if "vm:fixture" in extra_checks:
             (checkout / "dev/e2e/release-vm-check.sh").write_text(controller)
@@ -2177,7 +2181,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
                  patch.object(m, "execute", side_effect=AssertionError("execution")), \
                  patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status),
-                                          "--slots", "1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
+                                          "--slots", "slot-1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(m.main(), 1)
             self.assertEqual(before, set(checkout.rglob("*")))
 
@@ -2344,27 +2348,27 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual(events[-1]["status"], "interrupted")
             log = output / "refusal.log"
             log.write_text("agent-e2e: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\nE2E lease: slot=slot-1\nproduct failure\n")
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertIsNone(m.lease_ledger(log).refusal)
             # The installed standalone client prints the same typed refusal under its own name.
             script.write_text("#!/bin/bash\nprintf 'subyard-test-vms: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\\n'\nexit 4\n")
             result = m.execute("profile:sample/three", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_disk"))
             log.write_text("other-tool: retryable capacity refusal for slot-1: resource=disk; retry after resources become available\n")
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertIsNone(m.lease_ledger(log).refusal)
             # A later acquire of a multi-lease lane blocks on capacity only after a clean release.
             lease = "E2E lease: yard=hermes project=hermes run=0123abcd purpose=p slot=slot-001 type=subyard-pair vms=1 base=" + "a" * 64 + "\n"
             start = "E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n"
             refusal = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
             for released, expected in (("0", "memory"), ("1", None)):
                 log.write_text(lease + start + f"E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code={released}\n" + refusal)
-                self.assertEqual(m.capacity_reason(log), expected, released)
+                self.assertEqual(m.lease_ledger(log).refusal, expected, released)
             log.write_text(lease + refusal)
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertIsNone(m.lease_ledger(log).refusal)
             # Two overlapping leases with one released still hold a lease at the refusal.
             log.write_text(lease + lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal)
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertIsNone(m.lease_ledger(log).refusal)
             log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
-            self.assertIsNone(m.capacity_reason(log))
+            self.assertIsNone(m.lease_ledger(log).refusal)
             script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
             result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
@@ -2690,11 +2694,11 @@ while True: time.sleep(1)
                 available = output / "capacity-available"
                 controller = source / "controller.sh"
                 controller.write_text("#!/bin/bash\n"
-                    'test ! -f "$1" || exit 0\n'
+                    'if [ -f "$1" ]; then ' + PASS_CONTROLLER[2] + '; exit 0; fi\n'
                     "printf 'agent-e2e: retryable capacity refusal for slot-1: resource=" + resource +
                     "; retry after resources become available\\n'\nexit 4\n")
                 blocked, following = "profile:sample/one", "profile:sample/two"
-                checks = {"verify": ["true"], blocked: ["bash", str(controller), str(available)], following: ["true"]}
+                checks = {"verify": ["true"], blocked: ["bash", str(controller), str(available)], following: PASS_CONTROLLER}
                 receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
                            "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                            "checks": {name: {"status": "passed" if name == "verify" else "pending"} for name in checks}}
@@ -2738,7 +2742,7 @@ while True: time.sleep(1)
                     self.assertEqual((output / "events.jsonl").read_text().splitlines()[:len(events)],
                                      [json.dumps(item, sort_keys=True) for item in events])
 
-    def test_capacity_retry_waits_for_active_checks_and_records_both_attempts(self):
+    def test_capacity_retry_follows_waiting_checks_and_records_both_attempts(self):
         for slow_exit in (0, 23):
             with self.subTest(slow_exit=slow_exit), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 directory = Path(temporary)
@@ -2746,10 +2750,10 @@ while True: time.sleep(1)
                 output = directory / "acceptance"
                 blocked, slow, following = "profile:sample/one", "profile:sample/two", "profile:peer"
                 marker = output / "capacity-retried"
-                command = ["bash", "-c", 'test ! -f "$1" || exit 0\ntouch "$1"\n'
+                command = ["bash", "-c", 'if [ -f "$1" ]; then ' + PASS_CONTROLLER[2] + '; exit 0; fi\ntouch "$1"\n'
                     "printf 'agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\\n'\nexit 4",
                     "controller", str(marker)]
-                checks = {blocked: command, slow: ["bash", "-c", "exit " + str(slow_exit)], following: ["true"]}
+                checks = {blocked: command, slow: ["bash", "-c", PASS_CONTROLLER[2] + "\nexit " + str(slow_exit)], following: PASS_CONTROLLER}
                 # Local gate behavior is covered separately; use real execution and immutable records here.
                 receipt["checks"] = {name: {"status": "pending"} for name in checks}
                 started, finished = threading.Event(), threading.Event()
@@ -2760,7 +2764,8 @@ while True: time.sleep(1)
                     calls.append((name, slot))
                     if name == blocked:
                         if marker.exists():
-                            self.assertTrue(finished.is_set(), "capacity retry overlapped an active first-pass check")
+                            self.assertTrue(following_done.is_set(), "capacity retry jumped ahead of waiting work")
+                            self.assertTrue(finished.wait(3))  # Simulate broker admission once capacity returns.
                         else:
                             self.assertTrue(started.wait(3))
                     if name == slow:
@@ -2793,7 +2798,7 @@ while True: time.sleep(1)
                 record, _ = m.original_attempt(output, persisted, blocked, persisted["checks"][blocked])
                 self.assertEqual(record["result"]["status"], "passed")
 
-    def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
+    def test_only_unconfirmed_cleanup_prevents_slot_reuse(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         typed = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
@@ -2806,7 +2811,7 @@ while True: time.sleep(1)
                 output = Path(temporary)
                 blocked, following = "profile:sample/one", "profile:sample/two"
                 command = ["python3", "-c", "import sys; sys.stdout.write(" + repr(text) + "); sys.exit(" + str(code) + ")"]
-                checks = {"verify": ["true"], blocked: command, following: ["true"]}
+                checks = {"verify": ["true"], blocked: command, following: PASS_CONTROLLER}
                 receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
                            "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
                            "checks": {name: {"status": "passed" if name == "verify" else "pending"} for name in checks}}
@@ -2822,16 +2827,18 @@ while True: time.sleep(1)
                 self.assertEqual(attempt["failure_class"], "unknown")
                 self.assertNotIn("reason", attempt)
                 self.assertEqual(persisted["result"], "failed")
-                self.assertEqual(persisted["checks"][following]["status"], "pending")
+                reusable = lease not in text and guest not in text
+                self.assertEqual(persisted["checks"][following]["status"], "passed" if reusable else "pending")
                 events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
-                self.assertEqual([item["check"] for item in events if item["event"] == "check-start"], [blocked])
-                results = [item for item in events if item["event"] == "check-result"]
+                self.assertEqual([item["check"] for item in events if item["event"] == "check-start"],
+                                 [blocked, following] if reusable else [blocked])
+                results = [item for item in events if item["event"] == "check-result" and item["check"] == blocked]
                 self.assertEqual([(item["status"], item["exit_code"], item["failure_class"]) for item in results],
                                  [("failed", code, "unknown")])
                 self.assertNotIn("reason", results[0])
                 self.assertEqual(events[-1]["status"], "failed")
 
-    def test_interrupted_attempt_saved_and_untyped_blocked_worker_stops_queue(self):
+    def test_interrupted_attempt_saved_and_unconfirmed_cleanup_stops_slot(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
@@ -2844,7 +2851,7 @@ while True: time.sleep(1)
             calls = []
             def execute(name, command, root, output, env, slot=None):
                 calls.append(name)
-                return {"status": "blocked", "exit_code": 4, "duration_seconds": 1.2}
+                return {"status": "blocked", "exit_code": 4, "duration_seconds": 1.2, "cleanup_status": "unconfirmed"}
             with patch.object(m, "load_bound", return_value=(output / "source", receipt)), \
                  patch.object(m, "commands", return_value=checks), \
                  patch.object(m, "source_fingerprint", return_value="a" * 64), \
@@ -3260,13 +3267,9 @@ while True: time.sleep(1)
                  "environment_evidence": "recorded", "environments": [], "cleanup_status": "recorded",
                  "cleanup": {"guest-cleanup": {"exit_code": 0}, "lease-release": {"exit_code": 0}}}
         for name, failure, continues in (("lease", lease, True),
-                                         ("cleanup", {**lease, "exit_code": 3}, False),
-                                         ("cleanup-phase", {**lease, "cleanup": {**lease["cleanup"], "guest-cleanup": {"exit_code": 1}}}, False),
-                                         ("no-cleanup-witness", {**lease, "cleanup": {}, "cleanup_status": "unknown"}, False),
-                                         ("no-lease-release", {**lease, "cleanup": {"guest-cleanup": {"exit_code": 0}}}, False),
-                                         ("failed-lease-release", {**lease, "cleanup": {**lease["cleanup"], "lease-release": {"exit_code": 1}}}, False),
-                                         ("unallocated", {**lease, "environment_evidence": "unknown"}, False),
-                                         ("timeout", {**lease, "termination": "timeout", "exit_code": 124}, False)):
+                                         ("cleanup-failure", {**lease, "exit_code": 3, "cleanup_status": "unconfirmed"}, False),
+                                         ("unallocated", {**lease, "environment_evidence": "unknown"}, True),
+                                         ("timeout-with-release", {**lease, "termination": "timeout", "exit_code": 124}, True)):
             with self.subTest(name=name), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
                 names = ["verify", "vm:one", "vm:two"]
@@ -3298,13 +3301,61 @@ while True: time.sleep(1)
                         self.fail("second collector acquired lock")
             self.assertEqual((output / "collector.lock").stat().st_mode & 0o777, 0o600)
 
+    def test_slot_arguments_choose_an_exact_set(self):
+        parser = m.argparse.ArgumentParser()
+        m.add_slot_arguments(parser)
+        self.assertEqual(m.DEFAULT_SLOTS, (1, 2, 3, 4))
+        self.assertEqual(m.selected_slots(parser.parse_args(["--slot-count", "2"])), (1, 2))
+        self.assertEqual(m.selected_slots(parser.parse_args(["--slots", "slot-002,slot-4"])), (2, 4))
+        for flags in (["--slots", "2"], ["--slots", "slot-2,slot-002"], ["--slot-count", "2", "--slots", "slot-2"]):
+            with self.subTest(flags=flags), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parser.parse_args(flags)
+
+    def test_active_retry_is_queued_with_sibling_and_after_slot_refusal(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            retry, sibling, following = ("vm:" + name for name in ("retry", "sibling", "following"))
+            running, allow_sibling, following_done = (threading.Event() for _ in range(3))
+            recorded, started = [], []
+            def execute(name, slot):
+                started.append((name, slot))
+                if name == sibling:
+                    running.set()
+                    self.assertTrue(allow_sibling.wait(5))
+                if (name, slot) == (retry, 2) and started.count((retry, 2)) == 1:
+                    return {"reason": "slot-unavailable", "log": "refusal.log"}
+                return {"status": "passed"}
+
+            def record(name, result):
+                recorded.append(name)
+                if name == following:
+                    following_done.set()
+
+            with m.ThreadPoolExecutor(max_workers=1) as pool, redirect_stdout(io.StringIO()) as report:
+                scheduled = pool.submit(m.run_live, output, [retry, sibling, following], {retry, sibling, following},
+                                        [2, 4], lambda name: True, execute, record)
+                try:
+                    self.assertTrue(running.wait(5))
+                    self.assertTrue(following_done.wait(5))
+                    with self.assertRaisesRegex(ValueError, "did not acknowledge"):
+                        m.request_local_retry(output, "vm:outside-selection")
+                    self.assertEqual(m.request_local_retry(output, following), 0)
+                finally:
+                    allow_sibling.set()
+                self.assertTrue(scheduled.result(timeout=5))
+            self.assertIn("SLOT-UNAVAILABLE slot=slot-2", report.getvalue())
+            self.assertIn((following, 2), started)
+            self.assertEqual(recorded.count(following), 2)
+            self.assertEqual(recorded.count(sibling), 1)
+            with self.assertRaisesRegex(ValueError, "did not acknowledge"):
+                m.request_local_retry(output, following)
+
 
 def split_catalog_checkout(directory):
     """A synthetic catalog whose split-covered full check requires one sibling check."""
     checkout = fixture_checkout(directory, optional_vms=True)
     (checkout / "dev/e2e/release-vm-check.sh").write_text(
-        "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
-        "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
+        "#!/bin/bash\n" + PASS_CONTROLLER[2] + "\n")
     (checkout / m.CORE_VM_CATALOG).write_text(json.dumps({"schema_version": 1, "checks": [
         {"id": "p0-full", "command": ["bash", "dev/e2e/release-vm-check.sh", "--split-covered"],
          "requires": ["p0-split"], "timeout_seconds": 60},

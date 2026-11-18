@@ -108,13 +108,13 @@ and never gate a release or PR.
 Local long VM smoke and shipped-profile VM checks run on explicit request:
 
 ```sh
-dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slots 1 2 3
+dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slot-count 3
 # Or select one check from an existing frozen collector:
 python3 dev/release-acceptance.py run --output .build/release-local \
-  --only p0-release-smoke --slots 1
+  --only p0-release-smoke --slot-count 1
 ```
 
-`--slots` alone does not request local VM execution. Checks without counted hosted evidence or an
+Slot flags alone do not request local VM execution. Checks without counted hosted evidence or an
 explicit local request remain `not-run` in acceptance and publication; they are not passing physical evidence. Once requested, incomplete or failed
 checks block the candidate, including after interruption or a later default invocation.
 A catalog check's `requires` (the split lanes of `vm:p0-full`) must also pass once that check is requested
@@ -226,7 +226,7 @@ VM status. Collector selectors can target the downloaded candidate's acceptance 
 
 ```sh
 python3 dev/release-acceptance.py preflight \
-  --output .build/release-publication/ID/acceptance --with-vms --slots 1 2 3
+  --output .build/release-publication/ID/acceptance --with-vms --slot-count 3
 ```
 
 Source, asset or tooling changes require a new candidate. Never amend a frozen tree, its policy
@@ -415,7 +415,7 @@ Agents preparing a release apply the
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).
   Long VM smoke and shipped-profile VM checks run only on explicit operator request:
-  `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
+  `accept --with-vms --slots slot-N` or collector `run --only CHECK --slots slot-N`.
   Available slots alone do not request a VM run. Core `p0-release-smoke` is mandatory:
   local-only acceptance remains incomplete until it passes, and it cannot be excluded
   or waived as optional. Unrequested shipped-profile VM checks remain `not-run`,
@@ -461,30 +461,29 @@ python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/releas
 python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
-Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke, core and profile checks,
-or use `run --only p0-release-smoke --slots 1` for one check. `--slots` alone does not
-request VM execution. Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
+Add `--with-vms --slot-count 3` to `preflight`/`run` to request all VM smoke, core and profile checks,
+or use `run --only p0-release-smoke --slot-count 1` for one check. Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
 (full P0 and its split lanes, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
 and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
 selects one family. A catalog entry's optional `requires` lists sibling checks that must also pass
 whenever that check is requested or recorded; preparation records them in the receipt and the
 candidate's catalog must still match. Selecting a check also runs its required checks that have not
-passed for the candidate, so `run --only vm:p0-full --slots 1 2 3` runs the full P0 outside a release:
+passed for the candidate, so `run --only vm:p0-full --slot-count 3` runs the full P0 outside a release:
 `vm:p0-full --split-covered` plus its split checks; `--exclude` keeps a required check not run and the
 result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
-runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
-the next check; a refusal, interruption, timeout, cleanup failure or attempt without a lease stops the slot,
-so an unusable slot cannot turn later checks into failures. One collector owns a candidate's receipt
-at a time; run every check through it rather than separately, so the result is recorded. Once explicitly requested, a pending VM check remains required on
-continuation; interruption or exclusion cannot turn it back into optional passing acceptance.
+runs per selected slot and takes the next eligible check as soon as the slot is free. The default set
+is slots 1–4. Use `--slot-count 2` for slots 1 and 2, or `--slots slot-2,slot-4` for those exact
+slots. The flags are mutually exclusive and `--slots 2` is invalid. The broker admits each
+request against current memory and disk capacity. The collector reports each explicitly selected
+slot that the broker refuses while work is waiting and returns exit 2. A pending VM check remains
+required on continuation once explicitly requested, including after interruption or exclusion.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
 `--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
 accepts obligation IDs mapped to `available`, `unavailable` or `unknown`. Readiness declarations
-are planning inputs, not passing evidence. `--slots` and `--types` identify the contemplated requests;
-they do not reserve capacity or change controller dispatch. A compact `CAPACITY` line on stderr
-summarizes these selections, numeric headroom, observation time/age and prerequisites; stdout remains
-the JSON report. Missing observation time stays unknown, independent of file read time or mtime.
+are planning inputs. Slot flags and `--types` identify the contemplated requests without reserving
+capacity. A `CAPACITY` line on stderr summarizes these selections, headroom, observation time and
+prerequisites. Stdout carries the JSON report. An absent observation time stays unknown.
 Missing telemetry and legacy reservations leave headroom unknown. Observed unavailable selected
 slots or exhausted headroom report planning `insufficient` and exit 1 before packaging or local checks.
 Positive headroom does not prove the selected types fit: compare it with their actual resource contract
@@ -509,10 +508,16 @@ Process coverage (`dev/process-coverage.sh`) is optional; ordinary process contr
 Run the aggregator from the managed workspace checkout: it supplies that workspace for lease
 attribution while executing controllers and guest payloads from the frozen candidate.
 
-A repeated `run` executes only checks without a passing result. Use `--only profile:NAME` or
-`--only p0-release-smoke` for a remaining independent check; `--rerun` also repeats passed checks.
+A repeated `run` executes checks without a validated PASS. Use `--only profile:NAME` or
+`--only p0-release-smoke` for a remaining independent check. Add `--rerun` to repeat a passed check
+when the collector is idle. During an active local VM run, queue one exact selected lane with
+`python3 dev/release-acceptance.py retry --output DIR --check CHECK`. For `release.sh accept`,
+use the candidate's `acceptance` directory as DIR. The collector acknowledges a retry once it is
+queued. Requests for lanes outside the active local selection, already queued or running lanes, and
+lanes with unconfirmed cleanup in that run are refused. Sibling attempts and counted results
+remain in place.
 After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
-the same frozen candidate with `run --output DIR --slots N --only CHECK`. Passing local checks remain
+the same frozen candidate with `run --output DIR --slots slot-N --only CHECK`. Passing local checks remain
 bound to that identity and are retained; capacity alone does not require another `prepare`.
 This is a separate continuation run: retry the blocked check after conditions change, retaining
 its original attempt logs/events and applicable PASS results from the same candidate.
@@ -529,14 +534,17 @@ before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfi
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
 every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
-periodic-only lane as an unknown check. Available approved slots take the
-next queued check after their controller exits. A typed `blocked/capacity_memory` or
-`blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
-next independent check. After all first-pass controllers finish, capacity-blocked checks are
-retried once on slots whose workers drained the queue. Both attempts retain their logs and
-immutable records; a second capacity block leaves the candidate incomplete.
-Failures, interruptions, unknown refusals and attempts that
-reached a lease or guest start stop that worker's queue. Exit 4 alone does not permit continuation.
+periodic-only lane as an unknown check. After an attempt with confirmed lease cleanup, or a refusal
+that acquired no lease, the slot can take more work. A typed slot refusal lets another selected
+slot try that check. The collector queues one retry for a typed memory or disk refusal behind waiting work.
+A refusal can follow an earlier lease if that lease was released. Each attempt retains its log and
+immutable record. A slot with unconfirmed cleanup stays out of dispatch for the rest of the run.
+
+The collector accounts for each grant and release in the attempt log. Two grants and one release
+leave cleanup unconfirmed even if the controller exits zero. Reuse and evidence import validate
+the same log against its recorded hash. A historical live PASS without confirmed cleanup is
+incomplete and reruns when selected locally. A newer local failure remains authoritative over any
+previously available hosted PASS.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
 attempt and include the controllers' source and environment evidence. The run checks its platform

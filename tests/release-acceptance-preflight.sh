@@ -83,7 +83,8 @@ class ProfilePreflightTests(unittest.TestCase):
                     m.STOP.set()
                     return {"status": "interrupted", "exit_code": -15}
             code = 9 if local_failure and name == "verify" else outcomes.get(name, 0)
-            return native_execute(name, [sys.executable, "-c", f"raise SystemExit({code})"], root, output, env, slot)
+            lease = ("E2E lease: slot=slot-001 run=fixture\nE2E lease released: slot=slot-001 run=fixture\n") if slot else ""
+            return native_execute(name, [sys.executable, "-c", f"print({lease!r}, end=''); raise SystemExit({code})"], root, output, env, slot)
         stdout = io.StringIO()
         with patch.object(m, "load_bound", return_value=(self.root, receipt)), \
              patch.object(m, "commands", return_value=checks), \
