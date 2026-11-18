@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real sudo/PTY acceptance. Run only through dev/agent-e2e.sh on a disposable leased VM.
+# Real sudo/PTY acceptance runs on a disposable leased VM. --check-fixture is host-free.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -61,48 +61,43 @@ cleanup() {
   fi
   exit "$rc"
 }
-[ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
-for command in sg sudo script runuser useradd userdel visudo; do
-  command -v "$command" >/dev/null 2>&1 || die "$command is required"
-done
-
-if [ "$(id -u)" -ne 0 ]; then
-  # The controller runs as dev. Prepare the platform and candidate before
-  # switching to root for fixture user and sudoers management.
-  bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
-  # shellcheck source=tests/helpers/release-candidate.sh
-  . "$ROOT/tests/helpers/release-candidate.sh"
-  if engine="$(release_candidate_prepare "$ROOT")"; then
-    :
-  elif [ "$?" = 1 ]; then
-    "$ROOT/dev/build-engine.sh"
-    engine="$ROOT/.build/yard"
-  else
-    die 'could not verify frozen candidate'
+if [ "${1:-}" = --check-fixture ]; then
+  [ "$#" -le 2 ] || die 'usage: --check-fixture [engine]'
+  engine="${2:-$ROOT/.build/yard}"
+else
+  [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
+  for command in sg sudo script runuser useradd userdel visudo; do
+    command -v "$command" >/dev/null 2>&1 || die "$command is required"
+  done
+  if [ "$(id -u)" -ne 0 ]; then
+    # The controller prepares the platform and candidate as dev before
+    # switching to root for fixture user and sudoers management.
+    bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
+    # shellcheck source=tests/helpers/release-candidate.sh
+    . "$ROOT/tests/helpers/release-candidate.sh"
+    if engine="$(release_candidate_prepare "$ROOT")"; then
+      :
+    elif [ "$?" = 1 ]; then
+      "$ROOT/dev/build-engine.sh"
+      engine="$ROOT/.build/yard"
+    else
+      die 'could not verify frozen candidate'
+    fi
+    exec sudo -n env SUBYARD_E2E_VM="$SUBYARD_E2E_VM" bash "$0" "$engine"
   fi
-  exec sudo -n env SUBYARD_E2E_VM="$SUBYARD_E2E_VM" bash "$0" "$engine"
-fi
 
-engine="${1:-}"
-case "$engine" in
-  "$ROOT/.subyard-acceptance/runtime/bin/yard-engine"|"$ROOT/.build/yard") ;;
-  *) die 'candidate engine path is required' ;;
-esac
+  engine="${1:-}"
+  case "$engine" in
+    "$ROOT/.subyard-acceptance/runtime/bin/yard-engine"|"$ROOT/.build/yard") ;;
+    *) die 'candidate engine path is required' ;;
+  esac
+fi
 [ -x "$engine" ] || die 'candidate engine is missing'
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 TMP="$(mktemp -d /tmp/subyard-sudo-terminal.XXXXXX)"
 chmod 0711 "$TMP"
-token="${TMP##*.}"
-fixture_user="sy-sudo-$$"
-sudoers="/etc/sudoers.d/subyard-sudo-terminal-$token"
-getent passwd "$fixture_user" >/dev/null 2>&1 \
-  && die "refusing existing fixture user $fixture_user"
-[ ! -e "$sudoers" ] && [ ! -L "$sudoers" ] || die "refusing existing sudoers fixture $sudoers"
-FIXTURE_USER="$fixture_user"
-SUDOERS="$sudoers"
-
 fixture_repo="$TMP/repository"
 fixture_home="$TMP/home"
 install -d -m 0755 "$fixture_repo/config/profiles" "$fixture_repo/scripts/lib" "$fixture_home"
@@ -130,6 +125,7 @@ printf 'root-step=%s\n' "$(id -u)"
 SH
 chmod 0755 "$fixture_repo/scripts/teardown-physical.sh"
 
+# The sparse repository omits the catalog for the integrations in agents.env.
 cat > "$TMP/run-teardown" <<SH
 #!/usr/bin/env bash
 set -e
@@ -137,7 +133,10 @@ operator_home='$fixture_home'
 [ "\$(id -u)" != 0 ] || operator_home='$TMP/root-home'
 install -d -m 0700 "\$operator_home" "\$operator_home/.config" \\
   "\$operator_home/.config/subyard" "\$operator_home/.config/subyard/projects"
-exec env \\
+if [ "\$#" -eq 0 ]; then
+  set -- teardown --yes --keep-data
+fi
+exec env -i PATH="\$PATH" LANG=C.UTF-8 TERM="\${TERM:-dumb}" \\
   HOME="\$operator_home" \\
   SUBYARD_OPERATOR_HOME="\$operator_home" \\
   SUBYARD_CONFIG_HOME="\$operator_home/.config/subyard" \\
@@ -149,14 +148,29 @@ exec env \\
   RESTRICTED_DISK_PATHS="\$operator_home/host" \\
   SHIFT_MODE=shift \\
   FORWARD_SSH_AGENT=0 \\
+  CODING_TOOL_INTEGRATIONS= \\
   DEV_SUDO=0 \\
   DEV_UID=1000 \\
   DEV_USER=dev \\
   SSH_PORT=2222 \\
-  '$fixture_repo/yard' teardown --yes --keep-data
+  '$fixture_repo/yard' "\$@"
 SH
 chmod 0755 "$TMP/run-teardown"
 
+if [ "${1:-}" = --check-fixture ]; then
+  "$TMP/run-teardown" config show CODING_TOOL_INTEGRATIONS >/dev/null
+  printf 'ok: sparse sudo fixture configuration loads\n'
+  exit 0
+fi
+
+token="${TMP##*.}"
+fixture_user="sy-sudo-$$"
+sudoers="/etc/sudoers.d/subyard-sudo-terminal-$token"
+getent passwd "$fixture_user" >/dev/null 2>&1 \
+  && die "refusing existing fixture user $fixture_user"
+[ ! -e "$sudoers" ] && [ ! -L "$sudoers" ] || die "refusing existing sudoers fixture $sudoers"
+FIXTURE_USER="$fixture_user"
+SUDOERS="$sudoers"
 useradd --user-group --groups incus-admin --home-dir "$fixture_home" --shell /bin/bash "$FIXTURE_USER"
 chown -R "$FIXTURE_USER:$FIXTURE_USER" "$fixture_home"
 password="$(dd if=/dev/urandom bs=32 count=1 status=none | sha256sum | cut -c1-24)"
