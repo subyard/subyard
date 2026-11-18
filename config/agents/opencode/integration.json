@@ -8,6 +8,7 @@
       "id": "config",
       "kind": "config",
       "source": "opencode.jsonc",
+      "git_approval_off_source": "opencode-off.jsonc",
       "destination": ".config/opencode/opencode.jsonc",
       "format": "destination"
     },

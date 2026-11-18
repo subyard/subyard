@@ -682,9 +682,7 @@ func (runtime Runtime) artifactPackageSources() ([]config.MaterializedAsset, err
 		}
 		paths := []string{"integration.json"}
 		for _, artifact := range definition.Artifacts {
-			if artifact.Source != "" {
-				paths = append(paths, artifact.Source)
-			}
+			paths = append(paths, artifact.PackageSources()...)
 		}
 		for _, source := range paths {
 			path, err := definition.ArtifactSourcePath(source)

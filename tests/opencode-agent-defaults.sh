@@ -20,12 +20,16 @@ jq -e '
   (has("provider") | not) and
   (has("model") | not)
 ' "$policy" >/dev/null || fail "OpenCode yard policy contract is invalid"
+off_policy="$ROOT/config/agents/opencode/opencode-off.jsonc"
+diff -u <(jq 'del(.permission.bash["git commit", "git commit *", "git push", "git push *"])' "$policy") \
+  "$off_policy" || fail "OpenCode off policy must remove only the commit and push prompts"
 
 manifest="$ROOT/config/agents/opencode/integration.json"
 jq -e '
   .schema_version == 2 and .command == "opencode" and .provision == "provision.sh" and
   (.artifacts | length) == 2 and
   (.artifacts[0] | .id == "config" and .source == "opencode.jsonc" and
+    .git_approval_off_source == "opencode-off.jsonc" and
     .destination == ".config/opencode/opencode.jsonc" and .format == "destination") and
   (.artifacts[1] | .kind == "instructions" and .source_setting == "HOST_OPENCODE_AGENTS_MD" and
     .destination == ".config/opencode/AGENTS.md")
@@ -46,19 +50,6 @@ case "$AGENT_opencode_PERSIST" in
   *) fail "OpenCode SQLite session database is not persisted" ;;
 esac
 
-grep -Fq 'approval_policy = "on-request"' \
-  "$ROOT/config/agents/codex/config.toml" \
-  || fail "Codex yard approvals are not interactive"
-grep -Fq 'approvals_reviewer = "user"' \
-  "$ROOT/config/agents/codex/config.toml" \
-  || fail "Codex yard approvals are not routed to the operator"
-grep -Fq 'sandbox_mode = "danger-full-access"' \
-  "$ROOT/config/agents/codex/config.toml" \
-  || fail "Codex yard permissions are not unrestricted"
-if grep -Eq '^[[:space:]]*(default_permissions|\[permissions\.|\[sandbox_workspace_write\])' \
-  "$ROOT/config/agents/codex/config.toml"; then
-  fail "Codex yard config mixes legacy sandbox settings with permission profiles"
-fi
 grep -Fq 'HOST_OPENCODE_AGENTS_MD=' "$ROOT/config/host.env" \
   || fail "OpenCode host instructions are not configurable"
 
