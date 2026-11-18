@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -52,10 +53,25 @@ func TestServiceReadinessDiagnosticIsOptInAndClosed(t *testing.T) {
 
 func TestServiceReadinessBufferRetainsBoundAcrossWrites(t *testing.T) {
 	var buffer serviceReadinessBuffer
-	for range 1000 {
-		_, _ = buffer.Write([]byte("subyard-profile-readiness-v1 unit-inactive\n"))
+	const record = "subyard-profile-readiness-v1 unit-inactive\n"
+	for range serviceReadinessLimit/len(record) + 2 {
+		_, _ = buffer.Write([]byte(record))
 	}
-	if len(buffer) > 128 || buffer.reason() != "" {
+	if len(buffer) != serviceReadinessLimit || buffer.reason() != "" {
 		t.Fatal("readiness capture exceeded its bound or admitted duplicate output")
+	}
+}
+
+func TestServiceForwardsPendingPublicationDiagnostic(t *testing.T) {
+	root := testkit.TempDir(t)
+	record := domain.ConfigPublicationPendingPrefix +
+		`{"destination":"/home/dev/settings.json","journal":"/state/settings.intent","prior":{"/key":{"present":true,"value":"` +
+		strings.Repeat("x", 256) + `"}}}` + "\n"
+	fixture(t, root, "sample", "#!/bin/bash\nprintf '%s' '"+record+"private-canary\n' >&2\nexit 2\n", Definition{})
+	env := map[string]string{"SUBYARD_ENGINE_CONTEXT": "1", "SUBYARD_ENGINE_CONTEXT_SCHEMA": "1", "SUBYARD_PROFILE_DIAGNOSTICS": "1"}
+	var output bytes.Buffer
+	err := RunServices(context.Background(), root, []string{"--check"}, env, &output, &output)
+	if err == nil || ServiceCheckExit(err) != 2 || output.String() != record {
+		t.Fatalf("pending publication check=%v output=%q", err, output.String())
 	}
 }
