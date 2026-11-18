@@ -503,7 +503,7 @@ run_real_checked 'real yard start' "$TMP/real-start.out" start --yes
 grep -Fq 'started' "$TMP/real-start.out" || die 'real lifecycle start did not complete'
 grep -Fq '[sudo] password for' "$TMP/real-start.out" \
   && die 'inactive NetworkManager caused an unnecessary lifecycle sudo prompt'
-incus exec "$REAL_INSTANCE" --project "$REAL_PROJECT" -- unlink /var/lib/subyard-sudo-smoke
+incus exec "$REAL_INSTANCE" --project "$REAL_PROJECT" -- rm -f -- /var/lib/subyard-sudo-smoke
 run_real_checked 'second real yard stop' "$TMP/real-restop.out" stop --force --yes
 run_real_as_fixture sudo -k
 run_real_checked 'real stopped-yard provision' "$TMP/real-provision.out" \
