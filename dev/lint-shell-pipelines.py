@@ -47,18 +47,30 @@ SHELL_TOKEN = re.compile(
 )
 DOUBLE_TOKEN = re.compile(r'\\[\s\S]|\$\((?!\()|"')
 SHELL_COMMAND = re.compile(r"(?:^|[\s;&|()])(?:[\w./-]*/)?(?:ba|da|k|z)?sh\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*\s*$")
+# Require Bash in command position, including behind the repository's launchers.
 BASH_STDIN = re.compile(
-    r"(?:^|[\s;&|()])(?:[\w./-]*/)?bash(?:\s+-[a-bd-zA-Z]+|\s+(?:pipefail|errexit|nounset))*"
+    r"(?:^|[;&|()])\s*(?:(?:if|then|elif|else|do|\{)\s+)?(?:!\s+)?"
+    r"(?:(?:\w+=\S+|command|env|sudo(?:\s+-n)?|guest(?:_root|_dev|\s+_+)?|yexec|"
+    r"peer|operator_env|remote(?:_dev)?|(?:[\w./-]*/)?runuser\s+-u\s+[\w-]+\s+--)\s+)*"
+    r"(?:(?:timeout(?:\s+--[\w=-]+)*\s+\d+[smhd]?|(?:incus|_+)\s+exec\s+[^;&|<>()]*?\s+--)\s+)?"
+    r"(?:[\w./-]*/)?bash(?:\s+-[a-bd-zA-Z]+|\s+(?:pipefail|errexit|nounset))*"
     r"(?:\s+(?:--|-[a-bd-zA-Z]*s[a-bd-zA-Z]*)(?:\s+[^;&|<>()]*)?)?\s*$"
 )
 WORKFLOW_RUN = re.compile(r"^( *)(?:- )?run:\s*(\S.*)$")
-YAML_DOUBLE_QUOTED = re.compile(r'"((?:[^"\\]|\\.)*)"')
-YAML_ESCAPE = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)")
+YAML_DOUBLE_QUOTED = re.compile(r'"((?:[^"\\]|\\[\s\S])*)"')
+YAML_ESCAPE = re.compile(
+    r"\\(?P<escape>x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)"
+    r"|(?P<escaped_break>\\)\n[ \t]*|[ \t]*(?P<breaks>\n(?:[ \t]*\n)*)[ \t]*"
+)
 YAML_ESCAPES = dict(zip('0abtnvfre "/\\N_LP', '\0\a\b\t\n\v\f\r\x1b "/\\\x85\xa0\u2028\u2029'))
 
 
 def yaml_escape(match):
-    escape = match[1]
+    if match["escaped_break"]:
+        return ""
+    if breaks := match["breaks"]:
+        return "\n" * (breaks.count("\n") - 1) or " "
+    escape = match["escape"]
     if len(escape) > 1:
         return chr(int(escape[1:], 16))
     return YAML_ESCAPES.get(escape, match[0])
@@ -161,7 +173,7 @@ def early_grep(source, code, start, consumer):
         elif word.startswith("-"):
             value_options = "efABCDd" + ("gtrEjMT" if consumer == "rg" else "")
             for index, flag in enumerate(word[1:], 2):
-                if flag in "qmlL":
+                if flag in ("qml" if consumer == "rg" else "qmlL"):
                     return True
                 if flag in value_options:
                     skip_value = index == len(word)
@@ -172,7 +184,12 @@ def early_grep(source, code, start, consumer):
 def workflow_shell(source):
     lines = source.splitlines(keepends=True)
     block_start, block_indent = 0, 0
+    offset, quoted_end = 0, -1
     for index, line in enumerate(lines + ["end"]):
+        line_offset, offset = offset, offset + len(line)
+        if index <= quoted_end:
+            lines[index] = "\n"
+            continue
         if block_start and (not line.strip() or len(line) - len(line.lstrip()) > block_indent):
             continue
         if block_start:
@@ -188,8 +205,9 @@ def workflow_shell(source):
                 command = match[2]
                 if len(command) > 1 and command[0] == command[-1] == "'":
                     command = command[1:-1].replace("''", "'")
-                elif quoted := YAML_DOUBLE_QUOTED.match(command):
+                elif quoted := YAML_DOUBLE_QUOTED.match(source, line_offset + match.start(2)):
                     command = YAML_ESCAPE.sub(yaml_escape, quoted[1])
+                    quoted_end = index + quoted[0].count("\n")
                 lines[index] = command + "\n"
                 continue
         lines[index] = "\n"
@@ -212,7 +230,7 @@ def main():
         source = path.read_text()
         line_numbers = None
         if path.suffix in {".yml", ".yaml"}:
-            lines = workflow_shell(source)
+            lines = workflow_shell(source.removesuffix("\n") + "\n")
             line_numbers = [number for number, line in enumerate(lines, 1) for _ in range(line.count("\n"))]
             source = "".join(lines)
         _, fragments = shell_fragments(source)

@@ -69,6 +69,7 @@ class LintTools(unittest.TestCase):
     def test_shell_lint_rejects_early_consumers(self):
         consumers = ["grep -q x", "grep -Eq x", "grep -Fq x", "grep -m1 x", "head -1",
                      "head; echo done", "\n grep --quiet x", "grep -e term -q", "grep term -l",
+                     "grep -L x", "rg -Ll x",
                      "grep -e 'a | b' --max-count=1", "grep term \\\n -q", "grep term '-q'",
                      "{ head -c 8; }", "{ head -c 8 && echo done; }", "(head -c 8)"]
         pipe = "|"
@@ -85,8 +86,9 @@ class LintTools(unittest.TestCase):
         lines += [f"producer {pipe} (head -c 8 && cat >/dev/null)"]
         lines += [f"# producer {pipe} head -1", f"echo 'producer {pipe} head -1'",
                   f'echo "producer {pipe} grep -q term"', f"producer {pipe} grep -e '-q'",
-                  f"producer {pipe} grep -e-q", f"producer {pipe} grep -- -q",
+                  f"producer {pipe} grep -e-q", f"producer {pipe} grep -- -q", f"producer {pipe} rg -L x",
                   "cat <<'TEXT'", f"producer {pipe} head -1", "TEXT",
+                  "cat bash <<'TEXT'", f"producer {pipe} head -1", "TEXT",
                   'printf "%s" "bash -se" <<TEXT', f"producer {pipe} head -1", "TEXT"]
         self.write("probe.sh", "\n".join(["set -o pipefail", *lines, ""]))
         result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
@@ -109,14 +111,18 @@ class LintTools(unittest.TestCase):
   - run: "echo first\\nproducer \\x7c head -1" # Escapes belong to YAML.
   - run: "echo \\"producer {pipe} head -1\\""
   - run: producer {pipe} head -1
-""")
+  - run: "producer {pipe}
+      head -1"
+  - run: {pipe}
+      producer {pipe} head -1""")
         result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 1)
         self.assertEqual([line.partition(": ")[0] for line in result.stderr.splitlines()],
                          [".github/workflows/test.yml:7", ".github/workflows/test.yml:8",
                           ".github/workflows/test.yml:9", ".github/workflows/test.yml:10",
-                          ".github/workflows/test.yml:12"])
+                          ".github/workflows/test.yml:12", ".github/workflows/test.yml:13",
+                          ".github/workflows/test.yml:16"])
 
     def test_shell_lint_checks_orca_bash_heredoc(self):
         path = "config/profiles/orca/tests/e2e/managed-agents.sh"

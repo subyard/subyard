@@ -32,6 +32,13 @@ result = subprocess.run(['bash', '-c', capture_helper + '\nandroid_capture_evide
                         capture_output=True, text=True, timeout=10)
 assert result.returncode == 0 and result.stderr == 'x' * 65535 + '\n\ncapture_exit=23\n', result.stderr[-100:]
 
+# A token straddling the input cap must not appear even in part.
+producer = 'print("kept"); print("x" * (65536 - 5 - 33), "a" * 64); raise SystemExit(23)'
+result = subprocess.run(['bash', '-c', capture_helper + '\nandroid_capture_evidence "$@"',
+                         '_', sys.executable, '-c', producer],
+                        capture_output=True, text=True, timeout=10)
+assert result.returncode == 0 and result.stderr == 'kept\n\ncapture_exit=23\n', result.stderr[-100:]
+
 
 # Run the actual manifest validator against semantic output variations, not SDK
 # substitutes. Native compilation/signing remains the allocated VM's contract.
@@ -119,7 +126,7 @@ for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
                 assert marker and remainder.splitlines()[0] == str(adb_exit)
                 assert len(payload.encode()) <= 65536
                 if adb_exit != 124:
-                    assert len(payload.encode()) == 65536 and '1.1.1.1' not in payload
+                    assert len(payload.encode()) >= 65528 and '1.1.1.1' not in payload
             observed = calls.read_text()
             assert 'logcat -b main -b system -b crash -d -t 512' in observed
             assert 'shell dumpsys meminfo' in observed and 'dmesg; logcat' in observed
@@ -148,7 +155,7 @@ for status, phase, capture_exit, called in ((0, 'gradle', 0, False), (23, 'image
         assert '-n 512 -o cat -u subyard-android-slot-*' in result.stderr
         assert f'capture_exit={capture_exit}' in result.stderr
         payload, status_line = result.stderr.split('\n', 1)[1].rsplit('\ncapture_exit=', 1)
-        assert len(payload.encode()) == 65536 and status_line == f'{capture_exit}\n'
+        assert 65528 <= len(payload.encode()) <= 65536 and status_line == f'{capture_exit}\n'
         assert '1.1.1.1' not in payload
         assert '12:34:56.789' in result.stderr
         assert not any(value in result.stderr for value in ('192.0.2.1', '2001:db8::1', 'canary'))

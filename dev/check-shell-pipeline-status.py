@@ -139,9 +139,11 @@ def main():
 
         path = "scripts/install-key-tools.sh"
         functions = [fragment(source, "\ntool_version_matches() ", "\n}") for source in sources(path)]
-        compare(path, *["tool_version_matches() " + function + '\n}\ntool_version_matches ./version 1.3.1'
-                        for function in functions],
-                "age v1.3.1\n", fixture, (0, 23, 0, 23))
+        checks = ["tool_version_matches() " + function + '\n}\ntool_version_matches ./version 1.3.1'
+                  for function in functions]
+        compare(f"{path} [match]", *checks, "age v1.3.1\n", fixture, (0, 23, 0, 23))
+        compare(f"{path} [noisy mismatch]", *checks, "age v1.2.0\nage v1.3.1\n", fixture,
+                (1, (1, 23), 0, 23))
 
         path = "config/agents/codex/provision.sh"
         listing = 'tar -tvzf "$archive"'
