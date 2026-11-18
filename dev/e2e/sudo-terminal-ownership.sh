@@ -194,8 +194,7 @@ run_as_fixture() {
 }
 
 # The platform fixture stops short of yard init, which normally provisions this lock.
-SUBYARD_ENGINE_CONTEXT=1 SUBYARD_ENGINE_CONTEXT_SCHEMA=1 SUBYARD_USER="$FIXTURE_USER" \
-  "$fixture_repo/bin/yard-engine" _network-lock ensure "$(id -u "$FIXTURE_USER")"
+"$fixture_repo/bin/yard-engine" _network-lock ensure
 run_as_fixture "$fixture_repo/bin/yard-engine" _network-lock check
 
 run_prompted_pty() {
