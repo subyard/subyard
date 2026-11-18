@@ -1422,6 +1422,61 @@ func TestPrepareTransitionCheckOfProtectedRecoveryIsReadOnly(t *testing.T) {
 	}
 }
 
+func TestUpdateCheckPreservesActivationBlocker(t *testing.T) {
+	ctx := context.Background()
+	const target releasetransition.ReleaseID = "1.2.3-aaaaaaaaaaaa"
+	blocker := releasetransition.Blocker{
+		Code: releasetransition.CodeDependencyUnavailable, Resource: "activation.core-guest-runtime",
+		Message: "named activation failed", Retry: "yard -Y named init",
+	}
+	inspection := releasetransition.Inspection{
+		Plan: "plan-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Assessment: domain.ActionAssessment{
+			Action: "release.transition.v2", Effect: domain.ActionMutation, Changed: true,
+			Impacts: []domain.ActionImpact{domain.ImpactLocalMetadata, domain.ImpactPersistentData, domain.ImpactYardRuntime}, Recovery: domain.RecoveryReversible,
+			Consequences: []string{"repair release activation"},
+		},
+		Decisions: []releasetransition.RedactedDecision{
+			{Resource: "activation.materialized-config", Scope: "activation", Decision: releasetransition.DecisionCanonicalize, Result: "drift"},
+			{Resource: "activation.materialized-config", Scope: releasetransition.YardAttributionScope, Decision: releasetransition.DecisionPreserve, Result: "drift default"},
+			{Resource: blocker.Resource, Scope: releasetransition.YardAttributionScope, Decision: releasetransition.DecisionPreserve, Result: "failed named"},
+		},
+		Blockers: []releasetransition.Blocker{blocker},
+		Outcome: &releasetransition.Outcome{
+			Active: target, Target: target, Status: releasetransition.StatusOperatorActionRequired,
+			Code: blocker.Code, Message: blocker.Message, Retry: blocker.Retry,
+		},
+	}
+	request := releasetransition.ProcessRequest{Target: target, Direction: releasetransition.DirectionActivateTarget}
+	for _, jsonOutput := range []bool{false, true} {
+		var stdout bytes.Buffer
+		runtime := New(Config{
+			Stdout: &stdout,
+			UpdateCheckAdvice: func(context.Context, *releasetransition.Inspection) (string, string) {
+				return "default has file drift", "yard -Y default config apply"
+			},
+		})
+		prepared, err := runtime.prepareInspectedCandidateTransition(options{check: true, json: jsonOutput},
+			candidateVerification{}, candidateVerification{}, request, inspection, true, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := prepared.Execute(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var report releasetransition.Inspection
+		if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		goal := releasetransition.Goal{Target: request.Target, Direction: request.Direction}
+		if err := releasetransition.ValidateProcessInspection(goal, report); err != nil ||
+			len(report.Blockers) != 1 || report.Outcome.Retry != blocker.Retry ||
+			strings.Contains(stdout.String(), "config apply") {
+			t.Fatalf("update check lost its blocker: %v\n%s", err, stdout.String())
+		}
+	}
+}
+
 func TestPrepareTransitionRejectsArbitraryV0111RecoveryCandidate(t *testing.T) {
 	tests := []struct {
 		name               string

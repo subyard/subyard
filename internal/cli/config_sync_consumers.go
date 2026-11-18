@@ -49,7 +49,7 @@ func (consumers *configSyncConsumers) targets(plan configsync.Plan) ([]configTar
 }
 func (prepared *preparedCommand) prepareConfigSyncConsumers(ctx context.Context, execution *configSyncExecution) error {
 	all, names := configSyncConsumerScope(execution.approved)
-	retry := len(execution.approved.Changes) == 0
+	retry := len(execution.approved.Changes) == 0 || execution.action == "config.sync.pull"
 	if !all && len(names) == 0 && !retry {
 		return nil
 	}
@@ -65,10 +65,10 @@ func (prepared *preparedCommand) prepareConfigSyncConsumers(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	if retry {
+	if retry && !all {
 		// Publication may have completed independently of its consumers. Bind
-		// the remaining drift from the freshly validated published candidate.
-		native.approved = slices.DeleteFunc(native.approved, func(item configTargetAssessment) bool { return !item.Changed })
+		// the affected yards and any remaining drift against the candidate.
+		native.approved = slices.DeleteFunc(native.approved, func(item configTargetAssessment) bool { return !item.Changed && !names[item.Target.Name] })
 		if len(native.approved) == 0 {
 			return nil
 		}

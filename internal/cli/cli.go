@@ -1493,7 +1493,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 				printIgnoredAssignments(cli.options.Stdout, "  ", "", local)
 			}
 			if index == 0 && yardScoped {
-				cli.printYardAttention(localGate, yard.Name)
+				cli.printYardAttention(ctx, localGate, yard.Name)
 				continue
 			}
 			cli.printReleaseReadiness(releases[index], owner)
@@ -1612,7 +1612,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 	readiness := cli.releaseReadiness(ctx)
 	if gate, ok := cli.statusYardGate(ctx, readiness); ok {
 		fmt.Fprintln(cli.options.Stdout, "  "+gate.releaseLine())
-		cli.printYardAttention(gate, loaded.Context.YardName)
+		cli.printYardAttention(ctx, gate, loaded.Context.YardName)
 		cli.printNetworkManagerRebootReminder()
 		return 0
 	}

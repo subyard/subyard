@@ -657,7 +657,7 @@ func (admission *gateAdmission) verifyAfterEffect(ctx context.Context, cli *CLI)
 			if state.materializedDrift && admission.sources == nil {
 				_, gate.sourceRefusal = cli.repairSources(ctx)
 			}
-			cause, next := gate.yardAdvice(yard)
+			cause, next := cli.yardAdvice(ctx, gate, yard)
 			if cause != nil {
 				fmt.Fprintf(cli.options.Stderr, "yard: %v\n", cause)
 			}
@@ -703,7 +703,7 @@ func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names
 		historyErr = errors.New("protected release history could not be read")
 	}
 	sources, sourceErr := cli.repairSources(ctx)
-	if cause, next := gate.configRefreshAdvice(names, domain.CollectRefusals(historyErr, sourceErr)); cause != nil {
+	if cause, next := gate.configRefreshRefusal(names, domain.CollectRefusals(historyErr, sourceErr)); cause != nil {
 		return refuse(cause, next)
 	}
 	admission := &gateAdmission{kind: admissionRepair, request: gateRequest{yard: yard, handler: "@config", name: "config"}, history: *history, sources: sources, rechecked: true}
@@ -718,10 +718,10 @@ func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names
 	}, nil
 }
 
-// configRefreshAdvice uses the consumer gate's predicates for read-only advice.
-func (gate yardGate) configRefreshAdvice(names []string, sourceErr error) (error, string) {
+// configRefreshRefusal is shared by consumer admission and read-only advice.
+func (gate yardGate) configRefreshRefusal(names []string, sourceErr error) (error, string) {
 	var refusals []error
-	var next, blockedNext string
+	var blockedNext string
 	for _, name := range names {
 		state := gate.state(name)
 		for _, finding := range []struct {
@@ -735,9 +735,6 @@ func (gate yardGate) configRefreshAdvice(names []string, sourceErr error) (error
 				}
 			}
 		}
-		if next == "" && state.materializedDrift {
-			next = "yard -Y " + name + " config apply"
-		}
 	}
 	switch {
 	case sourceErr != nil:
@@ -745,14 +742,28 @@ func (gate yardGate) configRefreshAdvice(names []string, sourceErr error) (error
 	case blockedNext != "":
 		return domain.CollectRefusals(refusals...), blockedNext
 	default:
-		return nil, next
+		return nil, ""
 	}
 }
 
-func (gate yardGate) yardAdvice(yard string) (error, string) {
+func (cli *CLI) fileRefreshNeeded(ctx context.Context, yard string) bool {
+	loaded, err := cli.resolveReleaseTransitionContext(ctx, yard, "")
+	if err != nil {
+		return false
+	}
+	assessment, err := cli.assessConfigTarget(ctx, configTarget{Name: yard, Loaded: loaded}, true)
+	return err == nil && assessment.Changed
+}
+
+func (cli *CLI) yardAdvice(ctx context.Context, gate yardGate, yard string) (error, string) {
 	state := gate.state(yard)
 	if state.materializedDrift {
-		return gate.configRefreshAdvice([]string{yard}, gate.sourceRefusal)
+		if cause, next := gate.configRefreshRefusal([]string{yard}, gate.sourceRefusal); cause != nil {
+			return cause, next
+		}
+		if cli.fileRefreshNeeded(ctx, yard) {
+			return nil, "yard -Y " + yard + " config apply"
+		}
 	}
 	return nil, yardNextStep(yard, state)
 }
@@ -767,7 +778,7 @@ func (cli *CLI) guardEffects(context.Context) error {
 }
 
 // otherYardFindings reports each other implicated yard once, with its step.
-func (gate yardGate) otherYardFindings(yard string) []releasetransition.Blocker {
+func (cli *CLI) otherYardFindings(ctx context.Context, gate yardGate, yard string) []releasetransition.Blocker {
 	var findings []releasetransition.Blocker
 	for _, name := range gate.order {
 		if name == yard {
@@ -778,7 +789,7 @@ func (gate yardGate) otherYardFindings(yard string) []releasetransition.Blocker 
 		if len(state.messages) != 0 {
 			message = state.messages[0]
 		}
-		cause, next := gate.yardAdvice(name)
+		cause, next := cli.yardAdvice(ctx, gate, name)
 		if cause != nil {
 			message += "; " + cause.Error()
 		}
@@ -848,11 +859,16 @@ func (cli *CLI) updateCheckAdvice(ctx context.Context, inspection *releasetransi
 		return "", ""
 	}
 	_, sourceErr := cli.repairSources(ctx)
-	cause, next := gate.configRefreshAdvice(names, sourceErr)
+	cause, next := gate.configRefreshRefusal(names, sourceErr)
 	if cause != nil {
 		return cause.Error(), next
 	}
-	return "materialized configuration needs refresh in " + strings.Join(names, ", "), next
+	for _, name := range names {
+		if cli.fileRefreshNeeded(ctx, name) {
+			return "materialized configuration files need refresh in " + name, "yard -Y " + name + " config apply"
+		}
+	}
+	return "activation needs attention in " + strings.Join(names, ", "), yardNextStep(names[0], gate.state(names[0]))
 }
 
 // releaseLine states the release once; the protocol word ready is never used
@@ -870,7 +886,7 @@ func (gate yardGate) releaseLine() string {
 }
 
 // printYardAttention prints one yard's findings under it, with its next step.
-func (cli *CLI) printYardAttention(gate yardGate, yard string) {
+func (cli *CLI) printYardAttention(ctx context.Context, gate yardGate, yard string) {
 	state := gate.state(yard)
 	if _, implicated := gate.yards[yard]; !implicated && !gate.everyYard {
 		return
@@ -887,7 +903,7 @@ func (cli *CLI) printYardAttention(gate yardGate, yard string) {
 	for _, message := range messages {
 		fmt.Fprintf(cli.options.Stdout, "  attention %s\n", message)
 	}
-	cause, next := gate.yardAdvice(yard)
+	cause, next := cli.yardAdvice(ctx, gate, yard)
 	if cause != nil {
 		fmt.Fprintf(cli.options.Stdout, "  attention %s\n", cause)
 	}

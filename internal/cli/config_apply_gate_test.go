@@ -86,6 +86,7 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	remote, publisher := configBareSourceRepository(t, "owner-a", "")
 	assetPath := filepath.Join(publisher, "hosts/owner-a/overrides/agents", asset)
 	writeConfigCommandFile(t, assetPath, "original\n")
+	writeConfigCommandFile(t, filepath.Join(publisher, "hosts/owner-a/yards/named/config.env"), "SSH_PORT=2223\n")
 	commitConfigSource(t, publisher, "initial asset")
 	runConfigSyncGit(t, publisher, "push", "-q")
 	run(0, "config", "sync", "connect", remote, "--host-id", "owner-a", "--yes")
@@ -131,22 +132,72 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	if err := os.Remove(pending); err != nil {
 		t.Fatal(err)
 	}
+	observe(false, 1)
 	if output := run(0, "update", "--check", "--offline"); !strings.Contains(output, "yard -Y default config apply") {
 		t.Fatalf("update check omitted admissible repair: %s", output)
 	}
 	if output := run(0, "update", "--check", "--json", "--offline"); !strings.Contains(output, `"retry":"run yard update"`) {
 		t.Fatalf("update JSON changed its retry: %s", output)
 	}
+	observe(true, 1)
+	if output := run(0, "update", "--check", "--offline"); !strings.Contains(output, "yard -Y default init") ||
+		strings.Contains(output, "config apply") {
+		t.Fatalf("update check recommended a file refresh for current files: %s", output)
+	}
+	options.Executor = &selectionOnlyIntegrationExecutor{source: published, staleFiles: true}
 	if output := run(0, "-Y", "named", "status"); !strings.Contains(output, "next: yard -Y named config apply") {
 		t.Fatalf("status omitted admissible repair: %s", output)
 	}
-	observe(true, 1)
-	verified := slices.Clone(fake.ExecSteps)
+	options.Executor = fake
+
+	prompt := &callbackPrompt{callback: func() {
+		namedAsset := filepath.Join(publisher, "hosts/owner-a/yards/named/overrides/agents", asset)
+		writeConfigCommandFile(t, namedAsset, "named update\n")
+		commitConfigSource(t, publisher, "update named asset")
+		runConfigSyncGit(t, publisher, "push", "-q")
+	}}
+	options.Prompt = prompt
+	observe(false, 2)
+	if output := run(1, "config", "sync", "pull", "--apply"); !strings.Contains(output, "upstream changed after preview") ||
+		len(prompt.requests) != 1 || len(applier.yards) != 0 {
+		t.Fatalf("consumer-only pull accepted moved upstream: %s, %v", output, applier.yards)
+	}
+	options.Prompt = nil
+
 	observe(false, 3)
-	fake.ExecSteps = append(fake.ExecSteps, verified...)
-	if output := run(0, "config", "sync", "pull", "--apply", "--yes"); !strings.Contains(output, "already converged") ||
+	beforeHash := fmt.Sprintf("%x", sha256.Sum256([]byte("updated\n")))
+	afterHash := fmt.Sprintf("%x", sha256.Sum256([]byte("named update\n")))
+	for range 2 {
+		appendHashSteps(t, fake, loadConfigCommandContext(t, active, options.Environment, "default"))
+		start := len(fake.ExecSteps)
+		appendHashSteps(t, fake, loadConfigCommandContext(t, active, options.Environment, "named"))
+		for i := start; i < len(fake.ExecSteps); i++ {
+			result := &fake.ExecSteps[i].Result
+			result.Stdout = bytes.ReplaceAll(result.Stdout, []byte(beforeHash), []byte(afterHash))
+		}
+	}
+	if output := run(0, "config", "sync", "pull", "--apply", "--yes"); !strings.Contains(output, "applied generation") ||
 		!slices.Equal(applier.yards, []string{"default", "named"}) || len(fake.ExecSteps) != 0 {
 		t.Fatalf("retry did not converge exactly both consumers: %s, %v", output, applier.yards)
+	}
+	for _, wantOutput := range []string{"already converged", "applied generation"} {
+		if wantOutput == "applied generation" {
+			writeConfigCommandFile(t, filepath.Join(publisher, "hosts/owner-a/yards/named/config.env"),
+				"# Keep the named yard port.\nSSH_PORT=2223\n")
+			commitConfigSource(t, publisher, "document named yard port")
+			runConfigSyncGit(t, publisher, "push", "-q")
+		}
+		applier.yards = nil
+		observe(false, 3)
+		for range 2 {
+			for _, yard := range []string{"default", "named"} {
+				appendHashSteps(t, fake, loadConfigCommandContext(t, active, options.Environment, yard))
+			}
+		}
+		if output := run(0, "config", "sync", "pull", "--apply", "--yes"); !strings.Contains(output, wantOutput) ||
+			!slices.Equal(applier.yards, []string{"default", "named"}) || len(fake.ExecSteps) != 0 {
+			t.Fatalf("retry did not converge exactly both consumers: %s, %v", output, applier.yards)
+		}
 	}
 	after, err := fixture.cli.readReleaseHistory()
 	if err != nil || after == nil || *after != *history {

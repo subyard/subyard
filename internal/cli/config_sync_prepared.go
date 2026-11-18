@@ -22,6 +22,7 @@ type configSyncExecution struct {
 	consumers         *configSyncConsumers
 	consumersApplied  bool
 	guard             func(context.Context) error
+	checkConsumerOnly func(context.Context) error
 	run               func(context.Context, *CLI, domain.AdapterRequest) (configsync.Plan, error)
 }
 
@@ -112,6 +113,10 @@ func (prepared *preparedCommand) attachConfigSync(execution *configSyncExecution
 		if slices.ContainsFunc(execution.publicationSteps(), func(step domain.OperationStep) bool { return step.Decision != domain.StepSkip }) {
 			applied, err = execution.run(ctx, &copyCLI, domain.AdapterRequest{OperationID: prepared.Plan.OperationID})
 			if err != nil {
+				return domain.AdapterResult{}, configPreparedStale(err)
+			}
+		} else if execution.checkConsumerOnly != nil && execution.consumers != nil && execution.consumers.execution.changed() {
+			if err := execution.checkConsumerOnly(ctx); err != nil {
 				return domain.AdapterResult{}, configPreparedStale(err)
 			}
 		}
@@ -309,6 +314,9 @@ func (prepared *preparedCommand) prepareConfigPull(ctx context.Context, argument
 			return err
 		}
 		return cli.checkPreparedConfigGit(ctx, native.checkout, native.expectedHead, native.remote, native.remoteURL)
+	}
+	execution.checkConsumerOnly = func(ctx context.Context) error {
+		return cli.fetchRegisteredConfigUpstream(ctx, native.checkout, native.remote, native.remoteURL, native.expectedRemote)
 	}
 	execution.run = func(ctx context.Context, copyCLI *CLI, request domain.AdapterRequest) (configsync.Plan, error) {
 		native.preview = execution.current

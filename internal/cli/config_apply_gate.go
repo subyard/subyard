@@ -371,7 +371,7 @@ func (cli *CLI) finishConfigApplyRepair(
 	}
 	if outcome != nil {
 		if gate, ok := cli.yardScopedGate(outcome, inspection); ok && !gate.state(permit.yard).repairOnly() {
-			return gate.otherYardFindings(permit.yard), nil
+			return cli.otherYardFindings(ctx, gate, permit.yard), nil
 		}
 	}
 	if outcome != nil {

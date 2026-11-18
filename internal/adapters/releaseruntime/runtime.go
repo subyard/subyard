@@ -50,7 +50,7 @@ type Config struct {
 	// ConfigurationState supplies configuration state that update --check
 	// reports beside its inspection, such as ignored operator assignments.
 	ConfigurationState func() []config.ConfigurationState
-	// UpdateCheckAdvice supplies caller-specific advice for the human-readable check.
+	// UpdateCheckAdvice supplies caller-specific advice for checks without a blocker.
 	UpdateCheckAdvice func(context.Context, *releasetransition.Inspection) (message, retry string)
 }
 
@@ -1594,18 +1594,21 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			Action: "update.check", Changed: false, Consequences: nil,
 			ActiveLauncher: filepath.Join(parsed.root, "current", "bin", "yard"),
 			run: func(ctx context.Context) error {
-				report := inspection
-				if !parsed.json && runtime.config.UpdateCheckAdvice != nil {
-					if message, retry := runtime.config.UpdateCheckAdvice(ctx, &report); retry != "" {
-						outcome := *report.Outcome
-						outcome.Message, outcome.Retry = message, retry
-						report.Outcome = &outcome
+				type advice struct {
+					Message string `json:"message"`
+					Retry   string `json:"retry"`
+				}
+				var next *advice
+				if !parsed.json && len(inspection.Blockers) == 0 && runtime.config.UpdateCheckAdvice != nil {
+					if message, retry := runtime.config.UpdateCheckAdvice(ctx, &inspection); retry != "" {
+						next = &advice{Message: message, Retry: retry}
 					}
 				}
 				return runtime.writeInspection(parsed, struct {
 					releasetransition.Inspection
 					Configuration []config.ConfigurationState `json:"configuration,omitempty"`
-				}{report, runtime.configurationState()})
+					Advice        *advice                     `json:"advice,omitempty"`
+				}{inspection, runtime.configurationState(), next})
 			},
 		}, nil
 	}

@@ -1001,6 +1001,9 @@ func (executor *selectionOnlyIntegrationExecutor) Exec(_ context.Context, _, _ s
 		}
 		return ports.InstanceExecResult{Stdout: []byte(hash + "  " + request.Command[2] + "\n")}, nil
 	}
+	if len(request.Command) == 11 && request.Command[0] == "python3" && request.Command[4] == "observe" {
+		return ports.InstanceExecResult{Stdout: fmt.Appendf(nil, `{"converged":%t,"fingerprint":%q}`, !executor.staleFiles, request.Command[8])}, nil
+	}
 	if executor.missingCommand && slices.Contains(request.Command, "synthetic-cli") {
 		return ports.InstanceExecResult{ExitCode: 1}, errors.New("synthetic integration command is not installed")
 	}
@@ -1063,6 +1066,17 @@ func TestCompletedSelectionAuthoringAdmitsIntegrationOnlyDriftWithCurrentFiles(t
 					permit, err := apply.prepareConfigApplyRepair(context.Background(), "default", true, *gate)
 					if err != nil || (permit != nil) != (drift == "files") {
 						t.Fatalf("ordinary config apply file-drift guard changed: admitted=%t err=%v", permit != nil, err)
+					}
+					adviceGate := yardGate{yards: map[string]*yardGateState{
+						"default": {drift: true, materializedDrift: true},
+					}}
+					_, next := apply.yardAdvice(context.Background(), adviceGate, "default")
+					want := "yard -Y default init"
+					if drift == "files" {
+						want = "yard -Y default config apply"
+					}
+					if next != want {
+						t.Fatalf("yard advice = %q, want %q", next, want)
 					}
 					if drift != "files" {
 						blocked := options

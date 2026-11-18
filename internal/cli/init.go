@@ -1216,7 +1216,7 @@ func (cli *CLI) verifyInitReleaseReadiness(ctx context.Context, yard string) ([]
 			if len(gate.materializedDriftYards()) != 0 {
 				_, gate.sourceRefusal = cli.repairSources(ctx)
 			}
-			return gate.otherYardFindings(yard), nil
+			return cli.otherYardFindings(ctx, gate, yard), nil
 		}
 	}
 	// One text line: the release state, its first cause and next step.
