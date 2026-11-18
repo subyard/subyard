@@ -32,11 +32,18 @@ type Process struct {
 }
 
 type ProcessError struct {
-	ExitCode int
-	Message  string
+	ExitCode    int
+	Message     string
+	guestExited bool
 }
 
 func (err *ProcessError) Error() string { return "transport failed: " + err.Message }
+
+// GuestExitCode reports a command exit returned by SSH. A local start failure,
+// signal or SSH's connection failure status does not establish a guest exit.
+func (err *ProcessError) GuestExitCode() (int, bool) {
+	return err.ExitCode, err.guestExited
+}
 
 func Local(engine, repositoryRoot string) Process {
 	return Process{
@@ -198,10 +205,14 @@ func (transport Process) CallReader(ctx context.Context, request io.Reader) ([]b
 		}
 		exitCode := 1
 		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+		exited := errors.As(err, &exitError)
+		if exited {
 			exitCode = exitError.ExitCode()
 		}
-		return bytes.Clone(stdout.buffer.Bytes()), &ProcessError{ExitCode: exitCode, Message: message}
+		return bytes.Clone(stdout.buffer.Bytes()), &ProcessError{
+			ExitCode: exitCode, Message: message,
+			guestExited: transport.SSHTarget != "" && exited && exitCode > 0 && exitCode < 255,
+		}
 	}
 	return bytes.Clone(stdout.buffer.Bytes()), nil
 }

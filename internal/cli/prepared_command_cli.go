@@ -184,8 +184,12 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 	}
 	if err != nil {
 		var commitErr *commandCommitError
+		var hookFailure *application.ProjectHookFailure
 		if errors.As(err, &commitErr) {
 			cli.errorf("commit %s: %v", prepared.Definition.Name, err)
+		} else if prepared.Definition.Handler == "@init" && errors.As(err, &hookFailure) {
+			message, _ := hookFailure.ActivationDiagnostic()
+			cli.errorf("%s: %v; %s", prepared.Definition.Name, err, message)
 		} else {
 			cli.errorf("%s: %v", prepared.Definition.Name, err)
 		}

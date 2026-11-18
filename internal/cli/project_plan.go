@@ -252,10 +252,11 @@ func (execution *projectExecution) sourceBinding() string {
 		SecretIdentity                                            *ownerInputFile
 		HostLinks                                                 []string
 		Removal                                                   *projectRemovalObservation
+		HookPaths                                                 []string
 		ApprovedEnvironment, ExportSource, ExportObserved, Inputs string
 		ExportDestination                                         string
 	}{execution.Record.HostPath, execution.sourceDigest, execution.sourceSize, execution.cloneRevision, execution.cloneUnborn, execution.RequestedName, execution.ExplicitName,
-		execution.Record, execution.recordBefore, execution.Profile, execution.Environment, execution.SecretPath, execution.secretIdentity, execution.HostLinks, execution.approvedRemoval,
+		execution.Record, execution.recordBefore, execution.Profile, execution.Environment, execution.SecretPath, execution.secretIdentity, execution.HostLinks, execution.approvedRemoval, execution.approvedHookPaths,
 		execution.approvedEnvironment, execution.exportSourceTree, execution.exportObservedTree, execution.inputBaseline.binding(), execution.exportDestinationBinding()})
 }
 

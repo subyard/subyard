@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,8 @@ func TestProjectTransferPlanUsesOwnerConsentAndPreservesScope(t *testing.T) {
 	}
 }
 
+const ownerCopyHook = "/usr/local/libexec/subyard/projects-changed.d/fixture"
+
 func ownerProjectCopyFixture(t *testing.T) (*CLI, *preparedCommand, *bool) {
 	t.Helper()
 	root, environment, _ := nativeFixture(t)
@@ -56,9 +59,14 @@ func ownerProjectCopyFixture(t *testing.T) (*CLI, *preparedCommand, *bool) {
 	}
 	manifest = append(manifest, []byte("sync||@project||local|mutate|dynamic|public|projects|project-target|sync [path]|sync|--name --target --yes --help|\n")...)
 	testkit.WriteFile(t, manifestPath, manifest, 0o600)
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\n"), 0o644)
 	contentChanged := false
 	var prepared *preparedCommand
 	probe := projectActionObservationProbe{execute: func(request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		if slices.Equal(request.Command, []string{"bash", "-s", "--", "--observe"}) {
+			digest := strings.Repeat("a", 64)
+			return ports.InstanceExecResult{Stdout: []byte(`{"projects":"` + digest + `","wiring":"` + digest + `","hooks":["fixture"],"resolved":{"fixture":"` + ownerCopyHook + `"}}`)}, nil
+		}
 		if len(request.Command) >= 3 && strings.Contains(request.Command[2], "-printf") {
 			return ports.InstanceExecResult{Stdout: []byte("f\x00snapshot.txt\x00\x00")}, nil
 		}
@@ -122,14 +130,18 @@ func TestProjectOwnerCopyFinalizesOnlyAfterIndependentContentVerification(t *tes
 		t.Run(fmt.Sprint(corrupt), func(t *testing.T) {
 			program, prepared, changed := ownerProjectCopyFixture(t)
 			authorizePreparedFixture(prepared)
-			if _, err := program.beginOwnerProjectCopy(context.Background(), prepared); err != nil {
+			admission, err := program.beginOwnerProjectCopy(context.Background(), prepared)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(admission.Output["approvedHookPaths"], []string{ownerCopyHook}) {
+				t.Fatalf("admission lost the prepared hook paths: %v", admission.Output["approvedHookPaths"])
 			}
 			if _, err := prepared.Project.Store.GetReadOnly(context.Background(), prepared.Project.Record.ProjectID); !errors.Is(err, state.ErrNotFound) {
 				t.Fatalf("begin prematurely registered project: %v", err)
 			}
 			*changed = corrupt
-			_, err := program.finalizeOwnerProjectCopy(context.Background(), prepared)
+			_, err = program.finalizeOwnerProjectCopy(context.Background(), prepared)
 			if corrupt {
 				if !errors.Is(err, domain.ErrPlanStale) {
 					t.Fatalf("unverified content accepted: %v", err)

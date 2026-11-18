@@ -162,7 +162,7 @@ def valid_diagnostics(value):
 
 def core_adoption_problem(entry, current):
     # These shared core files predate the integration inventory. Recognize only
-    # their exact desired bytes and protected system metadata, never agent files.
+    # exact desired or known predecessor bytes with protected system metadata.
     modes = {'/usr/local/libexec/subyard/projects-changed': 0o755,
              '/etc/subyard/agent-project-hooks': 0o644}
     mode = modes.get(entry.get('path'))
@@ -171,7 +171,8 @@ def core_adoption_problem(entry, current):
             # Original installer heredoc, before shared resource hooks.
             'b632dd04a13ba11abff0b7502785ae09d8a6119c0c1261f338861796de82df35',
             'cefded0322e335042ff9a0e74f2cba187fb1a2a6aa8a2ffbcdf249ecc8e12588',
-            '11af99ae9813d9ba1ee71c3d19eeb1457b4e6dae9c45e6f25b781b5ad69211d7'
+            '11af99ae9813d9ba1ee71c3d19eeb1457b4e6dae9c45e6f25b781b5ad69211d7',
+            '1a99d38f52be1c6aead189ccdbd2f16bd24be92e3110c9915ee6624e7e0b1ddf',
         }
     }
     accepted_digests = {entry['digest']} | predecessor_digests.get(entry.get('path'), set())

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -39,10 +40,15 @@ type emptyClonePlanData struct {
 	requests      []ports.InstanceExecRequest
 	workspaceRoot string
 	beforeClone   func()
+	failingHook   string
 }
 
 func (data *emptyClonePlanData) Execute(ctx context.Context, yard domain.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	data.requests = append(data.requests, request)
+	if data.failingHook != "" && slices.Equal(request.Command, []string{"bash", "-s", "--", "--observe"}) {
+		digest := strings.Repeat("a", 64)
+		return ports.InstanceExecResult{Stdout: []byte(`{"projects":"` + digest + `","wiring":"` + digest + `","hooks":["fixture"],"resolved":{"fixture":"` + data.failingHook + `"}}`)}, nil
+	}
 	if data.workspaceRoot != "" {
 		if request.Command[0] == "git" && len(request.Command) > 1 && request.Command[1] == "clone" && data.beforeClone != nil {
 			data.beforeClone()
@@ -60,6 +66,9 @@ func (data *emptyClonePlanData) Execute(ctx context.Context, yard domain.Context
 		}
 		for index := range request.Command {
 			if strings.Contains(request.Command[index], "/usr/local/libexec/subyard/projects-changed") {
+				if data.failingHook != "" {
+					return ports.InstanceExecResult{ExitCode: 1, Stdout: []byte("subyard-project-hook-failed:" + data.failingHook + "\nsubyard-project-hook-failed:/private-path\n")}, &ports.GuestExitError{Code: 1}
+				}
 				return ports.InstanceExecResult{}, nil
 			}
 			request.Command[index] = strings.ReplaceAll(request.Command[index], "/srv/workspaces", data.workspaceRoot)
@@ -78,6 +87,8 @@ func TestProjectEmptyCloneNativeExecutionCommitsOnlyVerifiedCopy(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			program, execution, source, data := emptyClonePlanFixture(t)
 			data.workspaceRoot = testkit.TempDir(t)
+			data.failingHook = "/usr/local/libexec/subyard/projects-changed.d/fixture"
+			testkit.WriteFile(t, filepath.Join(program.options.RepositoryRoot, "config/projects-changed.sh"), []byte("#!/bin/sh\n"), 0o644)
 			definition, _ := program.manifest.Lookup("clone")
 			prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: admitPreparedFixture(program), Definition: definition, Loaded: execution.Loaded, Project: execution}
 			prepared.policy = commandPolicy(definition, execution.Loaded.Context, nil, execution)
@@ -96,11 +107,16 @@ func TestProjectEmptyCloneNativeExecutionCommitsOnlyVerifiedCopy(t *testing.T) {
 			if change == "ref-during" {
 				data.beforeClone = func() { emptyCloneAddRef(t, source, "refs/heads/main") }
 			}
-			result, runErr := prepared.Execute(context.Background(), orchestrator, io.Discard)
+			var diagnostics bytes.Buffer
+			result, runErr := prepared.Execute(context.Background(), orchestrator, &diagnostics)
 			metadataPath := filepath.Join(data.workspaceRoot, execution.Record.ProjectID, ".subyard-meta.json")
 			if change == "none" {
 				if runErr != nil || result.Status != "ok" {
 					t.Fatalf("native empty clone failed: %v", runErr)
+				}
+				if !strings.Contains(diagnostics.String(), "warning: yard default: project hook "+data.failingHook+" failed") ||
+					strings.Contains(diagnostics.String(), "private-path") {
+					t.Fatalf("clone hook warning: %q", diagnostics.String())
 				}
 				if _, err := execution.Store.GetReadOnly(context.Background(), execution.Record.ProjectID); err != nil {
 					t.Fatalf("verified empty clone not committed: %v", err)

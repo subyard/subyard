@@ -3,9 +3,11 @@ package reconcileruntime
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -28,6 +30,23 @@ func (fixture projectHooksFileExecutor) Exec(ctx context.Context, _, _ string, r
 		result.ExitCode = 1
 	}
 	return result, err
+}
+
+func TestProjectHookObservationRejectsOutOfRangeUID(t *testing.T) {
+	uids := []int{-1}
+	if strconv.IntSize == 64 {
+		overflow := int64(math.MaxUint32) + 1
+		uids = append(uids, int(overflow))
+	}
+	for _, uid := range uids {
+		_, err := observeProjectHookInputs(context.Background(), "../../..", domain.Context{DevUID: uid}, func(context.Context, ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+			t.Fatalf("executed hook observation with out-of-range UID %d", uid)
+			return ports.InstanceExecResult{}, nil
+		})
+		if err == nil {
+			t.Fatalf("accepted out-of-range UID %d", uid)
+		}
+	}
 }
 
 func TestProjectHooksProbeUsesExactDispatcherAndSelectedList(t *testing.T) {

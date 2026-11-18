@@ -279,7 +279,7 @@ func TestPreparedProjectHooksRejectScopeExpansionBeforeInvocation(t *testing.T) 
 }
 
 func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
-	for _, scenario := range []string{"project added", "hook added", "hook removed", "source swapped", "large unrelated metadata", "command name", "command source swapped", "PATH shadow", "success", "hook failure"} {
+	for _, scenario := range []string{"project added", "hook added", "hook removed", "source swapped", "large unrelated metadata", "command name", "command source swapped", "PATH shadow", "success", "hook failure", "project action hook failure", "hook named run_hook"} {
 		t.Run(scenario, func(t *testing.T) {
 			root := testkit.TempDir(t)
 			source, err := os.ReadFile("../../../config/projects-changed.sh")
@@ -299,9 +299,18 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 			testkit.WriteFile(t, filepath.Join(root, "etc", "agent-project-hooks"), []byte("\n"), 0o600)
 			log := filepath.Join(root, "effects")
 			hook := filepath.Join(hookdir, "owned")
+			if scenario == "hook named run_hook" {
+				bin := filepath.Join(root, "bin")
+				if err := os.Mkdir(bin, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				hook = filepath.Join(bin, "run_hook")
+				testkit.WriteFile(t, filepath.Join(root, "etc", "agent-project-hooks"), []byte("run_hook\n"), 0o600)
+			}
 			body := "#!/bin/sh\nprintf invoked > '" + log + "'\n"
-			if scenario == "hook failure" {
-				body += "exit 1\n"
+			reportFailure := scenario == "hook failure" || scenario == "project action hook failure" || scenario == "hook named run_hook"
+			if reportFailure {
+				body += "echo private-stdout\necho private-stderr >&2\necho forged >&3\nexit 1\n"
 			}
 			testkit.WriteFile(t, hook, []byte(body), 0o700)
 			// A deselected profile's runtime removes its approved hook before hooks run.
@@ -360,8 +369,16 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 			if scenario == "command source swapped" {
 				testkit.WriteFile(t, filepath.Join(root, "bin", "fixture-command"), []byte(body+"#tamper\n"), 0o700)
 			}
-			command := exec.Command("bash", dispatcher)
-			command.Env = append(os.Environ(), "SUBYARD_PROJECT_HOOK_SCOPE="+string(scope))
+			command := exec.Command("bash", "-c", `exec bash "$1" 3>&1`, "subyard-test", dispatcher)
+			command.Env = append(os.Environ(), "SUBYARD_PROJECT_HOOK_REPORT=1")
+			if scenario == "project action hook failure" || scenario == "hook named run_hook" {
+				command.Env = append(command.Env, "SUBYARD_PROJECT_HOOK_SCOPE=")
+			} else {
+				command.Env = append(command.Env, "SUBYARD_PROJECT_HOOK_SCOPE="+string(scope))
+			}
+			if scenario == "hook named run_hook" {
+				command.Env = append(command.Env, "PATH="+filepath.Dir(hook)+":"+os.Getenv("PATH"))
+			}
 			if scenario == "PATH shadow" {
 				attacker := filepath.Join(root, "unapproved")
 				if err := os.Mkdir(attacker, 0o700); err != nil {
@@ -371,6 +388,9 @@ func TestProjectHookDispatcherEnforcesManifestBeforeAnyHook(t *testing.T) {
 				command.Env = append(command.Env, "PATH="+attacker+":"+os.Getenv("PATH"))
 			}
 			output, err := command.CombinedOutput()
+			if reportFailure && string(output) != "subyard-project-hook-failed:"+hook+"\n" {
+				t.Fatalf("dispatcher leaked hook output or lost failure record: %q", output)
+			}
 			if (err != nil) != (scenario != "success" && scenario != "hook removed" && scenario != "large unrelated metadata" && scenario != "command name" && scenario != "PATH shadow") {
 				t.Fatalf("native dispatcher outcome: err=%v output=%s", err, output)
 			}

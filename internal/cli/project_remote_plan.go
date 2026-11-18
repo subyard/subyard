@@ -14,6 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/adapters/shelladapter"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
@@ -104,7 +105,12 @@ func (cli *CLI) prepareOwnerProjectCopy(ctx context.Context, loaded config.Loade
 	if source.TargetProfile != "yard" {
 		project.Record.Profile = source.TargetProfile
 	}
-	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: definition, Loaded: loaded, Project: project, exactState: operationStateDigest(source)}
+	project.approvedHookPaths = reconcileruntime.CaptureProjectHookPaths(ctx, cli.options.RepositoryRoot, loaded.Context, cli.projectDataPlane())
+	prepared := &preparedCommand{lifecycle: &preparedLifecycle{}, CLI: cli, Definition: definition, Loaded: loaded, Project: project,
+		exactState: operationStateDigest(struct {
+			Source ProjectCopySourceDescriptor
+			Hooks  []string
+		}{source, project.approvedHookPaths})}
 	prepared.stepsComplete = true
 	prepared.policy = commandPolicy(definition, loaded.Context, nil, project)
 	prepared.assess = func(ctx context.Context) (domain.ActionID, domain.ActionDelta, error) {
@@ -161,7 +167,9 @@ func (cli *CLI) beginOwnerProjectCopy(ctx context.Context, prepared *preparedCom
 	copy.begun = true
 	// The retained native reservation belongs to ownerCopy, not the ordinary
 	// command commit/abort path: streaming has not happened yet.
-	return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok", Output: map[string]any{"project": project.Record}}, nil
+	return domain.AdapterResult{Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Status: "ok", Output: map[string]any{
+		"project": project.Record, "approvedHookPaths": project.approvedHookPaths,
+	}}, nil
 }
 
 func (cli *CLI) finalizeOwnerProjectCopy(ctx context.Context, prepared *preparedCommand) (domain.AdapterResult, error) {
@@ -270,14 +278,18 @@ func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) e
 		if response.Result.Status != "ok" {
 			return domain.AdapterResult{}, errors.New("owner project admission response mismatch")
 		}
-		encoded, err := json.Marshal(response.Result.Output["project"])
+		encoded, err := json.Marshal(response.Result.Output)
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}
-		var admitted domain.ProjectRecord
-		if err := json.Unmarshal(encoded, &admitted); err != nil {
+		var admission struct {
+			Project           domain.ProjectRecord `json:"project"`
+			ApprovedHookPaths []string             `json:"approvedHookPaths"`
+		}
+		if err := json.Unmarshal(encoded, &admission); err != nil {
 			return domain.AdapterResult{}, err
 		}
+		admitted := admission.Project
 		if err := admitted.Validate(admitted.ProjectID); err != nil {
 			return domain.AdapterResult{}, err
 		}
@@ -290,7 +302,7 @@ func (prepared *preparedCommand) prepareRemoteProjectCopy(ctx context.Context) e
 		if yard.YardName == "" {
 			yard.YardName = "default"
 		}
-		orchestrator.Runner = application.ProjectActionRunner{Data: cli.projectDataPlane(), Archive: cli.projectArchiver(), PreparedArchive: project.preparedArchive, Project: project.Record, Yard: yard}
+		orchestrator.Runner = application.ProjectActionRunner{Data: cli.projectDataPlane(), Archive: cli.projectArchiver(), PreparedArchive: project.preparedArchive, Project: project.Record, Yard: yard, ApprovedHookPaths: admission.ApprovedHookPaths}
 		result, stderr, err := orchestrator.RunAdapter(ctx, projectTransferPlan(prepared.Plan), domain.AdapterRequest{Schema: shelladapter.ProtocolSchema, OperationID: exact.Plan.OperationID, Adapter: "project", Action: "sync"}, nil)
 		writeAdapterDiagnostics(diagnostics, stderr)
 		if err != nil || result.Status != "ok" {

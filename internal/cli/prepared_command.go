@@ -1281,6 +1281,10 @@ func (prepared *preparedCommand) prepareProject(ctx context.Context, _ *initBoot
 		return errors.New("project execution is required")
 	}
 	cli, loaded, definition := prepared.CLI, prepared.Loaded, prepared.Definition
+	switch definition.Name {
+	case "clone", "remove", "sync", "bind":
+		project.approvedHookPaths = reconcileruntime.CaptureProjectHookPaths(ctx, cli.options.RepositoryRoot, loaded.Context, cli.projectDataPlane())
+	}
 	if definition.Name == "sync" || definition.Name == "clone" || definition.Name == "export" {
 		if err := project.prepareSource(ctx, cli); err != nil {
 			return err
@@ -1340,7 +1344,7 @@ func (prepared *preparedCommand) prepareProject(ctx context.Context, _ *initBoot
 				Extensions:         strings.Fields(cli.env["CODE_RECOMMENDED_EXTENSIONS"]),
 				WorkspaceDirectory: filepath.Join(loaded.Context.Paths.ConfigHome, "workspaces"),
 				Yard:               loaded.Context, Project: project.Record, YardIdentity: project.YardIdentity,
-				SoftRemove: project.Environment["SUBYARD_PROJECT_REMOVE_SOFT"] == "1",
+				SoftRemove: project.Environment["SUBYARD_PROJECT_REMOVE_SOFT"] == "1", ApprovedHookPaths: project.approvedHookPaths,
 			}
 			result, stderr, err := orchestrator.RunAdapter(ctx, prepared.Plan, domain.AdapterRequest{
 				Schema: shelladapter.ProtocolSchema, OperationID: prepared.Plan.OperationID, Adapter: "project", Action: definition.Name,

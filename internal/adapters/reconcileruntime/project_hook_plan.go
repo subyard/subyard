@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -51,13 +53,46 @@ func (runtime Runtime) observeProjectHookInputs(ctx context.Context) (hookObserv
 	if runtime.Executor == nil {
 		return hookObservation{}, fmt.Errorf("project hook observation requires an executor")
 	}
+	return observeProjectHookInputs(ctx, runtime.RepositoryRoot, runtime.Yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
+	})
+}
+
+// CaptureProjectHookPaths snapshots advisory labels before a project action changes
+// guest metadata. Unavailable observations leave the action with its generic warning.
+func CaptureProjectHookPaths(ctx context.Context, root string, yard domain.Context, data ports.YardExecutor) []string {
+	observation, err := observeProjectHookInputs(ctx, root, yard, func(ctx context.Context, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+		return data.Execute(ctx, yard, request)
+	})
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, hook := range observation.Hooks {
+		path := observation.Resolved[hook]
+		if filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsFunc(path, unicode.IsControl) {
+			paths = append(paths, path)
+		}
+	}
+	slices.Sort(paths)
+	return slices.Compact(paths)
+}
+
+func observeProjectHookInputs(ctx context.Context, root string, yard domain.Context,
+	execute func(context.Context, ports.InstanceExecRequest) (ports.InstanceExecResult, error),
+) (hookObservation, error) {
 	callContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	source, err := os.ReadFile(filepath.Join(runtime.RepositoryRoot, "config", "projects-changed.sh"))
+	source, err := os.ReadFile(filepath.Join(root, "config", "projects-changed.sh"))
 	if err != nil {
 		return hookObservation{}, err
 	}
-	result, err := runtime.Executor.Exec(callContext, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"bash", "-s", "--", "--observe"}, Stdin: source, User: uint32(runtime.Yard.DevUID), Group: uint32(runtime.Yard.DevUID)})
+	parsedUID, err := strconv.ParseUint(strconv.Itoa(yard.DevUID), 10, 32)
+	if err != nil {
+		return hookObservation{}, fmt.Errorf("project hook observation requires a UID in the uint32 range")
+	}
+	uid := uint32(parsedUID)
+	result, err := execute(callContext, ports.InstanceExecRequest{Command: []string{"bash", "-s", "--", "--observe"}, Stdin: source, User: uid, Group: uid})
 	if err != nil || result.ExitCode != 0 {
 		return hookObservation{}, fmt.Errorf("project hook inputs could not be observed")
 	}

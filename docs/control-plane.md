@@ -56,6 +56,15 @@ and reconciliation. Guest ownership evidence covers structured fields, plain fil
 files, derived session links and known service receipts; evidence conflicts preserve artifacts.
 See [per-yard selection](configuration.md#per-yard-coding-tool-selection) for user-visible semantics.
 
+The project-hook pass verdict comes from its exit status. With approved paths, the
+wrapper opens fd 3 for advisory hook labels. Core filters labels against the approved
+HookPlan, deduplicates them and renders them in stable order. Hooks are root-owned,
+digest-pinned operator code running as the same UID as the dispatcher, so core makes
+no claim about who wrote a record. Diagnostics contain only fixed text, the yard name
+and approved paths. Hook stdout and stderr never enter the diagnostic. Older installed
+dispatchers receive the generic diagnostic until initialization or release activation
+updates them through the dispatcher content-digest contract.
+
 Explicit initialization also binds the selected yard's authoritative project records and
 guest metadata observations before approval. Its generic metadata step atomically restores
 missing canonical metadata before the installed project hooks run. Matching legacy metadata,
