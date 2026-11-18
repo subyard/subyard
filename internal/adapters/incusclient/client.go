@@ -306,12 +306,19 @@ func (client *Client) exec(
 			fmt.Errorf("wait for instance command: %w", context.Cause(ctx))
 	case err := <-wait:
 		<-dataDone
-		exitCode, validExit := nativeGuestExitCode(operation.Get().Metadata["return"])
+		native := operation.Get()
+		exitCode, validExit := nativeGuestExitCode(native.Metadata["return"])
 		result := ports.InstanceExecResult{
 			Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: exitCode,
 		}
 		if err != nil {
-			return result, normalizeOperationError("wait for instance command", operation.Get(), err)
+			// Incus records these two guest exits as failed operations as well
+			// as setting the return code. Require both pieces of native evidence.
+			commandExit := (exitCode == 126 && native.Err == "Command not executable") ||
+				(exitCode == 127 && native.Err == "Command not found")
+			if !validExit || !commandExit || native.StatusCode != api.Failure || err.Error() != native.Err {
+				return result, normalizeOperationError("wait for instance command", native, err)
+			}
 		}
 		if !validExit {
 			return result, errors.New("instance command returned malformed exit metadata")

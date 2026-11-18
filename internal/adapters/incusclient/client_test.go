@@ -310,6 +310,33 @@ func TestOfficialClientExecMapsStartOperationExitAndCancellation(t *testing.T) {
 	}
 }
 
+func TestOfficialClientExecRecognizesNativeCommandRefusals(t *testing.T) {
+	server, err := testkit.NewIncusServer(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	client := New(server.SocketPath)
+	for _, scenario := range []struct {
+		code    int
+		message string
+		guest   bool
+	}{
+		{126, "Command not executable", true},
+		{127, "Command not found", true},
+		{127, "runtime disconnected", false},
+		{1, "Command not found", false},
+	} {
+		server.QueueExec(testkit.IncusServerExecStep{ExitCode: scenario.code, OperationError: scenario.message})
+		result, err := client.Exec(context.Background(), "subyard", "yard", ports.InstanceExecRequest{Command: []string{"probe"}})
+		var guest *ports.GuestExitError
+		if err == nil || result.ExitCode != scenario.code || errors.As(err, &guest) != scenario.guest ||
+			guest != nil && guest.Code != scenario.code || guest == nil && !strings.Contains(err.Error(), scenario.message) {
+			t.Fatalf("exec status %d with operation error %q: %+v / %v", scenario.code, scenario.message, result, err)
+		}
+	}
+}
+
 func TestReconcileStateReadsDefaultProfileConfiguration(t *testing.T) {
 	fake := newNetworkIncusServer(t)
 	fake.projects["project-a"] = fakeProject{Config: map[string]string{"restricted": "true"}}
