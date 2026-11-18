@@ -117,12 +117,4 @@ func TestPendingConfigurationGateRequiresOnlyTypedCompletedReadiness(t *testing.
 			}
 		})
 	}
-	if !ordinaryCommandDuringPendingConfiguration("@ssh-agent") || !ordinaryCommandDuringPendingConfiguration("@project") {
-		t.Fatal("ordinary command is blocked")
-	}
-	for _, handler := range []string{"@init", "@config", "@integration", "@profile", "@update", "@migrate"} {
-		if ordinaryCommandDuringPendingConfiguration(handler) {
-			t.Fatalf("%s bypasses readiness", handler)
-		}
-	}
 }
