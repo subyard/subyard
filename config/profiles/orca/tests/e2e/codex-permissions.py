@@ -125,6 +125,7 @@ class App:
         provider.workspace, provider.command = workspace, command
         self.request('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': 'Run the fixture command.'}]})
         approvals = 0
+        command_result = None
         while True:
             frame = self.read()
             method = frame.get('method', '')
@@ -135,12 +136,16 @@ class App:
                 if unchanged:
                     unchanged()
                 self.send({'id': frame['id'], 'result': {'decision': decision}})
+            elif method == 'item/completed':
+                item = frame['params']['item']
+                if item['type'] == 'commandExecution':
+                    command_result = item
             elif method == 'turn/completed':
                 assert not provider.failure, provider.failure
                 statuses = ('completed', 'interrupted') if allow_interrupted else ('completed',)
                 assert frame['params']['turn']['status'] in statuses, 'turn failed: ' + json.dumps(frame['params']['turn'].get('error'))
                 assert approvals == (0 if decision is None else 1), 'protected command did not request approval'
-                return
+                return command_result
 
     def close(self):
         os.killpg(self.process.pid, signal.SIGTERM)
@@ -277,6 +282,18 @@ def terminal_checks(executable, env, provider, workspace, orca):
         terminal.close()
 
 
+def restricted_tool_check(app, provider, workspace):
+    started = app.request('thread/start', {'cwd': str(workspace), 'sandbox': 'read-only'})
+    assert started['sandbox']['type'] == 'readOnly', 'read-only sandbox was not applied'
+    proof = 'read-only fixture ' + uuid.uuid4().hex
+    (workspace / 'read-only.txt').write_text(proof + '\n')
+    result = app.turn(provider, started['thread']['id'], workspace, 'cat read-only.txt')
+    assert result is not None, 'read-only command did not report completion'
+    assert result['status'] == 'completed' and result['exitCode'] == 0, 'read-only command failed: ' + repr(result)
+    assert (result.get('aggregatedOutput') or '').strip() == proof, 'read-only command did not read fixture'
+    print('ok: native Codex read-only tool execution for ' + workspace.name, flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('workspace', nargs=2, type=Path)
@@ -369,6 +386,7 @@ def main():
                     if not args.home_rules and not args.managed_relay:
                         for overrides in ({'approvalPolicy': 'never'}, {'approvalsReviewer': 'auto_review'}):
                             app.request('turn/start', {'threadId': thread, **overrides, 'input': [{'type': 'text', 'text': 'Unsafe policy fixture.'}]}, reject=True)
+                        restricted_tool_check(app, provider, workspace)
                     print('ok: local work, deny, repeated commit/push prompts and amend for ' + workspace.name, flush=True)
                 finally:
                     app.close()

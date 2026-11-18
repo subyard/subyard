@@ -36,9 +36,21 @@ assert_controller_failure() { # [arguments...]
 }
 
 assert_owner_yard_sg_arguments() ( # <owner script>
-  # Simulate membership refreshed in the account database but absent in this process.
-  id() { [ "$#" -eq 2 ] && printf 'incus-admin\n' || printf 'dev\n'; }
-  sg() { [ "$1:$2" = incus-admin:-c ] && dash -c "$3"; }
+  local group_mode sg_log="$tmp/sg-invocations"
+  # The extracted yard function calls these stubs.
+  # shellcheck disable=SC2317
+  id() {
+    if [ "$#" -eq 2 ] || [ "$group_mode" = current ]; then
+      printf 'incus-admin\n'
+    else
+      printf 'dev\n'
+    fi
+  }
+  # shellcheck disable=SC2317
+  sg() {
+    printf '%s\n' "$1:$2" >> "$sg_log"
+    [ "$1:$2" = incus-admin:-c ] && dash -c "$3"
+  }
   # Read by the extracted yard function.
   # shellcheck disable=SC2034
   local YARD_NAME=fixture YARD_BIN="$tmp/yard stub" CANDIDATE_ENGINE="$tmp/yard stub"
@@ -50,5 +62,16 @@ exec sh -c "$7" sh "$8"
 SH
   chmod 0700 "$YARD_BIN"
   eval "$(sed -n '/^yard() {/,/^}/p' "$1")"
-  [ "$(yard shell -- sh -c "$script" 'literal $(false)')" = 'literal $(false)' ]
+  for group_mode in current stale; do
+    : > "$sg_log"
+    # shellcheck disable=SC2016
+    [ "$(yard shell -- sh -c "$script" 'literal $(false)')" = 'literal $(false)' ] \
+      || { printf 'yard changed command arguments with %s membership\n' "$group_mode" >&2; return 1; }
+    if [ "$group_mode" = current ]; then
+      [ ! -s "$sg_log" ] || { printf 'yard unexpectedly ran sg\n' >&2; return 1; }
+    else
+      [ "$(cat "$sg_log")" = incus-admin:-c ] \
+        || { printf 'yard did not refresh membership with sg exactly once\n' >&2; return 1; }
+    fi
+  done
 )
