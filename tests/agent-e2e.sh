@@ -6495,27 +6495,41 @@ import ctypes, json, os, pathlib, runpy, select, signal, stat, sys, tempfile
 from unittest.mock import patch
 module=runpy.run_path(str(pathlib.Path(sys.argv[1])/'dev/verify-release-upgrades.py'))
 run=module['run_process']
-for shape in ('missing-parent','missing-journal','unrelated-rename'):
+expected={'transaction':'tx-owned','checkpoint':'reconciling'}
+for shape in ('missing-parent','late-parent','missing-journal','unrelated-rename','present-journal'):
  with tempfile.TemporaryDirectory(prefix='subyard-boundary-watch-',dir='/tmp') as directory:
   root=pathlib.Path(directory)
   journal=root/'new/namespace/journal.json'; marker=root/'interrupted'; gate=root/'publish'
-  if shape=='missing-parent':
+  if shape in ('missing-parent','late-parent'):
    journal.parent.parent.mkdir()
   else:
    journal.parent.mkdir(parents=True)
+  if shape=='present-journal':
+   journal.write_text(json.dumps(expected))
   libc=ctypes.CDLL(None,use_errno=True)
   add_watch=libc.inotify_add_watch
   wait=select.select
+  parent_event=False
   def arm(fd,path,mask):
    if shape=='missing-parent' and path==os.fsencode(journal.parent.parent):
     # Create the namespace after the ancestor has been selected, before it is watched.
     journal.parent.mkdir(exist_ok=True)
    return add_watch(fd,path,mask)
   def release_publisher(*args):
-   if not gate.exists(): gate.touch()
-   return wait(*args)
+   global parent_event
+   # The next wait after the namespace event follows the observer's re-arm.
+   if shape!='present-journal' and (shape!='late-parent' or parent_event) and not gate.exists():
+    gate.touch()
+   result=wait(*args)
+   parent_event=bool(result[0])
+   return result
   publisher='''import json,os,pathlib,signal,sys,time
 p,gate=map(pathlib.Path,sys.argv[1:3])
+if sys.argv[3]=='present-journal':
+ signal.pause()
+ sys.exit(1)
+if sys.argv[3]=='late-parent':
+ p.parent.mkdir()
 if sys.argv[3]=='unrelated-rename':
  q=p.with_name('unrelated.tmp'); q.write_text('other'); os.replace(q,q.with_suffix('.published'))
 # Publish only once the observer is ready to wait. Nothing changes on the old ancestor.
@@ -6529,7 +6543,7 @@ signal.pause()
   with patch.object(ctypes,'CDLL',return_value=libc), patch.object(libc,'inotify_add_watch',side_effect=arm), patch.object(select,'select',side_effect=release_publisher):
    result=run([sys.executable,'-c',publisher,str(journal),str(gate),shape],os.environ.copy(),timeout=60,interrupt_checkpoint=(journal,'reconciling',marker))
   assert result.returncode==-signal.SIGKILL,(shape,result)
-  assert json.loads(marker.read_text())=={'transaction':'tx-owned','checkpoint':'reconciling'},shape
+  assert json.loads(marker.read_text())==expected,shape
   for artifact in (marker, root/'interrupted.stdout', root/'interrupted.stderr'):
    assert stat.S_IMODE(artifact.stat().st_mode)==0o600,artifact
 print('ok: first atomic journal observation')
