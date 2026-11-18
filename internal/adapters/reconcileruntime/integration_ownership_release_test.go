@@ -90,7 +90,8 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 		pointers []string
 		fields   string
 	}{
-		{[]string{"/edited/mode", "/kept"}, "2 fields left in place"},
+		{[]string{"/edited/mode", "/kept"}, "fields left in place: /edited/mode, /kept"},
+		{[]string{"/edited/mode", "/guest-only"}, "2 fields left in place"},
 		{nil, "no owned fields remain"},
 	} {
 		t.Run(scenario.fields, func(t *testing.T) {
@@ -99,7 +100,9 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 			runtime := ownershipReleaseRuntime(t, executor, &output)
 			testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "integration.json"), []byte("{}"), 0600)
 			runtime.Integrations = []profile.IntegrationDefinition{{Name: "sample", Root: runtime.RepositoryRoot}}
-			runtime.Environment = []string{"AGENT_sample_CONFIG_DEST=.sample/settings.json"}
+			asset := filepath.Join(runtime.RepositoryRoot, "settings.json")
+			testkit.WriteFile(t, asset, []byte(`{"edited":{"mode":"value"},"kept":true}`), 0600)
+			runtime.Environment = []string{"AGENT_sample_CONFIG_DEST=.sample/settings.json", "AGENT_sample_CONFIG=" + asset}
 			plan, err := runtime.IntegrationPlan(context.Background())
 			if err != nil {
 				t.Fatalf("changed owned fields blocked the plan: %v", err)
@@ -151,7 +154,7 @@ func TestOwnershipReleaseNoticeStaysWithinDiagnosticBound(t *testing.T) {
 		observation configmaterial.Observation
 		fields      string
 	}{
-		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 2}, "2 fields left in place"},
+		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: []string{"/a", "/b"}, ReleasedCount: 2}, "fields left in place: /a, /b"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, Released: long, ReleasedCount: len(long)}, "40 fields left in place"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged, ReleasedCount: 300}, "300 fields left in place"},
 		{configmaterial.Observation{Release: configmaterial.ReleaseChanged}, "no owned fields remain"},

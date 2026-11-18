@@ -824,7 +824,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 						inHome := strings.HasPrefix(path, home+"/")
 						command := shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", path})
 						if inHome {
-							command = runtime.preserveConfigCommand(path, ".subyard-preserved-", "--no-clobber")
+							command = runtime.preserveOwnedArtifactCommand(path)
 						}
 						return integrationOwnershipFailure(
 							fmt.Sprintf("integration ownership conflict in yard %s: %s at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Reason, path),
@@ -834,7 +834,8 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 				return ownershipRefusal(unavailable, result, err)
 			}()
 			if len(owners) == 0 {
-				causes = append(causes, cause)
+				finding := item.forReportedArtifact(integrationArtifact{Path: conflict.Path})
+				causes = append(causes, finding.refusal(cause))
 				continue
 			}
 			finding := item.atDestination(path)
@@ -963,7 +964,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		runtime.LegacyIntegrationFingerprint != "" && plan.AdoptionFingerprint != runtime.LegacyIntegrationFingerprint {
 		causes = append(causes, errors.New("legacy integration adoption changed after planning"))
 	}
-	retiredErr := runtime.observeRetiredIntegrationConfigs(ctx, phase, observed.Retired,
+	retiredErr := runtime.observeRetiredIntegrationConfigs(ctx, phase, observed.Retired, reader,
 		func(item integrationWorkItem, entry integrationArtifact, observation configmaterial.Observation) {
 			fingerprints = append(fingerprints, observation.Fingerprint)
 			record(item, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
@@ -1127,16 +1128,17 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 	if !absent {
 		return runtime, IntegrationPlan{}, nil
 	}
-	entries, err := candidate.integrationArtifactsWithSourceReader("inspect", reader)
-	if err != nil {
-		return runtime, IntegrationPlan{}, err
-	}
+	entries, artifactsErr := candidate.integrationArtifactsWithSourceReader("inspect", reader)
 	persist, persistErr := candidate.observePersist(ctx, entries, "inspect")
-	candidate.persistProjection = persist.projection()
-	observed, inventoryErr := candidate.integrationInventory(ctx, "observe", entries, "")
+	var observed integrationObservation
+	var inventoryErr error
+	if artifactsErr == nil {
+		candidate.persistProjection = persist.projection()
+		observed, inventoryErr = candidate.integrationInventory(ctx, "observe", entries, "")
+	}
 	structuredEvidence := []string{}
 	mode := configmaterial.ModeAssessAdopt
-	if inventoryErr != nil && !observed.Initial {
+	if artifactsErr != nil || inventoryErr != nil && !observed.Initial {
 		mode = configmaterial.ModeObserve
 	}
 	filesErr := candidate.observeDesiredIntegrationConfigs(ctx, "inspect", mode, reader,
@@ -1149,9 +1151,9 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 		})
 	var retiredErr error
 	if inventoryErr != nil {
-		retiredErr = candidate.observeRetiredIntegrationConfigs(ctx, "inspect", observed.Retired, nil)
+		retiredErr = candidate.observeRetiredIntegrationConfigs(ctx, "inspect", observed.Retired, reader, nil)
 	}
-	if err := collectIntegrationRefusals(persistErr, inventoryErr, filesErr, retiredErr); err != nil {
+	if err := collectIntegrationRefusals(artifactsErr, persistErr, inventoryErr, filesErr, retiredErr); err != nil {
 		return runtime, IntegrationPlan{}, err
 	}
 	plan, legacy := adoptionPlan(observed, structuredEvidence)
@@ -1193,7 +1195,7 @@ func (runtime Runtime) observeDesiredIntegrationConfigs(ctx context.Context, pha
 	return collectIntegrationRefusals(causes...)
 }
 
-func (runtime Runtime) observeRetiredIntegrationConfigs(ctx context.Context, phase string, retired []integrationArtifact,
+func (runtime Runtime) observeRetiredIntegrationConfigs(ctx context.Context, phase string, retired []integrationArtifact, reader func(config.MaterializedAsset) ([]byte, error),
 	visit func(integrationWorkItem, integrationArtifact, configmaterial.Observation),
 ) error {
 	var causes []error
@@ -1206,10 +1208,39 @@ func (runtime Runtime) observeRetiredIntegrationConfigs(ctx context.Context, pha
 		if err != nil {
 			causes = append(causes, item.refusal(err))
 		} else if visit != nil {
+			observation.Released = runtime.declaredRetirementFields(entry, observation.Released, reader)
 			visit(item, entry, observation)
 		}
 	}
 	return collectIntegrationRefusals(causes...)
+}
+
+func (runtime Runtime) declaredRetirementFields(entry integrationArtifact, pointers []string, reader func(config.MaterializedAsset) ([]byte, error)) []string {
+	if len(pointers) == 0 || entry.declaredPath == "" {
+		return nil
+	}
+	definitions, err := runtime.integrationDefinitions()
+	if err != nil {
+		return nil
+	}
+	values := runtimeEnvironment(runtime.Environment)
+	values["CODING_TOOL_INTEGRATIONS"] = entry.declaredOwner
+	delete(values, "INTEGRATION_HOST_LINKS") // The retired document no longer participates in the desired layout.
+	assets, err := config.MaterializedAssets(values, runtime.devUser(), definitions...)
+	if err != nil {
+		return nil
+	}
+	for _, asset := range assets {
+		if asset.Destination == entry.declaredPath && asset.OwnedFormat == entry.Format {
+			if reader == nil {
+				reader = config.MaterializedAsset.ReadSource
+			}
+			if payload, err := reader(asset); err == nil {
+				return configmaterial.DeclaredPointers(asset.OwnedFormat, payload, pointers)
+			}
+		}
+	}
+	return nil
 }
 
 func (runtime Runtime) observeIntegrationConfigFile(ctx context.Context, mode string, file guestConfigFile, payload []byte) (configmaterial.Observation, error) {
@@ -1319,16 +1350,7 @@ func (runtime Runtime) observeIntegrationConfigAt(ctx context.Context, format, m
 		}
 		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)
 	}
-	observation, err := configmaterial.ParseObservation(result.Stdout)
-	if err == nil && mode == configmaterial.ModeRetire && observation.Release != "" && runtime.Stdout != nil {
-		// Report the completed release once, from the call that performed it.
-		document := "a structured configuration"
-		if declaredPath != "" {
-			document = declaredPath
-		}
-		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+document+": ", observation, "; Subyard no longer manages it"))
-	}
-	return observation, err
+	return configmaterial.ParseObservation(result.Stdout)
 }
 
 // releasedInstalledDocument refuses an installed-view inspection of a document
@@ -1361,7 +1383,6 @@ func ownershipReleaseNotice(integration, path string, observation configmaterial
 	return boundedNotice(prefix+path+": ", observation, "")
 }
 
-// Retained field names come from guest evidence. Public warnings use their count.
 const ownershipNoticeLimit = 384
 
 func boundedNotice(prefix string, observation configmaterial.Observation, suffix string) string {
@@ -1380,11 +1401,13 @@ func boundedNotice(prefix string, observation configmaterial.Observation, suffix
 	if maximum := ownershipNoticeLimit / 2; len(prefix) > maximum {
 		prefix = truncateText(prefix, maximum-len("...: ")) + "...: "
 	}
-	notice := prefix + reason + "; " + fields + suffix
-	if len(notice) > ownershipNoticeLimit {
-		notice = prefix + reason + "; " + fmt.Sprintf("%d fields left in place", observation.ReleasedCount) + suffix
+	if len(observation.Released) != 0 && len(observation.Released) == observation.ReleasedCount {
+		notice := prefix + reason + "; fields left in place: " + strings.Join(observation.Released, ", ") + suffix
+		if len(notice) <= ownershipNoticeLimit {
+			return notice
+		}
 	}
-	return notice
+	return prefix + reason + "; " + fields + suffix
 }
 
 // truncateText cuts at a UTF-8 boundary within limit bytes.
@@ -1660,8 +1683,17 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	for _, entry := range observed.Retired {
 		if entry.Kind == "structured" {
 			item := runtime.integrationItem("apply retire structured config", entry.declaredOwner).forReportedArtifact(entry)
-			if _, err := runtime.observeIntegrationConfigAt(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, entry.declaredPath, nil); err != nil {
+			observation, err := runtime.observeIntegrationConfigAt(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, entry.declaredPath, nil)
+			if err != nil {
 				return item.refusal(err)
+			}
+			if observation.Release != "" && runtime.Stdout != nil {
+				observation.Released = runtime.declaredRetirementFields(entry, observation.Released, runtime.SourceReader)
+				document := entry.declaredPath
+				if document == "" {
+					document = "a structured configuration"
+				}
+				fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+document+": ", observation, "; Subyard no longer manages it"))
 			}
 		}
 	}

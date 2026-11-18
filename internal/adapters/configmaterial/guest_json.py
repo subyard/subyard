@@ -568,8 +568,8 @@ def retained_paths(current, owned):
 
 
 def printable_paths(paths):
-    # The host renders these names. Send the list only when every name is safe to
-    # print and the whole list is short; the count is always reported.
+    # The host matches these names to its template. Send a printable short list;
+    # the count is always reported.
     if (sum(len(path.encode()) + 2 for path in paths) > 384 or
             any(ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f for path in paths for c in path)):
         return []

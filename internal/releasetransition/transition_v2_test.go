@@ -3260,6 +3260,12 @@ func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
 	if message != "source unavailable; source unavailable" || retry != first.Recovery {
 		t.Fatalf("distinct inputs or omitted recovery misreported: %q / %q", message, retry)
 	}
+	var overflow bytes.Buffer
+	message, retry = publicActivationDiagnostic(cause, "fallback", "run yard update --check", WithMigrationDiagnosticWriter(context.Background(), &overflow))
+	if message != "source unavailable; source unavailable" || retry != first.Recovery ||
+		strings.Count(overflow.String(), "retry: "+second.Recovery) != 1 || strings.Contains(overflow.String(), first.Recovery) {
+		t.Fatalf("recovery missing from the bounded summary and stderr: %q / %q / %q", message, retry, &overflow)
+	}
 
 	second.Recovery = "inspect /home/dev/instructions"
 	message, retry = publicActivationDiagnostic(fmt.Errorf("private wrapper: %w", errors.Join(first, second)), "fallback", "run yard update --check")

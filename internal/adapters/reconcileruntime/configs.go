@@ -556,20 +556,21 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 }
 
 func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
-	return runtime.preserveConfigCommand(path, ".subyard-invalid-", "--backup=numbered")
-}
-
-func (runtime Runtime) preserveConfigCommand(path, prefix, option string) string {
 	exec := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--"}
 	digest := sha256.Sum256([]byte(filepath.Base(path)))
-	sibling := fmt.Sprintf("%s%x", prefix, digest[:8])
-	direct := shellquote.RecoveryCommand(append(slices.Clone(exec), "mv", "-T", option, "--", path, filepath.Join(filepath.Dir(path), sibling)))
+	sibling := fmt.Sprintf(".subyard-invalid-%x", digest[:8])
+	direct := shellquote.RecoveryCommand(append(slices.Clone(exec), "mv", "-T", "--backup=numbered", "--", path, filepath.Join(filepath.Dir(path), sibling)))
 	// Pass a long destination once to keep the recovery command short.
-	compact := shellquote.RecoveryCommand(append(exec, "sh", "-c", `mv -T "$3" -- "$1" "${1%/*}/$2"`, "subyard", path, sibling, option))
+	compact := shellquote.RecoveryCommand(append(exec, "sh", "-c", `mv -T --backup=numbered -- "$1" "${1%/*}/$2"`, "subyard", path, sibling))
 	if len(compact) < len(direct) {
 		return compact
 	}
 	return direct
+}
+
+func (runtime Runtime) preserveOwnedArtifactCommand(path string) string {
+	return shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--",
+		"sh", "-c", `d=$(mktemp -d -- "${1%/*}/.subyard-preserved-XXXXXXXX") && mv -vT -- "$1" "$d/${1##*/}"`, "subyard", path})
 }
 
 func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {

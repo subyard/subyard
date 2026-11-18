@@ -76,6 +76,11 @@ func (*ProjectHookFailure) Error() string {
 	return "an optional agent project hook failed; run 'yard init' to repair wiring and retry active integrations, or use the integration's sync command"
 }
 
+// Incomplete reports whether the dispatcher may have left hooks unrun.
+func (failure *ProjectHookFailure) Incomplete() bool {
+	return failure.Reason != projectHooksUnsuccessful
+}
+
 // ActivationDiagnostic reports that the pass failed or its state is undetermined;
 // retained state that an integration accepts is shown by that integration's status.
 func (failure *ProjectHookFailure) ActivationDiagnostic() (string, string) {
@@ -89,7 +94,7 @@ func (failure *ProjectHookFailure) ActivationDiagnostic() (string, string) {
 	}
 	if combined := domain.CollectRefusals(causes...); combined != nil {
 		message := combined.Error()
-		if failure.Reason != projectHooksUnsuccessful {
+		if failure.Incomplete() {
 			message += fmt.Sprintf("; yard %s: optional agent project hooks %s", yard, failure.Reason)
 		}
 		return message, "run yard migrate"

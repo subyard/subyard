@@ -439,7 +439,7 @@ func (runtime Runtime) ReadPersistRetained(ctx context.Context) ([]PersistRetain
 			}
 			id, matched := strings.CutPrefix(evidence.Path.value, prefix)
 			if prefix != "" && matched && validPersistHex(id, 8) {
-				retained = append(retained, PersistRetained{Integration: mapping.Integration, Kind: kind, Path: filepath.Dir(prefix), Bytes: evidence.Bytes})
+				retained = append(retained, PersistRetained{Integration: mapping.Integration, Kind: kind, Path: prefix + id, Bytes: evidence.Bytes})
 				break
 			}
 		}
@@ -456,7 +456,7 @@ func (runtime Runtime) PersistRetainedLines(retained []PersistRetained) []string
 			size = fmt.Sprintf("%d bytes", *item.Bytes)
 		}
 		inspect := shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "ls", "-la", "--", item.Path})
-		lines = append(lines, fmt.Sprintf("persist retained %s in %s (%s): an adoption could not remove it. Next, inspect the directory on the owner host: %s; remove the retained data manually once it is no longer needed", item.Kind, item.Path, size, inspect))
+		lines = append(lines, fmt.Sprintf("persist retained %s %s (%s): an adoption could not remove it. Next, inspect the directory on the owner host: %s; remove the retained data manually once it is no longer needed", item.Kind, item.Path, size, inspect))
 	}
 	return lines
 }

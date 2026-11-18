@@ -5,6 +5,7 @@ go 1.26.9
 toolchain go1.26.11
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/blang/semver/v4 v4.0.0
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/lxc/incus/v7 v7.6.0

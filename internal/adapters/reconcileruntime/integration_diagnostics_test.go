@@ -22,6 +22,40 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
+func TestOwnershipRecoveryPreservesEveryConflict(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "incus"), []byte("#!/bin/sh\nshift 5\nexec \"$@\"\n"), 0700)
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	path := filepath.Join(root, strings.Repeat("x", 249)+"&copy")
+	runtime := Runtime{Yard: domain.Context{YardInstanceName: "yard", IncusProject: "subyard"}}
+	command := runtime.preserveOwnedArtifactCommand(path)
+	for _, content := range []string{"first conflict", "second conflict"} {
+		testkit.WriteFile(t, path, []byte(content), 0600)
+		if output, err := exec.Command("sh", "-c", command).CombinedOutput(); err != nil {
+			t.Fatalf("preserve artifact: %v\n%s", err, output)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("conflicting artifact was left in place: %v", err)
+		}
+	}
+	backups, err := filepath.Glob(filepath.Join(root, ".subyard-preserved-*", filepath.Base(path)))
+	if err != nil || len(backups) != 2 {
+		t.Fatalf("preservation destinations: %v / %v", backups, err)
+	}
+	var saved []string
+	for _, backup := range backups {
+		payload, err := os.ReadFile(backup)
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved = append(saved, string(payload))
+	}
+	slices.Sort(saved)
+	if !slices.Equal(saved, []string{"first conflict", "second conflict"}) {
+		t.Fatalf("preserved data: %q", saved)
+	}
+}
+
 func TestIntegrationPlanReportsStructuredConfigAndBubblewrapRefusals(t *testing.T) {
 	runtime, definition, _, _ := integrationSourceFixture(t)
 	path := filepath.Join(definition.Root, "config.toml")
@@ -741,7 +775,7 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 				}
 			case "inventory conflict":
 				wantMessage = test.message + `: owned artifact drift at "/home/dev/.codex/AGENTS.md"; managed artifacts were preserved`
-				wantRetry = runtime.preserveConfigCommand("/home/dev/.codex/AGENTS.md", ".subyard-preserved-", "--no-clobber")
+				wantRetry = runtime.preserveOwnedArtifactCommand("/home/dev/.codex/AGENTS.md")
 			case "retire structured config":
 				wantMessage += ` at "/home/dev/settings.json"`
 			case "verify inventory drift":

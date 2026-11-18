@@ -340,8 +340,9 @@ directory, is released the same way: there is nothing to remove and nothing is c
 includes a document the operator renamed or moved away. `yard integration status` and the
 `yard init` plan warn which file is released and which owned fields stay in it. The
 command that performs the release prints a result line naming the yard, the file and the fields
-left in place, which Subyard no longer manages; when the list is too long it states only their
-number. Remove those fields by hand if they are unwanted. A later enable applies the shipped
+left in place, which Subyard no longer manages. It states only their number when the list is too
+long or the names cannot be verified against the host configuration. Remove those fields by hand
+if they are unwanted. A later enable applies the shipped
 fields again with fresh ownership. A release records its reason, bound to the recorded fields,
 before any ownership write and keeps it until that fresh ownership. Once its pending-retirement
 receipt is written, an interrupted release resumes as the same release and never edits the

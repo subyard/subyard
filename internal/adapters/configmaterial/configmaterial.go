@@ -11,12 +11,14 @@ import (
 	"io"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/BurntSushi/toml"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
@@ -418,4 +420,38 @@ func validReleasedPointers(pointers []string) bool {
 		}
 	}
 	return true
+}
+
+// DeclaredPointers returns only field names independently present in the host
+// template. Guest pointers can select those names but cannot supply them.
+func DeclaredPointers(format string, payload []byte, reported []string) []string {
+	var document map[string]any
+	switch format {
+	case "json":
+		if json.Unmarshal(payload, &document) != nil {
+			return nil
+		}
+	case "toml":
+		if _, err := toml.Decode(string(payload), &document); err != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	var matched []string
+	escape := strings.NewReplacer("~", "~0", "/", "~1")
+	var visit func(map[string]any, string)
+	visit = func(fields map[string]any, prefix string) {
+		for key, value := range fields {
+			pointer := prefix + "/" + escape.Replace(key)
+			if nested, ok := value.(map[string]any); ok && len(nested) != 0 {
+				visit(nested, pointer)
+			} else if _, found := slices.BinarySearch(reported, pointer); found {
+				matched = append(matched, pointer)
+			}
+		}
+	}
+	visit(document, "")
+	slices.Sort(matched)
+	return matched
 }

@@ -1721,16 +1721,17 @@ func (cli *CLI) appliedIntegrationTargetBaseline(ctx context.Context, target con
 		return target, baseline, nil
 	}
 	loaded, err = config.WithIntegrationSelection(loaded, applied.Selected)
+	if err != nil {
+		return target, baseline, errors.New("applied integration selection does not match the declared integrations")
+	}
 	for _, name := range []string{"HOST_LINKS", "INTEGRATION_HOST_LINKS"} {
-		if value, ok := applied.Settings[name]; ok && err == nil {
+		if value, ok := applied.Settings[name]; ok {
 			loaded.Environment[name] = value
 		}
 	}
 
-	if err == nil {
-		target.Loaded = loaded
-	}
-	return target, baseline, err
+	target.Loaded = loaded
+	return target, baseline, nil
 }
 
 func (reconciler *materializedConfigActivationReconciler) resolveScope(

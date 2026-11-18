@@ -4197,10 +4197,10 @@ func publicActivationDiagnostic(err error, message, retry string, contexts ...co
 	if len(findings) == 0 {
 		return message, retry
 	}
-	message, retry, visible := renderActivationFindings(findings)
+	message, retry, visible, renderedActions := renderActivationFindings(findings)
 	if hasStderr {
 		for index, finding := range full {
-			if index >= visible || finding.Recovery != findings[index].Recovery {
+			if index >= visible || !renderedActions[finding.Recovery] {
 				recordActivationFinding(contexts[0], finding)
 			}
 		}
@@ -4210,7 +4210,7 @@ func publicActivationDiagnostic(err error, message, retry string, contexts ...co
 
 // renderActivationFindings preserves finding order and spends the message
 // budget on findings first. An omitted recovery action does not hide a finding.
-func renderActivationFindings(findings []domain.Finding) (string, string, int) {
+func renderActivationFindings(findings []domain.Finding) (string, string, int, map[string]bool) {
 	retry := findings[0].Recovery
 	omitted := func(count int) string {
 		if count == 1 {
@@ -4251,12 +4251,12 @@ func renderActivationFindings(findings []domain.Finding) (string, string, int) {
 		if actions[action] || validateSafeAction(action) != nil {
 			continue
 		}
-		actions[action] = true
 		if candidate := join(message, "Additional recovery: "+action); len(candidate) <= maxDiagnosticText {
 			message = candidate
+			actions[action] = true
 		}
 	}
-	return message, retry, visible
+	return message, retry, visible, actions
 }
 
 func withPublicFailureCause(ctx context.Context, outcome Outcome, cause error, fallback string) Outcome {

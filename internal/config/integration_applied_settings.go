@@ -49,6 +49,11 @@ func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[st
 	// setting record the installed prompt mode. Explicit off overrides it below.
 	result["CODING_TOOL_GIT_APPROVAL"] = "prompt"
 	for name, value := range applied {
+		// Installed metadata can describe a declared integration, but cannot
+		// introduce another declaration on its own.
+		if owner := integrationMetadataOwner(name); owner != "" && !knownIntegration(values, owner) && !catalog.ShippedIntegration(owner) {
+			continue
+		}
 		result[name] = value
 	}
 	return result

@@ -59,14 +59,8 @@ func ComponentSelectionSource(trace SettingTrace) (SettingResolution, []SettingR
 func (loaded Loaded) IntegrationInventory() []ComponentSelection {
 	names := map[string]bool{} // Values track descriptor retirement.
 	for key := range loaded.Environment {
-		if !strings.HasPrefix(key, "AGENT_") {
-			continue
-		}
-		for _, suffix := range integrationMetadataSuffixes {
-			if strings.HasSuffix(key, "_"+suffix) {
-				names[strings.TrimSuffix(strings.TrimPrefix(key, "AGENT_"), "_"+suffix)] = false
-				break
-			}
+		if owner := integrationMetadataOwner(key); owner != "" {
+			names[owner] = false
 		}
 	}
 	for _, declaration := range loaded.Catalog.Integrations() {

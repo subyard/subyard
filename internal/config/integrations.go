@@ -212,6 +212,17 @@ func knownIntegration(values map[string]string, agent string) bool {
 	return false
 }
 
+func integrationMetadataOwner(name string) string {
+	if metadata, ok := strings.CutPrefix(name, "AGENT_"); ok {
+		for _, suffix := range integrationMetadataSuffixes {
+			if owner, ok := strings.CutSuffix(metadata, "_"+suffix); ok {
+				return owner
+			}
+		}
+	}
+	return ""
+}
+
 func checkIntegrationNames(values map[string]string, requested []string, shipped, retired func(string) bool) error {
 	repeated := checkRepeatedIntegrations(requested, func(id string) bool { return shipped(id) && knownIntegration(values, id) })
 	unknown := checkUnknownIntegrations(values, requested, retired, func(map[string]string, string) bool { return true })

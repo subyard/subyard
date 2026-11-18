@@ -150,13 +150,18 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 			var findings []error
 			for _, path := range failure.Hooks {
 				for _, item := range byPath[path] {
-					findings = append(findings, item.failure(err, ""))
+					findings = append(findings, item.failure(nil, ""))
 				}
+			}
+			failure.Hooks = nil // Only the matched declarations supply diagnostic labels.
+			if len(findings) != 0 && failure.Incomplete() {
+				item := runtime.integrationItem("apply hooks pass", "")
+				item.Message, item.Recovery = failure.ActivationDiagnostic()
+				findings = append(findings, integrationFailure{Finding: item.Finding})
 			}
 			if reported := domain.CollectRefusals(findings...); reported != nil {
 				return reported
 			}
-			failure.Hooks = nil // Only the matched declarations supply diagnostic labels.
 		}
 		return err
 	}
