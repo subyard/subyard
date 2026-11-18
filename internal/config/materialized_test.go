@@ -4,7 +4,39 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/profile"
 )
+
+func TestMaterializationUsesGitApprovalVariantForShippedSource(t *testing.T) {
+	root := t.TempDir()
+	prompt := filepath.Join(root, "prompt.json")
+	off := filepath.Join(root, "off.json")
+	definition := profile.IntegrationDefinition{Name: "sample", Root: root, Artifacts: []profile.IntegrationArtifact{{
+		ID: "config", Kind: "config", Source: "prompt.json", GitApprovalOffSource: "off.json",
+		Destination: ".sample/config.json", Format: "destination",
+	}}}
+	for _, scope := range []MaterializationScope{MaterializationConfigAssets, MaterializationRuntime} {
+		for _, test := range []struct{ mode, source, want string }{
+			{"", prompt, prompt}, {"prompt", prompt, prompt}, {"off", prompt, off},
+			{"prompt", prompt, prompt}, {"off", "/override.json", "/override.json"}, {"off", "", ""},
+		} {
+			values := map[string]string{
+				"CODING_TOOL_INTEGRATIONS": "sample", "CODING_TOOL_GIT_APPROVAL": test.mode, "AGENT_sample_CONFIG": test.source,
+			}
+			sources, err := SelectMaterializationSources(values, "dev", scope, definition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.want == "" && len(sources) == 0 {
+				continue
+			}
+			if len(sources) != 1 || sources[0].Asset.Source != test.want || sources[0].Asset.Destination != "/home/dev/.sample/config.json" {
+				t.Fatalf("%s mode %q with source %q: got %#v, want %q at the same destination", scope, test.mode, test.source, sources, test.want)
+			}
+		}
+	}
+}
 
 func TestMaterializedAssetsSelectOwnedFormatByDestinationAndKind(t *testing.T) {
 	assets, err := MaterializedAssets(map[string]string{

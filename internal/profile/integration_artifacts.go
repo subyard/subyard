@@ -11,13 +11,25 @@ import (
 // IntegrationArtifact is semantic data; native sources are bound by the package loader.
 // Modes and ownership retain the existing raw and structured writer policies.
 type IntegrationArtifact struct {
-	ID            string `json:"id"`
-	Label         string `json:"label,omitempty"`
-	Kind          string `json:"kind"`
-	Source        string `json:"source,omitempty"`
-	SourceSetting string `json:"source_setting,omitempty"`
-	Destination   string `json:"destination"`
-	Format        string `json:"format"`
+	ID                   string `json:"id"`
+	Label                string `json:"label,omitempty"`
+	Kind                 string `json:"kind"`
+	Source               string `json:"source,omitempty"`
+	GitApprovalOffSource string `json:"git_approval_off_source,omitempty"`
+	SourceSetting        string `json:"source_setting,omitempty"`
+	Destination          string `json:"destination"`
+	Format               string `json:"format"`
+}
+
+// PackageSources lists the shipped variants that must be validated and bound.
+func (artifact IntegrationArtifact) PackageSources() []string {
+	if artifact.GitApprovalOffSource != "" {
+		return []string{artifact.Source, artifact.GitApprovalOffSource}
+	}
+	if artifact.Source != "" {
+		return []string{artifact.Source}
+	}
+	return nil
 }
 
 func (definition IntegrationDefinition) validateArtifacts() error {
@@ -40,6 +52,9 @@ func (definition IntegrationDefinition) validateArtifacts() error {
 		ids[artifact.ID], destinations[artifact.Destination] = true, true
 		if artifact.Format != "raw" && artifact.Format != "json" && artifact.Format != "toml" && artifact.Format != "destination" {
 			return errors.New("invalid integration artifact format")
+		}
+		if path := artifact.GitApprovalOffSource; path != "" && (artifact.Kind != "config" || !textSafe(path) || !relative(path)) {
+			return errors.New("invalid Git approval off artifact source")
 		}
 		switch artifact.Kind {
 		case "config":

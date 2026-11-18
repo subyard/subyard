@@ -702,10 +702,10 @@ provision prints none.
 ### Commit and push approval prompts
 
 `CODING_TOOL_GIT_APPROVAL` is a syncable setting with the values `prompt` (default) and `off`.
-It governs Claude and Codex only. OpenCode keeps its home ask patterns. The Git prompt and hook
-registrations live in the root-owned files that provisioning writes, the Claude managed drop-in and the Codex managed
-requirements. The Claude and Codex home defaults carry no Git rules. To turn the prompts off for
-one yard:
+It governs Claude, Codex and OpenCode. Provisioning writes the Git prompt rules and hook
+registrations for Claude and Codex to their root-owned managed drop-in and managed requirements,
+respectively. Their home defaults carry no Git rules. OpenCode uses the shipped
+`~/.config/opencode/opencode.jsonc` home template. To turn the prompts off for one yard:
 
 ```sh
 yard -Y <yard> config set CODING_TOOL_GIT_APPROVAL off --scope yard
@@ -714,17 +714,22 @@ yard -Y <yard> init
 
 Set `prompt` the same way to restore them; shared or host scope applies the choice to more yards.
 Until `yard init` applies a change, it is listed as a pending init-owned setting.
-`off` removes the Git prompt rules and disables the Git hook. The Claude update lock and the Codex
+`off` removes the Git prompt rules and disables the Claude and Codex Git hook. The Claude update lock and the Codex
 approval policy, reviewer and `rm` rule stay. `claude-policy-check`, `codex-policy-check` and `yard status` verify the installed
 mode, so `off` is expected state, not drift. Existing sessions keep their loaded policy until restarted.
 With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
 
-In `prompt` mode, a managed Bash `PreToolUse` hook rejects alternate literal spellings of
+In `prompt` mode, Claude and Codex use a managed Bash `PreToolUse` hook that rejects alternate literal spellings of
 `git commit` and `git push`, including Git global options such as `-C` and `-c`, quoted command
 words, executable paths, and literal shell `-c` commands. Use a direct `git commit` or `git push`
 to reach the normal approval prompt. For another directory, use `cd <directory> && git commit`
 or `cd <directory> && git push`. Commands such as `git stash push`, `git log --grep commit`
 and `git rebase` continue through the normal permission flow.
+
+OpenCode's `prompt` template asks for direct `git commit` and `git push` commands. The `off`
+template removes those ask patterns. Config refreshes also apply the template for the selected
+mode. Custom config sources and OpenCode's project, agent and UI permissions retain their
+usual precedence. Use `opencode-permission-check` in the project to inspect the resolved V1 defaults.
 
 Limits:
 

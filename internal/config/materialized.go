@@ -52,6 +52,9 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 				}
 				declaredKinds[artifact.ID] = true
 				artifact.Source = filepath.Join(definition.Root, artifact.Source)
+				if artifact.GitApprovalOffSource != "" {
+					artifact.GitApprovalOffSource = filepath.Join(definition.Root, artifact.GitApprovalOffSource)
+				}
 				artifacts = append(artifacts, artifact)
 			}
 		}
@@ -70,6 +73,9 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			source, present := values[setting]
 			if !present {
 				source = artifact.Source
+			}
+			if source == artifact.Source && artifact.GitApprovalOffSource != "" && values["CODING_TOOL_GIT_APPROVAL"] == "off" {
+				source = artifact.GitApprovalOffSource
 			}
 			destination, present := values[setting+"_DEST"]
 			if !present {

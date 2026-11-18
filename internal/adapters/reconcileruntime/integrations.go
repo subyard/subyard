@@ -531,8 +531,8 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 				return nil, err
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
-			// Provision hooks own the approval rules. Only off adds a digest input;
-			// changed hooks or templates still change the digest as before.
+			// Only off adds a package digest input, preserving the default identity.
+			// Home template changes are also tracked by their file artifact digest.
 			if runtime.environmentValue("CODING_TOOL_GIT_APPROVAL") == "off" {
 				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
 			}

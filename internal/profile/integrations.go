@@ -119,9 +119,7 @@ func (definition IntegrationDefinition) ReadSource(path string) ([]byte, error) 
 func (definition IntegrationDefinition) SourceBinding() (string, error) {
 	files := []string{"integration.json"}
 	for _, artifact := range definition.Artifacts {
-		if artifact.Source != "" {
-			files = append(files, artifact.Source)
-		}
+		files = append(files, artifact.PackageSources()...)
 	}
 	for _, path := range []string{definition.Provision} {
 		if path != "" {
@@ -201,8 +199,8 @@ func (definition *IntegrationDefinition) validatePackage() error {
 		}
 	}
 	for _, artifact := range definition.Artifacts {
-		if artifact.Source != "" {
-			path, err := definition.ArtifactSourcePath(artifact.Source)
+		for _, source := range artifact.PackageSources() {
+			path, err := definition.ArtifactSourcePath(source)
 			if err != nil {
 				return err
 			}

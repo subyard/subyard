@@ -24,4 +24,18 @@ case "$AGENT_codex_PERSIST" in
   *auth.json* | *credentials* | *tokens*) fail "Codex authorization is host-persisted" ;;
 esac
 
+grep -Fq 'approval_policy = "on-request"' \
+  "$ROOT/config/agents/codex/config.toml" \
+  || fail "Codex yard approvals are not interactive"
+grep -Fq 'approvals_reviewer = "user"' \
+  "$ROOT/config/agents/codex/config.toml" \
+  || fail "Codex yard approvals are not routed to the operator"
+grep -Fq 'sandbox_mode = "danger-full-access"' \
+  "$ROOT/config/agents/codex/config.toml" \
+  || fail "Codex yard permissions are not unrestricted"
+if grep -Eq '^[[:space:]]*(default_permissions|\[permissions\.|\[sandbox_workspace_write\])' \
+  "$ROOT/config/agents/codex/config.toml"; then
+  fail "Codex yard config mixes legacy sandbox settings with permission profiles"
+fi
+
 printf 'ok: Codex agent defaults\n'
