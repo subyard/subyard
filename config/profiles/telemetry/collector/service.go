@@ -197,7 +197,7 @@ func (s *Store) publishCapturePolicy(spool string, policy Policy) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec("INSERT INTO metadata(key,value) VALUES('session_capture_attributes',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(data))
+	_, err = s.db.Exec("INSERT INTO metadata(key,value) VALUES('session_capture_attributes',?),('session_capture_policy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(data), policyFingerprint(policy))
 	return err
 }
 

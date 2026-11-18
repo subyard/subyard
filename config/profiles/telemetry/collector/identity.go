@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -30,6 +31,15 @@ func (key identityKey) digest(value string) []byte {
 
 func (key identityKey) verifier() string {
 	return hex.EncodeToString(key.digest("subyard.telemetry/identity-key/v1"))
+}
+
+func (key identityKey) exportProof(origin string, e Envelope) ([]byte, error) {
+	e.StoreProof = ""
+	data, err := json.Marshal(e)
+	if err != nil {
+		return nil, err
+	}
+	return key.digest("telemetry-export/v1\x00" + origin + "\x00" + string(data)), nil
 }
 
 func storeIdentityKey(db *sql.DB, dir string, version int) (identityKey, error) {

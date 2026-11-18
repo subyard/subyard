@@ -16,6 +16,7 @@ import tempfile
 import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
+POLICY_VERSION = 'subyard.telemetry.capture/v1'
 STORE_VERSION = 4
 KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
 BODY_ID = {'run': 'agent_run_id', **dict.fromkeys(('scope', 'process', 'sample', 'allocation', 'association'), 'object_id')}
@@ -139,37 +140,65 @@ def outbox_record(key, kind, body, source_id, event_id, source_time):
             'source_time': source_time, 'kind': kind, 'body': body, 'redactions': removed}
 
 
-def filter_session(record, attributes):
-    if record['kind'] not in ('session', 'relation'):
-        return True
+SESSION_FIELDS = ('session_id', 'native_session_id', 'session_attributes')
+NATIVE_SOURCE = 'native-otlp-attribute'
+
+
+def session_metadata(record):
     body = record['body']
-    if not body.get('session_id'):
-        return (record['kind'] != 'session' and body.get('relation') != 'native_session'
-                and not (body.get('source') or '').startswith('native-otlp-attribute'))
+    return (record['kind'] in ('session', 'relation') or any(field in body for field in SESSION_FIELDS)
+            or body.get('relation') == 'native_session' or (body.get('source') or '').startswith(NATIVE_SOURCE))
+
+
+def filter_session(record, attributes):
+    body = record['body']
+    native_relation = body.get('relation') == 'native_session'
+    native_source = (body.get('source') or '').startswith(NATIVE_SOURCE)
+    relation_kind = record['kind'] in ('session', 'relation')
     names = body.get('session_attributes')
-    if isinstance(names, list):
-        retained = [name for name in names if name in attributes]
-        if not retained:
-            return False
-        body['session_attributes'] = retained
-        record['redactions'] += len(names) - len(retained)
-    elif not set(BODY_RULES['session_attributes'][1]).issubset(attributes):
-        return False
+    retained = [name for name in names if name in attributes] if isinstance(names, list) else None
+    allowed = bool(retained) if retained is not None else set(BODY_RULES['session_attributes'][1]).issubset(attributes)
     keep_run = 'subyard.agent_run.id' in attributes
-    if not keep_run:
-        for field in ('agent_run_id', 'relation'):
+    keep_evidence = 'subyard.agent_run.evidence' in attributes
+
+    def remove(*fields):
+        for field in fields:
             if field in body:
                 del body[field]
                 record['redactions'] += 1
+
+    session = body.get('session_id') or body.get('native_session_id')
+    ambiguous = body.get('session_id') and body.get('native_session_id') and body['session_id'] != body['native_session_id']
+    if not relation_kind and (not allowed or not keep_run or ambiguous or (not session and 'session_attributes' in body)):
+        remove(*SESSION_FIELDS)
+        if native_relation:
+            remove('relation')
+        if native_source:
+            remove('source')
+        return True
+    if relation_kind and not session:
+        return record['kind'] != 'session' and not native_relation and not native_source and 'session_attributes' not in body
+    if not allowed or ambiguous:
+        return False
+
+    if 'native_session_id' in body:
+        if not body.get('session_id') and session:
+            body['session_id'] = body.pop('native_session_id')
+        else:
+            remove('native_session_id')
+    if retained is not None:
+        body['session_attributes'] = retained
+        record['redactions'] += len(names) - len(retained)
+    if not keep_run:
+        remove('agent_run_id', 'parent_run_id', 'relation')
         record['kind'] = 'session'
-    if not keep_run or 'subyard.agent_run.evidence' not in attributes:
-        source = 'native-otlp-attribute'
-        record['redactions'] += 'source' in body and body['source'] != source
-        body['source'] = source
+    if (relation_kind or native_source) and (not keep_run or not keep_evidence):
+        record['redactions'] += 'source' in body and body['source'] != NATIVE_SOURCE
+        body['source'] = NATIVE_SOURCE
     return True
 
 
-def private_directory(path):
+def private_directory(path, *, outbox=False):
     """Create/check the private leaf, never repair existing objects.
 
     Parents must already satisfy their owning contract: mkdir(parents=True) does
@@ -182,14 +211,15 @@ def private_directory(path):
             raise ValueError('unsafe directory')
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.stat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+    modes = (0o700, 0o1700) if outbox else (0o700,)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) not in modes:
         raise ValueError('private directory required')
     return path
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, *, outbox=False):
     path = Path(path)
-    private_directory(path.parent)
+    private_directory(path.parent, outbox=outbox)
     if path.is_symlink():
         raise ValueError('unsafe file')
     if path.exists():
@@ -251,17 +281,21 @@ def store_settings(directory):
             return {}
         if version != STORE_VERSION:
             raise ValueError('unsupported telemetry schema')
-        settings = dict(db.execute("SELECT key,value FROM metadata WHERE key IN ('identity_key_verifier','session_capture_attributes')"))
+        settings = dict(db.execute("""SELECT key,value FROM metadata WHERE key IN
+                        ('identity_key_verifier','session_capture_attributes','session_capture_policy')"""))
         if not settings.get('identity_key_verifier'):
             raise ValueError('telemetry identity key verifier is unavailable')
         return settings
 
 
-def capture_attributes(directory):
-    selected = store_settings(directory).get('session_capture_attributes')
+def capture_policy(directory):
+    settings = store_settings(directory)
+    selected = settings.get('session_capture_attributes')
     if selected is None:
-        return {*BODY_RULES['session_attributes'][1], 'subyard.agent_run.id', 'subyard.agent_run.evidence'}
-    return set(json.loads(selected))
+        attributes = {*BODY_RULES['session_attributes'][1], 'subyard.agent_run.id', 'subyard.agent_run.evidence'}
+    else:
+        attributes = set(json.loads(selected))
+    return attributes, settings.get('session_capture_policy', POLICY_VERSION)
 
 
 def identity_key(directory):
@@ -343,7 +377,7 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
             return False
         directory = private_directory(data_dir)
         key = identity_key(directory)
-        outbox = private_directory(directory/'outbox')
+        outbox = private_directory(directory/'outbox', outbox=True)
         fd = os.open(outbox/'.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'rb') as lock:
             info = os.fstat(lock.fileno())
@@ -383,21 +417,26 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
                 if source_time is None and generated_event_id:
                     source_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
             record = outbox_record(key, kind, body, source_id, event_id, source_time)
-            attributes = capture_attributes(directory) if kind in ('session', 'relation') else ()
-            if not filter_session(record, attributes):
-                return True
+            attributes = ()
+            if session_metadata(record):
+                attributes, policy = capture_policy(directory)
+                if not filter_session(record, attributes):
+                    return True
+                record['policy_version'] = policy
             if existing is not None:
                 if existing.get('schema') != SCHEMA and not (
                         not existing.get('schema') and existing.get('schema_version') == 1):
                     return False
-                old = existing if authenticated else outbox_record(
+                old = dict(existing, body=existing['body'].copy()) if authenticated else outbox_record(
                     key, existing['kind'], existing['body'], existing['source_id'],
                     existing['event_id'], existing.get('source_time'))
-                if not filter_session(old, attributes):
+                if session_metadata(old) and not filter_session(old, attributes):
                     return False
-                if {k: v for k, v in old.items() if k != 'redactions'} != {
-                        k: v for k, v in record.items() if k != 'redactions'}:
+                metadata = ('redactions', 'policy_version')
+                if {k: v for k, v in old.items() if k not in metadata} != {
+                        k: v for k, v in record.items() if k not in metadata}:
                     return False
+                record = existing if authenticated else record
             else:
                 entries = []
                 for pending in outbox.glob('*.json'):
@@ -427,14 +466,14 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
                     atomic_json(health_path, health)
                     return False
                 if gap:
-                    atomic_json(outbox/(gap['event_id']+'.json'), signed_record(key, gap))
+                    atomic_json(outbox/(gap['event_id']+'.json'), signed_record(key, gap), outbox=True)
                     health_path.unlink()
                     parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                     try:
                         os.fsync(parent_fd)
                     finally:
                         os.close(parent_fd)
-                atomic_json(path, signed_record(key, record))
+                atomic_json(path, signed_record(key, record), outbox=True)
         # Only initial run registration needs a committed acknowledgement before
         # native SDK startup. Broker and sampling paths stop at the durable outbox.
         if kind == 'run' and record['body'].get('state') == 'starting' and record['body'].get('agent'):

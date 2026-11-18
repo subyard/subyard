@@ -81,46 +81,97 @@ func sessionEnvelopes(signal map[string]any) []Envelope {
 	return entries
 }
 
+var sessionFields = []string{"session_id", "native_session_id", "session_attributes"}
+
+const nativeSessionSource = "native-otlp-attribute"
+
+func (r Record) hasSessionMetadata() bool {
+	if r.Kind == "session" || r.Kind == "relation" || stringValue(r.Body, "relation") == "native_session" ||
+		strings.HasPrefix(stringValue(r.Body, "source"), nativeSessionSource) {
+		return true
+	}
+	for _, field := range sessionFields {
+		if _, exists := r.Body[field]; exists {
+			return true
+		}
+	}
+	return false
+}
+
 func filterSessionRelation(r *Record, policy Policy) (bool, int64) {
-	if r.Kind != "session" && r.Kind != "relation" {
-		return true, 0
-	}
-	if stringValue(r.Body, "session_id") == "" {
-		return r.Kind != "session" && stringValue(r.Body, "relation") != "native_session" &&
-			!strings.HasPrefix(stringValue(r.Body, "source"), "native-otlp-attribute"), 0
-	}
 	var removed int64
-	if names, ok := r.Body["session_attributes"].([]any); ok {
-		before := len(names)
-		names = slices.DeleteFunc(names, func(name any) bool { return !slices.Contains(policy.Attributes, name.(string)) })
-		if len(names) == 0 {
-			return false, 0
-		}
-		removed += int64(before - len(names))
-		r.Body["session_attributes"] = names
-	} else {
-		// Legacy relations do not identify the contributing attribute.
-		for _, name := range sessionAttributeNames {
-			if !slices.Contains(policy.Attributes, name) {
-				return false, 0
-			}
-		}
-	}
-	if !slices.Contains(policy.Attributes, "subyard.agent_run.id") {
-		for _, field := range []string{"agent_run_id", "relation"} {
+	remove := func(fields ...string) {
+		for _, field := range fields {
 			if _, exists := r.Body[field]; exists {
 				delete(r.Body, field)
 				removed++
 			}
 		}
+	}
+	relationKind := r.Kind == "session" || r.Kind == "relation"
+	nativeRelation := stringValue(r.Body, "relation") == "native_session"
+	nativeSource := strings.HasPrefix(stringValue(r.Body, "source"), nativeSessionSource)
+	keepRun := slices.Contains(policy.Attributes, "subyard.agent_run.id")
+	keepEvidence := slices.Contains(policy.Attributes, "subyard.agent_run.evidence")
+	names, hasNames := r.Body["session_attributes"]
+	list, hasList := names.([]any)
+	var retained []any
+	allowed := true
+	if hasList {
+		for _, name := range list {
+			if slices.Contains(policy.Attributes, name.(string)) {
+				retained = append(retained, name)
+			}
+		}
+		allowed = len(retained) != 0
+	} else {
+		// Legacy records do not identify the contributing attribute.
+		for _, name := range sessionAttributeNames {
+			if !slices.Contains(policy.Attributes, name) {
+				allowed = false
+				break
+			}
+		}
+	}
+	primary, alias := stringValue(r.Body, "session_id"), stringValue(r.Body, "native_session_id")
+	session := firstNonempty(primary, alias)
+	ambiguous := primary != "" && alias != "" && primary != alias
+	if !relationKind && (!allowed || !keepRun || ambiguous || (session == "" && hasNames)) {
+		remove(sessionFields...)
+		if nativeRelation {
+			remove("relation")
+		}
+		if nativeSource {
+			remove("source")
+		}
+		return true, removed
+	}
+	if relationKind && session == "" {
+		return r.Kind != "session" && !nativeRelation && !nativeSource && !hasNames, 0
+	}
+	if !allowed || ambiguous {
+		return false, 0
+	}
+
+	if primary == "" && alias != "" {
+		r.Body["session_id"] = alias
+		delete(r.Body, "native_session_id")
+	} else {
+		remove("native_session_id")
+	}
+	if hasList {
+		r.Body["session_attributes"] = retained
+		removed += int64(len(list) - len(retained))
+	}
+	if !keepRun {
+		remove("agent_run_id", "parent_run_id", "relation")
 		r.Kind = "session"
 	}
-	if !slices.Contains(policy.Attributes, "subyard.agent_run.id") || !slices.Contains(policy.Attributes, "subyard.agent_run.evidence") {
-		const source = "native-otlp-attribute"
-		if old, exists := r.Body["source"]; exists && old != source {
+	if (relationKind || nativeSource) && (!keepRun || !keepEvidence) {
+		if old, exists := r.Body["source"]; exists && old != nativeSessionSource {
 			removed++
 		}
-		r.Body["source"] = source
+		r.Body["source"] = nativeSessionSource
 	}
 	return true, removed
 }

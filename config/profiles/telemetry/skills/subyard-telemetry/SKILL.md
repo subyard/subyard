@@ -14,20 +14,26 @@ data=/var/lib/subyard/telemetry
 "$collector" show-run --data-dir "$data" --run RUN_ID
 ```
 
-The active database is `$data/telemetry.sqlite`. After a schema 4 upgrade,
-`$data/archive/telemetry.sqlite` holds the previously retained records and
-projections, including run and session metadata, resource measurements, and
-native OTLP signals. It keeps the old schema, identifiers and export sequences.
-The active store starts a new sequence.
+The active database is `$data/telemetry.sqlite`. The first schema 4 upgrade
+archives the previous store under `$data/archive`. Subsequent legacy stores are
+archived under `$data/archive-2`, `$data/archive-3`, and so on. Each archive
+keeps its old schema, identifiers, export sequences and retained telemetry.
+Each new active store starts a fresh sequence.
 
 ```sh
-"$collector" stats --data-dir "$data/archive"
-"$collector" query --data-dir "$data/archive" --sql \
+for archive in "$data"/archive "$data"/archive-[0-9]*; do
+  [ -f "$archive/telemetry.sqlite" ] || continue
+  printf '%s\n' "$archive"
+  "$collector" stats --data-dir "$archive"
+done
+
+archive="$data/archive"
+"$collector" query --data-dir "$archive" --sql \
   'SELECT kind,count(*) AS records FROM records GROUP BY kind ORDER BY kind'
-"$collector" export --data-dir "$data/archive" --after 0 --limit 1000
+"$collector" export --data-dir "$archive" --after 0 --limit 1000
 ```
 
 Continue export with the last row's `sequence` as `--after` and keep separate
-cursors for the archive and the active store. Use stored run IDs from the
+cursors for every archive and the active store. Use stored run IDs from the
 archive's `runs` table for `show-run`. Keep exports private because archive
 records retain the capture rules of the previous release.

@@ -7,6 +7,7 @@ from contextlib import redirect_stderr
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -16,12 +17,137 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]/'internal/adapters/configmaterial'))
 import guest
+import records
 spec = importlib.util.spec_from_file_location('profile_lifecycle', Path(__file__).parent/'e2e/profile-lifecycle.py')
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_upgrade_resumes_after_each_publication(self):
+        profile = Path(guest.__file__).parent
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            workspace = Path(name)
+            source = workspace/'source'
+            shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin'))
+            shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            (source/'subyard-telemetry').write_bytes(b'candidate collector')
+            for selected in (True, False):
+                def make_runtime(root):
+                    account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
+                    return guest.Runtime(source, 'dev', selected, [], root/'control', root/'data',
+                                         root/'library', root/'units', root/'bin', account)
+
+                def publish_paths(runtime):
+                    paths = [runtime.data/'auth.token', runtime.control/'publishing',
+                             *runtime.assets, runtime.control/'assets.json']
+                    if not selected:
+                        paths.append(runtime.data/'drain.json')
+                    return paths
+
+                if os.getuid() == 0:
+                    workspace.chmod(0o711)
+                for step in range(len(publish_paths(make_runtime(workspace)))):
+                    with self.subTest(selected=selected, step=step), tempfile.TemporaryDirectory(dir=workspace) as case:
+                        root = Path(case)
+                        if os.getuid() == 0:
+                            root.chmod(0o711)
+                        runtime = make_runtime(root)
+                        control, data = runtime.control, runtime.data
+                        target = publish_paths(runtime)[step]
+                        for directory in (control, data, runtime.home, runtime.library, runtime.units, runtime.commands):
+                            directory.mkdir(mode=0o700)
+                        os.chown(data, runtime.uid, runtime.gid)
+                        (control/'marker').write_bytes(guest.MARKER)
+                        for path in [*runtime.assets, *runtime.retained]:
+                            path.write_bytes(b'previous '+path.name.encode())
+                        (control/'assets.json').write_text(json.dumps({
+                            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in [*runtime.assets, *runtime.retained]}))
+                        states = {unit: dict(LoadState='loaded', ActiveState='active',
+                                              UnitFileState='enabled' if selected else 'disabled')
+                                  for unit in (guest.COLLECTOR, guest.MANAGER)}
+                        if not selected:
+                            states[guest.COLLECTOR]['ActiveState'] = 'inactive'
+                        state_path = root/'services.json'
+                        state_path.write_text(json.dumps(states))
+                        runtime.manager = lambda unit: json.loads(state_path.read_text())[unit]
+                        runtime.running_no_new_privs = lambda fields: True
+                        runtime.skill_delivery = lambda mode: True
+
+                        def systemctl(operation, *arguments):
+                            if operation == 'daemon-reload':
+                                return
+                            states = json.loads(state_path.read_text())
+                            for unit in arguments:
+                                if unit == '--now':
+                                    continue
+                                if operation in ('enable', 'disable'):
+                                    states[unit]['UnitFileState'] = operation + 'd'
+                                if operation in ('stop', 'start') or '--now' in arguments:
+                                    states[unit]['ActiveState'] = 'active' if operation in ('enable', 'start') else 'inactive'
+                            state_path.write_text(json.dumps(states))
+
+                        publish = guest.native.publish
+
+                        def interrupt(path, *args, **kwargs):
+                            publish(path, *args, **kwargs)
+                            if path in runtime.assets or path == control/'assets.json':
+                                self.assertTrue(all(runtime.manager(unit)['ActiveState'] == 'inactive' for unit in states))
+                            if path == target:
+                                os.kill(os.getpid(), signal.SIGKILL)
+
+                        with patch.object(guest, 'systemctl', side_effect=systemctl), \
+                             patch.object(guest.native, 'reconcile', return_value=True):
+                            pid = os.fork()
+                            if pid == 0:
+                                try:
+                                    with patch.object(guest.native, 'publish', side_effect=interrupt):
+                                        runtime.apply()
+                                finally:
+                                    os._exit(1)
+                            _, status = os.waitpid(pid, 0)
+                            self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
+                            self.assertEqual(runtime.observe()['state'], 'stale')
+                            runtime.apply()
+                            self.assertEqual(runtime.observe()['state'], 'current')
+                        states = json.loads(state_path.read_text())
+                        self.assertEqual(states[guest.COLLECTOR]['ActiveState'], 'active' if selected else 'inactive')
+                        self.assertEqual(states[guest.MANAGER]['ActiveState'], 'active')
+                        self.assertEqual(states[guest.MANAGER]['UnitFileState'], 'enabled' if selected else 'disabled')
+                        self.assertEqual((data/'drain.json').exists(), not selected)
+
+    def test_running_legacy_producer_cannot_publish_after_upgrade(self):
+        # Keep the pre-upgrade lock open across publication, as a producer that
+        # passed its first directory check just before the upgrade could do.
+        code = """
+import fcntl, os, pathlib, stat, sys
+outbox = pathlib.Path(sys.argv[1])
+with (outbox/'.lock').open('r+b') as lock:
+    assert stat.S_IMODE(outbox.stat().st_mode) == 0o700
+    print('ready', flush=True)
+    sys.stdin.read()
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    if stat.S_IMODE(outbox.stat().st_mode) == 0o700:
+        (outbox/'late.json').write_text('{"agent_run_id":"raw-legacy-run"}')
+"""
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            data = Path(name)
+            self.assertTrue(records.emit(data, 'gap', {}, event_id='pending'))
+            outbox = data/'outbox'
+            pending = list(outbox.glob('*.json'))
+            with subprocess.Popen([sys.executable, '-B', '-c', code, str(outbox)],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE) as old:
+                self.assertEqual(old.stdout.readline().strip(), b'ready')
+                runtime = object.__new__(guest.Runtime)
+                runtime.data, runtime.uid, runtime.gid = data, os.getuid(), os.getgid()
+                runtime.fence_legacy_producers()
+                old.communicate(timeout=3)
+                self.assertEqual(old.returncode, 0)
+            self.assertCountEqual(outbox.glob('*.json'), pending)
+            self.assertTrue(records.emit(data, 'run', {'agent_run_id': 'new-run'}, event_id='new'))
+            self.assertEqual(len(list(outbox.glob('*.json'))), 2)
+
     def test_missing_managed_document_waits_before_first_telemetry_install(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
@@ -79,6 +205,7 @@ class LifecycleTest(unittest.TestCase):
             runtime.retained = {}
             runtime.selected = True
             runtime.home, runtime.agents = Path(name), []
+            runtime.control = Path(name)
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
             runtime.saved_inventory = lambda: {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}
@@ -224,6 +351,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
     def test_apply_repeat_pause_disable_preserves_data_and_never_stops_workloads(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
+            if os.getuid() == 0:
+                root.chmod(0o711)
             source = root/'source'
             source.mkdir()
             for path in Path(guest.__file__).parent.glob('*.py'):
@@ -261,7 +390,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     return '\n'.join(f'{key}={value}' for key,value in fields.items())
                 if args[0] == 'enable':
                     for unit in args[2:]:
-                        states[unit] = dict(ActiveState='active', UnitFileState='enabled')
+                        if states.get(unit, {}).get('ActiveState') != 'active':
+                            states[unit] = dict(ActiveState='active', UnitFileState='enabled')
                 if args[0] == 'disable':
                     for unit in args[1:]:
                         if unit.startswith('--'):
@@ -269,8 +399,9 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                         states[unit]['UnitFileState'] = 'disabled'
                         if '--now' in args:
                             states[unit]['ActiveState'] = 'inactive'
-                if args[0] == 'restart':
-                    for unit in args[1:]: states[unit]['ProcessNNP']='yes'
+                if args[0] == 'daemon-reload':
+                    for state in states.values():
+                        state.pop('ExecStart', None)
                 if args[0] in ('stop','start'):
                     for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
@@ -324,15 +455,27 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     path.write_bytes(legacy)
                     saved[str(path)]=hashlib.sha256(legacy).hexdigest()
                     states[unit].update(DropInPaths='/run/systemd/system/service.d/zzz-lxc-service.conf',NoNewPrivileges='no')
+                    command = runtime.starts[unit].removeprefix('/usr/bin/setpriv --no-new-privs ')
+                    states[unit]['ExecStart'] = '{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; }'
                 (root/'control/assets.json').write_text(json.dumps(saved))
                 self.assertEqual(runtime.observe()['state'],'stale')
                 self.assertEqual(runtime.startup(), {'state': 'ready'})
+                publish = guest.native.publish
+
+                def interrupt_legacy_unit(path, *args, **kwargs):
+                    publish(path, *args, **kwargs)
+                    if path == runtime.units/guest.COLLECTOR:
+                        raise InterruptedError
+
+                with patch.object(guest.native, 'publish', side_effect=interrupt_legacy_unit), self.assertRaises(InterruptedError):
+                    runtime.apply()
+                self.assertEqual(runtime.observe()['state'], 'stale')
                 runtime.apply()
-                self.assertIn(('restart',guest.COLLECTOR,guest.MANAGER),calls)
+                self.assertIn(('stop',guest.COLLECTOR,guest.MANAGER),calls)
                 self.assertEqual(runtime.observe()['state'],'current')
-                restarts=sum(call[0]=='restart' for call in calls)
+                stops=sum(call[0]=='stop' for call in calls)
                 runtime.apply()
-                self.assertEqual(sum(call[0]=='restart' for call in calls),restarts)
+                self.assertEqual(sum(call[0]=='stop' for call in calls),stops)
                 # A restart interrupted after new files/manifest were committed
                 # must still retry the old active NNP0 process on unchanged files.
                 states[guest.COLLECTOR]['ProcessNNP']='no'
@@ -340,7 +483,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(stale['state'],'stale')
                 self.assertNotEqual(stale['actual'],stale['desired'])
                 runtime.apply()
-                self.assertEqual(calls[-1],('restart',guest.COLLECTOR))
+                self.assertEqual(calls[-3:], [('stop',guest.COLLECTOR), ('daemon-reload',),
+                                             ('enable','--now',guest.COLLECTOR,guest.MANAGER)])
                 self.assertEqual(runtime.observe()['state'],'current')
                 for changed in ({'User':'root'},{'DropInPaths':'/etc/systemd/system/subyard-.service.d/foreign.conf'},
                                 {'DropInPaths':'/etc/systemd/system/'+guest.COLLECTOR+'.d/foreign.conf'},
@@ -360,7 +504,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 start = len(calls)
                 runtime.apply()
                 upgrade_calls = calls[start:]
-                self.assertLess(upgrade_calls.index(('stop', guest.MANAGER, guest.COLLECTOR)),
+                self.assertLess(upgrade_calls.index(('stop', guest.COLLECTOR, guest.MANAGER)),
                                 upgrade_calls.index(('enable', '--now', guest.COLLECTOR, guest.MANAGER)))
                 self.assertEqual(runtime.observe()['state'], 'current')
 
@@ -393,10 +537,12 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     observation = unselected.observe()
                     self.assertEqual(observation['state'], 'stale')
                     self.assertIn('telemetry.inventory', [item['parameter'] for item in observation['diagnostics']])
+                installed_records = root/'library/records.py'
+                candidate = installed_records.read_bytes()
+                installed_records.write_bytes(b'unmanaged edit')
                 with self.assertRaisesRegex(ValueError, 'managed asset changed'):
                     runs['source'].apply()
-                self.assertEqual(json.loads(inventory_path.read_text()), stale)
-                inventory_path.write_text(json.dumps(saved))
+                installed_records.write_bytes(candidate)
                 runs['source'].apply()
                 observed = runs['source'].observe()
                 self.assertEqual(observed['state'], 'current')

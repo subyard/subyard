@@ -3,21 +3,17 @@ package collector
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"golang.org/x/sys/unix"
 )
 
+var archiveName = regexp.MustCompile(`^archive(-[1-9][0-9]*)?$`)
+
 func archiveStore(dir string, db *sql.DB) error {
-	archive := filepath.Join(dir, "archive")
-	if err := privateDir(archive); err != nil {
-		return err
-	}
-	target := filepath.Join(archive, databaseName)
-	if _, err := os.Lstat(target); !os.IsNotExist(err) {
-		return errors.New("telemetry archive already exists or is unavailable")
-	}
 	// SQLite checkpoints the WAL when leaving WAL mode. The rename must
 	// move a self-contained database even after the previous writer crashed.
 	var journal string
@@ -27,16 +23,45 @@ func archiveStore(dir string, db *sql.DB) error {
 	if err := db.Close(); err != nil {
 		return err
 	}
-	if err := unix.Renameat2(unix.AT_FDCWD, filepath.Join(dir, databaseName), unix.AT_FDCWD, target, unix.RENAME_NOREPLACE); err != nil {
-		return err
+	for sequence := 1; ; sequence++ {
+		name := "archive"
+		if sequence > 1 {
+			name = fmt.Sprintf("archive-%d", sequence)
+		}
+		archive := filepath.Join(dir, name)
+		if err := privateDir(archive); err != nil {
+			return err
+		}
+		target := filepath.Join(archive, databaseName)
+		err := unix.Renameat2(unix.AT_FDCWD, filepath.Join(dir, databaseName), unix.AT_FDCWD, target, unix.RENAME_NOREPLACE)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		return sealArchive(dir, archive)
 	}
-	return sealArchive(dir)
 }
 
 // Finish a rename interrupted before the mode change or directory syncs.
 // Publish the new active database only after the archive is durable.
-func sealArchive(dir string) error {
-	archive := filepath.Join(dir, "archive")
+func sealArchives(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if archiveName.MatchString(entry.Name()) {
+			if err := sealArchive(dir, filepath.Join(dir, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func sealArchive(dir, archive string) error {
 	path := filepath.Join(archive, databaseName)
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return nil

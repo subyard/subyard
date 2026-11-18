@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -146,7 +148,7 @@ func Open(dir string, limits Limits) (*Store, error) {
 		return nil, errors.New("telemetry writer already running")
 	}
 	fail := func(e error) (*Store, error) { lock.Close(); return nil, e }
-	if err = sealArchive(dir); err != nil {
+	if err = sealArchives(dir); err != nil {
 		return fail(err)
 	}
 	path := filepath.Join(dir, databaseName)
@@ -286,7 +288,7 @@ func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) err
 		}
 		entries = append(entries, Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
 			SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: r.SourceTime,
-			Kind: r.Kind, Encoding: "json", Body: body, Redactions: r.redactions, local: r.authenticated})
+			Kind: r.Kind, Encoding: "json", Body: body, Redactions: r.redactions, local: r.authenticated, PolicyVersion: r.capturePolicy})
 	}
 	return s.capture(ctx, entries, policy)
 }
@@ -325,6 +327,8 @@ func (s *Store) capture(ctx context.Context, input []Envelope, p Policy) error {
 		}
 		if e.replay {
 			e.ImportPolicyVersion, e.PolicyVersion = policyFingerprint(p), claim
+		} else if e.local && claim != "" {
+			e.PolicyVersion = claim
 		}
 		if e.Kind != "" {
 			entries = append(entries, e)
@@ -506,7 +510,8 @@ func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error
 	if err != nil {
 		return false, ErrStorage
 	}
-	if old.SourceID != e.SourceID || old.Kind != e.Kind || old.Encoding != e.Encoding || old.PolicyVersion != e.PolicyVersion {
+	policyMatches := old.PolicyVersion == e.PolicyVersion || (e.local && !e.replay)
+	if old.SourceID != e.SourceID || old.Kind != e.Kind || old.Encoding != e.Encoding || !policyMatches {
 		return false, errEventCollision
 	}
 	if !samePayload(old, e) {
@@ -782,6 +787,17 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 	if version == 1 {
 		importPolicyColumn = "''"
 	}
+	var key identityKey
+	var storeOrigin string
+	if version == storeVersion {
+		var seq int
+		var name, file string
+		if db.QueryRowContext(ctx, "PRAGMA database_list").Scan(&seq, &name, &file) == nil && name == "main" && file != "" &&
+			db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='origin_id'").Scan(&storeOrigin) == nil {
+			// Keyless read-only exports are still usable in another store.
+			key, _ = storeIdentityKey(db, filepath.Dir(file), version)
+		}
+	}
 	rows, err := db.QueryContext(ctx, `SELECT sequence,origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,`+importPolicyColumn+` FROM records WHERE sequence>? ORDER BY sequence LIMIT ?`, after, limit)
 	if err != nil {
 		return after, err
@@ -795,6 +811,13 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 			return after, err
 		}
 		e.Body = body
+		if len(key) != 0 {
+			proof, err := key.exportProof(storeOrigin, e)
+			if err != nil {
+				return after, err
+			}
+			e.StoreProof = hex.EncodeToString(proof)
+		}
 		if err = encoder.Encode(e); err != nil {
 			return after, err
 		}
@@ -813,7 +836,7 @@ func (s *Store) replay(ctx context.Context, r io.Reader, p Policy) error {
 		if len(bytes.TrimSpace(scanner.Bytes())) == 0 {
 			continue
 		}
-		e, err := replayEnvelope(scanner.Bytes())
+		e, err := s.replayEnvelope(scanner.Bytes())
 		if err != nil {
 			return err
 		}
@@ -824,7 +847,7 @@ func (s *Store) replay(ctx context.Context, r io.Reader, p Policy) error {
 	return scanner.Err()
 }
 
-func replayEnvelope(data []byte) (Envelope, error) {
+func (s *Store) replayEnvelope(data []byte) (Envelope, error) {
 	var input map[string]json.RawMessage
 	if err := json.Unmarshal(data, &input); err != nil {
 		return Envelope{}, err
@@ -834,27 +857,35 @@ func replayEnvelope(data []byte) (Envelope, error) {
 	e := Envelope{
 		Schema: ExportSchema, OriginID: origin, EventID: event, replay: true,
 		SourceID: source, SourceVersion: str("source_version"), SourceTime: str("source_time"),
-		Kind: str("kind"), Encoding: str("encoding"), ReceivedTime: canonicalTimestamp(str("received_time")),
+		Kind: str("kind"), Encoding: str("encoding"), ReceivedTime: str("received_time"),
+		PolicyVersion: str("policy_version"), ImportPolicyVersion: str("import_policy_version"),
 	}
 	if str("schema") != ExportSchema || e.OriginID == "" || e.EventID == "" || e.SourceID == "" {
 		return Envelope{}, errors.New("unsupported export identity")
 	}
-	capturePolicy := str("policy_version")
-	if capturePolicy != "" && !capturePolicyVersion.MatchString(capturePolicy) {
+	if e.PolicyVersion != "" && !capturePolicyVersion.MatchString(e.PolicyVersion) {
 		return Envelope{}, errors.New("invalid export capture policy")
 	}
 	_ = json.Unmarshal(input["redactions"], &e.Redactions)
-	e.Redactions = min(max(e.Redactions, 0), math.MaxInt64/2)
-	if e.ReceivedTime == "" && str("received_time") != "" {
-		e.ReceivedTime = unknownSourceTime
-		e.Redactions++
-	}
+	_ = json.Unmarshal(input["sequence"], &e.Sequence)
 	if e.Encoding == "json" {
 		e.Body = input["body"]
 	} else if err := json.Unmarshal(input["protobuf"], &e.Protobuf); err != nil {
 		return Envelope{}, errors.New("invalid export protobuf")
 	}
-	e.PolicyVersion = capturePolicy
+	// Verify exactly the fields replay will use. A second JSON decoder
+	// could interpret case variants or duplicate keys differently.
+	if signature, err := hex.DecodeString(str("store_proof")); err == nil && len(signature) != 0 {
+		proof, err := s.key.exportProof(s.origin, e)
+		e.local = err == nil && hmac.Equal(signature, proof)
+	}
+	e.ImportPolicyVersion = ""
+	e.Redactions = min(max(e.Redactions, 0), math.MaxInt64/2)
+	e.ReceivedTime = canonicalTimestamp(e.ReceivedTime)
+	if e.ReceivedTime == "" && str("received_time") != "" {
+		e.ReceivedTime = unknownSourceTime
+		e.Redactions++
+	}
 	return e, nil
 }
 
@@ -869,21 +900,30 @@ func (s *Store) sanitizePayload(e *Envelope, p Policy, id identity, rekeyBinary 
 		if err != nil {
 			return nil, err
 		}
+		if e.replay && !e.local && clean.Kind == "association" && stringValue(clean.Body, "association_id") == "" {
+			// Pre-upgrade stores allowed free-form explicit interval IDs.
+			// Preserve their distinction while keeping the input private.
+			if legacy := stringValue(body, "association_id"); legacy != "" {
+				clean.Body["association_id"] = "h1:" + fmt.Sprintf("%x", s.key.digest("legacy-association/v1\x00"+legacy))
+				n--
+			}
+		}
 		// The envelope has already been mapped. Only map body identities.
-		keep, removed := filterSessionRelation(&clean, p)
-		if !keep {
-			e.Kind = ""
-			return nil, nil
+		e.PolicyVersion = PolicyVersion
+		if clean.hasSessionMetadata() {
+			keep, removed := filterSessionRelation(&clean, p)
+			if !keep {
+				e.Kind = ""
+				return nil, nil
+			}
+			n += removed
+			e.PolicyVersion = policyFingerprint(p)
 		}
 		e.Kind = clean.Kind
 		e.Body, _ = json.Marshal(clean.Body)
 		e.SourceTime = clean.SourceTime
 		e.SourceVersion = clean.SourceVersion
-		e.Redactions += n + removed
-		e.PolicyVersion = PolicyVersion
-		if e.Kind == "session" || e.Kind == "relation" {
-			e.PolicyVersion = policyFingerprint(p)
-		}
+		e.Redactions += n
 		return nil, nil
 	}
 	if e.Kind != e.Encoding {

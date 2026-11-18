@@ -170,20 +170,206 @@ assert record['kind'] == 'session'
 assert record['body'] == dict(session_id=records.opaque_id(records.identity_key(root), 'synthetic-session'),
                              session_attributes=['session.id'], source='native-otlp-attribute')
 assert record['redactions'] == 5  # Four fields or entries, plus the unknown source time.
+key = records.identity_key(root)
+record['event_id'] = records.opaque_id(key, 'previous-format')
+del record['policy_version']
+records.atomic_json(root/'outbox'/(record['event_id']+'.json'), records.signed_record(key, record))
 `
 	if output, err := exec.Command("python3", "-B", "-c", producer, store.dir).CombinedOutput(); err != nil {
 		t.Fatalf("producer: %v\n%s", err, output)
 	}
-	if err := store.ingestOutbox(context.Background(), outbox, p); err != nil {
+	// Restarting the collector with a broader policy must not relabel capture.
+	defaultPolicy := DefaultPolicy()
+	if err := store.publishCapturePolicy(outbox, defaultPolicy); err != nil {
 		t.Fatal(err)
 	}
-	var redactions int
-	var policy string
-	if err := store.db.QueryRow("SELECT redactions,policy_version FROM records WHERE kind='session'").Scan(&redactions, &policy); err != nil ||
-		redactions != 5 || policy != policyFingerprint(p) {
-		t.Fatalf("outbox drain lost policy/redactions: %s %d (%v)", policy, redactions, err)
+	if err := store.ingestOutbox(context.Background(), outbox, defaultPolicy); err != nil {
+		t.Fatal(err)
+	}
+	for event, want := range map[string]string{"mixed": policyFingerprint(p), "previous-format": PolicyVersion} {
+		var redactions int
+		var policy string
+		if err := store.db.QueryRow("SELECT redactions,policy_version FROM records WHERE kind='session' AND event_id=?",
+			store.key.id(event)).Scan(&redactions, &policy); err != nil || redactions != 5 || policy != want {
+			t.Fatalf("outbox drain lost policy/redactions for %s: %s %d (%v)", event, policy, redactions, err)
+		}
 	}
 	if entries, err := os.ReadDir(outbox); err != nil || len(entries) != 1 || entries[0].Name() != ".lock" {
 		t.Fatalf("outbox did not drain: %v (%v)", entries, err)
+	}
+}
+
+func TestSessionPolicyAcrossProducerIngestAndReplay(t *testing.T) {
+	ctx := context.Background()
+	p := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
+	input := []Record{
+		record("run", map[string]any{"agent_run_id": "test-run", "session_id": "excluded",
+			"session_attributes": []string{"thread.id"}, "unknown_fields": []string{"excluded"}}),
+		record("relation", map[string]any{"agent_run_id": "test-run", "native_session_id": "excluded",
+			"session_attributes": []string{"thread.id"}}),
+		record("relation", map[string]any{"agent_run_id": "test-run", "native_session_id": "allowed",
+			"session_attributes": []string{"thread.id", "session.id"}}),
+		record("run", map[string]any{"agent_run_id": "other-run", "native_session_id": "allowed",
+			"session_attributes": []string{"session.id"}}),
+	}
+	for _, transport := range []string{"producer", "ingest", "replay"} {
+		t.Run(transport, func(t *testing.T) {
+			store := fixtureStore(t)
+			switch transport {
+			case "producer":
+				outbox := filepath.Join(store.dir, "outbox")
+				if err := privateDir(outbox); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.publishCapturePolicy(outbox, p); err != nil {
+					t.Fatal(err)
+				}
+				const producer = `
+import json, pathlib, sys
+sys.path.insert(0, '..')
+import records
+root = pathlib.Path(sys.argv[1])
+for row in json.load(sys.stdin):
+    assert records.emit(root, row['kind'], row['body'], source_id=row['source_id'], event_id=row['event_id'])
+`
+				raw, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("python3", "-B", "-c", producer, store.dir)
+				cmd.Stdin = bytes.NewReader(raw)
+				if output, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("producer: %v\n%s", err, output)
+				}
+				// Drain under the default policy to prove filtering happened before publication.
+				if err := store.IngestOutbox(ctx, outbox); err != nil {
+					t.Fatal(err)
+				}
+			case "ingest":
+				if err := store.ingest(ctx, input, p); err != nil {
+					t.Fatal(err)
+				}
+			case "replay":
+				var stream bytes.Buffer
+				for _, r := range input {
+					body, _ := json.Marshal(r.Body)
+					e := Envelope{Schema: ExportSchema, OriginID: "producer:" + r.SourceID,
+						SourceID: r.SourceID, SourceVersion: r.SourceVersion, EventID: r.EventID,
+						Kind: r.Kind, Encoding: "json", Body: body}
+					if err := json.NewEncoder(&stream).Encode(e); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := store.replay(ctx, &stream, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			expected := map[string]struct{ kind, body string }{
+				store.key.id(input[0].EventID): {"run", `{"agent_run_id":"` + store.key.id("test-run") + `"}`},
+				store.key.id(input[2].EventID): {"session", `{"session_attributes":["session.id"],"session_id":"` +
+					store.key.id("allowed") + `","source":"native-otlp-attribute"}`},
+				store.key.id(input[3].EventID): {"run", `{"agent_run_id":"` + store.key.id("other-run") + `"}`},
+			}
+			rows, err := store.db.Query("SELECT event_id,kind,body FROM records")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var event, kind, body string
+				if err := rows.Scan(&event, &kind, &body); err != nil {
+					t.Fatal(err)
+				}
+				if want := expected[event]; want.kind != kind || want.body != body {
+					t.Errorf("unexpected %s record %s", kind, body)
+				}
+				delete(expected, event)
+			}
+			if err := rows.Err(); err != nil || len(expected) != 0 {
+				t.Fatalf("missing policy-filtered records: %v (%v)", expected, err)
+			}
+		})
+	}
+}
+
+func TestReplayRestoresPrunedSampleToItsOriginalRun(t *testing.T) {
+	ctx := context.Background()
+	store := fixtureStore(t)
+	const run, object = "fixture-run", "fixture-scope"
+	scope := record("scope", map[string]any{"object_id": object, "agent_run_id": run, "quality": "explicit"})
+	sample := record("sample", map[string]any{"object_id": object, "cpu_ns": 10})
+	if err := store.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": run}), scope, sample}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec("UPDATE records SET received_time='2000-01-01T00:00:00.000000000Z' WHERE kind='sample'"); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadOnly(store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var exported bytes.Buffer
+	if _, err := Export(ctx, reader, &exported, 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.prune(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRow("SELECT count(*) FROM samples").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("sample was not pruned: %d (%v)", count, err)
+	}
+	// An altered export must go through the destination's keyed mapping,
+	// even when a case-insensitive decoder would see the original body.
+	lines := bytes.Split(bytes.TrimSpace(exported.Bytes()), []byte("\n"))
+	forgedBody := `"body":{"cpu_ns":90,"object_id":"` + store.key.id(object) + `"},"BODY":`
+	altered := bytes.Replace(lines[len(lines)-1], []byte(`"body":`), []byte(forgedBody), 1)
+	if err := store.Replay(ctx, bytes.NewReader(altered)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Replay(ctx, &exported); err != nil {
+		t.Fatal(err)
+	}
+	query := `SELECT count(*),sum(sample_values.cpu_ns) FROM sample_values
+		JOIN objects USING(object_id) JOIN associations USING(object_id)
+		JOIN runs USING(agent_run_id) WHERE runs.agent_run_id=?`
+	var cpu int
+	if err := store.db.QueryRow(query, store.key.id(run)).Scan(&count, &cpu); err != nil || count != 1 || cpu != 10 {
+		t.Fatalf("restored sample failed to join its original run: count=%d cpu=%d (%v)", count, cpu, err)
+	}
+}
+
+func TestReplayArchivePreservesSeparateExplicitAssociationIntervals(t *testing.T) {
+	ctx := context.Background()
+	archive := fixtureStore(t)
+	for _, row := range []struct{ kind, event, body string }{
+		{"allocation", "object", `{"object_id":"object"}`},
+		{"association", "start-a", `{"association_id":"interval A","object_id":"object","agent_run_id":"run","source":"validated-grant","start_time":"2026-01-01T00:00:00Z"}`},
+		{"association", "end-a", `{"association_id":"interval A","object_id":"object","agent_run_id":"run","source":"validated-grant","end_time":"2026-01-01T01:00:00Z"}`},
+		{"association", "start-b", `{"association_id":"interval B","object_id":"object","agent_run_id":"run","source":"validated-grant","start_time":"2026-01-01T02:00:00Z"}`},
+	} {
+		seedRetained(t, archive, Envelope{OriginID: "archive", SourceID: "legacy", SourceVersion: "1",
+			EventID: row.event, Kind: row.kind, Encoding: "json", Body: json.RawMessage(row.body)})
+	}
+	if _, err := archive.db.Exec("PRAGMA user_version=2"); err != nil {
+		t.Fatal(err)
+	}
+	var exported bytes.Buffer
+	if _, err := Export(ctx, archive.db, &exported, 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	destination := fixtureStore(t)
+	for range 2 {
+		if err := destination.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count, closed int
+	var history string
+	if err := destination.db.QueryRow(`SELECT count(*),sum(end_time<>''),group_concat(associations.body)
+			FROM associations JOIN objects USING(object_id) WHERE agent_run_id=?`, destination.key.id("run")).
+		Scan(&count, &closed, &history); err != nil || count != 2 || closed != 1 || strings.Contains(history, "interval") {
+		t.Fatalf("legacy intervals were merged or exposed: count=%d closed=%d (%v)", count, closed, err)
 	}
 }

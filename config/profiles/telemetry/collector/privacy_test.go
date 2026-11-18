@@ -264,46 +264,6 @@ func assertPrivateFixtureCounters(t *testing.T, attrs pcommon.Map) {
 	}
 }
 
-func TestMergedProjectionDropsLegacyPrivateMetadata(t *testing.T) {
-	s := fixtureStore(t)
-	ctx := context.Background()
-	const at = "2026-01-01T01:00:00.000000000Z"
-	const private = "Acquisition-Target.pdf"
-	const legacy = `{"purpose":"` + private + `","unknown":"` + private + `","reserved_cpu":"7","state":"held"}`
-	run, object, association := newID(), newID(), newID()
-	for _, seed := range []struct {
-		sql  string
-		args []any
-	}{
-		{"INSERT INTO runs VALUES(?,?,?)", []any{s.key.id(run), legacy, at}},
-		{"INSERT INTO objects VALUES(?,?,?,?,?,?)", []any{s.key.id(object), "allocation", s.key.id(private), private, legacy, at}},
-		{"INSERT INTO allocations VALUES(?,?,?)", []any{s.key.id(object), legacy, at}},
-		{"INSERT INTO associations VALUES(?,?,?,?,?,?,?,?)", []any{s.key.id(association), s.key.id(object), s.key.id(private), "explicit", at, private, false, legacy}},
-	} {
-		if _, err := s.db.Exec(seed.sql, seed.args...); err != nil {
-			t.Fatal(err)
-		}
-	}
-	records := []Record{
-		record("run", map[string]any{"agent_run_id": run, "state": "main_exited"}),
-		record("allocation", map[string]any{"object_id": object, "state": "available"}),
-		record("association", map[string]any{"association_id": association, "object_id": object, "quality": "measured"}),
-	}
-	if err := s.Ingest(ctx, records); err != nil {
-		t.Fatal(err)
-	}
-	for _, query := range []string{
-		"SELECT body FROM runs", "SELECT body FROM allocations",
-		"SELECT body || parent_object_id || accounting FROM objects",
-		"SELECT body || agent_run_id || end_time FROM associations",
-	} {
-		var row string
-		if err := s.db.QueryRow(query).Scan(&row); err != nil || strings.Contains(row, private) || !strings.Contains(row, `"reserved_cpu":7`) {
-			t.Errorf("unsafe or incomplete projection %s: %s (%v)", query, row, err)
-		}
-	}
-}
-
 func TestLegacyCounterAndIdentityDelivery(t *testing.T) {
 	s := fixtureStore(t)
 	ctx := context.Background()

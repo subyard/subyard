@@ -34,6 +34,7 @@ type Record struct {
 
 	authenticated bool
 	redactions    int64
+	capturePolicy string
 }
 
 func (r *Record) UnmarshalJSON(data []byte) error {
@@ -75,6 +76,7 @@ type Envelope struct {
 	// PolicyVersion is the source capture claim; imports independently record
 	// the trusted local policy applied before the imported bytes are stored.
 	ImportPolicyVersion string          `json:"import_policy_version,omitempty"`
+	StoreProof          string          `json:"store_proof,omitempty"`
 	Redactions          int64           `json:"redactions"`
 	Body                json.RawMessage `json:"body,omitempty"`
 	Protobuf            []byte          `json:"protobuf,omitempty"`
@@ -249,8 +251,12 @@ func (id identity) body(input map[string]any) (map[string]any, int64) {
 		if ok {
 			out[name] = clean
 		}
-		if list, isList := value.([]any); ok && isList {
-			removed += int64(len(list) - len(clean.([]any)))
+		if list, isList := value.([]any); isList {
+			accepted, _ := clean.([]any)
+			removed += int64(len(list) - len(accepted))
+			if !ok && len(list) == 0 {
+				removed++
+			}
 		} else if !ok {
 			removed++
 		}
@@ -320,13 +326,19 @@ func (key identityKey) decodeRecord(data []byte) (Record, error) {
 		return Record{}, err
 	}
 	var count struct {
-		Redactions int64 `json:"redactions"`
+		Redactions    int64  `json:"redactions"`
+		PolicyVersion string `json:"policy_version"`
 	}
 	if err = json.Unmarshal(signed.Record, &count); err != nil {
 		return Record{}, err
 	}
 	r.authenticated = true
 	r.redactions = max(0, min(count.Redactions, 1<<31))
+	// Older signed outbox entries did not identify the producer's allowlist.
+	r.capturePolicy = PolicyVersion
+	if capturePolicyVersion.MatchString(count.PolicyVersion) {
+		r.capturePolicy = count.PolicyVersion
+	}
 	return r, nil
 }
 

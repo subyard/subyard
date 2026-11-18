@@ -161,12 +161,14 @@ held in an indefinite WAL reader transaction.
 
 The first schema 4 writer open moves a schema 1–3 database to
 `/var/lib/subyard/telemetry/archive/telemetry.sqlite` and initializes an empty
-active database at `/var/lib/subyard/telemetry/telemetry.sqlite`. For a
-standalone store the paths are relative to its `--data-dir`. The archive keeps
+active database at `/var/lib/subyard/telemetry/telemetry.sqlite`. If another
+legacy database is restored at the active path, the writer saves it in a new
+directory such as `archive-2` and starts another empty active store. For a
+standalone store the paths are relative to its `--data-dir`. Each archive keeps
 all telemetry that was still retained at upgrade time, including run and session
 metadata, resource measurements, and native OTLP signals. It keeps the old
-schema, identifiers, capture rules and sequence numbers. The new writer never
-prunes the archive.
+schema, identifiers, capture rules and sequence numbers. Archives are retained
+indefinitely.
 
 ```sh
 "$collector" stats --data-dir "$data/archive"
@@ -357,11 +359,13 @@ OTLP integer value, including the decimal representation used by OTLP JSON.
 
 An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with
 `attributes`, `span_names` and `event_names` allowlists that narrow the built-in
-vocabularies. On startup, `serve` publishes its selected session allowlist in
-the data store. Local producers apply it before writing session metadata to the
-outbox, including while the collector is stopped. Producers use the default
-policy until the first collector startup. Capture policy metadata and the
-redaction count accompany retained records.
+vocabularies. On startup, `serve` publishes its selected session allowlist and
+policy fingerprint together. Local producers apply the allowlist before writing
+session metadata to the outbox, including while the collector is stopped.
+Producers use the default allowlist until the first collector startup and sign
+the capture policy claim and redaction count with each session-bearing record.
+The collector keeps that claim if its policy changes before drain.
+Older signed records without a fingerprint retain the capture schema version.
 
 Identifiers from callers are keyed digests, including IDs with the same shape as
 generated IDs, session attributes and trace or span IDs. The local producer outbox
@@ -372,11 +376,17 @@ key, and local producers refuse to spool into it. Read-only SQL and export work
 without the key. `show-run` accepts the stored run reference and can resolve
 a launcher run ID in the active store when its key is available.
 
+Profile upgrades preserve queued records and close the outbox to producers
+still running pre-upgrade code. Workloads continue, though an old launcher may
+lose its exit record. The updated run manager continues final resource sampling.
+
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, share 16 pre-decode admissions between OTLP and
 private record ingress, and limit queued sanitized data to 16 MiB/128 requests,
-database/WAL capacity to 1 GiB and sample/OTLP retention to seven days. Lifecycle,
-session and attribution records remain under the hard disk bound so an old run's
+active database, WAL and shared-memory capacity to 1 GiB and sample/OTLP
+retention to seven days. Each legacy archive uses additional disk space outside
+that ceiling. Lifecycle, session and attribution records remain under the hard
+disk bound so an old run's
 outstanding resource responsibility does not disappear during owner downtime.
 The producer outbox is
 also bounded to 4096 files/64 MiB. Run snapshots have separate limits of 4096
@@ -417,8 +427,11 @@ Continue export with `--after` equal to the last exported `sequence`; each comma
 is a bounded snapshot, not an endless transaction. Continue a pre-upgrade export
 against the archive and start a new cursor at zero for the active store. Replay
 uses the source pair `(origin_id,event_id)` as input to the receiving
-store's keyed mapping. The destination preserves relationships within the imported
-history. Replaying the same input adds no projections. A matching identity with
+store's keyed mapping. A schema 4 export made with the source key available
+carries a proof the originating store can verify. Verified same-store replay
+reuses stored identifiers so a restored sample can rejoin its retained object
+and run. The destination preserves relationships within the imported history.
+Replaying the same input adds no projections. A matching identity with
 different data is an error. Two records with different identities remain separate
 even when their payloads match. Replay applies the destination's `--policy-file`
 or the default policy. Each replay row is subject to the queue and disk limits,

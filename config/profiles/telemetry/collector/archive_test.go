@@ -130,6 +130,61 @@ os._exit(0)
 	}
 }
 
+func TestArchiveRestoredLegacyStoreAlongsideExistingArchive(t *testing.T) {
+	dir := testkit.TempDir(t)
+	ctx := context.Background()
+	open := func() *Store {
+		t.Helper()
+		s, err := Open(dir, DefaultLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	legacy := open()
+	for _, event := range []string{"first-history", "second-history"} {
+		seedRetained(t, legacy, Envelope{OriginID: "legacy", EventID: event, SourceID: "legacy",
+			SourceVersion: "1", Kind: "gap", Encoding: "json", Body: json.RawMessage(`{}`)})
+		if _, err := legacy.db.Exec("PRAGMA user_version=2"); err != nil {
+			t.Fatal(err)
+		}
+		if err := legacy.Close(); err != nil {
+			t.Fatal(err)
+		}
+		legacy = open()
+		stats, err := Stats(ctx, legacy.db)
+		if err != nil || stats["records"] != int64(0) {
+			t.Fatalf("expected an empty active store after %s: %v (%v)", event, stats, err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Reopening also completes a seal interrupted on a numbered archive.
+	if err := os.Chmod(filepath.Join(dir, "archive-2", databaseName), 0600); err != nil {
+		t.Fatal(err)
+	}
+	active := open()
+	defer active.Close()
+	for archive, want := range map[string]string{"archive": "first-history", "archive-2": "second-history"} {
+		path := filepath.Join(dir, archive)
+		info, err := os.Stat(filepath.Join(path, databaseName))
+		if err != nil || info.Mode().Perm() != 0400 {
+			t.Fatalf("%s was not sealed: %v", archive, err)
+		}
+		db, err := OpenReadOnly(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event string
+		err = db.QueryRow("SELECT event_id FROM records").Scan(&event)
+		db.Close()
+		if err != nil || event != want {
+			t.Fatalf("%s has event %q, want %q (%v)", archive, event, want, err)
+		}
+	}
+}
+
 func TestEstablishedStoreRefusesMissingAndMismatchedKeys(t *testing.T) {
 	for _, missing := range []bool{true, false} {
 		t.Run(fmt.Sprint(missing), func(t *testing.T) {

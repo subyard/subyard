@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Install only the marked local collector and native exporter ownership."""
+import fcntl
 import hashlib
 import json
 import os
@@ -12,11 +13,13 @@ import secrets
 import stat
 import subprocess
 import sys
+import time
 
 import native
 import tomli_w
 
 MARKER = b'subyard-telemetry-v1\n'
+PUBLISHING = b'telemetry-publication-v1\n'
 COLLECTOR = 'subyard-telemetry.service'
 MANAGER = 'subyard-telemetry-runs.service'
 BINARY_LIMIT = 64*1024*1024
@@ -224,8 +227,10 @@ class Runtime:
             legacy_command = command.removeprefix('/usr/bin/setpriv --no-new-privs ')
             start = fields.get('ExecStart', '')
             if start.startswith('{ path='+legacy_command.split()[0]+' ; argv[]='+legacy_command+' ; ignore_errors=no ; '):
-                saved = json.loads(native.snapshot(self.control/'assets.json') or b'{}')
-                if self.asset_snapshot(self.units/unit) == legacy and saved.get(str(self.units/unit)) == hashlib.sha256(legacy).hexdigest():
+                path = self.units/unit
+                content = self.asset_snapshot(path)
+                if content == self.assets[path][0] or (content == legacy and
+                        self.saved_inventory().get(str(path)) == hashlib.sha256(legacy).hexdigest()):
                     command = legacy_command  # Known pinned previous startup, stale until migrated.
             valid_start = start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
             nnp = fields.get('NoNewPrivileges')
@@ -287,8 +292,9 @@ class Runtime:
                  for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
         saved = self.saved_inventory()
+        publishing = native.snapshot(self.control/'publishing') is not None
         inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
-        ready = ready and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
+        ready = ready and not publishing and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
         enabled = states[COLLECTOR].get('UnitFileState') == 'enabled'
@@ -304,12 +310,14 @@ class Runtime:
             return self.pending_agent_config(native_diagnostics)
         converged = converged and native_current is True
         skill_current = not self.selected or self.skill_delivery('check-registered')
-        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'states': states, 'native_current': converged, 'skill_current': skill_current}, sort_keys=True).encode()).hexdigest()
+        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'publishing': publishing, 'states': states, 'native_current': converged, 'skill_current': skill_current}, sort_keys=True).encode()).hexdigest()
         converged = converged and skill_current
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
         if not converged:
             diagnostics = []
+            if publishing:
+                diagnostics.append({'parameter': 'telemetry.publication', 'installed': 'pending', 'desired': 'complete'})
             if not inventory_current:
                 diagnostics.append({'parameter': 'telemetry.inventory', 'installed': 'changed', 'desired': 'current'})
             for path, (content, mode) in self.assets.items():
@@ -343,6 +351,59 @@ class Runtime:
             value['retained'] = {str(path): mode for path, mode in self.retained.items()}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
+    def fence_legacy_producers(self):
+        # Create and change producer-owned paths with the producer's privileges.
+        if os.getuid() == self.uid:
+            self.fence_outbox()
+            return
+        child = os.fork()
+        if child == 0:
+            code = 1
+            try:
+                os.setgroups([])
+                os.setgid(self.gid)
+                os.setuid(self.uid)
+                os.umask(0o077)
+                self.fence_outbox()
+                code = 0
+            finally:
+                os._exit(code)
+        if os.waitpid(child, 0)[1] != 0:
+            raise ValueError('could not fence legacy producer outbox')
+
+    def fence_outbox(self):
+        # Old emitters require exactly 0700 both on admission and before
+        # publication. Change the mode under their existing publication lock.
+        path = self.data/'outbox'
+        path.mkdir(mode=0o1700, exist_ok=True)
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(directory)
+            mode = stat.S_IMODE(info.st_mode)
+            if info.st_uid != self.uid or mode not in (0o700, 0o1700):
+                raise ValueError('foreign producer outbox')
+            if mode == 0o1700:
+                return
+            lock = os.open('.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+            with os.fdopen(lock, 'rb') as handle:
+                info = os.fstat(handle.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o600):
+                    raise ValueError('foreign producer outbox lock')
+                deadline = time.monotonic()+2
+                while True:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.01)
+                os.fchmod(directory, 0o1700)
+                os.fsync(directory)
+        finally:
+            os.close(directory)
+
     def apply(self):
         installed = self.owned()
         if (self.selected or installed) and native.agent_config_diagnostics(self.home, self.agents, getattr(self, 'managed_agents', ())):
@@ -356,7 +417,6 @@ class Runtime:
             self.control.mkdir(mode=0o700, parents=True)
             self.library.mkdir(mode=0o755, parents=True)
             native.publish(self.control/'marker', MARKER, None)
-            native.publish(self.control/'assets.json', self.inventory(), None)
         if self.data.is_symlink():
             raise ValueError('unsafe data directory')
         if self.data.exists() and (self.data.stat().st_uid != self.uid or stat.S_IMODE(self.data.stat().st_mode) != 0o700):
@@ -367,37 +427,44 @@ class Runtime:
         if not (self.data/'auth.token').exists():
             native.publish(self.data/'auth.token', (secrets.token_hex(32)+'\n').encode(), None, self.uid, self.gid)
         token = self.token()
-        saved = json.loads((self.control/'assets.json').read_text())
-        restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
-                   and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
-        service_assets = {self.library/'subyard-telemetry': COLLECTOR, self.library/'records.py': MANAGER}
-        replace_active = []
+        saved = self.saved_inventory()
+        changed = False
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
-            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
+            candidate = self.assets[path][0] if path in self.assets else None
+            if before is not None and before != candidate and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
                 raise ValueError('managed asset changed')
-            if path in (self.units/COLLECTOR, self.units/MANAGER) and before != self.assets[path][0] and before is not None:
-                unit = path.name
-                if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
-                    restart.append(unit)
-            if self.selected and path in service_assets and before != self.assets[path][0]:
-                unit = service_assets[path]
-                if before_states[unit].get('ActiveState') == 'active':
-                    replace_active.append(unit)
+            changed |= path in self.assets and before != candidate
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
-        # Stop before replacing loaded code. A retry after publication starts the
-        # inactive services even when the installed files already match.
-        if replace_active:
-            systemctl('stop', *replace_active)
+        publication = self.control/'publishing'
+        receipt = native.snapshot(publication)
+        if receipt is None:
+            native.publish(publication, PUBLISHING, None)
+        elif receipt != PUBLISHING:
+            raise ValueError('invalid telemetry publication receipt')
+        self.fence_legacy_producers()
+        # Quiesce before replacing any shared code. Starting the desired
+        # services is independent of how much of the candidate was published.
+        stop = [unit for unit, fields in before_states.items()
+                if fields.get('LoadState') == 'loaded' and
+                (changed or receipt is not None or not self.running_no_new_privs(fields))]
+        if stop:
+            systemctl('stop', *stop)
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)
             if before != content:
-                native.publish(path, content, before, max_bytes=self.asset_limit(path))
-            os.chmod(path, mode)
+                if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
+                    raise ValueError('managed asset changed')
+                native.publish(path, content, before, max_bytes=self.asset_limit(path), mode=mode)
+            elif stat.S_IMODE(path.stat().st_mode) != mode:
+                os.chmod(path, mode)
         for path, mode in self.retained.items():
             if self.asset_snapshot(path) is not None:
                 os.chmod(path, mode)
-        native.publish(self.control/'assets.json', self.inventory(), native.snapshot(self.control/'assets.json'))
+        inventory_path = self.control/'assets.json'
+        inventory, previous = self.inventory(), native.snapshot(inventory_path)
+        if inventory != previous:
+            native.publish(inventory_path, inventory, previous)
         systemctl('daemon-reload')
         if self.selected:
             drain = self.data/'drain.json'
@@ -408,10 +475,9 @@ class Runtime:
             systemctl('disable', '--now', COLLECTOR)
             systemctl('disable', MANAGER)
             native.publish(self.data/'drain.json', b'{"drain":true}\n', native.snapshot(self.data/'drain.json'), self.uid, self.gid)
-        restart = [unit for unit in restart if unit not in replace_active]
-        if restart:
-            systemctl('restart', *restart)
+            systemctl('start', MANAGER)
         self.skill_delivery('apply' if self.selected else 'remove')
+        publication.unlink()
 
 
 def main():
