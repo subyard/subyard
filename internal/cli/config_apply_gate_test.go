@@ -383,6 +383,7 @@ func newConfigApplyRepairFixture(t *testing.T, named bool) configApplyRepairFixt
 	writeCLIFile(t, source, "allow_rule()\n", 0o600)
 	writeCLIFile(t, filepath.Join(root, "config", "agents.env"), strings.Join([]string{
 		"CODING_TOOL_INTEGRATIONS=codex",
+		"CODING_TOOL_GIT_APPROVAL=off",
 		"AGENT_codex_RULES=" + source,
 		"AGENT_codex_RULES_DEST=.codex/rules/repo.rules",
 	}, "\n")+"\n", 0o600)

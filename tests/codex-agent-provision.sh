@@ -198,6 +198,7 @@ set_latest() { # <version> <amd64-sha> <arm64-sha>
     "$2" "$3" > "$releases/rust-v$1/codex-package_SHA256SUMS"
 }
 
+export CODING_TOOL_GIT_APPROVAL=prompt
 run_hook() { # <arch> <root> [environment assignments...]
   local arch="$1" install_root="$2"
   shift 2
@@ -286,7 +287,7 @@ run_hook amd64 "$root" >/dev/null
 [ "$(fetch_count)" -eq 8 ] || fail "older release metadata downloaded an artifact"
 [ "$("$link" --version)" = 'codex-cli 0.148.0' ] || fail "older release metadata downgraded a working runtime"
 
-# The approval mode converges on -> off -> on; other requirements stay mandatory.
+# Apply off to a previously managed prompt policy, then restore prompt.
 cp "$check" "$tmp/prompt-check"
 run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=off >/dev/null
 python3 - "$requirements" <<'PY'

@@ -264,10 +264,10 @@ native command link. See [Claude configuration and adoption](configuration.md#co
 
 Orca's stock Claude launch default is `--dangerously-skip-permissions`. In a native
 Claude chat launched with that argument, Orca answers every permission prompt itself,
-including the yard's commit and push approvals. Subyard therefore replaces that stock
+including the yard's commit and push approvals when `CODING_TOOL_GIT_APPROVAL=prompt`. Subyard therefore replaces that stock
 default with an explicit empty argument setting, the same repair it applies to Codex:
 Claude then reads the yard's settings, and native chat shows each approval to the user.
-Claude terminals keep the managed prompts with or without the argument. Choosing **Full
+In `prompt` mode, Claude terminals keep the managed prompts with or without the argument. Choosing **Full
 access** for an Orca chat, sending the argument from a paired Desktop or configuring it in
 custom Claude arguments is an explicit opt-out: Orca then approves commit and push in that
 chat without asking.
@@ -346,7 +346,8 @@ Subyard replaces Orca's stock Codex YOLO launch default with an explicit empty
 argument setting. With the default account, Codex then reads the yard's
 `~/.codex/config.toml`, including
 its approval policy and reviewer. The shipped configuration allows local work
-inside the yard while keeping user approval for matching commit/push rules.
+inside the yard, including commits and pushes. Set `CODING_TOOL_GIT_APPROVAL=prompt`
+to request approval for matching Git commands.
 Orca may label this launch mode **Manual**; that label does not mean a read-only
 Codex sandbox. On Linux, Orca also passes `-c disable_paste_burst=true` to the Codex
 launches it builds on the server, so that prompts typed from another client are sent;
@@ -364,8 +365,8 @@ self-updating daemon; `codex --no-daemon` runs the managed release. See
 still display its local YOLO preference; it does not
 describe the effective server launch. Custom shells and explicit executable
 paths bypass this Bash integration, but the native Codex CLI still loads the yard's
-`/etc/codex/requirements.toml`. These managed requirements preserve user approval and
-commit/push rules across projects, profiles and account-specific `CODEX_HOME` values.
+`/etc/codex/requirements.toml`. In `prompt` mode, the managed requirements enforce
+commit and push approval across projects, profiles and account-specific `CODEX_HOME` values.
 See [Codex permissions across projects](configuration.md#codex-permissions-across-projects).
 
 Codex terminals use Orca's per-terminal server isolation by default when the CLI

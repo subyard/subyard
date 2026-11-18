@@ -49,6 +49,37 @@ assert_managed_resolution() { # phase
 
 stage 'checking fresh yard managed binaries and native update locks'
 assert_managed_resolution fresh
+stage 'checking release readiness with the installed prompt packages and the new default'
+inventory=/var/lib/subyard/integrations/inventory.json
+package_records() {
+  guest_root cat "$inventory" | jq -ce '
+    [.entries[] | select(.kind == "package" and (.id == "claude" or .id == "codex"))]
+    | sort_by(.id) | select(map(.id) == ["claude", "codex"])'
+}
+prompt_packages="$(package_records)" || die 'prompt package records were not installed'
+guest_root cat "$inventory" | jq -e '.applied_settings | type == "object" and (has("CODING_TOOL_GIT_APPROVAL") | not)' >/dev/null \
+  || die 'prompt inventory does not use the historical encoding'
+sed -i '/^CODING_TOOL_GIT_APPROVAL=prompt$/d' "$SUBYARD_CONFIG_HOME/config.env"
+yard migrate --check --json >"$STATE/git-approval-upgrade-readiness.json" \
+  || die 'installed prompt packages blocked release readiness'
+jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$STATE/git-approval-upgrade-readiness.json" >/dev/null \
+  || die 'release readiness did not report ready before ordinary init'
+[ "$(package_records)" = "$prompt_packages" ] || die 'readiness changed the installed packages'
+yard init --yes || die 'ordinary init did not apply the new default'
+guest_root jq -e 'has("permissions") | not' "$claude_policy" >/dev/null \
+  || die 'ordinary init kept Claude Git prompts'
+guest_root grep -Fxq 'git_approval=off' /usr/local/bin/codex-policy-check \
+  || die 'ordinary init kept Codex Git prompts'
+guest_root cat "$inventory" | jq -e '.applied_settings.CODING_TOOL_GIT_APPROVAL == "off"' >/dev/null \
+  || die 'ordinary init did not record the new mode'
+off_packages="$(package_records)"
+jq -en --argjson prompt "$prompt_packages" --argjson off "$off_packages" \
+  'all(range(2); $prompt[.].digest != $off[.].digest)' >/dev/null \
+  || die 'ordinary init did not update both package records'
+printf 'CODING_TOOL_GIT_APPROVAL=prompt\n' >> "$SUBYARD_CONFIG_HOME/config.env"
+yard init --yes || die 'ordinary init did not restore prompt mode'
+[ "$(package_records)" = "$prompt_packages" ] || die 'prompt package identities did not return'
+printf 'ok: release ready with installed prompt packages; ordinary init applied off and restored prompt\n'
 guest_root jq -e '.env == {DISABLE_UPDATES: "1"}' "$claude_policy" >/dev/null \
   || die 'managed Claude update lock is missing'
 guest_root grep -Fxq 'check_for_update_on_startup = false' /etc/codex/requirements.toml \

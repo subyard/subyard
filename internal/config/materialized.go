@@ -74,7 +74,7 @@ func MaterializedAssets(values map[string]string, developer string, definitions 
 			if !present {
 				source = artifact.Source
 			}
-			if source == artifact.Source && artifact.GitApprovalOffSource != "" && values["CODING_TOOL_GIT_APPROVAL"] == "off" {
+			if source == artifact.Source && artifact.GitApprovalOffSource != "" && GitApprovalOff(values["CODING_TOOL_GIT_APPROVAL"]) {
 				source = artifact.GitApprovalOffSource
 			}
 			destination, present := values[setting+"_DEST"]
@@ -175,4 +175,9 @@ func ownedDestinationFormat(destination string) string {
 		return "toml"
 	}
 	return ""
+}
+
+// GitApprovalOff resolves the mode before any applied snapshot projection.
+func GitApprovalOff(value string) bool {
+	return value == "" || value == "off"
 }

@@ -718,22 +718,23 @@ provision prints none.
 
 ### Commit and push approval prompts
 
-`CODING_TOOL_GIT_APPROVAL` is a syncable setting with the values `prompt` (default) and `off`.
+`CODING_TOOL_GIT_APPROVAL` is a syncable setting with the values `off` (default) and `prompt`.
 It governs Claude, Codex and OpenCode. Provisioning writes the Git prompt rules and hook
 registrations for Claude and Codex to their root-owned managed drop-in and managed requirements,
 respectively. Their home defaults carry no Git rules. OpenCode uses the shipped
-`~/.config/opencode/opencode.jsonc` home template. To turn the prompts off for one yard:
+`~/.config/opencode/opencode.jsonc` home template. To enable prompts for one yard:
 
 ```sh
-yard -Y <yard> config set CODING_TOOL_GIT_APPROVAL off --scope yard
+yard -Y <yard> config set CODING_TOOL_GIT_APPROVAL prompt --scope yard
 yard -Y <yard> init
 ```
 
-Set `prompt` the same way to restore them; shared or host scope applies the choice to more yards.
+Shared or host scope applies the choice to more yards. After an upgrade, the next
+`yard init` removes the managed prompts on yards without an explicit `prompt` setting.
 Until `yard init` applies a change, it is listed as a pending init-owned setting.
 `off` removes the Git prompt rules and disables the Claude and Codex Git hook. The Claude update lock and the Codex
 approval policy, reviewer and `rm` rule stay. `claude-policy-check`, `codex-policy-check` and `yard status` verify the installed
-mode, so `off` is expected state, not drift. Existing sessions keep their loaded policy until restarted.
+mode and accept either correctly installed policy. Existing sessions keep their loaded policy until restarted.
 With prompts off, the remaining boundary for pushed changes is the remote's branch protection.
 
 In `prompt` mode, Claude and Codex use a managed Bash `PreToolUse` hook that rejects alternate literal spellings of
@@ -761,7 +762,9 @@ Limits:
 - A release without this setting refuses it wherever it is set, and refuses an installed snapshot
   that records `off`. Before switching to such a release, run
   `yard -Y <yard> config unset CODING_TOOL_GIT_APPROVAL --scope <scope>` at every scope that sets it
-  (add `--git` for a synced assignment), then `yard init`.
+  (add `--git` for a synced assignment). Apply `prompt` with a command-scoped override
+  for the final init (`CODING_TOOL_GIT_APPROVAL=prompt yard -Y <yard> init`) to clear the
+  recorded `off` without leaving a persistent assignment.
 - Updating an installation older than v0.14.0 (Codex) or v0.23.0 (Claude): agent sessions started
   after the home defaults are refreshed and before that agent's provision hook writes the managed
   policy get no commit/push prompt. Hooks run in the yard's agent order and stop at the first
@@ -770,7 +773,8 @@ Limits:
 ### Codex permissions across projects
 
 The default yard configuration permits local edits, builds, tests and network access without
-approval. In `prompt` mode, managed rules classify canonical direct `git commit` (including
+approval, including ordinary Git commits and pushes. In `prompt` mode, managed rules classify
+canonical direct `git commit` (including
 `--amend`) and `git push` as requiring user approval across projects. Repeated single-use approval also depends
 on the client's response behavior:
 
@@ -798,7 +802,8 @@ filesystem access and mandatory command approval are separate settings.
 The home rules explicitly allow `rm`, including recursive cleanup of build fixtures. Without a
 matching allow rule, Codex can still request approval for removal commands under `on-request`,
 even with `danger-full-access`. The allow rule relies on the yard as the isolation boundary;
-it does not limit removal to the current project. Managed commit/push prompts remain in force.
+it does not limit removal to the current project. In `prompt` mode, the managed Git rules apply
+independently.
 
 After updating Subyard, run `yard init` to reconcile existing yards, then start new Codex sessions.
 Existing sessions must be restarted to load the policy. `codex-policy-check` verifies the contents,
@@ -851,8 +856,8 @@ sessions. Installation checks do not certify an interactive approval UI:
 
 | Backend | Shipped yard setting | Limit of the evidence |
 | --- | --- | --- |
-| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow and, in `prompt` mode, native managed commit/push ask rules. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. Those checks also cover `auto` with a synthetic classifier and the installed managed binary; they use the client's own classifier requests, so server-side auto-mode review is not covered. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. The Orca `managed-agents` lane covers stock Orca terminal arguments and Orca's built-in Claude chat with a synthetic model. Other IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
-| OpenCode V1 | Global allow, with commit/push ask patterns under `permission.bash` in `prompt` mode. | **Unsupported for the strict single-use contract.** Native `once` prompts again; `always` permits a later matching command without another prompt. Project/agent/UI overrides can weaken the defaults. Direct launch remains available. |
+| Claude Code | `permissions.defaultMode = "bypassPermissions"`, with Bash allow. Native managed commit/push ask rules are enabled only in `prompt` mode. | Native SDK checks cover bypass/default, repeated Git approval, session allow updates, local/project allows and preservation of user/project denies. Those checks also cover `auto` with a synthetic classifier and the installed managed binary; they use the client's own classifier requests, so server-side auto-mode review is not covered. A native terminal fixture with explicit ask settings exposes only Yes/No and repeats the prompt. The Orca `managed-agents` lane covers stock Orca terminal arguments and Orca's built-in Claude chat with a synthetic model. Other IDE clients remain unverified; Subyard publishes no single-use guarantee for them. |
+| OpenCode V1 | Global allow by default. In `prompt` mode, `permission.bash` adds commit/push ask patterns. | **Unsupported for the strict single-use contract.** Native `once` prompts again; `always` permits a later matching command without another prompt. Project/agent/UI overrides can weaken the defaults. Direct launch remains available. |
 | pi | `defaultProjectTrust = "always"`. | Project trust is not a per-command approval gate; Subyard supplies no verified outer gate. |
 
 `bypassPermissions` is the standard Claude mode in a yard, with `autoCompactEnabled: true`. Claude Code can offer on first launch to make

@@ -261,6 +261,28 @@ func (runtime Runtime) AppliedIntegrationConfiguration(ctx context.Context) (App
 	return AppliedIntegrationConfiguration{Selected: observed.Selected, Settings: settings, Installed: observed.Installed, Identity: identity, Diagnostics: observed.Diagnostics}, nil
 }
 
+// withAppliedIntegrationSettings builds the runtime view of installed inputs.
+func (runtime Runtime) withAppliedIntegrationSettings(settings, identity map[string]string) (Runtime, error) {
+	catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
+	if err != nil {
+		return Runtime{}, err
+	}
+	environment := catalog.WithAppliedIntegrationInitSettings(runtimeEnvironment(runtime.Environment), settings)
+	if user, ok := identity["DEV_USER"]; ok {
+		uid, err := strconv.Atoi(identity["DEV_UID"])
+		if err != nil {
+			return Runtime{}, errors.New("invalid applied developer UID")
+		}
+		runtime.Yard.DevUser, runtime.Yard.DevUID = user, uid
+		maps.Copy(environment, identity)
+	}
+	runtime.Environment = make([]string, 0, len(environment))
+	for name, value := range environment {
+		runtime.Environment = append(runtime.Environment, name+"="+value)
+	}
+	return runtime, nil
+}
+
 // CheckAppliedGuestIdentity refuses identity authoring when no independent owner
 // can keep the installed consumers observable until ordinary init applies it.
 func (runtime Runtime) CheckAppliedGuestIdentity(ctx context.Context) error {
@@ -530,9 +552,9 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 				return nil, err
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
-			// Only off adds a package digest input, preserving the default identity.
+			// Preserve both installed mode identities across the default change.
 			// Home template changes are also tracked by their file artifact digest.
-			if runtime.environmentValue("CODING_TOOL_GIT_APPROVAL") == "off" {
+			if config.GitApprovalOff(runtime.environmentValue("CODING_TOOL_GIT_APPROVAL")) {
 				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
 			}
 		}
@@ -1600,6 +1622,11 @@ func (runtime Runtime) PrepareAppliedIntegrationSettings(ctx context.Context) (p
 	}
 	if !configuration.Installed || configuration.Settings != nil {
 		return nil, nil
+	}
+	// Retain the installed projection for revalidation and publication as well.
+	runtime, err = runtime.withAppliedIntegrationSettings(configuration.Settings, configuration.Identity)
+	if err != nil {
+		return nil, err
 	}
 	plan, observed, err := runtime.observeIntegrations(ctx)
 	if err != nil {
