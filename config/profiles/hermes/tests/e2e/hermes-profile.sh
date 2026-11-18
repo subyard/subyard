@@ -250,26 +250,26 @@ fi
 printf '  [ ok ] generic prerequisites, software independence and guest isolation verified\n'
 
 expanded="$(incus config show "$instance" --project "$project" --expanded)"
-printf '%s\n' "$expanded" | grep -Fq 'security.privileged: "true"' \
+grep -Fq 'security.privileged: "true"' <<<"$expanded" \
   && die "Hermes yard is privileged"
-printf '%s\n' "$expanded" | grep -Fq 'security.nesting: "true"' \
+grep -Fq 'security.nesting: "true"' <<<"$expanded" \
   || die "Hermes yard is missing core container nesting"
-printf '%s\n' "$expanded" | grep -Fq 'source: host-fixture' \
+grep -Fq 'source: host-fixture' <<<"$expanded" \
   && die "host-level mount leaked into the Hermes yard"
-printf '%s\n' "$expanded" | grep -Fq '/mnt/host/agent-sessions' \
+grep -Fq '/mnt/host/agent-sessions' <<<"$expanded" \
   && die "host agent state leaked into the Hermes yard"
 [ "$(setting "$YARD" NESTED_E2E_VMS)" = 0 ] \
   || die "Hermes yard inherited the nested-VM backend"
 project_state="$(incus project show "$project")"
-printf '%s\n' "$project_state" | grep -Fq 'restricted.containers.interception: block' \
+grep -Fq 'restricted.containers.interception: block' <<<"$project_state" \
   || die "Hermes project allows syscall interception"
 local_config="$(incus config show "$instance" --project "$project")"
-if printf '%s\n' "$local_config" | grep -Fq 'security.syscalls.intercept.bpf'; then
+if grep -Fq 'security.syscalls.intercept.bpf' <<<"$local_config"; then
   die "Hermes yard retained device-cgroup BPF interception"
 fi
 local_devices="$(incus config device list "$instance" --project "$project")"
 for nested_device in e2e-vsock e2e-vhost-vsock e2e-tun; do
-  printf '%s\n' "$local_devices" | grep -Fxq "$nested_device" \
+  grep -Fxq "$nested_device" <<<"$local_devices" \
     && die "Hermes yard retained nested-VM device $nested_device"
 done
 yard "$YARD" security --require-live --quiet \
@@ -363,11 +363,11 @@ rm -f -- "$STATE/faultbin/timeout" "$STATE/faultbin/sleep"
 PATH="$STATE/fakebin:$PATH" yard "$YARD" dashboard up --yes
 
 device_state="$(incus config device show "$instance" --project "$project")"
-printf '%s\n' "$device_state" | grep -Fq "listen: tcp:$TAILSCALE_IP:$dashboard_port" \
+grep -Fq "listen: tcp:$TAILSCALE_IP:$dashboard_port" <<<"$device_state" \
   || die "browser proxy is not bound to the selected owner address"
-printf '%s\n' "$device_state" | grep -Fq 'connect: tcp:127.0.0.1:9119' \
+grep -Fq 'connect: tcp:127.0.0.1:9119' <<<"$device_state" \
   || die "browser proxy does not target guest loopback"
-printf '%s\n' "$device_state" | grep -Fq 'bind: host' \
+grep -Fq 'bind: host' <<<"$device_state" \
   || die "browser proxy is not host-bound"
 curl --noproxy '*' -fsS --max-time 5 "http://$TAILSCALE_IP:$dashboard_port/" \
   | grep -Fq 'Directory listing'
@@ -380,8 +380,7 @@ printf '  [ .. ] proving route ownership survives mutable setting changes\n'
 yard "$YARD" config set HERMES_DASHBOARD_HOST_PORT "$replacement_dashboard_port" --scope yard --yes
 PATH="$STATE/fakebin:$PATH" yard "$YARD" dashboard up --yes
 device_state="$(incus config device show "$instance" --project "$project")"
-printf '%s\n' "$device_state" \
-  | grep -Fq "listen: tcp:$TAILSCALE_IP:$replacement_dashboard_port" \
+grep -Fq "listen: tcp:$TAILSCALE_IP:$replacement_dashboard_port" <<<"$device_state" \
   || die "owned browser proxy was not replaced after its port setting changed"
 curl --noproxy '*' -fsS --max-time 5 \
   "http://$TAILSCALE_IP:$replacement_dashboard_port/" | grep -Fq 'Directory listing'

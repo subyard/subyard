@@ -237,13 +237,13 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 project_exists && cleanup
 if cache_info="$(real_incus image info "$CONTAINER_CACHE_ALIAS" --project default 2>/dev/null)"; then
-  printf '%s\n' "$cache_info" | grep -Fqx 'Type: container' \
+  grep -Fqx 'Type: container' <<<"$cache_info" \
     || die "provisioned image alias $CONTAINER_CACHE_ALIAS is not a container image"
   CONTAINER_IMAGE="$CONTAINER_CACHE_ALIAS"
   printf '  [ ok ] using provisioned real-Incus container image %s\n' "$CONTAINER_CACHE_ALIAS"
 fi
 if cache_info="$(real_incus image info "$VM_CACHE_ALIAS" --project default 2>/dev/null)"; then
-  printf '%s\n' "$cache_info" | grep -Fqx 'Type: virtual-machine' \
+  grep -Fqx 'Type: virtual-machine' <<<"$cache_info" \
     || die "provisioned image alias $VM_CACHE_ALIAS is not a VM image"
   VM_IMAGE="$VM_CACHE_ALIAS"
   printf '  [ ok ] using provisioned real-Incus VM image %s\n' "$VM_CACHE_ALIAS"

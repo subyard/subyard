@@ -673,10 +673,10 @@ fi
 [ "$(hermes_setting DEV_SUDO)" = 0 ] || die 'Hermes preset enabled DEV_SUDO'
 [ "$(hermes_setting CODING_TOOL_INTEGRATIONS)" = '<unset>' ] \
   || die 'Hermes preset selected broad coding-tool integrations'
-hermes_profiles="$(hermes_setting ENVIRONMENT_PROFILES)"
-printf '%s\n' "$hermes_profiles" | tr ' ' '\n' | grep -Fxq hermes \
+hermes_profiles="$(hermes_setting ENVIRONMENT_PROFILES | tr ' ' '\n')"
+grep -Fxq hermes <<<"$hermes_profiles" \
   || die 'Hermes preset omitted hermes'
-printf '%s\n' "$hermes_profiles" | tr ' ' '\n' | grep -Fxq github \
+grep -Fxq github <<<"$hermes_profiles" \
   || die 'Hermes preset omitted github'
 incus project set "$HERMES_PROJECT" user.subyard.e2e="$MARKER"
 incus config set "$HERMES_INSTANCE" user.subyard.e2e="$MARKER" --project "$HERMES_PROJECT"

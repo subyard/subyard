@@ -156,7 +156,7 @@ owner_cleanup() {
   if [ "$OWNER_BASELINE_CAPTURED" = 1 ]; then
     while IFS= read -r fingerprint; do
       [ -n "$fingerprint" ] || continue
-      printf '%s\n' "$OWNER_BASELINE_IMAGES" | grep -Fxq "$fingerprint" \
+      grep -Fxq "$fingerprint" <<<"$OWNER_BASELINE_IMAGES" \
         || incus image delete "$fingerprint" --project default >/dev/null 2>&1 \
         || cleanup_failed=1
     done < <(incus image list --project default --format csv -c f)

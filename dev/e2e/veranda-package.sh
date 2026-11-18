@@ -22,7 +22,7 @@ check_input() {
   [ "$(dpkg-deb -f "$file" Version)" = "$version" ] || die 'unexpected package version'
   [ "$(dpkg-deb -f "$file" Architecture)" = "$architecture" ] || die 'package architecture differs from VM'
   files="$(dpkg-deb --fsys-tarfile "$file" | tar -tf -)"
-  if printf '%s\n' "$files" | grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)'; then die 'desktop package bundles a CLI or owner runtime'; fi
+  if grep -Eq '(^|/)(yard|sy|core|yard-engine|incus)(/|$)' <<<"$files"; then die 'desktop package bundles a CLI or owner runtime'; fi
 }
 BASE_VERSION="$(dpkg-deb -f "$BASE" Version)"
 NEXT_VERSION="$(dpkg-deb -f "$NEXT" Version)"

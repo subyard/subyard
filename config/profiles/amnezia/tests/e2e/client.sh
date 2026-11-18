@@ -204,7 +204,7 @@ for attempt in $(seq 1 15); do
 done
 ping_output="$(ping -n -c 2 -W 3 "$PROBE_TUNNEL_IP")" || fail 'VPN server tunnel address did not reply'
 ping_avg_ms="$(printf '%s\n' "$ping_output" | awk -F= '/min\/avg\/max/ { split($2, values, "/"); gsub(/ /, "", values[2]); print values[2] }')"
-printf '%s\n' "$ping_avg_ms" | grep -Eq '^[0-9]+([.][0-9]+)?$' || fail 'VPN ping average was unavailable'
+grep -Eq '^[0-9]+([.][0-9]+)?$' <<<"$ping_avg_ms" || fail 'VPN ping average was unavailable'
 ping -n -M do -s 1200 -c 1 -W 3 "$PROBE_TUNNEL_IP" >/dev/null 2>&1 \
   || fail '1200-byte ICMP payload failed'
 handshake="$(awg show awg0 latest-handshakes | awk 'NF == 2 { if (++n > 1) exit 1; print $2 }')" \
