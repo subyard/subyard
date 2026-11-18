@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,85 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
 )
+
+func TestReplayEmptyOTLPExport(t *testing.T) {
+	ctx := context.Background()
+	source, destination := fixtureStore(t), fixtureStore(t)
+	const input = `{"schema":"subyard.telemetry.export/v1","origin_id":"fixture","event_id":"empty",
+		"source_id":"native-otlp","source_version":"1","kind":"otlp/logs","encoding":"otlp/logs","protobuf":""}`
+	line := strings.ReplaceAll(input, "\n", "")
+	if err := source.Replay(ctx, strings.NewReader(line)); err != nil {
+		t.Fatal(err)
+	}
+	// Before export supported empty messages, replay accepted the explicit
+	// empty string and persisted a fingerprint with that representation.
+	const oldPayload = `["native-otlp","1","","otlp/logs","otlp/logs","",null,""]`
+	if _, err := source.db.Exec("UPDATE spool_inputs SET payload=?", fmt.Sprintf("%x", source.key.digest("replay-input/v1\x00"+oldPayload))); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []string{line, strings.Replace(line, `,"protobuf":""`, "", 1)} {
+		if err := source.Replay(ctx, strings.NewReader(row)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if _, err := Export(ctx, source.db, &output, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Replay(ctx, &output); err != nil {
+		t.Fatal(err)
+	}
+	var size int
+	if err := destination.db.QueryRow("SELECT coalesce(length(protobuf),0) FROM records WHERE kind='otlp/logs'").Scan(&size); err != nil || size != 0 {
+		t.Fatalf("round-tripped empty OTLP message: bytes=%d (%v)", size, err)
+	}
+}
+
+func TestReplayUsesAuthenticatedFingerprintAcrossPolicyChanges(t *testing.T) {
+	ctx := context.Background()
+	store := fixtureStore(t)
+	logs := plogotlp.NewExportRequest()
+	entry := logs.Logs().ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	entry.Attributes().PutStr("session.id", "fixture-session")
+	raw, err := logs.MarshalProto()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(Envelope{Schema: ExportSchema, OriginID: "foreign", EventID: "logs",
+		SourceID: "native-otlp", SourceVersion: "1", Kind: "otlp/logs", Encoding: "otlp/logs", Protobuf: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Replay(ctx, bytes.NewReader(input)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.db.Exec("UPDATE records SET received_time=?", unknownSourceTime); err != nil {
+		t.Fatal(err)
+	}
+	var local bytes.Buffer
+	if _, err = Export(ctx, store.db, &local, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	var original Envelope
+	if err = json.Unmarshal(local.Bytes(), &original); err != nil || !bytes.Contains(original.Protobuf, []byte("session.id")) {
+		t.Fatalf("fixture did not retain the optional attribute (%v)", err)
+	}
+	if err = store.prune(); err != nil {
+		t.Fatal(err)
+	}
+	narrow := DefaultPolicy()
+	narrow.Attributes = nil
+	if err = store.replay(ctx, bytes.NewReader(local.Bytes()), narrow); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Replay(ctx, &local); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.db.QueryRow("SELECT protobuf FROM records WHERE kind='otlp/logs'").Scan(&raw); err != nil ||
+		bytes.Contains(raw, []byte("session.id")) {
+		t.Fatalf("retry altered the restored payload (%v)", err)
+	}
+}
 
 func TestReplayLegacyRowCanGrowPastLiveRequestLimit(t *testing.T) {
 	ctx := context.Background()
@@ -188,7 +268,7 @@ func TestPythonSpoolKeepsCaptureAcrossPolicyChanges(t *testing.T) {
 			input := record("relation", map[string]any{"session_id": hexID, "agent_run_id": digestID,
 				"relation": "native_session", "source": "native-otlp-attribute/authenticated-header",
 				"session_attributes": []string{"session.id", "thread.id"}})
-			if err := store.publishCapturePolicy(change.before); err != nil {
+			if err := store.publishCapturePolicy(context.Background(), change.before); err != nil {
 				t.Fatal(err)
 			}
 			appendPython(t, store, []Record{input})
@@ -210,7 +290,7 @@ func TestPythonSpoolKeepsCaptureAcrossPolicyChanges(t *testing.T) {
 			if filepath.Base(files[0]) != wantStream+".open" || !bytes.HasPrefix(raw, []byte(spoolVersion+" "+wantStream+" ")) {
 				t.Fatal("spool routing disagrees with capture policy")
 			}
-			if err := store.publishCapturePolicy(change.after); err != nil {
+			if err := store.publishCapturePolicy(context.Background(), change.after); err != nil {
 				t.Fatal(err)
 			}
 			if err := store.drainSpool(ctx, change.after); err != nil {
@@ -242,7 +322,7 @@ func TestPythonSpoolKeepsCaptureAcrossPolicyChanges(t *testing.T) {
 				count != 1 || strings.Contains(body, "agent_run_id") || strings.Contains(body, "thread.id") {
 				t.Fatalf("replay reconstructed missing fields: %d %q (%v)", count, body, err)
 			}
-			if err := store.publishCapturePolicy(p); err != nil {
+			if err := store.publishCapturePolicy(context.Background(), p); err != nil {
 				t.Fatal(err)
 			}
 			const producer = `
@@ -285,7 +365,7 @@ func TestSessionPolicyAcrossProducerIngestAndReplay(t *testing.T) {
 			store := fixtureStore(t)
 			switch transport {
 			case "producer":
-				if err := store.publishCapturePolicy(p); err != nil {
+				if err := store.publishCapturePolicy(context.Background(), p); err != nil {
 					t.Fatal(err)
 				}
 				appendPython(t, store, input)
@@ -384,6 +464,49 @@ func TestReplayRestoresPrunedSampleToItsOriginalRun(t *testing.T) {
 	var cpu int
 	if err := store.db.QueryRow(query, store.key.id(run)).Scan(&count, &cpu); err != nil || count != 1 || cpu != 10 {
 		t.Fatalf("restored sample failed to join its original run: count=%d cpu=%d (%v)", count, cpu, err)
+	}
+}
+
+func TestForeignSampleStillDeduplicatesAfterLocalRestore(t *testing.T) {
+	ctx := context.Background()
+	source, destination := fixtureStore(t), fixtureStore(t)
+	sample := record("sample", map[string]any{"object_id": "scope", "cpu_ns": 10})
+	if err := source.Ingest(ctx, []Record{sample, record("gap", map[string]any{"reason": "source_offline"})}); err != nil {
+		t.Fatal(err)
+	}
+	var foreign, local bytes.Buffer
+	if _, err := Export(ctx, source.db, &foreign, 0, 10); err != nil {
+		t.Fatal(err)
+	}
+	first, _, _ := bytes.Cut(foreign.Bytes(), []byte("\n"))
+	for range 2 {
+		if err := destination.Replay(ctx, bytes.NewReader(first)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := destination.db.Exec("UPDATE records SET received_time=?", unknownSourceTime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Export(ctx, destination.db, &local, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.prune(); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Replay(ctx, &local); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Replay(ctx, &foreign); err != nil {
+		t.Fatal(err)
+	}
+	var samples, gaps int
+	if err := destination.db.QueryRow("SELECT (SELECT count(*) FROM samples),(SELECT count(*) FROM gaps)").
+		Scan(&samples, &gaps); err != nil || samples != 1 || gaps != 1 {
+		t.Fatalf("restored sample=%d, subsequent gap=%d (%v)", samples, gaps, err)
+	}
+	changed := bytes.Replace(first, []byte(`"cpu_ns":10`), []byte(`"cpu_ns":20`), 1)
+	if err := destination.Replay(ctx, bytes.NewReader(changed)); !errors.Is(err, errEventCollision) {
+		t.Fatalf("changed input did not collide: %v", err)
 	}
 }
 

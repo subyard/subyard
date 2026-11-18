@@ -37,7 +37,7 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	if options.Spool != "" && filepath.Clean(options.Spool) != spool {
 		return errors.New("spool must be the data directory spool")
 	}
-	if err = s.publishCapturePolicy(options.Policy); err != nil {
+	if err = s.publishCapturePolicy(ctx, options.Policy); err != nil {
 		return err
 	}
 	socket := filepath.Join(s.dir, "control.sock")

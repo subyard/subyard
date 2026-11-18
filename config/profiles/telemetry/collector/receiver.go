@@ -350,7 +350,7 @@ func (s *Store) receiverReady() error {
 	if err != nil {
 		return err
 	}
-	if err = s.nativeLoss(tx, ""); err != nil {
+	if err = s.nativeLoss(tx, "", at); err != nil {
 		return err
 	}
 	if _, err = tx.Exec("UPDATE metadata SET value=? WHERE key='receiver_heartbeat'", at); err != nil {
@@ -359,30 +359,51 @@ func (s *Store) receiverReady() error {
 	return tx.Commit()
 }
 
-// Match against retained outage intervals even when the registration first
-// arrives after readiness and its native process has already exited.
-// A run that started before the outage needs an end time to establish overlap.
-func (s *Store) nativeLoss(tx *sql.Tx, run string) error {
-	rows, err := tx.Query(`SELECT r.agent_run_id,o.start,o.end FROM receiver_outages o JOIN runs r
-		ON json_extract(r.body,'$.start_time') < o.end
-		AND (json_extract(r.body,'$.end_time') > o.start OR
-			(json_extract(r.body,'$.end_time') IS NULL AND json_extract(r.body,'$.start_time') >= o.start))
-		WHERE coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')
-		AND (?='' OR r.agent_run_id=?)`, run, run)
+// A pre-outage run without an end time has provisional coverage. Keep that
+// evidence in the local projection until a late record establishes overlap.
+func (s *Store) nativeLoss(tx *sql.Tx, run, readyAt string) error {
+	const source = "native-receiver"
+	query := `SELECT r.agent_run_id,o.start,o.end,
+		json_extract(r.body,'$.end_time') IS NOT NULL OR json_extract(r.body,'$.start_time') >= o.start
+		FROM receiver_outages o JOIN runs r ON json_extract(r.body,'$.start_time') < o.end
+		AND coalesce(json_extract(r.body,'$.end_time'),o.end) > o.start
+		WHERE coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')`
+	var args []any
+	if run == "" {
+		query += ` AND o.end=? AND r.agent_run_id IN (
+			SELECT json_extract(body,'$.agent_run_id') FROM records WHERE kind='run' AND import_policy_version='')`
+		args = []any{readyAt}
+	} else {
+		// Rebuild provisional gaps when a local run update arrives.
+		if _, err := tx.Exec(`DELETE FROM gaps WHERE agent_run_id=? AND origin_id=?
+			AND NOT EXISTS(SELECT 1 FROM records r WHERE r.origin_id=gaps.origin_id AND r.event_id=gaps.event_id)`,
+			run, "producer:"+s.key.id(source)); err != nil {
+			return err
+		}
+		query += " AND r.agent_run_id=?"
+		args = []any{run}
+	}
+	rows, err := tx.Query(query, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var id, first, last string
-		if err = rows.Scan(&id, &first, &last); err != nil {
+		var confirmed bool
+		if err = rows.Scan(&id, &first, &last, &confirmed); err != nil {
 			return err
 		}
-		e := s.localRecord("gap", "native-receiver", id+":"+first, first,
+		e := s.localRecord("gap", source, id+":"+first, first,
 			map[string]any{"agent_run_id": id, "reason": "possible_native_loss", "quality": "partial",
 				"coverage_start": first, "coverage_end": last})
 		e.ReceivedTime, e.PolicyVersion = last, PolicyVersion
-		if err = s.putRecord(tx, e, DefaultPolicy()); err != nil {
+		if confirmed {
+			err = s.putRecord(tx, e, DefaultPolicy())
+		} else {
+			err = s.key.project(tx, e)
+		}
+		if err != nil {
 			return err
 		}
 	}

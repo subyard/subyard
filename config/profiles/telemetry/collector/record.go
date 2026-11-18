@@ -78,6 +78,7 @@ type Envelope struct {
 	// PolicyVersion is the source capture claim; imports independently record
 	// the trusted local policy applied before the imported bytes are stored.
 	ImportPolicyVersion string          `json:"import_policy_version,omitempty"`
+	InputProof          string          `json:"input_proof,omitempty"`
 	StoreProof          string          `json:"store_proof,omitempty"`
 	Redactions          int64           `json:"redactions"`
 	Body                json.RawMessage `json:"body,omitempty"`
@@ -265,11 +266,6 @@ func (id identity) body(input map[string]any) (map[string]any, int64) {
 		}
 	}
 	return out, removed
-}
-
-func (id identity) record(r Record) (Record, int64, error) {
-	r.SourceID, r.EventID = id(r.SourceID), id(r.EventID)
-	return id.cleanRecord(r)
 }
 
 func (id identity) cleanRecord(r Record) (Record, int64, error) {

@@ -117,7 +117,7 @@ class LauncherTest(unittest.TestCase):
                 self.assertFalse(launcher.admit_manifest(root, {**first, 'agent_run_id': 'second'}))
                 (root/'runs-v5/first.json').unlink()
                 self.assertTrue(launcher.admit_manifest(root, {**first, 'agent_run_id': 'second'}))
-            payload = {'agent_run_id': 'third', 'metadata': 'x'*100}
+            payload = {'agent_run_id': 'third', 'cgroup': 'x'*100}
             with patch.object(launcher, 'MAX_RUN_BYTES', 1):
                 self.assertFalse(launcher.admit_manifest(root, payload))
             with patch.object(launcher, 'MAX_RUN_PAYLOAD', 10):
@@ -237,11 +237,19 @@ assert not records.emit(sys.argv[2], 'gap', {})
     def test_reserved_capacity_is_charged_and_failed_placement_releases_it(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            run = {'agent_run_id':'one', 'boot_id':launcher.boot_id()}
+            run = {'agent_run_id':'one', 'boot_id':launcher.boot_id(), 'pid':42, 'start_ticks':123,
+                   'project_id':'private-project', 'task_id':'private-task', 'agent_version':'private-version',
+                   'worktree_id':'private-worktree', 'start_time':'2026-01-01T00:00:00Z'}
+            path = root/'runs-v5/one.json'
             with patch.object(launcher, 'MAX_RUN_BYTES', launcher.MAX_RUN_PAYLOAD):
                 self.assertTrue(launcher.admit_manifest(root, run, reserve=True))
+                self.assertEqual(set(records.read_private(path)), {
+                    'agent_run_id', 'boot_id', 'manifest_state', 'launcher_pid', 'launcher_start_ticks'})
                 self.assertFalse(launcher.admit_manifest(root, {**run,'agent_run_id':'two'}, reserve=True))
                 launcher.finish_manifest(root, run)
+                self.assertEqual(records.read_private(path), {field: run[field] for field in (
+                    'agent_run_id', 'boot_id', 'pid', 'start_ticks')})
+                self.assertEqual(launcher.environment(root, {**run, 'agent':'other'}, {})['SUBYARD_TASK_ID'], 'private-task')
                 self.assertTrue(launcher.admit_manifest(root, {**run,'agent_run_id':'two'}))
             args = types.SimpleNamespace(command=['/bin/true'], data_dir=str(root), agent='other', agent_version='fixture', scope_mode='require',
                 task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)

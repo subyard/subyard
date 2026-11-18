@@ -17,7 +17,7 @@ func TestRecordFieldParity(t *testing.T) {
 		// Walk every field, including IDs normally mandatory for other kinds.
 		for _, path := range []string{privatePath, "private/notes", "private notes", credential} {
 			r := record("gap", map[string]any{field: path})
-			clean, removed, err := identity((identityKey{}).id).record(r)
+			clean, removed, err := cleanFixtureRecord(r)
 			if rule.kind == "id" && legacyID.MatchString(path) {
 				if err != nil || clean.Body[field] != (identityKey{}).id(path) {
 					t.Errorf("%s: legacy path identifier was not pseudonymized: %v", field, err)
@@ -69,7 +69,7 @@ for body in json.load(sys.stdin):
 		t.Fatalf("producer returned %d rows for %d inputs", len(lines), len(inputs))
 	}
 	for i, input := range inputs {
-		clean, _, err := identity((identityKey{}).id).record(record("gap", input))
+		clean, _, err := cleanFixtureRecord(record("gap", input))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -97,13 +97,13 @@ func TestRecordRejectsPathMetadata(t *testing.T) {
 	} {
 		r := record("allocation", map[string]any{"object_id": "fixture"})
 		mutate(&r)
-		if _, _, err := identity((identityKey{}).id).record(r); err == nil {
+		if _, _, err := cleanFixtureRecord(r); err == nil {
 			t.Errorf("accepted invalid required metadata: %+v", r)
 		}
 	}
 	r := record("allocation", map[string]any{"object_id": "fixture"})
 	r.SourceVersion, r.SourceTime = privatePath, privatePath
-	if clean, removed, err := identity((identityKey{}).id).record(r); err != nil || clean.SourceVersion != "" || clean.SourceTime != unknownSourceTime || removed != 2 {
+	if clean, removed, err := cleanFixtureRecord(r); err != nil || clean.SourceVersion != "" || clean.SourceTime != unknownSourceTime || removed != 2 {
 		t.Fatalf("invalid source version was not redacted (removed=%d, err=%v)", removed, err)
 	}
 }
@@ -113,4 +113,10 @@ func TestMissingFieldRedactionsCountDroppedEntries(t *testing.T) {
 	if got, ok := body["missing"].([]any); !ok || len(got) != 1 || got[0] != "cpu_ns" || removed != 2 {
 		t.Fatalf("missing field redaction: body=%v removed=%d", body, removed)
 	}
+}
+
+func cleanFixtureRecord(r Record) (Record, int64, error) {
+	var key identityKey
+	r.SourceID, r.EventID = key.id(r.SourceID), key.id(r.EventID)
+	return identity(key.id).cleanRecord(r)
 }

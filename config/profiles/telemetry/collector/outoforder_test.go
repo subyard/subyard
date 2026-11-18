@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Subyard/Subyard/internal/testkit"
+	"golang.org/x/sys/unix"
 )
 
 func TestUnorderedLifecycleProjection(t *testing.T) {
@@ -49,7 +51,7 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 					}
 				case "spool":
 					p := DefaultPolicy()
-					if err := s.publishCapturePolicy(p); err != nil {
+					if err := s.publishCapturePolicy(context.Background(), p); err != nil {
 						t.Fatal(err)
 					}
 					appendPython(t, s, records)
@@ -145,7 +147,7 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			ctx := context.Background()
 			s := fixtureStore(t)
 			p := DefaultPolicy()
-			if err := s.publishCapturePolicy(p); err != nil {
+			if err := s.publishCapturePolicy(context.Background(), p); err != nil {
 				t.Fatal(err)
 			}
 			const runID = "recovery-run"
@@ -270,5 +272,61 @@ for _ in range(2):
 				}
 			}
 		})
+	}
+}
+
+func TestServeDrainsSealedSpoolAndStopsWithDirectoryLocked(t *testing.T) {
+	s := fixtureStore(t)
+	p := DefaultPolicy()
+	if err := s.publishCapturePolicy(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	spool := filepath.Join(s.dir, "spool")
+	appendPython(t, s, []Record{record("gap", map[string]any{"reason": "source_offline"})})
+	if err := sealSegment(spool, "broker.open"); err != nil {
+		t.Fatal(err)
+	}
+	appendPython(t, s, []Record{record("gap", map[string]any{"agent_run_id": "busy", "reason": "source_offline"})})
+	lock, err := lockDirectory(spool, unix.LOCK_EX|unix.LOCK_NB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	authFile := filepath.Join(s.dir, "auth.token")
+	testkit.WriteFile(t, authFile, []byte(strings.Repeat("a", 32)), 0600)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, s, Options{AuthFile: authFile, Receiver: func(ctx context.Context, _ *Store, _ Options, _ *localAuth) error {
+			<-ctx.Done()
+			return nil
+		}})
+	}()
+	for {
+		var count int
+		if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM gaps").Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count == 1 {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("collector exited before draining the sealed segment: %v", err)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stalled producer blocked collector shutdown")
+	}
+	if _, err := os.Stat(filepath.Join(spool, s.key.id("busy")+".open")); err != nil {
+		t.Fatalf("busy segment was not retained: %v", err)
 	}
 }

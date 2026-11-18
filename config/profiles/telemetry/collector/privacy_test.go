@@ -42,7 +42,7 @@ assert records.emit(root, 'allocation', body, filename, filename, filename)
 `
 	s := fixtureStore(t)
 	ctx := context.Background()
-	if err := s.publishCapturePolicy(DefaultPolicy()); err != nil {
+	if err := s.publishCapturePolicy(context.Background(), DefaultPolicy()); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("python3", "-B", "-c", producer, s.dir, filename)

@@ -171,9 +171,11 @@ the old producer path in place, checkpoints the schema 1–4 database and
 publishes it read-only at `/var/lib/subyard/telemetry/archive/telemetry.sqlite`
 (or the next numbered archive if the path is already occupied by a sealed
 store). The new active schema 5 store imports verified pending records and
-legacy health markers. A disabled collector finishes the store transition
-when enabled. Fresh installs and compatible spool upgrades skip legacy
-quiesce.
+legacy health markers. Unreadable run manifests and health markers produce a
+`legacy_history_unreadable` gap in the active store. A retired manifest's
+filename can still identify an interrupted run in the archive. A disabled
+collector finishes the store transition when enabled. Fresh installs and
+compatible spool upgrades skip legacy quiesce.
 
 Unfinished historical runs get an ordinary `interrupted_by_upgrade` gap with
 `missing=final_tail` in the archive. The gap appears in `show-run`, export and
@@ -421,15 +423,18 @@ request; there is no misleading partial-success count. Collector failure does no
 make agent commands or broker lifecycle operations wait indefinitely. If the
 bounded local spool fills, collection records a capacity gap where the reserved
 marker can be written. A run overlapping receiver downtime can carry a
-`possible_native_loss` gap. Native bytes the receiver never saw cannot be
-recovered by the spool.
+`possible_native_loss` gap. For a run already open at the start of an outage,
+the gap stays in the local projection until a completion establishes overlap.
+An earlier completion clears the provisional gap. Native bytes the receiver
+never saw cannot be recovered by the spool.
 
 ## Export and replay
 
 Export is JSON Lines with schema `subyard.telemetry.export/v1`. OTLP protobuf is
 base64 in the `protobuf` field, with kind/encoding `otlp/logs`, `otlp/metrics` or
-`otlp/traces`. Internal records use JSON `body`. Source and receive timestamps,
-policy identity, record identities and provenance are retained.
+`otlp/traces`. An empty OTLP message omits `protobuf`. Internal records use JSON
+`body`. Source and receive timestamps, policy identity, record identities and
+provenance are retained.
 
 ```sh
 "$collector" export --data-dir "$data" --after 0 --limit 1000 > telemetry-0001.jsonl
@@ -442,8 +447,10 @@ against the archive and start a new cursor at zero for the active store. Replay
 uses the source pair `(origin_id,event_id)` as input to the receiving
 store's keyed mapping. An active-store export made with the source key available
 carries a proof the originating store can verify. Verified same-store replay
-reuses stored identifiers so a restored sample can rejoin its retained object
-and run. The destination preserves relationships within the imported history.
+reuses stored identifiers and the recorded input fingerprint. A restored sample
+can rejoin its retained object and run, and retrying its original delivery
+deduplicates against it. The destination preserves relationships within the
+imported history.
 Replaying the same input adds no projections. A matching identity with
 different data is an error. Two records with different identities remain separate
 even when their payloads match. Replay applies the destination's `--policy-file`
@@ -453,6 +460,13 @@ capture-policy claim; `import_policy_version` records the trusted local policy
 applied by replay. Imported policy metadata never authorizes additional content.
 Legacy exports without that optional import field remain supported. Provenance
 already lost by an older importer cannot be reconstructed.
+
+The database capacity limit also covers deduplication entries for fully
+filtered inputs and receiver outage intervals. Both survive sample retention.
+The collector uses the former to recognize retries after policy changes and
+the latter to attribute gaps when local run records arrive from the spool
+after readiness. At readiness it evaluates the new interval for known local
+runs.
 
 OTLP has no universal delivery identity. If a sender retries after a successful
 commit whose acknowledgement was lost, the native delivery can appear twice.

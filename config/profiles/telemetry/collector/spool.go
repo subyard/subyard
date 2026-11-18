@@ -125,8 +125,18 @@ func publishPrivate(path string, data []byte) error {
 	return syncArchiveDirectory(dir)
 }
 
-func (s *Store) publishCapturePolicy(policy Policy) error {
-	lock, err := lockDirectory(s.dir, unix.LOCK_EX)
+func (s *Store) publishCapturePolicy(ctx context.Context, policy Policy) error {
+	ctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	lock, err := lockDirectory(s.dir, unix.LOCK_EX|unix.LOCK_NB)
+	for errors.Is(err, unix.EWOULDBLOCK) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+		lock, err = lockDirectory(s.dir, unix.LOCK_EX|unix.LOCK_NB)
+	}
 	if err != nil {
 		return err
 	}
@@ -231,7 +241,7 @@ func sealSegment(spool, name string) error {
 		return errInvalidRecord
 	}
 	// Holding the inode exclusively makes any incomplete tail safe to retire.
-	dir, err := lockDirectory(spool, unix.LOCK_EX)
+	dir, err := lockDirectory(spool, unix.LOCK_EX|unix.LOCK_NB)
 	if err != nil {
 		return err
 	}
@@ -256,6 +266,9 @@ func (s *Store) drainSpool(ctx context.Context, policy Policy) error {
 		return err
 	}
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if name, ok := strings.CutSuffix(entry.Name(), ".open"); ok && streamID.MatchString(name) {
 			err := sealSegment(spool, entry.Name())
 			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, unix.EWOULDBLOCK) {
@@ -263,13 +276,13 @@ func (s *Store) drainSpool(ctx context.Context, policy Policy) error {
 			}
 		}
 	}
-	dir, err := lockDirectory(spool, unix.LOCK_SH)
+	entries, err = os.ReadDir(spool)
 	if err != nil {
 		return err
 	}
-	entries, err = os.ReadDir(spool)
-	err = errors.Join(err, dir.Sync(), dir.Close())
-	if err != nil {
+	// Seal publication can race this listing. Sync after the listing so each
+	// visible sealed name is durable before advancing its checkpoint.
+	if err = syncArchiveDirectory(spool); err != nil {
 		return err
 	}
 	blocked := map[string]bool{}

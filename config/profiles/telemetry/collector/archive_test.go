@@ -204,7 +204,7 @@ func TestEstablishedStoreRefusesMissingAndMismatchedKeys(t *testing.T) {
 			if err := s.Ingest(context.Background(), []Record{record("gap", map[string]any{})}); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.publishCapturePolicy(DefaultPolicy()); err != nil {
+			if err := s.publishCapturePolicy(context.Background(), DefaultPolicy()); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Close(); err != nil {

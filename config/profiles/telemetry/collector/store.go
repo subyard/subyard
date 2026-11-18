@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"math"
 	"net/url"
 	"os"
@@ -322,9 +321,9 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 	var replay bool
 	for _, e := range input {
 		replay = e.replay
-		if e.replay {
-			// A local export can refer to rows already in this store. Accept
-			// only a matching payload and never write its asserted identities.
+		if e.replay && e.InputProof == "" {
+			// Older exports lack a trusted input fingerprint. Check their
+			// asserted identities against the retained payload.
 			exists, err := s.checkDuplicate(s.db, e, p)
 			if err != nil {
 				return err
@@ -543,12 +542,12 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope, policy Policy) error {
 	if err = s.key.project(tx, e); err != nil {
 		return ErrStorage
 	}
-	if e.Kind == "run" && e.local && !e.replay {
+	if e.Kind == "run" && !e.replay {
 		body, err := decodeBody(e.Body)
 		if err != nil {
 			return ErrStorage
 		}
-		return s.nativeLoss(tx, stringValue(body, "agent_run_id"))
+		return s.nativeLoss(tx, stringValue(body, "agent_run_id"), "")
 	}
 	return nil
 }
@@ -621,7 +620,9 @@ func (s *Store) prune() error {
 	if err != nil {
 		return err
 	}
-	for _, table := range []string{"samples", "gaps", "relations"} {
+	// Provisional receiver gaps have no canonical record and are resolved
+	// by run updates, independently of sample retention.
+	for _, table := range []string{"samples", "relations"} {
 		if _, err = tx.Exec("DELETE FROM " + table + " WHERE NOT EXISTS(SELECT 1 FROM records r WHERE r.origin_id=" + table + ".origin_id AND r.event_id=" + table + ".event_id)"); err != nil {
 			return err
 		}
@@ -672,59 +673,28 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 		}
 		// Outbox filenames and replay delivery order are independent of source
 		// chronology. Older records fill missing metadata beneath newer state.
-		merged, at, err := mergeTimedProjection(tx, "SELECT body,source_time FROM runs WHERE agent_run_id=?", run, b, e.SourceTime)
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(`INSERT INTO runs VALUES(?,?,?) ON CONFLICT(agent_run_id) DO UPDATE SET
-			body=excluded.body, source_time=excluded.source_time`, run, merged, at)
+		_, err := tx.Exec(`INSERT INTO runs VALUES(?,?,?) ON CONFLICT(agent_run_id) DO UPDATE SET
+			body=CASE WHEN excluded.source_time>=runs.source_time THEN json_patch(runs.body,excluded.body) ELSE json_patch(excluded.body,runs.body) END,
+			source_time=max(runs.source_time,excluded.source_time)`, run, body, e.SourceTime)
 		return err
 	case "scope", "process", "allocation":
 		if object == "" {
 			return errors.New("object identity missing")
 		}
-		kind, parent, accounting := e.Kind, stringValue(b, "parent_object_id"), stringValue(b, "accounting")
-		var oldBody, oldTime, oldKind string
-		var oldParent, oldAccounting sql.NullString
-		err := tx.QueryRow("SELECT body,source_time,kind,parent_object_id,accounting FROM objects WHERE object_id=?", object).
-			Scan(&oldBody, &oldTime, &oldKind, &oldParent, &oldAccounting)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		oldTime = canonicalTimestamp(oldTime)
-		newer := e.SourceTime >= oldTime
-		if _, ok := identity(keepID).field(bodyRules["accounting"], oldAccounting.String); !ok {
-			oldAccounting.String = ""
-		}
-		if newer {
-			parent = firstNonempty(parent, oldParent.String)
-			accounting = firstNonempty(accounting, oldAccounting.String)
-		} else {
-			parent = firstNonempty(oldParent.String, parent)
-			accounting = firstNonempty(oldAccounting.String, accounting)
-			switch oldKind {
-			case "scope", "process", "allocation":
-				kind = oldKind
-			}
-		}
-		merged, err := mergeProjection(oldBody, b, newer)
-		if err != nil {
-			return err
-		}
-		_, err = tx.Exec(`INSERT INTO objects VALUES(?,?,?,?,?,?) ON CONFLICT(object_id) DO UPDATE SET
-			kind=excluded.kind,parent_object_id=excluded.parent_object_id,accounting=excluded.accounting,
-			body=excluded.body,source_time=excluded.source_time`,
-			object, kind, parent, accounting, merged, max(oldTime, e.SourceTime))
+		_, err := tx.Exec(`INSERT INTO objects VALUES(?,?,?,?,?,?) ON CONFLICT(object_id) DO UPDATE SET
+			kind=CASE WHEN excluded.source_time>=objects.source_time THEN excluded.kind ELSE objects.kind END,
+			parent_object_id=CASE WHEN excluded.source_time>=objects.source_time THEN coalesce(nullif(excluded.parent_object_id,''),objects.parent_object_id) ELSE coalesce(nullif(objects.parent_object_id,''),excluded.parent_object_id) END,
+			accounting=CASE WHEN excluded.source_time>=objects.source_time THEN coalesce(nullif(excluded.accounting,''),objects.accounting) ELSE coalesce(nullif(objects.accounting,''),excluded.accounting) END,
+			body=CASE WHEN excluded.source_time>=objects.source_time THEN json_patch(objects.body,excluded.body) ELSE json_patch(excluded.body,objects.body) END,
+			source_time=max(objects.source_time,excluded.source_time)`,
+			object, e.Kind, stringValue(b, "parent_object_id"), stringValue(b, "accounting"), body, e.SourceTime)
 		if err != nil {
 			return err
 		}
 		if e.Kind == "allocation" {
-			merged, at, err := mergeTimedProjection(tx, "SELECT body,source_time FROM allocations WHERE object_id=?", object, b, e.SourceTime)
-			if err != nil {
-				return err
-			}
 			if _, err = tx.Exec(`INSERT INTO allocations VALUES(?,?,?) ON CONFLICT(object_id) DO UPDATE SET
-				body=excluded.body,source_time=excluded.source_time`, object, merged, at); err != nil {
+				body=CASE WHEN excluded.source_time>=allocations.source_time THEN json_patch(allocations.body,excluded.body) ELSE json_patch(excluded.body,allocations.body) END,
+				source_time=max(allocations.source_time,excluded.source_time)`, object, body, e.SourceTime); err != nil {
 				return err
 			}
 		}
@@ -752,11 +722,11 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 		if id == "" {
 			id = key.projectionID(e.OriginID, object, run, stringValue(b, "source"))
 		}
-		var oldBody, oldObject string
+		var oldObject string
 		var oldRun, oldStart, oldEnd sql.NullString
 		shared, _ := b["shared"].(bool)
-		err := tx.QueryRow("SELECT body,object_id,agent_run_id,start_time,end_time,shared FROM associations WHERE association_id=?", id).
-			Scan(&oldBody, &oldObject, &oldRun, &oldStart, &oldEnd, &shared)
+		err := tx.QueryRow("SELECT object_id,agent_run_id,start_time,end_time,shared FROM associations WHERE association_id=?", id).
+			Scan(&oldObject, &oldRun, &oldStart, &oldEnd, &shared)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -766,60 +736,19 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 		}
 		start := firstNonempty(canonicalTimestamp(oldStart.String), stringValue(b, "start_time"))
 		end := firstNonempty(stringValue(b, "end_time"), canonicalTimestamp(oldEnd.String))
-		merged, err := mergeProjection(oldBody, b, true)
-		if err != nil {
-			return err
-		}
 		_, err = tx.Exec(`INSERT INTO associations VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(association_id) DO UPDATE SET
 			object_id=excluded.object_id,agent_run_id=excluded.agent_run_id,shared=excluded.shared,
-			start_time=excluded.start_time,end_time=excluded.end_time,quality=excluded.quality,body=excluded.body`,
-			id, object, run, stringValue(b, "quality"), start, end, shared, merged)
+			start_time=excluded.start_time,end_time=excluded.end_time,quality=excluded.quality,body=json_patch(associations.body,excluded.body)`,
+			id, object, run, stringValue(b, "quality"), start, end, shared, body)
 		return err
 	case "gap":
-		_, err := tx.Exec("INSERT INTO gaps VALUES(?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING", e.OriginID, e.EventID, object, run, e.SourceTime, body)
+		_, err := tx.Exec("INSERT INTO gaps VALUES(?,?,?,?,?,?)", e.OriginID, e.EventID, object, run, e.SourceTime, body)
 		return err
 	case "relation", "session":
 		_, err := tx.Exec("INSERT INTO relations VALUES(?,?,?,?,?)", e.OriginID, e.EventID, run, stringValue(b, "session_id"), body)
 		return err
 	}
 	return nil
-}
-
-func mergeTimedProjection(tx *sql.Tx, query, id string, body map[string]any, at string) (string, string, error) {
-	var oldBody, oldTime string
-	err := tx.QueryRow(query, id).Scan(&oldBody, &oldTime)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", "", err
-	}
-	oldTime = canonicalTimestamp(oldTime)
-	merged, err := mergeProjection(oldBody, body, at >= oldTime)
-	return merged, max(at, oldTime), err
-}
-
-func mergeProjection(oldBody string, incoming map[string]any, newer bool) (string, error) {
-	merged := incoming
-	if oldBody != "" {
-		old, err := decodeBody([]byte(oldBody))
-		if err != nil {
-			return "", err
-		}
-		base, patch := old, incoming
-		if !newer {
-			base, patch = incoming, old
-		}
-		merged = maps.Clone(base)
-		// The schema retains only scalars and lists. Match JSON Merge Patch's
-		// deletion semantics for an explicitly null field in the newer patch.
-		for name, value := range patch {
-			if value == nil {
-				delete(merged, name)
-			} else {
-				merged[name] = value
-			}
-		}
-	}
-	data, err := json.Marshal(merged)
-	return string(data), err
 }
 
 func firstNonempty(a, b string) string {
@@ -852,6 +781,7 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 	}
 	// A v1 archive predates import policy metadata.
 	importPolicyColumn := "import_policy_version"
+	inputProofColumn := "''"
 	if version == 1 {
 		importPolicyColumn = "''"
 	}
@@ -864,9 +794,12 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 			db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='origin_id'").Scan(&storeOrigin) == nil {
 			// Keyless read-only exports are still usable in another store.
 			key, _ = storeIdentityKey(db, filepath.Dir(file), version)
+			if len(key) != 0 {
+				inputProofColumn = "coalesce((SELECT payload FROM spool_inputs WHERE origin=records.origin_id AND event=records.event_id),'')"
+			}
 		}
 	}
-	rows, err := db.QueryContext(ctx, `SELECT sequence,origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,`+importPolicyColumn+` FROM records WHERE sequence>? ORDER BY sequence LIMIT ?`, after, limit)
+	rows, err := db.QueryContext(ctx, `SELECT sequence,origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,`+importPolicyColumn+`,`+inputProofColumn+` FROM records WHERE sequence>? ORDER BY sequence LIMIT ?`, after, limit)
 	if err != nil {
 		return after, err
 	}
@@ -875,7 +808,7 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 	for rows.Next() {
 		e := Envelope{Schema: ExportSchema}
 		var body []byte
-		if err = rows.Scan(&e.Sequence, &e.OriginID, &e.EventID, &e.ReceivedTime, &e.SourceID, &e.SourceVersion, &e.SourceTime, &e.Kind, &e.Encoding, &e.PolicyVersion, &e.Redactions, &body, &e.Protobuf, &e.ImportPolicyVersion); err != nil {
+		if err = rows.Scan(&e.Sequence, &e.OriginID, &e.EventID, &e.ReceivedTime, &e.SourceID, &e.SourceVersion, &e.SourceTime, &e.Kind, &e.Encoding, &e.PolicyVersion, &e.Redactions, &body, &e.Protobuf, &e.ImportPolicyVersion, &e.InputProof); err != nil {
 			return after, err
 		}
 		e.Body = body
@@ -927,6 +860,7 @@ func (s *Store) replayEnvelope(data []byte) (Envelope, error) {
 		SourceID: source, SourceVersion: str("source_version"), SourceTime: str("source_time"),
 		Kind: str("kind"), Encoding: str("encoding"), ReceivedTime: str("received_time"),
 		PolicyVersion: str("policy_version"), ImportPolicyVersion: str("import_policy_version"),
+		InputProof: str("input_proof"),
 	}
 	if str("schema") != ExportSchema || e.OriginID == "" || e.EventID == "" || e.SourceID == "" {
 		return Envelope{}, errors.New("unsupported export identity")
@@ -938,8 +872,14 @@ func (s *Store) replayEnvelope(data []byte) (Envelope, error) {
 	_ = json.Unmarshal(input["sequence"], &e.Sequence)
 	if e.Encoding == "json" {
 		e.Body = input["body"]
-	} else if err := json.Unmarshal(input["protobuf"], &e.Protobuf); err != nil {
-		return Envelope{}, errors.New("invalid export protobuf")
+	} else if encoded := input["protobuf"]; len(encoded) == 0 {
+		// Omitted protobuf is the export spelling for an empty message.
+		// Preserve the fingerprint of the previously accepted empty string.
+		e.Protobuf = []byte{}
+	} else {
+		if err := json.Unmarshal(encoded, &e.Protobuf); err != nil {
+			return Envelope{}, errors.New("invalid export protobuf")
+		}
 	}
 	// Verify exactly the fields replay will use. A second JSON decoder
 	// could interpret case variants or duplicate keys differently.
@@ -949,20 +889,25 @@ func (s *Store) replayEnvelope(data []byte) (Envelope, error) {
 	}
 	// Identify the input before sanitizing it for the destination's policy.
 	// Delivery metadata can differ between exports of the same record.
-	var body map[string]any
-	if e.Encoding == "json" {
-		var err error
-		body, err = decodeBody(e.Body)
+	if e.local && hex64.MatchString(e.InputProof) {
+		e.inputID = e.InputProof
+	} else {
+		e.InputProof = ""
+		var body map[string]any
+		if e.Encoding == "json" {
+			var err error
+			body, err = decodeBody(e.Body)
+			if err != nil {
+				return Envelope{}, err
+			}
+		}
+		payload, err := json.Marshal([]any{e.SourceID, e.SourceVersion, e.SourceTime,
+			e.Kind, e.Encoding, e.PolicyVersion, body, e.Protobuf})
 		if err != nil {
 			return Envelope{}, err
 		}
+		e.inputID = hex.EncodeToString(s.key.digest("replay-input/v1\x00" + string(payload)))
 	}
-	payload, err := json.Marshal([]any{e.SourceID, e.SourceVersion, e.SourceTime,
-		e.Kind, e.Encoding, e.PolicyVersion, body, e.Protobuf})
-	if err != nil {
-		return Envelope{}, err
-	}
-	e.inputID = hex.EncodeToString(s.key.digest("replay-input/v1\x00" + string(payload)))
 	e.ImportPolicyVersion = ""
 	e.Redactions = min(max(e.Redactions, 0), math.MaxInt64/2)
 	e.ReceivedTime = canonicalTimestamp(e.ReceivedTime)

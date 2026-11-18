@@ -299,6 +299,7 @@ class Runtime:
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
         saved = self.saved_inventory()
         cutover_pending = self.selected and (self.data/CUTOVER).exists()
+        policy_current = not self.selected or (self.data/'spool-policy.json').exists()
         inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
         ready = ready and not cutover_pending and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
@@ -316,14 +317,16 @@ class Runtime:
             return self.pending_agent_config(native_diagnostics)
         converged = converged and native_current is True
         skill_current = not self.selected or self.skill_delivery('check-registered')
-        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': converged, 'skill_current': skill_current}, sort_keys=True).encode()).hexdigest()
-        converged = converged and skill_current
+        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': converged, 'skill_current': skill_current, 'policy_current': policy_current}, sort_keys=True).encode()).hexdigest()
+        converged = converged and skill_current and policy_current
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
         if not converged:
             diagnostics = []
             if cutover_pending:
                 diagnostics.append({'parameter': 'telemetry.cutover', 'installed': 'pending', 'desired': 'complete'})
+            if not policy_current:
+                diagnostics.append({'parameter': 'telemetry.spool-policy', 'installed': 'missing', 'desired': 'present'})
             if not inventory_current:
                 diagnostics.append({'parameter': 'telemetry.inventory', 'installed': 'changed', 'desired': 'current'})
             for path, (content, mode) in self.assets.items():
@@ -443,14 +446,19 @@ class Runtime:
         existing = native.snapshot(receipt, max_bytes=4096)
         if existing is None:
             legacy = any((self.data/name).exists() for name in ('outbox', 'runs', 'runs-v4', 'manager.lock'))
-            info = database.lstat() if database.exists() or database.is_symlink() else None
-            if info is not None:
-                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
-                        or stat.S_IMODE(info.st_mode) != 0o600):
-                    raise ValueError('foreign telemetry database')
-                with database.open('rb') as stream:
-                    stream.seek(60)
-                    version = int.from_bytes(stream.read(4), 'big')
+            try:
+                fd = os.open(database, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                info = None
+            else:
+                try:
+                    info = os.fstat(fd)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                            or stat.S_IMODE(info.st_mode) != 0o600):
+                        raise ValueError('foreign telemetry database')
+                    version = int.from_bytes(os.pread(fd, 4, 60), 'big')
+                finally:
+                    os.close(fd)
                 legacy = 0 < version < 5 or (version == 0 and legacy)
             if not legacy:
                 return False

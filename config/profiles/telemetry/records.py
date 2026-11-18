@@ -252,11 +252,7 @@ def atomic_json(path, value):
             out.flush()
             os.fsync(out.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -303,6 +299,13 @@ def lock_until(fd, mode, deadline):
             if remaining <= 0:
                 raise
             time.sleep(min(0.005, remaining))
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 @contextmanager
@@ -354,7 +357,10 @@ def append_frame(spool, stream, frame, deadline=None):
     if deadline is None:
         deadline = time.monotonic()+LOCK_WAIT
     target = spool/(stream+'.open')
-    while time.monotonic() < deadline:
+    for attempt in itertools.count():
+        # Always try the uncontended path once. Bound waits and retries.
+        if attempt and time.monotonic() >= deadline:
+            return False
         try:
             fd = os.open(target, os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
         except FileNotFoundError:
@@ -399,10 +405,9 @@ def append_frame(spool, stream, frame, deadline=None):
                     or not re.fullmatch(rb'[0-9a-f]{32}', fields[2]) or not re.fullmatch(rb'[0-9]{16}', fields[3])):
                 raise ValueError('unsupported spool segment')
             if os.pread(fd, 1, info.st_size-1) == b'\n' and info.st_size+len(frame) <= SEGMENT_BYTES:
-                write_frame(fd, frame)
                 # A previous appender may have died just after linking this inode.
-                with directory_lock(spool, fcntl.LOCK_SH, deadline) as directory:
-                    os.fsync(directory)
+                sync_directory(spool)
+                write_frame(fd, frame)
                 return True
             # The sealed reader treats any bytes after the last newline as a gap.
             with directory_lock(spool, fcntl.LOCK_EX, deadline) as directory:
@@ -413,7 +418,6 @@ def append_frame(spool, stream, frame, deadline=None):
                 os.fsync(directory)
         finally:
             os.close(fd)
-    return False
 
 
 def write_frame(fd, data):
@@ -461,9 +465,9 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
         directory = private_directory(data_dir)
         with directory_lock(directory, fcntl.LOCK_SH, deadline):
             key = identity_key(directory)
+            attributes, policy = capture_policy(directory, key)
             stream = 'broker'
             try:
-                attributes, policy = capture_policy(directory, key)
                 source_id = source_id or read_private(directory/'producer.json')['source_id']
                 if source_time is USE_CURRENT_TIME:
                     source_time = now() if not event_id else None

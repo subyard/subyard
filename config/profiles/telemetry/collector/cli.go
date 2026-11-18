@@ -15,7 +15,7 @@ import (
 
 func RunCLI(args []string, receiver ReceiverFunc) error {
 	if len(args) == 0 {
-		return errors.New("usage: subyard-telemetry serve|export|replay|show-run|stats|query [options]")
+		return errors.New("usage: subyard-telemetry prepare|serve|export|replay|show-run|stats|query [options]")
 	}
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
@@ -58,7 +58,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 			return err
 		}
 		if command == "prepare" {
-			return errors.Join(store.publishCapturePolicy(policy), store.Close())
+			return errors.Join(store.publishCapturePolicy(ctx, policy), store.Close())
 		}
 		defer store.Close()
 		if command == "serve" {

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import concurrent.futures
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -45,6 +46,20 @@ for index in range(6):
             self.assertEqual(loss['count'], 2)
             self.assertEqual(loss['stream'], records.opaque_id(records.identity_key(root), 'overflow'))
             self.assertTrue(loss['first'] <= loss['last'])
+            with patch.object(records, 'identity_key', return_value=b'x'*32):
+                self.assertFalse(records.emit(root, 'run', {'agent_run_id':'overflow'}))
+            self.assertEqual((root/'spool-loss').read_bytes(), marker)
+
+    def test_existing_segment_append_under_directory_contention(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+            root = prepare(Path(directory))
+            with patch.object(records, 'LOCK_WAIT', 0):
+                self.assertTrue(records.emit(root, 'gap', {}, broker=True))
+            marker = (root/'spool-loss').read_bytes()
+            with records.directory_lock(root/'spool', fcntl.LOCK_EX):
+                self.assertTrue(records.emit(root, 'gap', {}, broker=True))
+            self.assertEqual(len(list(spooled(root))), 2)
+            self.assertEqual((root/'spool-loss').read_bytes(), marker)
 
     def test_policy_and_path_validation_fail_closed(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:

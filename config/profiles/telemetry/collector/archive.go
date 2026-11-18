@@ -144,10 +144,11 @@ func (c cutover) checkpointArchive(dir, path string) error {
 }
 
 type legacyRun struct {
-	ID       string `json:"agent_run_id"`
-	Boot     string `json:"boot_id"`
-	PID      int    `json:"pid"`
-	Reserved string `json:"manifest_state"`
+	ID         string `json:"agent_run_id"`
+	Boot       string `json:"boot_id"`
+	PID        int    `json:"pid"`
+	Reserved   string `json:"manifest_state"`
+	unreadable bool
 }
 
 func legacyRuns(dir string) ([]legacyRun, error) {
@@ -171,8 +172,13 @@ func legacyRuns(dir string) ([]legacyRun, error) {
 				continue
 			}
 			data, err := readLegacyFile(filepath.Join(root, entry.Name()), 16384)
+			if err != nil {
+				// The filename still identifies the run in the old store.
+				runs = append(runs, legacyRun{ID: id, unreadable: true})
+				continue
+			}
 			var run legacyRun
-			if err == nil && json.Unmarshal(data, &run) == nil && run.ID == id {
+			if json.Unmarshal(data, &run) == nil && run.ID == id {
 				runs = append(runs, run)
 			}
 		}
@@ -264,9 +270,22 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 		return err
 	}
 	store := Store{key: key}
+	unreadable := func(event, run string) error {
+		body := map[string]any{"reason": "legacy_history_unreadable", "quality": "partial"}
+		if run != "" {
+			body["agent_run_id"] = run
+		}
+		e := store.localRecord("gap", "legacy-cutover", "unreadable:"+event, c.Started, body)
+		e.PolicyVersion, e.ReceivedTime = PolicyVersion, c.Started
+		return store.putRecord(tx, e, policy)
+	}
 	boot, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	for _, run := range runs {
-		if run.Boot == strings.TrimSpace(string(boot)) && run.PID > 0 && run.Reserved != "reserved" {
+		if run.unreadable {
+			if err := unreadable("run:"+run.ID, key.id(run.ID)); err != nil {
+				return err
+			}
+		} else if run.Boot == strings.TrimSpace(string(boot)) && run.PID > 0 && run.Reserved != "reserved" {
 			// An unfinished manifest can still have descendants after the main PID exits.
 			id := key.id(run.ID)
 			e := store.localRecord("run", "legacy-cutover", "registration:"+id, c.Started,
@@ -346,13 +365,22 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 		{"producer-health.json", "producer_outbox_capacity"},
 	} {
 		data, err := readLegacyFile(filepath.Join(dir, marker.path), frameBytes)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			if err := unreadable(marker.path, ""); err != nil {
+				return err
+			}
+			continue
+		}
 		var health struct {
 			ID    string `json:"event_id"`
 			Count int64  `json:"count"`
 			First string `json:"first_time"`
 			Last  string `json:"last_time"`
 		}
-		if err == nil && json.Unmarshal(data, &health) == nil && legacyID.MatchString(health.ID) && health.Count > 0 &&
+		if json.Unmarshal(data, &health) == nil && legacyID.MatchString(health.ID) && health.Count > 0 &&
 			canonicalTimestamp(health.First) != "" && canonicalTimestamp(health.Last) != "" {
 			if err = add(Record{Schema: RecordSchema, SourceID: producer, EventID: health.ID,
 				SourceVersion: "1", Kind: "gap", SourceTime: health.First, Body: map[string]any{

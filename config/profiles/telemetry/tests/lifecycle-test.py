@@ -29,6 +29,32 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_cutover_receipt_reads_the_validated_inode(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            runtime = object.__new__(guest.Runtime)
+            runtime.data, runtime.uid, runtime.gid = Path(name), os.getuid(), os.getgid()
+            database = runtime.data/'telemetry.sqlite'
+            os.mkfifo(database, 0o600)
+            with self.assertRaisesRegex(ValueError, 'foreign telemetry database'):
+                runtime.cutover_receipt()
+            database.unlink()
+            database.write_bytes(bytes(60)+(4).to_bytes(4, 'big'))
+            database.chmod(0o600)
+            original = database.stat()
+            pread = os.pread
+
+            def replace_path(fd, size, offset):
+                database.rename(runtime.data/'original.sqlite')
+                database.write_bytes(bytes(60)+(5).to_bytes(4, 'big'))
+                database.chmod(0o600)
+                return pread(fd, size, offset)
+
+            with patch.object(guest.os, 'pread', side_effect=replace_path):
+                self.assertTrue(runtime.cutover_receipt())
+            receipt = json.loads((runtime.data/guest.CUTOVER).read_bytes())
+            self.assertEqual((receipt['device'], receipt['inode']), (original.st_dev, original.st_ino))
+            self.assertNotEqual(database.stat().st_ino, receipt['inode'])
+
     def test_installed_cutover_preserves_workloads_and_resumes(self):
         profile = Path(guest.__file__).parent
         with tempfile.TemporaryDirectory(dir='/tmp') as name, ExitStack() as children:
@@ -84,6 +110,7 @@ root = pathlib.Path(sys.argv[1])
 with contextlib.closing(sqlite3.connect(root/'telemetry.sqlite')) as db:
     db.execute("PRAGMA user_version=4")
     db.execute("INSERT INTO runs VALUES('legacy-run','{}','')")
+    db.execute("INSERT INTO runs VALUES('unreadable-run','{}','')")
     db.commit()
 for path, value in (
     ('runs/legacy-run.json', dict(agent_run_id='legacy-run', pid=2147483647,
@@ -100,9 +127,14 @@ for path, value in (
     target = root/path
     target.write_text(json.dumps(value))
     target.chmod(0o600)
+for path in ('runs/unreadable-run.json', 'runs-v4/observer-health'):
+    target = root/path
+    target.parent.mkdir(mode=0o700, exist_ok=True)
+    target.touch()
+    target.chmod(0)
 '''
             subprocess.run(dev(sys.executable, '-Bc', initialization, data), check=True, timeout=5)
-            children.callback(lambda: runtime.as_developer(lambda: ((data/'runs').chmod(0o700), (data/'outbox').chmod(0o700))))
+            children.callback(lambda: runtime.as_developer(lambda: ((data/'runs').chmod(0o700), (data/'runs-v4').chmod(0o700), (data/'outbox').chmod(0o700))))
             observer = child(sys.executable, '-B', launcher, data)
             self.assertTrue(select.select([observer.stdout], [], [], 5)[0])
             self.assertEqual(observer.stdout.readline(), b'locked\n')
@@ -251,17 +283,26 @@ assert launcher.launch(args) == 0
                 self.assertEqual(health['run_manifest_capacity'], (3, '2026-01-01T01:00:00.000000000Z', '2026-01-01T02:00:00.000000000Z'))
                 self.assertEqual(health['producer_outbox_capacity'][0], 2)
                 self.assertIn('source_offline', health)
+                unreadable = db.execute(f"SELECT agent_run_id FROM gaps WHERE {reason}='legacy_history_unreadable'").fetchall()
+                self.assertCountEqual(unreadable, [('',), (records.opaque_id(key, 'unreadable-run'),)])
+                self.assertIsNone(db.execute("SELECT 1 FROM runs WHERE agent_run_id=?",
+                                              (records.opaque_id(key, 'unreadable-run'),)).fetchone())
             archive = data/'archive/telemetry.sqlite'
             self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o400)
             with closing(sqlite3.connect(archive.as_uri()+'?mode=ro', uri=True)) as db:
-                self.assertEqual(db.execute("SELECT json_extract(body,'$.reason') FROM gaps").fetchall(),
-                                 [('interrupted_by_upgrade',)])
+                self.assertCountEqual(db.execute("SELECT agent_run_id,json_extract(body,'$.reason') FROM gaps").fetchall(),
+                                      [('legacy-run', 'interrupted_by_upgrade'), ('unreadable-run', 'interrupted_by_upgrade')])
             database = data/'telemetry.sqlite'
             active_inode = database.stat().st_ino
             (data/'spool-policy.json').unlink()
             invoked.clear()
             with patch.object(guest, 'systemctl', side_effect=systemctl), patch.object(guest.native, 'reconcile', return_value=True):
+                observed = runtime.observe()
+                self.assertEqual(observed['state'], 'stale')
+                self.assertIn({'parameter': 'telemetry.spool-policy', 'installed': 'missing', 'desired': 'present'},
+                              observed['diagnostics'])
                 runtime.apply()
+                self.assertEqual(runtime.observe()['state'], 'current')
             self.assertEqual(database.stat().st_ino, active_inode)
             self.assertTrue((data/'spool-policy.json').is_file())
             self.assertFalse((data/guest.CUTOVER).exists())

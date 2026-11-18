@@ -99,15 +99,13 @@ runpy.run_path(script, run_name='__main__')
         script = str(SOURCE/'deliver.py')
         result = subprocess.run([sys.executable, '-B', '-c', code, script, str(target), *command], timeout=5)
         self.assertEqual(result.returncode, -signal.SIGKILL)
-        staging, = self.installed.parent.glob('.staging-*')
-        unfinished = staging/'content'
-        previous = unfinished.read_bytes()
+        unfinished = self.installed.parent/'.subyard-skill-staging'
+        self.assertEqual(unfinished.read_bytes(), (self.skill/'SKILL.md').read_bytes())
         self.assertFalse(target.exists())
         self.assertEqual(self.run_mode('check'), 10)
         subprocess.run([sys.executable, '-B', script, *command], check=True, timeout=5)
         self.assertEqual(target.read_bytes(), (self.skill/'SKILL.md').read_bytes())
-        self.assertEqual(unfinished.read_bytes(), previous)
-        self.assertEqual(list(self.installed.parent.glob('.staging-*')), [staging])
+        self.assertFalse(unfinished.exists())
         for root in staging_roots:
             self.assertEqual((root/'.staging/notes').read_text(), 'operator notes')
         self.assertEqual(self.run_mode('check'), 0)

@@ -26,6 +26,11 @@ DEFAULT_DATA_DIR = '/var/lib/subyard/telemetry'
 MAX_RUNS = 4096
 MAX_RUN_BYTES = 16*1024*1024
 MAX_RUN_PAYLOAD = 16384
+OBSERVER_FIELDS = (
+    'agent_run_id', 'boot_id', 'host_id', 'pid', 'start_ticks', 'shared',
+    'cgroup', 'cgroup_identity', 'scope_root', 'scope_root_identity',
+    'parent_scope_id', 'scope_start_time', 'scope_baselines',
+)
 
 
 @contextlib.contextmanager
@@ -55,11 +60,12 @@ def admit_manifest(data_dir, run, reserve=False):
         identity = run['agent_run_id']
         if not records.IDENTITY.fullmatch(identity):
             raise ValueError('invalid run identity')
-        value = dict(run)
+        fields = ('agent_run_id', 'boot_id') if reserve else OBSERVER_FIELDS
+        value = {field: run[field] for field in fields if field in run}
         if reserve:
             value.update(manifest_state='reserved', launcher_pid=os.getpid(),
                          launcher_start_ticks=processes.start_ticks(os.getpid()))
-        size = len((json.dumps(value, sort_keys=True, separators=(',', ':'))+'\n').encode())
+        size = len(records.compact_json(value))+1
         with manifest_lock(root):
             path = root/(identity+'.json')
             if size > MAX_RUN_PAYLOAD or path.exists() or path.is_symlink():
@@ -99,9 +105,10 @@ def finish_manifest(data_dir, run):
         previous = records.read_private(path)
         if not isinstance(previous, dict) or previous.get('manifest_state') != 'reserved' or previous.get('launcher_pid') != os.getpid() or previous.get('launcher_start_ticks') != processes.start_ticks(os.getpid()):
             raise ValueError('run reservation identity')
-        if len((json.dumps(run, sort_keys=True, separators=(',', ':'))+'\n').encode()) > MAX_RUN_PAYLOAD:
+        value = {field: run[field] for field in OBSERVER_FIELDS if field in run}
+        if len(records.compact_json(value))+1 > MAX_RUN_PAYLOAD:
             raise ValueError('run payload limit')
-        records.atomic_json(path, run)
+        records.atomic_json(path, value)
 
 
 def discard_reservation(data_dir, run):
