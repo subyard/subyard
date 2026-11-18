@@ -193,6 +193,10 @@ run_as_fixture() {
   runuser -u "$FIXTURE_USER" -- "$@"
 }
 
+# The platform fixture stops short of yard init, which normally provisions this lock.
+"$fixture_repo/bin/yard-engine" _network-lock ensure "$(id -u "$FIXTURE_USER")"
+run_as_fixture "$fixture_repo/bin/yard-engine" _network-lock check
+
 run_prompted_pty() {
   local output="$1" command_line="$2" input pid input_fd count=0 deadline
   shift 2
