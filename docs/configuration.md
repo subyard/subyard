@@ -616,6 +616,11 @@ An interactive `codex` from an SSH or VS Code shell prefers upstream's shared ap
 - **Disconnects:** when a plain client's terminal dies during a slow tool, the tool finishes on the daemon
   and its result reaches the model. Under `--no-daemon` the tool stops with the client.
 
+On kernels with AppArmor user namespace restrictions, Codex provisioning tests Bubblewrap as the
+yard developer. If the sandbox cannot start, provisioning loads the distribution's
+`bwrap-userns-restrict` profile inside the yard. AppArmor reloads it on guest boot.
+`codex-policy-check` verifies that Bubblewrap can create the user and network namespaces.
+
 #### Codex version drift
 
 The daemon and the command can run different versions. `codex app-server daemon version` reports both, as
