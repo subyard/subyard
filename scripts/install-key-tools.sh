@@ -35,9 +35,12 @@ case "$(uname -m)" in
 esac
 
 tool_version_matches() { # <path> <version>
+  local output
   [ -f "$1" ] && [ ! -L "$1" ] && [ -x "$1" ] || return 1
   [ "$(stat -c '%a:%u' "$1")" = "755:$(id -u)" ] || return 1
-  "$1" --version 2>&1 | awk -v expected="$2" '
+  # Keep trailing newlines so a blank line and silent success remain distinct.
+  output=$("$1" --version 2>&1 && printf '.') || return $?
+  printf '%s' "${output%.}" | awk -v expected="$2" '
     NR == 1 { for (i=1; i<=NF; i++) { token=$i; sub(/^v/, "", token); if (token==expected) matched=1 } }
     END { exit (NR != 0 && !matched) }
   '

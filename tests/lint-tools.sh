@@ -80,6 +80,10 @@ class LintTools(unittest.TestCase):
         self.assert_shell_findings("probe.sh", "\n".join("producer | " + cmd for cmd in consumers),
                                    range(1, len(consumers) + 1))
 
+    def test_shell_lint_checks_extensionless_scripts(self):
+        pipe = "|"
+        self.assert_shell_findings("probe", f"#!/usr/bin/env bash\nproducer {pipe} grep -Fq term\n", [2])
+
     def test_shell_lint_ignores_comments_and_draining_consumers(self):
         pipe = "|"
         self.assert_shell_findings("probe", f"""#!/bin/sh

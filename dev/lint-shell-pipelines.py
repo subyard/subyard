@@ -28,7 +28,7 @@ PIPE = re.compile(
     r"""(?=[\s;&<>()'"]|$)"""
 )
 RUN = re.compile(r"^(\s*(?:-\s+)?)run:\s*(.*)$")
-SHEBANG = re.compile(rb"^#!.*[/ ](?:ba|da|z|k)?sh")
+SHEBANG = re.compile(rb"^#!.*[/ ](?:ba|da|z|k)?sh\b")
 
 failed = False
 for path in map(Path, filter(None, subprocess.check_output(

@@ -12,6 +12,7 @@ cat > "$TMP/fixture/age/age" <<'SH'
 case "${KEY_TOOL_PROBE:-normal}" in
   normal) echo 'age 9.9.1' ;;
   silent) exit 0 ;;
+  blank) printf '\n' ;;
   failure) exit 23 ;;
   noisy-failure) echo 'could not read version' >&2; exit 23 ;;
   mismatch) printf 'age 1.0.0\nage 9.9.1\n' ;;
@@ -86,16 +87,17 @@ PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --yes >/dev/null
 receipt="$SUBYARD_KEYS_TOOLS_DIR/bin/.subyard-native-tools.json"
 [ "$(stat -c '%a' "$receipt")" = 600 ] || fail 'native tool receipt is not protected'
 while read -r probe expected; do
-  ready=yes
-  KEY_TOOL_PROBE="$probe" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check || ready=no
-  [ "$ready" = "$expected" ] || fail "version probe $probe: expected ready=$expected, got $ready"
+  status=0
+  KEY_TOOL_PROBE="$probe" PATH="$TMP/bin:$PATH" bash "$ROOT/scripts/install-key-tools.sh" --check || status=$?
+  [ "$status" -eq "$expected" ] || fail "version probe $probe: expected exit $expected, got $status"
 done <<'PROBES'
-normal yes
-silent yes
-failure no
-noisy-failure no
-mismatch no
-large yes
+normal 0
+silent 0
+blank 1
+failure 23
+noisy-failure 23
+mismatch 1
+large 0
 PROBES
 # The same operator may invoke yard through sg with a different primary group.
 KEY_TOOL_REAL_ID="$(command -v id)"
