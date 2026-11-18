@@ -393,33 +393,6 @@ DEV_SUDO=0
 NESTED_E2E_VMS=0
 EOF
 chmod 0600 "$real_config"/yards/*/config.env
-install -d -m 0700 -o "$FIXTURE_USER" -g "$FIXTURE_USER" "$real_config/tools/bin"
-cat > "$real_config/tools/bin/age" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = --version ] && { printf 'age 1.3.1\n'; exit 0; }
-exit 2
-SH
-cat > "$real_config/tools/bin/age-keygen" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-case "${1:-}" in
-  --version) printf 'age-keygen 1.3.1\n' ;;
-  -o)
-    recipient="age1$(printf '%s-%s-%s' "$2" "$$" "$RANDOM" | sha256sum | cut -c1-58)"
-    printf 'FAKE:%s\n' "$recipient" > "$2"
-    printf 'Public key: %s\n' "$recipient" >&2
-    ;;
-  -y) sed -n 's/^FAKE://p' "$2" ;;
-  *) exit 2 ;;
-esac
-SH
-cat > "$real_config/tools/bin/sops" <<'SH'
-#!/usr/bin/env bash
-[ "${1:-}" = --version ] && { printf 'sops 3.13.2\n'; exit 0; }
-exit 2
-SH
-chmod 0755 "$real_config/tools/bin/age" \
-  "$real_config/tools/bin/age-keygen" "$real_config/tools/bin/sops"
 chown -R "$FIXTURE_USER:$FIXTURE_USER" "$real_config"
 run_real_as_fixture() {
   run_as_fixture "$@"
