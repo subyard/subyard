@@ -13,9 +13,7 @@ Stop writing before handoff; return changed behavior/files, exact checks and lim
 candidate identity covering dirty/untracked inputs, evidence, risks and remaining work.
 Resume repairs only when assigned.
 
-When the change touches a profile or a behavior with owning lanes in
-docs/testing.md#coverage-ownership, dispatch those Periodic E2E checks on your pushed branch
-and report their run URLs and results. Run short checks directly. For a necessary long check, assign at most one observer
+Run short checks directly. For a necessary long check, assign at most one observer
 under roles/observer.md and the skill's assignment policy; run directly if
 unavailable. Transfer candidate/command, handles, evidence and deadlines/stop policy,
 then end this phase while retaining writer ownership. Handoff is not readiness. The
