@@ -331,6 +331,7 @@ SH
 chmod 0755 "$real_repo/config/profiles/sudo-smoke/provision.sh"
 
 real_config="$fixture_home/.config/subyard"
+real_storage_path="$(incus storage get default source)"
 install -d -m 0700 -o "$FIXTURE_USER" -g "$FIXTURE_USER" \
   "$fixture_home/.config" "$real_config" "$real_config/yards"
 real_ssh_port=$((30000 + ($$ % 20000)))
@@ -348,7 +349,6 @@ DEV_UID=1001
 ENVIRONMENT_PROFILES=sudo-smoke
 CODING_TOOL_INTEGRATIONS=
 SRV_POOL=$E2E_POOL
-STORAGE_PATH=$(incus storage get default source)
 HOST_MOUNTS=sudo-host:/mnt/host/sudo:rw:0700
 HOST_BASE=$fixture_home/host-real
 RESTRICTED_DISK_PATHS=$fixture_home/host-real
@@ -424,6 +424,7 @@ exec env -i \\
   SUBYARD_NO_AUDIT=1 \\
   SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \\
   SUBYARD_REPOSITORY_ROOT='$real_repo' \\
+  STORAGE_PATH='$real_storage_path' \\
   MIN_DISK_GIB=1 \\
   HOST_CLAUDE_MD= \\
   HOST_CODEX_AGENTS_MD= \\
