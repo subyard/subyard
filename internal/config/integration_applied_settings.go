@@ -25,7 +25,7 @@ func (catalog Catalog) IntegrationInitSettings(values map[string]string) map[str
 	// keys record absence; nil remains the legacy "baseline unavailable" state.
 	result := map[string]string{}
 	for name, value := range values {
-		if catalog.IntegrationInitSetting(name) && name != "CODING_TOOL_INTEGRATIONS" && !DefaultGitApproval(name, value) {
+		if catalog.IntegrationInitSetting(name) && name != "CODING_TOOL_INTEGRATIONS" && !ImplicitAppliedGitApproval(name, value) {
 			result[name] = value
 		}
 	}
@@ -44,6 +44,10 @@ func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[st
 			continue
 		}
 		result[name] = value
+	}
+	if applied != nil {
+		// Snapshots from the prompt-by-default release omitted prompt.
+		result["CODING_TOOL_GIT_APPROVAL"] = "prompt"
 	}
 	for name, value := range applied {
 		result[name] = value
@@ -75,8 +79,8 @@ func (catalog Catalog) ValidateIntegrationInitSettings(values map[string]string)
 	return nil
 }
 
-// DefaultGitApproval reports the default approval mode, which snapshots omit so
-// that readers from before the setting accept them; absence means prompt.
-func DefaultGitApproval(name, value string) bool {
+// ImplicitAppliedGitApproval reports the legacy snapshot encoding for prompt.
+// Keep that encoding so readers from before the setting can still read it.
+func ImplicitAppliedGitApproval(name, value string) bool {
 	return name == "CODING_TOOL_GIT_APPROVAL" && (value == "" || value == "prompt")
 }

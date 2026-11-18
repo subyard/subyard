@@ -6,7 +6,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 fixture="$(mktemp -d /tmp/subyard-claude-native.XXXXXX)"
 trap 'rm -rf -- "$fixture"' EXIT
 if [ "${1:-}" != --installed-policy ]; then
-  sudo -n bash "$ROOT/config/agents/claude/provision.sh"
+  if [ "${1:-}" = --install-only ]; then
+    sudo -n bash "$ROOT/config/agents/claude/provision.sh"
+  else
+    sudo -n env CODING_TOOL_GIT_APPROVAL=prompt bash "$ROOT/config/agents/claude/provision.sh"
+  fi
 fi
 if [ "${1:-}" = --install-only ]; then
   version="$(claude --version)"
@@ -46,13 +50,13 @@ if [ "$result" = 0 ]; then
     "$ROOT/config/agents/claude/settings.json" "$fixture/evidence-managed" || result=$?
 fi
 if [ "$result" = 0 ] && [ "${1:-}" != --installed-policy ]; then
-  # Prompts off removes only the ask rules; restore the default mode afterwards.
+  # Prompts off removes only the ask rules; restore the prompt fixture afterwards.
   sudo -n env CODING_TOOL_GIT_APPROVAL=off bash "$ROOT/config/agents/claude/provision.sh"
   claude-policy-check
   PARITY_GIT_APPROVAL=off PARITY_CLAUDE_CLI=/usr/local/bin/claude \
     "$fixture/venv/bin/python" -B "$ROOT/config/agents/claude/tests/e2e/permission-policy.py" \
     "$ROOT/config/agents/claude/settings.json" "$fixture/evidence-off" || result=$?
-  sudo -n bash "$ROOT/config/agents/claude/provision.sh"
+  sudo -n env CODING_TOOL_GIT_APPROVAL=prompt bash "$ROOT/config/agents/claude/provision.sh"
   claude-policy-check
 fi
 # These logs contain only fixture commands and the synthetic loopback model exchange.

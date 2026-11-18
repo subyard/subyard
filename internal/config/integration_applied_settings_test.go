@@ -38,7 +38,7 @@ func TestAppliedIntegrationSettingsPreserveAbsentInputs(t *testing.T) {
 	applied := catalog.IntegrationInitSettings(before)
 	desired := map[string]string{"AGENT_sample_COMMAND": "new-command", "DEV_USER": "other", "AGENT_sample_PROJECTS_CHANGED": "new-hook", "AGENT_sample_HEALTH": "new-health", "UNRELATED": "retained"}
 	projected := catalog.WithAppliedIntegrationInitSettings(desired, applied)
-	if projected["AGENT_sample_COMMAND"] != "old-command" || projected["DEV_USER"] != "dev" || projected["UNRELATED"] != "retained" {
+	if projected["AGENT_sample_COMMAND"] != "old-command" || projected["DEV_USER"] != "dev" || projected["UNRELATED"] != "retained" || projected["CODING_TOOL_GIT_APPROVAL"] != "prompt" {
 		t.Fatal("applied domain projection changed unrelated state or lost applied values")
 	}
 	for _, name := range []string{"AGENT_sample_PROJECTS_CHANGED", "AGENT_sample_HEALTH"} {
@@ -57,12 +57,12 @@ func TestAppliedIntegrationSettingsPreserveAbsentInputs(t *testing.T) {
 
 // Default-mode snapshots stay readable by readers that predate the setting;
 // such readers refuse any unknown field, so only off is recorded.
-func TestAppliedIntegrationSettingsRecordOnlyNonDefaultGitApproval(t *testing.T) {
+func TestAppliedIntegrationSettingsPreserveGitApprovalEncoding(t *testing.T) {
 	catalog := Catalog{}
 	for _, value := range []string{"", "prompt"} {
 		settings := catalog.IntegrationInitSettings(map[string]string{"DEV_USER": "dev", "CODING_TOOL_GIT_APPROVAL": value})
 		if len(settings) != 1 || settings["DEV_USER"] != "dev" {
-			t.Fatalf("default mode %q entered the snapshot: %#v", value, settings)
+			t.Fatalf("implicit applied mode %q entered the snapshot: %#v", value, settings)
 		}
 	}
 	settings := catalog.IntegrationInitSettings(map[string]string{"CODING_TOOL_GIT_APPROVAL": "off"})

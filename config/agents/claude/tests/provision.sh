@@ -65,7 +65,7 @@ case "$url" in
 esac
 CURL
 chmod 0755 "$tmp/bin/curl"
-export CLAUDE_TEST_ROOT="$tmp"
+export CLAUDE_TEST_ROOT="$tmp" CODING_TOOL_GIT_APPROVAL=prompt
 export SUBYARD_TEST_ARTIFACT_CURL="$ROOT/tests/helpers/artifact-curl.sh" SUBYARD_TEST_TRANSFER_LOG="$tmp/transfer.log"
 run_hook() { # installation root [architecture]
   local root="$1" arch="${2:-amd64}"
@@ -190,9 +190,9 @@ grep -Fq 'Git approval hook permissions drifted' "$tmp/hook-drift.err"
 grep -Fq 'Git approval hook content drifted' "$tmp/hook-drift.err"
 run_hook "$root" >/dev/null
 
-# The approval mode converges on -> off -> on, keeping the update lock and foreign policies.
-jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'default mode lacks the Git ask rules'
-CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null
+# Upgrade a previously managed prompt policy with the setting unset, then restore prompt.
+jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'prompt mode lacks the Git ask rules'
+(unset CODING_TOOL_GIT_APPROVAL; run_hook "$root") >/dev/null
 jq -e '. == {"$comment":"Subyard Claude permission policy","env":{DISABLE_UPDATES:"1"}}' "$policy" >/dev/null \
   || fail 'off mode kept the Git ask rules or dropped the update lock'
 [ "$(stat -c '%a' "$policy")" = 644 ] || fail 'off mode policy mode drifted'

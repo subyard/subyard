@@ -530,9 +530,9 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 				return nil, err
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
-			// Only off adds a package digest input, preserving the default identity.
+			// Preserve both installed mode identities across the default change.
 			// Home template changes are also tracked by their file artifact digest.
-			if runtime.environmentValue("CODING_TOOL_GIT_APPROVAL") == "off" {
+			if config.GitApprovalOff(runtime.environmentValue("CODING_TOOL_GIT_APPROVAL")) {
 				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
 			}
 		}

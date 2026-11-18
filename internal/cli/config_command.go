@@ -118,7 +118,8 @@ func (cli *CLI) runConfig(ctx context.Context, loaded config.Loaded, arguments [
 				"  repair-registration <yard> [--check] [--yes]  preserve a shadowed flat registration in recovery\n"+
 				"  status  check materialized file settings in running local yards (read-only)\n"+
 				"  apply   refresh materialized file settings in running local yards\n"+
-				"  sync    connect, inspect, pull, push committed changes or cache Git settings\n",
+				"  sync    connect, inspect, pull, push committed changes or cache Git settings\n"+
+				"  CODING_TOOL_GIT_APPROVAL defaults to off; set prompt to enable managed commit and push prompts after yard init\n",
 			cli.options.Program)
 		return 0
 	}

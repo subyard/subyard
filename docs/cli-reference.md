@@ -383,4 +383,5 @@ Usage: yard config fields [SETTING] | show [SETTING] | paths | validate [--all-l
   status  check materialized file settings in running local yards (read-only)
   apply   refresh materialized file settings in running local yards
   sync    connect, inspect, pull, push committed changes or cache Git settings
+  CODING_TOOL_GIT_APPROVAL defaults to off; set prompt to enable managed commit and push prompts after yard init
 ```

@@ -18,7 +18,7 @@ if [ -z "$DEV_HOME" ] && [ "$(id -u)" = 0 ]; then
 fi
 expected_owner="$(id -u):$(id -g)"
 die() { printf 'Claude policy: %s\n' "$*" >&2; exit 1; }
-GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
+GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-off}"
 
 # BEGIN generated Git approval hook
 git_approval_hook() {

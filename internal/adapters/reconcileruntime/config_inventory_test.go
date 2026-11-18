@@ -141,7 +141,7 @@ func configInventoryEntry(home, kind, content string) map[string]any {
 	return entry
 }
 
-func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
+func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.T) {
 	f := newConfigInventoryFixture(t)
 	root := testkit.TempDir(t)
 	prompt := root + "/prompt.jsonc"
@@ -157,12 +157,25 @@ func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=fixture", "AGENT_fixture_CONFIG=" + prompt, ""},
 	}
 	ctx := context.Background()
-	for _, step := range []struct{ mode, want string }{
-		{"prompt", "{\"approval\":\"ask\"}\n"},
-		{"off", "{\"approval\":\"allow\"}\n"},
-		{"prompt", "{\"approval\":\"ask\"}\n"},
+	for _, step := range []struct {
+		mode, want string
+		applied    bool
+	}{
+		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
+		{mode: "", want: "{\"approval\":\"ask\"}\n", applied: true},
+		{mode: "", want: "{\"approval\":\"allow\"}\n"},
+		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
 	} {
-		runtime.Environment[2] = "CODING_TOOL_GIT_APPROVAL=" + step.mode
+		mode := step.mode
+		if step.applied {
+			// The older inventory snapshot omitted its implicit prompt mode.
+			projected := (config.Catalog{}).WithAppliedIntegrationInitSettings(
+				map[string]string{"CODING_TOOL_GIT_APPROVAL": "off"}, map[string]string{},
+			)
+			mode = projected["CODING_TOOL_GIT_APPROVAL"]
+		}
+		runtime.Environment[2] = "CODING_TOOL_GIT_APPROVAL=" + mode
+		runtime.appliedIntegrationInspection = step.applied
 		files, err := runtime.guestConfigFiles()
 		if err != nil {
 			t.Fatal(err)
@@ -176,6 +189,13 @@ func TestConfigInventoryRestoresGitApprovalPrompt(t *testing.T) {
 		}
 		entry := inventoryFileEntry(f.home, "fixture", "settings", string(payload))
 		entries := inventoryArtifacts(t, []map[string]any{entry})
+		if step.applied {
+			observed, err := runtime.integrationInventory(ctx, "observe", entries, "")
+			if err != nil || observed.Changed {
+				t.Fatalf("legacy installed policy drifted before init: changed=%t, error=%v", observed.Changed, err)
+			}
+			continue
+		}
 		for _, operation := range []string{"apply", "commit"} {
 			if _, err := runtime.integrationInventory(ctx, operation, entries, ""); err != nil {
 				t.Fatalf("%s %s: %v", step.mode, operation, err)
