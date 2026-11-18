@@ -329,19 +329,18 @@ prepare)
   if owner "$launcher" update --rollback --yes >"$STATE/rollback.log" 2>&1; then
     die 'rollback to the released guard was accepted'
   fi
-  # The rollback-compatibility blocker (the device-guard epoch), not another rollback-incompatible one.
-  # Its message is unique to that blocker (resource transition.rollback-compatibility).
   sed 's/^/evidence: rollback: /' "$STATE/rollback.log"
-  # The source provenance check runs before it and refuses a published 0.29.0 target first; the
-  # CLI exposes no rollback check past it, so that case is a stated limit and the epoch blocker
-  # itself is proven host-free (go:releasetransition). Any other refusal fails the lane.
+  # Retained-release selection can refuse the registry change before the epoch blocker runs.
+  # The registry comparison below isolates the device guard boundary that caused the mismatch.
   grep -Fq 'code=rollback-incompatible' "$STATE/rollback.log" || die 'rollback was refused without code=rollback-incompatible'
   if grep -Fq 'the retained release cannot safely accept the current migration ledger' "$STATE/rollback.log"; then
     evidence 'rollback refused by the rollback-compatibility blocker'
+  elif grep -Fq "the selected release's migration registry differs from the active release's registry" "$STATE/rollback.log"; then
+    evidence 'rollback refused by the retained-release registry check'
   elif grep -Fq 'source release has invalid or foreign V2 registry provenance' "$STATE/rollback.log"; then
     evidence 'LIMIT: rollback refused by the source provenance check, which runs before the rollback-compatibility blocker for every published target before this epoch; that blocker is proven host-free'
   else
-    die 'rollback was refused by neither the rollback-compatibility blocker nor the provenance check'
+    die 'rollback was refused for an unexpected reason'
   fi
   # The installed 0.29.0 and the candidate registries differ only by the NetworkManager device
   # guard migration and power-metadata 3 -> 4.
