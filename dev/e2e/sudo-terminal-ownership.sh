@@ -357,7 +357,12 @@ cat > "$real_repo/config/profiles/sudo-smoke/provision.sh" <<'SH'
 #!/usr/bin/env bash
 # subyard-provision-check-v1
 set -euo pipefail
-[ "${1:-}" != --check ] || exit 0
+marker=/var/lib/subyard-sudo-smoke
+if [ "${1:-}" = --check ]; then
+  [ -f "$marker" ] || exit 10
+  exit 0
+fi
+touch "$marker"
 printf 'sudo-smoke-hook-ok\n'
 SH
 chmod 0755 "$real_repo/config/profiles/sudo-smoke/provision.sh"
@@ -498,6 +503,7 @@ run_real_checked 'real yard start' "$TMP/real-start.out" start --yes
 grep -Fq 'started' "$TMP/real-start.out" || die 'real lifecycle start did not complete'
 grep -Fq '[sudo] password for' "$TMP/real-start.out" \
   && die 'inactive NetworkManager caused an unnecessary lifecycle sudo prompt'
+incus exec "$REAL_INSTANCE" --project "$REAL_PROJECT" -- unlink /var/lib/subyard-sudo-smoke
 run_real_checked 'second real yard stop' "$TMP/real-restop.out" stop --force --yes
 run_real_as_fixture sudo -k
 run_real_checked 'real stopped-yard provision' "$TMP/real-provision.out" \
