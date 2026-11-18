@@ -733,9 +733,10 @@ except `boundary` and `cleanup`; a lane that the catalog also declares as its ow
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
 becomes an ordinary owner with the packaged candidate, and unchanged controllers lease from it.
-The `pool`, `check` and Intel `nested` jobs use the bounded runner/P0 snapshots and failed-log
+The `pool`, `check`, `veranda` and Intel `nested` jobs use the bounded runner/P0 snapshots and failed-log
 tails [listed in hosted check diagnostics](reference/release-publication.md#exact-candidate-hosted-release-checks), uploaded on every outcome as `pool-diagnostics-ATTEMPT`,
-`diagnostics-JOB_INDEX-ATTEMPT` and `nested-diagnostics-JOB_INDEX-ATTEMPT`. Their `runner/check.log`
+`diagnostics-JOB_INDEX-ATTEMPT`, `veranda-diagnostics-JOB_INDEX-ATTEMPT` and
+`nested-diagnostics-JOB_INDEX-ATTEMPT`. Their `runner/check.log`
 contains check output, including native cleanup output, and their broker event records survive
 interruption when final steps can run. Logs are staged under the runner temporary directory rather
 than the managed candidate workspace; the upload path therefore matches the capture path. Jobs run
@@ -771,8 +772,9 @@ engine release: `veranda:x11`, `veranda:wayland` and the manual `veranda:x11-rem
 `dev/e2e/veranda-short.sh`, as the [Veranda SHORT recipe](../veranda/desktop/README.md#disposable-x11-and-wayland-short)
 does. A separate `veranda-bundle` job builds the GUI and a matching engine with the stable version
 `VERANDA_VERSION` and adds them to a copy of the candidate bundle; other checks keep the unchanged
-candidate bundle and still run if that build fails, while the Veranda checks then fail. These checks
-measure no resource budgets.
+candidate bundle. The main matrix starts after the pool gate while the Veranda bundle is still
+building. A bundle failure blocks the Veranda matrix and fails the workflow. These checks measure
+no resource budgets.
 
 The periodic-only `periodic:config-sync` check runs by default and can be selected with `checks`.
 It leases a standard pair for installed configuration sync over SSH/Git, using the ordinary candidate

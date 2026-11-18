@@ -2004,7 +2004,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertNotIn("SUBYARD_E2E_CANDIDATE_BUNDLE", set(observed["verify"]))
                 self.assertNotIn("SUBYARD_E2E_CONTROLLER_WORKSPACE", set(observed["verify"]))
                 self.assertNotIn("SUBYARD_E2E_CAPACITY_WAIT", set(observed["verify"]))
-                self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CAPACITY_WAIT"], capacity_wait or m.LIVE_CAPACITY_WAIT)
+                self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CAPACITY_WAIT"], "0s")
                 self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CONTROLLER_WORKSPACE"], str(m.ROOT))
                 self.assertEqual(observed["profile:sample"]["SUBYARD_E2E_CANDIDATE_BUNDLE"],
                                  str(output / "candidate-bundle.tar.gz"))
@@ -2170,7 +2170,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
                  patch.object(m, "execute", side_effect=AssertionError("execution")), \
                  patch.object(sys, "argv", ["acceptance", "preflight", "--broker-status", str(status),
-                                          "--slots", "1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
+                                          "--slots", "slot-1", "--types", "subyard-pair", "--with-vms"]), redirect_stdout(io.StringIO()):
                 self.assertEqual(m.main(), 1)
             self.assertEqual(before, set(checkout.rglob("*")))
 
@@ -2672,7 +2672,8 @@ while True: time.sleep(1)
                 ("fixture/unfinished", "start", 0, 0)])
             self.assertNotIn("do-not-export", json.dumps(events))
 
-    def test_prelease_capacity_refusal_retries_once_and_later_continues_same_candidate(self):
+    def test_prelease_capacity_deadline_preserves_other_results_on_resume(self):
+        self.enterContext(patch.object(m, "LIVE_CAPACITY_WAIT", "0s"))
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         for resource in ("memory", "disk"):
@@ -2695,7 +2696,7 @@ while True: time.sleep(1)
                 execute = m.execute
                 def observe(name, *args):
                     calls.append((name, args[-1]))
-                    self.assertEqual(args[3]["SUBYARD_E2E_CAPACITY_WAIT"], m.LIVE_CAPACITY_WAIT)
+                    self.assertEqual(args[3]["SUBYARD_E2E_CAPACITY_WAIT"], "0s")
                     result = execute(name, *args)
                     original[name] = copy.deepcopy(result)
                     return result
@@ -2704,7 +2705,7 @@ while True: time.sleep(1)
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
                      patch.object(m, "execute", side_effect=observe):
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                    self.assertEqual(calls, [(blocked, 1), (following, 1), (blocked, 1)])
+                    self.assertEqual(calls, [(blocked, 1), (following, 1)])
                     persisted = json.loads((output / "receipt.json").read_text())
                     self.assertEqual(persisted["result"], "incomplete")
                     self.assertEqual(persisted["checks"][blocked], original[blocked] | {
@@ -2714,7 +2715,7 @@ while True: time.sleep(1)
                     events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
                     attempts = [item for item in events if item["event"] == "check-result"]
                     self.assertEqual([(item["check"], item["status"]) for item in attempts],
-                                     [(blocked, "blocked"), (following, "passed"), (blocked, "blocked")])
+                                     [(blocked, "blocked"), (following, "passed")])
                     self.assertEqual(events[-1]["status"], "incomplete")
                     blocked_log = output / original[blocked]["log"]
                     log_bytes = blocked_log.read_bytes()
@@ -2731,7 +2732,8 @@ while True: time.sleep(1)
                     self.assertEqual((output / "events.jsonl").read_text().splitlines()[:len(events)],
                                      [json.dumps(item, sort_keys=True) for item in events])
 
-    def test_capacity_retry_waits_for_active_checks_and_records_both_attempts(self):
+    def test_capacity_retry_uses_an_available_slot_while_a_peer_is_active(self):
+        self.enterContext(patch.object(m, "ADMISSION_POLL_SECONDS", 0))
         for slow_exit in (0, 23):
             with self.subTest(slow_exit=slow_exit), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 directory = Path(temporary)
@@ -2753,14 +2755,14 @@ while True: time.sleep(1)
                     calls.append((name, slot))
                     if name == blocked:
                         if marker.exists():
-                            self.assertTrue(finished.is_set(), "capacity retry overlapped an active first-pass check")
+                            self.assertFalse(finished.is_set(), "capacity retry waited for unrelated active work")
                         else:
                             self.assertTrue(started.wait(3))
                     if name == slow:
                         started.set()
                         self.assertTrue(following_done.wait(3))
                     result = execute(name, command, root, output, env, slot)
-                    if name == following:
+                    if name == blocked and result["status"] == "passed":
                         following_done.set()
                     if name == slow:
                         finished.set()
@@ -2785,6 +2787,56 @@ while True: time.sleep(1)
                 persisted = json.loads((output / "receipt.json").read_text())
                 record, _ = m.original_attempt(output, persisted, blocked, persisted["checks"][blocked])
                 self.assertEqual(record["result"]["status"], "passed")
+
+    def test_scheduler_dispatches_hosted_failure_and_safe_retry_while_peer_runs(self):
+        peer_started, fallback_done, retry_done = (threading.Event() for _ in range(3))
+        calls, results = [], {}
+        def attempt(name, slot):
+            calls.append((name, slot))
+            if name == "slow":
+                peer_started.set()
+                self.assertTrue(fallback_done.wait(3))
+                self.assertTrue(retry_done.wait(3))
+            if name == "flaky" and sum(item == "flaky" for item, _ in calls) == 1:
+                return {"status": "failed", "exit_code": 143, "termination": "signal",
+                        "environment_evidence": "recorded", "cleanup_status": "recorded",
+                        "cleanup": {"lease-release": {"exit_code": 0}}}
+            if name == "flaky":
+                retry_done.set()
+            if name == "hosted-failed":
+                fallback_done.set()
+            return {"status": "passed"}
+
+        def hosted(names):
+            self.assertTrue(peer_started.wait(3))
+            self.assertEqual(names, {"hosted-failed", "hosted-passed", "hosted-running"})
+            return {"hosted-passed"}, {"hosted-failed"}, set()
+
+        m.run_live(attempt, results.__setitem__, ["slow", "flaky"], m.BROKER_SLOTS, 2, "1s",
+                   {"hosted-failed", "hosted-passed", "hosted-running"}, hosted, lambda: ())
+        self.assertEqual({name for name, _ in calls}, {"slow", "flaky", "hosted-failed"})
+        self.assertEqual(sum(name == "flaky" for name, _ in calls), 2)
+        self.assertTrue(all(result["status"] == "passed" for result in results.values()))
+
+    def test_default_pool_uses_a_slot_after_broker_admission_changes(self):
+        peer_started, slot_opened = threading.Event(), threading.Event()
+        calls, results = [], {}
+        def attempt(name, slot):
+            calls.append((name, slot))
+            if name == "slow":
+                peer_started.set()
+                self.assertTrue(slot_opened.wait(3))
+            elif slot == 2 and sum(item == 2 for _, item in calls) > 1:
+                self.assertTrue(peer_started.is_set())
+                slot_opened.set()
+            else:
+                return {"status": "blocked", "reason": "capacity_slot"}
+            return {"status": "passed"}
+
+        with patch.object(m, "ADMISSION_POLL_SECONDS", 0):
+            m.run_live(attempt, results.__setitem__, ["slow", "waiting"], m.BROKER_SLOTS, 4, "4s",
+                       (), None, lambda: ())
+        self.assertEqual(results, {"slow": {"status": "passed"}, "waiting": {"status": "passed"}})
 
     def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
@@ -2924,6 +2976,7 @@ while True: time.sleep(1)
     def test_invocation_prerequisite_rerun_stop_capacity_and_interruption(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        self.enterContext(patch.object(m, "LIVE_CAPACITY_WAIT", "0s"))
         for case in ("prerequisite", "rerun", "blocked", "interrupted", "excluded", "stopped"):
             with self.subTest(case=case), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
@@ -3258,7 +3311,7 @@ while True: time.sleep(1)
                                          ("no-lease-release", {**lease, "cleanup": {"guest-cleanup": {"exit_code": 0}}}, False),
                                          ("failed-lease-release", {**lease, "cleanup": {**lease["cleanup"], "lease-release": {"exit_code": 1}}}, False),
                                          ("unallocated", {**lease, "environment_evidence": "unknown"}, False),
-                                         ("timeout", {**lease, "termination": "timeout", "exit_code": 124}, False)):
+                                         ("timeout", {**lease, "termination": "timeout", "exit_code": 124}, True)):
             with self.subTest(name=name), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
                 names = ["verify", "vm:one", "vm:two"]
@@ -3275,11 +3328,31 @@ while True: time.sleep(1)
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
                      patch.object(m, "execute", side_effect=execute):
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                self.assertEqual(calls, ["vm:one", "vm:two"] if continues else ["vm:one"])
+                self.assertEqual(calls, ["vm:one", "vm:two", "vm:one"] if continues else ["vm:one"])
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(persisted["checks"]["vm:one"]["status"], "failed")
                 self.assertEqual(persisted["checks"]["vm:two"]["status"], "passed" if continues else "pending")
                 self.assertEqual(persisted["result"], "failed")
+
+    def test_exact_slots_and_concurrency_count_have_distinct_syntax(self):
+        parser = m.argparse.ArgumentParser()
+        m.add_slot_arguments(parser)
+        self.assertEqual(parser.parse_args(["--slots", "slot-2", "slot-004"]).slots, [2, 4])
+        self.assertEqual(parser.parse_args(["--slot-count", "2"]).slot_count, 2)
+        for args in (["--slots", "2"], ["--slot-count", "5"], ["--slot-count", "2", "--slots", "slot-2"]):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parser.parse_args(args)
+
+    def test_concurrent_rerun_queues_one_exact_live_lane(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            name = "profile:sample"
+            (output / "receipt.json").write_text(json.dumps({"checks": {name: {"status": "failed"}}}))
+            with m.acceptance_lock(output), patch.object(m.signal, "signal"), \
+                 patch.object(sys, "argv", ["collector", "run", "--output", str(output), "--only", name, "--rerun"]):
+                self.assertEqual(m.main(), 0)
+            self.assertTrue(m.retry_path(output, name).is_file())
+            self.assertEqual(json.loads((output / "receipt.json").read_text())["checks"][name], {"status": "failed"})
 
     def test_single_collector_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3502,7 +3575,7 @@ class FullSplitRequirement(unittest.TestCase):
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
-        self.assertEqual(len(m.CI_HOSTED_CHECKS), 22)
+        self.assertEqual(len(m.CI_HOSTED_CHECKS), 24)
         self.assertEqual(set(m.hosted_checks(root, "0.0.0", m.profile_inventory(root))), m.CI_HOSTED_CHECKS)
         self.assertTrue(all(declared[name] for name in m.CI_HOSTED_CHECKS))
         with patch.object(m, "CI_HOSTED_CHECKS", m.CI_HOSTED_CHECKS | {"vm:unknown"}):

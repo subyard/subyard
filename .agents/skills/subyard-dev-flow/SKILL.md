@@ -136,6 +136,10 @@ coordinator, and do not create or close shared task files or start another full 
   physical lane.
 - For release preparation, acceptance and publication, follow the
   [agent release workflow](../../../docs/reference/release-publication.md#agent-release-workflow).
+  Release acceptance always has priority on local broker slots and in CI. Use all broker slots by
+  default: acceptance schedules up to four lanes as memory and disk admission allows. Pass
+  `--slots slot-N ...` only for an explicit restriction, or `--slot-count N` to cap concurrency
+  while keeping all four slots eligible.
 - Once relevant checks pass, broaden or repeat them only for a new change, failure or unresolved
   risk. Report the actual evidence and its limits; do not turn a focused pass into a claim that
   the full lifecycle or release gate passed.

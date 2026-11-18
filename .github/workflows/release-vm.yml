@@ -37,7 +37,6 @@ jobs:
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      max-parallel: 12
       matrix:
         check: ${{ fromJSON(inputs.checks) }}
     steps:
@@ -99,7 +98,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always() && steps.evidence.outcome == 'success'
         with:
-          name: ci-hosted-${{ strategy.job-index }}
+          name: ci-hosted-${{ strategy.job-index }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/ci-hosted/
           if-no-files-found: error
           retention-days: 90

@@ -140,9 +140,9 @@ printf 'ok: CI and Release share the prepared-context real-adapter gate\n'
 # Source-level security contract for the exact-candidate hosted VM evidence producer.
 HOSTED_WORKFLOW="$ROOT/.github/workflows/release-vm.yml"
 for contract in '  workflow_dispatch:' '  actions: read' '    runs-on: ubuntu-24.04' \
-  '    timeout-minutes: 350' '      max-parallel: 12' \
+  '    timeout-minutes: 350' '      fail-fast: false' \
   '          run-id: ${{ inputs.candidate_run }}' '          name: release-candidate-${{ inputs.candidate_attempt }}' \
-  '          name: ci-hosted-${{ strategy.job-index }}' '        if: always()'; do
+  '          name: ci-hosted-${{ strategy.job-index }}-${{ github.run_attempt }}' '        if: always()'; do
   grep -Fq "$contract" "$HOSTED_WORKFLOW" || fail "hosted workflow lacks exact-candidate contract: $contract"
 done
 ! grep -Eq 'self-hosted|pull_request|secrets[.[]|:[[:space:]]*write' "$HOSTED_WORKFLOW" \
@@ -328,15 +328,20 @@ for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):
         evidence = next(step for step in steps if "name: ci-hosted-" in step)
         assert "if: always() && steps.evidence.outcome == 'success'" in evidence
         assert "id: evidence" in workflow
+        assert "max-parallel:" not in workflow
         assert "continue-on-error" not in evidence
         exporter = next(step for step in steps if step.startswith("name: Preserve native evidence"))
         assert "continue-on-error" not in exporter
 a = module("acceptance", "dev/release-acceptance.py")
 assert a.CI_HOSTED_POLICIES == {"911e6588dded3367817a8c21c5a849dd5b945b2e",
                                 "836bbd8229d65149c75731a2f9ea46f2aa45e241",
+                                "14d5180368026f77db2f4890ec5b3d0fd9706a24",
                                 a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes())}
 p = module("periodic", "dev/ci/plan-periodic-checks.py")
 plan = p.plan(root)
+regular = {entry["id"] for entry in plan["checks"]["include"]}
+assert {"vm:integration-selection/default", "profile:test-vms-client"} <= regular & a.CI_HOSTED_CHECKS
+assert not a.CI_HOSTED_CHECKS & p.NESTED
 entries = {entry["id"]: entry["command"] for group in plan.values() for entry in group["include"]}
 commands = a.commands(root, "0.0.0", a.profile_inventory(root))
 config_sync = {"id": "periodic:config-sync",
@@ -382,7 +387,7 @@ workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()
 selection = workflow.split('          plan="$(python3 -B dev/ci/plan-periodic-checks.py)"\n', 1)[1]
 selection = selection.split('          if [ -n "$RETRY" ]; then', 1)[0]
 for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "published:0.17.3", "published:0.27.0",
-             *optional_vm):
+             *optional_vm, "veranda:x11", "veranda:wayland-ime"):
     selected = json.loads(subprocess.check_output(
         ["bash", "-euc", selection + '\nprintf "%s\\n" "$plan"'], cwd=root, text=True,
         env=dict(os.environ, ONLY=only, plan=json.dumps(plan))))
@@ -391,6 +396,15 @@ for only in ("", config_sync["id"], "p0:source-upgrade", "published:0.11.0", "pu
                 {kind: {"include": [entry for entry in group["include"] if not entry.get("manual")]}
                  for kind, group in plan.items()})
     assert selected == expected
+check_job, veranda_job = (workflow.split(f"  {name}:\n", 1)[1].split("    steps:", 1)[0]
+                          for name in ("check", "veranda"))
+assert "needs: [candidate, pool]" in check_job
+assert "needs: [candidate, pool, veranda-bundle]" in veranda_job
+assert "    steps: *periodic-check-steps" in workflow
+assert "fail-fast: false" in check_job and "fail-fast: false" in veranda_job
+assert {entry["id"] for entry in plan["veranda"]["include"]} == p.VERANDA.keys() | p.VERANDA_MANUAL.keys()
+assert all(entry["bundle"] == "veranda-bundle" for entry in plan["veranda"]["include"])
+assert all("bundle" not in entry for kind in ("checks", "nested") for entry in plan[kind]["include"])
 print("ok: periodic config sync runs by default and by dispatch, outside release acceptance")
 # Periodic-only profile lanes are planned for Periodic E2E but are never release checks.
 periodic_only = {"profile:" + name + "/" + lane["id"] for name, entry in a.profile_inventory(root).items()

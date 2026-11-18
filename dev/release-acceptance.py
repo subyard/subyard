@@ -3,7 +3,7 @@
 import argparse
 import ast
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import fcntl
@@ -13,7 +13,6 @@ import math
 import os
 from pathlib import Path
 import platform
-import queue
 import re
 import shutil
 import signal
@@ -34,13 +33,21 @@ TERM_GRACE_SECONDS = 30
 KILL_GRACE_SECONDS = 10
 
 
+class CollectorBusy(ValueError):
+    pass
+
+
+def retry_path(output, name):
+    return output / ("retry-" + hashlib.sha256(name.encode()).hexdigest())
+
+
 @contextmanager
 def acceptance_lock(output, shared=False):
     with private_file(output / "collector.lock", "a") as stream:
         try:
             fcntl.flock(stream, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise ValueError("candidate is already in use by another collector") from None
+            raise CollectorBusy("candidate is already in use by another collector") from None
         yield
 
 
@@ -252,6 +259,8 @@ def defer_external(output, obligations, reason, authorization_reference):
 
 
 LIVE_CAPACITY_WAIT = "120m"
+BROKER_SLOTS = (1, 2, 3, 4)
+ADMISSION_POLL_SECONDS = 5
 # Successful release preparation jobs run these exact commands on the exact
 # candidate commit and assets; a prepared candidate counts them instead of
 # repeating them locally. Publication rechecks the job and workflow policy.
@@ -282,7 +291,8 @@ CI_HOSTED_CHECKS = frozenset({
     "profile:orca/projects", "profile:orca/ssh-agent", "profile:orca/codex-permissions",
     "profile:orca/managed-agents", "profile:orca/identity-rename",
     "vm:published-upgrade/anchor", "vm:published-upgrade/0.29.0",
-    "vm:integration-selection/container",
+    "vm:integration-selection/container", "vm:integration-selection/default",
+    "profile:test-vms-client",
     "vm:integration-selection/special", "vm:disabled-components",
     "profile:test-vms/full-uninstall", "profile:github", "vm:p0-full-uninstall",
     # Split from vm:p0-full, whose --split-covered matrix keeps only the nested-VM stages.
@@ -295,15 +305,27 @@ CI_HOSTED_POLICIES = frozenset({
     "836bbd8229d65149c75731a2f9ea46f2aa45e241",
     # Checkout uses the workflow SHA; the exact workflow/candidate commit guard is retained.
     "14d5180368026f77db2f4890ec5b3d0fd9706a24",
+    "e1e7aa9e268532cf97f661792cc1adb54b6ff7c1",  # Attempt-specific artifact names.
 })
 
 
 def hosted_checks(root, version, inventory):
     declared = commands(root, version, inventory)
-    unknown = sorted(CI_HOSTED_CHECKS - {name for name, command in declared.items() if command})
+    names = CI_HOSTED_CHECKS
+    source = root / "dev/release-acceptance.py"
+    if root != ROOT and source.is_file():
+        # Read the pinned list without executing candidate code.
+        for node in ast.parse(source.read_text()).body:
+            if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "CI_HOSTED_CHECKS"
+                                                   for target in node.targets):
+                names = frozenset(ast.literal_eval(node.value.args[0]))
+                if not names <= CI_HOSTED_CHECKS:
+                    raise ValueError("pinned candidate declares unreviewed hosted checks")
+                break
+    unknown = sorted(names - {name for name, command in declared.items() if command})
     if unknown:
         raise ValueError("unknown CI hosted checks: " + ",".join(unknown))
-    return sorted(CI_HOSTED_CHECKS)
+    return sorted(names)
 
 
 def validate_hosted_binding(name, result, candidate, manifest):
@@ -724,7 +746,7 @@ def execute(name, command, root, output, env, slot=None):
         log_sha256 = digest(log)
     except OSError:
         log_sha256, capture_error = None, True
-    blocked = capacity_reason(log) if code == 4 and not interrupted else None
+    blocked = capacity_reason(log, code) if code in (2, 4) and not interrupted else None
     result = {"status": "interrupted" if interrupted else "blocked" if blocked else "passed" if code == 0 and not capture_error else "failed", "exit_code": code,
               "duration_seconds": round(time.monotonic() - start, 2), "log": log.name,
               "log_sha256": log_sha256, "command": command_identity(command, root)}
@@ -827,7 +849,7 @@ def phase_events(output, name, log, offset, seen, final=False, phases=None):
     return offset, discard
 
 
-def capacity_reason(log):
+def capacity_reason(log, code=4):
     # The shared broker client emits this only after validating the typed broker refusal,
     # as the runner (agent-e2e) or as the installed standalone client (subyard-test-vms).
     # A lane may take sequential leases; a refusal of a later acquire still blocks on
@@ -838,7 +860,13 @@ def capacity_reason(log):
         for line in stream:
             match = re.fullmatch(rb"(?:agent-e2e|subyard-test-vms): retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", line)
             release = re.fullmatch(rb"E2E_RELEASE state=end duration_seconds=[0-9]{1,9} budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n", line)
-            if match:
+            busy = re.fullmatch(rb"(?:agent-e2e|subyard-test-vms): requested E2E slot slot-[0-9]{1,3} is unavailable: state=(?:held|provisioning|draining|quarantined|recovering|unavailable) reason=[a-z]+(?:; [^\n]*)?\n", line)
+            invalid_slot = re.fullmatch(rb"(?:agent-e2e|subyard-test-vms): lease acquire failed \(invalid_request: invalid_slot\)\n", line)
+            if code == 2 and invalid_slot:
+                reason = None if held else "slot_missing"
+            elif code == 2 and busy:
+                reason = None if held else "slot"
+            elif code == 4 and match:
                 reason = None if held else match[1].decode()
             elif line.startswith(b"E2E lease:"):
                 held += 1
@@ -1097,12 +1125,9 @@ def is_live(name):
 
 
 def slot_continues_after(result):
-    """A check that failed inside a recorded lease, with its cleanup and lease release witnessed as
-    passing, leaves the slot to the next check. Refusals, interruptions, timeouts, cleanup failures
-    (exit 3), missing cleanup evidence and attempts without a lease stop that slot, so an unusable
-    slot cannot turn later checks into failures. A typed capacity block keeps the slot separately."""
+    """Reuse a slot after a lane failure only with evidence of clean lease release."""
     cleanup = result.get("cleanup") or {}
-    return (result.get("status") == "failed" and result.get("termination") == "exit"
+    return (result.get("status") == "failed" and result.get("capture_status") != "failed"
             and result.get("exit_code") not in (3, 4) and result.get("environment_evidence") == "recorded"
             and result.get("cleanup_status") == "recorded" and "lease-release" in cleanup
             and all(item.get("exit_code") == 0 for item in cleanup.values()))
@@ -1307,7 +1332,106 @@ def print_acceptance_summary(output, receipt):
     print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
 
 
-def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=()):
+def slot_id(value):
+    if not re.fullmatch(r"slot-[0-9]{1,3}", value) or int(value.split("-")[1]) == 0:
+        raise argparse.ArgumentTypeError("use slot-N for an exact broker slot")
+    return int(value.split("-")[1])
+
+
+def add_slot_arguments(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--slots", type=slot_id, nargs="+", metavar="slot-N",
+                       help="restrict execution to these exact slots; default: all broker slots (1–4)")
+    group.add_argument("--slot-count", type=int, choices=BROKER_SLOTS,
+                       help="limit concurrent lanes across all broker slots; default: 4")
+
+
+def validate_slot_list(parser, slots):
+    if slots and len(set(slots)) != len(slots):
+        parser.error("slot IDs must be unique")
+
+
+def run_live(attempt, record, live, slots, slot_count, capacity_wait, hosted, poll_hosted, poll_retries):
+    """Keep scheduling independent lanes while broker admission and hosted jobs change."""
+    duration = re.fullmatch(r"([0-9]{1,6})([sm])", capacity_wait)
+    if not duration:
+        raise ValueError("SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s")
+    budget = int(duration[1]) * (60 if duration[2] == "m" else 1)
+    ready, active, retired = list(live), {}, set()
+    cooldown, deadlines, retried = {}, {}, set()
+    hosted = set(hosted)
+    ci = None
+    next_poll = 0
+    with ThreadPoolExecutor(max_workers=slot_count + bool(hosted)) as pool:
+        while not STOP.is_set():
+            now = time.monotonic()
+            for future in [job for job in active if job.done()]:
+                name, slot = active.pop(future)
+                result = future.result()
+                if result is None:
+                    continue
+                record(name, result)
+                reason = result.get("reason", "")
+                if result["status"] == "blocked" and reason == "capacity_slot_missing":
+                    retired.add(slot)
+                    ready.append(name)
+                elif result["status"] == "blocked" and reason in ("capacity_slot", "capacity_memory", "capacity_disk"):
+                    key = (slot, None if reason == "capacity_slot" else name)
+                    cooldown[key] = now + ADMISSION_POLL_SECONDS
+                    deadline = deadlines.setdefault(name, now + budget)
+                    if now < deadline:
+                        ready.append(name)
+                elif slot_continues_after(result):
+                    if name not in retried:
+                        retried.add(name)
+                        ready.append(name)
+                elif result["status"] != "passed":
+                    retired.add(slot)
+                    print(f"SLOT slot-{slot} stopped after {name}: clean lease release unconfirmed", flush=True)
+                if result["status"] != "blocked":
+                    deadlines.pop(name, None)
+                    for candidate_slot in slots:
+                        cooldown.pop((candidate_slot, name), None)
+            if ci is not None and ci.done():
+                passed, fallback, waiting = ci.result()
+                ready.extend(sorted(hosted & fallback - passed))
+                hosted.intersection_update(waiting - passed - fallback)
+                ci = None
+                next_poll = now + 20
+            for name in poll_retries():
+                if name not in ready and not any(name == running for running, _ in active.values()):
+                    deadlines.pop(name, None)
+                    retried.discard(name)
+                    ready.insert(0, name)
+            ready = [name for name in ready if deadlines.get(name, math.inf) > now]
+            occupied = {slot for _, slot in active.values()}
+            for slot in slots:
+                if len(active) >= slot_count:
+                    break
+                if slot in occupied or slot in retired or cooldown.get((slot, None), 0) > now:
+                    continue
+                name = next((name for name in ready if cooldown.get((slot, name), 0) <= now), None)
+                if name is not None:
+                    ready.remove(name)
+                    active[pool.submit(attempt, name, slot)] = name, slot
+            if hosted and ci is None and now >= next_poll:
+                ci = pool.submit(poll_hosted, hosted.copy())
+            if not (active or hosted or (ready and len(retired) < len(slots))):
+                break
+            futures = list(active) + ([ci] if ci is not None else [])
+            if futures:
+                wait(futures, timeout=1, return_when=FIRST_COMPLETED)
+            else:
+                STOP.wait(1)
+        # A collector stop still records terminal outcomes of children it interrupted.
+        for future, (name, _) in active.items():
+            result = future.result()
+            if result is not None:
+                record(name, result)
+
+
+def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=(),
+               slot_count=None, hosted=(), poll_hosted=None):
     root, receipt = load_bound(output)
     if receipt.get("superseded"):
         raise ValueError("candidate was explicitly superseded; prepare a new candidate")
@@ -1344,8 +1468,10 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     live = [name for name in pending if is_live(name)]
     durations = duration_estimates(receipt, previous)
     live.sort(key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
-    if live and not slots:
-        raise ValueError("live checks require --slots N [N ...]")
+    slots = slots or BROKER_SLOTS
+    slot_count = slot_count or len(slots)
+    hosted = set(hosted) & set(live)
+    live = [name for name in live if name not in hosted]
     try:
         invocation = Invocation(output, receipt, selected, pending, excluded, requested)
     except OSError:
@@ -1377,6 +1503,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                     invocation.cancel_start(name)
                 return None
             with lock:
+                retry_path(output, name).unlink(missing_ok=True)
                 receipt["checks"][name] = {"status": "running", "command": command_identity(checks[name], root)}
                 save(output, receipt)  # Invalidate a previous PASS before any child can start.
             check_env = dict(env, SUBYARD_E2E_LOCAL_EVIDENCE=str(output)) if name in preflights else env
@@ -1418,17 +1545,17 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
         # Fresh targeted jobs may leave unselected preflights pending.
         stopped = [name for name in preflights
                    if (local_ready and name in selected and receipt["checks"][name]["status"] != "passed")
-                   or (live and receipt["checks"][name]["status"] in ("failed", "blocked", "interrupted", "incomplete", "running"))]
+                   or ((live or hosted) and receipt["checks"][name]["status"] in ("failed", "blocked", "interrupted", "incomplete", "running"))]
         if stopped:
             for label, states in (("refused", ("failed", "blocked")), ("interrupted", ("interrupted",)),
                                   ("incomplete", ("incomplete", "running")), ("not run", ("pending",))):
                 names = [name for name in stopped if receipt["checks"][name]["status"] in states]
                 if names:
                     print(f"INCOMPLETE: profile preflights {label}: " + ", ".join(names), flush=True)
-        waiting_local = not local_ready and (live or (only and failure_reason != "local-check-stop"
+        waiting_local = not local_ready and (live or hosted or (only and failure_reason != "local-check-stop"
                                                      and any(name in pending for name in preflights)))
         if waiting_local:
-            waiting = "live checks" if live else "profile preflights"
+            waiting = "live checks" if live or hosted else "profile preflights"
             print(f"INCOMPLETE: {waiting} await successful local gates", flush=True)
         if stopped or waiting_local:
             invocation.finish("interrupted" if STOP.is_set() else "finished",
@@ -1440,46 +1567,37 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             # For example, an excluded local gate: name it instead of leaving preflights silently not run.
             print("INCOMPLETE: profile preflights await successful local gates; not passed: " + ", ".join(unready_local), flush=True)
             failure_reason = "prerequisite-stop"
-        # Only live checks wait for broker memory or disk instead of draining the queue on a
-        # transient refusal; a refusal that outlasts this bound still blocks visibly.
-        env["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
+        # Each controller makes an atomic admission attempt. The scheduler owns the wait
+        # so one refused request does not hold up a slot or a smaller lane.
+        env["SUBYARD_E2E_CAPACITY_WAIT"] = "0s"
         # Physical controllers consume the frozen transport; local tests keep normal bundling.
         env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
                    SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
                    SUBYARD_E2E_LOCAL_EVIDENCE=str(output),
                    SUBYARD_E2E_CONTROLLER_WORKSPACE=str(ROOT))
-        work = queue.Queue()
-        for name in live:
-            work.put(name)
-        retries = queue.Queue()
-        def collect(slot):
-            while not STOP.is_set():
-                try:
-                    name = work.get_nowait()
-                except queue.Empty:
-                    return slot
-                result = attempt(name, slot)
-                if result is None:
-                    return
-                with lock:
-                    receipt["checks"][name] = result
-                    invocation.record(name, result)
-                    save(output, receipt)
-                    invocation.write()
-                capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
-                                    and result.get("termination") == "exit"
-                                    and result.get("reason") in ("capacity_memory", "capacity_disk"))
-                if capacity_blocked and not retrying:
-                    retries.put(name)
-                if result["status"] != "passed" and not capacity_blocked and not slot_continues_after(result):
-                    return
-        with ThreadPoolExecutor(max_workers=max(1, len(slots))) as pool:
-            for retrying in (False, True):
-                futures = [pool.submit(collect, slot) for slot in slots]
-                slots = [slot for future in as_completed(futures) if (slot := future.result()) is not None]
-                # Wait for every first-pass controller to finish before retrying capacity blocks.
-                # Only workers that drained their queue remain safe to reuse.
-                work = retries
+        def record(name, result):
+            with lock:
+                receipt["checks"][name] = result
+                invocation.record(name, result)
+                save(output, receipt)
+                invocation.write()
+
+        def hosted_poll(names):
+            passed, fallback, waiting = poll_hosted(root, receipt, lock, names)
+            with lock:
+                invocation.pending.difference_update(passed)
+            return passed, fallback, waiting
+
+        def poll_retries():
+            names = [name for name in sorted(selected - hosted)
+                     if is_live(name) and checks[name] and retry_path(output, name).is_file()]
+            with lock:
+                invocation.pending.update(names)
+                invocation.reused = [name for name in invocation.reused if name not in names]
+            return names
+
+        if any(is_live(name) and checks[name] for name in selected):
+            run_live(attempt, record, live, slots, slot_count, capacity_wait, hosted, hosted_poll, poll_retries)
         if source_fingerprint(root) != receipt["source_fingerprint"]:
             receipt["checks"]["verify"]["status"] = "failed"
             receipt["error"] = "source changed during acceptance"
@@ -2981,7 +3099,7 @@ def main():
     prep.add_argument("--prepared", type=Path, help="import bound CI sources/assets without rebuilding")
     run = sub.add_parser("run", help="run pending checks; each live retry acquires fresh VMs")
     run.add_argument("--output", type=Path, required=True)
-    run.add_argument("--slots", type=int, nargs="+", default=[])
+    add_slot_arguments(run)
     run.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
     run.add_argument("--only", action="append", default=[])
     run.add_argument("--rerun", action="store_true")
@@ -2994,7 +3112,8 @@ def main():
     pre.add_argument("--exclude", action="append", default=[])
     pre.add_argument("--broker-status", type=Path, help="already-collected public broker JSON; no live query")
     pre.add_argument("--external-readiness", type=Path, help="JSON obligation IDs mapped to available/unavailable/unknown")
-    pre.add_argument("--slots", type=int, nargs="+", default=[], help="explicit slots being considered; does not reserve them")
+    pre.add_argument("--slots", type=slot_id, nargs="+", default=[], metavar="slot-N",
+                     help="explicit slots being considered; does not reserve them")
     pre.add_argument("--types", nargs="+", default=[], help="environment types being considered; planning inputs only")
     imp = sub.add_parser("import", help="explicitly inherit named passing evidence between bound candidates")
     imp.add_argument("--output", type=Path, required=True)
@@ -3060,10 +3179,22 @@ def main():
     if args.action == "defer-external":
         with acceptance_lock(output):
             return defer_external(output, args.obligation, args.reason, args.authorization_reference)
-    if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
-        parser.error("slots must be unique integers from 1 to 999")
-    with acceptance_lock(output):
-        return run_checks(output, args.slots, args.only, args.rerun, args.first, args.exclude, args.with_vms)
+    validate_slot_list(parser, args.slots)
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(acceptance_lock(output))
+        except CollectorBusy:
+            if not (args.rerun and len(args.only) == 1 and is_live(args.only[0])
+                    and not (args.first or args.exclude or args.slots or args.slot_count)):
+                raise
+            name = args.only[0]
+            if name not in json.loads((output / "receipt.json").read_text())["checks"]:
+                raise ValueError("concurrent rerun requires one exact live check")
+            retry_path(output, name).touch(mode=0o600)
+            print(f"QUEUED {name} for the active collector", flush=True)
+            return 0
+        return run_checks(output, args.slots, args.only, args.rerun, args.first, args.exclude,
+                          args.with_vms, slot_count=args.slot_count)
 
 
 def subprocess_failure_message(error):

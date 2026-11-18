@@ -509,7 +509,7 @@ class Contracts(unittest.TestCase):
                 local = state_dir / identity["candidate_id"] / "prepared"
                 self.assertEqual((local / "identity.json").read_bytes(), original_identity)
                 github.repository = argv[4] = "SUBYARD/Subyard"
-                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "1"]
+                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "slot-1"]
                 with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1) as run, \
                      patch.object(m.a, "reuse_isolated_tests", wraps=m.a.reuse_isolated_tests) as reuse:
                     self.assertEqual(m.main(), 1)
@@ -766,7 +766,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(document["schema_version"], 1)
         github = FakeGitHub(identity)
         captured = io.StringIO()
-        for slots in ([], ["--slots", "1"]):
+        for slots in ([], ["--slots", "slot-1"]):
             with patch.object(m, "GitHub", return_value=github), \
                  patch.object(m.a, "execution_environment", return_value=document["environment"]), \
                  patch.object(m.a, "execute", side_effect=AssertionError("default accept dispatched a VM")), \
@@ -805,14 +805,21 @@ class Contracts(unittest.TestCase):
         legacy["checks"]["p0-release-smoke"] = m.a.OPTIONAL_VM_NOT_RUN.copy()
         with self.assertRaises(ValueError):
             m.validate_attestation(legacy, self.identity, self.output / "source")
+        native_execute = m.a.execute
+        def fail_fixture(name, command, root, output, env, slot):
+            result = native_execute(name, ["false"], root, output, env, slot)
+            result["command"] = m.a.command_identity(command, root)
+            return result
+
         for option in (["--with-vms"], ["--only", "profile:sample"]):
             with patch.object(m, "GitHub", return_value=github), \
                  patch.object(m.a, "execution_environment", return_value=document["environment"]), \
+                 patch.object(m.a, "execute", side_effect=fail_fixture) as execute, \
                  patch.object(m.signal, "signal"), \
                  patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
                                            "accept", "--candidate", identity["candidate_id"], *option]):
-                with self.assertRaisesRegex(ValueError, "require --slots"):
-                    m.main()
+                self.assertEqual(m.main(), 1)
+                self.assertEqual(execute.call_args.args[-1], 1)
 
     def test_release_scope_uses_previous_merged_tag_and_product_migration_paths(self):
         repository = self.directory / "scope-repository"
@@ -961,9 +968,9 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full release required"):
             run("accept", "--level", "ordinary", scope=migration)
         self.assertEqual((output / "receipt.json").read_bytes(), before)
-        with_vms, level, _ = run("accept", "--level", "full", "--slots", "1", scope=migration)
+        with_vms, level, _ = run("accept", "--level", "full", "--slots", "slot-1", scope=migration)
         self.assertEqual((with_vms, level["level"], level["migration_changes"]), (True, "full", ["internal/migration/a.go"]))
-        with_vms, recorded, _ = run("accept", "--slots", "1")  # The recorded level persists.
+        with_vms, recorded, _ = run("accept", "--slots", "slot-1")  # The recorded level persists.
         self.assertEqual((with_vms, recorded), (True, level))
         with self.assertRaisesRegex(ValueError, "full release requires every VM check; not run: profile:sample"):
             m.attestation(output, identity)
@@ -1032,7 +1039,7 @@ class Contracts(unittest.TestCase):
              patch.object(m.a, "execute", side_effect=AssertionError("already passed")), \
              patch.object(m.signal, "signal"), redirect_stdout(captured), \
              patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
-                                       "accept", "--candidate", identity["candidate_id"], "--slots", "1"]):
+                                       "accept", "--candidate", identity["candidate_id"], "--slots", "slot-1"]):
             self.assertEqual(m.main(), 0)
         self.assertIn("external_optional_not_run=" + name, captured.getvalue())
         self.assertEqual(json.loads((directory / "attestation.json").read_text())["external_obligations"],
@@ -2480,7 +2487,7 @@ class HostedChecks(unittest.TestCase):
         document = m.attestation(self.output, self.identity)
         m.validate_attestation(document, self.identity, self.root)
         self.assertTrue(m.publish_remote(self.github, self.prepared, document, self.root)["immutable"])
-        self.assertFalse((self.directory / "ci-hosted-downloads/456-1-99/source").exists())
+        self.assertFalse((self.directory / "ci-hosted-downloads/456-99/source").exists())
         self.assertEqual(self.collect()[1], "")
 
     def test_wrong_sha_failed_job_unknown_policy_foreign_candidate_missing_cleanup_and_stale_attempt_stay_open(self):
@@ -2843,54 +2850,50 @@ class HostedChecks(unittest.TestCase):
         self.assertEqual(result["execution"], "ci-hosted")
         m.publish_remote(self.github, self.prepared, m.attestation(self.output, self.identity), self.root)
 
-    def test_accept_runs_local_checks_before_waiting_for_hosted_ones(self):
-        calls = []
-        record = lambda name: lambda *args, **kwargs: calls.append((name, kwargs.get("exclude", ()), args[2] if name == "run" else None)) or 0
-        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
-             patch.object(m.a, "run_checks", side_effect=record("run")), \
-             patch.object(m, "wait_ci_hosted", side_effect=record("wait")), \
-             patch.object(m, "collect_ci", side_effect=record("collect")):
-            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 0)
-        self.assertEqual(calls, [("run", ["profile:sample"], []), ("wait", (), None), ("collect", (), None),
-                                 ("run", (), ["profile:sample"])])
-        calls.clear()
-        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
-             patch.object(m.a, "run_checks", side_effect=record("run")), \
-             patch.object(m, "wait_ci_hosted", side_effect=record("wait")):
-            m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0)
-        self.assertEqual(calls, [("run", (), [])])
-        # Ordinary acceptance leaves optional hosted VM checks not run and does not wait.
-        calls.clear()
-        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
-             patch.object(m.a, "run_checks", side_effect=record("run")), \
-             patch.object(m, "wait_ci_hosted", side_effect=record("wait")):
-            m.accept_checks(self.github, self.directory, self.identity, [], [], False, [], 60)
-        self.assertEqual(calls, [("run", (), [])])
-        # A failed local pass is reported without waiting for hosted jobs or running them locally.
-        calls.clear()
-        receipt = json.loads((self.output / "receipt.json").read_text())
-        failed = {**receipt, "result": "failed"}
-        with patch.object(m, "hosted_open", return_value=["profile:sample"]), \
-             patch.object(m.a, "run_checks", side_effect=lambda *args, **kwargs: calls.append(("run", kwargs.get("exclude", ()), args[2])) or 1), \
-             patch.object(m.json, "loads", side_effect=lambda text, *args, **kwargs: failed if text == (self.output / "receipt.json").read_text() else json.JSONDecoder().decode(text)), \
-             patch.object(m, "wait_ci_hosted", side_effect=record("wait")), \
-             patch.object(m, "collect_ci", side_effect=record("collect")):
-            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 60), 1)
-        self.assertEqual([call[0] for call in calls], ["run", "collect"])
+    def test_hosted_poll_releases_failed_jobs_and_keeps_running_jobs_hosted(self):
+        self.run.update(status="in_progress", conclusion=None)
+        self.job.update(conclusion="failure")
+        passed, fallback, state = m.collect_ci(self.github, self.directory, self.identity)
+        self.assertEqual((passed, fallback, state), (set(), {"profile:sample"}, "pending"))
+        self.job.update(status="in_progress", conclusion=None)
+        self.assertEqual(m.collect_ci(self.github, self.directory, self.identity), (set(), set(), "pending"))
 
-    def test_wait_is_bounded_and_zero_override_collects_without_wait(self):
-        with patch.object(m, "discover") as discover:
-            m.wait_ci_hosted(self.github, self.directory, self.identity, 0)
-            discover.assert_not_called()
-        with patch.object(m, "discover", return_value={**self.run, "status": "in_progress"}), \
-             patch.object(m.time, "monotonic", side_effect=itertools.count(0, 11).__next__):
-            m.wait_ci_hosted(self.github, self.directory, self.identity, 10)
-        # A request that never produced a run stops waiting after discovery time, not the whole budget.
-        with patch.object(m, "discover", return_value=None), patch.object(m.a.STOP, "wait"), \
-             patch.object(m.time, "monotonic", side_effect=itertools.count(0, m.DISCOVERY_SECONDS).__next__), \
-             redirect_stdout(io.StringIO()) as printed:
-            m.wait_ci_hosted(self.github, self.directory, self.identity, 21600)
-        self.assertIn("has no hosted run", printed.getvalue())
+    def test_hosted_retry_counts_attempt_two_and_preserves_earlier_passes(self):
+        self.run["conclusion"] = "failure"
+        original_api = self.github.api
+        calls = []
+        def api(path, method="GET", **kwargs):
+            if path == "actions/runs/456/rerun-failed-jobs":
+                calls.append((path, method))
+                return None
+            if path in ("actions/runs/456/attempts/1", "actions/runs/456/attempts/2"):
+                return {**self.run, "run_attempt": int(path[-1])}
+            return original_api(path, method, **kwargs)
+        with patch.object(self.github, "api", side_effect=api):
+            m.retry_hosted(self.github, self.directory, self.identity)
+            self.assertEqual(calls, [("actions/runs/456/rerun-failed-jobs", "POST")])
+            with self.assertRaisesRegex(ValueError, "waiting to appear"):
+                m.retry_hosted(self.github, self.directory, self.identity)
+            self.run.update(run_attempt=2, conclusion="success")
+            original_pages = self.github.pages
+            for attempt in (1, 2):
+                self.execution_attempt = attempt
+                def pages(path, key=None):
+                    if path == "actions/runs/456/attempts/2/jobs":
+                        return [self.job] if attempt == 2 else []
+                    if path == "actions/runs/456/artifacts":
+                        return [{"id": 99, "name": f"ci-hosted-0-{attempt}"}]
+                    if path == "actions/runs/456/attempts/1/jobs":
+                        return [self.job]
+                    return original_pages(path, key)
+                with patch.object(self.github, "pages", side_effect=pages):
+                    result, _ = self.collect()
+                self.assertEqual(result["ci_hosted"]["run_attempt"], attempt)
+                _, receipt = m.a.load_bound(self.output)
+                receipt["checks"]["profile:sample"] = {"status": "pending"}
+                m.a.save(self.output, receipt)
+                shutil.rmtree(self.directory / "ci-hosted-downloads")
+
 
 
 unittest.main()

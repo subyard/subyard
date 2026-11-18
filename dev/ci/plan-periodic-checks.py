@@ -116,8 +116,11 @@ def plan(root=ROOT):
         if check["id"] in {"published:0.11.0", "published:0.17.3", "published:0.27.0"}:
             check["optional"] = True
     include += PERIODIC_ONLY
-    include += [veranda_short(name, options) for name, options in VERANDA.items()]
-    include += [veranda_short(name, options) | {"manual": True} for name, options in VERANDA_MANUAL.items()]
+    veranda = [veranda_short(name, options) for name, options in VERANDA.items()]
+    veranda += [veranda_short(name, options) | {"manual": True} for name, options in VERANDA_MANUAL.items()]
+    nested_hosted = sorted(NESTED & module.CI_HOSTED_CHECKS)
+    if nested_hosted:
+        raise SystemExit("plan-periodic-checks: Intel-only checks in the Release VM matrix: " + ", ".join(nested_hosted))
     missing = sorted(SPLIT - set(declared))
     if missing:
         raise SystemExit("plan-periodic-checks: split checks left the collector: " + " ".join(missing))
@@ -125,7 +128,8 @@ def plan(root=ROOT):
     if unknown:
         raise SystemExit("plan-periodic-checks: unknown nested checks: " + " ".join(unknown))
     return {"checks": {"include": [c for c in include if c["id"] not in NESTED]},
-            "nested": {"include": [c for c in include if c["id"] in NESTED]}}
+            "nested": {"include": [c for c in include if c["id"] in NESTED]},
+            "veranda": {"include": veranda}}
 
 
 if __name__ == "__main__":

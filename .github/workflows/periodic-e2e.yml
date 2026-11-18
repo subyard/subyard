@@ -181,15 +181,13 @@ jobs:
               '.nested.include |= [.[] as $check | range(1; $copies + 1) | $check + {copy: .}]' <<<"$plan")"
           fi
           # An empty matrix fails its job, so an empty list skips the job instead.
-          for kind in checks nested; do
+          for kind in checks nested veranda; do
             printf '%s=%s\n' "$kind" "$(jq -c --arg kind "$kind" '.[$kind] | select(.include != [])' <<<"$plan")" \
               >> "$GITHUB_OUTPUT"
           done
-          printf 'veranda=%s\n' "$(jq '[.[].include[] | select(.bundle == "veranda-bundle")] != []' <<<"$plan")" \
-            >> "$GITHUB_OUTPUT"
           {
             echo '### Checks'
-            jq -r '.checks.include[].id' <<<"$plan"
+            jq -r '(.checks, .veranda).include[].id' <<<"$plan"
             echo '### Nested VM checks, only on Intel runners'
             jq -r '.nested.include[].id' <<<"$plan" | uniq
           } >> "$GITHUB_STEP_SUMMARY"
@@ -203,10 +201,10 @@ jobs:
 
   # The candidate bundle plus the GUI and its matching engine, as the Veranda SHORT recipe in
   # veranda/desktop/README.md stages them. Other checks keep the unchanged candidate bundle, and a
-  # failed build here fails only the Veranda checks.
+  # failed build here blocks only the Veranda matrix.
   veranda-bundle:
     needs: candidate
-    if: needs.candidate.outputs.veranda == 'true'
+    if: needs.candidate.outputs.veranda != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -303,28 +301,21 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Waits for the Veranda bundle job, but runs whatever its result: the Veranda checks then fail.
+  # Ordinary checks can use CI while the separate Veranda bundle builds.
   check:
     continue-on-error: ${{ matrix.optional || false }}
     name: ${{ matrix.id }}
-    needs: [candidate, pool, veranda-bundle]
+    needs: [candidate, pool]
     if: ${{ !cancelled() && needs.candidate.outputs.checks && needs.pool.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 350
     strategy:
       fail-fast: false
-      # With the nested jobs, leaves room in the account-wide 20-job pool for ordinary CI and
-      # release preparation.
+      # With the nested and Veranda jobs, leaves room in the account-wide 20-job pool for
+      # ordinary CI and release acceptance.
       max-parallel: 11
       matrix: ${{ fromJSON(needs.candidate.outputs.checks) }}
-    steps:
-      - name: Require the Veranda bundle
-        if: matrix.bundle == 'veranda-bundle' && needs.veranda-bundle.result != 'success'
-        env:
-          RESULT: ${{ needs.veranda-bundle.result }}
-        run: |
-          printf '::error title=Veranda bundle not built::The veranda-bundle job ended with %s; see its log.\n' "$RESULT"
-          exit 1
+    steps: &periodic-check-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -365,10 +356,22 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: diagnostics-${{ strategy.job-index }}-${{ github.run_attempt }}
+          name: ${{ matrix.bundle && 'veranda-diagnostics' || 'diagnostics' }}-${{ strategy.job-index }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/hosted-diagnostics/
           retention-days: 7
           if-no-files-found: error
+
+  veranda:
+    name: ${{ matrix.id }}
+    needs: [candidate, pool, veranda-bundle]
+    if: ${{ !cancelled() && needs.candidate.outputs.veranda && needs.pool.result == 'success' && needs.veranda-bundle.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.candidate.outputs.veranda) }}
+    steps: *periodic-check-steps
 
   # Checks that boot a VM inside the leased VM, which runs inside the runner's VM. Hosted runners
   # are Azure Hyper-V VMs on either Intel or AMD CPUs, and the runner label cannot choose one. On

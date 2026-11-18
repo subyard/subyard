@@ -3,6 +3,7 @@
 import argparse
 import base64
 import copy
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -1389,121 +1390,116 @@ def hosted_artifact(github, artifact, destination):
     archive.unlink()
 
 
+def hosted_target_open(name, result):
+    return a.transfer_target_open(name, result) or result["status"] in ("failed", "blocked", "interrupted", "running")
+
+
 def hosted_open(directory, output):
     """Hosted checks of a dispatched request that are not yet passed in the local receipt."""
     if not (directory / "ci-hosted.json").exists():
         return []
     checks = json.loads((output / "receipt.json").read_text())["checks"]
-    return sorted(name for name in a.CI_HOSTED_CHECKS if name in checks and checks[name].get("status") != "passed")
-
-
-def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds):
-    """Run local checks while hosted jobs are still going; only then wait, count the hosted
-    results and run the hosted checks that did not pass there."""
-    output = directory / "acceptance"
-    # Only checks this invocation would run anyway; ordinary acceptance leaves optional VM checks not run.
-    hosted = hosted_open(directory, output) if wait_seconds and (with_vms or only) else []
-    if only:
-        # The selection also runs required checks, so their hosted results count here too.
-        receipt = json.loads((output / "receipt.json").read_text())
-        wanted = a.select_checks(receipt["checks"], only)
-        wanted |= a.selected_requirements(receipt, wanted)
-        hosted = [name for name in hosted if name in wanted]
-    if hosted:
-        with a.acceptance_lock(output):
-            first = a.run_checks(output, slots, only, False, exclude=hosted, with_vms=with_vms, previous=previous)
-            failed = first and json.loads((output / "receipt.json").read_text()).get("result") == "failed"
-        if failed:
-            # Hosted jobs may still run: never duplicate them locally. Count those already finished;
-            # the rest stay pending for a later accept, and the receipt keeps the local failure.
-            print("CI-HOSTED-SKIP all: a local check failed; not waiting for hosted jobs or running them locally", flush=True)
-            with a.acceptance_lock(output):
-                collect_ci(github, directory, identity)
-            return first
-        with a.acceptance_lock(output):
-            wait_ci_hosted(github, directory, identity, wait_seconds)
-            collect_ci(github, directory, identity)
-        # Local failures of the first pass are not repeated; the receipt result covers every check.
-        only = hosted
-    with a.acceptance_lock(output):
-        return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous)
+    state = json.loads((directory / "ci-hosted.json").read_text())
+    return sorted(name for name in state["checks"] if name in checks and hosted_target_open(name, checks[name]))
 
 
 DISCOVERY_SECONDS = 600
 
 
-def wait_ci_hosted(github, directory, identity, seconds):
-    path = directory / "ci-hosted.json"
-    if not path.exists() or seconds == 0:
-        return
-    state = json.loads(path.read_text())
+def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds, slot_count=None):
+    """Feed terminal hosted failures back to local workers as soon as they are available."""
+    output = directory / "acceptance"
+    started = time.monotonic()
+    hosted = hosted_open(directory, output) if with_vms or only else []
+
+    def poll(root, receipt, lock, names):
+        passed, fallback, state = collect_ci(github, directory, identity, bound=(root, receipt, lock), names=names)
+        elapsed = time.monotonic() - started
+        waiting = names if (state != "finished" and elapsed < wait_seconds
+                            and (state != "missing" or elapsed < DISCOVERY_SECONDS)) else set()
+        if not waiting and names - passed - fallback:
+            print("CI-HOSTED pending: " + ", ".join(sorted(names - passed - fallback)), flush=True)
+        return passed, fallback, waiting
+
+    with a.acceptance_lock(output):
+        return a.run_checks(output, slots, only, False, with_vms=with_vms, previous=previous,
+                            slot_count=slot_count, hosted=hosted, poll_hosted=poll)
+
+
+def retry_hosted(github, directory, identity):
+    state = json.loads((directory / "ci-hosted.json").read_text())
     if state.get("identity_sha256") != identity_hash(identity):
         raise ValueError("retained hosted request candidate changed")
-    started = time.monotonic()
-    deadline, last_report = started + seconds, 0
-    while not a.STOP.is_set():
-        try:
-            run = discover(github, "release-vm.yml", state["request"])
-        except (ValueError, OSError) as error:
-            print(f"CI-HOSTED-SKIP all: {error}", flush=True)
-            return
-        if run and (run.get("status") == "completed" or run.get("head_sha") != identity["commit"]):
-            return
-        # A lost or refused dispatch never produces a run; do not hold acceptance for the whole wait.
-        if not run and time.monotonic() - started >= DISCOVERY_SECONDS:
-            print(f"CI-HOSTED-SKIP all: request {state['request']} has no hosted run after {DISCOVERY_SECONDS}s", flush=True)
-            return
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        if time.monotonic() - last_report >= 60:
-            print(f"WAIT CI-HOSTED request={state['request']} status={run.get('status') if run else 'not-discovered'} remaining={int(remaining)}s", flush=True)
-            last_report = time.monotonic()
-        a.STOP.wait(min(20, remaining))
+    run = discover(github, "release-vm.yml", state["request"])
+    if (not run or run.get("head_sha") != identity["commit"] or run.get("event") != "workflow_dispatch"
+            or run.get("status") != "completed" or run.get("conclusion") == "success"):
+        raise ValueError("expected a completed unsuccessful hosted run on the candidate commit")
+    if run["run_attempt"] < state.get("retry_attempt", 1):
+        raise ValueError("the previously requested hosted retry is waiting to appear")
+    github.api(f"actions/runs/{run['id']}/rerun-failed-jobs", "POST")
+    state["retry_attempt"] = run["run_attempt"] + 1
+    write_json(directory / "ci-hosted.json", state)
+    print(f"CI-HOSTED retry requested run={run['id']} after attempt={run['run_attempt']}", flush=True)
 
 
-def collect_ci(github, directory, identity):
-    """Bounded read of finished successful jobs; every refusal leaves local work open."""
+def collect_ci(github, directory, identity, bound=None, names=None):
+    """Count verified passes and identify hosted checks eligible for local fallback."""
     output, state_path = directory / "acceptance", directory / "ci-hosted.json"
     if not state_path.exists():
-        return
+        return set(), set(), "missing"
     state = json.loads(state_path.read_text())
     if state.get("identity_sha256") != identity_hash(identity):
         raise ValueError("retained hosted request candidate changed")
+    names = sorted(set(state["checks"]) if names is None else set(state["checks"]) & names)
+    passed, fallback = set(), set()
     try:
         run = discover(github, "release-vm.yml", state["request"])
-        jobs, artifacts = [], []
-        if run:
-            run_id, attempt = run["id"], run["run_attempt"]
-            jobs = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
-            artifacts = [item for item in github.pages(f"actions/runs/{run_id}/artifacts", "artifacts")
-                         if re.fullmatch(r"ci-hosted-[0-9]+", item["name"]) and not item.get("expired")]
-            if len(jobs) > len(a.CI_HOSTED_CHECKS) or len(artifacts) > len(a.CI_HOSTED_CHECKS):
-                raise ValueError("hosted job or artifact inventory exceeds reviewed matrix limit")
+        if not run:
+            return passed, fallback, "missing"
+        if run.get("head_sha") != identity["commit"]:
+            raise ValueError("hosted run candidate SHA mismatch")
+        run_id, latest = run["id"], run["run_attempt"]
+        retry_visible = latest >= state.get("retry_attempt", 1)
+        terminal = retry_visible and run.get("status") == "completed"
+        inventory = set(state["checks"])
+        jobs = {}
+        for attempt in range(latest, 0, -1):
+            entries = github.pages(f"actions/runs/{run_id}/attempts/{attempt}/jobs", "jobs")
+            if len(entries) > len(a.CI_HOSTED_CHECKS) or len({job["name"] for job in entries}) != len(entries):
+                raise ValueError("hosted job inventory exceeds reviewed matrix or has duplicates")
+            for job in entries:
+                jobs.setdefault(job["name"], (attempt, job))
+            if inventory <= jobs.keys():
+                break
+        artifacts = [item for item in github.pages(f"actions/runs/{run_id}/artifacts", "artifacts")
+                     if re.fullmatch(r"ci-hosted-[0-9]+(?:-[0-9]+)?", item["name"]) and not item.get("expired")]
+        if len(artifacts) > latest * len(a.CI_HOSTED_CHECKS):
+            raise ValueError("hosted artifact inventory exceeds reviewed matrix limit")
     except (ValueError, OSError) as error:
-        for name in state["checks"]:
+        for name in names:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
-        return
-    if not run:
-        for name in state["checks"]:
-            print(f"CI-HOSTED-SKIP {name}: dispatch not discovered", flush=True)
-        return
-    root, receipt = a.load_bound(output)
+        return passed, fallback, "pending"
+    root, receipt, lock = bound if bound else (*a.load_bound(output), nullcontext())
     commands = a.commands(root, identity["version"], receipt["profiles"])
     unavailable_artifacts = set()
-    for name in state["checks"]:
+    for name in names:
         if a.STOP.is_set():
-            return
+            break
         if name not in a.CI_HOSTED_CHECKS or name not in commands:
             print(f"CI-HOSTED-SKIP {name}: unknown check", flush=True)
             continue
-        if not a.transfer_target_open(name, receipt["checks"][name]):
+        with lock:
+            if receipt["checks"][name]["status"] == "passed":
+                passed.add(name)
+            if not hosted_target_open(name, receipt["checks"][name]):
+                continue
+        attempt, job = jobs.get(name, (latest, {}))
+        if job.get("status") != "completed" or job.get("conclusion") != "success":
+            if terminal or (retry_visible and attempt == latest and job.get("status") == "completed"):
+                fallback.add(name)
+                print(f"CI-HOSTED-SKIP {name}: job missing or unsuccessful", flush=True)
             continue
         try:
-            matches = [job for job in jobs if job.get("name") == name and job.get("status") == "completed" and job.get("conclusion") == "success"]
-            if len(matches) != 1:
-                raise ValueError("job missing, running or unsuccessful")
-            job = matches[0]
             policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
             metadata = {"run_id": run_id, "run_attempt": attempt, "job_id": job["id"], "policy": policy,
                         "head_sha": identity["commit"], "candidate_sha256": identity_hash(identity)}
@@ -1512,11 +1508,12 @@ def collect_ci(github, directory, identity):
             # artifact once per collection, without accepting any source tree or candidate bundle.
             found = []
             for artifact in artifacts:
-                if not re.fullmatch(r"ci-hosted-[0-9]+", artifact["name"]) or artifact.get("expired"):
+                artifact_attempt = artifact["name"].split("-")[3:]
+                if artifact_attempt and artifact_attempt != [str(attempt)]:
                     continue
                 if artifact["id"] in unavailable_artifacts:
                     continue
-                cached = directory / "ci-hosted-downloads" / f"{run_id}-{attempt}-{artifact['id']}"
+                cached = directory / "ci-hosted-downloads" / f"{run_id}-{artifact['id']}"
                 try:
                     if not cached.exists():
                         cached.parent.mkdir(mode=0o700, exist_ok=True)
@@ -1570,12 +1567,17 @@ def collect_ci(github, directory, identity):
             log = "ci-hosted-" + record["id"] + ".log"
             shutil.copyfile(cached / result["log"], output / log)
             result["log"] = log
-            receipt["checks"][name] = result
-            a.save(output, receipt)
+            with lock:
+                if not hosted_target_open(name, receipt["checks"][name]):
+                    continue
+                receipt["checks"][name] = result
+                a.save(output, receipt)
+            passed.add(name)
             a.event(output, "ci-hosted-counted", check=name, **metadata)
             print(f"CI-HOSTED {name} run={run_id} job={job['id']}", flush=True)
         except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as error:
             print(f"CI-HOSTED-SKIP {name}: {error}", flush=True)
+    return passed, fallback, "finished" if terminal else "pending"
 
 
 def earlier_candidates(state_dir, directory, identity):
@@ -1627,7 +1629,7 @@ def release_level(requested, reason, scope, recorded=None):
     if requested == "ordinary":
         if changed:
             refusals.append(f"full release required: migration or update-contract changes since {baseline}: {listed}; "
-                            "rerun accept with --level full --slots N [N ...]")
+                            "rerun accept with --level full")
         elif changed is None and reason is None:
             refusals.append("cannot determine migration changes since the previous release from local tags; "
                             "use --level full, or --level-reason to record why an ordinary release is safe")
@@ -1700,11 +1702,11 @@ def main():
     prepare.add_argument("--version", required=True)
     prepare.add_argument("--commit", required=True)
     prepare.add_argument("--workflow-ref", help="dispatch branch at the candidate commit; default: prefer the default branch")
-    for action in ("accept", "publish"):
+    for action in ("accept", "publish", "retry-hosted"):
         command = sub.add_parser(action)
         command.add_argument("--candidate", required=True)
         if action == "accept":
-            command.add_argument("--slots", nargs="+", type=int, default=[])
+            a.add_slot_arguments(command)
             command.add_argument("--ci-wait-seconds", type=int, default=21600,
                                  help="bounded hosted-check wait (default six hours); 0 collects finished jobs immediately")
             command.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
@@ -1712,7 +1714,7 @@ def main():
             command.add_argument("--level", choices=("ordinary", "full"),
                                  help="release level; default: the recorded level, else ordinary; full runs every VM check")
             command.add_argument("--level-reason", help="public one-line reason recorded with the release level")
-        else:
+        elif action == "publish":
             command.add_argument("--workflow-ref", help="dispatch branch at the candidate commit; default: prefer the default branch")
             command.add_argument("--operator-acceptance", type=Path, action="append", default=[],
                                  help="explicit exact-candidate profile failure declaration; repeat for each authorized check")
@@ -1815,26 +1817,30 @@ def main():
             raise ValueError("local state belongs to another candidate/repository")
         write_json(directory / "identity.json", identity)
         output = directory / "acceptance"
+        if args.action == "retry-hosted":
+            retry_hosted(github, directory, identity)
+            return 0
         if args.action == "accept":
             for signum in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(signum, lambda signum, frame: a.STOP.set())
-            if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
-                raise ValueError("slots must be unique integers from 1 to 999")
+            a.validate_slot_list(parser, args.slots)
             ensure_acceptance(directory, identity, prepared)
             if not 0 <= args.ci_wait_seconds <= 86400:
                 raise ValueError("--ci-wait-seconds must be from 0 to 86400")
-            with a.acceptance_lock(output):
-                collect_ci(github, directory, identity)
             recorded = json.loads((output / "receipt.json").read_text()).get("release_level", {})
             requested = args.level or recorded.get("level", "ordinary")
             level = (recorded if args.level is None and args.level_reason is None and recorded
                      else release_level(requested, args.level_reason, release_scope(identity["version"], identity["commit"]), recorded))
             record_release_level(output, level)
             print(f"RELEASE_LEVEL {level['level']} reason={level['reason']}", flush=True)
+            with_vms = args.with_vms or level["level"] == "full"
+            if not (with_vms or args.only):
+                with a.acceptance_lock(output):
+                    collect_ci(github, directory, identity)
             previous = earlier_candidates(state_dir, directory, identity)
             a.reuse_isolated_tests(output, previous)
             result = accept_checks(github, directory, identity, args.slots, args.only,
-                                   args.with_vms or level["level"] == "full", previous, args.ci_wait_seconds)
+                                   with_vms, previous, args.ci_wait_seconds, slot_count=args.slot_count)
             if result == 0:
                 write_json(directory / "attestation.json", attestation(output, identity))
             return result

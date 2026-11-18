@@ -51,18 +51,34 @@ For a CI-prepared candidate, `verify`, ShellCheck, local adapters and released-c
 are counted from the successful preparation jobs and not repeated; `release-acceptance.py run` with
 `--only NAME --rerun` replaces a counted result with a local run. A locally prepared candidate runs them.
 
-After downloading the preparation artifact, `prepare` also dispatches `release-vm.yml` asynchronously
-for the 25 exact IDs in `CI_HOSTED_CHECKS`. The workflow needs a branch whose head is the candidate
-commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`; otherwise it reports the refusal and
-leaves those checks open. It downloads the exact preparation run/attempt artifact, uses the shared
-hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to
-350 minutes). Repeating preparation discovers the durable request instead of dispatching another.
-`accept` waits up to six hours for that request, then collects only completed successful jobs before
-running the remaining requested checks. `--ci-wait-seconds 0` collects the current snapshot immediately;
-a nonzero override is bounded to 86400 seconds. Failed, running, missing or refused results stay open
-for local execution when requested. After a local check fails, `accept` neither waits nor runs hosted
-checks locally: it counts finished hosted results and leaves the rest pending for a later `accept`. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
-`CI-HOSTED-SKIP CHECK: REASON`.
+After downloading the preparation artifact, `prepare` dispatches `release-vm.yml` asynchronously
+for the candidate's exact `CI_HOSTED_CHECKS` inventory. The workflow needs a branch whose head is the
+candidate commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`. Each job gets the exact
+preparation artifact, sets up its own pool, and runs one collector selection under a 350-minute job
+limit. The matrix uses available CI runners and leaves sibling jobs running after a failure. Repeating
+preparation discovers the durable request and keeps the existing run.
+
+Release acceptance always has priority on local broker slots and in CI. Give it the available
+capacity before starting Periodic E2E or other discretionary checks. Full acceptance defaults to all
+four local broker slots (1–4) and picks up newly admitted slots as the broker's memory and disk
+capacity changes. Use `--slots slot-1 slot-3` only to restrict execution to specific slots, or
+`--slot-count 2` to limit concurrent lanes while still considering all four slots.
+
+`accept` runs the local queue while it collects completed hosted jobs. It reuses verified passes and
+makes terminal hosted failures eligible for local execution when requested. Running and queued jobs
+remain hosted even after the wait expires. The default hosted wait is six hours. Set
+`--ci-wait-seconds 0` for one snapshot, or set a custom bound up to 86400 seconds.
+
+To rerun the failed hosted jobs in a completed run, use the same GitHub authorization as for
+`prepare` and run:
+
+```sh
+dev/release.sh retry-hosted --candidate rRUN_ID-aATTEMPT
+```
+
+The next `accept` collects the new attempt and can still count successful jobs from earlier attempts.
+Choose the hosted retry between `accept` invocations to keep this decision serialized with local
+fallback. Collection reports `CI-HOSTED CHECK run=RUN job=JOB` or `CI-HOSTED-SKIP CHECK: REASON`.
 
 Hosted evidence is `execution: ci-hosted`, with the original runner environment, manifest, complete
 PASS attempt and recorded cleanup. Candidate ID, commit, source fingerprint, version, runtime and
@@ -108,10 +124,10 @@ and never gate a release or PR.
 Local long VM smoke and shipped-profile VM checks run on explicit request:
 
 ```sh
-dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms --slots 1 2 3
+dev/release.sh accept --candidate rRUN_ID-aATTEMPT --with-vms
 # Or select one check from an existing frozen collector:
 python3 dev/release-acceptance.py run --output .build/release-local \
-  --only p0-release-smoke --slots 1
+  --only p0-release-smoke --slots slot-1
 ```
 
 `--slots` alone does not request local VM execution. Checks without counted hosted evidence or an
@@ -226,7 +242,7 @@ VM status. Collector selectors can target the downloaded candidate's acceptance 
 
 ```sh
 python3 dev/release-acceptance.py preflight \
-  --output .build/release-publication/ID/acceptance --with-vms --slots 1 2 3
+  --output .build/release-publication/ID/acceptance --with-vms
 ```
 
 Source, asset or tooling changes require a new candidate. Never amend a frozen tree, its policy
@@ -415,7 +431,7 @@ Agents preparing a release apply the
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).
   Long VM smoke and shipped-profile VM checks run only on explicit operator request:
-  `accept --with-vms --slots N` or collector `run --only CHECK --slots N`.
+  `accept --with-vms` or collector `run --only CHECK`.
   Available slots alone do not request a VM run. Core `p0-release-smoke` is mandatory:
   local-only acceptance remains incomplete until it passes, and it cannot be excluded
   or waived as optional. Unrequested shipped-profile VM checks remain `not-run`,
@@ -461,15 +477,15 @@ python3 dev/release-acceptance.py prepare --version X.Y.Z --output .build/releas
 python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
-Add `--with-vms --slots 1 2 3` to `preflight`/`run` to request all VM smoke, core and profile checks,
-or use `run --only p0-release-smoke --slots 1` for one check. `--slots` alone does not
+Add `--with-vms` to `preflight`/`run` to request all VM smoke, core and profile checks,
+or use `run --only p0-release-smoke --slots slot-1` for one check. `--slots` alone does not
 request VM execution. Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
 (full P0 and its split lanes, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
 and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
 selects one family. A catalog entry's optional `requires` lists sibling checks that must also pass
 whenever that check is requested or recorded; preparation records them in the receipt and the
 candidate's catalog must still match. Selecting a check also runs its required checks that have not
-passed for the candidate, so `run --only vm:p0-full --slots 1 2 3` runs the full P0 outside a release:
+passed for the candidate, so `run --only vm:p0-full` runs the full P0 outside a release:
 `vm:p0-full --split-covered` plus its split checks; `--exclude` keeps a required check not run and the
 result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
 runs per listed slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
@@ -495,7 +511,8 @@ regression after required local gates. Remaining live checks run longest-first u
 durations in the current receipt, then earlier candidate receipts already found by release publication.
 Unknown durations and ties retain declaration order. Explicit `--exclude CHECK` leaves the required gate incomplete.
 
-Select available slots using `dev/agent-e2e.sh --status`; each slot runs one controller at a time.
+The collector considers slots 1–4 by default. Each slot runs one controller at a time.
+The broker's exact-slot acquisition decides admission on every attempt.
 Source fingerprints use Git executable-bit semantics; snapshots normalize public file modes explicitly,
 so the checkout umask cannot change the candidate. One plain source copy is retained for local
 checks and controllers, with the runtime assets under its `.subyard-acceptance/release/` directory.
@@ -509,15 +526,12 @@ Process coverage (`dev/process-coverage.sh`) is optional; ordinary process contr
 Run the aggregator from the managed workspace checkout: it supplies that workspace for lease
 attribution while executing controllers and guest payloads from the frozen candidate.
 
-A repeated `run` executes only checks without a passing result. Use `--only profile:NAME` or
-`--only p0-release-smoke` for a remaining independent check; `--rerun` also repeats passed checks.
-After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
-the same frozen candidate with `run --output DIR --slots N --only CHECK`. Passing local checks remain
-bound to that identity and are retained; capacity alone does not require another `prepare`.
-This is a separate continuation run: retry the blocked check after conditions change, retaining
-its original attempt logs/events and applicable PASS results from the same candidate.
-Planning insufficiency is distinct from an actual typed broker refusal recorded as `blocked` with
-`capacity_memory` or `capacity_disk`. Both leave required physical acceptance incomplete.
+A repeated `run` executes only checks without an applicable pass. Use `--only CHECK --rerun` to
+replace the result of one lane. When a collector already holds the candidate, this command queues an
+exact live lane for a subsequent scheduling pass in that selection. Use the active collector's slot
+settings for queued work. If the active selection does not cover the lane, target it once that
+collector exits. Every attempt keeps its own logs and immutable record. Capacity changes alone leave
+the candidate identity and its other passing results intact.
 Profiles may declare independent checks in `tests/e2e/acceptance-lanes.json` with schema version 1
 and ordered `lanes` entries containing `id` and runner `arguments`. A lane marked
 `"periodic_only": true` runs only in Periodic E2E: it is not a release check, so release
@@ -529,14 +543,12 @@ before live dispatch. Recorded failed, blocked, interrupted, incomplete, or unfi
 preflights prevent live dispatch, including targeted continuation. Untouched pending preflights
 remain exempt for fresh targeted jobs, whose explicit selections remain unchanged. Explicit `--with-vms` requests
 every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
-periodic-only lane as an unknown check. Available approved slots take the
-next queued check after their controller exits. A typed `blocked/capacity_memory` or
-`blocked/capacity_disk` refusal before any lease or guest start lets that slot worker take the
-next independent check. After all first-pass controllers finish, capacity-blocked checks are
-retried once on slots whose workers drained the queue. Both attempts retain their logs and
-immutable records; a second capacity block leaves the candidate incomplete.
-Failures, interruptions, unknown refusals and attempts that
-reached a lease or guest start stop that worker's queue. Exit 4 alone does not permit continuation.
+periodic-only lane as an unknown check. Free slots take the next eligible check. A typed busy, memory
+or disk refusal returns the lane to the queue. The collector probes again as capacity changes and
+reports a persistent block after the bounded admission wait. A failed lane with confirmed lease
+cleanup gets one independent retry. Unconfirmed cleanup retires that slot and leaves other slots
+running. Restarting the collector after an interruption resumes outstanding work against the same
+candidate and reuses its passes.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
 attempt and include the controllers' source and environment evidence. The run checks its platform
@@ -803,10 +815,11 @@ Veranda and live P0 acceptance remain separate checks.
 `release-vm.yml` runs the explicit `CI_HOSTED_CHECKS` inventory against a downloaded preparation
 artifact, one fresh collector per job. It shares the Periodic E2E pool setup. Job success requires
 a terminal recorded PASS for that exact selection and recorded cleanup; the collector's aggregate
-receipt stays incomplete while other checks are unrequested. `accept` waits up to six hours (override
-with `--ci-wait-seconds`, including `0`), counts verified successful jobs as `ci-hosted`, and runs only
-the remaining requested checks. Wrong SHA, failed jobs, unknown workflow policies, foreign candidates,
-stale attempts and missing cleanup refuse import. Publication rechecks GitHub execution facts.
+receipt stays incomplete while other checks are unrequested. `accept` counts verified successful
+jobs as `ci-hosted` while local checks run. Wrong SHA, failed jobs, unknown workflow policies, foreign
+candidates, mismatched attempts and missing cleanup refuse import. Publication rechecks GitHub execution facts.
+Default integration selection and the installed test-VM client use the ordinary hosted pool. The
+telemetry, Android and Amnezia checks require the Intel nested-VM lanes in Periodic E2E.
 Nested-VM stages keep `vm:p0-full` local; its non-nested power-systemd and
 legacy-continuation lanes are the hosted `vm:p0-power-systemd` and
 `vm:p0-legacy-continuation` checks, which its `--split-covered` matrix does not repeat.
@@ -821,8 +834,8 @@ workflow run page. Contents differ by workflow:
 | Artifact | Contents, when produced by the check |
 | --- | --- |
 | Release VM `hosted-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `acceptance/<check>-*.log`, other collector logs, `acceptance/receipt.json`, `acceptance/events.jsonl`, `acceptance/attempts/*.json` and `acceptance/runs/*.json`; `runner/` probe logs/results and broker events; `p0/` failure snapshots; `cleanup.log` and `summary.json` |
-| Periodic `pool-diagnostics-ATTEMPT`, `diagnostics-JOB_INDEX-ATTEMPT`, `nested-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `runner/check.log`, probe logs, `runner/results.tsv` and service/yard broker events; available `p0/` failure snapshots; `cleanup.log` and `summary.json`. These jobs have no collector output under `$RUNNER_TEMP/acceptance`, so no `acceptance/`, receipt, original attempt or invocation records |
-| Release VM `ci-hosted-JOB_INDEX` | Strict validated native PASS evidence: `ci-execution.json`, receipt, events, logs, original attempts/manifests and invocation records. This is separate from diagnostic snapshots |
+| Periodic `pool-diagnostics-ATTEMPT`, `diagnostics-JOB_INDEX-ATTEMPT`, `veranda-diagnostics-JOB_INDEX-ATTEMPT`, `nested-diagnostics-JOB_INDEX-ATTEMPT` | Sanitized `runner/check.log`, probe logs, `runner/results.tsv` and service/yard broker events; available `p0/` failure snapshots; `cleanup.log` and `summary.json`. These jobs have no collector output under `$RUNNER_TEMP/acceptance`, so no `acceptance/`, receipt, original attempt or invocation records |
+| Release VM `ci-hosted-JOB_INDEX-ATTEMPT` | Strict validated native PASS evidence: `ci-execution.json`, receipt, events, logs, original attempts/manifests and invocation records. This is separate from diagnostic snapshots |
 
 `p0/` preserves the route-relative paths of `p0-*.failure.log` (keeper, redacted broker status,
 capacity, reachability and OOM snapshots). `cleanup.log` contains captured cleanup/release lines;
@@ -872,7 +885,7 @@ The lightweight redaction/capture tests can run independently with
 Check steps have a 340-minute limit within the 350-minute job budget (110/120 for the Periodic E2E
 pool), reserving time for diagnostic collection/upload. Runner loss or a forced termination that
 prevents final steps can still prevent upload. Diagnostic snapshots never count as evidence. The
-separate `ci-hosted-JOB_INDEX` artifact is uploaded only after strict validation of the complete
+separate `ci-hosted-JOB_INDEX-ATTEMPT` artifact is uploaded only after strict validation of the complete
 selected PASS and cleanup; its retention remains 90 days.
 
 ## Development verification
