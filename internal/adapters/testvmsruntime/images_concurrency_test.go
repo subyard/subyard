@@ -111,11 +111,11 @@ func TestConcurrentColdPrepareBuildsOnceAndPreservesBothPins(t *testing.T) {
 			return nil, nil, nil
 		case "profile device list default --project " + project:
 			return []byte("root\neth0"), nil, nil
-		case "list e2e-base-1 --project " + project + " -f csv -c s":
+		case "list e2e-base-1 --project " + project + " -f csv -c ns":
 			if builderRunning {
-				return []byte("RUNNING"), nil, nil
+				return []byte("e2e-base-1,RUNNING"), nil, nil
 			}
-			return []byte("STOPPED"), nil, nil
+			return []byte("e2e-base-1,STOPPED"), nil, nil
 		case "query /1.0/instances/e2e-base-1?project=" + project:
 			devices := map[string]map[string]string{}
 			if metadataAttached {

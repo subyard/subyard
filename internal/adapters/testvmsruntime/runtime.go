@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -540,7 +541,7 @@ func (cfg Config) validateManagedNames(names []string) error {
 func (runtime *Runtime) ensureVM(ctx context.Context, vm string) error {
 	cfg := runtime.Config
 	if runtime.vmExists(ctx, vm) {
-		kind, err := runtime.incus(ctx, "list", vm, "--project", cfg.Project, "-f", "csv", "-c", "t")
+		kind, err := instanceColumn(ctx, runtime.incus, cfg.Project, vm, "t")
 		if err != nil {
 			return err
 		}
@@ -651,8 +652,7 @@ func (runtime *Runtime) tightenProject(ctx context.Context) error {
 }
 
 func (runtime *Runtime) startVM(ctx context.Context, vm string) error {
-	state, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project,
-		"-f", "csv", "-c", "s")
+	state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 	if err != nil {
 		return err
 	}
@@ -808,27 +808,25 @@ func (runtime *Runtime) vmIP(ctx context.Context, vm string) (string, error) {
 	for candidate := range interfaces {
 		name = candidate
 	}
-	payload, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project,
-		"--format", "json")
+	path := "/1.0/instances/" + url.PathEscape(vm) + "/state?project=" + url.QueryEscape(runtime.Config.Project)
+	payload, err := runtime.incus(ctx, "query", path)
 	if err != nil {
 		return "", err
 	}
-	var instances []struct {
-		State struct {
-			Network map[string]struct {
-				Addresses []struct {
-					Family  string `json:"family"`
-					Scope   string `json:"scope"`
-					Address string `json:"address"`
-				} `json:"addresses"`
-			} `json:"network"`
-		} `json:"state"`
+	var state struct {
+		Network map[string]struct {
+			Addresses []struct {
+				Family  string `json:"family"`
+				Scope   string `json:"scope"`
+				Address string `json:"address"`
+			} `json:"addresses"`
+		} `json:"network"`
 	}
-	if err := json.Unmarshal([]byte(payload), &instances); err != nil || len(instances) != 1 {
-		return "", fmt.Errorf("decode %s network state", vm)
+	if err := json.Unmarshal([]byte(payload), &state); err != nil {
+		return "", fmt.Errorf("decode %s network state: %w", vm, err)
 	}
 	unique := map[string]bool{}
-	for _, address := range instances[0].State.Network[name].Addresses {
+	for _, address := range state.Network[name].Addresses {
 		if address.Family == "inet" && address.Scope == "global" &&
 			net.ParseIP(address.Address).To4() != nil {
 			unique[address.Address] = true
@@ -841,6 +839,21 @@ func (runtime *Runtime) vmIP(ctx context.Context, vm string) (string, error) {
 		return address, nil
 	}
 	panic("unreachable")
+}
+
+// instanceColumn selects one status or type column from an exact instance name.
+func instanceColumn(ctx context.Context, incus func(context.Context, ...string) (string, error), project, instance, column string) (string, error) {
+	rows, err := incus(ctx, "list", instance, "--project", project, "-f", "csv", "-c", "n"+column)
+	if err != nil {
+		return "", err
+	}
+	// Incus names and the status/type columns contain no CSV delimiters.
+	for row := range strings.SplitSeq(rows, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(row), instance+","); ok {
+			return value, nil
+		}
+	}
+	return "", nil
 }
 
 func (runtime *Runtime) incus(ctx context.Context, arguments ...string) (string, error) {

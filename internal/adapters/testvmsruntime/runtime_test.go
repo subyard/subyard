@@ -118,9 +118,9 @@ func (runner *pairRequestBudgetRunner) Run(
 	case "info e2e-vm-1 --project " + runner.project,
 		"info e2e-vm-2 --project " + runner.project:
 		return nil, nil, nil
-	case "list e2e-vm-1 --project " + runner.project + " -f csv -c s":
+	case "list e2e-vm-1 --project " + runner.project + " -f csv -c ns":
 		return runner.vmState(ctx, "e2e-vm-1")
-	case "list e2e-vm-2 --project " + runner.project + " -f csv -c s":
+	case "list e2e-vm-2 --project " + runner.project + " -f csv -c ns":
 		return runner.vmState(ctx, "e2e-vm-2")
 	}
 	if len(arguments) > 0 && arguments[0] == "exec" {
@@ -134,13 +134,13 @@ func (runner *pairRequestBudgetRunner) vmState(
 	vm string,
 ) ([]byte, []byte, error) {
 	if !runner.stopped[vm] {
-		return []byte("RUNNING\n"), nil, nil
+		return []byte(vm + ",RUNNING\n"), nil, nil
 	}
 	if err := runner.consume(ctx, 5*time.Second); err != nil {
 		return nil, nil, err
 	}
 	runner.verifiedStops = append(runner.verifiedStops, vm)
-	return []byte("STOPPED\n"), nil, nil
+	return []byte(vm + ",STOPPED\n"), nil, nil
 }
 
 func (*pairRequestBudgetRunner) LookPath(name string) (string, error) {
@@ -188,11 +188,11 @@ func (runner *requestDeadlineRunner) Run(
 		return nil, nil, nil
 	case "info e2e-vm-2 --project " + runner.project:
 		return nil, nil, errors.New("not found")
-	case "list e2e-vm-1 --project " + runner.project + " -f csv -c s":
+	case "list e2e-vm-1 --project " + runner.project + " -f csv -c ns":
 		if runner.stopped {
-			return []byte("STOPPED\n"), nil, nil
+			return []byte(arguments[1] + ",STOPPED\n"), nil, nil
 		}
-		return []byte("RUNNING\n"), nil, nil
+		return []byte(arguments[1] + ",RUNNING\n"), nil, nil
 	}
 	if len(arguments) > 0 && arguments[0] == "exec" {
 		return nil, nil, nil
@@ -590,8 +590,8 @@ func TestStopRunningVMAcceptsConcurrentSuccessfulStop(t *testing.T) {
 		switch strings.Join(arguments, " ") {
 		case "stop e2e-vm-1 --project subyard-e2e-vms --timeout 60":
 			return nil, nil, errors.New("matching non-reusable operation has now succeeded")
-		case "list e2e-vm-1 --project subyard-e2e-vms -f csv -c s":
-			return []byte("STOPPED\n"), nil, nil
+		case "list e2e-vm-1 --project subyard-e2e-vms -f csv -c ns":
+			return []byte(arguments[1] + ",STOPPED\n"), nil, nil
 		default:
 			return nil, nil, fmt.Errorf("unexpected call: %s", strings.Join(arguments, " "))
 		}
@@ -619,14 +619,14 @@ func TestStopRunningVMFailureIncludesLogTails(t *testing.T) {
 						return nil, nil, stopFailure
 					}
 					return nil, nil, nil
-				case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+				case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c ns":
 					if scenario == "success" {
-						return []byte("STOPPED\n"), nil, nil
+						return []byte(args[1] + ",STOPPED\n"), nil, nil
 					}
 					if scenario == "state unavailable" {
 						return nil, nil, errors.New("state probe failed")
 					}
-					return []byte("RUNNING\n"), nil, nil
+					return []byte(args[1] + ",RUNNING\n"), nil, nil
 				case "console e2e-vm-1 --project " + cfg.Project + " --show-log":
 					return []byte(console), nil, nil
 				case "info --show-log e2e-vm-1 --project " + cfg.Project:
@@ -697,11 +697,11 @@ func TestReleaseStopsRebootingGuestWhenKeyCleanupIsTemporarilyUnavailable(t *tes
 			return nil, nil, nil
 		case "info e2e-vm-2 --project " + cfg.Project:
 			return nil, nil, errors.New("not found")
-		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c ns":
 			if stopped {
-				return []byte("STOPPED\n"), nil, nil
+				return []byte(arguments[1] + ",STOPPED\n"), nil, nil
 			}
-			return []byte("RUNNING\n"), nil, nil
+			return []byte(arguments[1] + ",RUNNING\n"), nil, nil
 		case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
 			stopped = true
 			return nil, nil, nil
@@ -755,12 +755,12 @@ func TestReleaseTrimsRunningRetainedVMAfterCleanupBeforeVerifiedStop(t *testing.
 			return nil, nil, nil
 		case "info e2e-vm-2 --project " + cfg.Project:
 			return nil, nil, errors.New("not found")
-		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c ns":
 			if stopped {
 				trace = append(trace, "stopped-verified")
-				return []byte("STOPPED\n"), nil, nil
+				return []byte(arguments[1] + ",STOPPED\n"), nil, nil
 			}
-			return []byte("RUNNING\n"), nil, nil
+			return []byte(arguments[1] + ",RUNNING\n"), nil, nil
 		case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
 			stopped = true
 			trace = append(trace, "stop")
@@ -834,11 +834,11 @@ func TestReleaseContinuesAfterRetainedGuestTrimDeadlineWithoutGuestOutput(t *tes
 			return nil, nil, nil
 		case "info e2e-vm-2 --project " + cfg.Project:
 			return nil, nil, errors.New("not found")
-		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c ns":
 			if stopped {
-				return []byte("STOPPED\n"), nil, nil
+				return []byte(arguments[1] + ",STOPPED\n"), nil, nil
 			}
-			return []byte("RUNNING\n"), nil, nil
+			return []byte(arguments[1] + ",RUNNING\n"), nil, nil
 		case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
 			stopped = true
 			return nil, nil, nil
@@ -1004,11 +1004,11 @@ func TestReleaseSlotContinuesAfterOrdinaryRetainedGuestTrimCommandError(t *testi
 			return nil, nil, nil
 		case "info e2e-vm-2 --project " + cfg.Project:
 			return nil, nil, errors.New("not found")
-		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c ns":
 			if stopped {
-				return []byte("STOPPED\n"), nil, nil
+				return []byte(arguments[1] + ",STOPPED\n"), nil, nil
 			}
-			return []byte("RUNNING\n"), nil, nil
+			return []byte(arguments[1] + ",RUNNING\n"), nil, nil
 		case "stop e2e-vm-1 --project " + cfg.Project + " --timeout 60":
 			stopped = true
 			return nil, nil, nil
@@ -1070,8 +1070,8 @@ func TestReleaseDoesNotTrimStoppedRetainedVM(t *testing.T) {
 			return nil, nil, nil
 		case "info e2e-vm-2 --project " + cfg.Project:
 			return nil, nil, errors.New("not found")
-		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s":
-			return []byte("STOPPED\n"), nil, nil
+		case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c ns":
+			return []byte(arguments[1] + ",STOPPED\n"), nil, nil
 		}
 		return nil, nil, fmt.Errorf("unexpected call: %s", strings.Join(arguments, " "))
 	}}
@@ -1395,11 +1395,11 @@ func TestVMIPFollowsTheOnlyDefaultRouteInterface(t *testing.T) {
 		switch {
 		case reflect.DeepEqual(arguments[:2], []string{"exec", cfg.vm(1)}):
 			return []byte("default via 10.42.0.1 dev enp5s0 proto dhcp\n"), nil, nil
-		case arguments[0] == "list":
-			return []byte(`[{"state":{"network":{
+		case reflect.DeepEqual(arguments, []string{"query", "/1.0/instances/" + cfg.vm(1) + "/state?project=" + cfg.Project}):
+			return []byte(`{"network":{
 				"enp5s0":{"addresses":[{"family":"inet","scope":"global","address":"10.42.0.7"}]},
 				"incusbr0":{"addresses":[{"family":"inet","scope":"global","address":"10.99.0.1"}]}
-			}}}]`), nil, nil
+			}}`), nil, nil
 		}
 		return nil, nil, fmt.Errorf("unexpected call: %v", arguments)
 	}}
@@ -1499,8 +1499,8 @@ func TestLegacyRetirementDeletesStoppedOwnedPairAndRejectsForeignInventory(t *te
 				case "config get e2e-vm-1 user.subyard.managed --project " + cfg.Project,
 					"config get e2e-vm-2 user.subyard.managed --project " + cfg.Project:
 					return []byte(managedMarker + "\n"), nil, nil
-				case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c s", "list e2e-vm-2 --project " + cfg.Project + " -f csv -c s":
-					return []byte("STOPPED"), nil, nil
+				case "list e2e-vm-1 --project " + cfg.Project + " -f csv -c ns", "list e2e-vm-2 --project " + cfg.Project + " -f csv -c ns":
+					return []byte(arguments[1] + ",STOPPED"), nil, nil
 				case "delete e2e-vm-1 --project " + cfg.Project,
 					"delete e2e-vm-2 --project " + cfg.Project:
 					deletes++
@@ -1642,8 +1642,8 @@ func TestExistingVMReconcilesSleepAndDropsLegacyRawAppArmorPolicy(t *testing.T) 
 		switch strings.Join(arguments, " ") {
 		case "info " + cfg.vm(1) + " --project " + cfg.Project:
 			return nil, nil, nil
-		case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c t":
-			return []byte("VIRTUAL-MACHINE\n"), nil, nil
+		case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c nt":
+			return []byte(arguments[1] + ",VIRTUAL-MACHINE\n"), nil, nil
 		case "config get " + cfg.vm(1) + " user.subyard.managed --project " + cfg.Project:
 			return []byte(managedMarker + "\n"), nil, nil
 		case "config get " + cfg.vm(1) + " raw.apparmor --project " + cfg.Project:
@@ -1692,8 +1692,8 @@ func TestVMSleepReconciliationRejectsForeignOwnership(t *testing.T) {
 							return []byte("8GiB"), nil, nil
 						case "info " + cfg.vm(1) + " --project " + cfg.Project:
 							return nil, nil, nil
-						case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c t":
-							return []byte("VIRTUAL-MACHINE"), nil, nil
+						case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c nt":
+							return []byte(args[1] + ",VIRTUAL-MACHINE"), nil, nil
 						}
 						if len(args) > 3 && args[0] == "config" && args[1] == "get" {
 							if args[3] == marker {

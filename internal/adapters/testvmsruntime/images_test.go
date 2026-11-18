@@ -141,11 +141,11 @@ func TestBuilderCleanupRequiresPhysicalProofAndRecoversUncommittedImages(t *test
 						}
 					}
 					return nil, nil, nil
-				case "list e2e-base-1 --project " + project + " -f csv -c s":
+				case "list e2e-base-1 --project " + project + " -f csv -c ns":
 					if failure == "stop" {
-						return []byte("RUNNING"), nil, nil
+						return []byte("e2e-base-1,RUNNING"), nil, nil
 					}
-					return []byte("STOPPED"), nil, nil
+					return []byte("e2e-base-1,STOPPED"), nil, nil
 				case "delete e2e-base-1 --project " + project:
 					if failure == "delete" {
 						return nil, nil, errors.New("delete failed")
@@ -693,8 +693,8 @@ func TestBuilderPreCreationFailureRecoveryAfterRestart(t *testing.T) {
 						return []byte("e2e-base-1"), nil, nil
 					}
 					return nil, nil, nil
-				case "list e2e-base-1 --project " + project + " -f csv -c s":
-					return []byte("STOPPED"), nil, nil
+				case "list e2e-base-1 --project " + project + " -f csv -c ns":
+					return []byte("e2e-base-1,STOPPED"), nil, nil
 				case "console e2e-base-1 --show-log --project " + project:
 					consoles++
 					return []byte("partial init stopped console"), nil, nil

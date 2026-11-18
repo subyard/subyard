@@ -207,16 +207,27 @@ func TestCloudInitDiskPreservesCommandFailureIdentity(t *testing.T) {
 	}
 }
 
-func TestStartVMDoesNotMutateRunningInstance(t *testing.T) {
-	runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
-		if args[0] != "list" {
-			t.Fatalf("running VM mutated: %v", args)
-		}
-		return []byte("RUNNING"), nil, nil
-	}}
-	rt := &Runtime{Config: fixtureConfig(t), Runner: runner}
-	if err := rt.startVM(context.Background(), rt.Config.vm(1)); err != nil {
-		t.Fatal(err)
+func TestStartVMUsesTheExactInstanceState(t *testing.T) {
+	for _, exactExists := range []bool{false, true} {
+		t.Run(fmt.Sprintf("exactExists=%t", exactExists), func(t *testing.T) {
+			cfg := fixtureConfig(t)
+			vm := cfg.vm(1)
+			runner := &fakeRunner{handler: func(_ string, args, _ []string, _ io.Reader) ([]byte, []byte, error) {
+				if strings.Join(args, " ") != "list "+vm+" --project "+cfg.Project+" -f csv -c ns" {
+					t.Fatalf("unexpected Incus call: %v", args)
+				}
+				rows := vm + "-neighbour,RUNNING\n"
+				if exactExists {
+					rows += vm + ",RUNNING\n"
+				}
+				return []byte(rows), nil, nil
+			}}
+			rt := &Runtime{Config: cfg, Runner: runner}
+			err := rt.startVM(context.Background(), vm)
+			if (err == nil) != exactExists {
+				t.Fatalf("startVM(%q) = %v with exact instance present: %t", vm, err, exactExists)
+			}
+		})
 	}
 }
 
@@ -254,8 +265,8 @@ func TestBuildBaseRejectsDisabledCloudInitBeforeAPT(t *testing.T) {
 					return nil, nil, errors.New("absent")
 				case strings.HasPrefix(command, "profile device list "):
 					return []byte("root\neth0"), nil, nil
-				case strings.Contains(command, " -c s"):
-					return []byte("STOPPED"), nil, nil
+				case strings.HasSuffix(command, " -c ns"):
+					return []byte(args[1] + ",STOPPED"), nil, nil
 				case args[0] == "query" && strings.Contains(args[1], "/metadata?"):
 					if len(args) == 2 {
 						return []byte(metadata), nil, nil
@@ -368,8 +379,8 @@ func TestStartVMRequiresCloudInitDiskBeforeFirstBoot(t *testing.T) {
 							devices = `{"subyard-cloud-init":{"type":"disk","source":"cloud-init:config"}}`
 						}
 						return []byte(`{"type":"virtual-machine","config":{"user.subyard.managed":"` + managedMarker + `"},"devices":` + devices + `,"expanded_devices":` + devices + `}`), nil, nil
-					case strings.Contains(command, " -c s"):
-						return []byte("STOPPED"), nil, nil
+					case strings.HasSuffix(command, " -c ns"):
+						return []byte(args[1] + ",STOPPED"), nil, nil
 					case strings.HasPrefix(command, "config device add "):
 						if attachFails {
 							return nil, nil, errors.New("attach failed")

@@ -170,11 +170,11 @@ func TestDisposableDeletionRequiresEveryExactMarkerAndVerifiedStop(t *testing.T)
 						return []byte("2"), nil, nil
 					}
 					return []byte("3"), nil, nil
-				case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c s":
+				case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c ns":
 					if mismatch == "running" {
-						return []byte("RUNNING"), nil, nil
+						return []byte(args[1] + ",RUNNING"), nil, nil
 					}
-					return []byte("STOPPED"), nil, nil
+					return []byte(args[1] + ",STOPPED"), nil, nil
 				case "delete " + cfg.vm(1) + " --project " + cfg.Project:
 					if mismatch == "delete" {
 						return nil, nil, errors.New("delete failed")
@@ -300,8 +300,8 @@ func TestCancelledAllocationWaitsForNativeCreationAndFencesLateGuest(t *testing.
 					return []byte(strconv.FormatUint(value, 10)), nil, nil
 				case "config get " + cfg.vm(1) + " user.subyard.lease-epoch --project " + cfg.Project:
 					return []byte(strconv.FormatUint(grant.LeaseEpoch, 10)), nil, nil
-				case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c s":
-					return []byte("STOPPED"), nil, nil
+				case "list " + cfg.vm(1) + " --project " + cfg.Project + " -f csv -c ns":
+					return []byte(args[1] + ",STOPPED"), nil, nil
 				case "delete " + cfg.vm(1) + " --project " + cfg.Project:
 					deleted = true
 					return nil, nil, nil

@@ -471,8 +471,7 @@ func removeInactiveRouteGenerations(root, active string) error {
 }
 
 func (backend *Backend) outerState(ctx context.Context) (string, error) {
-	state, err := backend.incus(ctx, "list", backend.Instance, "--project", backend.Project,
-		"-f", "csv", "-c", "s")
+	state, err := instanceColumn(ctx, backend.incus, backend.Project, backend.Instance, "s")
 	return strings.TrimSpace(state), err
 }
 

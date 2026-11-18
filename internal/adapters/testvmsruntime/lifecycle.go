@@ -653,8 +653,7 @@ func (runtime *Runtime) stopRetainedWithEvidence(ctx context.Context) (stopEvide
 	trimCtx, cancelTrim := context.WithTimeout(ctx, retainedGuestTrimTotalTimeout)
 	defer cancelTrim()
 	for _, vm := range names {
-		state, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project,
-			"-f", "csv", "-c", "s")
+		state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 		if err != nil {
 			return evidence, err
 		}
@@ -756,8 +755,7 @@ func (runtime *Runtime) recordStopOutcome(
 func (runtime *Runtime) stopRunningVM(ctx context.Context, vm string) error {
 	_, stopErr := runtime.incus(ctx, "stop", vm, "--project", runtime.Config.Project,
 		"--timeout", "60")
-	state, stateErr := runtime.incus(ctx, "list", vm, "--project",
-		runtime.Config.Project, "-f", "csv", "-c", "s")
+	state, stateErr := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 	if stateErr == nil && strings.TrimSpace(state) == "STOPPED" {
 		return nil
 	}
@@ -866,7 +864,7 @@ func (runtime *Runtime) deleteAllocation(ctx context.Context) error {
 		if err := runtime.requireAllocationMarker(ctx, vm); err != nil {
 			return err
 		}
-		state, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+		state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 		if err != nil {
 			return err
 		}
@@ -991,7 +989,7 @@ func (runtime *Runtime) deleteStoppedLegacyPair(ctx context.Context) error {
 		if err := runtime.requireVMMarker(ctx, vm); err != nil {
 			return err
 		}
-		state, err := runtime.incus(ctx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+		state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 		if err != nil {
 			return err
 		}

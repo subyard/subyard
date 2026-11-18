@@ -59,9 +59,9 @@ func TestHungGuestCleanupLeavesContextForNativeStop(t *testing.T) {
 					return nil, nil, nil
 				case strings.HasPrefix(joined, "list e2e-vm-1 "):
 					if stopped {
-						return []byte("STOPPED\n"), nil, nil
+						return []byte(args[1] + ",STOPPED\n"), nil, nil
 					}
-					return []byte("RUNNING\n"), nil, nil
+					return []byte(args[1] + ",RUNNING\n"), nil, nil
 				default:
 					return cleanupDeadlineInventory(rt, args), nil, nil
 				}
@@ -101,7 +101,7 @@ func TestQuarantineGuestCleanupDeadlineLeavesContextForDiagnostics(t *testing.T)
 			return nil, nil, ctx.Err()
 		}
 		if strings.HasPrefix(strings.Join(args, " "), "list e2e-vm-1 ") {
-			return []byte("RUNNING\n"), nil, nil
+			return []byte(args[1] + ",RUNNING\n"), nil, nil
 		}
 		return cleanupDeadlineInventory(rt, args), nil, nil
 	}
@@ -109,7 +109,7 @@ func TestQuarantineGuestCleanupDeadlineLeavesContextForDiagnostics(t *testing.T)
 	if err := rt.removeQuarantinedGuestKeys(ctx); !hung || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("hung quarantine cleanup did not finish at its deadline: hung=%v error=%v", hung, err)
 	}
-	if ctx.Err() != nil || rt.recoveryDiagnostics(ctx, "")["vm_1_state"] != "RUNNING\n" {
+	if ctx.Err() != nil || rt.recoveryDiagnostics(ctx, "")["vm_1_state"] != "RUNNING" {
 		t.Fatal("quarantine cleanup timeout consumed subsequent diagnostics context")
 	}
 }

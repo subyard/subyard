@@ -754,7 +754,7 @@ func (rt *Runtime) cleanupImageBuild(ctx context.Context, store LeaseStore, regi
 		}
 		for _, name := range names {
 			_, stopErr := builder.incus(ctx, "stop", name, "--force", "--project", cfg.Project)
-			state, stateErr := builder.incus(ctx, "list", name, "--project", cfg.Project, "-f", "csv", "-c", "s")
+			state, stateErr := instanceColumn(ctx, builder.incus, cfg.Project, name, "s")
 			if stateErr != nil {
 				return errors.Join(stopErr, stateErr)
 			}
