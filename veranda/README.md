@@ -23,7 +23,7 @@ make verify-veranda
 ```
 
 This is the shared local and CI entrypoint. It runs the Python runner contract and
-Linux resource probe first, stopping on a failed prerequisite, then formatting,
+Linux probe, memory-accounting, packaging and Cargo cache tests first, stopping on a failed prerequisite, then formatting,
 Clippy, and native tests in order while reporting all independent Rust failures.
 Use `python3 dev/check-veranda.py --rust-only` to skip the Python prerequisites and
 run formatting, Clippy, and native tests. See [testing](../docs/testing.md#run-veranda-host-free-checks)

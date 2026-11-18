@@ -289,19 +289,25 @@ func (store Connections) recoverRegistrationLocked(heldHostIDs ...string) error 
 }
 
 func (store Connections) applyRegistrationLocked(journal registrationJournal) error {
-	if err := store.writeConnectionFile(journal.Connection); err != nil {
+	return store.applyConnectionJournalLocked(journal.Connection, journal.Snapshot, store.registrationPath())
+}
+
+// applyConnectionJournalLocked publishes a journaled connection and snapshot,
+// then removes the journal that made the change resumable.
+func (store Connections) applyConnectionJournalLocked(connection Connection, snapshot Snapshot, journalPath string) error {
+	if err := store.writeConnectionFile(connection); err != nil {
 		return err
 	}
-	if err := store.cache().Write(journal.Snapshot); err != nil {
+	if err := store.cache().Write(snapshot); err != nil {
 		return err
 	}
 	if err := store.hitIO(ownerIOJournalCleanup); err != nil {
 		return err
 	}
-	if err := os.Remove(store.registrationPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return store.syncDirectory(filepath.Dir(store.registrationPath()))
+	return store.syncDirectory(filepath.Dir(journalPath))
 }
 
 func (store Connections) recoverPendingLocked(heldHostIDs ...string) error {

@@ -232,17 +232,5 @@ func (store Connections) recoverConnectionRepairLocked(heldHostIDs ...string) er
 }
 
 func (store Connections) applyConnectionRepairLocked(journal connectionRepairJournal) error {
-	if err := store.writeConnectionFile(journal.NewConnection); err != nil {
-		return err
-	}
-	if err := store.cache().Write(journal.Snapshot); err != nil {
-		return err
-	}
-	if err := store.hitIO(ownerIOJournalCleanup); err != nil {
-		return err
-	}
-	if err := os.Remove(store.connectionRepairPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return store.syncDirectory(filepath.Dir(store.connectionRepairPath()))
+	return store.applyConnectionJournalLocked(journal.NewConnection, journal.Snapshot, store.connectionRepairPath())
 }

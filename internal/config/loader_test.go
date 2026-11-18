@@ -162,7 +162,7 @@ func TestRetiredE2EVMTemplateReportsMigrationAndTeardown(t *testing.T) {
 	// Even if a stale file is present, the retired name must never act as an alias.
 	writeFixture(t, filepath.Join(configDir, "yards", "profiles", "e2e-vms.env"), "NESTED_E2E_VMS=1\n")
 
-	err := applyYardConfig(configDir, "e2e-yard", yardFile, environment{})
+	err := applyYardTemplateTracked(configDir, "e2e-yard", "e2e-vms", yardFile, environment{}, nil)
 	if err == nil {
 		t.Fatal("retired e2e-vms template was accepted")
 	}

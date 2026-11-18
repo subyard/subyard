@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -43,13 +42,6 @@ func (err *ProcessError) Error() string { return "transport failed: " + err.Mess
 // signal or SSH's connection failure status does not establish a guest exit.
 func (err *ProcessError) GuestExitCode() (int, bool) {
 	return err.ExitCode, err.guestExited
-}
-
-func Local(engine, repositoryRoot string) Process {
-	return Process{
-		Program: engine, Arguments: []string{"rpc", "--stdio"}, Directory: repositoryRoot,
-		Env: append(os.Environ(), "SUBYARD_REPOSITORY_ROOT="+repositoryRoot),
-	}
 }
 
 func SSH(program, target string, connectTimeout time.Duration) (Process, error) {

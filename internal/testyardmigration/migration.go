@@ -805,12 +805,6 @@ func Verify(options Options, before Prepared) error {
 	)
 }
 
-// VerifyState retains the categorical read-only verifier for imported v1
-// journals that predate exact owner-registration evidence.
-func VerifyState(options Options, before State) error {
-	return verifyState(options, before)
-}
-
 func verifyState(options Options, before State) error {
 	if err := validateOptions(&options); err != nil {
 		return err
@@ -849,44 +843,6 @@ func verifyDesiredOwner(ctx context.Context, options Options, before Prepared) e
 	}
 	if progress != ProgressDesired {
 		return errors.New("owner migration requires verified desired state")
-	}
-	return nil
-}
-
-// VerifyRollback checks that rollback restored the exact registration shape.
-func VerifyRollback(options Options, before State) error {
-	if err := validateOptions(&options); err != nil {
-		return err
-	}
-	observed, err := inspectRegistration(options)
-	if err != nil {
-		return err
-	}
-	if before == StateCurrent {
-		if observed.state != StateCurrent {
-			return fmt.Errorf("test-yard no-op rollback expected current registration, found %s", observed.state)
-		}
-		return nil
-	}
-	if before == StateAbsent {
-		switch observed.state {
-		case StateAbsent,
-			StateLegacyDirectory,
-			StateLegacyDirectoryProjects,
-			StateLegacyDirectoryOverrides,
-			StateLegacyDirectoryState,
-			StateLegacyFlat:
-			return nil
-		default:
-			return fmt.Errorf("test-yard no-op rollback found migrated state %s", observed.state)
-		}
-	}
-	_, _, migrates := preparedLegacyState(before)
-	if migrates {
-		before = expectedLegacyState(before)
-	}
-	if !equivalentLegacyState(observed.state, before) {
-		return fmt.Errorf("test-yard rollback expected registration state %s, found %s", before, observed.state)
 	}
 	return nil
 }

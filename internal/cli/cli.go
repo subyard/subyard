@@ -2967,36 +2967,7 @@ func (cli *CLI) resolveGlobalProject(
 	if err != nil {
 		return state.Match{}, err
 	}
-	resolver := state.Resolver{Stores: stores}
-	if !isExplicitProjectPath(selector) {
-		return resolver.Resolve(ctx, selector)
-	}
-	path, err := filepath.EvalSymlinks(cli.projectSelectorPath(selector))
-	if err != nil {
-		return state.Match{}, err
-	}
-	path, err = filepath.Abs(path)
-	if err != nil {
-		return state.Match{}, err
-	}
-	matches := make([]state.Match, 0)
-	for yardName, store := range stores {
-		records, listErr := store.List(ctx)
-		if listErr != nil {
-			return state.Match{}, listErr
-		}
-		for _, record := range recordsBySource(records, path) {
-			matches = append(matches, state.Match{Yard: yardName, Record: record})
-		}
-	}
-	if len(matches) > 1 {
-		return state.Match{}, fmt.Errorf("%w: project path %q is registered in multiple yards",
-			state.ErrAmbiguous, selector)
-	}
-	if len(matches) == 0 {
-		return state.Match{}, fmt.Errorf("project path %q is not in any yard", selector)
-	}
-	return matches[0], nil
+	return cli.resolveProjectInStores(ctx, stores, selector)
 }
 
 func (cli *CLI) resolveGlobalProjectReadOnly(
@@ -3008,6 +2979,14 @@ func (cli *CLI) resolveGlobalProjectReadOnly(
 	if err != nil {
 		return state.Match{}, err
 	}
+	return cli.resolveProjectInStores(ctx, stores, selector)
+}
+
+func (cli *CLI) resolveProjectInStores(
+	ctx context.Context,
+	stores map[string]ports.ProjectStore,
+	selector string,
+) (state.Match, error) {
 	resolver := state.Resolver{Stores: stores}
 	if !isExplicitProjectPath(selector) {
 		return resolver.Resolve(ctx, selector)

@@ -17,28 +17,6 @@ func RequireFreshLoaded(
 	environment []string,
 	unit string,
 ) error {
-	return requireManagerState(ctx, systemctl, environment, unit, false)
-}
-
-// RequireSettledPrevious observes a unit restored from a retained release. A
-// previously published unit may be incompatible with the current systemd and
-// therefore parse as bad-setting; it must still have been reloaded completely.
-func RequireSettledPrevious(
-	ctx context.Context,
-	systemctl string,
-	environment []string,
-	unit string,
-) error {
-	return requireManagerState(ctx, systemctl, environment, unit, true)
-}
-
-func requireManagerState(
-	ctx context.Context,
-	systemctl string,
-	environment []string,
-	unit string,
-	allowBadSetting bool,
-) error {
 	command := exec.CommandContext(
 		ctx,
 		systemctl,
@@ -57,8 +35,7 @@ func requireManagerState(
 	if err != nil {
 		return err
 	}
-	loadStateAccepted := loadState == "loaded" || allowBadSetting && loadState == "bad-setting"
-	if !loadStateAccepted || needDaemonReload != "no" {
+	if loadState != "loaded" || needDaemonReload != "no" {
 		return fmt.Errorf(
 			"systemd manager state is LoadState=%s NeedDaemonReload=%s",
 			loadState,
