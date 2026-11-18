@@ -265,7 +265,7 @@ func TestNonoverlappingAttribution(t *testing.T) {
 func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	s := fixtureStore(t)
 	outbox := filepath.Join(s.dir, "outbox")
-	if err := privateDir(outbox); err != nil {
+	if err := os.Chmod(outbox, 0700); err != nil {
 		t.Fatal(err)
 	}
 	token := strings.Repeat("a", 32)

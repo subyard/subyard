@@ -157,6 +157,11 @@ func Open(dir string, limits Limits) (*Store, error) {
 		return fail(err)
 	}
 	bad := func(e error) (*Store, error) { db.Close(); return fail(e) }
+	if version < storeVersion {
+		if err = fenceBeforeUpgrade(dir); err != nil {
+			return bad(err)
+		}
+	}
 	if version != 0 && version < storeVersion {
 		if err = archiveStore(dir, db); err != nil {
 			return bad(err)
@@ -197,9 +202,11 @@ func Open(dir string, limits Limits) (*Store, error) {
 		return bad(err)
 	}
 	if version == 0 {
-		if err = initializeStore(db, key); err != nil {
+		if err = initializeStore(db, dir, key); err != nil {
 			return bad(err)
 		}
+	} else if err = ensureProducerPayloadColumn(db); err != nil {
+		return bad(err)
 	}
 	var origin string
 	if err = db.QueryRow("SELECT value FROM metadata WHERE key='origin_id'").Scan(&origin); err != nil {
@@ -230,7 +237,7 @@ func openWriterDatabase(path string) (*sql.DB, int, error) {
 	return db, version, nil
 }
 
-func initializeStore(db *sql.DB, key identityKey) error {
+func initializeStore(db *sql.DB, dir string, key identityKey) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -242,14 +249,26 @@ func initializeStore(db *sql.DB, key identityKey) error {
 	if _, err = tx.Exec("INSERT INTO metadata(key,value) VALUES('origin_id',?),('identity_key_verifier',?)", newID(), key.verifier()); err != nil {
 		return err
 	}
+	if err = recordInterruptedRuns(tx, dir, key.id); err != nil {
+		return err
+	}
 	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", storeVersion)); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+func ensureProducerPayloadColumn(db *sql.DB) error {
+	var exists bool
+	if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM pragma_table_info('records') WHERE name='producer_payload')").Scan(&exists); err != nil || exists {
+		return err
+	}
+	_, err := db.Exec("ALTER TABLE records ADD COLUMN producer_payload TEXT NOT NULL DEFAULT ''")
+	return err
+}
+
 const schema = `CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS records(sequence INTEGER PRIMARY KEY AUTOINCREMENT,origin_id TEXT NOT NULL,event_id TEXT NOT NULL,received_time TEXT NOT NULL,source_id TEXT NOT NULL,source_version TEXT NOT NULL,source_time TEXT,kind TEXT NOT NULL,encoding TEXT NOT NULL,policy_version TEXT NOT NULL,redactions INTEGER NOT NULL,body BLOB,protobuf BLOB,import_policy_version TEXT NOT NULL DEFAULT '',UNIQUE(origin_id,event_id));
+CREATE TABLE IF NOT EXISTS records(sequence INTEGER PRIMARY KEY AUTOINCREMENT,origin_id TEXT NOT NULL,event_id TEXT NOT NULL,received_time TEXT NOT NULL,source_id TEXT NOT NULL,source_version TEXT NOT NULL,source_time TEXT,kind TEXT NOT NULL,encoding TEXT NOT NULL,policy_version TEXT NOT NULL,redactions INTEGER NOT NULL,body BLOB,protobuf BLOB,import_policy_version TEXT NOT NULL DEFAULT '',producer_payload TEXT NOT NULL DEFAULT '',UNIQUE(origin_id,event_id));
 CREATE INDEX IF NOT EXISTS records_time ON records(received_time);
 CREATE TABLE IF NOT EXISTS runs(agent_run_id TEXT PRIMARY KEY,body TEXT NOT NULL,source_time TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS objects(object_id TEXT PRIMARY KEY,kind TEXT NOT NULL,parent_object_id TEXT,accounting TEXT,body TEXT NOT NULL,source_time TEXT NOT NULL);
@@ -286,9 +305,13 @@ func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) err
 		if err != nil {
 			return errInvalidRecord
 		}
-		entries = append(entries, Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
+		e := Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID,
 			SourceID: r.SourceID, SourceVersion: r.SourceVersion, SourceTime: r.SourceTime,
-			Kind: r.Kind, Encoding: "json", Body: body, Redactions: r.redactions, local: r.authenticated, PolicyVersion: r.capturePolicy})
+			Kind: r.Kind, Encoding: "json", Body: body, Redactions: r.redactions, local: r.authenticated, PolicyVersion: r.capturePolicy}
+		if r.authenticated && r.hasSessionMetadata() {
+			e.producerPayload = hex.EncodeToString(s.key.digest("producer-retry/v1\x00" + r.Kind + "\x00" + string(body)))
+		}
+		entries = append(entries, e)
 	}
 	return s.capture(ctx, entries, policy)
 }
@@ -470,7 +493,7 @@ func (s *Store) commit(batch []writeRequest) error {
 	defer tx.Rollback()
 	for _, r := range batch {
 		for _, e := range r.entries {
-			res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion)
+			res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version,producer_payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion, e.producerPayload)
 			if err != nil {
 				return ErrStorage
 			}
@@ -502,8 +525,8 @@ type rowQuerier interface {
 
 func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error) {
 	old := Envelope{OriginID: e.OriginID, EventID: e.EventID}
-	err := db.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).
-		Scan((*[]byte)(&old.Body), &old.Protobuf, &old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion)
+	err := db.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version,producer_payload FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).
+		Scan((*[]byte)(&old.Body), &old.Protobuf, &old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion, &old.producerPayload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -513,6 +536,14 @@ func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error
 	producerRetry := e.local && !e.replay && e.Encoding == "json"
 	if old.SourceID != e.SourceID || old.Encoding != e.Encoding ||
 		(!producerRetry && (old.Kind != e.Kind || old.PolicyVersion != e.PolicyVersion)) {
+		return false, errEventCollision
+	}
+	// The same signed input may project to a different kind after a policy
+	// change. The keyed fingerprint preserves the retry without its lost fields.
+	if producerRetry && e.producerPayload != "" && old.producerPayload != "" {
+		if old.producerPayload == e.producerPayload && old.SourceVersion == e.SourceVersion && sameSourceTime(old, e) {
+			return true, nil
+		}
 		return false, errEventCollision
 	}
 	if !samePayload(old, e) {
@@ -534,11 +565,14 @@ func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error
 }
 
 func samePayload(a, b Envelope) bool {
+	return a.Kind == b.Kind && a.SourceVersion == b.SourceVersion && sameSourceTime(a, b) &&
+		bytes.Equal(a.Body, b.Body) && bytes.Equal(a.Protobuf, b.Protobuf)
+}
+
+func sameSourceTime(a, b Envelope) bool {
 	// A live producer retry with a stable ID may no longer know the source time.
 	producerRetry := !b.replay && b.Encoding == "json" && b.OriginID == "producer:"+b.SourceID
-	sameTime := a.SourceTime == b.SourceTime || (producerRetry && b.SourceTime == unknownSourceTime)
-	return a.Kind == b.Kind && a.SourceVersion == b.SourceVersion && sameTime &&
-		bytes.Equal(a.Body, b.Body) && bytes.Equal(a.Protobuf, b.Protobuf)
+	return a.SourceTime == b.SourceTime || (producerRetry && b.SourceTime == unknownSourceTime)
 }
 func (s *Store) prune() error {
 	cutoff := time.Now().Add(-s.limits.Retention).UTC().Format(timestampLayout)

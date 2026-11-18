@@ -77,6 +77,15 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 		literals[i] = sqlLiteral(id)
 	}
 	runSet := "(" + strings.Join(literals, ",") + ")"
+	interrupted, err := Query(ctx, db, `SELECT r.agent_run_id
+		FROM metadata m, json_each(m.value) i JOIN runs r ON r.agent_run_id=i.value
+		WHERE m.key='upgrade_interrupted_runs' AND r.agent_run_id IN `+runSet+`
+		AND json_extract(r.body,'$.resource_completed') IS NOT 1
+		AND coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','resources_complete','resources_unknown')
+		ORDER BY r.agent_run_id`)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := db.QueryContext(ctx, `SELECT o.object_id,o.parent_object_id,o.accounting,o.body,a.body,a.start_time,a.end_time,a.shared,a.quality,a.agent_run_id FROM associations a JOIN objects o ON o.object_id=a.object_id WHERE a.agent_run_id IN `+runSet+` ORDER BY o.object_id,a.start_time,a.agent_run_id LIMIT 10001`)
 	if err != nil {
 		return nil, err
@@ -322,6 +331,14 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 		return nil, err
 	}
 	gaps := []any{}
+	for _, row := range interrupted {
+		id := row["agent_run_id"]
+		if id == run {
+			body["interrupted_by_upgrade"] = true
+		}
+		gaps = append(gaps, map[string]any{"agent_run_id": id, "reason": "interrupted_by_upgrade",
+			"quality": "partial", "missing": "final_tail"})
+	}
 	gapRows, err := db.QueryContext(ctx, `SELECT body FROM gaps WHERE agent_run_id IN `+runSet+`
 		OR object_id IN(SELECT object_id FROM associations WHERE agent_run_id IN `+runSet+`)
 		OR nullif(json_extract(body,'$.owner_id'),'') IN(

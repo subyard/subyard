@@ -43,7 +43,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if command == "serve" || command == "replay" {
+	if command == "serve" || command == "replay" || command == "prepare" {
 		policy, err := LoadPolicy(*policyFile)
 		if err != nil {
 			return err
@@ -56,6 +56,9 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		store, err := Open(*dir, limits)
 		if err != nil {
 			return err
+		}
+		if command == "prepare" {
+			return store.Close()
 		}
 		defer store.Close()
 		if command == "serve" {

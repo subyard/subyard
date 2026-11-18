@@ -82,9 +82,10 @@ type Envelope struct {
 	Protobuf            []byte          `json:"protobuf,omitempty"`
 
 	// Only internal capture and an authenticated producer can set local.
-	local  bool
-	replay bool
-	native bool
+	local           bool
+	replay          bool
+	native          bool
+	producerPayload string
 }
 
 func newID() string {

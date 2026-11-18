@@ -175,53 +175,70 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	}
 }
 
-func (s *Store) publishCapturePolicy(spool string, policy Policy) error {
+func lockOutbox(spool string) (*os.File, error) {
 	const fencedMode = os.ModeSticky | 0700
 	if err := os.Mkdir(spool, fencedMode); err == nil {
 		if err = os.Chmod(spool, fencedMode); err != nil {
-			return err
+			return nil, err
 		}
 	} else if !os.IsExist(err) {
-		return err
+		return nil, err
 	}
 	dir, err := os.OpenFile(spool, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer dir.Close()
 	info, err := dir.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Geteuid() {
-		return errors.New("producer outbox has another owner")
+		return nil, errors.New("producer outbox has another owner")
 	}
 	if info.Mode() != os.ModeDir|0700 && info.Mode() != os.ModeDir|fencedMode {
-		return errors.New("invalid producer outbox mode")
+		return nil, errors.New("invalid producer outbox mode")
 	}
 	// Producers hold the same lock from policy lookup through outbox publication.
 	path := filepath.Join(spool, ".lock")
 	if err := privateFile(path); err != nil {
-		return err
+		return nil, err
 	}
 	lock, err := os.OpenFile(path, os.O_RDWR|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer lock.Close()
-	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
-		return err
+	fail := func(err error) (*os.File, error) { lock.Close(); return nil, err }
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		err = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) || time.Now().After(deadline) {
+			return fail(err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	// Legacy serializers check for exactly 0700, including before writing.
 	// Keep the same outbox and its queued records for the current collector.
 	if info.Mode() == os.ModeDir|0700 {
 		if err = dir.Chmod(fencedMode); err != nil {
-			return err
+			return fail(err)
 		}
 		if err = dir.Sync(); err != nil {
-			return err
+			return fail(err)
 		}
 	}
+	return lock, nil
+}
+
+func (s *Store) publishCapturePolicy(spool string, policy Policy) error {
+	lock, err := lockOutbox(spool)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	names := append(slices.Clone(sessionAttributeNames), "subyard.agent_run.id", "subyard.agent_run.evidence")
 	names = slices.DeleteFunc(names, func(name string) bool { return !slices.Contains(policy.Attributes, name) })
 	data, err := json.Marshal(names)

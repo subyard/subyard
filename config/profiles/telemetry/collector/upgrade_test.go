@@ -147,9 +147,6 @@ func TestNarrowPolicyControlsLiveAndReplayedSessionRelations(t *testing.T) {
 func TestPythonOutboxUsesSelectedCapturePolicy(t *testing.T) {
 	store := fixtureStore(t)
 	outbox := filepath.Join(store.dir, "outbox")
-	if err := privateDir(outbox); err != nil {
-		t.Fatal(err)
-	}
 	p := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
 	if err := store.publishCapturePolicy(outbox, p); err != nil {
 		t.Fatal(err)
@@ -201,9 +198,8 @@ records.atomic_json(root/'outbox'/(record['event_id']+'.json'), records.signed_r
 	}
 }
 
-func TestPreStartupOutboxRelationDrainsAfterPolicyTightens(t *testing.T) {
+func TestPreStartupOutboxRelationDrainsAfterPolicyChange(t *testing.T) {
 	ctx := context.Background()
-	dir := testkit.TempDir(t)
 	const producer = `
 from pathlib import Path
 import sys
@@ -214,56 +210,68 @@ assert records.emit(root, 'relation', dict(session_id='fixture-session', agent_r
     relation='native_session', source='native-otlp-attribute/authenticated-header',
     session_attributes=['session.id', 'thread.id']), event_id='first-relation')
 `
-	if output, err := exec.Command("python3", "-B", "-c", producer, dir).CombinedOutput(); err != nil {
-		t.Fatalf("producer: %v\n%s", err, output)
-	}
-	store, err := Open(dir, DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { store.Close() })
-	outbox := filepath.Join(dir, "outbox")
-	path := filepath.Join(outbox, store.key.id("first-relation")+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	signed, err := store.key.decodeRecord(data)
-	want := policyFingerprint(DefaultPolicy())
-	if err != nil || !signed.authenticated || signed.Kind != "relation" || signed.capturePolicy != want {
-		t.Fatalf("pre-startup capture policy = %q, want %q (%v)", signed.capturePolicy, want, err)
-	}
-	// Commit as the original drain would, leaving the file for redelivery.
-	if err = store.Ingest(ctx, []Record{signed}); err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	restarted, err := Open(dir, DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restarted.Close()
+	wide := DefaultPolicy()
 	narrow := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
-	if err := restarted.publishCapturePolicy(outbox, narrow); err != nil {
-		t.Fatal(err)
-	}
-	if err := restarted.ingestOutbox(ctx, outbox, narrow); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("committed relation still in the outbox: %v", err)
-	}
-	var count int
-	var kind, policy string
-	if err := restarted.db.QueryRow("SELECT count(*),min(kind),min(policy_version) FROM records").
-		Scan(&count, &kind, &policy); err != nil || count != 1 || kind != "relation" || policy != want {
-		t.Fatalf("retry changed the committed record: %d %s %s (%v)", count, kind, policy, err)
-	}
-	signed.Body["session_id"] = restarted.key.id("different-session")
-	if err := restarted.ingest(ctx, []Record{signed}, narrow); !errors.Is(err, errEventCollision) {
-		t.Fatalf("different session must still collide: %v", err)
+	for _, change := range []struct {
+		name, kind    string
+		before, after Policy
+	}{
+		{"tighten", "relation", wide, narrow},
+		{"widen", "session", narrow, wide},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			dir := testkit.TempDir(t)
+			if output, err := exec.Command("python3", "-B", "-c", producer, dir).CombinedOutput(); err != nil {
+				t.Fatalf("producer: %v\n%s", err, output)
+			}
+			store, err := Open(dir, DefaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { store.Close() })
+			outbox := filepath.Join(dir, "outbox")
+			path := filepath.Join(outbox, store.key.id("first-relation")+".json")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			signed, err := store.key.decodeRecord(data)
+			want := policyFingerprint(DefaultPolicy())
+			if err != nil || !signed.authenticated || signed.Kind != "relation" || signed.capturePolicy != want {
+				t.Fatalf("pre-startup capture policy = %q, want %q (%v)", signed.capturePolicy, want, err)
+			}
+			// Commit as the original drain would, leaving the file for redelivery.
+			if err = store.ingest(ctx, []Record{signed}, change.before); err != nil {
+				t.Fatal(err)
+			}
+			if err = store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := Open(dir, DefaultLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restarted.Close()
+			if err := restarted.publishCapturePolicy(outbox, change.after); err != nil {
+				t.Fatal(err)
+			}
+			if err := restarted.ingestOutbox(ctx, outbox, change.after); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("committed relation still in the outbox: %v", err)
+			}
+			var count int
+			var kind, policy string
+			if err := restarted.db.QueryRow("SELECT count(*),min(kind),min(policy_version) FROM records").
+				Scan(&count, &kind, &policy); err != nil || count != 1 || kind != change.kind || policy != want {
+				t.Fatalf("retry changed the committed record: %d %s %s (%v)", count, kind, policy, err)
+			}
+			signed.Body["session_id"] = restarted.key.id("different-session")
+			if err := restarted.ingest(ctx, []Record{signed}, change.after); !errors.Is(err, errEventCollision) {
+				t.Fatalf("different session must still collide: %v", err)
+			}
+		})
 	}
 }
 
@@ -286,9 +294,6 @@ func TestSessionPolicyAcrossProducerIngestAndReplay(t *testing.T) {
 			switch transport {
 			case "producer":
 				outbox := filepath.Join(store.dir, "outbox")
-				if err := privateDir(outbox); err != nil {
-					t.Fatal(err)
-				}
 				if err := store.publishCapturePolicy(outbox, p); err != nil {
 					t.Fatal(err)
 				}
@@ -442,9 +447,6 @@ func TestLegacyAssociationIntervalsStaySeparate(t *testing.T) {
 				}
 			} else {
 				outbox := filepath.Join(destination.dir, "outbox")
-				if err := privateDir(outbox); err != nil {
-					t.Fatal(err)
-				}
 				for i, row := range rows {
 					body, err := decodeBody([]byte(row.body))
 					if err != nil {

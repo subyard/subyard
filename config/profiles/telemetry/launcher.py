@@ -21,6 +21,7 @@ import processes
 import records
 
 
+RUNS = 'runs-v4'
 MAX_RUNS = 4096
 MAX_RUN_BYTES = 16*1024*1024
 MAX_RUN_PAYLOAD = 16384
@@ -64,7 +65,7 @@ def admit_manifest(data_dir, run, reserve=False):
     root = None
     try:
         directory = records.private_directory(data_dir)
-        root = records.private_directory(directory/'runs')
+        root = records.private_directory(directory/RUNS)
         identity = run['agent_run_id']
         if not records.IDENTITY.fullmatch(identity):
             raise ValueError('invalid run identity')
@@ -114,7 +115,7 @@ def admit_manifest(data_dir, run, reserve=False):
 
 
 def finish_manifest(data_dir, run):
-    root = records.private_directory(Path(data_dir)/'runs')
+    root = records.private_directory(Path(data_dir)/RUNS)
     with manifest_lock(root):
         path = root/(run['agent_run_id']+'.json')
         previous = records.read_private(path)
@@ -127,7 +128,7 @@ def finish_manifest(data_dir, run):
 
 def discard_reservation(data_dir, run):
     try:
-        root = records.private_directory(Path(data_dir)/'runs')
+        root = records.private_directory(Path(data_dir)/RUNS)
         with manifest_lock(root):
             path = root/(run['agent_run_id']+'.json')
             previous = records.read_private(path)
@@ -195,7 +196,7 @@ def environment(data_dir, run, environ):
 def scope_parent(data_dir, run, root, proc=Path('/proc'), cgroups=Path('/sys/fs/cgroup')):
     candidates = processes.delegated_parents(proc, cgroups)
     if run.get('parent_run_id'):
-        path = Path(data_dir)/'runs'/(run['parent_run_id']+'.json')
+        path = Path(data_dir)/RUNS/(run['parent_run_id']+'.json')
         try:
             previous = records.read_private(path)
             if previous.get('cgroup') and previous['boot_id'] == run['boot_id']:
@@ -324,22 +325,14 @@ def removed_scope(run):
     return None
 
 
-def observe(data_dir, once=False, until_empty=False, interval=5, manager_intent=None):
+def observe(data_dir, once=False, interval=5):
     samplers = {}
     sampled_sources = 0
     source_thread = None
     scan = None
     deferred = []
     while True:
-        if manager_intent is not None:
-            try:
-                fcntl.flock(manager_intent, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            except BlockingIOError:
-                if scan is not None:
-                    scan.close()
-                return 0
-            fcntl.flock(manager_intent, fcntl.LOCK_UN)
-        root = records.private_directory(Path(data_dir)/'runs')
+        root = records.private_directory(Path(data_dir)/RUNS)
         pending = []
         total = 0
         batch, deferred = deferred, []
@@ -379,8 +372,6 @@ def observe(data_dir, once=False, until_empty=False, interval=5, manager_intent=
                 manifest_health(data_dir, root)
         except (OSError, ValueError, KeyError, TypeError):
             pass
-        if until_empty and not pending and not batch and scan is None:
-            return 0
         if not pending and not batch and scan is None and (Path(data_dir)/'drain.json').exists():
             try:
                 delegation = records.read_private(Path(data_dir)/'delegation.json')
@@ -442,34 +433,6 @@ def observe(data_dir, once=False, until_empty=False, interval=5, manager_intent=
         time.sleep(interval)
 
 
-def open_observer_lock(data_dir, name):
-    return os.fdopen(os.open(Path(data_dir)/name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'rb')
-
-
-def detached_observer(data_dir):
-    # Standalone fallback has no service lifetime guarantee; its scope is partial.
-    pid = os.fork()
-    if pid:
-        os.waitpid(pid, 0)
-        return
-    os.setsid()
-    if os.fork():
-        os._exit(0)
-    null = os.open('/dev/null', os.O_RDWR)
-    for descriptor in (0, 1, 2):
-        os.dup2(null, descriptor)
-    if null > 2:
-        os.close(null)
-    try:
-        with open_observer_lock(data_dir, 'observer-v2.lock') as observer, \
-                open_observer_lock(data_dir, 'manager-v2.lock') as intent:
-            fcntl.flock(observer, fcntl.LOCK_EX)
-            observe(data_dir, until_empty=True, manager_intent=intent)
-    finally:
-        os._exit(0)
-
-
-
 def gated_child(command, env):
     read_fd, write_fd = os.pipe()
     try:
@@ -517,7 +480,7 @@ def launch(args):
     group = None
     try:
         records.private_directory(data_dir)
-        records.private_directory(data_dir/'runs')
+        records.private_directory(data_dir/RUNS)
         if tracked and args.scope_mode != 'partial':
             group = create_scope(data_dir, run)
     except (OSError, ValueError, KeyError) as error:
@@ -602,11 +565,6 @@ def launch(args):
                 pid, write_fd = gated_child(command, env)
             except OSError:
                 return 127
-        if tracked and not group:
-            try:
-                detached_observer(data_dir)
-            except OSError:
-                pass
         os.write(write_fd, b'1')
     except (OSError, ValueError, KeyError):
         if write_fd >= 0:
@@ -670,13 +628,10 @@ def main():
             records.emit(args.data_dir, 'gap', {'reason': 'delegation_unavailable', 'quality': 'partial'})
     if not 0.1 <= args.sample_interval <= 300:
         parser.error('sample interval must be between 0.1 and 300 seconds')
-    # Legacy detached observers can stay on manager.lock after their outbox is
-    # fenced. The new manager announces intent before waiting for a v2 observer
-    # to finish its current scan and yield.
-    with open_observer_lock(args.data_dir, 'manager-v2.lock') as intent, \
-            open_observer_lock(args.data_dir, 'observer-v2.lock') as observer:
-        fcntl.flock(intent, fcntl.LOCK_EX)
-        fcntl.flock(observer, fcntl.LOCK_EX)
+    root = records.private_directory(Path(args.data_dir)/RUNS)
+    fd = os.open(root/'manager.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'rb') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         return observe(args.data_dir, interval=args.sample_interval)
 
 

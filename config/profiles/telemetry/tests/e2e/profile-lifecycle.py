@@ -193,7 +193,7 @@ while time.monotonic()<deadline:
         body=record.get('body',{})
         if record.get('kind')=='sample' and body.get('object_id')==records.opaque_id(records.identity_key(data),run['agent_run_id']+':scope') and body.get('final'):
             final.append(body)
-    if (state/'done').is_file() and not (data/'runs'/(run['agent_run_id']+'.json')).exists() and final:
+    if (state/'done').is_file() and not (data/'runs-v4'/(run['agent_run_id']+'.json')).exists() and final:
         assert final[-1]['populated'] is False
         print(json.dumps({'retained_records':retained,'descendant_completed':True,'final_counter_durable':True}),flush=True)
         break
@@ -400,7 +400,7 @@ try:
     os.chmod(root/'result.tmp',0o600)
     os.replace(root/'result.tmp',root/'result')
     deadline=time.monotonic()+150
-    while list(pathlib.Path('/var/lib/subyard/telemetry/runs').glob('*.json')):
+    while list(pathlib.Path('/var/lib/subyard/telemetry/runs-v4').glob('*.json')):
         assert time.monotonic()<deadline,'fixture scopes did not drain'
         time.sleep(.2)
 except BaseException as error:

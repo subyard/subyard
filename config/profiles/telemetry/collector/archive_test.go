@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/testkit"
@@ -48,14 +49,31 @@ func TestArchiveUpgrade(t *testing.T) {
 			}
 			archive := filepath.Join(dir, "archive")
 			archivedDB := filepath.Join(archive, databaseName)
+			outbox := filepath.Join(dir, "outbox")
+			if err = os.Chmod(outbox, 0700); err != nil {
+				t.Fatal(err)
+			}
+			runs := filepath.Join(dir, "runs")
+			if err = privateDir(runs); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(runs, 0700) })
+			testkit.WriteFile(t, filepath.Join(runs, "legacy.json"), []byte(`{"agent_run_id":"legacy"}`), 0600)
 			switch version {
+			case 1:
+				// Token validation happens after opening the standalone writer.
+				// Even a failed serve must already have fenced the old producers.
+				if err = RunCLI([]string{"serve", "--data-dir", dir, "--auth-file", filepath.Join(dir, "missing")}, nil); !os.IsNotExist(err) {
+					t.Fatalf("serve should fail for the missing token: %v", err)
+				}
 			case 2:
-				// Simulate interruption immediately after the archive rename.
 				if err = privateDir(archive); err != nil {
 					t.Fatal(err)
 				}
-				if err = os.Rename(path, archivedDB); err != nil {
-					t.Fatal(err)
+				code := `import os, signal, sys; os.rename(*sys.argv[1:]); os.kill(os.getpid(), signal.SIGKILL)`
+				if err = exec.Command("python3", "-B", "-c", code, path, archivedDB).Run(); err == nil ||
+					err.(*exec.ExitError).Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+					t.Fatalf("archive rename was not interrupted: %v", err)
 				}
 			case 3:
 				// Leave a committed row exclusively in the legacy writer's WAL.
@@ -72,6 +90,16 @@ os._exit(0)
 				}
 				if stat, err := os.Stat(path + "-wal"); err != nil || stat.Size() == 0 {
 					t.Fatalf("missing legacy WAL: %v", err)
+				}
+				input := filepath.Join(dir, "empty.jsonl")
+				testkit.WriteFile(t, input, nil, 0600)
+				if err = RunCLI([]string{"replay", "--data-dir", dir, "--input", input}, nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if version != 2 {
+				if st, err := os.Stat(outbox); err != nil || st.Mode() != os.ModeDir|os.ModeSticky|0700 {
+					t.Fatalf("standalone writer did not fence the legacy outbox: %v (%v)", st, err)
 				}
 			}
 			var activeOrigin string
@@ -105,6 +133,17 @@ os._exit(0)
 			rows, err := Query(ctx, db, "SELECT agent_run_id FROM runs")
 			if err != nil || len(rows) != 1 || rows[0]["agent_run_id"] != "legacy" {
 				t.Fatalf("archive query changed legacy rows: %v (%v)", rows, err)
+			}
+			if version != 2 {
+				report, err := ShowRun(ctx, db, "legacy")
+				if err != nil {
+					t.Fatal(err)
+				}
+				gaps := report["gaps"].([]any)
+				if report["run"].(map[string]any)["interrupted_by_upgrade"] != true || len(gaps) != 1 ||
+					gaps[0].(map[string]any)["missing"] != "final_tail" {
+					t.Fatalf("missing interruption coverage: %v", report)
+				}
 			}
 			var archivedVersion int
 			if err := db.QueryRow("PRAGMA user_version").Scan(&archivedVersion); err != nil || archivedVersion != version {
@@ -224,7 +263,7 @@ import records
 from pathlib import Path
 root, message = Path(sys.argv[1]), sys.argv[2]
 assert not records.emit(root, 'gap', {}, source_id='fixture', event_id='wrong-key')
-assert not (root/'outbox').exists()
+assert not list((root/'outbox').glob('*.json'))
 try:
     records.identity_key(root)
 except ValueError as error:

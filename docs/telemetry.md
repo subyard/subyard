@@ -88,7 +88,8 @@ refuses before starting the command when safe placement or bounded durable run
 tracking cannot be established; `--scope-mode partial` requests the fallback.
 Default launches preserve the native command on telemetry-capacity failure and
 report partial or unavailable coverage. Sampling defaults to five seconds. The collector and
-observer stay outside measured workload groups.
+run manager stay outside measured workload groups. The run manager observes
+both fully managed scopes and partial runs.
 
 Full accounting uses an available caller-owned delegated ancestor. Its finite
 CPU, memory, I/O and process ceilings still apply to the whole subtree. Permission
@@ -159,9 +160,16 @@ held in an indefinite WAL reader transaction.
 
 ### Pre-upgrade archive
 
-The first schema 4 writer open moves a schema 1–3 database to
+The profile upgrade stops the collector, the run manager, and legacy detached
+observers while agent workloads keep running. It fences the outbox, moves the
+schema 1–3 database to
 `/var/lib/subyard/telemetry/archive/telemetry.sqlite` and initializes an empty
-active database at `/var/lib/subyard/telemetry/telemetry.sqlite`. If another
+schema 4 database at `/var/lib/subyard/telemetry/telemetry.sqlite` before
+starting the updated services. An interrupted upgrade resumes on retry. A
+disabled collector upgrades its store the next time it is enabled. For a
+standalone installation, stop the legacy observer before opening a schema 4
+writer. The writer fences the outbox before archiving or initializing the store,
+including when the first command is a replay. If another
 legacy database is restored at the active path, the writer saves it in a new
 directory such as `archive-2` and starts another empty active store. For a
 standalone store the paths are relative to its `--data-dir`. Each archive keeps
@@ -169,6 +177,12 @@ all telemetry that was still retained at upgrade time, including run and session
 metadata, resource measurements, and native OTLP signals. It keeps the old
 schema, identifiers, capture rules and sequence numbers. Archives are retained
 indefinitely.
+
+Runs still under observation at the stop keep their recorded samples.
+`show-run` marks them as `interrupted_by_upgrade` and reports a missing final
+run sample. The new run manager observes new runs. Queued records are retained for
+sanitized delivery to the active store, where those runs carry the same
+interruption marker.
 
 ```sh
 "$collector" stats --data-dir "$data/archive"
@@ -350,7 +364,8 @@ Likewise direct workload and inclusive parent scopes must not be added together.
 ## Capture policy and delivery
 
 Durable telemetry is rebuilt from closed field schemas at the producer outbox,
-collector ingest and replay, and after merging SQLite projections. Allocation
+collector ingest and replay. SQLite projections merge inputs that have already
+been sanitized. Allocation
 purpose, log bodies, severity text, arbitrary attributes and free-form names are
 excluded. The OTLP schema retains severity numbers, timestamps, binary trace
 and span IDs, links and numeric metric data. Known metric names, units and other
@@ -376,10 +391,9 @@ key, and local producers refuse to spool into it. Read-only SQL and export work
 without the key. `show-run` accepts the stored run reference and can resolve
 a launcher run ID in the active store when its key is available.
 
-Profile upgrades and standalone collector startup preserve queued records and
-close the outbox to producers still running pre-upgrade code. Workloads continue,
-though an old launcher may lose its exit record. The updated run manager
-continues final resource sampling.
+The outbox fence prevents loaded pre-upgrade producers from publishing at the
+old capture boundary. An old launcher may lose its exit record when its
+workload eventually exits.
 
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, share 16 pre-decode admissions between OTLP and

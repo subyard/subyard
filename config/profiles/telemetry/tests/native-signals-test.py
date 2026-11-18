@@ -95,8 +95,8 @@ class NativeSignalsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
-            (root/'runs').mkdir(mode=0o700)
-            (root/'runs/local.json').write_text(json.dumps(dict(agent='codex', agent_run_id='local')))
+            (root/'runs-v4').mkdir(mode=0o700)
+            (root/'runs-v4/local.json').write_text(json.dumps(dict(agent='codex', agent_run_id='local')))
             before = set(root.rglob('*'))
             command = fixture.native_context_command(root, root)
             completed = subprocess.run(shlex.split(command), capture_output=True, timeout=5,
@@ -262,8 +262,8 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
             data, state, home = root/'data', root/'state', root/'home'
-            (data/'runs').mkdir(parents=True)
-            (data/'runs/native-run.json').write_text(json.dumps(dict(agent='codex', agent_run_id='native-run')))
+            (data/'runs-v4').mkdir(parents=True)
+            (data/'runs-v4/native-run.json').write_text(json.dumps(dict(agent='codex', agent_run_id='native-run')))
             (state/'yards/test-yard').mkdir(parents=True)
             for path in (state/'id_ed25519', state/'id_ed25519.pub', state/'yards/test-yard/client-id'):
                 path.write_text('PRIVATE_CONTENT')

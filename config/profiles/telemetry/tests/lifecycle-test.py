@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 import json
 import hashlib
-import fcntl
 import importlib.util
 import io
-from contextlib import redirect_stderr
+from contextlib import ExitStack, closing, redirect_stderr
 import os
 from pathlib import Path
 import select
 import shutil
 import signal
+import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,6 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]/'internal/adapters/configmaterial'))
 import guest
-import launcher
 import records
 spec = importlib.util.spec_from_file_location('profile_lifecycle', Path(__file__).parent/'e2e/profile-lifecycle.py')
 fixture = importlib.util.module_from_spec(spec)
@@ -29,116 +29,184 @@ spec.loader.exec_module(fixture)
 class LifecycleTest(unittest.TestCase):
     def test_upgrade_resumes_after_each_publication(self):
         profile = Path(guest.__file__).parent
+        legacy_observer = b'''
+import fcntl, pathlib, sys
+with (pathlib.Path(sys.argv[1])/'manager.lock').open('rb') as lock:
+    print('opened', flush=True)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    print('locked', flush=True)
+    sys.stdin.read()
+'''
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             workspace = Path(name)
+            workspace.chmod(0o711)
             source = workspace/'source'
             shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
-            (source/'subyard-telemetry').write_bytes(b'candidate collector')
-            for selected in (True, False):
-                def make_runtime(root):
+            binary = source/'subyard-telemetry'
+            subprocess.run(['go', 'build', '-o', binary, './config/profiles/telemetry/cmd/telemetry'],
+                           cwd=profile.parents[2], check=True, timeout=90)
+
+            for step in ('stopped', 'fenced', 'asset', 'archived', 'started'):
+                with self.subTest(step=step), tempfile.TemporaryDirectory(dir=workspace) as case, ExitStack() as children:
+                    root = Path(case)
+                    root.chmod(0o711)
                     account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
-                    return guest.Runtime(source, 'dev', selected, [], root/'control', root/'data',
-                                         root/'library', root/'units', root/'bin', account)
+                    runtime = guest.Runtime(source, 'dev', True, [], root/'control', root/'data',
+                                            root/'library', root/'units', root/'bin', account)
+                    control, data = runtime.control, runtime.data
+                    for directory in (control, data, runtime.home, runtime.library, runtime.units, runtime.commands):
+                        directory.mkdir(mode=0o700 if directory == data else 0o755)
+                    os.chown(data, runtime.uid, runtime.gid)
+                    (control/'marker').write_bytes(guest.MARKER)
+                    installed_launcher = runtime.library/'launcher.py'
+                    for path, (_, mode) in runtime.assets.items():
+                        if path.name != 'record-policy.txt':
+                            path.write_bytes(legacy_observer if path == installed_launcher else b'previous '+path.name.encode())
+                            path.chmod(mode)
+                    (control/'assets.json').write_text(json.dumps({
+                        str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in runtime.assets if path.exists()}))
 
-                def publish_paths(runtime):
-                    paths = [runtime.data/'auth.token', runtime.control/'publishing',
-                             *runtime.assets, runtime.control/'assets.json']
-                    if not selected:
-                        paths.append(runtime.data/'drain.json')
-                    return paths
+                    def developer(*command):
+                        if os.getuid() != runtime.uid:
+                            return ['/usr/bin/setpriv', '--reuid', str(runtime.uid), '--regid', str(runtime.gid), '--clear-groups', *command]
+                        return command
 
-                if os.getuid() == 0:
-                    workspace.chmod(0o711)
-                for step in range(len(publish_paths(make_runtime(workspace)))):
-                    with self.subTest(selected=selected, step=step), tempfile.TemporaryDirectory(dir=workspace) as case:
-                        root = Path(case)
-                        if os.getuid() == 0:
-                            root.chmod(0o711)
-                        runtime = make_runtime(root)
-                        control, data = runtime.control, runtime.data
-                        target = publish_paths(runtime)[step]
-                        for directory in (control, data, runtime.home, runtime.library, runtime.units, runtime.commands):
-                            directory.mkdir(mode=0o700)
-                        os.chown(data, runtime.uid, runtime.gid)
-                        (control/'marker').write_bytes(guest.MARKER)
-                        launch_boundary = target == runtime.library/'records.py'
-                        launch_assets = {runtime.library/'launcher.py', runtime.library/'processes.py',
-                                         runtime.commands/'subyard-telemetry-run'}
-                        for path in [*runtime.assets, *runtime.retained]:
-                            if path.name == 'record-policy.txt':
-                                continue  # Released installations lack the new import dependency.
-                            if launch_boundary and path in launch_assets:
-                                content, mode = runtime.assets[path]
-                                path.write_bytes(content)
-                                path.chmod(mode)
-                            else:
-                                path.write_bytes(b'previous '+path.name.encode())
-                        (control/'assets.json').write_text(json.dumps({
-                            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                            for path in [*runtime.assets, *runtime.retained] if path.exists()}))
-                        states = {unit: dict(LoadState='loaded', ActiveState='active',
-                                              UnitFileState='enabled' if selected else 'disabled')
-                                  for unit in (guest.COLLECTOR, guest.MANAGER)}
-                        if not selected:
-                            states[guest.COLLECTOR]['ActiveState'] = 'inactive'
-                        state_path = root/'services.json'
-                        state_path.write_text(json.dumps(states))
-                        runtime.manager = lambda unit: json.loads(state_path.read_text())[unit]
-                        runtime.running_no_new_privs = lambda fields: True
-                        runtime.skill_delivery = lambda mode: True
+                    def child(*command):
+                        process = children.enter_context(subprocess.Popen(developer(*command), stdin=subprocess.PIPE, stdout=subprocess.PIPE))
+                        children.callback(lambda: process.kill() if process.poll() is None else None)
+                        return process
 
-                        def systemctl(operation, *arguments):
-                            if operation == 'daemon-reload':
-                                return
-                            states = json.loads(state_path.read_text())
-                            for unit in arguments:
-                                if unit == '--now':
-                                    continue
-                                if operation in ('enable', 'disable'):
-                                    states[unit]['UnitFileState'] = operation + 'd'
-                                if operation in ('stop', 'start') or '--now' in arguments:
-                                    states[unit]['ActiveState'] = 'active' if operation in ('enable', 'start') else 'inactive'
-                            state_path.write_text(json.dumps(states))
+                    # Use real SQLite and flock state. Only systemd operations
+                    # are substituted so the fixture runs without a system manager.
+                    initialization = '''
+from contextlib import closing
+import json, os, pathlib, sqlite3, sys
+root = pathlib.Path(sys.argv[1])
+(root/'runs').mkdir(mode=0o700)
+(root/'runs/legacy-run.json').write_text(json.dumps({'agent_run_id': 'legacy-run'}))
+(root/'runs/legacy-run.json').chmod(0o600)
+(root/'manager.lock').touch(mode=0o600)
+(root/'outbox').mkdir(mode=0o700)
+path = root/'telemetry.sqlite'
+with closing(sqlite3.connect(path)) as db:
+    db.executescript("""
+create table metadata(key text primary key, value text);
+insert into metadata values('origin_id', 'released');
+create table runs(agent_run_id text, body text, source_time text);
+insert into runs values('legacy-run', '{"state":"starting"}', '');
+create table associations(object_id text, body text, start_time text, end_time text, shared integer, quality text, agent_run_id text);
+create table objects(object_id text, parent_object_id text, accounting text, body text, kind text);
+create table records(origin_id text, event_id text, kind text);
+insert into records values('released', 'last-measurement', 'sample');
+create table samples(object_id text);
+create table relations(agent_run_id text, session_id text, origin_id text, event_id text, body text);
+create table gaps(agent_run_id text, object_id text, source_time text, body text);
+pragma user_version=2;
+""")
+os.chmod(path, 0o600)
+'''
+                    subprocess.run(developer(sys.executable, '-Bc', initialization, data), check=True, timeout=5)
+                    children.callback((data/'runs').chmod, 0o700)
+                    workload = child(sys.executable, '-Bc', 'import sys; sys.stdin.read()')
+                    observer = child(sys.executable, '-B', installed_launcher, data)
+                    self.assertTrue(select.select([observer.stdout], [], [], 5)[0])
+                    self.assertEqual(observer.stdout.readline(), b'opened\n')
+                    self.assertEqual(observer.stdout.readline(), b'locked\n')
+                    waiting = child(sys.executable, '-B', installed_launcher, data)
+                    self.assertTrue(select.select([waiting.stdout], [], [], 5)[0])
+                    self.assertEqual(waiting.stdout.readline(), b'opened\n')
 
-                        publish = guest.native.publish
+                    state_path = root/'services.json'
+                    units = (guest.COLLECTOR, guest.MANAGER)
+                    state_path.write_text(json.dumps({unit: dict(LoadState='loaded', ActiveState='active', UnitFileState='enabled')
+                                                      for unit in units}))
+                    runtime.manager = lambda unit: json.loads(state_path.read_text())[unit]
+                    runtime.running_no_new_privs = lambda fields: True
+                    runtime.skill_delivery = lambda mode: True
+                    stops = []
 
-                        def interrupt(path, *args, **kwargs):
-                            publish(path, *args, **kwargs)
-                            if path in runtime.assets or path == control/'assets.json':
-                                self.assertTrue(all(runtime.manager(unit)['ActiveState'] == 'inactive' for unit in states))
-                            if path == target:
-                                os.kill(os.getpid(), signal.SIGKILL)
+                    def cut(boundary):
+                        if interrupted and step == boundary:
+                            os.kill(os.getpid(), signal.SIGKILL)
 
-                        with patch.object(guest, 'systemctl', side_effect=systemctl), \
-                             patch.object(guest.native, 'reconcile', return_value=True):
-                            pid = os.fork()
-                            if pid == 0:
-                                try:
-                                    with patch.object(guest.native, 'publish', side_effect=interrupt):
-                                        runtime.apply()
-                                finally:
-                                    os._exit(1)
-                            _, status = os.waitpid(pid, 0)
-                            self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
-                            self.assertEqual(runtime.observe()['state'], 'stale')
-                            if launch_boundary:
-                                launch_data = records.private_directory(root/'launch-data')
-                                # Keep this boundary probe focused on import and native execution.
-                                (launch_data/'runs').touch()
-                                result = subprocess.run([runtime.commands/'subyard-telemetry-run', '--agent', 'other',
-                                    '--data-dir', launch_data, '--scope-mode', 'partial', '--',
-                                    sys.executable, '-c', 'print("workload ran"); raise SystemExit(23)'],
-                                    capture_output=True, timeout=5)
-                                self.assertEqual(result.returncode, 23, result.stderr)
-                                self.assertEqual(result.stdout, b'workload ran\n')
-                            runtime.apply()
-                            self.assertEqual(runtime.observe()['state'], 'current')
+                    def systemctl(operation, *arguments):
+                        if operation == 'daemon-reload':
+                            return
                         states = json.loads(state_path.read_text())
-                        self.assertEqual(states[guest.COLLECTOR]['ActiveState'], 'active' if selected else 'inactive')
-                        self.assertEqual(states[guest.MANAGER]['ActiveState'], 'active')
-                        self.assertEqual(states[guest.MANAGER]['UnitFileState'], 'enabled' if selected else 'disabled')
-                        self.assertEqual((data/'drain.json').exists(), not selected)
+                        for unit in arguments:
+                            if unit == '--now':
+                                continue
+                            if operation in ('enable', 'disable'):
+                                states[unit]['UnitFileState'] = operation + 'd'
+                            if operation == 'stop':
+                                stops.append(unit)
+                                states[unit]['ActiveState'] = 'inactive'
+                            if operation == 'enable' and '--now' in arguments:
+                                states[unit]['ActiveState'] = 'active'
+                        state_path.write_text(json.dumps(states))
+                        if operation == 'enable':
+                            cut('started')
+
+                    def after(operation, boundary):
+                        def run(*args, **kwargs):
+                            operation(*args, **kwargs)
+                            cut(boundary)
+                        return run
+
+                    def publication(path, *args, **kwargs):
+                        publish(path, *args, **kwargs)
+                        if path == runtime.library/'records.py':
+                            cut('asset')
+
+                    publish = guest.native.publish
+                    runtime.prepare_store = after(runtime.prepare_store, 'archived')
+                    as_developer = runtime.as_developer
+
+                    def developer_step(operation):
+                        as_developer(operation)
+                        cut('stopped' if operation == runtime.quiesce_legacy_observers else 'fenced')
+
+                    runtime.as_developer = developer_step
+
+                    with patch.object(guest, 'systemctl', side_effect=systemctl), \
+                         patch.object(guest.native, 'reconcile', return_value=True), \
+                         patch.object(guest.native, 'publish', side_effect=publication):
+                        interrupted = True
+                        pid = os.fork()
+                        if pid == 0:
+                            try:
+                                runtime.apply()
+                            finally:
+                                os._exit(1)
+                        _, status = os.waitpid(pid, 0)
+                        self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
+                        self.assertEqual(runtime.observe()['state'], 'stale')
+                        self.assertEqual(observer.wait(timeout=5), -signal.SIGKILL)
+                        self.assertEqual(waiting.wait(timeout=5), -signal.SIGKILL)
+                        self.assertIsNone(workload.poll())
+                        archive = data/'archive/telemetry.sqlite'
+                        outbox = data/'outbox'
+                        self.assertEqual(stat.S_IMODE(outbox.stat().st_mode), 0o700 if step == 'stopped' else 0o1700)
+                        self.assertEqual(archive.exists(), step in ('archived', 'started'))
+                        for unit in units:
+                            self.assertEqual(runtime.manager(unit)['ActiveState'], 'active' if step == 'started' else 'inactive')
+                        interrupted = False
+                        runtime.apply()
+                        self.assertEqual(runtime.observe()['state'], 'current')
+                        self.assertEqual(stops, [] if step == 'started' else list(units))
+                    self.assertIsNone(workload.poll())
+                    self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o400)
+                    with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+                        self.assertEqual(db.execute('PRAGMA user_version').fetchone(), (4,))
+                        self.assertEqual(db.execute('SELECT count(*) FROM records').fetchone(), (0,))
+                    with closing(sqlite3.connect(archive.as_uri()+'?mode=ro', uri=True)) as db:
+                        self.assertEqual(db.execute('SELECT event_id FROM records').fetchone(), ('last-measurement',))
+                    self.assertTrue((data/'runs/legacy-run.json').exists())
+                    subprocess.run(developer(sys.executable, '-Bc',
+                        'import sys; sys.path.insert(0, sys.argv[1]); import launcher; launcher.observe(sys.argv[2], once=True)',
+                        runtime.library, data), check=True, timeout=5)
+                    self.assertFalse(list((data/'runs-v4').glob('*.json')))
 
     def test_running_legacy_producer_cannot_publish_after_upgrade(self):
         # Keep the pre-upgrade lock open across publication, as a producer that
@@ -164,76 +232,12 @@ with (outbox/'.lock').open('r+b') as lock:
                 self.assertEqual(old.stdout.readline().strip(), b'ready')
                 runtime = object.__new__(guest.Runtime)
                 runtime.data, runtime.uid, runtime.gid = data, os.getuid(), os.getgid()
-                runtime.fence_legacy_producers()
+                runtime.as_developer(runtime.fence_outbox)
                 old.communicate(timeout=3)
                 self.assertEqual(old.returncode, 0)
             self.assertCountEqual(outbox.glob('*.json'), pending)
             self.assertTrue(records.emit(data, 'run', {'agent_run_id': 'new-run'}, event_id='new'))
             self.assertEqual(len(list(outbox.glob('*.json'))), 2)
-
-    def test_new_manager_finishes_run_while_fenced_observer_holds_legacy_lock(self):
-        # Run a loaded observer with the released serializer's exact-mode
-        # admission rule and its legacy flock, in a process we can reap.
-        old_observer = """
-import fcntl, sys
-from pathlib import Path
-sys.path.insert(0, sys.argv[1])
-import launcher, records
-data = Path(sys.argv[2])
-private_directory = records.private_directory
-def legacy_directory(path, **_):
-    return private_directory(path)
-records.private_directory = legacy_directory
-assert records.emit(data, 'gap', {}, event_id='before-handoff')
-print('loaded', flush=True)
-with (data/'manager.lock').open('rb') as lock:
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    assert not records.emit(data, 'gap', {}, event_id='after-handoff')
-    launcher.observe(data, once=True)
-    print('fenced', flush=True)
-    sys.stdin.read()
-"""
-        profile = Path(launcher.__file__).parent
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            data = Path(name)
-            runtime = object.__new__(guest.Runtime)
-            runtime.data, runtime.uid, runtime.gid = data, os.getuid(), os.getgid()
-            runs = records.private_directory(data/'runs')
-            with subprocess.Popen([sys.executable, '-Bc', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE) as workload, \
-                 (data/'manager.lock').open('wb') as legacy_manager:
-                manifest = runs/'fixture-run.json'
-                records.atomic_json(manifest, dict(agent_run_id='fixture-run', host_id='fixture-host',
-                    boot_id=launcher.boot_id(), pid=workload.pid, start_ticks=launcher.processes.start_ticks(workload.pid)))
-                fcntl.flock(legacy_manager, fcntl.LOCK_EX)
-                with subprocess.Popen([sys.executable, '-Bc', old_observer, str(profile), str(data)],
-                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE) as old:
-                    try:
-                        self.assertTrue(select.select([old.stdout], [], [], 5)[0], 'legacy observer did not load')
-                        self.assertEqual(old.stdout.readline(), b'loaded\n')
-                        runtime.fence_legacy_producers()
-                        self.assertEqual((data/'outbox').stat().st_mode & 0o7777, 0o1700)
-                        fcntl.flock(legacy_manager, fcntl.LOCK_UN)
-                        self.assertTrue(select.select([old.stdout], [], [], 5)[0], 'legacy observer did not acquire lock')
-                        self.assertEqual(old.stdout.readline(), b'fenced\n')
-                        with self.assertRaises(BlockingIOError):
-                            fcntl.flock(legacy_manager, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        self.assertTrue(manifest.exists())
-
-                        records.atomic_json(data/'drain.json', {'drain': True})
-                        command = [sys.executable, '-B', launcher.__file__, 'manager', '--data-dir', str(data),
-                                   '--sample-interval', '0.1']
-                        workload.communicate(timeout=5)
-                        subprocess.run(command, check=True, timeout=8)
-                        self.assertIsNone(old.poll())
-                        self.assertFalse(manifest.exists())
-                        body = [records.read_outbox(path)['body'] for path in (data/'outbox').glob('*.json')]
-                        self.assertTrue(any(entry.get('final') is True for entry in body))
-                        self.assertTrue(any(entry.get('resource_completed') is True for entry in body))
-                        old.communicate(timeout=5)
-                        self.assertEqual(old.returncode, 0)
-                    finally:
-                        if old.poll() is None:
-                            old.kill()
 
     def test_missing_managed_document_waits_before_first_telemetry_install(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -493,6 +497,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
+                 patch.object(guest.Runtime, 'prepare_store'), \
                  patch.object(guest.Runtime, 'skill_delivery', side_effect=skill_delivery), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
                 runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')

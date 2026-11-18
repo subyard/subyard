@@ -44,9 +44,9 @@ def mkdir(path, mode, uid, gid):
         os.chown(current, uid, gid)
 
 
-def write(path, data, mode, uid, gid):
+def write(path, data, mode, uid, gid, staging=None):
     safe(path)
-    fd, temporary = tempfile.mkstemp(prefix='.skill-', dir=path.parent)
+    fd, temporary = tempfile.mkstemp(prefix='.skill-', dir=staging or path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             os.fchmod(stream.fileno(), mode)
@@ -65,14 +65,15 @@ def metadata(path, mode, uid, gid):
     return stat.S_ISREG(st.st_mode) and stat.S_IMODE(st.st_mode) == mode and (st.st_uid, st.st_gid) == (uid, gid)
 
 
-def abandoned_write(path, uid, gid):
-    if not re.fullmatch(r'\.skill-[a-z0-9_]{8}', path.name):
-        return False
-    st = path.lstat()
-    mode = stat.S_IMODE(st.st_mode)
-    return (stat.S_ISREG(st.st_mode) and st.st_nlink == 1
-            and (st.st_uid, st.st_gid) == (uid, gid)
-            and (mode & ~0o600 == 0 or mode == 0o644))
+def staging_directory(parent, uid, gid):
+    path = parent / '.staging'
+    mkdir(path, 0o700, uid, gid)
+    st = path.stat()
+    if (st.st_uid, st.st_gid) != (uid, gid) or stat.S_IMODE(st.st_mode) != 0o700:
+        raise ValueError('unsafe skill staging directory')
+    for entry in path.iterdir():
+        entry.unlink()
+    return path
 
 
 def validate_sources(result):
@@ -163,7 +164,6 @@ def delivery(args):
             if set(json.loads(receipt.read_bytes())['skills']) & set(wanted):
                 raise ValueError('skill name already belongs to another provider')
     changed = old != desired if wanted else bool(old['skills'])
-    abandoned = []
     # Validate the whole operation before changing any artifacts.
     for name in names:
         if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name):
@@ -180,7 +180,6 @@ def delivery(args):
                 raise ValueError('unsafe canonical skill directory')
             changed |= stat.S_IMODE(st.st_mode) != 0o755 or (st.st_uid,st.st_gid) != (owner,os.getegid())
             actual = set()
-            recorded_parents = {directory / Path(relative).parent for relative in known}
             for p in directory.rglob('*'):
                 relative = str(p.relative_to(directory))
                 if p.is_symlink():
@@ -190,8 +189,6 @@ def delivery(args):
                     if (st.st_uid,st.st_gid) != (owner,os.getegid()) or st.st_mode & 0o022:
                         raise ValueError('unsafe canonical skill directory')
                     changed |= stat.S_IMODE(st.st_mode) != 0o755
-                elif relative not in known and p.parent in recorded_parents and abandoned_write(p, owner, os.getegid()):
-                    abandoned.append(p)
                 else:
                     actual.add(relative)
             # Legacy package installers used this explicit managed-content marker.
@@ -213,17 +210,16 @@ def delivery(args):
             changed |= not path.exists() or not metadata(path, 0o644, owner, os.getegid()) or path.read_bytes() != data
         changed |= bool(known - set(wanted.get(name, {})))
     if args.mode in ('check', 'check-removed'):
-        return 10 if changed or abandoned else 0
-    # Only receipt-owned file parents can contain a previous staged write.
-    for path in abandoned:
-        path.unlink()
+        return 10 if changed else 0
     mkdir(state, 0o700, owner, os.getegid())
     mkdir(canonical, 0o755, owner, os.getegid())
+    receipt_staging = staging_directory(state, owner, os.getegid())
+    skill_staging = staging_directory(canonical, owner, os.getegid())
     # Record the union before writes; retries recognize files installed just
     # before an interruption without claiming any unrecognized path.
     pending = dict(desired, skills={name: dict(old['skills'].get(name, {}), **desired['skills'].get(name, {})) for name in names})
     if names:
-        write(receipt_path, (json.dumps(pending, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid())
+        write(receipt_path, (json.dumps(pending, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), receipt_staging)
     for name in sorted(names):
         directory = canonical / name
         for adapter in adapters + ('.codex/skills',):
@@ -248,7 +244,7 @@ def delivery(args):
                     parent.chmod(0o755)
                     os.chown(parent,owner,os.getegid())
                 if not path.exists() or not metadata(path, 0o644, owner, os.getegid()) or path.read_bytes() != data:
-                    write(path, data, 0o644, owner, os.getegid())
+                    write(path, data, 0o644, owner, os.getegid(), skill_staging)
             for adapter in adapters:
                 link = args.home / adapter / name
                 mkdir(link.parent, 0o755, args.uid, args.gid)
@@ -261,7 +257,7 @@ def delivery(args):
                     child.rmdir()
             directory.rmdir()
     if wanted:
-        write(receipt_path, (json.dumps(desired, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid())
+        write(receipt_path, (json.dumps(desired, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), receipt_staging)
     elif receipt_path.exists():
         receipt_path.unlink()
     return 0

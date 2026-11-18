@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import pwd
 import re
+import select
+import signal
 import grp
 from types import SimpleNamespace
 import secrets
@@ -20,6 +22,7 @@ import tomli_w
 
 MARKER = b'subyard-telemetry-v1\n'
 PUBLISHING = b'telemetry-publication-v1\n'
+START_READY = b'telemetry-start-ready-v1 '
 COLLECTOR = 'subyard-telemetry.service'
 MANAGER = 'subyard-telemetry-runs.service'
 BINARY_LIMIT = 64*1024*1024
@@ -352,10 +355,10 @@ class Runtime:
             value['retained'] = {str(path): mode for path, mode in self.retained.items()}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
-    def fence_legacy_producers(self):
+    def as_developer(self, operation):
         # Create and change producer-owned paths with the producer's privileges.
         if os.getuid() == self.uid:
-            self.fence_outbox()
+            operation()
             return
         child = os.fork()
         if child == 0:
@@ -365,12 +368,80 @@ class Runtime:
                 os.setgid(self.gid)
                 os.setuid(self.uid)
                 os.umask(0o077)
-                self.fence_outbox()
+                operation()
                 code = 0
             finally:
                 os._exit(code)
         if os.waitpid(child, 0)[1] != 0:
-            raise ValueError('could not fence legacy producer outbox')
+            raise ValueError('telemetry developer operation failed')
+
+    def quiesce_legacy_observers(self):
+        # Detached observers inherited the launcher command line. Only the
+        # observer opens this file, including contenders blocked in flock.
+        lock = self.data/'manager.lock'
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0)
+        except FileExistsError:
+            fd = os.open(lock, os.O_PATH | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) not in (0, 0o600)):
+                raise ValueError('foreign legacy observer lock')
+            # Block new opens before looking for observers with existing FDs.
+            if stat.S_IMODE(info.st_mode) != 0:
+                with open(f'/proc/self/fd/{fd}', 'rb') as handle:
+                    os.fchmod(handle.fileno(), 0)
+                    os.fsync(handle.fileno())
+            self.stop_lock_users(info)
+        finally:
+            os.close(fd)
+        runs = self.data/'runs'
+        runs.mkdir(mode=0o500, exist_ok=True)
+        fd = os.open(runs, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) not in (0o700, 0o500):
+                raise ValueError('foreign legacy run directory')
+            os.fchmod(fd, 0o500)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def stop_lock_users(self, lock):
+        script = os.fsencode(self.library/'launcher.py')
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal():
+                continue
+            try:
+                if process.stat().st_uid != self.uid or script not in (process/'cmdline').read_bytes().split(b'\0'):
+                    continue
+                pidfd = os.pidfd_open(int(process.name))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            try:
+                for entry in (process/'fd').iterdir():
+                    try:
+                        matches = os.path.samestat(entry.stat(), lock)
+                    except FileNotFoundError:
+                        continue
+                    if matches:
+                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                        exited = select.poll()
+                        exited.register(pidfd, select.POLLIN)
+                        if not exited.poll(5000):
+                            raise TimeoutError('legacy observer did not stop')
+                        break
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+            finally:
+                os.close(pidfd)
+
+    def prepare_store(self):
+        account = [] if self.uid == os.getuid() else ['--reuid', str(self.uid), '--regid', str(self.gid), '--clear-groups']
+        subprocess.run(['/usr/bin/setpriv', '--no-new-privs', *account, self.library/'subyard-telemetry',
+                        'prepare', '--data-dir', self.data], check=True, timeout=30,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def fence_outbox(self):
         # Old emitters require exactly 0700 both on admission and before
@@ -439,18 +510,24 @@ class Runtime:
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
         publication = self.control/'publishing'
         receipt = native.snapshot(publication)
-        if receipt is None:
-            native.publish(publication, PUBLISHING, None)
-        elif receipt != PUBLISHING:
+        ready = START_READY + self.desired().encode() + b'\n'
+        if receipt is not None and receipt != PUBLISHING and not re.fullmatch(START_READY+b'[0-9a-f]{64}\n', receipt):
             raise ValueError('invalid telemetry publication receipt')
-        self.fence_legacy_producers()
-        # Quiesce before replacing any shared code. Starting the desired
-        # services is independent of how much of the candidate was published.
-        stop = [unit for unit, fields in before_states.items()
-                if fields.get('LoadState') == 'loaded' and
-                (changed or receipt is not None or not self.running_no_new_privs(fields))]
-        if stop:
-            systemctl('stop', *stop)
+        preparing = changed or not installed or (receipt is not None and receipt != ready)
+        if preparing:
+            if receipt != PUBLISHING:
+                native.publish(publication, PUBLISHING, receipt)
+            stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded']
+            if stop:
+                # A reboot during publication must not auto-start old units.
+                systemctl('disable', *stop)
+                systemctl('stop', *stop)
+            self.as_developer(self.quiesce_legacy_observers)
+            self.as_developer(self.fence_outbox)
+        elif receipt is None:
+            stop = [unit for unit, fields in before_states.items() if not self.running_no_new_privs(fields)]
+            if stop:
+                systemctl('stop', *stop)
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)
             if before != content:
@@ -466,6 +543,10 @@ class Runtime:
         inventory, previous = self.inventory(), native.snapshot(inventory_path)
         if inventory != previous:
             native.publish(inventory_path, inventory, previous)
+        if preparing:
+            if self.selected:
+                self.prepare_store()
+            native.publish(publication, ready, PUBLISHING)
         systemctl('daemon-reload')
         if self.selected:
             drain = self.data/'drain.json'
@@ -478,7 +559,8 @@ class Runtime:
             native.publish(self.data/'drain.json', b'{"drain":true}\n', native.snapshot(self.data/'drain.json'), self.uid, self.gid)
             systemctl('start', MANAGER)
         self.skill_delivery('apply' if self.selected else 'remove')
-        publication.unlink()
+        if preparing or receipt == ready:
+            publication.unlink()
 
 
 def main():
@@ -520,6 +602,8 @@ def main():
         return
     if mode == 'resume':
         if runtime.selected and runtime.owned():
+            if native.snapshot(runtime.control/'publishing') is not None:
+                raise ValueError('telemetry publication pending')
             systemctl('start', COLLECTOR, MANAGER)
         return
     if mode == 'startup':
