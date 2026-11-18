@@ -104,10 +104,7 @@ func BuildPlan(options Options) (Plan, error) {
 		SourceDigest: source.digest, HostID: hostID, InitializeHostID: initializeHostID,
 		PreviousGeneration: previous.Generation, Generation: previous.Generation + 1,
 		Adopt: options.Adopt, options: options, desired: source.files, previous: previous,
-		localDesired: localDesired, scalarLayers: make(map[string][]config.ConfigurationLayer, len(legacyContexts)),
-	}
-	for _, loaded := range legacyContexts {
-		plan.scalarLayers[loaded.Context.YardName] = loaded.ConfigurationLayers
+		localDesired: localDesired,
 	}
 	plan.localInputs, err = observeLocalInputs(options.ConfigHome, source, previous)
 	if err != nil {
@@ -382,7 +379,6 @@ func validateCandidate(
 		}
 	}
 	contexts := make([]config.Loaded, 0, len(yardNames)+1)
-	var refusals []error
 	load := func(name string) error {
 		loaded, err := config.Load(config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
@@ -396,31 +392,27 @@ func validateCandidate(
 		return nil
 	}
 	if err := load("default"); err != nil {
-		refusals = append(refusals, err)
+		return err
 	}
 	for _, name := range yardNames {
 		reset, err := config.YardFallbackReset(options.ConfigHome, name)
 		if err != nil {
-			refusals = append(refusals, err)
-			continue
+			return err
 		}
 		if reset && localYards[name] == "" {
 			continue
 		}
 		if err := load(name); err != nil {
-			refusals = append(refusals, err)
+			return err
 		}
-	}
-	if len(capture) != 0 {
-		*capture[0] = contexts
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return err
 	}
 	if !options.inspectionOnly {
 		if err := validateInventory(contexts); err != nil {
 			return err
 		}
+	}
+	if len(capture) != 0 {
+		*capture[0] = contexts
 	}
 	return nil
 }

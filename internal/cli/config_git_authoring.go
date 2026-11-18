@@ -1,13 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
 
 	"github.com/Subyard/Subyard/internal/config"
-	"github.com/Subyard/Subyard/internal/configsync"
 )
 
 func (cli *CLI) runConfigGitAuthoring(ctx context.Context, loaded config.Loaded, requests []configAuthoringRequest, content []byte) int {
@@ -16,23 +16,10 @@ func (cli *CLI) runConfigGitAuthoring(ctx context.Context, loaded config.Loaded,
 	})
 }
 
-func exportSelectedScalars(baseline configsync.Plan, scope config.SettingScope, yard string, edits config.PersistentScalarEdits) ([]string, error) {
-	path, content, err := baseline.EditScalarSettings(scope, yard, edits)
-	if err != nil || path == "" {
-		return nil, err
-	}
-	relative, err := filepath.Rel(baseline.SourceRoot, path)
-	if err != nil {
-		return nil, err
-	}
-	if err := writeExportedConfigFile(path, content, 0o600); err != nil {
-		return nil, err
-	}
-	return []string{filepath.ToSlash(relative)}, nil
-}
-
-// exportSelectedFile edits only the selected source file setting.
-func (cli *CLI) exportSelectedFile(loaded config.Loaded, candidate, hostID string, request configAuthoringRequest, content []byte) ([]string, error) {
+// exportSelectedConfig edits only the explicitly selected source setting. Local
+// overrides, other hosts and runtime state never participate in this export.
+func (cli *CLI) exportSelectedConfig(loaded config.Loaded, candidate, hostID string, requests []configAuthoringRequest, content []byte) ([]string, error) {
+	request := requests[0]
 	root := filepath.Join(candidate, "hosts", hostID)
 	switch request.scope {
 	case config.ScopeShared:
@@ -40,36 +27,52 @@ func (cli *CLI) exportSelectedFile(loaded config.Loaded, candidate, hostID strin
 	case config.ScopeYard:
 		root = filepath.Join(root, "yards", loaded.Context.YardName)
 	}
+	path := filepath.Join(root, "config.env")
 	var paths []string
-	local, err := cli.configFileAuthoringPath(loaded, request)
-	if err != nil {
-		return nil, err
-	}
-	var localRoot string
-	switch request.scope {
-	case config.ScopeShared:
-		localRoot = filepath.Join(loaded.Context.Paths.ConfigHome, "overrides", "shared")
-	case config.ScopeHost:
-		localRoot = filepath.Join(loaded.Context.Paths.ConfigHome, "overrides", "host")
-	case config.ScopeYard:
-		localRoot = filepath.Join(loaded.Context.Paths.ConfigHome, "yards", loaded.Context.YardName, "overrides")
-	}
-	relative, err := filepath.Rel(localRoot, local)
-	if err != nil {
-		return nil, err
-	}
-	path := filepath.Join(root, "overrides", relative)
-	// A named source yard needs a definition, even when its only selected
-	// change is a file setting. Preserve it as an empty registration.
-	if request.scope == config.ScopeYard && loaded.Context.YardName != "default" {
-		definition := filepath.Join(root, "config.env")
-		if _, err := os.Lstat(definition); errors.Is(err, os.ErrNotExist) {
-			if err := writeExportedConfigFile(definition, nil, 0o600); err != nil {
+	if request.action == "set" || request.action == "unset" {
+		snapshot, err := readConfigAuthoringTarget(path)
+		if err != nil {
+			return nil, err
+		}
+		if request.action == "set" {
+			content, err = cli.catalog.EditPersistentAssignmentsContent(path, snapshot.Content, configSetAssignments(requests))
+		} else {
+			content, err = cli.catalog.EditPersistentAssignmentContent(path, snapshot.Content, request.name, nil)
+		}
+		if err != nil || bytes.Equal(content, snapshot.Content) {
+			return nil, err
+		}
+	} else {
+		local, err := cli.configFileAuthoringPath(loaded, request)
+		if err != nil {
+			return nil, err
+		}
+		var localRoot string
+		switch request.scope {
+		case config.ScopeShared:
+			localRoot = filepath.Join(loaded.Context.Paths.ConfigHome, "overrides", "shared")
+		case config.ScopeHost:
+			localRoot = filepath.Join(loaded.Context.Paths.ConfigHome, "overrides", "host")
+		case config.ScopeYard:
+			localRoot = filepath.Join(loaded.Context.Paths.ConfigHome, "yards", loaded.Context.YardName, "overrides")
+		}
+		relative, err := filepath.Rel(localRoot, local)
+		if err != nil {
+			return nil, err
+		}
+		path = filepath.Join(root, "overrides", relative)
+		// A named source yard needs a definition, even when its only selected
+		// change is a file setting. Preserve it as an empty registration.
+		if request.scope == config.ScopeYard && loaded.Context.YardName != "default" {
+			definition := filepath.Join(root, "config.env")
+			if _, err := os.Lstat(definition); errors.Is(err, os.ErrNotExist) {
+				if err := writeExportedConfigFile(definition, nil, 0o600); err != nil {
+					return nil, err
+				}
+				paths = append(paths, definition)
+			} else if err != nil {
 				return nil, err
 			}
-			paths = append(paths, definition)
-		} else if err != nil {
-			return nil, err
 		}
 	}
 	if err := writeExportedConfigFile(path, content, 0o600); err != nil {

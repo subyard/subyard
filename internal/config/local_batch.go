@@ -26,7 +26,7 @@ type localBatch struct {
 	scope               SettingScope
 	baseline            *PersistentFileSnapshot
 	assignments         []LocalBatchAssignment
-	replacements        PersistentScalarEdits
+	replacements        []PersistentAssignment
 	valid               map[string]bool
 	unavailable         map[string]bool
 	templateUnavailable bool
@@ -45,7 +45,7 @@ func (settings Catalog) CheckLocalBatchConstraints(options LoadOptions, scope Se
 			continue
 		}
 		if _, present := batch.valid[assignment.Name]; !present {
-			batch.replacements = append(batch.replacements, PersistentScalarEdit{Name: assignment.Name, Value: &assignment.Value})
+			batch.replacements = append(batch.replacements, assignment.PersistentAssignment)
 		}
 		batch.valid[assignment.Name] = assignment.Valid
 	}
@@ -60,7 +60,6 @@ func (settings Catalog) CheckLocalBatchConstraints(options LoadOptions, scope Se
 	}
 	tracker := newSettingTracker()
 	tracker.catalog, tracker.batch = settings, batch
-	options.ScalarEdits = batch.replacements
 	_, values, err := load(options, tracker)
 	return batch.assignmentRefusals, domain.CollectRefusals(err, batch.checkDependencies(options, tracker, values))
 }
@@ -197,30 +196,27 @@ func (batch *localBatch) applyTarget(reader io.Reader, values environment, obser
 	if len(content) > 8<<20 {
 		return sourceError(batch.path, 0, "", "scalar settings", "target exceeds its size bound", nil)
 	}
-	records, err := batch.replacements.editRecords(batch.path, content)
+	records, err := persistentEditRecords(batch.path, content, batch.replacements, false)
 	if err != nil {
 		return err
 	}
 	policy.batch = batch
 	line := 1
 	for _, record := range records {
-		if record.edit != nil {
+		if record.replacement != nil {
 			valid := batch.valid[record.name]
 			batch.setAvailable(record.name, valid)
 			if valid {
-				values[record.name] = *record.edit.Value
+				values[record.name] = record.replacement.Value
 			} else {
 				delete(values, record.name)
 			}
 			observe(record.name, values[record.name], line)
-			line += 1 + strings.Count(*record.edit.Value, "\n")
+			line += 1 + strings.Count(record.replacement.Value, "\n")
 			continue
 		}
-		if text := record.text; text != "" {
-			policy.report = func(name, value string) { discard(name, value, line) }
-			if err := applyRecordRetired(text, values, func(name, value string) { observe(name, value, line) }, policy); err != nil {
-				return sourceContext(batch.path, line, recordSettingKey(text), "scalar settings", err)
-			}
+		if record.name != "" {
+			applyLiteralAssignment(record.name, record.value, line, values, observe, policy, discard)
 		}
 		line += strings.Count(record.raw, "\n")
 		if !strings.HasSuffix(record.raw, "\n") {

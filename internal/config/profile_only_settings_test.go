@@ -109,71 +109,21 @@ func TestOperatorProfileOnlyAssignmentsAreIgnoredAndReported(t *testing.T) {
 	}
 }
 
-// An ignored assignment has no side effects: neither its own nested defaults
-// nor a nested default of it in another assignment changes any setting.
-func TestIgnoredProfileOnlyExpressionsHaveNoSideEffects(t *testing.T) {
+func TestIgnoredProfileOnlyAssignmentsStillRequireLiterals(t *testing.T) {
 	fixture := newProfileOnlyFixture(t)
 	host := filepath.Join(fixture.configHome, "config.env")
-	fixture.write(t, host, "YARD_DEVICES=\"${LIMITS_MEMORY:=bogus}\"\nLIMITS_CPU=\"${LIMITS_CPU:-2}\"\nYARD_CAPS=\"${LIMITS_CPU:=9}\"\n")
-	loaded, err := fixture.load("default", nil)
-	if err != nil {
-		t.Fatalf("a nested default of an ignored assignment refused the load: %v", err)
+	fixture.write(t, host, "YARD_DEVICES=\"${LIMITS_MEMORY:=bogus}\"\nYARD_CAPS=$CAPABILITIES\n")
+	_, err := fixture.load("default", nil)
+	message, ok := SourceDiagnostic(fixture.configHome, err)
+	if !ok || !strings.Contains(message, "config.env:1: YARD_DEVICES") || !strings.Contains(message, "only literal values") {
+		t.Fatalf("expected source refusal, got %v", err)
 	}
-	if value := loaded.Environment["LIMITS_MEMORY"]; value == "bogus" {
-		t.Fatalf("ignored assignment set LIMITS_MEMORY=%q", value)
-	}
-	if value := loaded.Environment["LIMITS_CPU"]; value != "2" {
-		t.Fatalf("ignored assignment changed LIMITS_CPU=%q", value)
-	}
-	if got := renderedIgnored(loaded); len(got) != 2 || !strings.Contains(got[0], "YARD_CAPS in "+host+":3") || !strings.Contains(got[1], "YARD_DEVICES in "+host+":1") {
-		t.Fatalf("observations = %q", got)
-	}
-
-	// A default of a discarded name inside another record stays isolated: the
-	// other setting keeps its value, later records never see the default, and
-	// it is not reported (a known limitation).
-	fixture.write(t, host, "LIMITS_CPU=\"${YARD_CAPS:=4}\"\nLIMITS_MEMORY=\"${YARD_CAPS:-2}GiB\"\n: \"${YARD_DEVICES:=${LIMITS_MEMORY:=bogus}}\"\n")
-	loaded, err = fixture.load("default", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Environment["LIMITS_CPU"] != "4" || loaded.Environment["LIMITS_MEMORY"] != "2GiB" || loaded.Environment["YARD_CAPS"] != "" || loaded.Environment["YARD_DEVICES"] != "" {
-		t.Fatalf("discarded defaults leaked: CPU=%q MEMORY=%q CAPS=%q DEVICES=%q", loaded.Environment["LIMITS_CPU"], loaded.Environment["LIMITS_MEMORY"], loaded.Environment["YARD_CAPS"], loaded.Environment["YARD_DEVICES"])
-	}
-	if got := renderedIgnored(loaded); len(got) != 0 {
-		t.Fatalf("nested observations = %q", got)
-	}
-
-	// A required check of an ignored name never refuses either, nor is its
-	// message evaluated.
-	fixture.write(t, host, "YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n: \"${YARD_DEVICES:?${MISSING:?required}}\"\n")
-	if loaded, err = fixture.load("default", nil); err != nil || len(loaded.IgnoredAssignments()) != 1 {
-		t.Fatalf("a required check of an ignored name refused the load: %v %q", err, renderedIgnored(loaded))
-	}
-	if _, err := ParsePersistentAssignments(host, []byte("YARD_DEVICES=kvm\n: \"${YARD_DEVICES:?}\"\n: \"${YARD_DEVICES:?${MISSING:?required}}\"\n")); err != nil {
-		t.Fatalf("persistent parse refused a required check of an ignored name: %v", err)
-	}
-
-	// The exception stops at ignored names: a required check of a retired
-	// setting still refuses.
-	fixture.write(t, host, ": \"${CODEX_VERSION:?}\"\n")
-	if _, err = fixture.load("default", nil); err == nil || !strings.Contains(err.Error(), "required parameter is unset") {
-		t.Fatalf("a required check of a retired name did not refuse the load: %v", err)
-	}
-
-	// Evaluating an ignored expression never refuses loading.
-	fixture.write(t, host, "YARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\n")
-	loaded, err = fixture.load("default", nil)
-	if err != nil {
-		t.Fatalf("an ignored expression refused the load: %v", err)
-	}
-	if got := renderedIgnored(loaded); len(got) != 1 || got[0] != "YARD_DEVICES in "+host+":1 is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_DEVICES --scope host --local" {
-		t.Fatalf("failed ignored expression observations = %q", got)
+	if !strings.Contains(err.Error(), "config.env:2: YARD_CAPS") || strings.Contains(err.Error(), "bogus") || strings.Contains(err.Error(), "CAPABILITIES") {
+		t.Fatalf("additional source refusal missing or input leaked: %v", err)
 	}
 }
 
-// The repair names config unset only when that command writes the file the
-// value came from; a flat registration names the exact line to remove.
+// The repair selects the same local registration as config unset.
 func TestIgnoredProfileOnlyRepairTargetsTheSourceFile(t *testing.T) {
 	fixture := newProfileOnlyFixture(t)
 	flat := filepath.Join(fixture.configHome, "yards", "box.env")
@@ -183,8 +133,8 @@ func TestIgnoredProfileOnlyRepairTargetsTheSourceFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	ignored := loaded.IgnoredAssignments()
-	if len(ignored) != 1 || ignored[0].Repair() != "remove line 2 from "+flat ||
-		ignored[0].String() != "YARD_DEVICES in "+flat+":2 is ignored: only environment profiles declare it; remove that line" {
+	if len(ignored) != 1 || ignored[0].Repair() != "yard -Y box config unset YARD_DEVICES --scope yard --local" ||
+		ignored[0].String() != "YARD_DEVICES in "+flat+":2 is ignored: only environment profiles declare it; remove it with yard -Y box config unset YARD_DEVICES --scope yard --local" {
 		t.Fatalf("flat registration repair = %#v %q", ignored, renderedIgnored(loaded))
 	}
 
@@ -200,27 +150,25 @@ func TestIgnoredProfileOnlyRepairTargetsTheSourceFile(t *testing.T) {
 	}
 }
 
-// Every operator-file parse path discards a profile-only assignment as the
-// loader does: a failing expression refuses none, and the advertised config
-// unset still removes the assignment.
-func TestIgnoredProfileOnlyExpressionsParseOnEveryOperatorPath(t *testing.T) {
+// Profile-only literals stay visible to repair while sync omits them.
+func TestIgnoredProfileOnlyLiteralsParseOnEveryOperatorPath(t *testing.T) {
 	fixture := newProfileOnlyFixture(t)
 	path := filepath.Join(fixture.configHome, "config.env")
-	content := []byte("SSH_PORT=2290\nYARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\nLIMITS_MEMORY=\"${YARD_DEVICES:-2}GiB\"\n")
+	content := []byte("SSH_PORT=2290\nYARD_DEVICES=gpu\nLIMITS_MEMORY=2GiB\n")
 	fixture.write(t, path, string(content))
 	assignments, err := ParsePersistentAssignments(path, content)
 	if err != nil {
-		t.Fatalf("persistent parse refused an ignored expression: %v", err)
+		t.Fatalf("persistent parse refused an ignored literal: %v", err)
 	}
 	if len(assignments) != 3 || assignments[1].Name != "YARD_DEVICES" || assignments[2].Value != "2GiB" {
 		t.Fatalf("persistent assignments = %#v", assignments)
 	}
-	names, err := AssignedSettingNames(path)
+	names, err := AssignedSettingNames(path, content)
 	if err != nil || strings.Join(names, " ") != "LIMITS_MEMORY SSH_PORT" {
 		t.Fatalf("assigned names = %q, %v", names, err)
 	}
 	edited, err := EditPersistentAssignmentContent(path, content, "YARD_DEVICES", nil)
-	if err != nil || string(edited) != "SSH_PORT=2290\nLIMITS_MEMORY=\"${YARD_DEVICES:-2}GiB\"\n" {
-		t.Fatalf("config unset of an ignored expression = %q, %v", edited, err)
+	if err != nil || string(edited) != "SSH_PORT=2290\nLIMITS_MEMORY=2GiB\n" {
+		t.Fatalf("config unset of an ignored literal = %q, %v", edited, err)
 	}
 }

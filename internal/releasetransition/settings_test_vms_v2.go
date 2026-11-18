@@ -402,7 +402,7 @@ func exactDirectSettingsV2Value(
 	if len(assignments) == 0 {
 		return "", false, true
 	}
-	if len(assignments) != 1 || !assignments[0].Direct || assignments[0].Dynamic {
+	if len(assignments) != 1 {
 		return "", true, false
 	}
 	return assignments[0].Value, true, true

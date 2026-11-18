@@ -109,7 +109,7 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 	catalog.integrations = append(catalog.integrations, profile.IntegrationDefinition{SchemaVersion: 1, Name: "retired-widget", Retired: true, RetiredSettings: []string{"OBSOLETE_PORT"}})
 	for _, selection := range []string{"sample retired-widget", "retired-widget", ""} {
 		home, configHome := testkit.TempDir(t), testkit.TempDir(t)
-		original := "CODING_TOOL_INTEGRATIONS=\"" + selection + "\"\nOBSOLETE_PORT=${UNUSED_PORT:=12345}\n"
+		original := "CODING_TOOL_INTEGRATIONS=\"" + selection + "\"\nOBSOLETE_PORT=12345\n"
 		path := filepath.Join(configHome, "config.env")
 		testkit.WriteFile(t, path, []byte(original), 0o600)
 		loaded, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: home, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
@@ -149,9 +149,6 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 		}
 		if _, ok := loaded.Environment["OBSOLETE_PORT"]; ok {
 			t.Fatal("retired setting remains effective")
-		}
-		if _, ok := loaded.Environment["UNUSED_PORT"]; ok {
-			t.Fatal("retired expression mutated live environment")
 		}
 		data, _ := os.ReadFile(path)
 		if string(data) != original {

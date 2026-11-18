@@ -42,11 +42,12 @@ func TestSourceDiagnosticDoesNotRenderMalformedInput(t *testing.T) {
 	for _, fixture := range []struct {
 		name, content, key, reason string
 	}{
-		{"required parameter", "SSH_PORT=${SSH_PORT:?" + secret + "}\n", "SSH_PORT", "required parameter is unset"},
-		{"invalid parameter", "SSH_PORT=${" + secret + "!}\n", "SSH_PORT", "invalid parameter name"},
+		{"required parameter", "SSH_PORT=${SSH_PORT:?" + secret + "}\n", "SSH_PORT", "only literal values"},
+		{"invalid parameter", "SSH_PORT=${" + secret + "!}\n", "SSH_PORT", "only literal values"},
 		{"invalid variable", secret + "!=value\n", "", "invalid variable name"},
 		{"unknown setting", secret + "=value\n", "", "unknown setting"},
 		{"invalid mount", "HOST_MOUNTS=" + secret + "\n", "HOST_MOUNTS", "invalid mount list"},
+		{"mixed quotes", "GIT_USER_NAME='start'$" + secret + "'end'\n", "GIT_USER_NAME", "Replace it with one literal value"},
 		{"unterminated value", "SSH_PORT='" + secret + "\n", "SSH_PORT", "unterminated quoted assignment"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {

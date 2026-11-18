@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,7 +30,7 @@ func TestConfigPathsShowsEffectiveLayersWithoutValues(t *testing.T) {
 	hostRule := filepath.Join(configHome, "overrides", "host", "agents", "codex", "rules", "repo.rules")
 	writeConfigCommandFile(t, hostRule, "private-canary-value\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"),
-		"AGENT_codex_RULES=\"$SUBYARD_CONFIG_DIR/../private/agents/codex/rules/repo.rules\"\n", 0o600)
+		"AGENT_codex_RULES='"+filepath.Join(configDir, "../private/agents/codex/rules/repo.rules")+"'\n", 0o600)
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "paths"},
@@ -3242,77 +3243,72 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 	}
 }
 
-func TestConfigSetRefusesDynamicLayeredSettings(t *testing.T) {
-	const layered = `GIT_USER_NAME=Jane
-GIT_USER_EMAIL="${GIT_USER_NAME:-${DEV_USER:-Jane}}@example.invalid"
-GIT_USER_NAME=Jane
-`
-	for _, test := range []struct {
-		name, scope, shared, host, yard, setting, value, refusal string
-	}{
-		{name: "same value with duplicate records", shared: "DEV_USER=alice\n", host: layered,
-			setting: "GIT_USER_NAME", value: "Jane", refusal: "config.env:2: GIT_USER_EMAIL"},
-		{name: "earlier layer changes fallback", shared: "DEV_USER=alice\n", host: layered,
-			setting: "GIT_USER_NAME", value: "Janet", refusal: "config.env:2: GIT_USER_EMAIL"},
-		{name: "earlier layer prevents conditional assignment", shared: "GIT_USER_NAME=Jane\n",
-			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:=fallback}@example.invalid"` + "\n",
-			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "config.env:1: GIT_USER_EMAIL"},
-		{name: "earlier layer satisfies required parameter", shared: "GIT_USER_NAME=Jane\n",
-			host:    `GIT_USER_EMAIL="${GIT_USER_NAME:?required}@example.invalid"` + "\n",
-			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "config.env:1: GIT_USER_EMAIL"},
-		{name: "later named yard reads the setting", host: "GIT_USER_NAME=Jane\n",
-			yard:    `GIT_USER_EMAIL="${GIT_USER_NAME}@example.invalid"` + "\n",
-			setting: "GIT_USER_NAME", value: "Janet", refusal: "yards/neighbor/config.env:1: GIT_USER_EMAIL"},
-		{name: "later yard introduces an empty setting", host: "GIT_USER_NAME=Jane\n",
-			yard:    `: "${GIT_USER_NAME:-${GIT_USER_EMAIL:=}}"` + "\n",
-			setting: "GIT_USER_NAME", refusal: "yards/neighbor/config.env:1"},
-		{name: "masked shared assignment record", scope: "shared", host: "GIT_USER_NAME=local\n",
-			shared:  `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n",
-			setting: "GIT_USER_EMAIL", value: "new@example.invalid", refusal: "overrides/shared/config.env:1: GIT_USER_EMAIL"},
+func TestConfigReadsRefuseExpansionsInUserLayers(t *testing.T) {
+	for _, relative := range []string{
+		"overrides/shared/config.env", "config.env", "yards/neighbor/config.env", "yards/neighbor.env",
+		".sync/settings/overrides/shared/config.env", ".sync/settings/config.env", ".sync/settings/yards/neighbor/config.env",
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			root, _, configHome, environment := configCommandFixture(t)
-			path := filepath.Join(configHome, "config.env")
-			writeConfigCommandFile(t, path, test.host)
-			if test.shared != "" {
-				writeConfigCommandFile(t, filepath.Join(configHome, "overrides/shared/config.env"), test.shared)
-			}
-			if test.yard != "" {
-				writeConfigCommandFile(t, filepath.Join(configHome, "yards/neighbor/config.env"), test.yard)
+		t.Run(relative, func(t *testing.T) {
+			root, _, home, environment := configCommandFixture(t)
+			path := filepath.Join(home, relative)
+			const original = "# existing configuration\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
+			writeConfigCommandFile(t, path, original)
+			if !strings.Contains(relative, "yards/") {
+				writeConfigCommandFile(t, filepath.Join(home, "yards/neighbor/config.env"), "# selected yard\n")
 			}
 			before, err := os.Stat(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"config", "set", test.setting, test.value}
-			if test.value == "" {
-				args = []string{"config", "unset", test.setting}
-			}
-			scope := firstNonempty(test.scope, "host")
-			args = append(args, "--scope", scope, "--yes")
-			var stdout, stderr bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", WorkingDir: root,
-				Arguments: args, Environment: environment, Stdout: &stdout, Stderr: &stderr})
-			if err != nil {
-				t.Fatal(err)
-			}
-			code := program.Run(context.Background())
-			if code != 1 || !strings.Contains(stderr.String(), test.refusal) || !strings.Contains(stderr.String(), "edit the file manually") {
-				t.Fatalf("config authoring: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
-			}
-			if stored, err := os.ReadFile(path); err != nil || string(stored) != test.host {
-				t.Fatalf("stored host settings = %q, %v; want %q", stored, err, test.host)
-			}
-			after, err := os.Stat(path)
-			if err != nil || !os.SameFile(before, after) {
-				t.Fatalf("configuration file was replaced: %v", err)
-			}
-			if test.shared != "" {
-				if stored := mustReadConfigFixture(t, filepath.Join(configHome, "overrides/shared/config.env")); string(stored) != test.shared {
-					t.Fatalf("refusal changed shared settings: %q", stored)
+			for _, args := range [][]string{
+				{"config", "show", "GIT_USER_EMAIL"},
+				{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "yard", "--yes"},
+			} {
+				var output bytes.Buffer
+				code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
+					Arguments: append([]string{"-Y", "neighbor"}, args...), Stdout: io.Discard, Stderr: &output})
+				if code != 2 || !strings.Contains(output.String(), relative+":2: GIT_USER_EMAIL") ||
+					!strings.Contains(output.String(), "Replace the parameter expansion or setting reference with its value") ||
+					strings.Contains(output.String(), "original") {
+					t.Fatalf("%v: exit=%d output=%s", args, code, &output)
 				}
 			}
+			after, err := os.Stat(path)
+			if err != nil || !os.SameFile(before, after) || string(mustReadConfigFixture(t, path)) != original {
+				t.Fatal("refused read or write changed the settings file")
+			}
 		})
+	}
+}
+
+func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	flat := filepath.Join(home, "yards/neighbor.env")
+	const prefix = "# existing registration\r\nSSH_PORT=2298\r\n"
+	writeConfigCommandFile(t, flat, prefix+"GIT_USER_NAME=Jane\r\n", 0o640)
+	run := func(args ...string) {
+		t.Helper()
+		var output bytes.Buffer
+		if code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
+			Arguments: append([]string{"-Y", "neighbor", "config", "set", "--scope", "yard", "--yes"}, args...),
+			Stdout:    io.Discard, Stderr: &output}); code != 0 {
+			t.Fatalf("exit=%d %s", code, &output)
+		}
+	}
+	run("GIT_USER_NAME", "O'Connor")
+	if got := string(mustReadConfigFixture(t, flat)); got != prefix+"GIT_USER_NAME='O'\\''Connor'\r\n" {
+		t.Fatalf("single edit changed unrelated records: %q", got)
+	}
+	run("GIT_USER_NAME", "O'Connor", "GIT_USER_EMAIL", "new@example.invalid")
+	if got := string(mustReadConfigFixture(t, flat)); got != prefix+"GIT_USER_NAME='O'\\''Connor'\r\nGIT_USER_EMAIL='new@example.invalid'\n" {
+		t.Fatalf("batch changed unrelated records: %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(home, "yards/neighbor/config.env")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested registration shadows the flat one: %v", err)
+	}
+	loaded := loadConfigCommandContext(t, root, environment, "neighbor")
+	if loaded.Context.SSHPort != 2298 || loaded.Environment["GIT_USER_NAME"] != "O'Connor" {
+		t.Fatal("flat registration lost its effective settings")
 	}
 }
 

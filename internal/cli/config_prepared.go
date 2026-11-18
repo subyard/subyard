@@ -190,11 +190,19 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	if action == "set" {
 		value = &request.value
 	}
+	candidate, err := cli.catalog.EditPersistentAssignmentContent(path, baseline.Content, request.name, value)
+	if err != nil {
+		return err
+	}
+	desired := config.PersistentFileSnapshot{Exists: true, Content: candidate}
+	if action == "unset" && len(candidate) == 0 {
+		desired = config.PersistentFileSnapshot{}
+	}
 	prospectiveRequest := request
 	if request.sourceGuard != nil && slices.Contains([]string{"CODING_TOOL_INTEGRATIONS", "ENVIRONMENT_PROFILES"}, request.name) {
 		prospectiveRequest.action = "selection-repair"
 	}
-	prospective, desired, err := cli.prepareConfigScalarDraft(loaded, prospectiveRequest, path, baseline, config.PersistentScalarEdits{{Name: definition.Name, Value: value}})
+	prospective, err := cli.prepareConfigProspective(loaded, prospectiveRequest, path, desired)
 	if err != nil {
 		return err
 	}
@@ -215,7 +223,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		}
 	}
 	return prepared.attachLocalConfigScalars(ctx, []configAuthoringRequest{request}, prospective, baseline, desired, func(guard func() error) error {
-		return config.ApplyPersistentFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, desired, guard)
+		return cli.catalog.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, guard)
 	})
 }
 

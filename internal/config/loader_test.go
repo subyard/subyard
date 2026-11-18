@@ -212,7 +212,7 @@ func TestLoadHostSettingsAndMigratedPrivateAssets(t *testing.T) {
 	writeFixture(t, filepath.Join(shipped, "agents.env"),
 		`AGENT_codex_RULES="$SUBYARD_CONFIG_DIR/agents/codex/rules/repo.rules"`)
 	writeFixture(t, filepath.Join(configHome, "config.env"),
-		"DEV_SUDO=1\nAGENT_codex_RULES=\"$SUBYARD_CONFIG_DIR/../private/agents/codex/repo.rules\"\n")
+		"DEV_SUDO=1\nAGENT_codex_RULES="+filepath.Join(root, "private/agents/codex/repo.rules")+"\n")
 	writeFixture(t, filepath.Join(hostAgents, "codex", "repo.rules"), "fixture\n")
 	writeFixture(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
 
@@ -768,7 +768,7 @@ func TestRetiredCodexAssignmentsCannotAffectExportsOrOtherSettings(t *testing.T)
 	if len(values) != 1 || values["CODING_TOOL_INTEGRATIONS"] != "codex" {
 		t.Fatalf("retired assignments changed effective input: %#v", values)
 	}
-	names, err := AssignedSettingNames(file)
+	names, err := AssignedSettingNames(file, []byte("CODEX_VERSION=0.147.0\nCODEX_SHA256_ARM64=\nCODING_TOOL_INTEGRATIONS=codex\n"))
 	if err != nil || len(names) != 1 || names[0] != "CODING_TOOL_INTEGRATIONS" {
 		t.Fatalf("retired assignments escaped enumeration: %v, %v", names, err)
 	}

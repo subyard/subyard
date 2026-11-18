@@ -1005,8 +1005,8 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 
 	want = `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n"
 	writeConfigCommandFile(t, target, want, 0o640)
-	output = run(1, "GIT_USER_EMAIL", "new@example.invalid", "SSH_PORT", "2390", "--scope", "yard", "--yes")
-	if !strings.Contains(output, "config.env:1: GIT_USER_EMAIL") || !strings.Contains(output, "edit the file manually") {
+	output = run(2, "GIT_USER_EMAIL", "new@example.invalid", "SSH_PORT", "2390", "--scope", "yard", "--yes")
+	if !strings.Contains(output, "config.env:1: GIT_USER_EMAIL") || !strings.Contains(output, "only literal values") {
 		t.Fatalf("dynamic record refusal: %s", output)
 	}
 	assertFile()
@@ -1027,7 +1027,6 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		hardLinks       = "target has hard links"
 		interrupted     = "an interrupted configuration transaction requires recovery"
 		retiredSetting  = "setting is retired and can no longer be set"
-		preservedRecord = "edit the file manually"
 		unavailable     = "an input is invalid or unavailable"
 		invalidDepends  = "AGENT_blocked_DEPENDS (scalar settings): invalid name value"
 	)
@@ -1054,10 +1053,6 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		{name: "alias ambiguity", scope: "yard",
 			assignments: []string{"AGENTS", "codex", "CODING_TOOL_INTEGRATIONS", "claude"}, code: 2,
 			refusals: []string{"AGENTS: configuration (scalar settings): unknown setting", "AGENTS and CODING_TOOL_INTEGRATIONS assign the same setting"}},
-		{name: "bad pair and editor refusal", scope: "yard", yardConfig: "GIT_USER_NAME=original\n: \"${GIT_USER_NAME:=preserved}\"\n",
-			assignments: []string{"GIT_USER_NAME", "", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{unknownSetting, preservedRecord}},
-		{name: "bad value and editor refusal", scope: "yard", yardConfig: "GIT_USER_NAME=original\n: \"${GIT_USER_NAME:=preserved}\"\n",
-			assignments: []string{"GIT_USER_NAME", "", "SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort, preservedRecord}},
 		{name: "bad pair and dependency refusal", scope: "yard", hostLink: true,
 			assignments: []string{"GIT_USER_NAME", "", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{unknownSetting, hardLinks}},
 		{name: "sibling discovery failure and default collision", scope: "host", namedConfig: "# sibling\n", badSibling: true,

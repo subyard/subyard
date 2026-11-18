@@ -105,7 +105,7 @@ func parseConfigAliasRepair(arguments []string) (configAliasRepairRequest, error
 }
 
 func (cli *CLI) aliasRepairContent(path string, content []byte, request configAliasRepairRequest) ([]byte, error) {
-	assignments, err := cli.catalog.ParsePersistentAssignments(path, content)
+	assignments, err := config.ParsePersistentAssignments(path, content)
 	if err != nil {
 		return nil, err
 	}
@@ -122,9 +122,6 @@ func (cli *CLI) aliasRepairContent(path string, content []byte, request configAl
 		for _, assignment := range assignments {
 			if assignment.Name != choice.name && !slices.Contains(definition.Aliases, assignment.Name) {
 				continue
-			}
-			if !assignment.Direct || assignment.Dynamic {
-				return nil, &config.SourceError{Path: path, Line: assignment.Line, Key: choice.name, Role: "alias repair", Reason: "targeted assignment must be literal and direct"}
 			}
 			if assignment.Name != choice.name {
 				legacy = true

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -60,7 +61,7 @@ func TestWritePersistentAssignmentPreservesUnrelatedRecords(t *testing.T) {
 	}
 }
 
-func TestPersistentAssignmentRefusesDynamicRecords(t *testing.T) {
+func TestPersistentAssignmentRefusesNonliteralRecords(t *testing.T) {
 	const shared = `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"`
 	for _, test := range []struct {
 		name, content, setting, key string
@@ -73,6 +74,7 @@ func TestPersistentAssignmentRefusesDynamicRecords(t *testing.T) {
 		{"dormant default", "GATE=earlier\n: ${GATE:-${GIT_USER_NAME:=original}}\n", "GIT_USER_NAME", "", 2},
 		{"unreachable default", ": ${GIT_USER_NAME:=Jane}${GIT_USER_NAME:-${SSH_PORT:=2222}}\n", "GIT_USER_NAME", "", 1},
 		{"same value", "GIT_USER_NAME=Jane\n: ${GIT_USER_NAME:-${SSH_PORT:=2222}}\nGIT_USER_NAME=Jane\n", "GIT_USER_NAME", "", 2},
+		{"unrelated reference", "SSH_HOST=$HOST", "GIT_USER_NAME", "SSH_HOST", 1},
 		{"discarded expansion", `GIT_USER_EMAIL="${CODEX_VERSION:-${GIT_USER_NAME:=original}}@example.invalid"`, "GIT_USER_EMAIL", "GIT_USER_EMAIL", 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -83,7 +85,7 @@ func TestPersistentAssignmentRefusesDynamicRecords(t *testing.T) {
 				err := WritePersistentAssignment(filepath.Dir(path), path, test.setting, requested)
 				var source *SourceError
 				if !errors.As(err, &source) || source.Path != path || source.Line != test.line || source.Key != test.key ||
-					!strings.Contains(source.Reason, "edit the file manually") {
+					!strings.Contains(source.Reason, "Replace the parameter expansion or setting reference with its value") {
 					t.Fatalf("expected record refusal, got %v", err)
 				}
 				if stored, err := os.ReadFile(path); err != nil || string(stored) != test.content {
@@ -114,7 +116,7 @@ SSH_PORT=2222
 	if want := prefix + "GIT_USER_EMAIL='new@example.invalid'\n"; err != nil || string(content) != want {
 		t.Fatalf("edited content = %q, %v; want %q", content, err, want)
 	}
-	values, err := ReadAssignments(path)
+	values, err := ReadLiteralAssignments(path)
 	if err != nil || values["SSH_PORT"] != "2222" || values["GIT_USER_EMAIL"] != value {
 		t.Fatalf("read assignments = %q, %v", values, err)
 	}
@@ -137,9 +139,9 @@ func TestPersistentAssignmentKeepsExistingMultilineCRLF(t *testing.T) {
 	if err != nil || !bytes.HasPrefix(content, []byte(initial)) {
 		t.Fatalf("edited content = %q, %v", content, err)
 	}
-	values, err := EvaluateAssignments(bytes.NewReader(content), "config.env", nil)
-	if err != nil || values["GIT_USER_NAME"] != "first\r\nsecond" {
-		t.Fatalf("read assignments = %q, %v", values, err)
+	assignments, err := ParsePersistentAssignments("config.env", content)
+	if err != nil || len(assignments) != 2 || assignments[0].Value != "first\r\nsecond" {
+		t.Fatalf("read assignments = %#v, %v", assignments, err)
 	}
 }
 
@@ -150,7 +152,7 @@ func TestPersistentAssignmentValueRoundTrip(t *testing.T) {
 	if err := WritePersistentAssignment(configHome, path, "GIT_USER_NAME", &value); err != nil {
 		t.Fatal(err)
 	}
-	values, err := ReadAssignments(path)
+	values, err := ReadLiteralAssignments(path)
 	if err != nil || len(values) != 1 || values["GIT_USER_NAME"] != value {
 		t.Fatalf("read assignments = %q, %v", values, err)
 	}
@@ -444,27 +446,19 @@ func TestReadPersistentFileSnapshotRejectsUnsafePaths(t *testing.T) {
 	})
 }
 
-func TestParsePersistentAssignmentsPreservesDuplicateAndDynamicProvenance(t *testing.T) {
-	content := []byte("# retained\nYARD_TEMPLATE=e2e-vms\n" +
-		"export YARD_TEMPLATE='test-vms'\n" +
-		": ${NESTED_E2E_VMS:=0}\nNESTED_E2E_VMS=\"$NESTED_E2E_VMS\"\n")
+func TestParsePersistentAssignmentsPreservesDuplicateProvenance(t *testing.T) {
+	content := []byte("# retained\nYARD_TEMPLATE=e2e-vms\nexport YARD_TEMPLATE='test-vms'\nGIT_USER_NAME=\\$HOME\n")
 	assignments, err := ParsePersistentAssignments("fixture.env", content)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(assignments) != 4 {
-		t.Fatalf("assignments = %#v", assignments)
-	}
 	want := []PersistentAssignment{
-		{Name: "YARD_TEMPLATE", Value: "e2e-vms", Line: 2, Direct: true},
-		{Name: "YARD_TEMPLATE", Value: "test-vms", Line: 3, Direct: true},
-		{Name: "NESTED_E2E_VMS", Value: "0", Line: 4, Dynamic: true},
-		{Name: "NESTED_E2E_VMS", Value: "0", Line: 5, Direct: true, Dynamic: true},
+		{Name: "YARD_TEMPLATE", Value: "e2e-vms", Line: 2},
+		{Name: "YARD_TEMPLATE", Value: "test-vms", Line: 3},
+		{Name: "GIT_USER_NAME", Value: "$HOME", Line: 4},
 	}
-	for index := range want {
-		if assignments[index] != want[index] {
-			t.Fatalf("assignment %d = %#v, want %#v", index, assignments[index], want[index])
-		}
+	if !slices.Equal(assignments, want) {
+		t.Fatalf("assignments = %#v, want %#v", assignments, want)
 	}
 }
 
@@ -656,33 +650,5 @@ func TestWritePersistentAssignmentAliasRejectsStaleAndInvalidTargets(t *testing.
 				t.Fatalf("rejected write changed content: %q, %v", after, err)
 			}
 		})
-	}
-}
-
-func TestWritePersistentAssignmentRejectsPreservedConditionalAlias(t *testing.T) {
-	selection := "neighbor fixture"
-	empty := ""
-	for _, setting := range []struct {
-		initial string
-		values  []*string
-		reason  string
-	}{
-		{"YARD_PROFILES=neighbor\n: ${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "edit the file manually"},
-		{"YARD_PROFILES=neighbor\nDEV_USER=${YARD_PROFILES:=neighbor}\n", []*string{&selection, nil}, "edit the file manually"},
-		{"ENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{nil, &empty}, "edit the file manually"},
-		{"YARD_PROFILES=neighbor\nENVIRONMENT_PROFILES=neighbor\n: ${ENVIRONMENT_PROFILES:=neighbor}\n", []*string{&empty}, "edit the file manually"},
-	} {
-		for _, value := range setting.values {
-			configHome := testkit.TempDir(t)
-			path := filepath.Join(configHome, "config.env")
-			testkit.WriteFile(t, path, []byte(setting.initial), 0o600)
-			if err := WritePersistentAssignment(configHome, path, "ENVIRONMENT_PROFILES", value); err == nil || !strings.Contains(err.Error(), setting.reason) {
-				t.Fatalf("conditional alias accepted: %v", err)
-			}
-			content, err := os.ReadFile(path)
-			if err != nil || string(content) != setting.initial {
-				t.Fatalf("rejected write changed content: %q, %v", content, err)
-			}
-		}
 	}
 }

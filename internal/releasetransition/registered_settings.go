@@ -126,7 +126,7 @@ func (t *V2Transition) inspectRegisteredSettings(ctx context.Context, m Migratio
 				if present[a.Name] {
 					continue
 				}
-				if !slices.Contains(t.options.RegisteredEndpointSettings, a.Name) || !a.Direct || a.Dynamic {
+				if !slices.Contains(t.options.RegisteredEndpointSettings, a.Name) {
 					return plan, invalid("registered endpoint output names an undeclared setting")
 				}
 				value := a.Value

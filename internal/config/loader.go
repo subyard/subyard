@@ -41,7 +41,6 @@ type LoadOptions struct {
 	// An empty source marks a logical file absent.
 	ProspectiveFiles *ProspectiveFiles
 	FileOverrides    map[string]string
-	ScalarEdits      PersistentScalarEdits
 	YardDirs         []string
 }
 
@@ -336,11 +335,6 @@ func load(
 	}
 	if yardName != "default" && localYard == "" && gitYard == "" && !(options.AllowResetYard && resetFallback) {
 		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
-	}
-	if len(options.ScalarEdits) != 0 {
-		if err := tracker.checkScalarEditLayers(options.ScalarEdits, gitShared, gitHost, gitYard, localShared, localHost, localYard); err != nil {
-			return domain.Context{}, nil, err
-		}
 	}
 	if yardName != "default" {
 		yardDerivationLayer := tracker.addLayer("yard", "derived", "yard name "+yardName, true, settingScalar,
@@ -1182,7 +1176,6 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
 	var discarded []observedAssignment
-	var content bytes.Buffer
 	policy := discardPolicy{retired: settings.RetiredSetting, batch: batch}
 	if scope != ScopeShipped {
 		policy.ignored = IsProfileOnlySetting
@@ -1199,8 +1192,10 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	var err error
 	if batch != nil && path == batch.path {
 		err = batch.applyTarget(reader, probe, observe, discard, policy)
+	} else if scope == ScopeShipped {
+		err = applyShippedEnv(reader, path, probe, observe, policy)
 	} else {
-		err = applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, observe, policy, discard)
+		err = applyLiteralEnv(reader, path, probe, observe, policy, discard)
 	}
 	if err != nil {
 		return err
@@ -1239,14 +1234,9 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 		if assignment.unavailable {
 			continue
 		}
-		syncable := requireSyncable
-		if syncable && assignment.name == "SSH_PORT" {
-			if err := LegacyGitSSHPort(path, content.Bytes()); err != nil {
-				return sourceContext(path, assignment.line, "SSH_PORT", "scalar settings", err)
-			}
-			syncable = false
-		}
-		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, syncable); err != nil {
+		// Legacy Git SSH ports are read for migration, while new Git authoring
+		// still requires every selected setting to be syncable.
+		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, requireSyncable && assignment.name != "SSH_PORT"); err != nil {
 			return sourceContext(path, assignment.line, recognizedSettingKey(settings, assignment.name), "scalar settings", err)
 		}
 	}

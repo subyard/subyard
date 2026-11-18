@@ -1003,51 +1003,22 @@ func TestConfigSetSeveralPairsValidatesCombinedTarget(t *testing.T) {
 	}
 }
 
-func TestConfigSetGitBatchRefusesDynamicLayeredSettings(t *testing.T) {
+func TestConfigSetGitBatchRefusesNonliteralSource(t *testing.T) {
 	f := newConfigSSHFixture(t)
-	f.publishRemoteChange(`GIT_USER_EMAIL="${GIT_USER_NAME:=Jane}@example.invalid"` + "\n")
-	f.run(0, "config", "sync", "pull", "--yes")
-	writeConfigCommandFile(t, filepath.Join(f.configHome, "config.env"), "GIT_USER_NAME=local\n")
+	checkout := filepath.Join(f.home, ".local/share/subyard-config")
+	const relative = "shared/config.env"
+	const original = "# existing source\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
+	writeConfigCommandFile(t, filepath.Join(checkout, relative), original)
+	commitConfigSource(t, checkout, "Existing nonliteral configuration")
 	head := f.commitCount()
-	f.run(1, "config", "set", "GIT_USER_EMAIL", "new@example.invalid", "E2E_VM_CPU", "3", "--scope", "shared", "--git", "--yes")
-	if !strings.Contains(f.stderr.String(), "shared/config.env:1: GIT_USER_EMAIL") || !strings.Contains(f.stderr.String(), "edit the file manually") || f.commitCount() != head {
-		t.Fatalf("refused edit changed source or missed collateral setting: %s", f.stderr.String())
+	localHead := configSourceGitOutput(t, checkout, "rev-parse", "HEAD")
+	f.run(1, "config", "set", "GIT_USER_NAME", "Janet", "GIT_USER_EMAIL", "new@example.invalid", "--scope", "shared", "--git", "--yes")
+	output := f.stderr.String()
+	if !strings.Contains(output, relative+":2: GIT_USER_EMAIL") || !strings.Contains(output, "only literal values") || strings.Contains(output, "original") {
+		t.Fatalf("Git authoring lost the source refusal: %s", output)
 	}
-
-	const dependent = "GIT_USER_NAME=Jane\n" + `GIT_USER_EMAIL="${GIT_USER_NAME}@example.invalid"` + "\n"
-	f.publishRemoteChange(dependent)
-	f.run(0, "config", "sync", "pull", "--yes")
-	for _, reverse := range []bool{false, true} {
-		pairs := []string{"GIT_USER_NAME", "Janet", "GIT_USER_EMAIL", "new@example.invalid"}
-		if reverse {
-			pairs = []string{pairs[2], pairs[3], pairs[0], pairs[1]}
-		}
-		head := f.commitCount()
-		f.run(1, append(append([]string{"config", "set"}, pairs...), "--scope", "shared", "--git", "--yes")...)
-		if f.commitCount() != head || !strings.Contains(f.stderr.String(), "edit the file manually") {
-			t.Fatalf("reverse=%t: %s", reverse, f.stderr.String())
-		}
-		want := dependent
-		if stored := configSourceGitOutput(t, f.remote, "show", "HEAD:shared/config.env"); stored != want {
-			t.Fatalf("reverse=%t: stored source = %q, want %q", reverse, stored, want)
-		}
-	}
-
-	const duplicates = dependent + "GIT_USER_NAME=Jane\n"
-	f.publishRemoteChange(duplicates)
-	f.run(0, "config", "sync", "pull", "--yes")
-	head = f.commitCount()
-	f.run(1, "config", "set", "GIT_USER_NAME", "Jane", "E2E_VM_CPU", "3", "--scope", "shared", "--git", "--yes")
-	if stored := configSourceGitOutput(t, f.remote, "show", "HEAD:shared/config.env"); stored != duplicates || f.commitCount() != head || !strings.Contains(f.stderr.String(), "edit the file manually") {
-		t.Fatalf("same-value pair rewrote existing source: %q", stored)
-	}
-
-	f.publishRemoteChange("GIT_USER_NAME=Jane\n")
-	f.run(0, "config", "sync", "pull", "--yes")
-	writeConfigCommandFile(t, filepath.Join(f.configHome, "config.env"), `GIT_USER_EMAIL="${GIT_USER_NAME}@local.invalid"`+"\n")
-	head = f.commitCount()
-	f.run(1, "config", "set", "GIT_USER_NAME", "Janet", "E2E_VM_CPU", "4", "--scope", "shared", "--git", "--yes")
-	if !strings.Contains(f.stderr.String(), "config.env:1: GIT_USER_EMAIL") || f.commitCount() != head {
-		t.Fatalf("refused edit changed source or missed a later local dependency: %s", f.stderr.String())
+	if f.commitCount() != head || configSourceGitOutput(t, checkout, "rev-parse", "HEAD") != localHead ||
+		string(mustReadConfigFixture(t, filepath.Join(checkout, relative))) != original {
+		t.Fatal("refused Git edit changed the source or published a commit")
 	}
 }

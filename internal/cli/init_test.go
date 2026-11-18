@@ -604,8 +604,7 @@ func TestProfileOnlySettingsAreIgnoredAndReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeCLIFile(t, host, string(settings)+"YARD_CAPS=fuse\n", 0o600)
-	// An ignored expression that cannot be evaluated refuses neither init nor unset.
-	writeCLIFile(t, yard, "YARD_TEMPLATE=hostless\nYARD_DEVICES=\"${LIMITS_MEMORY:?required}\"\n", 0o600)
+	writeCLIFile(t, yard, "YARD_TEMPLATE=hostless\nYARD_DEVICES=gpu\n", 0o600)
 	environment = append(environment, "YARD_MOUNTS=cache:/srv/cache:rw:0755")
 	want := []string{
 		"ignored: YARD_CAPS in " + host + ":" + strconv.Itoa(strings.Count(string(settings), "\n")+1) + " is ignored: only environment profiles declare it; remove it with yard -Y default config unset YARD_CAPS --scope host --local",

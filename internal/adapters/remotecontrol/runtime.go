@@ -45,7 +45,7 @@ func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteReco
 	if err != nil {
 		return domain.RemoteRecord{}, false, err
 	}
-	values, err := config.ReadAssignments(path)
+	values, err := config.ReadLiteralAssignments(path)
 	if err != nil {
 		return domain.RemoteRecord{}, false, err
 	}

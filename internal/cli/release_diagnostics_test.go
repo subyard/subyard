@@ -81,7 +81,7 @@ func TestReleaseDiagnosticsIdentifyMalformedNamedYard(t *testing.T) {
 		t.Fatalf("missing named-yard diagnostic: %v", err)
 	}
 	message, retry := diagnostic.ActivationDiagnostic()
-	for _, want := range []string{"yard broken", "yards/broken/config.env:2", "SSH_PORT", "required parameter is unset"} {
+	for _, want := range []string{"yard broken", "yards/broken/config.env:2", "SSH_PORT", "only literal values"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("diagnostic omits %q: %q", want, message)
 		}

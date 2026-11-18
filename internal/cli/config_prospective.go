@@ -27,11 +27,10 @@ type configProspective struct {
 	semantics       string
 	directoryInputs map[string]bool
 	checkBatch      func(locked bool) error
-	scalarEdits     config.PersistentScalarEdits
 }
 
-func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot, edits ...config.PersistentScalarEdit) (*configProspective, error) {
-	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path, scalarEdits: edits}
+func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAuthoringRequest, path string, desired config.PersistentFileSnapshot) (*configProspective, error) {
+	plan := &configProspective{cli: cli, loaded: loaded, request: request, path: path}
 	if desired.Exists {
 		file, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
 		if err != nil {
@@ -58,16 +57,6 @@ func (cli *CLI) prepareConfigProspective(loaded config.Loaded, request configAut
 		return nil, err
 	}
 	return plan, nil
-}
-
-func (cli *CLI) prepareConfigScalarDraft(loaded config.Loaded, request configAuthoringRequest, path string, baseline config.PersistentFileSnapshot, edits config.PersistentScalarEdits) (*configProspective, config.PersistentFileSnapshot, error) {
-	content, err := edits.LayerContent(path, baseline.Content)
-	if err != nil {
-		return nil, config.PersistentFileSnapshot{}, err
-	}
-	desired := config.PersistentFileSnapshot{Exists: edits[0].Value != nil || len(content) != 0, Content: content}
-	plan, err := cli.prepareConfigProspective(loaded, request, path, desired, edits...)
-	return plan, desired, err
 }
 
 func (plan *configProspective) close() {
@@ -238,7 +227,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	var refusals []error
 	for _, name := range names {
 		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
-			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked, ScalarEdits: plan.scalarEdits})
+			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked})
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 			continue

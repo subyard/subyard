@@ -126,13 +126,10 @@ func inspectReservedRegistration(options Options, path, yard string) error {
 			if assignment.Name != "YARD_TEMPLATE" {
 				continue
 			}
-			if assignment.Direct && !assignment.Dynamic {
-				if assignment.Value == "test-vms" {
-					return nil
-				}
-				return reservedRegistrationDiagnostic(path, yard)
+			if assignment.Value == "test-vms" {
+				return nil
 			}
-			break
+			return reservedRegistrationDiagnostic(path, yard)
 		}
 	}
 	if err == nil && yard == CurrentYard && filepath.IsAbs(options.RepositoryRoot) {

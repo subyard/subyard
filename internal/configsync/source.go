@@ -236,25 +236,16 @@ func (snapshot *sourceSnapshot) readConfig(
 		}
 		return nil
 	}
-	applications, err := settingApplications(snapshot.catalog, source)
+	label, err := filepath.Rel(snapshot.root, source)
 	if err != nil {
 		return err
 	}
-	names, err := config.AssignedSettingNames(source)
+	names, err := config.AssignedSettingNames(filepath.ToSlash(label), content)
 	if err != nil {
 		return err
 	}
 	for _, name := range names {
-		if config.IsProfileOnlySetting(name) {
-			// The loader ignores and reports a persisted operator value; it never refuses it.
-			continue
-		}
 		requireSyncable := name != "SSH_PORT"
-		if !requireSyncable {
-			if err := config.LegacyGitSSHPort(source, content); err != nil {
-				return err
-			}
-		}
 		definition, err := snapshot.catalog.ValidateSettingName(scope, name, requireSyncable)
 		if err != nil {
 			return err
@@ -268,7 +259,7 @@ func (snapshot *sourceSnapshot) readConfig(
 	target = filepath.ToSlash(filepath.Join(config.GitSettingsRelativePath, target))
 	snapshot.files[target] = candidateFile{
 		SourcePath: source, Content: content, Digest: digestBytes(content), Mode: 0o600,
-		Applications: applications,
+		Applications: settingApplications(snapshot.catalog, names),
 	}
 	snapshot.scalarPath[target] = source
 	return nil
@@ -566,16 +557,12 @@ func validateOwnedMode(path string, info os.FileInfo, directory bool) error {
 	return nil
 }
 
-func settingApplications(catalog config.Catalog, path string) ([]config.SettingApplication, error) {
-	names, err := config.AssignedSettingNames(path)
-	if err != nil {
-		return nil, err
-	}
+func settingApplications(catalog config.Catalog, names []string) []config.SettingApplication {
 	seen := map[config.SettingApplication]struct{}{}
 	var result []config.SettingApplication
 	for _, name := range names {
 		definition, ok := catalog.LookupSetting(name)
-		if !ok || config.IsProfileOnlySetting(name) {
+		if !ok {
 			continue
 		}
 		if _, exists := seen[definition.Application]; exists {
@@ -585,7 +572,7 @@ func settingApplications(catalog config.Catalog, path string) ([]config.SettingA
 		result = append(result, definition.Application)
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left] < result[right] })
-	return result, nil
+	return result
 }
 
 func snapshotDigest(files map[string]candidateFile, manifest []byte) string {

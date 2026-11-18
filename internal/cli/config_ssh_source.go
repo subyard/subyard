@@ -41,9 +41,6 @@ func sanitizeLegacySSHSource(candidate, hostID string, catalogs ...config.Catalo
 		if !before.Exists {
 			continue
 		}
-		if err := config.LegacyGitSSHPort(path, before.Content); err != nil {
-			return nil, err
-		}
 		content, err := settings.EditPersistentAssignmentContent(path, before.Content, "SSH_PORT", nil)
 		if err != nil {
 			return nil, err

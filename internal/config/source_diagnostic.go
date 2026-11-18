@@ -177,6 +177,8 @@ func (err *SourceError) diagnostic(configHome string) string {
 			} else {
 				role = "local " + role
 			}
+		} else if errors.Is(err, errSettingExpansion) {
+			path = filepath.Base(path)
 		} else {
 			path = "configuration source outside config home"
 		}
@@ -233,7 +235,7 @@ func recognizedSettingKey(settings Catalog, name string) string {
 }
 
 func recordSettingKey(record string) string {
-	name, _ := persistentDirectAssignment(record)
+	name, _ := envRecordAssignment(record)
 	return recognizedSettingKey(Catalog{}, name)
 }
 

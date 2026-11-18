@@ -114,6 +114,12 @@ highest precedence. It is never persisted by config sync. `yard [-Y <yard>] conf
 is the authoritative explanation of the actual chain, including derived values. Start from
 [`config/settings.env.example`](../config/settings.env.example).
 
+User settings files at shared, host and yard scope accept literal values only. This applies to
+local overrides and Git settings. A reference such as `$NAME` or `${NAME}`, including a conditional
+default, causes a read error that identifies the file and line. Replace the expression with the
+value you want to save. To include dollar text literally, use single quotes around the value.
+Shipped release defaults still support parameter expansion.
+
 Inside a quoted multiline scalar value, line endings are part of the value.
 Both LF and CRLF are preserved. Older readers normalized CRLF to LF, so
 converting an existing multiline settings file between line-ending styles
@@ -1049,9 +1055,9 @@ configuration. `config edit` requires `VISUAL` or `EDITOR` to name one executabl
 
 Persistent set/unset writers canonicalize every member of the selected legacy alias family,
 including removal of all aliases on unset. They preserve unrelated records, comments and existing
-permissions. If a record assigns a selected setting using an expansion, or reads a selected setting
-through a reference, the writer identifies the record and asks you to edit the file manually.
-This applies to single writes, batches and Git writes. Before consent they load the prospective scoped configuration through the normal
+permissions. Each setting change edits only the requested key in the selected file. A batch
+applies all its pairs atomically to that same file. Local yard writes use an existing flat
+registration when it is the selected definition. Before consent, the writers validate the draft through the normal
 resolver, including every affected local registration for host/shared changes. Relevant source,
 profile and asset dependencies are bound by content and filesystem identity and rechecked before
 publication; changed inputs require a fresh assessment. Transient selection overrides cannot hide
@@ -1132,8 +1138,9 @@ blocked. The release settings migration pins each affected local yard's existing
 effective port, preserving winning local files and leaving external Git source and managed cache
 untouched. Command overrides do not participate. Explicit config sync transactionally removes
 legacy SSH assignments from its owned cache and adds local pins when removal would change a
-port. Prepared Git push or selected Git authoring separately removes them from the selected
-owner's source after consent, retaining empty tracked yard definitions, other owners and assets.
+port. `config sync push` can remove them from the selected owner's source after consent, retaining
+empty tracked yard definitions, other owners and assets. Run config sync separately when a
+Git scalar edit requires migration of local settings.
 Existing port collisions, permissions, ownership and stale-input checks still apply. Policies
 for other listeners remain with their declaring core or profile settings; listener classification
 alone does not make a setting portable.

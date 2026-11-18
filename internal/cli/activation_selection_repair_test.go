@@ -1109,7 +1109,7 @@ func TestActivationSelectionRepairCanDisableRemovedProfile(t *testing.T) {
 	root, home, path, environment := activationSelectionRepairFixture(t, map[string]string{
 		"config/retired-components.json": `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile","settings":["REMOVED_PORT"]}]}`,
 	})
-	testkit.WriteFile(t, path, []byte("ENVIRONMENT_PROFILES='removed-profile neighbor'\nREMOVED_PORT=${ENVIRONMENT_PROFILES:=removed-profile}\n"), 0600)
+	testkit.WriteFile(t, path, []byte("ENVIRONMENT_PROFILES='removed-profile neighbor'\nREMOVED_PORT=none\n"), 0600)
 	journalPath := filepath.Join(home, "release-transition/v2/journal.json")
 	before := mustReadConfigFixture(t, journalPath)
 	var stdout, stderr bytes.Buffer

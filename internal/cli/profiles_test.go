@@ -154,7 +154,6 @@ func TestScopedProfileEnableDisablePreservesNeighborsAndSkipsInit(t *testing.T) 
 		"export YARD_PROFILES='neighbor\n'\n",
 		"YARD_PROFILES='neighbor'\nENVIRONMENT_PROFILES='neighbor'\n",
 		"ENVIRONMENT_PROFILES='neighbor'\nYARD_PROFILES='neighbor'\n",
-		"YARD_PROFILES='neighbor'\n: ${ENVIRONMENT_PROFILES:=neighbor}\n",
 	} {
 		t.Run(selection, func(t *testing.T) {
 			cli, _, runtime, path, output := scopedProfileFixture(t, "# keep this comment\n"+selection+"SSH_PORT=2222\n")
@@ -217,7 +216,7 @@ func TestScopedProfileDisabledGuardRejectsEnableBeforeWrite(t *testing.T) {
 	}
 }
 
-func TestScopedProfileRejectsPreservedConditionalAliasBeforeApply(t *testing.T) {
+func TestScopedProfileRejectsExpansionsBeforeApply(t *testing.T) {
 	for _, test := range []struct {
 		initial, verb string
 	}{
@@ -229,7 +228,7 @@ func TestScopedProfileRejectsPreservedConditionalAliasBeforeApply(t *testing.T) 
 			initial := test.initial
 			cli, _, runtime, path, _ := scopedProfileFixture(t, initial)
 			runtime.installed = test.verb == "disable"
-			if _, err := prepareScopedProfile(t, cli, test.verb, "fixture"); err == nil || !strings.Contains(err.Error(), "preserved record") {
+			if _, err := prepareScopedProfile(t, cli, test.verb, "fixture"); err == nil || !strings.Contains(err.Error(), "only literal values") {
 				t.Fatalf("conditional alias accepted: %v", err)
 			}
 			content, err := os.ReadFile(path)
@@ -555,7 +554,7 @@ func TestScopedProfileRecordFailureRetainsSelectionAndRetryRecords(t *testing.T)
 func TestRemovedProfileStatusDisableAndStaleConsent(t *testing.T) {
 	for _, change := range []string{"none", "settings", "declaration"} {
 		t.Run(change, func(t *testing.T) {
-			cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='removed-profile neighbor'\nREMOVED_PORT=${ENVIRONMENT_PROFILES:=removed-profile}\n")
+			cli, _, runtime, path, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES='removed-profile neighbor'\nREMOVED_PORT=none\n")
 			declaration := filepath.Join(cli.options.RepositoryRoot, "config/retired-components.json")
 			writeCLIFile(t, declaration, `{"schema_version":1,"components":[{"kind":"profile","id":"removed-profile","settings":["REMOVED_PORT"]}]}`, 0644)
 			var err error

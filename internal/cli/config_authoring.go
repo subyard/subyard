@@ -240,10 +240,6 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 		return configUsage(err)
 	}
 	target, err := cli.configGitScalarsTarget(loaded, requests)
-	if errors.Is(err, config.ErrDynamicScalarRecord) {
-		// The cache can lag the source. Check its records in the Git draft.
-		return nil
-	}
 	if err != nil {
 		return fmt.Errorf("combined configuration: %w", err)
 	}
@@ -253,17 +249,12 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 	return domain.CollectRefusals(refusals...)
 }
 
-func configScalarEdits(catalog config.Catalog, requests []configAuthoringRequest) config.PersistentScalarEdits {
-	edits := make(config.PersistentScalarEdits, 0, len(requests))
+func configSetAssignments(requests []configAuthoringRequest) []config.PersistentAssignment {
+	assignments := make([]config.PersistentAssignment, 0, len(requests))
 	for _, request := range requests {
-		definition, _ := catalog.LookupSetting(request.name)
-		var value *string
-		if request.action == "set" {
-			value = &request.value
-		}
-		edits = append(edits, config.PersistentScalarEdit{Name: definition.Name, Value: value})
+		assignments = append(assignments, config.PersistentAssignment{Name: request.name, Value: request.value})
 	}
-	return edits
+	return assignments
 }
 
 // configGitScalarsTarget loads the selected yard with the assignments applied
@@ -286,15 +277,7 @@ func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAu
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return config.Loaded{}, err
 	}
-	environment := maps.Clone(cli.baseEnv)
-	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
-	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
-	environment["SUBYARD_HOME"] = paths.DataHome
-	delete(environment, "SUBYARD_YARD")
-	options := config.LoadOptions{Resources: cli.operationResourceRegistry, RepositoryRoot: cli.options.RepositoryRoot,
-		OperatorHome: paths.OperatorHome, YardName: yard, Environment: environment}
-	edits := configScalarEdits(loaded.Catalog, requests)
-	content, err = edits.LayerContent(path, content)
+	content, err = cli.catalog.EditPersistentAssignmentsContent(path, content, configSetAssignments(requests))
 	if err != nil {
 		return config.Loaded{}, err
 	}
@@ -313,9 +296,13 @@ func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAu
 	if err != nil {
 		return config.Loaded{}, err
 	}
-	options.FileOverrides = map[string]string{path: draft.Name()}
-	options.ScalarEdits = edits
-	return config.Load(options)
+	environment := maps.Clone(cli.baseEnv)
+	environment["SUBYARD_CONFIG_HOME"] = paths.ConfigHome
+	environment["SUBYARD_CONFIG_DIR"] = paths.ConfigDir
+	environment["SUBYARD_HOME"] = paths.DataHome
+	delete(environment, "SUBYARD_YARD")
+	return config.Load(config.LoadOptions{Resources: cli.operationResourceRegistry, RepositoryRoot: cli.options.RepositoryRoot,
+		OperatorHome: paths.OperatorHome, YardName: yard, Environment: environment, FileOverrides: map[string]string{path: draft.Name()}})
 }
 
 // configGitAuthoringMessage names the selected settings without their values.
@@ -425,10 +412,28 @@ func configScalarAuthoringPath(
 		if name == "" {
 			name = "default"
 		}
-		return filepath.Join(
-			loaded.Context.Paths.ConfigHome, "yards",
-			name, "config.env",
-		), nil
+		paths := loaded.Context.Paths
+		nested := filepath.Join(paths.ConfigHome, "yards", name, "config.env")
+		if name == "default" {
+			return nested, nil
+		}
+		flat := filepath.Join(paths.ConfigHome, "yards", name+".env")
+		registration, err := config.FindYardRegistrationFile(paths.ConfigDir, paths.ConfigHome, name)
+		if err != nil && !errors.Is(err, config.ErrUnknownYard) {
+			return "", err
+		}
+		switch registration {
+		case nested, flat:
+			return registration, nil
+		case "", filepath.Join(paths.ConfigHome, config.GitSettingsRelativePath, "yards", name, "config.env"):
+			// Preserve a flat file that lookup skipped because it is unsafe.
+			if _, err := os.Lstat(flat); !errors.Is(err, os.ErrNotExist) {
+				return flat, err
+			}
+			return nested, nil
+		default:
+			return "", configPublicRefusal("the yard uses a private registration outside the configuration root. Edit that registration directly")
+		}
 	default:
 		return "", errors.New("unsupported persistent scope")
 	}

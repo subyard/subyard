@@ -36,17 +36,18 @@ func (prepared *preparedCommand) prepareLocalConfigBatch(ctx context.Context, re
 	}
 
 	canonical := make([]configAuthoringRequest, len(requests))
+	edits := make([]config.PersistentAssignment, len(requests))
 	for index, assignment := range assignments {
+		edits[index] = assignment.PersistentAssignment
 		canonical[index] = requests[index]
 		canonical[index].name = assignment.Name
 	}
-	edits := configScalarEdits(loaded.Catalog, canonical)
-	content, err := edits.LayerContent(path, baseline.Content)
+	content, err := loaded.Catalog.EditPersistentAssignmentsContent(path, baseline.Content, edits)
 	if err != nil {
 		return configAuthoringFailure{home, err}
 	}
 	desired := config.PersistentFileSnapshot{Exists: true, Content: content}
-	prospective, err := cli.prepareConfigProspective(loaded, canonical[0], path, desired, edits...)
+	prospective, err := cli.prepareConfigProspective(loaded, canonical[0], path, desired)
 	if err != nil {
 		return err
 	}
