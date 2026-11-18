@@ -105,7 +105,7 @@ assert_credential_outputs_private() {
       fi
     done
   done < <(find "$TMP" -maxdepth 1 -type f -name "*.out" -print)
-  if find "$TMPDIR" -mindepth 1 -print -quit | grep -q .; then
+  if find "$TMPDIR" -mindepth 1 -print -quit | grep -a >/dev/null .; then
     fail "key operations left files in the private temp root"
   fi
 }

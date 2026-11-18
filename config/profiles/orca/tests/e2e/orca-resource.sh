@@ -482,7 +482,7 @@ visible=0
 window=''
 for _ in $(seq 1 300); do
   kill -0 "$app_pid" 2>/dev/null || exit 1
-  window="$(xdotool search --onlyvisible --class '^orca$' 2>/dev/null | head -n 1)" || true
+  window="$(xdotool search --onlyvisible --class '^orca$' 2>/dev/null | sed -n '1p')" || true
   if [ -n "$window" ]; then
     visible=1
     break

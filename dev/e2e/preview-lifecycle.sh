@@ -67,8 +67,8 @@ ensure_owner_incus() {
   local platform_root="$HOME/.cache/subyard-e2e-platform/incus"
   [ ! -L "$HOME/.cache" ] && [ ! -L "$HOME/.cache/subyard-e2e-platform" ] \
     && [ ! -L "$platform_root" ] || fail 'unsafe platform directory'
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     reexec_with_incus_group
   fi
   if ! /usr/bin/incus query '/1.0/instances?project=default' >/dev/null 2>&1 \
@@ -93,8 +93,8 @@ ensure_owner_incus() {
       bash "$ROOT/scripts/01-install-incus.sh" --yes
     )
   fi
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     reexec_with_incus_group
   fi
   # The installer uses the actual native session, without the sudo wrapper.
@@ -120,11 +120,11 @@ print_fixture_logs() {
     printf 'preview-lifecycle: %s\n' "${log##*/}" >&2
     tail -n 30 "$log" >&2
   done < <(find "$STATE" -maxdepth 1 -type f -name '*.log' -printf '%T@\t%p\n' \
-    | sort -nr | head -n 3 || true)
+    | sort -nr | sed -n '1,3p' || true)
 }
 yard() {
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' timeout --foreground 1800 "$YARD_BIN" "$@"
     sg incus-admin -c "exec $command"
@@ -615,7 +615,7 @@ chmod 0755 "$STATE/bin/code"
 export PREVIEW_TEST_STATE="$STATE"
 
 assert_no_listener() {
-  ! ss -Hltn 'sport = :8765' | grep -q . || fail 'unexpected preview listener remains'
+  ! ss -Hltn 'sport = :8765' | grep -a >/dev/null . || fail 'unexpected preview listener remains'
 }
 check_preview() {
   local name="$1" alias="$2" selector="${3:-$1}" command path preview_url code_pid bind_host
@@ -626,7 +626,7 @@ check_preview() {
   }
   ssh -G "$alias" > "$STATE/code.options" 2>/dev/null
   ! grep -q '^localforward ' "$STATE/code.options" || fail 'ordinary alias has a preview forward'
-  ssh -G "$alias.code" 2>/dev/null | grep -Fqx "hostname $alias.code" \
+  ssh -G "$alias.code" 2>/dev/null | grep -aFx >/dev/null "hostname $alias.code" \
     || fail 'retired code alias still resolves to the yard'
   ssh -T "$alias" -- sleep 120 > "$STATE/normal-ssh.log" 2>&1 & NORMAL_PID=$!
   sleep 0.2

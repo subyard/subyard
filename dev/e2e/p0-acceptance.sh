@@ -253,7 +253,7 @@ write_evidence() {
   chmod 0600 "$temp"
   mv -f "$temp" "$P0_EVIDENCE"
   while [ "$(find "$(dirname "$P0_EVIDENCE")" -maxdepth 1 -type f -name 'p0-*.json' | wc -l)" -gt 20 ]; do
-    oldest="$(find "$(dirname "$P0_EVIDENCE")" -maxdepth 1 -type f -name 'p0-*.json' -printf '%T@\t%p\n' | sort -n | head -n1 | cut -f2-)"
+    oldest="$(find "$(dirname "$P0_EVIDENCE")" -maxdepth 1 -type f -name 'p0-*.json' -printf '%T@\t%p\n' | sort -n | sed -n '1p' | cut -f2-)"
     [ -n "$oldest" ] || break
     find "${oldest%.json}.failure.log" -delete 2>/dev/null || true
     find "$oldest" -delete
@@ -1500,10 +1500,10 @@ if [ "$BROKER_RECOVERY_ONLY" = 1 ]; then
   exit 0
 fi
 
-vm1_ip="$(ssh -F "$CONFIG" -G e2e-vm-1 | awk '$1=="hostname" {print $2; exit}')"
+vm1_ip="$(ssh -F "$CONFIG" -G e2e-vm-1 | awk '!found && $1=="hostname" {print $2; found=1}')"
 vm2_ip=''
 if [ "$VM_COUNT" = 2 ]; then
-  vm2_ip="$(ssh -F "$CONFIG" -G e2e-vm-2 | awk '$1=="hostname" {print $2; exit}')"
+  vm2_ip="$(ssh -F "$CONFIG" -G e2e-vm-2 | awk '!found && $1=="hostname" {print $2; found=1}')"
 fi
 
 case "$P0_LANE" in

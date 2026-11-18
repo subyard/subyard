@@ -197,7 +197,7 @@ hold_lease() (
         .run == $run and .purpose == $purpose' \
       /run/subyard-e2e-lease.json >/dev/null
     guest 1 systemctl is-enabled --quiet subyard-e2e-lease-context.service
-    guest 1 ip route show default | grep -q .
+    guest 1 ip route show default | grep -a >/dev/null .
   fi
 
   umask 077
@@ -447,7 +447,7 @@ assert_untouched_slots "$exact_busy_state" exact-busy \
 grep -Eq "^E2E lease: yard=$A_YARD project=$A_PROJECT .* purpose=holder-a slot=$A_SLOT$" \
   "$STATE_PARENT/a.log" \
   || die 'primary holder did not print canonical project attribution'
-! grep '^E2E lease:' "$STATE_PARENT/a.log" | grep -Eq \
+! grep '^E2E lease:' "$STATE_PARENT/a.log" | grep -aE >/dev/null \
   '([0-9]{1,3}\.){3}[0-9]{1,3}|lease_id|capability|/tmp/|/home/' \
   || die 'assignment banner disclosed an endpoint, credential or private path'
 
@@ -483,7 +483,7 @@ if [ -n "$PEER_SLOT" ]; then
     || die 'concurrent holders changed unselected capacity'
   grep -Eq "^E2E lease: yard=$A_YARD project=$A_PROJECT .* purpose=holder-b slot=$PEER_SLOT$" \
     "$STATE_PARENT/b.log" || die 'peer holder did not print its attributed assignment'
-  ! grep '^E2E lease:' "$STATE_PARENT/b.log" | grep -Eq \
+  ! grep '^E2E lease:' "$STATE_PARENT/b.log" | grep -aE >/dev/null \
     '([0-9]{1,3}\.){3}[0-9]{1,3}|lease_id|capability|/tmp/|/home/' \
     || die 'peer assignment banner disclosed an endpoint, credential or private path'
   wait_for_guest_access b "$B_CONFIG" \

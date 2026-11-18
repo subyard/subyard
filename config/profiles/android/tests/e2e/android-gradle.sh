@@ -210,7 +210,7 @@ connected() {
       esac
       # Bound both runtime and bytes, including stderr and unavailable queries.
       { timeout --kill-after=2 5 "${command[@]}" 2>&1; printf '\ncapture_exit=%s\n' "$?"; } |
-        head -c 65536 | sed -E \
+        { head -c 65536 && cat >/dev/null; } | sed -E \
         -e 's/(token|credential|secret|password|authorization|api[_-]?key)[=: ][^[:space:]]+/[redacted]/Ig' \
         -e 's/\b[0-9a-fA-F]{64}\b/[redacted]/g' \
         -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[address]/g' \

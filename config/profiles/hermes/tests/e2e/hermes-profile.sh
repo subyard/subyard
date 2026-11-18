@@ -40,8 +40,8 @@ reexec_with_incus_group() {
 ensure_owner_incus() {
   local platform_root="$HOME/.cache/subyard-hermes-profile-platform"
   if command -v incus >/dev/null 2>&1 \
-    && ! id -nG | tr ' ' '\n' | grep -qx incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -qx incus-admin; then
+    && ! id -nG | tr ' ' '\n' | grep -ax >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
     reexec_with_incus_group
   fi
   if command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1; then
@@ -69,8 +69,8 @@ ensure_owner_incus() {
     prepare_test_incus_dispatcher "$ROOT" || exit
     bash "$ROOT/scripts/01-install-incus.sh" --yes --zabbly
   )
-  if ! id -nG | tr ' ' '\n' | grep -qx incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -qx incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -ax >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
     reexec_with_incus_group
   fi
   command -v incus >/dev/null 2>&1 && incus info >/dev/null 2>&1 \
@@ -80,7 +80,7 @@ ensure_owner_incus() {
 
 next_port() {
   local candidate="$1"
-  while ss -H -ltn "sport = :$candidate" 2>/dev/null | grep -q .; do
+  while ss -H -ltn "sport = :$candidate" 2>/dev/null | grep -a >/dev/null .; do
     candidate=$((candidate + 1))
   done
   printf '%s\n' "$candidate"
@@ -182,7 +182,7 @@ replacement_dashboard_port="$(next_port "$((dashboard_port + 1))")"
 # Keep the synthetic owner endpoint stable from initial release readiness onward.
 octet=$((20 + ($$ % 200)))
 candidate_tailscale_ip="100.127.254.$octet"
-if ip -4 address show | grep -Fq "$candidate_tailscale_ip/"; then
+if ip -4 address show | grep -aF >/dev/null "$candidate_tailscale_ip/"; then
   die "selected test Tailscale address already exists"
 fi
 sudo -n ip address add "$candidate_tailscale_ip/32" dev lo
@@ -198,7 +198,7 @@ export PATH="$STATE/fakebin:$PATH"
 
 printf '  [ .. ] creating a fresh isolated yard from the Hermes preset\n'
 definition="$SUBYARD_CONFIG_HOME/yards/$YARD/config.env"
-if ss -Hln 'sport = :2224' 2>/dev/null | grep -q .; then
+if ss -Hln 'sport = :2224' 2>/dev/null | grep -a >/dev/null .; then
   install -d -m 0700 "$(dirname "$definition")"
   install -m 0600 "$ROOT/config/profiles/hermes/yard.env" "$definition"
   yard "$YARD" config set SSH_PORT "$ssh_port" --scope yard --yes
@@ -243,7 +243,7 @@ test ! -S /run/host-services/ssh-auth.sock || fail "host SSH agent leaked into t
 if command -v sudo >/dev/null 2>&1 && sudo -n true; then
   fail "passwordless sudo enabled"
 fi
-if systemctl list-unit-files --no-legend 2>/dev/null | awk "{print \$1}" | grep -Eq "^subyard-hermes"; then
+if systemctl list-unit-files --no-legend 2>/dev/null | awk "{print \$1}" | grep -aE >/dev/null "^subyard-hermes"; then
   fail "Subyard-owned Hermes service installed"
 fi
 '
@@ -330,7 +330,7 @@ incus exec "$instance" --project "$project" -- \
   || die "controlled guest loopback fixture did not start"
 
 guest_ip="$(incus list "$instance" --project "$project" -f csv -c 4 \
-  | tr ',' '\n' | awk '/^[0-9]+\./ {print; exit}')"
+  | tr ',' '\n' | awk '!found && /^[0-9]+\./ {print; found=1}')"
 [ -n "$guest_ip" ] || die "Hermes yard has no L1 IPv4"
 if curl --noproxy '*' -fsS --connect-timeout 2 "http://$guest_ip:9119/" >/dev/null 2>&1; then
   die "guest loopback fixture is reachable through the L1 address"
@@ -370,7 +370,7 @@ grep -Fq 'connect: tcp:127.0.0.1:9119' <<<"$device_state" \
 grep -Fq 'bind: host' <<<"$device_state" \
   || die "browser proxy is not host-bound"
 curl --noproxy '*' -fsS --max-time 5 "http://$TAILSCALE_IP:$dashboard_port/" \
-  | grep -Fq 'Directory listing'
+  | grep -aF >/dev/null 'Directory listing'
 if curl --noproxy '*' -fsS --connect-timeout 2 "http://$guest_ip:9119/" >/dev/null 2>&1; then
   die "typed owner route made the fixture directly reachable over L1"
 fi
@@ -383,7 +383,7 @@ device_state="$(incus config device show "$instance" --project "$project")"
 grep -Fq "listen: tcp:$TAILSCALE_IP:$replacement_dashboard_port" <<<"$device_state" \
   || die "owned browser proxy was not replaced after its port setting changed"
 curl --noproxy '*' -fsS --max-time 5 \
-  "http://$TAILSCALE_IP:$replacement_dashboard_port/" | grep -Fq 'Directory listing'
+  "http://$TAILSCALE_IP:$replacement_dashboard_port/" | grep -aF >/dev/null 'Directory listing'
 if curl --noproxy '*' -fsS --connect-timeout 2 \
   "http://$TAILSCALE_IP:$dashboard_port/" >/dev/null 2>&1; then
   die "old owner endpoint survived route replacement"

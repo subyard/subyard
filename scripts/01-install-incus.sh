@@ -303,7 +303,7 @@ if ! getent group incus-admin >/dev/null 2>&1; then
   warn "group 'incus-admin' missing; creating it"
   groupadd --system incus-admin
 fi
-if id -nG "$OPERATOR_USER" 2>/dev/null | tr ' ' '\n' | grep -qx incus-admin; then
+if id -nG "$OPERATOR_USER" 2>/dev/null | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
   ok "$OPERATOR_USER already in incus-admin"
 else
   usermod -aG incus-admin "$OPERATOR_USER"

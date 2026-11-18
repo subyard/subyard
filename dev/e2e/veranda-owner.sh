@@ -78,8 +78,8 @@ export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 yard_in() {
   local selected_yard="$1" invocation
   shift
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     printf -v invocation '%q ' "$YARD_ENGINE" -Y "$selected_yard" "$@"
     sg incus-admin -c "exec $invocation"
   else
@@ -202,8 +202,8 @@ if [ "${SUBYARD_E2E_VERANDA_RELEASE_GUI_ONLY:-0}" = 1 ]; then
   fi
   printf -v gui_scenario '%q ' bash "$ROOT/dev/e2e/veranda-release-gui.sh" \
     "${gui_args[@]}"
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     sg incus-admin -c "exec $gui_scenario"
   else
     bash "$ROOT/dev/e2e/veranda-release-gui.sh" "${gui_args[@]}"
@@ -220,8 +220,8 @@ if [ "${SUBYARD_E2E_VERANDA_NATIVE_ONLY:-0}" = 1 ]; then
 else
   printf 'veranda-owner: framed RPC physical scenario\n'
   printf -v scenario '%q ' python3 "$ROOT/dev/e2e/veranda-owner.py" "$ROOT/.build/yard" "$YARD_NAME" "$PROFILE_NAME" "$STATE"
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     sg incus-admin -c "exec $scenario"
   else
     python3 "$ROOT/dev/e2e/veranda-owner.py" "$ROOT/.build/yard" "$YARD_NAME" "$PROFILE_NAME" "$STATE"
@@ -233,8 +233,8 @@ case "${SUBYARD_E2E_VERANDA_NATIVE:-0}" in
     [ -x "$ROOT/.build/veranda-native-test" ] || die 'native acceptance requires the staged candidate test binary'
     printf -v native_scenario '%q ' bash "$ROOT/dev/e2e/veranda-native.sh" \
       "$ROOT/.build/veranda-native-test" "$ROOT/.build/yard" "$YARD_NAME" "$STATE"
-    if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-      && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+      && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
       sg incus-admin -c "exec $native_scenario"
     else
       bash "$ROOT/dev/e2e/veranda-native.sh" "$ROOT/.build/veranda-native-test" \

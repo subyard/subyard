@@ -1085,7 +1085,7 @@ done
 nested_bridge_create_line="$(grep -nF 'incus network create "$OUTER_BRIDGE" ipv4.address=auto ipv6.address=none' \
   "$nested_teardown_script" | cut -d: -f1)"
 nested_yard_init_line="$(grep -nF 'yard init --yes' "$nested_teardown_script" \
-  | head -n 1 | cut -d: -f1)"
+  | sed -n '1p' | cut -d: -f1)"
 [ -n "$nested_bridge_create_line" ] && [ -n "$nested_yard_init_line" ] \
   && [ "$nested_bridge_create_line" -lt "$nested_yard_init_line" ] \
   && grep -A1 -F 'incus storage create "$OUTER_POOL" dir' "$nested_teardown_script" \

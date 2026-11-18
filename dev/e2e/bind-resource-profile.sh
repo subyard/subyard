@@ -34,8 +34,8 @@ yard() {
   local program="$ROOT/.build/yard"
   [ "$mode" != producer-reboot ] || program="$fixture_launcher"
   # First init can enroll this user, but cannot update its parent shell's groups.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     local command
     printf -v command '%q ' "$program" -Y "$YARD_NAME" "$@"
     sg incus-admin -c "exec $command"
@@ -245,7 +245,7 @@ yard init --yes
 [ "$(incus config get "$instance" limits.cpu --project "$project")" = 1 ] \
   && [ "$(incus config get "$instance" limits.memory --project "$project")" = 1GiB ] \
   || die 'stopped container limits did not converge'
-incus list "$instance" --project "$project" --format csv -c s | grep -Fxq STOPPED \
+incus list "$instance" --project "$project" --format csv -c s | grep -aFx >/dev/null STOPPED \
   || die 'resource limit reconciliation lost stopped power intent'
 yard start --yes
 assert_limits 1 1GiB

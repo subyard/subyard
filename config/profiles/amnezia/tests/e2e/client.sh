@@ -188,13 +188,13 @@ fail() {
     'NF == 3 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { printf "client_rx_bytes=%s client_tx_bytes=%s\n", $2, $3 }' >&2 || true
   exit 1
 }
-route() { ip -4 route get "$1" 2>/dev/null | grep -q ' dev awg0 '; }
+route() { ip -4 route get "$1" 2>/dev/null | grep -a >/dev/null ' dev awg0 '; }
 route 1.1.1.1 || fail 'public IPv4 does not route through awg0'
 route "$PROBE_OWNER_IP" || fail 'owner management IPv4 does not route through awg0'
 if [ -n "$PROBE_PRIVATE_IP" ]; then
   route "$PROBE_PRIVATE_IP" || fail 'private IPv4 does not route through awg0'
 fi
-ip -6 route show table all 2>/dev/null | grep -Eq '^default dev awg0( |$)' \
+ip -6 route show table all 2>/dev/null | grep -aE >/dev/null '^default dev awg0( |$)' \
   || fail 'IPv6 default route is not captured by awg0'
 # A server restart loses the current session; allow the retained peer to rekey.
 for attempt in $(seq 1 15); do
@@ -207,13 +207,13 @@ ping_avg_ms="$(printf '%s\n' "$ping_output" | awk -F= '/min\/avg\/max/ { split($
 grep -Eq '^[0-9]+([.][0-9]+)?$' <<<"$ping_avg_ms" || fail 'VPN ping average was unavailable'
 ping -n -M do -s 1200 -c 1 -W 3 "$PROBE_TUNNEL_IP" >/dev/null 2>&1 \
   || fail '1200-byte ICMP payload failed'
-handshake="$(awg show awg0 latest-handshakes | awk 'NF == 2 { if (++n > 1) exit 1; print $2 }')" \
+handshake="$(awg show awg0 latest-handshakes | awk 'NF == 2 && ++n == 1 { print $2 } END { if (n > 1) exit 1 }')" \
   || fail 'cannot read the single native peer handshake'
 case "$handshake" in ''|*[!0-9]*) fail 'peer handshake is missing' ;; esac
 age="$(( $(date +%s) - handshake ))"
 [ "$handshake" -gt 0 ] && [ "$age" -ge 0 ] && [ "$age" -le 180 ] \
   || fail 'peer handshake is stale'
-counts="$(awg show awg0 transfer | awk 'NF == 3 { if (++n > 1) exit 1; print $2, $3 } END { if (n != 1) exit 1 }')" \
+counts="$(awg show awg0 transfer | awk 'NF == 3 && ++n == 1 { print $2, $3 } END { if (n != 1) exit 1 }')" \
   || fail 'cannot read native peer counters'
 set -- $counts
 [ "$#" = 2 ] || fail 'cannot read native peer counters'
@@ -245,7 +245,7 @@ if curl -6 -k --noproxy '*' -sS --connect-timeout 3 --max-time 6 --output /dev/n
     'https://[2606:4700:4700::1111]/' >/dev/null 2>&1; then
   fail 'IPv6 escaped through the VPN'
 fi
-counts="$(awg show awg0 transfer | awk 'NF == 3 { if (++n > 1) exit 1; print $2, $3 } END { if (n != 1) exit 1 }')" \
+counts="$(awg show awg0 transfer | awk 'NF == 3 && ++n == 1 { print $2, $3 } END { if (n != 1) exit 1 }')" \
   || fail 'cannot read native peer counters after traffic'
 set -- $counts
 [ "$#" = 2 ] && [ "$1" -gt "$before_rx" ] && [ "$2" -gt "$before_tx" ] \

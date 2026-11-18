@@ -718,7 +718,7 @@ assert_down() {
 
 assert_guest_staging_clean() {
   if find "$ORCA_TEST_GUEST/tmp" -mindepth 1 -maxdepth 1 -type d \
-    -name 'subyard-orca.*' | grep -q .; then
+    -name 'subyard-orca.*' | grep -a >/dev/null .; then
     fail "$1 left a guest staging directory"
   fi
   [ -f "$ORCA_TEST_GUEST/tmp/unrelated" ] \
@@ -1080,7 +1080,7 @@ jq -e '.settled == true and any(.cleanup[]; .retention == "protected" and .atten
 ENVIRONMENT_PROFILES=orca run_orca status >"$TMP/status-refused.out"
 grep -Fq '[ .. ] checkouts registered: 0/0; protected project cleanup is retained' "$TMP/status-refused.out" \
   || { cat "$TMP/status-refused.out" >&2; fail "status did not report a settled pass with a protected refused record"; }
-grep -F 'Orca refused a session close; repository is retained' "$TMP/status-refused.out" | grep -Fq '[warn]' \
+grep -F 'Orca refused a session close; repository is retained' "$TMP/status-refused.out" | grep -aF >/dev/null '[warn]' \
   || fail 'status did not warn about a refused close'
 grep -Fq 'in Orca by hand' "$TMP/status-refused.out" || fail 'status omitted the manual-close action'
 rm -f "$TMP/project-report.json"
@@ -1956,7 +1956,7 @@ rm -rf "$fixed_check"
 # one list, so they cannot diverge.
 handler_source="$ROOT/config/profiles/orca/resources/orca/handler.sh"
 for user in observe_registration_contract refuse_unsafe_contract_links; do
-  sed -n "/^$user() {/,/^}/p" "$handler_source" | grep -Fq '"${ORCA_FIXED_PATHS[@]}"' \
+  sed -n "/^$user() {/,/^}/p" "$handler_source" | grep -aF >/dev/null '"${ORCA_FIXED_PATHS[@]}"' \
     || fail "$user does not read the shared fixed-path list"
 done
 grep -Fxq 'ORCA_REMOVE_UNIT_FILES=("${ORCA_FIXED_UNIT_FILES[@]}" "${ORCA_FIXED_UNIT_HELPERS[@]}")' "$handler_source" &&

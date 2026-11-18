@@ -222,4 +222,4 @@ bash "$PROFILE_DIR/pool-install.sh"
 
 skill_delivery apply
 
-echo "android provision OK: jdk=$("$JDK_HOME/bin/java" -version 2>&1 | head -1) sdk=$ANDROID_SDK_ROOT api=$ANDROID_API"
+echo "android provision OK: jdk=$("$JDK_HOME/bin/java" -version 2>&1 | sed -n '1p') sdk=$ANDROID_SDK_ROOT api=$ANDROID_API"

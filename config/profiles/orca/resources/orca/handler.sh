@@ -153,7 +153,7 @@ clear_mobile_request() {
 
 device_exists() {
   incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null |
-    grep -qx "$ORCA_DEVICE"
+    grep -ax >/dev/null "$ORCA_DEVICE"
 }
 
 device_value() {
@@ -274,9 +274,9 @@ resolve_owner_address() {
       awk '{print $1}' | sort -u
   )
   for candidate in "${tailscale_ips[@]}"; do
-    if printf '%s\n' "${resolved_ips[@]}" | grep -Fqx "$candidate" &&
+    if printf '%s\n' "${resolved_ips[@]}" | grep -aFx >/dev/null "$candidate" &&
       ip -4 -brief address show scope global |
-        awk '{sub(/\/.*/, "", $3); print $3}' | grep -Fqx "$candidate"; then
+        awk '{sub(/\/.*/, "", $3); print $3}' | grep -aFx >/dev/null "$candidate"; then
       ORCA_OWNER_IP="$candidate"
       count=$((count + 1))
     fi
@@ -289,7 +289,7 @@ resolve_owner_address() {
 orca_device_fingerprint() {
   local configuration
   configuration="$(incus config device show "$YARD_INSTANCE_NAME" "${PROJ[@]}" |
-    awk -v device="$ORCA_DEVICE" '$0 == device ":" {inside=1; print; next} inside && /^[^[:space:]]/ {exit} inside {print}')" \
+    awk -v device="$ORCA_DEVICE" '!done && $0 == device ":" {inside=1; print; next} inside && /^[^[:space:]]/ {inside=0; done=1} inside {print}')" \
     || die 'Orca native proxy metadata unavailable'
   [ -n "$configuration" ] || die 'Orca native proxy metadata unavailable'
   printf '%s\n' "$configuration" | sha256sum | awk '{print $1}'
@@ -298,7 +298,7 @@ orca_device_fingerprint() {
 orca_device_exact_shape() {
   local keys
   keys="$(incus config device show "$YARD_INSTANCE_NAME" "${PROJ[@]}" |
-    awk -v device="$ORCA_DEVICE" '$0 == device ":" {inside=1;next} inside && /^[^[:space:]]/ {exit}
+    awk -v device="$ORCA_DEVICE" '!done && $0 == device ":" {inside=1;next} inside && /^[^[:space:]]/ {inside=0; done=1}
       inside && /^  [A-Za-z0-9_.-]+:/ {key=$0;sub(/^  /,"",key);sub(/:.*/,"",key);print key}' | LC_ALL=C sort)"
   [ "$keys" = $'bind\nconnect\nlisten\ntype' ]
 }
@@ -314,7 +314,7 @@ refuse_port_collision() {
   route_matches && return 0
   if ss -Hltn "sport = :$ORCA_HOST_PORT" |
     awk '{print $4}' |
-    grep -Eq "^($ORCA_OWNER_IP|0\\.0\\.0\\.0|\\*):$ORCA_HOST_PORT$"; then
+    grep -aE >/dev/null "^($ORCA_OWNER_IP|0\\.0\\.0\\.0|\\*):$ORCA_HOST_PORT$"; then
     die "owner endpoint $ORCA_OWNER_IP:$ORCA_HOST_PORT is already in use"
   fi
 }
@@ -1750,7 +1750,7 @@ remove_route_state() {
 remove_receipt_matches() { # <marker>
   local show keys key value fields=""
   show="$(incus config device show "$YARD_INSTANCE_NAME" "${PROJ[@]}")" || return 2
-  keys="$(awk -v device="$ORCA_DEVICE" '$0 == device ":" {inside=1;next} inside && /^[^[:space:]]/ {exit}
+  keys="$(awk -v device="$ORCA_DEVICE" '!done && $0 == device ":" {inside=1;next} inside && /^[^[:space:]]/ {inside=0; done=1}
     inside && /^  [A-Za-z0-9_.-]+:/ {key=$0;sub(/^  /,"",key);sub(/:.*/,"",key);print key}' <<<"$show" | LC_ALL=C sort)"
   [ "$keys" = $'bind\nconnect\nlisten\ntype' ] || return 1
   for key in bind connect listen type; do

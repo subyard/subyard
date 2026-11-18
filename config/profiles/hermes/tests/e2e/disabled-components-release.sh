@@ -509,7 +509,7 @@ exercise_runtime_pending() {
       if systemctl is-active --quiet "$unit"; then echo "left $unit running" >&2; exit 1; fi
     done
     test -f /srv/agents/orca/state/runtime-pending-kept
-    dpkg-query -W -f="\${Status}" orca-ide | grep -q "install ok installed"
+    dpkg-query -W -f="\${Status}" orca-ide | grep -a >/dev/null "install ok installed"
   ' _ "$fault_dir" || die 'orca remove did not remove the Orca wiring while keeping its state and package'
   operator_yard -Y default orca remove --yes > "$STATE_ROOT/runtime-pending-remove-2.txt" 2>&1 \
     || { cat "$STATE_ROOT/runtime-pending-remove-2.txt"; die 'a repeated orca remove failed'; }

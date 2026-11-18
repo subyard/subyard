@@ -33,8 +33,8 @@ if [ "$YARD_BIN" = "$root/.build/yard" ]; then
 else
   refresh_operator_session() {
     # Product enrollment updates the account; this fixture shell can retain old groups.
-    if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-      && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+    if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+      && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
       local command
       printf -v command '%q ' "$root/config/profiles/amnezia/tests/e2e/owner.sh" "$@"
       exec sg incus-admin -c "exec $command"
@@ -161,7 +161,7 @@ signature() {
   # Compare both files only after they are readable; never hash partial state.
   state="$(guest timeout 100 sh -ceu '
     for attempt in $(seq 1 45); do
-      if docker container inspect --format "{{.State.Running}}" amnezia-awg2 2>/dev/null | grep -Fxq true \
+      if docker container inspect --format "{{.State.Running}}" amnezia-awg2 2>/dev/null | grep -aFx >/dev/null true \
         && server="$(docker exec amnezia-awg2 sha256sum /opt/amnezia/awg/awg0.conf 2>/dev/null)"; then
         sha256sum /srv/amnezia/admin.key
         printf "%s\n" "$server"
@@ -320,7 +320,7 @@ case "$phase" in
       yard init --yes
     fi
     incus list yard-vpn-e2e --project subyard-vpn-e2e --format csv -c s \
-      | grep -Fxq STOPPED || die 'profile init did not restore stopped power intent'
+      | grep -aFx >/dev/null STOPPED || die 'profile init did not restore stopped power intent'
     # The allocated owner has a private address; configure it through the product
     # while stopped, before the first start publishes the endpoint.
     route="$(ip -4 -j route get 1.1.1.1)"
@@ -469,11 +469,11 @@ PYPRIORITY
     if yard start --yes >"$diagnostic" 2>&1; then die 'VM startup bypassed the Incus CPU ceiling'; fi
     grep -Fq 'cpu.max' "$diagnostic" || die 'CPU ceiling refusal lost its primary diagnostic'
     incus list yard-vpn-e2e --project subyard-vpn-e2e --format csv -c s \
-      | grep -Fxq STOPPED || die 'rejected scheduling left the VM running'
+      | grep -aFx >/dev/null STOPPED || die 'rejected scheduling left the VM running'
     [ "$(incus config get yard-vpn-e2e user.subyard.desired_power --project subyard-vpn-e2e)" = stopped ] \
       || die 'rejected startup changed managed power intent'
     incus list yard-work-e2e --project subyard-work-e2e --format csv -c s \
-      | grep -Fxq RUNNING || die 'VM scheduling refusal stopped the ordinary yard'
+      | grep -aFx >/dev/null RUNNING || die 'VM scheduling refusal stopped the ordinary yard'
     sudo -n systemctl set-property --runtime incus.service CPUQuota=
     [ "$(systemctl show incus.service -p CPUQuotaPerSecUSec --value)" = infinity ] \
       || die 'Incus CPU ceiling was not restored'
@@ -490,7 +490,7 @@ PYPRIORITY
     [ "$(signature)" = "$before" ] || die 'shutdown changed VPN state'
     yard vpn status
     verify_disabled
-    guest docker inspect --format '{{.State.Running}}' amnezia-awg2 | grep -Fxq true || die 'network shutdown stopped the application-owned VPN'
+    guest docker inspect --format '{{.State.Running}}' amnezia-awg2 | grep -aFx >/dev/null true || die 'network shutdown stopped the application-owned VPN'
     ;;
   recovery-agent-loss)
     # The transient unit runs inside the nested VPN VM. It makes the next
@@ -699,7 +699,7 @@ PY
       kernel="$(uname -r)"
       rules="$(iptables -t raw -S PREROUTING)"
       present=0
-      if printf "%s\n" "$rules" | grep -q -- "--comment cve-2026-98432"; then present=1; fi
+      if printf "%s\n" "$rules" | grep -a >/dev/null -- "--comment cve-2026-98432"; then present=1; fi
       bare="$(printf "%s\n" "$rules" | grep -cFx -- "-A PREROUTING" || true)"
       admin_shell="$(getent passwd amnezia | cut -d: -f7)"
       if su -s /bin/sh amnezia -c "command -v iptables" >/dev/null 2>&1; then admin_path=1; else admin_path=0; fi

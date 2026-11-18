@@ -196,7 +196,7 @@ CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null
 jq -e '. == {"$comment":"Subyard Claude permission policy","env":{DISABLE_UPDATES:"1"}}' "$policy" >/dev/null \
   || fail 'off mode kept the Git ask rules or dropped the update lock'
 [ "$(stat -c '%a' "$policy")" = 644 ] || fail 'off mode policy mode drifted'
-"$check" | grep -Fq 'managed Git prompts off' || fail 'off mode readiness did not name the mode'
+"$check" | grep -aF >/dev/null 'managed Git prompts off' || fail 'off mode readiness did not name the mode'
 jq '.env = {DISABLE_UPDATES: "1"}' "$tmp/legacy-policy.json" > "$policy"
 if "$check" >/dev/null 2>&1; then fail 'off mode accepted the prompt policy'; fi
 if CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>&1; then fail 'invalid mode accepted'; fi
@@ -222,7 +222,7 @@ printf 'keep\n' > "$dev_home/data/unknown"
 versions_before="$(sha256sum "$dev_home/data/claude/versions/2.0.1" "$dev_home/data/unknown")"
 count="$(wc -l < "$tmp/fetch.log")"
 run_shadow_hook >/dev/null
-"$check" | grep -Fq 'Conflict:' && fail 'absent shadow reported a conflict'
+"$check" | grep -aF >/dev/null 'Conflict:' && fail 'absent shadow reported a conflict'
 ln -s "$dev_home/data/claude/versions/2.0.1" "$shadow"
 if "$check" >"$tmp/shadow.out" 2>&1; then fail 'native shadow passed readiness'; fi
 grep -Fq 'run yard init' "$tmp/shadow.out" || fail 'native shadow readiness lacks its repair'

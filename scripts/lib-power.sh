@@ -35,7 +35,7 @@ incus_instance_columns() { # <project> <instance> <columns> [timeout]
   else
     rows="$(incus list "$2" --project "$1" -f csv -c "n$3" 2>/dev/null)" || return
   fi
-  printf '%s\n' "$rows" | awk -v prefix="$2," 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }'
+  printf '%s\n' "$rows" | awk -v prefix="$2," '!found && index($0, prefix) == 1 { print substr($0, length(prefix) + 1); found=1 }'
 }
 
 power_state() { incus_instance_columns "$1" "$2" s; } # <project> <instance>

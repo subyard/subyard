@@ -148,7 +148,7 @@ RUNNER_FAIL_NATIVE=27 run_fixture native-failure || rc=$?
 summary="$(summary_path native-failure)"
 awk -F '\t' '$1 == "check" && $3 == "build" && $4 == "failed" && $5 == 2 { found=1 }
   END { exit !found }' "$summary" || fail 'native bootstrap failure missing from summary'
-tail -n 1 "$summary" | grep -q $'^run\tall\tall\tfailed\t2\t' || fail 'native bootstrap run reported incorrectly'
+tail -n 1 "$summary" | grep -a >/dev/null $'^run\tall\tall\tfailed\t2\t' || fail 'native bootstrap run reported incorrectly'
 grep -q 'fixture native bootstrap failed' "$tmp/native-failure.out" || fail 'native bootstrap failure detail was suppressed'
 ! grep -Fxq 'RUN go-race' "$tmp/native-failure.out" || fail 'runner tested Go after native bootstrap failure'
 
@@ -170,7 +170,7 @@ grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/umask-failure.out" \
   && grep -Fq 'fixture_test.go:1: expected failure detail' "$tmp/umask-failure.out" \
   || fail 'early Go failure was hidden by trailing package output'
 ! grep -q '^0077 ' "$tmp/umask-failure.go" || fail 'umask matrix continued after failure'
-! sed -n '/RUN go-race/,$p' "$tmp/umask-failure.out" | grep -Fxq 'RUN build' || fail 'runner built the engine after a failed Go run'
+! sed -n '/RUN go-race/,$p' "$tmp/umask-failure.out" | grep -aFx >/dev/null 'RUN build' || fail 'runner built the engine after a failed Go run'
 
 rc=0
 RUNNER_FAIL_UMASK=0002 run_fixture focused-failure || rc=$?
@@ -178,7 +178,7 @@ RUNNER_FAIL_UMASK=0002 run_fixture focused-failure || rc=$?
 [ "$(wc -l < "$tmp/focused-failure.go")" -eq 2 ] || fail 'focused failure did not stop before umask 0077'
 grep -Fq -- '--- FAIL: TestEarlyFailure' "$tmp/focused-failure.out" \
   || fail 'focused Go failure detail was suppressed'
-! sed -n '/RUN go-race/,$p' "$tmp/focused-failure.out" | grep -Fxq 'RUN build' || fail 'runner built the engine after a focused Go failure'
+! sed -n '/RUN go-race/,$p' "$tmp/focused-failure.out" | grep -aFx >/dev/null 'RUN build' || fail 'runner built the engine after a focused Go failure'
 
 rc=0
 RUNNER_MISSING_TEST=TestProjectStoreConformance run_fixture missing-selection || rc=$?
@@ -200,7 +200,7 @@ run_fixture failure || rc=$?
 summary="$(summary_path failure)"
 awk -F '\t' '$1 == "check" && $3 == "tests/unit.sh" && $4 == "failed" && $5 == 23 { found=1 }
   END { exit !found }' "$summary" || fail 'failed test missing from summary'
-tail -n 1 "$summary" | grep -q $'^run\tall\tall\tfailed\t23\t' || fail 'failed run reported incorrectly'
+tail -n 1 "$summary" | grep -a >/dev/null $'^run\tall\tall\tfailed\t23\t' || fail 'failed run reported incorrectly'
 grep -q 'expected failure detail' "$tmp/failure.out" || fail 'failure detail was suppressed'
 ! grep -q 'RUN tests/contract.sh' "$tmp/failure.out" || fail 'runner continued after failure'
 

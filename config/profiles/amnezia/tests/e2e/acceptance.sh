@@ -48,7 +48,7 @@ diagnose_failure() {
     ulimit -f 128
     timeout --signal=TERM --kill-after=2 110 ssh -F "$CLIENT_CONFIG" -T e2e-vm-1 -- "$command" \
       <"$ROOT/config/profiles/amnezia/tests/e2e/failure-capture.py" 2>"$OUTPUT/capture-transport.log"
-  ) | head -c 3145728 >"$OUTPUT/failure.tar"
+  ) | { head -c 3145728 && cat >/dev/null; } >"$OUTPUT/failure.tar"
   codes=("${PIPESTATUS[@]}")
   printf 'transport_exit_code=%s\narchive_pipe_exit_code=%s\nduration_seconds=%s\narchive_bytes=%s\n' \
     "${codes[0]}" "${codes[1]}" "$((SECONDS - started))" "$(stat -c %s "$OUTPUT/failure.tar")" >"$OUTPUT/capture-result"
@@ -66,7 +66,7 @@ capture_native_failure() {
   install -m 0600 /dev/null "$OUTPUT/native-failure.tar"
   command="$(quote_ssh_command sh -c 'cd /var/tmp/subyard-amnezia-native-app/failure 2>/dev/null || exit 0; exec tar -cf - -- *')" || return 0
   timeout --signal=TERM --kill-after=2 20 ssh -F "$CLIENT_CONFIG" -T e2e-vm-2 -- "$command" \
-    </dev/null 2>/dev/null | head -c 3145728 >"$OUTPUT/native-failure.tar"
+    </dev/null 2>/dev/null | { head -c 3145728 && cat >/dev/null; } >"$OUTPUT/native-failure.tar"
   codes=("${PIPESTATUS[@]}")
   printf 'native_failure_transport_exit_code=%s\nnative_failure_archive_bytes=%s\n' \
     "${codes[0]}" "$(stat -c %s "$OUTPUT/native-failure.tar")" >>"$OUTPUT/capture-result"
@@ -318,13 +318,13 @@ owner_boot_evidence() {
     journalctl -b -o short-monotonic --no-pager -u ssh.service -u ssh.socket \
       -u subyard-power-reconcile.service -u systemd-networkd.service -u networking.service \
       -u incus.service -u incus.socket -u cloud-init.service -u cloud-final.service | tail -n 150
-    systemctl list-jobs --no-pager | head -n 30
+    systemctl list-jobs --no-pager | sed -n "1,30p"
   ')" || return 0
   printf 'amnezia_acceptance_stage=owner-boot-evidence\n' >&2
   for attempt in 1 2 3; do
     timeout --foreground --signal=KILL 30 ssh -F "$CLIENT_CONFIG" -T \
       -o ConnectTimeout=5 -o ConnectionAttempts=1 e2e-vm-1 -- "$command" </dev/null 2>&1 \
-      | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/IPV4/g; s/^/amnezia_owner_boot: /' | head -c 65536 >&2 && return 0
+      | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/IPV4/g; s/^/amnezia_owner_boot: /' | { head -c 65536 && cat >/dev/null; } >&2 && return 0
     printf 'amnezia_owner_boot_evidence_attempt=%s failed\n' "$attempt" >&2
     sleep 5
   done

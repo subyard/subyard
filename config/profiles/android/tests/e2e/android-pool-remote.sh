@@ -58,8 +58,8 @@ export STORAGE_PATH="$HOME/.cache/subyard-e2e-platform/incus/incus/storage"
 export SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 owner() {
   local command
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     printf -v command '%q ' "$YARD_BIN" -Y "$yard_name" "$@"
     timeout --foreground 45 sg incus-admin -c "exec $command"
   else
@@ -219,7 +219,7 @@ PY
 chmod 0700 "$work/owner-command"
 
 port=$((40000 + ($$ % 10000)))
-while ss -Hln "sport = :$port" 2>/dev/null | grep -q .; do port=$((port + 1)); done
+while ss -Hln "sport = :$port" 2>/dev/null | grep -a >/dev/null .; do port=$((port + 1)); done
 cat > "$work/sshd_config" <<CONFIG
 Port $port
 ListenAddress 127.0.0.1
@@ -268,7 +268,7 @@ if [ -n "$viewer_tools" ]; then
 fi
 for _ in $(seq 1 50); do
   kill -0 "$sshd_job" 2>/dev/null || fail 'temporary sshd exited'
-  if ss -Hln "sport = :$port" | grep -q .; then break; fi
+  if ss -Hln "sport = :$port" | grep -a >/dev/null .; then break; fi
   sleep 0.1
 done
 

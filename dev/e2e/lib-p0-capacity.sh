@@ -43,7 +43,7 @@ p0_capacity_prepare_root() {
       || p0_capacity_die "state root is not a plain directory: $P0_CAPACITY_STATE_ROOT" || return
     if [ -e "$marker" ]; then
       p0_capacity_assert_root_marker || return
-    elif find "$P0_CAPACITY_STATE_ROOT" -mindepth 1 -print -quit | grep -q .; then
+    elif find "$P0_CAPACITY_STATE_ROOT" -mindepth 1 -print -quit | grep -a >/dev/null .; then
       p0_capacity_die "refusing non-empty unmarked state root $P0_CAPACITY_STATE_ROOT"
       return
     fi
@@ -65,7 +65,7 @@ p0_capacity_prepare_platform_root() {
     if [ -e "$marker" ]; then
       [ "$(cat "$marker" 2>/dev/null)" = subyard-e2e-platform-v1 ] \
         || p0_capacity_die "refusing unmarked platform root $P0_CAPACITY_PLATFORM_ROOT" || return
-    elif find "$P0_CAPACITY_PLATFORM_ROOT" -mindepth 1 -print -quit | grep -q .; then
+    elif find "$P0_CAPACITY_PLATFORM_ROOT" -mindepth 1 -print -quit | grep -a >/dev/null .; then
       p0_capacity_die "refusing non-empty unmarked platform root $P0_CAPACITY_PLATFORM_ROOT"
       return
     fi
@@ -295,7 +295,7 @@ p0_capacity_delete_tree() {
   p0_capacity_assert_tree_marker "$path" "$marker" || return
   owner="$(id -u)"
   local -a privilege=()
-  if find "$path" -xdev ! -user "$owner" -print -quit 2>/dev/null | grep -q .; then
+  if find "$path" -xdev ! -user "$owner" -print -quit 2>/dev/null | grep -a >/dev/null .; then
     privilege=(sudo -n)
   fi
   if [ ! -e "$receipt" ]; then

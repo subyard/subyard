@@ -73,7 +73,7 @@ facts() {
       || printf '%s nested: %s\n' "$module" "$(cat "/sys/module/$module/parameters/nested")"
   done
   systemctl is-active docker || true
-  sudo -n iptables -S FORWARD 2>&1 | head -5 || true
+  sudo -n iptables -S FORWARD 2>&1 | sed -n '1,5p' || true
   command -v incus lxc lxd 2>/dev/null || true
   stat -c '%a %U %n' "$HOME" || true
 }
@@ -132,7 +132,7 @@ drop_docker() {
   sudo -n ip link delete docker0 2>/dev/null || true
   sudo -n iptables -P FORWARD ACCEPT
   sudo -n iptables -F DOCKER-USER 2>/dev/null || true
-  sudo -n iptables -S FORWARD | head -5
+  sudo -n iptables -S FORWARD | sed -n '1,5p'
 }
 
 install_candidate() {

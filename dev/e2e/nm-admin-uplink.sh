@@ -125,7 +125,7 @@ effective_unmanaged() {
 }
 device_state() { nmcli -t -f DEVICE,STATE device | awk -F: -v d="$1" '$1 == d { print $2 }'; }
 managedness() { nmcli -t -f DEVICE,STATE device | awk -F: '{ print $1 ":" ($2 == "unmanaged" ? "unmanaged" : "managed") }' | sort; }
-address_of() { ip -4 -o addr show dev "$1" scope global 2>/dev/null | awk '{print $4; exit}'; }
+address_of() { ip -4 -o addr show dev "$1" scope global 2>/dev/null | awk 'NR == 1 {print $4}'; }
 settle() { sleep "${1:-8}"; }
 nm_reloads_since() { sudo -n journalctl -u NetworkManager --since "@$1" --no-pager -q 2>/dev/null | grep -Eci 'config: (signal|update)|reload' || true; }
 load_uplink() { # shellcheck disable=SC1091
@@ -135,7 +135,7 @@ watchdog_start() {
   cat > "$STATE/watchdog.sh" <<WATCHDOG
 #!/bin/bash
 while :; do
-  if [ "\$(ip -4 -o addr show dev $UP scope global | awk '{print \$4; exit}')" != "$UP_ADDRESS" ]; then
+  if [ "\$(ip -4 -o addr show dev $UP scope global | awk 'NR == 1 {print \$4}')" != "$UP_ADDRESS" ]; then
     printf '%s address changed\n' "\$(date -Is)" >> "$STATE/watchdog.log"
     ip addr add "$UP_ADDRESS" dev "$UP" 2>/dev/null
     ip route replace default via "$UP_GATEWAY" dev "$UP"
@@ -151,7 +151,7 @@ watchdog_clean() { [ ! -s "$STATE/watchdog.log" ] || die "watchdog restored the 
 uplink_admins() { # <label>: unmanaged and addressed, no NetworkManager profile active on it
   [ "$(device_state "$UP")" = unmanaged ] || die "$1: NetworkManager manages the uplink $UP ($(device_state "$UP"))"
   [ -n "$(address_of "$UP")" ] || die "$1: the uplink $UP has no IPv4 address"
-  ip -4 route show default | grep -q " dev $UP" || die "$1: the default route left $UP"
+  ip -4 route show default | grep -a >/dev/null " dev $UP" || die "$1: the default route left $UP"
 }
 yard_devices_unmanaged() { # <label>
   local device state checked=0
@@ -220,9 +220,9 @@ CANDIDATE_VERSION="$(jq -er '.version' "$ROOT/.subyard-acceptance/candidate.json
 case "$MODE" in
 prepare)
   install -d -m 0700 "$STATE" "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME" "$SUBYARD_HOME"
-  UP="$(ip -4 route show default | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
-  UP_GATEWAY="$(ip -4 route show default | awk '{print $3; exit}')"
-  UP_ADDRESS="$(ip -4 -o addr show dev "$UP" scope global | awk '{print $4; exit}')"
+  UP="$(ip -4 route show default | awk '!found {for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); found=1; break }}')"
+  UP_GATEWAY="$(ip -4 route show default | awk 'NR == 1 {print $3}')"
+  UP_ADDRESS="$(ip -4 -o addr show dev "$UP" scope global | awk 'NR == 1 {print $4}')"
   [ -n "$UP" ] && [ -n "$UP_ADDRESS" ] && [ -n "$UP_GATEWAY" ] || die 'cannot identify the VM uplink'
   printf 'UP=%q\nUP_ADDRESS=%q\nUP_GATEWAY=%q\n' "$UP" "$UP_ADDRESS" "$UP_GATEWAY" > "$STATE/uplink.env"
   # Docker- and libvirt-style bridges that persist across reboots, owned by networkd.
@@ -340,7 +340,7 @@ prepare)
     "$ROOT/config/release-transition.json" > "$STATE/candidate-registry.json"
   jq -S . "$installed_registry" > "$STATE/installed-registry.json"
   cmp -s "$STATE/candidate-registry.json" "$STATE/installed-registry.json" \
-    || die "the registries differ beyond the device guard boundary: $(diff "$STATE/installed-registry.json" "$STATE/candidate-registry.json" | head -20)"
+    || die "the registries differ beyond the device guard boundary: $(diff "$STATE/installed-registry.json" "$STATE/candidate-registry.json" | sed -n '1,20p')"
   jq -e '.currentEpochs["power-metadata"] == 4 and ([.migrations[] | select(.id == "introduce-nm-device-guard-v4" and .fromEpoch == 3 and .toEpoch == 4)] | length == 1)' \
     "$ROOT/config/release-transition.json" >/dev/null || die 'the candidate registry lacks the device guard boundary'
   [ "$(owner "$launcher" version)" = "yard $CANDIDATE_VERSION" ] || die 'the refused rollback changed the active release'
@@ -393,7 +393,7 @@ resume)
   owner "$launcher" status >"$STATE/status-after.log" 2>&1 || true
   ! grep -Fq 'Reminder: reboot the host once' "$STATE/status-after.log" || die 'yard status still asks for a reboot'
   uplink_admins 'after the reboot'
-  ! nmcli -t -f NAME,DEVICE connection show --active | grep -q ":$UP$" || die 'an NetworkManager profile is active on the uplink'
+  ! nmcli -t -f NAME,DEVICE connection show --active | grep -a >/dev/null ":$UP$" || die 'an NetworkManager profile is active on the uplink'
   [ "$(effective_unmanaged)" = "interface-name:$UP,interface-name:docker*" ] || die "effective unmanaged-devices is not exactly the administrator's: $(effective_unmanaged)"
   for bridge in docker0 virbr0; do
     [ -n "$(address_of "$bridge")" ] || die "$bridge lost its address after the reboot"
@@ -402,10 +402,10 @@ resume)
   pass 'after the reboot the uplink is the administrator'"'"'s and docker0/virbr0 keep their addresses'
 
   for _ in $(seq 1 60); do
-    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -q ",RUNNING$" && break
+    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -a >/dev/null ",RUNNING$" && break
     sleep 3
   done
-  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -q ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
+  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -a >/dev/null ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
   yard_devices_unmanaged 'yard restored at boot'
   [ "$(device_state dum0)" = connected ] || die 'the reboot lost dum0'
   pass 'the boot reconciler restored the running yard with its veth unmanaged'
@@ -470,9 +470,9 @@ final)
 
 fresh-prepare)
   install -d -m 0700 "$STATE" "$SUBYARD_OPERATOR_HOME" "$SUBYARD_CONFIG_HOME" "$SUBYARD_HOME"
-  UP="$(ip -4 route show default | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
-  UP_GATEWAY="$(ip -4 route show default | awk '{print $3; exit}')"
-  UP_ADDRESS="$(ip -4 -o addr show dev "$UP" scope global | awk '{print $4; exit}')"
+  UP="$(ip -4 route show default | awk '!found {for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); found=1; break }}')"
+  UP_GATEWAY="$(ip -4 route show default | awk 'NR == 1 {print $3}')"
+  UP_ADDRESS="$(ip -4 -o addr show dev "$UP" scope global | awk 'NR == 1 {print $4}')"
   printf 'UP=%q\nUP_ADDRESS=%q\nUP_GATEWAY=%q\n' "$UP" "$UP_ADDRESS" "$UP_GATEWAY" > "$STATE/uplink.env"
   # The fixture platform runs before NetworkManager exists, so it writes no guard.
   bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
@@ -604,10 +604,10 @@ fresh-final)
   load_uplink
   launcher="$STATE/bin/yard"
   for _ in $(seq 1 60); do
-    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -q ",RUNNING$" && break
+    sudo -n /usr/bin/incus list --all-projects -f csv -c ns 2>/dev/null | grep -a >/dev/null ",RUNNING$" && break
     sleep 3
   done
-  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -q ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
+  sudo -n /usr/bin/incus list --all-projects -f csv -c ns | grep -a >/dev/null ",RUNNING$" || die 'the boot reconciler did not restore the running yard'
   settle
   yard_devices_unmanaged 'yard restored at boot'
   uplink_admins 'after the final reboot'

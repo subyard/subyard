@@ -46,8 +46,8 @@ for command in git go incus jq python3 sg ssh ssh-keygen ssh-keyscan sudo timeou
 done
 [ -x /usr/sbin/sshd ] || die '/usr/sbin/sshd is required'
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
   printf -v reexec 'exec bash %q' "$ROOT/config/profiles/orca/tests/e2e/orca-projects.sh"
   exec sg incus-admin -c "$reexec"
 fi
@@ -66,8 +66,8 @@ incus() {
 yard_engine() {
   local command
   # Init refreshes its child session; this fixture can retain the old groups.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     printf -v command '%q ' "$YARD_BIN" "$@"
     sg incus-admin -c "exec $command"
   else
@@ -238,7 +238,7 @@ rpc.call("terminal.createAgentSession", {
 YARD
   for _ in $(seq 1 30); do
     after="$(worktree_tabs "$worktree")" || die 'Orca session tab read failed after the agent session'
-    comm -13 <(sort <<<"$before") <(sort <<<"$after") | head -n1 | grep . && return 0
+    comm -13 <(sort <<<"$before") <(sort <<<"$after") | sed -n '1p' | grep . && return 0
     sleep 1
   done
   die 'agent session tab did not appear'
@@ -582,7 +582,7 @@ for mode in ordinary hook sync periodic legacy; do
     yard orca restart --yes >/dev/null
     # Restart starts the discovery timer again; keep this stage's passes explicit.
     pause_discovery
-    worktree_tabs "${removal_selector#id:}" | grep -Fxq "$removal_saved_tab" \
+    worktree_tabs "${removal_selector#id:}" | grep -aFx >/dev/null "$removal_saved_tab" \
       || die 'saved removed-project tab did not survive the Orca restart'
     removal_agent_tab="$(agent_session_tab "${removal_selector#id:}")"
   fi
@@ -733,7 +733,7 @@ grep -Fq 'cleanup is retained' "$STATE/protected-sync.out" "$STATE/protected-syn
   || { show_output "$STATE/protected-sync.out" "$STATE/protected-sync.err"
        die 'strict sync omitted the retained cleanup message'; }
 [ "$(repo_id "$protected_root")" = "$protected_id" ] || die 'a protected record was removed'
-worktree_tabs "$protected_id::$protected_root" | grep -Fxq "$protected_tab" || die 'a protected tab was closed'
+worktree_tabs "$protected_id::$protected_root" | grep -aFx >/dev/null "$protected_tab" || die 'a protected tab was closed'
 guest_dev rmdir "/srv/workspaces/$protected_name"
 yard orca sync --yes >/dev/null || die 'sync did not clean up once the address was empty'
 assert_absent_repo "$protected_root"

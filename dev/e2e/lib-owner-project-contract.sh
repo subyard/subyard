@@ -131,7 +131,7 @@ owner_project_contract() {
   "${project_yard[@]}" shell P0Project-3 --yes -- sh -c 'printf "mutated\n" >> result.txt'
   "${project_yard[@]}" shell P0Project-4 --yes -- grep -Fxq second result.txt
   "${project_yard[@]}" export P0Project-3 --yes >/dev/null
-  patch="$(grep -RIl -- 'mutated' "${SUBYARD_HOME:-$HOME/.subyard}/exports" | head -n1)"
+  patch="$(grep -RIl -- 'mutated' "${SUBYARD_HOME:-$HOME/.subyard}/exports" | sed -n '1p')"
   [ -n "$patch" ] || die 'project export did not contain the guest change'
   "${project_yard[@]}" remove P0Project-3 --yes >/dev/null
   "${project_yard[@]}" shell P0Project-4 --yes -- grep -Fxq second result.txt

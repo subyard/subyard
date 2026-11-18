@@ -140,7 +140,7 @@ PY_PROCESSES
   operator_env git -C "$state/host/control-project" status --porcelain >/dev/null
   operator_env grep -Fxq '# foreign shell content' "$state/shell.rc" || fail 'foreign shell content removed'
   ! operator_env grep -Fq '# Subyard CLI' "$state/shell.rc" || fail 'managed shell blocks remain'
-  operator_env env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -c '. "$1"; command -v foreign-control' _ "$state/shell.rc" | grep -Fxq "$state/bin/foreign-control"
+  operator_env env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin bash -c '. "$1"; command -v foreign-control' _ "$state/shell.rc" | grep -aFx >/dev/null "$state/bin/foreign-control"
   operator_env grep -Fq "Host $foreign" "$home/.ssh/config" || fail 'foreign SSH content removed'
   ! operator_env grep -Eq '^Include subyard(-[^ ]+)?\.config$' "$home/.ssh/config" || fail 'managed SSH Includes remain'
   if [ -f "$state/legacy-result.log" ]; then

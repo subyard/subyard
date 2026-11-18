@@ -11,7 +11,7 @@ done
 fail() { printf 'ssh-unknown-host: %s\n' "$*" >&2; exit 1; }
 free_port() {
   local port=$((36000 + RANDOM % 12000))
-  while ss -Hln "sport = :$port" 2>/dev/null | grep -q .; do port=$((port + 1)); done
+  while ss -Hln "sport = :$port" 2>/dev/null | grep -a >/dev/null .; do port=$((port + 1)); done
   printf '%s\n' "$port"
 }
 
@@ -69,7 +69,7 @@ if [ -z "${SUBYARD_SSH_TRUST_RESUME:-}" ]; then
       [ -f "$PLATFORM_MARKER" ] && [ ! -L "$PLATFORM_MARKER" ] \
         && [ "$(cat "$PLATFORM_MARKER")" = subyard-e2e-platform-v1 ] \
         || fail 'unexpected shared E2E platform marker'
-    elif find "$PLATFORM_ROOT" -mindepth 1 -print -quit | grep -q .; then
+    elif find "$PLATFORM_ROOT" -mindepth 1 -print -quit | grep -a >/dev/null .; then
       fail 'refusing a non-empty unmarked shared platform root'
     fi
   else
@@ -102,8 +102,8 @@ EOF
 fi
 # init can install Incus and enroll dev, but cannot change its parent shell's
 # groups. Resume the same fixture with the membership needed by owner SSH too.
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin; then
-  id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin \
+if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
+  id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
     || fail 'product initialization did not grant Incus access'
   printf -v resume_command 'exec env SUBYARD_SSH_TRUST_RESUME=%q bash %q' \
     "$STATE" "$ROOT/tests/real-host/ssh-unknown-host.sh"

@@ -102,7 +102,7 @@ subyard_state_remove_canonical() {
 incus_preflight() {
   command -v incus >/dev/null 2>&1 || die "incus not found — run 'yard init' first"
   incus info >/dev/null 2>&1 && return 0
-  if id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -qx incus-admin; then
+  if id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -ax >/dev/null incus-admin; then
     warn "can't reach the Incus daemon: this session predates your 'incus-admin' group (the yard is fine)."
     printf "  Log out and back in once to fix it everywhere, or run %snewgrp incus-admin%s for this shell.\n" \
       "$C_HEAD" "$C_OFF" >&2
@@ -256,7 +256,7 @@ nm_guard_bridges_in() { # <conf>: bridges a current-format guard lists
   ' "$1" | LC_ALL=C sort -u
 }
 
-nm_device_is_veth() { ip -d -o link show dev "$1" 2>/dev/null | grep -Eq ' veth( |@|$)'; }
+nm_device_is_veth() { ip -d -o link show dev "$1" 2>/dev/null | grep -aE >/dev/null ' veth( |@|$)'; }
 
 nm_device_is_own() { # <device> <newline-separated bridges>
   grep -Fxq -- "$1" <<< "$2" && return 0
@@ -868,18 +868,18 @@ incus_instance_primary_ipv4() {
   while remaining=$((deadline - SECONDS)); [ "$remaining" -gt 0 ]; do
     [ "$remaining" -le 5 ] || remaining=5
     if output="$(timeout --foreground "$remaining" incus exec "$instance" --project "$project" -- sh -eu -c '
-      interface="$(ip -4 route show default | awk "NR == 1 { for (i=1; i<=NF; i++) if (\$i == \"dev\") { print \$(i+1); exit } }")"
+      interface="$(ip -4 route show default | awk "NR == 1 { for (i=1; i<=NF; i++) if (\$i == \"dev\") { print \$(i+1); break } }")"
       printf "route %s\n" "${interface:-none}"
       [ -z "$interface" ] || ip -4 -o address show dev "$interface" scope global
     ' 2>/dev/null)"; then
-      address="$(printf '%s\n' "$output" | awk '$1 == "route" { next } { split($4, value, "/"); print value[1]; exit }')"
+      address="$(printf '%s\n' "$output" | awk '$1 == "route" { next } !found { split($4, value, "/"); print value[1]; found=1 }')"
       if [ -n "$address" ] && [ "$SECONDS" -le "$deadline" ]; then
         printf '%s\n' "$address"
         return 0
       fi
-      case "$(printf '%s\n' "$output" | awk '$1 == "route" { print $2; exit }')" in
+      case "$(printf '%s\n' "$output" | awk '!found && $1 == "route" { print $2; found=1 }')" in
         '' | none) observed='no default IPv4 route' ;;
-        *) observed="default route on $(printf '%s\n' "$output" | awk '$1 == "route" { print $2; exit }') without a global IPv4 address" ;;
+        *) observed="default route on $(printf '%s\n' "$output" | awk '!found && $1 == "route" { print $2; found=1 }') without a global IPv4 address" ;;
       esac
       [ -z "$address" ] || observed='the guest answered after the deadline'
     else

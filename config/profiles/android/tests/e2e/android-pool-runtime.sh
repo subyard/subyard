@@ -88,7 +88,7 @@ cleanup() {
     { timeout --kill-after=2 5 "${incus_binary[@]}" --project "$project" exec "$instance" -- \
         journalctl --no-pager -q -n 512 -o cat -u 'subyard-android-slot-*' 2>&1
       printf '\ncapture_exit=%s\n' "$?"; } |
-      head -c 65536 | sed -E \
+      { head -c 65536 && cat >/dev/null; } | sed -E \
       -e 's/(token|credential|secret|password|authorization|api[_-]?key)[=: ][^[:space:]]+/[redacted]/Ig' \
       -e 's/\b[0-9a-fA-F]{64}\b/[redacted]/g' \
       -e 's/([0-9]{1,3}\.){3}[0-9]{1,3}/[address]/g' \
@@ -201,7 +201,7 @@ android_candidate_command "$YARD_BIN" migrate --check --json | jq -e '.outcome.s
 printf 'android candidate release-preflight=PASS\n'
 mkdir -p "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME"
 ssh_port=$((30000 + ($$ % 10000)))
-while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -q .; do ssh_port=$((ssh_port + 1)); done
+while ss -H -ltn "sport = :$ssh_port" 2>/dev/null | grep -a >/dev/null .; do ssh_port=$((ssh_port + 1)); done
 cat > "$SUBYARD_CONFIG_HOME/yards/$YARD_NAME/config.env" <<EOF
 ENVIRONMENT_PROFILES=android
 CODING_TOOL_INTEGRATIONS=

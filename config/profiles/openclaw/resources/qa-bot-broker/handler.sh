@@ -274,7 +274,7 @@ while IFS= read -r line; do
   if [ -z "$note" ]; then
     note="$kind:$(printf '%s' "$line" | jq -cS '.payload' | sha256sum | cut -c1-12)"
   fi
-  if printf '%s\n' "$existing" | grep -qxF "$note"; then skipped=$((skipped+1)); continue; fi
+  if printf '%s\n' "$existing" | grep -axF >/dev/null "$note"; then skipped=$((skipped+1)); continue; fi
   body="$(printf '%s' "$line" | jq -c --arg n "$note" '{kind:.kind, actorId:"yard-qa-pool", note:$n, payload:.payload}')"
   resp="$(curl -sS --max-time 25 -X POST "$base/admin/add" \
     -H "authorization: Bearer $maint" -H 'content-type: application/json' -d "$body")"

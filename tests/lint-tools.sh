@@ -23,8 +23,9 @@ class LintTools(unittest.TestCase):
         self.root = Path(temporary.name)
         self.root.chmod(0o700)
         (self.root / "dev").mkdir(mode=0o700)
-        for name in ("lint.sh", "audit-go.sh", "check-govulncheck.py"):
+        for name in ("lint.sh", "lint-shell-pipelines.py", "audit-go.sh", "check-govulncheck.py"):
             shutil.copy2(source / "dev" / name, self.root / "dev" / name)
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
 
     def messages(self, *findings):
         config = {"config": {"protocol_version": "v1.0.0", "scan_mode": "source", "scan_level": "symbol"}}
@@ -64,6 +65,20 @@ class LintTools(unittest.TestCase):
                 self.assertEqual(result.stderr.splitlines(), [
                     f"dev/{name}: failed (exit {code})" for name, code in zip(names, exits) if code
                 ])
+
+    def test_shell_lint_rejects_early_consumers(self):
+        consumers = ["grep -q x", "grep -Eq x", "grep -Fq x", "grep -m1 x", "head -1",
+                     "head; echo done", "\n grep --quiet x"]
+        pipe = "|"
+        lines = [f"producer {pipe} {consumer}" for consumer in consumers]
+        lines += [f"producer {pipe} grep -aF x >/dev/null", "grep -Fq x file"]
+        lines += [f"producer {pipe} {{ head -c 8 && cat >/dev/null; }}"]
+        self.write("probe.sh", "\n".join(["set -o pipefail", *lines, ""]))
+        result = subprocess.run(["python3", "dev/lint-shell-pipelines.py"], cwd=self.root,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual([line.partition(": ")[0] for line in result.stderr.splitlines()],
+                         [f"probe.sh:{line}" for line in range(2, 2 + len(consumers))])
 
     def audit(self, payload, exit_code, entries=()):
         report = self.root / "payload"

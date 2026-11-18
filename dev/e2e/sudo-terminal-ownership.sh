@@ -254,7 +254,7 @@ if ! incus storage show default --project default >/dev/null 2>&1; then
 fi
 if incus storage show "$E2E_POOL" --project default >/dev/null 2>&1; then
   [ "$(incus storage show "$E2E_POOL" --project default \
-    | awk '$1 == "driver:" { print $2; exit }')" = dir ] \
+    | awk '!found && $1 == "driver:" { print $2; found=1 }')" = dir ] \
     && [ "$(incus storage get "$E2E_POOL" user.subyard.owner --project default)" = \
       sudo-terminal-e2e-v1 ] \
     || die "refusing unexpected existing storage pool $E2E_POOL"
@@ -294,7 +294,7 @@ real_config="$fixture_home/.config/subyard"
 install -d -m 0700 -o "$FIXTURE_USER" -g "$FIXTURE_USER" \
   "$fixture_home/.config" "$real_config" "$real_config/yards"
 real_ssh_port=$((30000 + ($$ % 20000)))
-while ss -H -ltn "sport = :$real_ssh_port" 2>/dev/null | grep -q .; do
+while ss -H -ltn "sport = :$real_ssh_port" 2>/dev/null | grep -a >/dev/null .; do
   real_ssh_port=$((real_ssh_port + 1))
 done
 install -d -m 0700 "$real_config/yards/$real_yard" "$real_config/yards/sudo-e2e-sentinel"

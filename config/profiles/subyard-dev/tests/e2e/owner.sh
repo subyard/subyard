@@ -14,8 +14,8 @@ for command in go incus jq sg sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
-if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-  && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+  && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
   printf -v reexec 'exec bash %q' "$ROOT/config/profiles/subyard-dev/tests/e2e/owner.sh"
   exec sg incus-admin -c "$reexec"
 fi
@@ -30,8 +30,8 @@ incus() {
 yard() {
   local engine="${CANDIDATE_ENGINE:-$ROOT/.build/yard}" command
   # Init refreshes its child session; the fixture's parent keeps the old groups.
-  if ! id -nG | tr ' ' '\n' | grep -Fxq incus-admin \
-    && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq incus-admin; then
+  if ! id -nG | tr ' ' '\n' | grep -aFx >/dev/null incus-admin \
+    && id -nG "$(id -un)" | tr ' ' '\n' | grep -aFx >/dev/null incus-admin; then
     printf -v command '%q ' "$engine" -Y "$YARD_NAME" "$@"
     sg incus-admin -c "exec $command"
   else

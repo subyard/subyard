@@ -101,7 +101,7 @@ docker_forwarding_converge() {
   local config_changed="${1:?docker_forwarding_converge needs config state}"
   [ "$config_changed" != 1 ] || systemctl restart docker
   command -v iptables >/dev/null 2>&1 \
-    && iptables -S FORWARD | grep -qx -- '-P FORWARD DROP' \
+    && iptables -S FORWARD | grep -ax >/dev/null -- '-P FORWARD DROP' \
     && iptables -P FORWARD ACCEPT
   return 0
 }
@@ -267,14 +267,14 @@ bash "$SCRIPT_DIR/refresh-installed-guest-runtime.sh" --yes
 
 # --- 4. fix /dev/kvm device GID to the in-yard 'kvm' group --------------------
 echo "KVM gid:"
-if incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -qx kvm; then
+if incus config device list "$YARD_INSTANCE_NAME" "${PROJ[@]}" 2>/dev/null | grep -ax >/dev/null kvm; then
   KVM_GID="$(incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" -- getent group kvm | cut -d: -f3)"
   if [ -n "${KVM_GID:-}" ]; then
     # Nested hosts reject the gid property on unix-char devices — degrade with a warn
     # (KVM stays root-owned in the yard; the emulator then needs sudo/acl there).
     if err="$(incus config device set "$YARD_INSTANCE_NAME" kvm gid "$KVM_GID" "${PROJ[@]}" 2>&1)"; then
       ok "set kvm device gid=$KVM_GID (matches in-yard 'kvm' group)"
-    elif printf '%s' "$err" | grep -q "nested container"; then
+    elif printf '%s' "$err" | grep -a >/dev/null "nested container"; then
       warn "nested host: kvm device gid not settable — /dev/kvm stays root-owned in the yard"
     else
       printf '%s\n' "$err" >&2

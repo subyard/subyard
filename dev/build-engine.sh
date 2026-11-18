@@ -22,7 +22,7 @@ engine_stale() {
   [ "$("$OUTPUT" --version 2>/dev/null)" = "$(basename "$OUTPUT") $VERSION" ] || return 0
   [ "$REPO/go.mod" -nt "$OUTPUT" ] || [ "$REPO/go.sum" -nt "$OUTPUT" ] || \
     find "$REPO/cmd" "$REPO/internal" -type f -name '*.go' ! -name '*_test.go' \
-      -newer "$OUTPUT" -print -quit | grep -q .
+      -newer "$OUTPUT" -print -quit | grep -a >/dev/null .
 }
 
 engine_stale || exit 0
