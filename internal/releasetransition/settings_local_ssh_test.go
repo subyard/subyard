@@ -84,7 +84,7 @@ func TestLocalSSHMigrationPinsAllPersistentYardsAndResumesCAS(t *testing.T) {
 				t.Fatalf("converge: %#v %v", outcome, err)
 			}
 			for yard, port := range map[string]int{"default": 2240, "named": 2241, "override": 2242} {
-				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: yard, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: yard, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
 				if err != nil || loaded.Context.SSHPort != port {
 					t.Fatalf("yard %s port changed: %v", yard, err)
 				}
@@ -543,7 +543,7 @@ func TestLocalSSHMigrationPinsDefaultYardWhereTheLoaderReadsIt(t *testing.T) {
 			}
 			// Without the Git value only the local pin can keep the port.
 			testkit.WriteFile(t, filepath.Join(configHome, ".sync/settings/config.env"), nil, 0o600)
-			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "default", DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "default", Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
 			if err != nil || loaded.Context.SSHPort != 2240 {
 				t.Fatalf("default yard port = %d after Git cleanup, want the pinned 2240: %v", loaded.Context.SSHPort, err)
 			}

@@ -145,7 +145,7 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		known := loaded.Context.YardName == "default"
 		if !known {
 			if _, rootErr := os.Stat(options.ConfigHome); !errors.Is(rootErr, os.ErrNotExist) {
-				_, registrationErr := config.FindYardRegistrationFile(filepath.Join(options.RepositoryRoot, "config"), options.ConfigHome, loaded.Context.YardName)
+				_, registrationErr := config.FindYardRegistrationFile(options.ConfigHome, loaded.Context.YardName)
 				known = registrationErr == nil
 				if registrationErr != nil && !errors.Is(registrationErr, config.ErrUnknownYard) {
 					cleanup()
@@ -155,7 +155,7 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		}
 		if known {
 			live, loadErr = config.Load(config.LoadOptions{Catalog: &loaded.Catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
-				YardName: loaded.Context.YardName, ConfigLocked: options.ConfigLocked, DisablePrivate: true,
+				YardName: loaded.Context.YardName, ConfigLocked: options.ConfigLocked,
 				Environment: candidateEnvironment(options.Environment, options.ConfigHome, loaded.Catalog)})
 		} else {
 			loadErr = config.ErrUnknownYard

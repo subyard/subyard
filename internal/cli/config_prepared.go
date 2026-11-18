@@ -206,7 +206,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	prepared.closeResource = func() error { prospective.close(); return nil }
 	changed := !sameConfigAuthoringSnapshot(baseline, desired)
 	if changed {
-		protected, err := readConfigPersistentSnapshot(configScalarAuthoringRoot(loaded, path), path)
+		protected, err := readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
 		if err != nil {
 			return err
 		}
@@ -220,7 +220,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		}
 	}
 	return prepared.attachLocalConfigScalars(ctx, []configAuthoringRequest{request}, prospective, baseline, desired, func(guard func() error) error {
-		return config.WriteLocalScalarFileIfUnchanged(loaded.Context.Paths.ConfigHome, configScalarAuthoringRoot(loaded, path), path, baseline, candidate, guard)
+		return config.WriteLocalScalarFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, candidate, guard)
 	})
 }
 
@@ -228,7 +228,7 @@ func (prepared *preparedCommand) attachLocalConfigScalars(ctx context.Context, r
 	cli, loaded := prepared.CLI, prepared.Loaded
 	request := requests[0]
 	action, path := request.action, prospective.path
-	storageRoot := configScalarAuthoringRoot(loaded, path)
+	storageRoot := loaded.Context.Paths.ConfigHome
 	changed := !sameConfigAuthoringSnapshot(baseline, desired)
 	names := make([]string, 0, len(requests))
 	for _, request := range requests {

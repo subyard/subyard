@@ -34,7 +34,7 @@ func TestYardResetSuppressesFallbackAndKeepsNewLocalSettings(t *testing.T) {
 			write(filepath.Join(configHome, "config.env"), "SSH_PORT=2223\n")
 			asset := filepath.Join(git, "yards", name, "overrides", "agents", "codex", "rules", "repo.rules")
 			write(asset, "old yard rule\n")
-			options := LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: name, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, "data")}}
+			options := LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: name, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, "data")}}
 			before, err := Load(options)
 			if err != nil {
 				t.Fatal(err)
@@ -54,7 +54,7 @@ func TestYardResetSuppressesFallbackAndKeepsNewLocalSettings(t *testing.T) {
 				if _, err := Load(options); !errors.Is(err, ErrUnknownYard) {
 					t.Fatalf("reset fallback registered yard: %v", err)
 				}
-				names, err := YardNames(filepath.Join(home, "shipped"), configHome)
+				names, err := YardNames(configHome)
 				if err != nil || !reflect.DeepEqual(names, []string{"default"}) {
 					t.Fatalf("reset inventory: %v %v", names, err)
 				}
@@ -80,33 +80,32 @@ func TestYardResetSuppressesFallbackAndKeepsNewLocalSettings(t *testing.T) {
 	}
 }
 
-func TestYardResetKeepsLegacySourceAndAllowsLocalShadow(t *testing.T) {
+func TestYardResetKeepsGitSourceAndAllowsFlatRegistration(t *testing.T) {
 	root := testkit.TempDir(t)
 	configHome := filepath.Join(root, "local")
-	configDir := filepath.Join(root, "config")
-	private := filepath.Join(root, "private", "yards", "named.env")
-	if err := os.MkdirAll(filepath.Dir(private), 0700); err != nil {
+	git := filepath.Join(configHome, GitSettingsRelativePath, "yards", "named", "config.env")
+	if err := os.MkdirAll(filepath.Dir(git), 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, private, []byte("SSH_PORT=3333\n"), 0600)
+	testkit.WriteFile(t, git, []byte("SSH_PORT=3333\n"), 0600)
 	noOp := func() error { return nil }
 	if err := ResetYardConfiguration(configHome, "named", noOp, noOp, noOp); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := FindYardRegistrationFile(configDir, configHome, "named"); !errors.Is(err, ErrUnknownYard) {
-		t.Fatalf("legacy source reactivated: %v", err)
+	if _, err := FindYardRegistrationFile(configHome, "named"); !errors.Is(err, ErrUnknownYard) {
+		t.Fatalf("Git source reactivated: %v", err)
 	}
 	flat := filepath.Join(configHome, "yards", "named.env")
 	if err := os.MkdirAll(filepath.Dir(flat), 0700); err != nil {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, flat, []byte("SSH_PORT=4444\n"), 0600)
-	path, err := FindYardRegistrationFile(configDir, configHome, "named")
+	path, err := FindYardRegistrationFile(configHome, "named")
 	if err != nil || path != flat {
 		t.Fatalf("new flat registration: %s %v", path, err)
 	}
-	if _, err := os.Stat(private); err != nil {
-		t.Fatal("legacy source removed")
+	if _, err := os.Stat(git); err != nil {
+		t.Fatal("Git source removed")
 	}
 }
 

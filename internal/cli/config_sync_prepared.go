@@ -402,7 +402,7 @@ func (prepared *preparedCommand) prepareConfigPush(ctx context.Context, request 
 				return adapter.plan, err
 			}
 			if err := copyCLI.configGitRun(ctx, native.checkout, "push", "--porcelain", "--", native.remote, adapter.plan.SourceCommit+":refs/heads/"+native.remoteBranch); err != nil {
-				return adapter.plan, fmt.Errorf("push failed without force: %w; local checkout remains ahead and can be retried", err)
+				return adapter.plan, fmt.Errorf("push failed without force: %w; local checkout remains ahead and can be retried with %s config sync push", err, copyCLI.options.Program)
 			}
 		}
 		execution.consumersApplied = true

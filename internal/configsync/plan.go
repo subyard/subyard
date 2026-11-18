@@ -333,11 +333,6 @@ func validateCandidate(
 	catalog config.Catalog,
 	capture ...*[]config.Loaded,
 ) error {
-	configDir := options.Environment["SUBYARD_CONFIG_DIR"]
-	if configDir == "" {
-		configDir = filepath.Join(options.RepositoryRoot, "config")
-	}
-	_, hostErr := config.LocalHostSettingsFile(configDir, options.ConfigHome)
 	excluded, err := legacyLocalExclusions(options.ConfigHome, previous)
 	if err != nil {
 		return err
@@ -374,7 +369,7 @@ func validateCandidate(
 		return err
 	}
 	yardNames, err := candidateYardNames(options.ConfigHome, source, previous)
-	if err := domain.CollectRefusals(hostErr, err); err != nil {
+	if err != nil {
 		return err
 	}
 	localYards := map[string]string{}
@@ -415,7 +410,7 @@ func validateCandidate(
 			continue
 		}
 		sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
-		if _, err := config.Load(config.LoadOptions{Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome, YardName: name, Environment: environment, DisablePrivate: true, ConfigLocked: options.ConfigLocked, LayerPaths: sourceLayers, FileOverrides: options.validationOverrides, SyncSource: true}); err != nil {
+		if _, err := config.Load(config.LoadOptions{Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome, YardName: name, Environment: environment, ConfigLocked: options.ConfigLocked, LayerPaths: sourceLayers, FileOverrides: options.validationOverrides, SyncSource: true}); err != nil {
 			return fmt.Errorf("yard %s retained source: %w", name, err)
 		}
 	}
@@ -423,7 +418,7 @@ func validateCandidate(
 	load := func(name string) error {
 		loaded, err := config.Load(config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
-			YardName: name, Environment: environment, DisablePrivate: true,
+			YardName: name, Environment: environment,
 			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides,
 		})
 		if err != nil {

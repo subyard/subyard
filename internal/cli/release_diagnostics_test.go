@@ -215,7 +215,7 @@ func TestMaterializedPendingListingNamesEveryYard(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "second", "config.env"), "SSH_PORT=2299\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "alpha", "config.env"), "SSH_PORT=2298\n")
-	expected, err := config.YardNames(filepath.Join(root, "config"), configHome)
+	expected, err := config.YardNames(configHome)
 	if err != nil {
 		t.Fatal(err)
 	}

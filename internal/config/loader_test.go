@@ -42,7 +42,6 @@ func TestLoadNamedContext(t *testing.T) {
 		RepositoryRoot: root,
 		OperatorHome:   operatorHome,
 		YardName:       "named",
-		DisablePrivate: true,
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME": operatorHome,
 			"SUBYARD_CONFIG_HOME":   configHome,
@@ -92,7 +91,6 @@ func TestLoadRejectsBroadDataHome(t *testing.T) {
 	_, err := Load(LoadOptions{
 		RepositoryRoot: filepath.Clean(filepath.Join("..", "..")),
 		OperatorHome:   operatorHome,
-		DisablePrivate: true,
 		Environment: map[string]string{
 			"HOME":                  operatorHome,
 			"SUBYARD_OPERATOR_HOME": operatorHome,
@@ -138,7 +136,6 @@ func TestLoadExactYardSettingsFile(t *testing.T) {
 		OperatorHome:     operatorHome,
 		YardName:         "custom-name",
 		YardSettingsFile: preset,
-		DisablePrivate:   true,
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME": operatorHome,
 			"SUBYARD_CONFIG_HOME":   configHome,
@@ -220,7 +217,6 @@ func TestLoadHostSettingsAndMigratedPrivateAssets(t *testing.T) {
 		RepositoryRoot: root,
 		OperatorHome:   operatorHome,
 		YardName:       "named",
-		DisablePrivate: true,
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME": operatorHome,
 		},
@@ -267,7 +263,7 @@ func TestGitApprovalDefaultAndExplicitPromptScopes(t *testing.T) {
 			home := t.TempDir()
 			configHome := filepath.Join(home, ".config", "subyard")
 			options := LoadOptions{
-				RepositoryRoot: root, OperatorHome: home, YardName: "named", DisablePrivate: true,
+				RepositoryRoot: root, OperatorHome: home, YardName: "named",
 				Environment: map[string]string{"HOME": home, "SUBYARD_CONFIG_HOME": configHome},
 			}
 			yardConfig := filepath.Join(configHome, "yards", "named", "config.env")
@@ -319,7 +315,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 		"SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard"),
 	}
 	defaultLoaded, err := Load(LoadOptions{
-		RepositoryRoot: root, OperatorHome: home, Environment: base, DisablePrivate: true,
+		RepositoryRoot: root, OperatorHome: home, Environment: base,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -331,7 +327,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	defaultAsset := filepath.Join(configHome, "yards", "default", "overrides", "agents", "codex", "rules", "repo.rules")
 	writeFixture(t, defaultAsset, "default yard rules\n")
 	defaultLoaded, err = Load(LoadOptions{
-		RepositoryRoot: root, OperatorHome: home, Environment: base, DisablePrivate: true,
+		RepositoryRoot: root, OperatorHome: home, Environment: base,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -342,7 +338,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	assertEffectiveSetting(t, defaultLoaded.Settings["AGENT_codex_RULES"], defaultAsset, "yard", "file settings", defaultAsset)
 	namedLoaded, err := Load(LoadOptions{
 		RepositoryRoot: root, OperatorHome: home, YardName: "named",
-		Environment: base, DisablePrivate: true,
+		Environment: base,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -358,7 +354,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	withEnvironment["SECRET_TOKEN"] = "must-not-be-traced"
 	environmentLoaded, err := Load(LoadOptions{
 		RepositoryRoot: root, OperatorHome: home, YardName: "named",
-		Environment: withEnvironment, DisablePrivate: true,
+		Environment: withEnvironment,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -502,7 +498,7 @@ func TestPersistentSettingsValidationFailsClosed(t *testing.T) {
 			configHome := filepath.Join(home, ".config", "subyard")
 			writeFixture(t, filepath.Join(configHome, test.relative), test.content)
 			_, err := Load(LoadOptions{
-				RepositoryRoot: root, OperatorHome: home, DisablePrivate: true,
+				RepositoryRoot: root, OperatorHome: home,
 				Environment: map[string]string{
 					"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome,
 					"SUBYARD_HOME": filepath.Join(home, ".subyard"),
@@ -522,7 +518,7 @@ func TestProductionLoaderRejectsPendingConfigurationTransaction(t *testing.T) {
 	configHome := filepath.Join(home, ".config", "subyard")
 	writeFixture(t, filepath.Join(configHome, ".sync", "transaction.json"), "{}\n")
 	options := LoadOptions{
-		RepositoryRoot: root, OperatorHome: home, DisablePrivate: true,
+		RepositoryRoot: root, OperatorHome: home,
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome,
 			"SUBYARD_HOME": filepath.Join(home, ".subyard"),
@@ -725,7 +721,7 @@ func TestLoadIgnoresRetiredCodexReleasePins(t *testing.T) {
 			writeFixture(t, yardFile, yardContent)
 			loaded, err := Load(LoadOptions{
 				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: operatorHome,
-				YardName: yard, DisablePrivate: true,
+				YardName: yard,
 				Environment: map[string]string{
 					"SUBYARD_CONFIG_HOME": configHome,
 					"CODEX_VERSION":       "not-a-version", "CODEX_SHA256_AMD64": "not-a-checksum", "CODEX_SHA256_ARM64": "",
@@ -850,7 +846,7 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 	writeFixture(t, filepath.Join(configHome, "yards", "named.env"), "SSH_PORT=3333\n")
 
 	loaded, err := Load(LoadOptions{
-		RepositoryRoot: root, OperatorHome: operatorHome, YardName: "named", DisablePrivate: true,
+		RepositoryRoot: root, OperatorHome: operatorHome, YardName: "named",
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_CONFIG_HOME": configHome,
 			"SUBYARD_ENGINE_CONTEXT": "1", "YARD_INSTANCE_NAME": "yard", "INCUS_PROJECT": "subyard",

@@ -221,7 +221,6 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 		defaultLoaded.Context.Paths.ConfigDir, "..", "private", "yards", "private.env",
 	), "SSH_PORT=5555\n")
 	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
-	privateLoaded := loadConfigCommandContext(t, root, environment, "private")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.YardInstanceName: {
 			Name: defaultLoaded.Context.YardInstanceName, Project: defaultLoaded.Context.IncusProject,
@@ -231,14 +230,9 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 			Name: namedLoaded.Context.YardInstanceName, Project: namedLoaded.Context.IncusProject,
 			Status: "Running",
 		},
-		privateLoaded.Context.IncusProject + "/" + privateLoaded.Context.YardInstanceName: {
-			Name: privateLoaded.Context.YardInstanceName, Project: privateLoaded.Context.IncusProject,
-			Status: "Running",
-		},
 	}}
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
-	appendHashSteps(t, fake, privateLoaded)
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
@@ -255,7 +249,7 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "yard default materialized-config: converged") ||
 		!strings.Contains(stdout.String(), "yard named materialized-config: converged") ||
-		!strings.Contains(stdout.String(), "yard private materialized-config: converged") ||
+		strings.Contains(stdout.String(), "yard private materialized-config:") ||
 		strings.Contains(stdout.String(), "yard remote materialized-config:") {
 		t.Fatalf("all-local selection is wrong:\n%s", stdout.String())
 	}
@@ -263,10 +257,8 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	fake.ExecSteps = nil
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
-	appendHashSteps(t, fake, privateLoaded)
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
-	appendHashSteps(t, fake, privateLoaded)
 	applier := &recordingConfigApplier{}
 	stdout.Reset()
 	stderr.Reset()
@@ -3281,16 +3273,51 @@ func TestConfigReadsRefuseExpansionsInUserLayers(t *testing.T) {
 	}
 }
 
+func TestConfigHostAuthoringCollectsIndependentSourceRefusals(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	host := filepath.Join(home, "config.env")
+	neighbor := filepath.Join(home, "yards/neighbor/config.env")
+	const hostContent = "GIT_USER_EMAIL=$INVALID_HOST_REFERENCE\nDEV_SUDO=invalid\n"
+	const yardContent = "GIT_USER_NAME=$INVALID_YARD_REFERENCE\n"
+	writeConfigCommandFile(t, host, hostContent)
+	writeConfigCommandFile(t, neighbor, yardContent)
+	for _, invocation := range []struct {
+		args []string
+		code int
+		want []string
+	}{
+		{[]string{"config", "validate"}, 1, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO"}},
+		{[]string{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "yards/neighbor/config.env:1: GIT_USER_NAME"}},
+	} {
+		var output bytes.Buffer
+		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: invocation.args, Stdout: &output, Stderr: &output})
+		if code != invocation.code {
+			t.Fatalf("%v: exit=%d %s", invocation.args, code, &output)
+		}
+		for _, want := range invocation.want {
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("%v: missing %q in %s", invocation.args, want, &output)
+			}
+		}
+	}
+	if string(mustReadConfigFixture(t, host)) != hostContent || string(mustReadConfigFixture(t, neighbor)) != yardContent {
+		t.Fatal("refused edit changed settings")
+	}
+}
+
 func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
 	root, _, home, environment := configCommandFixture(t)
 	flat := filepath.Join(home, "yards/neighbor.env")
+	overlay := filepath.Join(root, "private/yards/neighbor.env")
+	const ignored = "SSH_PORT=2399\nGIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
+	writeConfigCommandFile(t, overlay, ignored)
 	const prefix = "# existing registration\r\nSSH_PORT=2298\r\n"
 	writeConfigCommandFile(t, flat, prefix+"GIT_USER_NAME=Jane\r\n", 0o640)
 	run := func(args ...string) {
 		t.Helper()
 		var output bytes.Buffer
 		if code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
-			Arguments: append([]string{"-Y", "neighbor", "config", "set", "--scope", "yard", "--yes"}, args...),
+			Arguments: append([]string{"-Y", "neighbor", "config", "set", "--scope", "yard", "--local", "--yes"}, args...),
 			Stdout:    io.Discard, Stderr: &output}); code != 0 {
 			t.Fatalf("exit=%d %s", code, &output)
 		}
@@ -3305,6 +3332,9 @@ func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(home, "yards/neighbor/config.env")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("nested registration shadows the flat one: %v", err)
+	}
+	if content := string(mustReadConfigFixture(t, overlay)); content != ignored {
+		t.Fatalf("yard edit changed checkout overlay: %q", content)
 	}
 	loaded := loadConfigCommandContext(t, root, environment, "neighbor")
 	if loaded.Context.SSHPort != 2298 || loaded.Environment["GIT_USER_NAME"] != "O'Connor" {
@@ -3462,6 +3492,34 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	if code := run("config", "sync", "status", "--offline"); code != 0 {
 		t.Fatalf("post-push status: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
+	}
+	// A clean working tree can still have another owner's unpublished commit.
+	pending := filepath.Join(checkout, "hosts/owner-b/config.env")
+	const pendingContent = "GIT_USER_NAME='Owner B'\n"
+	writeConfigCommandFile(t, pending, pendingContent)
+	if code := run("config", "set", "GIT_USER_NAME", "Jane", "--scope", "shared", "--git", "--yes"); code == 0 || !strings.Contains(stderr.String(), "checkout is dirty") {
+		t.Fatalf("accepted unpublished file: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if got := string(mustReadConfigFixture(t, pending)); got != pendingContent {
+		t.Fatalf("unpublished file changed: %q", got)
+	}
+	runConfigSyncGit(t, checkout, "add", "--", "hosts/owner-b/config.env")
+	runConfigSyncGit(t, checkout, "-c", "user.name=Subyard Test", "-c", "user.email=test@invalid", "commit", "-m", "Save unrelated owner settings")
+	localBefore := snapshotConfigCheckout(t, checkout)
+	upstreamBefore := configSourceGitOutput(t, remote, "rev-parse", "HEAD")
+	cacheBefore := mustReadConfigFixture(t, configsync.ManifestPath(configHome))
+	for _, edit := range [][]string{
+		{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "shared", "--git", "--yes"},
+		{"config", "unset", "E2E_VM_CPU", "--scope", "shared", "--git", "--yes"},
+	} {
+		if code := run(edit...); code == 0 || !strings.Contains(stderr.String(), "checkout contains unpublished commits") {
+			t.Fatalf("accepted unpublished commit: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+		}
+		if upstream := configSourceGitOutput(t, remote, "rev-parse", "HEAD"); upstream != upstreamBefore ||
+			!reflect.DeepEqual(snapshotConfigCheckout(t, checkout), localBefore) ||
+			!bytes.Equal(mustReadConfigFixture(t, configsync.ManifestPath(configHome)), cacheBefore) {
+			t.Fatal("refused edit changed the checkout, upstream or cache")
+		}
 	}
 	gone := remote + ".temporarily-unavailable"
 	if err := os.Rename(remote, gone); err != nil {
@@ -3688,7 +3746,7 @@ func loadConfigCommandContext(t *testing.T, root string, environment []string, y
 	}
 	loaded, err := config.Load(config.LoadOptions{
 		RepositoryRoot: root, OperatorHome: values["SUBYARD_OPERATOR_HOME"],
-		YardName: yard, Environment: values, DisablePrivate: true,
+		YardName: yard, Environment: values,
 	})
 	if err != nil {
 		t.Fatal(err)

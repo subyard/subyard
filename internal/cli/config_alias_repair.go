@@ -398,13 +398,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		}
 		return 1
 	}
-	configDir := values["SUBYARD_CONFIG_DIR"]
-	if configDir == "" {
-		configDir = filepath.Join(cli.options.RepositoryRoot, "config")
-	}
 	names := []string{yard}
 	if all {
-		names, err = config.YardNames(configDir, home)
+		names, err = config.YardNames(home)
 	}
 	type row struct {
 		Yard       string `json:"yard"`

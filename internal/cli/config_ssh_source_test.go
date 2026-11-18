@@ -97,6 +97,7 @@ func TestGitScalarEditPreservesLegacySSHSource(t *testing.T) {
 	source := filepath.Join(checkout, "hosts/owner-a/config.env")
 	writeConfigCommandFile(t, source, "SSH_PORT=2300\nGIT_USER_NAME=Jane\n", 0o600)
 	commitConfigSource(t, checkout, "Legacy owner transport setting")
+	runConfigSyncGit(t, checkout, "push", "--quiet")
 	cache := filepath.Join(f.configHome, config.GitSettingsRelativePath, "config.env")
 	cached := mustReadConfigFixture(t, cache)
 	writeConfigCommandFile(t, cache, string(cached)+"SSH_PORT=2299\n", 0o600)

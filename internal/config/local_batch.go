@@ -108,7 +108,7 @@ func (batch *localBatch) checkDependencies(options LoadOptions, tracker *setting
 	for _, path := range tracker.assetValidationInputs {
 		check(path)
 	}
-	for _, path := range YardFileCandidates(configDir, home, options.YardName) {
+	for _, path := range LocalYardSettingsCandidates(filepath.Join(home, "yards"), options.YardName) {
 		check(path)
 	}
 	check(YardResetMarkerPath(home, options.YardName))

@@ -94,8 +94,7 @@ func (cli *CLI) networkService(yards []domain.Context) *yardnetwork.Service {
 				return nil, errors.New("resource ingress inventory root is unavailable")
 			}
 			if yard.Name != "default" {
-				if _, err := config.FindYardRegistrationFile(inventoryRoot.Paths.ConfigDir,
-					inventoryRoot.Paths.ConfigHome, yard.Name); err != nil {
+				if _, err := config.FindYardRegistrationFile(inventoryRoot.Paths.ConfigHome, yard.Name); err != nil {
 					if errors.Is(err, config.ErrUnknownYard) {
 						// A saved binding can outlive a removed yard registration.
 						return nil, nil

@@ -40,14 +40,34 @@ func (err *SourceError) Unwrap() error { return err.cause }
 // text. Paths within configHome are relative to that root; external sources are
 // identified without exposing an absolute operator or repository path.
 func SourceDiagnostic(configHome string, err error) (string, bool) {
-	var source *SourceError
-	if !errors.As(err, &source) {
-		return "", false
+	var messages []string
+	for _, source := range sourceErrors(err) {
+		message := source.diagnostic(configHome)
+		if source.ownerLocal && configHome == "" {
+			message = source.Error()
+		}
+		if !slices.Contains(messages, message) {
+			messages = append(messages, message)
+		}
 	}
-	if source.ownerLocal && configHome == "" {
-		return source.Error(), true
+	return strings.Join(messages, "; "), len(messages) != 0
+}
+
+// Keep an outer SourceError's provenance when it wraps another source error.
+func sourceErrors(err error) []*SourceError {
+	for ; err != nil; err = errors.Unwrap(err) {
+		switch cause := err.(type) {
+		case *SourceError:
+			return []*SourceError{cause}
+		case interface{ Unwrap() []error }:
+			var sources []*SourceError
+			for _, child := range cause.Unwrap() {
+				sources = append(sources, sourceErrors(child)...)
+			}
+			return sources
+		}
 	}
-	return source.diagnostic(configHome), true
+	return nil
 }
 
 // OwnerMetadataError retains nonsecret owner-local metadata for the invoking
@@ -297,20 +317,25 @@ func settingValueReason(definition SettingDefinition) string {
 
 // SourceAliasRepairRetry identifies the bounded local repair boundary without rendering values.
 func SourceAliasRepairRetry(home, yard string, cause error) string {
-	var source *SourceError
-	if !errors.As(cause, &source) || source.Reason != "conflicting legacy and canonical settings" || !slices.Contains([]string{"YARD_IMAGE", "YARD_IMAGE_FALLBACK", "ENVIRONMENT_PROFILES", "CODING_TOOL_INTEGRATIONS"}, source.Key) {
-		return ""
-	}
 	if !domain.SafeName(yard) {
 		return ""
 	}
+	sources := sourceErrors(cause)
+	index := slices.IndexFunc(sources, func(source *SourceError) bool {
+		return source.Reason == "conflicting legacy and canonical settings" &&
+			slices.Contains([]string{"YARD_IMAGE", "YARD_IMAGE_FALLBACK", "ENVIRONMENT_PROFILES", "CODING_TOOL_INTEGRATIONS"}, source.Key)
+	})
+	if index < 0 {
+		return ""
+	}
+	source := sources[index]
 	scope := ""
 	switch filepath.Clean(source.Path) {
 	case filepath.Join(home, "config.env"):
 		scope = "host"
 	case filepath.Join(home, "overrides", "shared", "config.env"):
 		scope = "shared"
-	case filepath.Join(home, "yards", yard, "config.env"):
+	case filepath.Join(home, "yards", yard, "config.env"), filepath.Join(home, "yards", yard+".env"):
 		scope = "yard"
 	}
 	if scope == "" {

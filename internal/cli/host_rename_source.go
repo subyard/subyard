@@ -111,7 +111,7 @@ func (cli *CLI) runRegisteredHostRename(ctx context.Context, yard string, args [
 		defaults[key] = value
 	}
 	defaults["SUBYARD_CONFIG_HOME"] = empty
-	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: values["SUBYARD_OPERATOR_HOME"], YardName: "default", Environment: defaults, DisablePrivate: true})
+	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: values["SUBYARD_OPERATOR_HOME"], YardName: "default", Environment: defaults})
 	if err != nil {
 		cli.errorf("host rename: %v", err)
 		return 1, true

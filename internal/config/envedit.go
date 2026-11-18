@@ -318,17 +318,17 @@ func WritePersistentFileIfUnchanged(
 	content []byte,
 	guards ...func() error,
 ) error {
-	return writePersistentFileIfUnchanged(configHome, configHome, path, expected, content, guards)
+	return writePersistentFileIfUnchanged(configHome, path, expected, content, guards)
 }
 
 // WriteLocalScalarFileIfUnchanged keeps the configuration root lock while
-// editing a selected scalar source in config home or the private settings root.
-func WriteLocalScalarFileIfUnchanged(configHome, storageRoot, path string, expected PersistentFileSnapshot, content []byte, guard func() error) error {
-	return writePersistentFileIfUnchanged(configHome, storageRoot, path, expected, content,
+// editing a selected scalar source in config home.
+func WriteLocalScalarFileIfUnchanged(configHome, path string, expected PersistentFileSnapshot, content []byte, guard func() error) error {
+	return writePersistentFileIfUnchanged(configHome, path, expected, content,
 		[]func() error{func() error { return CheckLocalSettingsWritable(configHome) }, guard})
 }
 
-func writePersistentFileIfUnchanged(configHome, storageRoot, path string, expected PersistentFileSnapshot, content []byte, guards []func() error) error {
+func writePersistentFileIfUnchanged(configHome, path string, expected PersistentFileSnapshot, content []byte, guards []func() error) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
 	}
@@ -337,17 +337,10 @@ func writePersistentFileIfUnchanged(configHome, storageRoot, path string, expect
 		return err
 	}
 	defer unlock()
-	if storageRoot != configHome {
-		unlockStorage, err := LockRoot(storageRoot, true)
-		if err != nil {
-			return err
-		}
-		defer unlockStorage()
-	}
 	if err := checkLocalSettingsTargetWritable(configHome, path); err != nil {
 		return err
 	}
-	current, err := ReadPersistentFileSnapshot(storageRoot, path)
+	current, err := ReadPersistentFileSnapshot(configHome, path)
 	if err != nil {
 		return err
 	}
@@ -359,7 +352,7 @@ func writePersistentFileIfUnchanged(configHome, storageRoot, path string, expect
 			return err
 		}
 	}
-	return writePersistentFile(storageRoot, path, content)
+	return writePersistentFile(configHome, path, content)
 }
 
 func persistentFileSnapshot(path string) (PersistentFileSnapshot, error) {

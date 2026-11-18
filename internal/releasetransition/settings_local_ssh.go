@@ -21,7 +21,7 @@ func (transition *V2Transition) inspectLocalSSHPorts(view V2SettingsSnapshotView
 	if view == nil {
 		view = posixV2SettingsSnapshotView{configHome: transition.options.ConfigHome}
 	}
-	names, err := config.YardNames(transition.options.CandidateConfigDir, transition.options.ConfigHome)
+	names, err := config.YardNames(transition.options.ConfigHome)
 	if err != nil {
 		return settingsV2Plan{}, err
 	}
@@ -113,12 +113,12 @@ func (transition *V2Transition) loadSSHPortYard(yard string, files *config.Prosp
 		operator = transition.options.ConfigHome
 	}
 	return config.Load(config.LoadOptions{RepositoryRoot: filepath.Dir(transition.options.CandidateConfigDir), OperatorHome: operator,
-		YardName: yard, DisablePrivate: true, ProspectiveFiles: files,
+		YardName: yard, ProspectiveFiles: files,
 		Environment: map[string]string{"SUBYARD_CONFIG_HOME": transition.options.ConfigHome, "SUBYARD_CONFIG_DIR": transition.options.CandidateConfigDir}})
 }
 
 func (transition *V2Transition) localSSHPortSnapshot(yard string, view V2SettingsSnapshotView, loaded config.Loaded) (config.PersistentFileSnapshot, string, Fingerprint, error) {
-	expected, path, err := readLocalYardSettings(transition.options.ConfigHome, yard, view)
+	expected, path, err := config.ReadLocalYardSettingsSnapshot(transition.options.ConfigHome, yard, view.ReadSnapshot)
 	if err != nil {
 		return expected, path, "", err
 	}

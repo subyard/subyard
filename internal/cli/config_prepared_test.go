@@ -373,14 +373,14 @@ func TestConfigExactUnsetKeepsEmptyRegistration(t *testing.T) {
 	}
 }
 
-func TestConfigExactHostScalarEditsPrivateSource(t *testing.T) {
+func TestConfigExactHostScalarIgnoresCheckoutOverlay(t *testing.T) {
 	root, _, home, environment := configCommandFixture(t)
 	host := filepath.Join(home, "config.env")
 	if err := os.Remove(host); err != nil {
 		t.Fatal(err)
 	}
 	private := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_DIR"), "..", "private", "config.env")
-	const initial = "GIT_USER_EMAIL=private@example.invalid\n"
+	const initial = "GIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
 	writeConfigCommandFile(t, private, initial, 0o640)
 	program := configExactProgram(t, root, environment, nil, nil)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
@@ -388,23 +388,20 @@ func TestConfigExactHostScalarEditsPrivateSource(t *testing.T) {
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if got := string(mustReadConfigFixture(t, private)); got != initial+"GIT_USER_NAME='Jane'\n" {
-		t.Fatalf("private host settings = %q", got)
-	}
-	if _, err := os.Stat(host); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("created a second settings file: %v", err)
+	if got := string(mustReadConfigFixture(t, host)); got != "GIT_USER_NAME='Jane'\n" {
+		t.Fatalf("host settings = %q", got)
 	}
 	loaded = loadConfigCommandContext(t, root, environment, "default")
 	prepared = configExactPlan(t, program, loaded, []string{"set", "GIT_USER_NAME", "Jane", "GIT_USER_EMAIL", "next@example.invalid", "--scope", "host"})
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	writeConfigCommandFile(t, host, "")
-	_, err := config.Load(config.LoadOptions{RepositoryRoot: root, Environment: program.baseEnv, YardName: "default"})
-	var conflict *config.SettingsFileConflict
-	if !errors.As(err, &conflict) || conflict.First != host || conflict.Second != private ||
-		!strings.Contains(config.Diagnose(home, err).Message("invalid configuration"), "Merge their settings into one file") {
-		t.Fatalf("host files were not refused: %v", err)
+	loaded = loadConfigCommandContext(t, root, environment, "default")
+	if loaded.Environment["GIT_USER_EMAIL"] != "next@example.invalid" {
+		t.Fatal("canonical host settings were not loaded")
+	}
+	if got := string(mustReadConfigFixture(t, private)); got != initial {
+		t.Fatalf("checkout overlay settings changed: %q", got)
 	}
 }
 

@@ -199,7 +199,7 @@ func (cli *CLI) observeFullTeardown(ctx context.Context, current config.Loaded, 
 			}
 		}
 	}
-	names, err := config.YardNames(current.Context.Paths.ConfigDir, current.Context.Paths.ConfigHome)
+	names, err := config.YardNames(current.Context.Paths.ConfigHome)
 	if err != nil {
 		return err
 	}

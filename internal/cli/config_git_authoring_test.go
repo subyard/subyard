@@ -148,7 +148,7 @@ func TestConfigGitScalarAuthoringRefusesUnrelatedCacheChanges(t *testing.T) {
 	}
 }
 
-func TestConfigGitAuthoringRetriesRejectedPushWithoutDuplicateCommit(t *testing.T) {
+func TestConfigGitAuthoringRetriesRejectedPushThroughSyncPush(t *testing.T) {
 	f := newConfigGitAuthoringFixture(t)
 	hook := filepath.Join(f.remote, "hooks", "pre-receive")
 	testkit.WriteFile(t, hook, []byte("#!/bin/sh\nexit 1\n"), 0o700)
@@ -166,7 +166,14 @@ func TestConfigGitAuthoringRetriesRejectedPushWithoutDuplicateCommit(t *testing.
 	if err := os.Remove(hook); err != nil {
 		t.Fatal(err)
 	}
-	f.run(0, "config", "set", "DEV_UID", "2301", "--scope", "host", "--git", "--yes")
+	f.run(1, "config", "set", "DEV_UID", "2301", "--scope", "host", "--git", "--yes")
+	if !strings.Contains(f.stderr.String(), "checkout contains unpublished commits") {
+		t.Fatalf("scalar retry did not refuse the pending commit: %s", f.stderr.String())
+	}
+	if actual := strings.TrimSpace(configSourceGitOutput(t, f.remote, "rev-parse", "HEAD")); actual != before {
+		t.Fatalf("scalar retry advanced upstream to %s", actual)
+	}
+	f.run(0, "config", "sync", "push", "--yes")
 	if actual := strings.TrimSpace(configSourceGitOutput(t, f.remote, "rev-parse", "HEAD")); actual != ahead {
 		t.Fatalf("retry created a duplicate commit: remote=%s existing=%s", actual, ahead)
 	}
@@ -247,6 +254,7 @@ func TestConfigGitAuthoringRejectsSourceSymlinksBeforeWriting(t *testing.T) {
 				arguments = []string{"config", "set", "DEV_UID", "2301", "--scope", "host", "--git"}
 			}
 			commitConfigSource(t, checkout, "Invalid source boundary")
+			runConfigSyncGit(t, checkout, "push", "--quiet")
 			before := configSourceGitOutput(t, checkout, "rev-parse", "HEAD")
 			prompt := &testkit.Prompt{}
 			program, err := New(Options{RepositoryRoot: f.root, Program: "yard", Arguments: arguments,

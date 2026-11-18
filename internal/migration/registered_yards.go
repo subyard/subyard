@@ -176,18 +176,21 @@ func (m *RegisteredYardMigration) plans(ctx context.Context) ([]registeredYardPl
 // a hostname keeps working beside its numeric listen address.
 func (m *RegisteredYardMigration) planEndpointSettings(plan *registeredYardPlan, instance ports.InstanceInfo, contracts []resource.ProxyContract) error {
 	loaded := plan.loaded
-	var err error
-	plan.settingsPath, err = registeredSettingsPath(loaded)
-	if err != nil {
-		return err
+	if !domain.SafeName(loaded.Context.YardName) {
+		return errors.New("unsafe registered yard")
 	}
-	plan.settingsBefore, err = config.ReadPersistentFileSnapshot(m.ConfigHome, plan.settingsPath)
+	read := func(path string) (config.PersistentFileSnapshot, error) {
+		snapshot, err := config.ReadPersistentFileSnapshot(m.ConfigHome, path)
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+		return snapshot, err
+	}
 	if m.settingsView != nil {
-		plan.settingsBefore, err = m.settingsView.ReadSnapshot(plan.settingsPath)
+		read = m.settingsView.ReadSnapshot
 	}
-	if errors.Is(err, os.ErrNotExist) {
-		err = nil
-	}
+	var err error
+	plan.settingsBefore, plan.settingsPath, err = config.ReadLocalYardSettingsSnapshot(m.ConfigHome, loaded.Context.YardName, read)
 	if err != nil {
 		return err
 	}
@@ -225,12 +228,9 @@ func (m *RegisteredYardMigration) planEndpointSettings(plan *registeredYardPlan,
 	if string(plan.settingsBefore.Content) != string(plan.settingsDesired) {
 		if err := config.CheckLocalSettingsWritable(m.ConfigHome); err != nil {
 			refusals = append(refusals, err)
-		} else if loaded.Context.YardName != "default" {
-			source, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, m.ConfigHome, loaded.Context.YardName)
-			refusals = append(refusals, err)
-			if err == nil && source != plan.settingsPath {
-				refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New("endpoint import requires a protected local yard registration; refusing to shadow the existing private or Git registration"), "endpoint import requires a protected local yard registration; refusing to shadow the existing private or Git registration"))
-			}
+		} else if loaded.Context.YardName != "default" && !plan.settingsBefore.Exists {
+			message := "endpoint import requires a protected local yard registration; refusing to shadow the existing Git registration"
+			refusals = append(refusals, domain.MigrationStateRefusal(m.Yard, errors.New(message), message))
 		}
 	}
 	return domain.CollectRefusals(refusals...)
@@ -441,24 +441,6 @@ func (m *RegisteredYardMigration) Reconcile(ctx context.Context, _ releasetransi
 	}
 	return nil
 }
-func registeredSettingsPath(loaded config.Loaded) (string, error) {
-	if !domain.SafeName(loaded.Context.YardName) {
-		return "", errors.New("unsafe registered yard")
-	}
-	nested := filepath.Join(loaded.Context.Paths.ConfigHome, "yards", loaded.Context.YardName, "config.env")
-	if loaded.Context.YardName != "default" {
-		source, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome, loaded.Context.YardName)
-		if err != nil {
-			return "", err
-		}
-		flat := filepath.Join(loaded.Context.Paths.ConfigHome, "yards", loaded.Context.YardName+".env")
-		if source == flat {
-			return flat, nil
-		}
-	}
-	return nested, nil
-}
-
 func registeredMigrationDefault(trace config.SettingTrace) bool {
 	for _, resolution := range trace.Resolutions {
 		if resolution.Status == "effective" {

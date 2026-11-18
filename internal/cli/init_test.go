@@ -787,7 +787,7 @@ func TestInitProfileExistingDefinitionMustMatchPreset(t *testing.T) {
 }
 
 func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
-	for _, location := range []string{"private", "flat config home"} {
+	for _, location := range []string{"ignored overlay", "flat config home"} {
 		t.Run(location, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			environment = withoutCommandSetting(environment, "SSH_PORT")
@@ -815,8 +815,8 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 			loaded, bootstrap, err := program.loadInitContext(
 				"custom-name", true, []string{"--profile", "sample-service"},
 			)
-			if err != nil || bootstrap != nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
-				t.Fatalf("legacy definition was not reused: loaded=%#v bootstrap=%#v err=%v",
+			if err != nil || (bootstrap != nil) != (location == "ignored overlay") || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
+				t.Fatalf("unexpected init registration plan: loaded=%#v bootstrap=%#v err=%v",
 					loaded.Environment, bootstrap, err)
 			}
 			canonical := filepath.Join(root, "state", "yards", "custom-name", "config.env")
@@ -827,7 +827,7 @@ func TestInitProfileReusesSupportedLegacyDefinition(t *testing.T) {
 	}
 }
 
-func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) {
+func TestInitProfileIgnoresPrivateDefinitionFromEffectiveConfigDir(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	environment = withoutCommandSetting(environment, "SSH_PORT")
 	preset := filepath.Join(root, "config", "profiles", "sample-service", "yard.env")
@@ -841,6 +841,7 @@ func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) 
 		t.Fatal(err)
 	}
 	writeCLIFile(t, filepath.Join(alternateConfig, "agents.env"), "AGENT_codex_COMMAND=codex\n", 0o600)
+	writeCLIFile(t, filepath.Join(alternateConfig, "ports.env"), "SSH_PORT=2222\n", 0o600)
 	environment = append(environment, "SUBYARD_CONFIG_DIR="+alternateConfig)
 	legacy := filepath.Join(root, "installed", "private", "yards", "custom-name.env")
 	if err := os.MkdirAll(filepath.Dir(legacy), 0o700); err != nil {
@@ -857,9 +858,20 @@ func TestInitProfileReusesPrivateDefinitionFromEffectiveConfigDir(t *testing.T) 
 	loaded, bootstrap, err := program.loadInitContext(
 		"custom-name", true, []string{"--profile", "sample-service"},
 	)
-	if err != nil || bootstrap != nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
-		t.Fatalf("effective private definition was not reused: loaded=%#v bootstrap=%#v err=%v",
+	if err != nil || bootstrap == nil || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "codex" {
+		t.Fatalf("init did not plan a fresh local definition: loaded=%#v bootstrap=%#v err=%v",
 			loaded.Environment, bootstrap, err)
+	}
+	plain, err := New(Options{RepositoryRoot: root, Environment: environment, WorkingDir: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, bootstrap, err = plain.loadInitContext("custom-name", true, nil)
+	if err != nil || bootstrap == nil || len(loaded.Integrations.Requested) != 0 {
+		t.Fatalf("plain init did not plan a fresh local yard: bootstrap=%#v err=%v", bootstrap, err)
+	}
+	if got := string(mustReadConfigFixture(t, legacy)); got != content {
+		t.Fatalf("init changed checkout overlay: %q", got)
 	}
 }
 

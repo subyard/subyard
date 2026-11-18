@@ -25,7 +25,7 @@ func TestConfigSyncKeepsResetYardAbsentWithoutDeletingSource(t *testing.T) {
 	if err := Apply(plan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := config.FindYardRegistrationFile(filepath.Join(fixture.root, "config"), fixture.configHome, "named"); !errors.Is(err, config.ErrUnknownYard) {
+	if _, err := config.FindYardRegistrationFile(fixture.configHome, "named"); !errors.Is(err, config.ErrUnknownYard) {
 		t.Fatalf("sync reactivated reset yard: %v", err)
 	}
 	for _, path := range []string{filepath.Join(fixture.source, "hosts/owner-a/yards/named/config.env"), filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "yards/named/config.env")} {

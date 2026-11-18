@@ -151,7 +151,7 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 	}
 	loaded, err := config.Load(config.LoadOptions{
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
-		Environment: fixture.options(false).Environment, DisablePrivate: true,
+		Environment: fixture.options(false).Environment,
 	})
 	if err != nil || loaded.Environment["DEV_UID"] != "2235" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "" {
 		t.Fatalf("offline fallback/local empty resolution: value=%s err=%v", loaded.Environment["DEV_UID"], err)
@@ -161,7 +161,7 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 	}
 	demo, err := config.Load(config.LoadOptions{
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome, YardName: "demo",
-		Environment: fixture.options(false).Environment, DisablePrivate: true,
+		Environment: fixture.options(false).Environment,
 	})
 	if err != nil || demo.Environment["DEV_UID"] != "2234" {
 		t.Fatalf("offline Git-only yard: value=%s err=%v", demo.Environment["DEV_UID"], err)
@@ -171,7 +171,7 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 	}
 	loaded, err = config.Load(config.LoadOptions{
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
-		Environment: fixture.options(false).Environment, DisablePrivate: true,
+		Environment: fixture.options(false).Environment,
 	})
 	if err != nil || loaded.Environment["AGENT_codex_RULES"] != filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "overrides/host/agents/codex/rules/repo.rules") {
 		t.Fatalf("absent local file did not reveal cached Git file: %v", err)

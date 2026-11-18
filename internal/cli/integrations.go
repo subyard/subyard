@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -210,21 +209,13 @@ func (prepared *preparedCommand) prepareIntegration(ctx context.Context, _ *init
 		if desiredChanged {
 			decision, observed = domain.StepApply, "captured persistent registration"
 		}
-		target := write.SourcePath
-		if target == "" {
-			target = loaded.Context.Paths.ConfigHome + ":yard " + loaded.Context.YardName
-		}
-		steps := []domain.OperationStep{{ID: "integration.selection", Target: target, Observed: observed, Desired: "requested integrations [" + strings.Join(requested, ", ") + "]", Decision: decision,
+		steps := []domain.OperationStep{{ID: "integration.selection", Target: write.Path, Observed: observed, Desired: "requested integrations [" + strings.Join(requested, ", ") + "]", Decision: decision,
 			Preconditions: []string{"canonical registration, role and persistent configuration remain valid"}, Verify: "read the canonical requested integration selection", Consequence: selectionConsequence}}
 		steps = append(steps, plan.OperationSteps(loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName)...)
 		steps[1].DependsOn = []string{steps[0].ID}
 		return steps
 	}
 	consequences := slices.Clone(plan.Steps)
-	gitRoot := filepath.Join(loaded.Context.Paths.ConfigHome, filepath.FromSlash(config.GitSettingsRelativePath))
-	if write.FlatBefore.Exists || (write.SourcePath != "" && !strings.HasPrefix(write.SourcePath, gitRoot+string(filepath.Separator))) {
-		consequences = append(consequences, "Preserve and migrate the complete legacy yard registration to canonical config")
-	}
 	if desiredChanged {
 		consequences = append([]string{"Store requested integrations for yard " + loaded.Context.YardName + ": " + value}, consequences...)
 	}

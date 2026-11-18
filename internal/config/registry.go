@@ -12,29 +12,25 @@ import (
 )
 
 // YardNames returns the configured yard names without evaluating their files.
-// The default context is always first; duplicate private/installed entries collapse.
-func YardNames(configDir, configHome string) ([]string, error) {
-	return discoverYardNames(configDir, configHome, false)
+// The default context is always first; local and Git entries for the same yard collapse.
+func YardNames(configHome string) ([]string, error) {
+	return discoverYardNames(configHome, false)
 }
 
 // LocalBatchYardNames includes the default and any other discoverable yards
 // even when a registration or enumeration fails.
-func LocalBatchYardNames(configDir, configHome string) ([]string, error) {
-	return discoverYardNames(configDir, configHome, true)
+func LocalBatchYardNames(configHome string) ([]string, error) {
+	return discoverYardNames(configHome, true)
 }
 
-func discoverYardNames(configDir, configHome string, collect bool) ([]string, error) {
+func discoverYardNames(configHome string, collect bool) ([]string, error) {
 	seen := map[string]struct{}{}
 	var refusals []error
-	for _, root := range []struct {
-		directory   string
-		allowNested bool
-	}{
-		{directory: filepath.Join(configDir, "..", "private", "yards")},
-		{directory: filepath.Join(configHome, "yards"), allowNested: true},
-		{directory: filepath.Join(configHome, GitSettingsRelativePath, "yards"), allowNested: true},
+	for _, directory := range []string{
+		filepath.Join(configHome, "yards"),
+		filepath.Join(configHome, GitSettingsRelativePath, "yards"),
 	} {
-		entries, err := os.ReadDir(root.directory)
+		entries, err := os.ReadDir(directory)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -47,7 +43,7 @@ func discoverYardNames(configDir, configHome string, collect bool) ([]string, er
 		}
 		for _, entry := range entries {
 			name := ""
-			if root.allowNested && entry.IsDir() {
+			if entry.IsDir() {
 				name = entry.Name()
 			} else if strings.HasSuffix(entry.Name(), ".env") {
 				name = strings.TrimSuffix(entry.Name(), ".env")
@@ -70,7 +66,7 @@ func discoverYardNames(configDir, configHome string, collect bool) ([]string, er
 	_, defaultErr := LocalYardSettingsFile(filepath.Join(configHome, "yards"), "default")
 	refusals = append(refusals, defaultErr)
 	for _, name := range discovered {
-		if _, err := FindYardRegistrationFile(configDir, configHome, name); err != nil {
+		if _, err := FindYardRegistrationFile(configHome, name); err != nil {
 			if errors.Is(err, ErrUnknownYard) {
 				continue
 			}
@@ -80,14 +76,6 @@ func discoverYardNames(configDir, configHome string, collect bool) ([]string, er
 		names = append(names, name)
 	}
 	return names, domain.CollectRefusals(refusals...)
-}
-
-func YardFileCandidates(configDir, configHome, name string) []string {
-	return []string{
-		filepath.Join(configHome, "yards", name, "config.env"),
-		filepath.Join(configDir, "..", "private", "yards", name+".env"),
-		filepath.Join(configHome, "yards", name+".env"),
-	}
 }
 
 // SettingsFileConflict names the two files competing for a single local scope.
@@ -126,21 +114,9 @@ func selectSettingsFile(first, second, firstLabel, secondLabel string, exists fu
 	return first, nil
 }
 
-// LocalHostSettingsFile returns the existing host source or the path to create.
-func LocalHostSettingsFile(configDir, configHome string) (string, error) {
-	return localHostSettingsFile(configDir, configHome, pathExists)
-}
-
-func localHostSettingsFile(configDir, configHome string, exists func(string) (bool, error)) (string, error) {
-	local := filepath.Join(configHome, "config.env")
-	if configDir == "" {
-		return local, nil
-	}
-	private := filepath.Join(configDir, "..", "private", "config.env")
-	if private == local {
-		return local, nil
-	}
-	return selectSettingsFile(local, private, "config.env", "private/config.env", exists)
+// LocalYardSettingsCandidates returns both local layouts in preference order.
+func LocalYardSettingsCandidates(yardsDir, name string) [2]string {
+	return [2]string{filepath.Join(yardsDir, name, "config.env"), filepath.Join(yardsDir, name+".env")}
 }
 
 // LocalYardSettingsFile returns the existing config-home source or the path to
@@ -150,13 +126,26 @@ func LocalYardSettingsFile(yardsDir, name string, readers ...func(string) (bool,
 	if len(readers) > 0 {
 		exists = readers[0]
 	}
-	return selectSettingsFile(filepath.Join(yardsDir, name, "config.env"), filepath.Join(yardsDir, name+".env"),
+	paths := LocalYardSettingsCandidates(yardsDir, name)
+	return selectSettingsFile(paths[0], paths[1],
 		"yards/"+name+"/config.env", "yards/"+name+".env", exists)
+}
+
+// ReadLocalYardSettingsSnapshot selects the local file in the caller's view
+// and returns the exact snapshot used for that selection.
+func ReadLocalYardSettingsSnapshot(configHome, name string, read func(string) (PersistentFileSnapshot, error)) (PersistentFileSnapshot, string, error) {
+	snapshots := make(map[string]PersistentFileSnapshot, 2)
+	path, err := LocalYardSettingsFile(filepath.Join(configHome, "yards"), name, func(path string) (bool, error) {
+		snapshot, err := read(path)
+		snapshots[path] = snapshot
+		return snapshot.Exists, err
+	})
+	return snapshots[path], path, err
 }
 
 // FindYardRegistrationFile returns the highest-precedence regular,
 // non-symlink definition for a named yard.
-func FindYardRegistrationFile(configDir, configHome, name string) (string, error) {
+func FindYardRegistrationFile(configHome, name string) (string, error) {
 	if name == "default" || !domain.SafeName(name) {
 		return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 	}
@@ -168,22 +157,12 @@ func FindYardRegistrationFile(configDir, configHome, name string) (string, error
 	if err != nil {
 		return "", err
 	}
-	return findFirstYardFile(yardRegistrationCandidates(configDir, configHome, name, local, reset), name)
+	return findFirstYardFile(yardRegistrationCandidates(configHome, name, local, reset), name)
 }
 
-func yardRegistrationCandidates(configDir, configHome, name, local string, reset bool) []string {
+func yardRegistrationCandidates(configHome, name, local string, reset bool) []string {
 	candidates := []string{local}
 	if !reset {
-		if configDir != "" {
-			private := filepath.Join(configDir, "..", "private", "yards", name+".env")
-			// Preserve the repository fallback's precedence between the
-			// supported config-home layouts.
-			if filepath.Base(local) == name+".env" {
-				candidates = []string{private, local}
-			} else {
-				candidates = append(candidates, private)
-			}
-		}
 		candidates = append(candidates, filepath.Join(configHome, GitSettingsRelativePath, "yards", name, "config.env"))
 	}
 	return candidates

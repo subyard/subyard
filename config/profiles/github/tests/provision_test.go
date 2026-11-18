@@ -60,7 +60,7 @@ func TestProvisionTransportsSelectedGitMode(t *testing.T) {
 					environment["GITHUB_GIT_MODE"] = mode
 				}
 				loaded, err := config.Load(config.LoadOptions{
-					RepositoryRoot: root, OperatorHome: home, DisablePrivate: true, Environment: environment,
+					RepositoryRoot: root, OperatorHome: home, Environment: environment,
 				})
 				if err != nil {
 					t.Fatal(err)

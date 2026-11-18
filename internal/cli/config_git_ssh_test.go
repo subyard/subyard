@@ -1010,6 +1010,7 @@ func TestConfigSetGitBatchRefusesNonliteralSource(t *testing.T) {
 	const original = "# existing source\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
 	writeConfigCommandFile(t, filepath.Join(checkout, relative), original)
 	commitConfigSource(t, checkout, "Existing nonliteral configuration")
+	runConfigSyncGit(t, checkout, "push", "--quiet", f.remote, "HEAD")
 	head := f.commitCount()
 	localHead := configSourceGitOutput(t, checkout, "rev-parse", "HEAD")
 	f.run(1, "config", "set", "GIT_USER_NAME", "Janet", "GIT_USER_EMAIL", "new@example.invalid", "--scope", "shared", "--git", "--yes")

@@ -55,7 +55,7 @@ func TestEnvironmentProfileSelectionKeepsAuthoredIntentAndEffectiveSet(t *testin
 				t.Fatal(err)
 			}
 			testkit.WriteFile(t, path, []byte(tc.content), 0600)
-			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: tc.yard, DisablePrivate: true, Environment: profileSelectionTestEnvironment(home)})
+			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: tc.yard, Environment: profileSelectionTestEnvironment(home)})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -101,7 +101,7 @@ func TestEnvironmentProfileSelectionPreservesLayerPrecedence(t *testing.T) {
 	}
 	write(filepath.Join(root, "config/yards/profiles/preset.env"), "ENVIRONMENT_PROFILES=preset\n")
 	write(filepath.Join(configHome, GitSettingsRelativePath, "yards/named/config.env"), "YARD_TEMPLATE=preset\nYARD_PROFILES=git\n")
-	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "named", DisablePrivate: true, Environment: profileSelectionTestEnvironment(home)}
+	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "named", Environment: profileSelectionTestEnvironment(home)}
 	check := func(want string) {
 		t.Helper()
 		loaded, err := Load(options)

@@ -31,7 +31,7 @@ func TestRemovedIntegrationSettingsRemainReadable(t *testing.T) {
 					original += "AGENT_retiredtwo_" + suffix + "=retained\n"
 				}
 				testkit.WriteFile(t, path, []byte(original), 0600)
-				loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": home}})
+				loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_HOME": home}})
 				if err != nil {
 					t.Fatal(err)
 				}

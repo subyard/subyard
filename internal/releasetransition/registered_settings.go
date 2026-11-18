@@ -19,7 +19,7 @@ func (t *V2Transition) registeredSettingsSnapshot(yard string, view V2SettingsSn
 	if view == nil {
 		view = posixV2SettingsSnapshotView{configHome: t.options.ConfigHome}
 	}
-	snapshot, path, err := readLocalYardSettings(t.options.ConfigHome, yard, view)
+	snapshot, path, err := config.ReadLocalYardSettingsSnapshot(t.options.ConfigHome, yard, view.ReadSnapshot)
 	if err != nil {
 		return snapshot, path, "", err
 	}
@@ -34,16 +34,6 @@ func (t *V2Transition) registeredSettingsSnapshot(yard string, view V2SettingsSn
 	}
 	payload, err := json.Marshal(inputs)
 	return snapshot, path, fingerprintPayload(payload), err
-}
-
-func readLocalYardSettings(home, yard string, view V2SettingsSnapshotView) (config.PersistentFileSnapshot, string, error) {
-	snapshots := make(map[string]config.PersistentFileSnapshot, 2)
-	path, err := config.LocalYardSettingsFile(filepath.Join(home, "yards"), yard, func(path string) (bool, error) {
-		snapshot, err := view.ReadSnapshot(path)
-		snapshots[path] = snapshot
-		return snapshot.Exists, err
-	})
-	return snapshots[path], path, err
 }
 
 func observeRegisteredOwner(ctx context.Context, owner V2ActivationReconciler, releases ReleasePair, links ReleaseLinks, view V2SettingsSnapshotView) (V2ActivationObservation, error) {

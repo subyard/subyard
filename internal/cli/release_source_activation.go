@@ -44,7 +44,7 @@ func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition
 	if err != nil {
 		return nil, err
 	}
-	actual, err := config.YardNames(filepath.Join(cli.options.RepositoryRoot, "config"), home)
+	actual, err := config.YardNames(home)
 	if err != nil {
 		return nil, err
 	}

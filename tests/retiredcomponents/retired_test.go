@@ -110,7 +110,7 @@ func TestShippedRetiredSettingsAndAliasesRemainReadable(t *testing.T) {
 					t.Fatal(err)
 				}
 				testkit.WriteFile(t, path, []byte(content), 0600)
-				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": home, "OPENLIT_HOST_PORT": "24318", "AI_OBSERVER_HOST_PORT": "8080", "AGENT_paseo_COMMAND": "retained"}})
+				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_HOME": home, "OPENLIT_HOST_PORT": "24318", "AI_OBSERVER_HOST_PORT": "8080", "AGENT_paseo_COMMAND": "retained"}})
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -396,6 +397,33 @@ func parseConfigAuthoringRequests(
 	return []configAuthoringRequest{request}, nil
 }
 
+// A failed selected-yard load still permits inspection of other yards affected
+// by a shared or host edit. Keep the original refusal and inspect read-only.
+func (cli *CLI) collectConfigAuthoringRefusals(home, yard string, arguments []string, loadErr error) error {
+	if home == "" || !domain.SafeName(yard) {
+		return loadErr
+	}
+	args := configArguments(arguments)
+	if len(args) == 0 || !slices.Contains([]string{"set", "unset", "import", "edit"}, args[0]) {
+		return loadErr
+	}
+	requests, err := parseConfigAuthoringRequests(args[0], args[1:], false)
+	if err != nil || requests[0].scope == config.ScopeYard {
+		return loadErr
+	}
+	names, err := config.LocalBatchYardNames(home)
+	refusals := []error{loadErr, err}
+	for _, name := range names {
+		if name == yard {
+			continue
+		}
+		if _, err := cli.resolveContextWithYardSettings(name, ""); err != nil {
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+		}
+	}
+	return domain.CollectRefusals(refusals...)
+}
+
 func configScalarAuthoringPath(
 	loaded config.Loaded,
 	scope config.SettingScope,
@@ -406,39 +434,12 @@ func configScalarAuthoringPath(
 			loaded.Context.Paths.ConfigHome, "overrides", "shared", "config.env",
 		), nil
 	case config.ScopeHost:
-		paths := loaded.Context.Paths
-		return config.LocalHostSettingsFile(paths.ConfigDir, paths.ConfigHome)
+		return filepath.Join(loaded.Context.Paths.ConfigHome, "config.env"), nil
 	case config.ScopeYard:
-		name := loaded.Context.YardName
-		if name == "" {
-			name = "default"
-		}
-		paths := loaded.Context.Paths
-		local, err := config.LocalYardSettingsFile(filepath.Join(paths.ConfigHome, "yards"), name)
-		if err != nil || name == "default" {
-			return local, err
-		}
-		registration, err := config.FindYardRegistrationFile(paths.ConfigDir, paths.ConfigHome, name)
-		if err != nil && !errors.Is(err, config.ErrUnknownYard) {
-			return "", err
-		}
-		switch registration {
-		case "", filepath.Join(paths.ConfigHome, config.GitSettingsRelativePath, "yards", name, "config.env"):
-			return local, nil
-		default:
-			return registration, nil
-		}
+		return config.LocalYardSettingsFile(filepath.Join(loaded.Context.Paths.ConfigHome, "yards"), firstNonempty(loaded.Context.YardName, "default"))
 	default:
 		return "", errors.New("unsupported persistent scope")
 	}
-}
-
-func configScalarAuthoringRoot(loaded config.Loaded, path string) string {
-	paths := loaded.Context.Paths
-	if relative, err := filepath.Rel(paths.ConfigHome, path); err == nil && filepath.IsLocal(relative) {
-		return paths.ConfigHome
-	}
-	return filepath.Join(paths.ConfigDir, "..", "private")
 }
 
 func (cli *CLI) configFileAuthoringPath(

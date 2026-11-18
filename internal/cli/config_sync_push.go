@@ -165,6 +165,11 @@ func (cli *CLI) prepareConfigSyncPush(
 	if err != nil {
 		return nil, err
 	}
+	scalarEdit := len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset")
+	if scalarEdit && repository.ahead != 0 {
+		repository.cleanup()
+		return nil, errors.New("checkout contains unpublished commits; publish or reconcile them separately before editing a Git setting")
+	}
 	if repository.behind != 0 {
 		relation := configGitRelation(repository.ahead, repository.behind)
 		repository.cleanup()
@@ -204,7 +209,6 @@ func (cli *CLI) prepareConfigSyncPush(
 		return nil, fmt.Errorf("validate configuration before source change: %w", err)
 	}
 	var paths []string
-	scalarEdit := len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset")
 	if !scalarEdit {
 		paths, err = sanitizeLegacySSHSource(repository.checkout, syncState.HostID, cli.catalog)
 		if err != nil {

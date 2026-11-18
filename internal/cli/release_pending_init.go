@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -105,8 +104,7 @@ func (prepared *preparedCommand) preparePostRepairInit(ctx context.Context, exec
 // not inspected, matching the repair's ordinary installed-view assessment.
 func (cli *CLI) inspectPendingInit(ctx context.Context, configHome string) (pendingInitPlan, error) {
 	operation := cli.releaseActivationOperation()
-	configDir := firstNonempty(operation.env["SUBYARD_CONFIG_DIR"], filepath.Join(operation.options.RepositoryRoot, "config"))
-	names, err := config.YardNames(configDir, configHome)
+	names, err := config.YardNames(configHome)
 	if err != nil {
 		return pendingInitPlan{}, err
 	}

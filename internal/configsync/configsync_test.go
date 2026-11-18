@@ -1147,7 +1147,7 @@ func newSyncFixture(t *testing.T, hostID string) *syncFixture {
 	}
 	loaded, err := config.Load(config.LoadOptions{
 		RepositoryRoot: root, OperatorHome: operatorHome,
-		Environment: environment, DisablePrivate: true,
+		Environment: environment,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -70,8 +70,8 @@ sessions block teardown; an unfinished guest without SSH or an unavailable guest
 require a separate stop. An unavailable Incus daemon remains an error.
 
 The reset preserves HostID, credentials, shared and host settings, neighboring yards, and shared
-bridge/pool resources still in use. It leaves Git-authored definitions, their offline cache, and
-repository legacy definitions intact. A protected local marker prevents their yard scalars and
+bridge/pool resources still in use. It preserves Git-authored definitions and their offline cache.
+A protected local marker prevents their yard scalars and
 file assets from silently reactivating the removed registration or influencing its replacement.
 A new local registration keeps that boundary; shared and host fallback still applies. Sync can
 refresh the retained Git source without registering the reset yard again.
@@ -97,11 +97,16 @@ Each yard has its own settings, including `default`:
 SSH_PORT=2222
 ```
 
-Each local scope has one settings file. An existing repository `private/config.env`
-can supply host settings, and an existing flat `yards/NAME.env` can supply yard
-settings. If both paths for either scope exist, merge their settings into one
-file and remove the other before loading configuration. Scalar edits use the
-existing file. Unsetting its final assignment leaves the file in place.
+Each local scope has one settings file. An existing flat `yards/NAME.env` can also
+supply local settings for any yard, including `default`. If both local yard paths
+exist, merge their settings into one file and remove the other before loading
+configuration. Scalar and integration edits use the existing file. Unsetting its
+final assignment leaves the file in place.
+
+Move settings from any old checkout overlay into the corresponding local or Git
+configuration before upgrading. For host settings from `private/config.env`, use
+the host file under the configuration root or the Git host layer. For a definition
+from `private/yards/NAME.env`, use the local or Git yard layer.
 
 Scalar precedence is:
 
@@ -140,10 +145,12 @@ ignores retired settings. The literal-value rule still applies to assignments in
 `yard update --check` and the `init` plan report each non-empty one as configuration state, not
 as a warning, with its file and line and its removal:
 `yard -Y NAME config unset NAME --scope SCOPE --local` (or `--git`) when that command writes the
-file, otherwise the line to remove from that file.
-Expressions such as `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"` or `${YARD_DEVICES:?}` cause a read
-error under the literal-value rule. The JSON report of `update --check` carries
-them in its `configuration` array. If such a value supplied a device, the `init` plan names each
+file, otherwise the line to remove from that file. The JSON report of `update --check` lists
+ignored literal assignments in its `configuration` array.
+
+Expressions such as `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"` or `${YARD_DEVICES:?}` cause
+a configuration read error under the literal-value rule. If an old profile-only assignment
+supplied a device, the `init` plan names each
 device that the extras stage now detaches; while the yard's instance cannot be read, it states that
 any attached `yx-*` device no selected profile requests is detached. A VM yard does not apply a
 profile's container-only `YARD_DEVICES`; the `init` plan reports each entry as not applicable to VM
@@ -1375,7 +1382,8 @@ or creates a commit. Its optional `-m`/`--message` argument remains accepted for
 Use typed writers with `--git` to create and push a setting change. Dirty, conflicted, detached,
 upstream-less or diverged checkouts fail closed; Subyard does not stash, merge, rebase, reset or
 resolve conflicts.
-Git scalar edits require the cache to match the source outside the selected edit.
+Git scalar edits require a clean checkout at its upstream commit and a cache that matches
+the source outside the selected edit. Publish or reconcile pending checkout changes separately.
 Run `yard config sync pull` to reconcile any other differences before retrying the edit.
 
 `sync pull`, `sync push` and typed writers with `--git` fetch the upstream once to plan. A change

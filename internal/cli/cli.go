@@ -808,6 +808,9 @@ func (cli *CLI) Run(ctx context.Context) int {
 			operatorHome = cli.env["HOME"]
 		}
 		configHome, _ := config.ResolveConfigHome(operatorHome, cli.env)
+		if core && definition.Handler == "@config" && cli.activation == nil {
+			err = cli.collectConfigAuthoringRefusals(configHome, yard, commandArguments, err)
+		}
 		integrity := config.KnownCause{Err: ownerinventory.ErrIntegrity, Text: "owner inventory integrity validation failed: owner HostID mismatch or unverified response", Next: "repair the verified owner connection"}
 		diagnostic := config.Diagnose(configHome, err, integrity)
 		if len(diagnostic.Refusals) == 1 && !diagnostic.Unclassified && config.IsRetiredYardTemplate(err) {
@@ -2912,7 +2915,7 @@ func (cli *CLI) resolveLocalProject(
 }
 
 func (cli *CLI) projectStores(ctx context.Context, yard domain.Context) (map[string]ports.ProjectStore, error) {
-	names, err := config.YardNames(yard.Paths.ConfigDir, yard.Paths.ConfigHome)
+	names, err := config.YardNames(yard.Paths.ConfigHome)
 	if err != nil {
 		return nil, err
 	}
@@ -2943,7 +2946,7 @@ func (cli *CLI) projectStores(ctx context.Context, yard domain.Context) (map[str
 func (cli *CLI) projectStoresReadOnly(
 	ctx context.Context, yard domain.Context,
 ) (map[string]ports.ProjectStore, error) {
-	names, err := config.YardNames(yard.Paths.ConfigDir, yard.Paths.ConfigHome)
+	names, err := config.YardNames(yard.Paths.ConfigHome)
 	if err != nil {
 		return nil, err
 	}
@@ -3776,9 +3779,8 @@ func (cli *CLI) usage() {
   personal-data mount root and projects. Pick one for a command with -Y/--yard (or the
   sugar '@<name>' as the first token). Most commands still use the default yard without a
   selector; 'yard status' instead summarizes all known yards, while '-Y default status'
-  shows its details. Define an installed yard in ~/.config/subyard/yards/<name>/config.env;
-  source checkouts may also use
-  private/yards/<name>.env (SSH_PORT required).
+  shows its details. Define a local yard in ~/.config/subyard/yards/<name>/config.env.
+  An existing flat yards/<name>.env also works. Use one file per yard.
   '%s yards' lists them all.
 
 Remote yards:

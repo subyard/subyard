@@ -27,7 +27,7 @@ func TestHermesYardFileClearsInheritedHostAndCapabilityWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(filepath.Join(configHome, "yards", "hermes", "config.env"), string(preset))
-	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "hermes", DisablePrivate: true, Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard")}})
+	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "hermes", Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard")}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestHermesYardFileClearsInheritedHostAndCapabilityWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(host, string(settings)+"YARD_CAPS=fuse\nYARD_DEVICES=gpu\nYARD_MOUNTS=cache:/srv/cache:rw:0755\n")
-	loaded, err = config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "hermes", DisablePrivate: true, Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard")}})
+	loaded, err = config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "hermes", Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, ".subyard")}})
 	if err != nil {
 		t.Fatalf("Hermes refused ignored operator extras: %v", err)
 	}

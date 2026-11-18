@@ -659,7 +659,7 @@ func TestRegisteredHostRenameRecoveryBeforeBrokenSettingsLoad(t *testing.T) {
 	// Preserve the upstream migration's local port pin. The deleted Git kind
 	// leaves a recoverable VM-only local setting invalid before early ingress.
 	writeConfigCommandFile(t, filepath.Join(configHome, "yards/demo/config.env"), "SSH_PORT=2234\nVM_CPU_WEIGHT=1000\nYARD_IMAGE=images:ubuntu/24.04\n")
-	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "demo", DisablePrivate: true}); err == nil || !strings.Contains(err.Error(), "require YARD_KIND=vm") {
+	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "demo"}); err == nil || !strings.Contains(err.Error(), "require YARD_KIND=vm") {
 		t.Fatalf("deleted Git cache did not break effective VM settings: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -674,7 +674,7 @@ func TestRegisteredHostRenameRecoveryBeforeBrokenSettingsLoad(t *testing.T) {
 	if len(prompt.Requests) != 1 {
 		t.Fatalf("confirmation count=%d", len(prompt.Requests))
 	}
-	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "default", DisablePrivate: true}); err != nil {
+	if _, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), YardName: "default"}); err != nil {
 		t.Fatal(err)
 	}
 }

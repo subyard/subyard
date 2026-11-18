@@ -153,7 +153,7 @@ elif [ "$(id -u "$DEV_USER")" != "$DEV_UID" ]; then
 fi
 usermod -aG yard,kvm,docker "$DEV_USER"
 
-# dev sudo (DEV_SUDO; public default 0, enable in private/config.env): passwordless sudo so
+# dev sudo (DEV_SUDO; default 0, enable in ~/.config/subyard/config.env): passwordless sudo so
 # the agent — and you, via `yard shell` — can make root changes in the yard. dev is already
 # ~root-in-yard via the docker group and the yard is unprivileged, so this doesn't widen the
 # real boundary. Reconciled: DEV_SUDO=0 removes the grant on the next provision.

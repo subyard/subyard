@@ -169,7 +169,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 	names := []string{plan.loaded.Context.YardName}
 	if plan.request.scope != config.ScopeYard {
 		var err error
-		names, err = config.LocalBatchYardNames(paths.ConfigDir, paths.ConfigHome)
+		names, err = config.LocalBatchYardNames(paths.ConfigHome)
 		refusals = append(refusals, err)
 	}
 	environment := plan.cli.configProspectiveEnvironment(plan.loaded)
@@ -243,7 +243,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		}
 	}
 	for _, name := range names {
-		for _, candidate := range config.YardFileCandidates(paths.ConfigDir, paths.ConfigHome, name) {
+		for _, candidate := range config.LocalYardSettingsCandidates(filepath.Join(paths.ConfigHome, "yards"), name) {
 			observe(candidate)
 		}
 		observe(filepath.Join(paths.ConfigHome, ".yard-reset-"+name))

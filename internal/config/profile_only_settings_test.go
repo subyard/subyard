@@ -48,7 +48,7 @@ func (fixture profileOnlyFixture) load(yard string, command map[string]string) (
 	for name, value := range command {
 		environment[name] = value
 	}
-	return Load(LoadOptions{RepositoryRoot: fixture.root, OperatorHome: fixture.home, YardName: yard, DisablePrivate: true, Environment: environment})
+	return Load(LoadOptions{RepositoryRoot: fixture.root, OperatorHome: fixture.home, YardName: yard, Environment: environment})
 }
 
 func renderedIgnored(loaded Loaded) []string {

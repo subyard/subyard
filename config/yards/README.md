@@ -18,8 +18,8 @@ The installed definition lives at:
 ~/.config/subyard/yards/<name>/config.env
 ```
 
-Source checkouts may still use `private/yards/<name>.env`; release installation migrates it to
-the installed path. For manual definitions, start from [`example.env`](example.env). `SSH_PORT` must be unique; the yard
+Existing flat definitions at `~/.config/subyard/yards/<name>.env` also work. Use one file per yard.
+For manual definitions, start from [`example.env`](example.env). `SSH_PORT` must be unique; the yard
 name derives the instance, Incus project, SSH alias, storage volume and host-data root.
 
 ```sh
