@@ -193,25 +193,47 @@ run_as_fixture() {
   runuser -u "$FIXTURE_USER" -- "$@"
 }
 
+run_prompted_pty() {
+  local output="$1" command_line="$2" input pid input_fd count=0 deadline
+  shift 2
+  mkfifo -m 0600 "$output.input" || return
+  run_as_fixture script --echo never -qefc "$command_line" /dev/null \
+    <"$output.input" >"$output" 2>&1 &
+  pid=$!
+  exec {input_fd}>"$output.input" || return
+  for input in "$@"; do
+    count=$((count + 1))
+    deadline=$((SECONDS + 30))
+    # sudo can discard input during the delay before a retry prompt.
+    until [ "$(grep -Fc '[sudo] password for' "$output" || true)" -ge "$count" ]; do
+      if ! kill -0 "$pid" 2>/dev/null || [ "$SECONDS" -ge "$deadline" ]; then
+        exec {input_fd}>&-
+        wait "$pid" || return
+        return 1
+      fi
+      sleep 0.1
+    done
+    printf '%s' "$input" >&"$input_fd"
+  done
+  local rc=0
+  wait "$pid" || rc=$?
+  exec {input_fd}>&-
+  return "$rc"
+}
+
 run_as_fixture sudo -k
 pty_output="$TMP/pty.out"
 wrong="incorrect-$token"
 printf '  [ .. ] checking wrong-password retry, success and cached credential\n'
 set +e
-{
-  sleep 1
-  printf '%s\n' "$wrong"
-  sleep 1
-  printf '%s\n' "$password"
-} | run_as_fixture script --echo never -qefc \
-  "sudo -k; '$TMP/run-teardown'; '$TMP/run-teardown'" /dev/null \
-  >"$pty_output" 2>&1
+run_prompted_pty "$pty_output" "sudo -k; '$TMP/run-teardown'; '$TMP/run-teardown'" \
+  "$wrong"$'\n' "$password"$'\n'
 pty_rc=$?
 set -e
 if [ "$pty_rc" -ne 0 ]; then
   tr -d '\r' < "$pty_output" \
-    | grep -E '(\[sudo\] password for|Sorry, try again|root-step=|yard:|adapter|not found|unknown|failed)' \
-    >&2 || true
+    | sed "s/$password/[redacted]/g" \
+    | tail -n 120 >&2
   die "interactive PTY command failed with status $pty_rc"
 fi
 grep -Fq '[sudo] password for' "$pty_output" \
@@ -241,11 +263,7 @@ run_as_fixture sudo -k
 interrupt_output="$TMP/interrupt.out"
 printf '  [ .. ] checking Ctrl-C at the standard sudo prompt\n'
 set +e
-{
-  sleep 1
-  printf '\003'
-} | run_as_fixture script --echo never -qefc \
-  "sudo -k; '$TMP/run-teardown'" /dev/null >"$interrupt_output" 2>&1
+run_prompted_pty "$interrupt_output" "sudo -k; '$TMP/run-teardown'" $'\003'
 interrupt_rc=$?
 set -e
 [ "$interrupt_rc" -ne 0 ] || die 'Ctrl-C did not cancel sudo authorization'
@@ -438,11 +456,7 @@ run_real_pty() {
   run_real_as_fixture sudo -k
   printf '  [ .. ] %s\n' "$label"
   set +e
-  {
-    sleep 1
-    printf '%s\n' "$password"
-  } | run_real_as_fixture script --echo never -qefc \
-    "$command_line" /dev/null >"$output" 2>&1
+  run_prompted_pty "$output" "$command_line" "$password"$'\n'
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
