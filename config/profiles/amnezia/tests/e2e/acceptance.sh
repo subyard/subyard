@@ -42,7 +42,7 @@ diagnose_failure() {
   install -m 0600 /dev/null "$OUTPUT/failure.tar"
   install -m 0600 /dev/null "$OUTPUT/capture-transport.log"
   install -m 0600 /dev/null "$OUTPUT/capture-result"
-  # Send the probe inline: a failed re-staging after reboot leaves no guest source tree.
+  # Send the probe inline so capture can run even if initial staging failed.
   command="$(quote_ssh_command python3 - collect)" || return 2
   (
     ulimit -f 128
@@ -259,10 +259,13 @@ prepare_native_clients() {
 }
 
 reboot_owner() {
-  local before after='' down=0 ready=0
+  local before after state command rc down=0 verified_boot=''
   printf 'amnezia_acceptance_stage=owner-host-reboot\n'
-  before="$(guest 1 cat /proc/sys/kernel/random/boot_id </dev/null)"
-  cleanup_guest 1
+  before="$(guest 1 cat /proc/sys/kernel/random/boot_id </dev/null)" || {
+    rc=$?
+    owner_boot_evidence || true
+    return "$rc"
+  }
   timeout --foreground 20 ssh -F "$CLIENT_CONFIG" -T \
     -o ConnectTimeout=3 -o ConnectionAttempts=1 \
     e2e-vm-1 -- sudo -n systemctl reboot </dev/null >/dev/null 2>&1 || true
@@ -272,21 +275,38 @@ reboot_owner() {
       </dev/null >/dev/null 2>&1; then down=1; break; fi
     sleep 1
   done
-  [ "$down" = 1 ] || die 'owner host did not go down for reboot'
+  if [ "$down" = 0 ]; then
+    owner_boot_evidence || true
+    die 'owner host did not go down for reboot'
+  fi
+  # SSH can answer before systemd has finished booting. Keep the candidate already
+  # staged on persistent /var/tmp and only poll read-only boot state here.
+  command="$(quote_ssh_command sh -c 'printf "BootID="; cat /proc/sys/kernel/random/boot_id && exec systemctl is-system-running')"
   for _ in $(seq 1 180); do
-    after="$(timeout --foreground 6 ssh -F "$CLIENT_CONFIG" -T \
+    rc=0
+    state="$(timeout --foreground 6 ssh -F "$CLIENT_CONFIG" -T \
       -o ConnectTimeout=3 -o ConnectionAttempts=1 e2e-vm-1 -- \
-      cat /proc/sys/kernel/random/boot_id </dev/null 2>/dev/null)" || after=''
-    [ -n "$after" ] && [ "$after" != "$before" ] && { ready=1; break; }
+      "$command" </dev/null 2>/dev/null)" || rc=$?
+    after="${state%%$'\n'*}"
+    if [[ "$after" = BootID=?* ]] && [ "${after#BootID=}" != "$before" ]; then
+      # Start the reconciliation deadline at the first sight of the new boot.
+      # A queued unit can keep systemd in "starting" past that deadline.
+      if [ "$after" != "$verified_boot" ]; then
+        (verify_boot_result) || { rc=$?; owner_boot_evidence || true; return "$rc"; }
+        verified_boot="$after"
+      fi
+      case "${state#*$'\n'}:$rc" in
+        running:0|degraded:1) return 0 ;;
+      esac
+    fi
     sleep 1
   done
-  [ "$ready" = 1 ] || { owner_boot_evidence; die 'owner host did not return with a new boot ID'; }
-  prepare_guest 1 "$bundle" "$bundle_hash"
-  verify_boot_result
+  owner_boot_evidence || true
+  die 'owner host did not return with a new boot ID and ready systemd'
 }
 
-# Print bounded owner boot evidence after a failed reboot return. The staged worktree may
-# be absent, so the probe is sent inline; IPv4 addresses are masked.
+# Print bounded owner boot evidence after a failed reboot check. Send the probe inline
+# and mask IPv4 addresses.
 owner_boot_evidence() {
   local command attempt
   command="$(quote_ssh_command sudo -n bash -c '

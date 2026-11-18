@@ -28,10 +28,8 @@ export SUBYARD_OPERATOR_HOME="$HOME" SUBYARD_NO_AUDIT=1 SUBYARD_KEYS_SYSTEMD_SKI
 export MIN_DISK_GIB=1
 # shellcheck source=scripts/lib/host.sh
 . "$root/scripts/lib/host.sh"
-# Guest source trees are disposable across reboots; keep this lease's engine on disk.
 if [ "$YARD_BIN" = "$root/.build/yard" ]; then
-  "$root/dev/build-engine.sh" --output "$fixture/yard"
-  install -D -m 0755 "$fixture/yard" "$YARD_BIN"
+  "$root/dev/build-engine.sh"
 else
   refresh_operator_session() {
     # Product enrollment updates the account; this fixture shell can retain old groups.
