@@ -90,6 +90,7 @@ link="$root/usr/local/bin/claude"
 check="$root/usr/local/bin/claude-policy-check"
 policy_dir="$root/etc/claude-code/managed-settings.d"
 policy="$policy_dir/50-subyard-git-approval.json"
+git_hook="$(dirname "$policy_dir")/subyard-git-approval-hook"
 install -d -m 0755 "$policy_dir"
 printf '{"permissions":{"deny":["Bash(secret *)"]}}\n' > "$policy_dir/10-foreign.json"
 before="$(sha256sum "$policy_dir/10-foreign.json")"
@@ -174,6 +175,20 @@ cp "$tmp/legacy-policy.json" "$policy"
 if "$check" >/dev/null 2>&1; then fail 'policy without the update lock passed readiness'; fi
 run_hook "$root" >/dev/null
 jq -e '.env == {DISABLE_UPDATES: "1"}' "$policy" >/dev/null || fail 'legacy policy did not converge'
+
+# The installed hook and its managed registration converge together.
+python3 "$ROOT/dev/sync-git-approval-hook.py" --check
+python3 "$ROOT/config/agents/shared/tests/git-approval-hook-test.py" "$git_hook"
+jq -e --arg hook "$git_hook" '
+  .hooks.PreToolUse == [{matcher:"Bash", hooks:[{
+    type:"command", command:($hook | @sh), timeout:3, onFailure:"block"
+  }]}]' "$policy" >/dev/null || fail 'managed Git hook registration missing'
+printf '# fixture drift\n' >> "$git_hook"
+chmod 0666 "$git_hook"
+if "$check" >/dev/null 2>"$tmp/hook-drift.err"; then fail 'Git hook drift passed readiness'; fi
+grep -Fq 'Git approval hook permissions drifted' "$tmp/hook-drift.err"
+grep -Fq 'Git approval hook content drifted' "$tmp/hook-drift.err"
+run_hook "$root" >/dev/null
 
 # The approval mode converges on -> off -> on, keeping the update lock and foreign policies.
 jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'default mode lacks the Git ask rules'

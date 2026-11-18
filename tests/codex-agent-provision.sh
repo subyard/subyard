@@ -228,8 +228,16 @@ run_hook amd64 "$root" >/dev/null
 "$link" app-server --help >/dev/null || fail "fresh install has no app-server command"
 CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "package check rejected a valid install"
 python3 - "$requirements" <<'PY'
-import pathlib, sys, tomllib
-policy = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())
+import pathlib, shlex, sys, tomllib
+path = pathlib.Path(sys.argv[1])
+policy = tomllib.loads(path.read_text())
+assert policy['features']['hooks'] is True
+assert policy['hooks']['managed_dir'] == str(path.parent)
+group, = policy['hooks']['PreToolUse']
+assert group['matcher'] == 'Bash'
+hook, = group['hooks']
+assert hook['type'] == 'command' and hook['timeout'] == 3
+assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook')]
 assert policy['allowed_approval_policies'] == ['on-request']
 assert policy['allowed_approvals_reviewers'] == ['user']
 rule, = policy['rules']['prefix_rules']
@@ -524,6 +532,16 @@ for stale_version in 0.147.0 latest; do
     || fail "obsolete environment pins overrode the current release"
 done
 
+# Readiness checks the helper independently of its requirements registration.
+git_hook="$(dirname "$requirements")/subyard-git-approval-hook"
+mv "$git_hook" "$tmp/expected-git-hook"
+if CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null 2>"$tmp/hook-drift.err"; then
+  fail "missing Git hook passed readiness"
+fi
+grep -Fq 'Git approval hook is missing' "$tmp/hook-drift.err"
+run_hook amd64 "$root" >/dev/null
+cmp "$git_hook" "$tmp/expected-git-hook" || fail "Git hook was not repaired"
+
 # Missing, modified and writable requirements fail readiness and reconcile on rerun.
 cp "$requirements" "$tmp/expected-requirements"
 for drift in missing policy permissions directory; do
@@ -575,7 +593,8 @@ run_hook amd64 "$bare" >/dev/null
 [ "$(od -An -tx1 -N4 <&9 | tr -d '[:space:]')" = 7f454c46 ] || fail "open bare image was truncated"
 exec 9<&-
 CODEX_CHECK_DEV_USER="$(id -un)" "$bare_check" >/dev/null || fail "converged bare layout failed readiness"
-cmp "$bare_requirements" "$requirements" || fail "bare layout kept its old policy"
+sed "s|$root/etc/codex|$bare/etc/codex|g" "$requirements" | cmp - "$bare_requirements" \
+  || fail "bare layout kept its old policy"
 # Forward again after a rollback: a bare binary replaced the link and the release stayed behind.
 rm "$bare_runtime"
 cp "$release_root/0.148.0/bin/codex" "$bare_runtime"
