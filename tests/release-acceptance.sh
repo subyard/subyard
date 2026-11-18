@@ -779,6 +779,7 @@ exit "$COLLECTOR_EXIT"
             checkout = fixture_checkout(directory, optional_vms=True)
             (checkout / "config/profiles/sample/tests/e2e/acceptance.sh").write_text(
                 "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
+                "printf 'E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0\\n'\n"
                 "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
             source, target = directory / "source-candidate", directory / "target-candidate"
             source_root, old = prepare_fixture(checkout, source)
@@ -830,6 +831,7 @@ exit "$COLLECTOR_EXIT"
         checkout = fixture_checkout(directory, optional_vms=True)
         controller = (
             "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
+            "printf 'E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0\\n'\n"
             "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
         (checkout / "config/profiles/sample/tests/e2e/acceptance.sh").write_text(controller)
         if "vm:fixture" in extra_checks:
@@ -2359,7 +2361,8 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertIsNone(m.capacity_reason(log))
             log.write_text(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal + lease)
             self.assertIsNone(m.capacity_reason(log))
-            script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
+            guest = "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
+            script.write_text("#!/bin/bash\nprintf '%s' " + shlex.quote(lease + guest + start + "E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\n" + refusal) + "\nexit 4\n")
             result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
 
@@ -2389,6 +2392,14 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             self.assertEqual(result["termination"], "signal")
             self.assertEqual(result["cleanup_status"], "unconfirmed")
             self.assertFalse(m.slot_continues_after(result))
+            script.write_text(script.read_text().replace("exit 143\n", "exit 0\n"))
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["exit_code"], result["cleanup_status"]), ("failed", 0, "unconfirmed"))
+            self.assertFalse(m.slot_continues_after(result))
+            release = "printf 'E2E_RELEASE state=end duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0\\n' >&2\n"
+            script.write_text(script.read_text().replace("exit 0\n", release + "exit 0\n"))
+            result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
+            self.assertEqual((result["status"], result["cleanup_status"]), ("passed", "recorded"))
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -3435,6 +3446,7 @@ def split_catalog_checkout(directory):
     checkout = fixture_checkout(directory, optional_vms=True)
     (checkout / "dev/e2e/release-vm-check.sh").write_text(
         "#!/bin/bash\nprintf 'E2E lease: yard=sample slot=slot-001 run=sample type=subyard-pair vms=2 base=%064d\\n' 0\n"
+        "printf 'E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0\\n'\n"
         "printf 'E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\\n'\n")
     (checkout / m.CORE_VM_CATALOG).write_text(json.dumps({"schema_version": 1, "checks": [
         {"id": "p0-full", "command": ["bash", "dev/e2e/release-vm-check.sh", "--split-covered"],
@@ -3640,21 +3652,22 @@ class FullSplitRequirement(unittest.TestCase):
 
 class HostedInventory(unittest.TestCase):
     def test_retired_check_is_eligible_only_under_a_reviewed_historical_policy(self):
-        policy = "911e6588dded3367817a8c21c5a849dd5b945b2e"
-        name = "vm:published-upgrade/0.11.0-chain"
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             source = Path(temporary)
             (source / "dev").mkdir()
             (source / ".github/workflows").mkdir(parents=True)
-            (source / "dev/release-acceptance.py").write_text(f"CI_HOSTED_CHECKS = frozenset({{{name!r}}})\n")
             (source / ".github/workflows/release-vm.yml").touch()
-            with patch.object(m, "commands", return_value={name: ["true"]}), \
-                 patch.object(m, "git_blob_sha", return_value=policy):
-                self.assertEqual(m.hosted_checks(source, "0.29.0", {}), [name])
-            with patch.object(m, "commands", return_value={name: ["true"]}), \
-                 patch.object(m, "git_blob_sha", return_value="e1e7aa9e268532cf97f661792cc1adb54b6ff7c1"):
-                with self.assertRaisesRegex(ValueError, "unreviewed hosted checks"):
-                    m.hosted_checks(source, "0.29.0", {})
+            for name, policy in (
+                ("vm:published-upgrade/0.11.0-chain", "911e6588dded3367817a8c21c5a849dd5b945b2e"),
+                ("vm:published-upgrade/0.30.0", "14d5180368026f77db2f4890ec5b3d0fd9706a24"),
+            ):
+                with self.subTest(name=name), patch.object(m, "commands", return_value={name: ["true"]}):
+                    (source / "dev/release-acceptance.py").write_text(f"CI_HOSTED_CHECKS = frozenset({{{name!r}}})\n")
+                    with patch.object(m, "git_blob_sha", return_value=policy):
+                        self.assertEqual(m.hosted_checks(source, "0.31.0", {}), [name])
+                    with patch.object(m, "git_blob_sha", return_value="e1e7aa9e268532cf97f661792cc1adb54b6ff7c1"), \
+                         self.assertRaisesRegex(ValueError, "unreviewed hosted checks"):
+                        m.hosted_checks(source, "0.31.0", {})
 
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))

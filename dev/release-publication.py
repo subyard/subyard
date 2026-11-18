@@ -1434,9 +1434,9 @@ def retry_hosted(github, directory, identity):
         raise ValueError("expected a completed unsuccessful hosted run on the candidate commit")
     if run["run_attempt"] < state.get("retry_attempt", 1):
         raise ValueError("the previously requested hosted retry is waiting to appear")
-    github.api(f"actions/runs/{run['id']}/rerun-failed-jobs", "POST")
     state["retry_attempt"] = run["run_attempt"] + 1
     write_json(directory / "ci-hosted.json", state)
+    github.api(f"actions/runs/{run['id']}/rerun-failed-jobs", "POST")
     print(f"CI-HOSTED retry requested run={run['id']} after attempt={run['run_attempt']}", flush=True)
 
 
@@ -1455,11 +1455,11 @@ def collect_ci(github, directory, identity, bound=None, names=None):
         run = discover(github, "release-vm.yml", state["request"])
         if not run:
             return passed, fallback, "missing"
-        if run.get("head_sha") != identity["commit"]:
-            raise ValueError("hosted run candidate SHA mismatch")
         run_id, latest = run["id"], run["run_attempt"]
         retry_visible = latest >= state.get("retry_attempt", 1)
         terminal = retry_visible and run.get("status") == "completed"
+        if run.get("head_sha") != identity["commit"]:
+            raise ValueError("hosted run candidate SHA mismatch")
         policy = workflow_file_blob(github, ".github/workflows/release-vm.yml", identity["commit"])
         allowed = a.hosted_policy_checks(policy)
         inventory = set(state["checks"])

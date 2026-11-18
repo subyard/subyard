@@ -63,6 +63,7 @@ jobs:
       actions: read
     outputs:
       run: ${{ steps.release.outputs.active == 'false' && steps.compare.outputs.run == 'true' }}
+      release_active: ${{ steps.release.outputs.active }}
     steps:
       - &release-capacity
         name: Give release checks first use of runner capacity
@@ -335,6 +336,7 @@ jobs:
       actions: read
     outputs:
       run: ${{ steps.release.outputs.active == 'false' }}
+      release_active: ${{ steps.release.outputs.active }}
     steps:
       - *release-capacity
       - name: Record matrix admission
@@ -498,14 +500,16 @@ jobs:
 
   # The only job allowed to start runs. It checks out nothing and runs no repository code.
   reschedule:
-    needs: nested
-    if: ${{ !cancelled() && needs.nested.result != 'skipped' }}
+    needs: [changes, admit, nested]
+    if: >-
+      ${{ !cancelled() && (needs.nested.result != 'skipped' || (inputs.origin && inputs.checks
+      && (needs.changes.outputs.release_active == 'true' || needs.admit.outputs.release_active == 'true'))) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       actions: write
     steps:
-      - name: Retry nested VM checks that landed on AMD
+      - name: Retry nested VM checks that did not run
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -514,25 +518,35 @@ jobs:
           REF: ${{ github.ref_name }}
           ORIGIN: ${{ inputs.origin || github.run_id }}
           ATTEMPT: ${{ inputs.origin && inputs.attempt || 0 }}
+          DEFERRED_CHECKS: ${{ needs.nested.result == 'skipped' && inputs.checks || '' }}
         run: |
-          # A nested job whose check step was skipped ran on AMD. A check is retried only when
-          # every copy of it did.
-          checks="$(gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
-            | jq -r '[.[].jobs[] | select(any(.steps[]; .name == "Require Intel, since nested VMs on AMD under Hyper-V are too slow for these checks" and .conclusion == "success"))
-              | {id: (.name | sub(" #[0-9]+$"; "")),
-                 ran: any(.steps[]; .name == "Run the check" and .conclusion != "skipped")}]
-              | group_by(.id)[] | select(all(.[]; .ran | not)) | .[0].id' | sort | xargs)"
+          if [ -n "$DEFERRED_CHECKS" ]; then
+            checks="$DEFERRED_CHECKS"
+            reason='Release workflows had priority'
+          else
+            # Retry checks whose copies all skipped their check step after the CPU probe.
+            checks="$(gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs?per_page=100" \
+              | jq -r '[.[].jobs[] | select(any(.steps[]; .name == "Require Intel, since nested VMs on AMD under Hyper-V are too slow for these checks" and .conclusion == "success"))
+                | {id: (.name | sub(" #[0-9]+$"; "")),
+                   ran: any(.steps[]; .name == "Run the check" and .conclusion != "skipped")}]
+                | group_by(.id)[] | select(all(.[]; .ran | not)) | .[0].id' | sort | xargs)"
+            reason='No Intel runner was assigned'
+          fi
           if [ -z "$checks" ]; then
             printf 'Every nested VM check ran on an Intel runner.\n' >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           attempt=$((ATTEMPT + 1))
           if [ "$attempt" -gt "$NESTED_ATTEMPTS" ]; then
-            printf '::error title=Nested VM checks did not run::No Intel runner in %s attempts; not run: %s\n' \
-              "$NESTED_ATTEMPTS" "$checks"
+            printf '::error title=Nested VM checks did not run::Retry limit (%s) reached. %s on the last attempt. Pending: %s\n' \
+              "$NESTED_ATTEMPTS" "$reason" "$checks"
             exit 1
+          fi
+          # Back off before checking release capacity again on a fresh run.
+          if [ -n "$DEFERRED_CHECKS" ]; then
+            sleep 300
           fi
           gh workflow run periodic-e2e.yml --ref "$REF" -f checks="$checks" -f origin="$ORIGIN" \
             -f attempt="$attempt"
-          printf 'Rescheduled on new runners at the latest %s commit, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
-            "$REF" "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s. Rescheduled at the latest %s commit, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
+            "$reason" "$REF" "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"

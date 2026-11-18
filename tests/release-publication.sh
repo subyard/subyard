@@ -2894,6 +2894,14 @@ class HostedChecks(unittest.TestCase):
         self.assertEqual(self.run_acceptance(artifacts_available=False), (1, [1]))
         self.assertEqual(m.a.load_bound(self.output)[1]["checks"]["profile:sample"]["status"], "failed")
 
+    def test_wrong_sha_falls_back_only_once_the_run_completes(self):
+        self.run.update(head_sha="f" * 40, status="in_progress", conclusion=None)
+        self.assertEqual(self.run_acceptance(), (1, []))
+        self.run.update(status="completed", conclusion="success")
+        self.assertEqual(self.run_acceptance(), (1, [1]))
+        self.assertEqual(m.a.load_bound(self.output)[1]["checks"]["profile:sample"]["status"], "failed")
+        self.assertFalse((self.directory / "ci-hosted-downloads").exists())
+
     def test_hosted_pass_cannot_replace_a_later_explicit_local_rerun(self):
         self.assertEqual(self.run_acceptance(), (0, []))
         self.assertEqual(self.run_acceptance(rerun=True), (1, [1]))
@@ -2944,6 +2952,17 @@ class HostedChecks(unittest.TestCase):
                 receipt["checks"]["profile:sample"] = {"status": "pending"}
                 m.a.save(self.output, receipt)
                 shutil.rmtree(self.directory / "ci-hosted-downloads")
+
+    def test_lost_hosted_retry_response_preserves_choice_over_local_fallback(self):
+        self.run["conclusion"] = self.job["conclusion"] = "failure"
+        with patch.object(self.github, "api", side_effect=ValueError("lost response")) as api:
+            with self.assertRaisesRegex(ValueError, "lost response"):
+                m.retry_hosted(self.github, self.directory, self.identity)
+            with self.assertRaisesRegex(ValueError, "waiting to appear"):
+                m.retry_hosted(self.github, self.directory, self.identity)
+            api.assert_called_once_with("actions/runs/456/rerun-failed-jobs", "POST")
+        self.assertEqual(self.run_acceptance(), (1, []))
+        self.assertEqual(m.a.load_bound(self.output)[1]["checks"]["profile:sample"], {"status": "pending"})
 
 
 

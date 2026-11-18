@@ -280,7 +280,7 @@ token_sites = {
         ("changes", "Give release checks first use of runner capacity", "GH_TOKEN: ${{ github.token }}"),
         ("changes", "Compare with the last finished run", "GH_TOKEN: ${{ github.token }}"),
         ("supersede", "Replace earlier runs on this branch", "GH_TOKEN: ${{ github.token }}"),
-        ("reschedule", "Retry nested VM checks that landed on AMD", "GH_TOKEN: ${{ github.token }}"),
+        ("reschedule", "Retry nested VM checks that did not run", "GH_TOKEN: ${{ github.token }}"),
     },
 }
 for filename, allowed in token_sites.items():
@@ -429,6 +429,34 @@ assert "needs: [candidate, admit]" in nested_job
 assert all("needs.admit.outputs.run == 'true'" in job for job in (check_job, veranda_job, nested_job))
 assert workflow.count("*release-capacity") == 1
 assert sum(int(re.search(r"max-parallel: (\d+)", job)[1]) for job in (check_job, veranda_job, nested_job)) == 14
+retry = workflow.split("  reschedule:\n", 1)[1]
+assert "needs: [changes, admit, nested]" in retry
+assert all("release_active: ${{ steps.release.outputs.active }}" in job for job in (changes, admit_job))
+assert "needs.nested.result != 'skipped' || (inputs.origin && inputs.checks" in retry
+assert "needs.changes.outputs.release_active == 'true' || needs.admit.outputs.release_active == 'true'" in retry
+assert "DEFERRED_CHECKS: ${{ needs.nested.result == 'skipped' && inputs.checks || '' }}" in retry
+retry_step = retry.split("        run: |\n", 1)[1]
+with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+    summary = Path(temporary) / "summary"
+    stub = r'''sleep() { printf 'sleep=%s\n' "$1"; }
+    gh() {
+        [ "$1 $2" = 'workflow run' ] || return 90
+        printf '%s\n' "$@"
+    }
+    '''
+    for attempt in (3, 30):
+        result = subprocess.run(["bash", "-euc", stub + retry_step], capture_output=True, text=True, check=False,
+                                env=dict(os.environ, REF="test-branch", ORIGIN="123", ATTEMPT=str(attempt),
+                                         NESTED_ATTEMPTS="30", DEFERRED_CHECKS="p0:one p0:two",
+                                         GITHUB_STEP_SUMMARY=str(summary)))
+        if attempt == 3:
+            assert result.returncode == 0, result
+            assert result.stdout.splitlines() == ["sleep=300", "workflow", "run", "periodic-e2e.yml", "--ref",
+                                                   "test-branch", "-f", "checks=p0:one p0:two", "-f", "origin=123",
+                                                   "-f", "attempt=4"]
+        else:
+            assert result.returncode == 1 and result.stdout.startswith("::error title=Nested VM checks did not run::")
+            assert "Release workflows had priority" in result.stdout and "p0:one p0:two" in result.stdout
 assert {entry["id"] for entry in plan["veranda"]["include"]} == p.VERANDA.keys() | p.VERANDA_MANUAL.keys()
 assert all(entry["bundle"] == "veranda-bundle" for entry in plan["veranda"]["include"])
 assert all("bundle" not in entry for kind in ("checks", "nested") for entry in plan[kind]["include"])

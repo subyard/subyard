@@ -358,7 +358,7 @@ HISTORICAL_HOSTED_CHECKS = {
         "vm:reliable-migrations", "vm:integration-legacy-upgrade",
     },
     "836bbd8229d65149c75731a2f9ea46f2aa45e241": _BOUNDARY_HOSTED | _CHAIN_HOSTED,
-    "14d5180368026f77db2f4890ec5b3d0fd9706a24": _BOUNDARY_HOSTED,
+    "14d5180368026f77db2f4890ec5b3d0fd9706a24": _BOUNDARY_HOSTED | {"vm:published-upgrade/0.30.0"},
 }
 
 
@@ -838,8 +838,10 @@ def execute(name, command, root, output, env, slot=None):
         result["reason"] = "capacity_" + blocked
     if cleanup_status:
         result["cleanup_status"] = cleanup_status
-    if result["status"] != "passed" and phases.get("leases_held"):
+    if phases.get("leases_held"):
         result["cleanup_status"] = "unconfirmed"
+        if result["status"] == "passed":
+            result["status"] = "failed"
     if slot:
         result["slot"] = slot
     try:

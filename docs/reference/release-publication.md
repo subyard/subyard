@@ -603,10 +603,10 @@ projects only this bounded grammar into phase events, without copying fixture ou
 cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
-Exit 124 is a timeout; known signal exits retain the signal number. Any lease or guest-start
-marker rules out capacity classification for the entire attempt, even if a typed refusal follows it.
-Exit 4 then remains a failed check with its native exit. A typed refusal before any such marker is
-environment failure; otherwise cause stays unknown unless the fixture emits the bounded
+Exit 124 is a timeout; known signal exits retain the signal number. A typed capacity refusal on
+acquire is an environment failure and blocks the check when no lease is outstanding and every
+earlier lease was observed to release cleanly. With a lease still held or a failed release, exit 4
+remains a failed check with its native exit. Cause stays unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
 budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub
