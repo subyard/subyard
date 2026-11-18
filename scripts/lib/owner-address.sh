@@ -8,16 +8,3 @@ subyard_owner_tail_address() {
     [ "$third" -le 255 ] && [ "$fourth" -le 255 ] &&
     [[ "$third" != 0?* && "$fourth" != 0?* ]]
 }
-
-subyard_owner_host() {
-  local address
-  if address="$(timeout 2 tailscale ip -4 2>/dev/null)" &&
-    subyard_owner_tail_address "$address" &&
-    ip -j -4 address show up | jq -e --arg address "$address" \
-      'any(.[].addr_info[]; .local == $address)' >/dev/null; then
-    printf '%s\n' "$address"
-  else
-    printf '127.0.0.1\n'
-  fi
-}
-

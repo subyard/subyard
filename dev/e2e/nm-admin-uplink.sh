@@ -102,7 +102,6 @@ name="nmguard$TOKEN"
 conf_dir=/etc/NetworkManager/conf.d
 guard="$conf_dir/zz-subyard-unmanaged.conf"
 admin_conf="$conf_dir/00-keep-uplink.conf"
-pin=/etc/udev/rules.d/00-subyard-e2e-uplink-pin.rules
 state_record=/var/lib/subyard/nm-guard-state
 launcher="$STATE/bin/yard"
 export SUBYARD_OPERATOR_HOME="$STATE/home" SUBYARD_CONFIG_HOME="$STATE/config" SUBYARD_HOME="$STATE/data"
@@ -186,16 +185,6 @@ install_network_manager() {
     >"$STATE/apt.log" 2>&1 || die 'network-manager install failed'
   settle
   evidence "NetworkManager $(NetworkManager --version)"
-}
-pin_uplink() { # on|off
-  if [ "$1" = on ]; then
-    printf 'ENV{INTERFACE}=="%s", ENV{NM_UNMANAGED}="1"\n' "$UP" | sudo -n tee "$pin" >/dev/null
-  else
-    sudo -n rm -f "$pin"
-  fi
-  sudo -n udevadm control --reload
-  sudo -n udevadm trigger --action=change --subsystem-match=net
-  sudo -n udevadm settle
 }
 install_candidate() {
   owner env YARD_RELEASE_BASE_URL="file://$ROOT/.subyard-acceptance/release" YARD_RELEASE_CACHE="$STATE/releases" \

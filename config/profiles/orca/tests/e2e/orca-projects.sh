@@ -116,26 +116,6 @@ free_port() {
 
 catalog() { orca_rpc repo.list; }
 groups() { orca_rpc projectGroup.list; }
-probe_runtime() {
-  # Probe saved-tab protection and cheap native requests without logging payloads.
-  guest_dev python3 -B - <<'YARD' || true
-import importlib.util, time
-spec = importlib.util.spec_from_file_location('fixture', '/tmp/orca-projects-helper.py')
-fixture = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(fixture)
-for method in ('session.tabs.listAll', 'status.get', 'projectGroup.list', 'repo.list'):
-    started = time.monotonic()
-    try:
-        response = fixture.call_any_result('/srv/agents/orca/config/orca/orca-runtime.json', method, None)
-        result = 'responded'
-        if method == 'session.tabs.listAll':
-            snapshots = fixture.snapshot_tabs(response)
-            result += f' snapshots={len(snapshots)} tabs={sum(len(item["tabs"]) for item in snapshots)}'
-    except fixture.SafeRpcError as error:
-        result = str(error)
-    print(f'orcaprobe: {method}: {result} ({time.monotonic() - started:.1f}s)', flush=True)
-YARD
-}
 repo_id() {
   local path="$1"
   catalog | jq -er --arg path "$path" '

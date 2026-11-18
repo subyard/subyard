@@ -194,7 +194,3 @@ subyard_srv_create_config() {
     *) return 2 ;;
   esac
 }
-subyard_srv_config_render() {
-  subyard_srv_create_config || return
-  printf '%s\0' "$SUBYARD_SRV_CONTENT_TYPE" "${SUBYARD_SRV_CREATE_CONFIG[@]}" '' "${SUBYARD_SRV_DEVICE_CONFIG[@]}"
-}
