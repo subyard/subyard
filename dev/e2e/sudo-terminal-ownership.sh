@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+LOCAL_RELEASE="$ROOT/.build/sudo-terminal-release"
+LOCAL_VERSION=1.0.0-candidate.e2e
 TMP=''
 FIXTURE_USER=''
 SUDOERS=''
@@ -78,27 +80,42 @@ else
     if engine="$(release_candidate_prepare "$ROOT")"; then
       :
     elif [ "$?" = 1 ]; then
-      make -C "$ROOT" build
-      engine="$ROOT/.build/runtime/current/bin/yard-engine"
+      "$ROOT/dev/package-engine.sh" --version "$LOCAL_VERSION" --output-dir "$LOCAL_RELEASE"
+      engine=--local-release
     else
       die 'could not verify frozen candidate'
     fi
     exec sudo -n env SUBYARD_E2E_VM="$SUBYARD_E2E_VM" bash "$0" "$engine"
   fi
 
-  engine="${1:-}"
-  case "$engine" in
-    "$ROOT/.subyard-acceptance/runtime/bin/yard-engine"|"$ROOT/.build/runtime/current/bin/yard-engine") ;;
-    *) die 'candidate engine path is required' ;;
+  case "${1:-}" in
+    "$ROOT/.subyard-acceptance/runtime/bin/yard-engine")
+      runtime="$ROOT/.subyard-acceptance/runtime"
+      release="$ROOT/.subyard-acceptance/release"
+      ;;
+    --local-release)
+      runtime=''
+      release="$LOCAL_RELEASE"
+      case "$(uname -m)" in
+        x86_64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) die 'unsupported candidate architecture' ;;
+      esac
+      ;;
+    *) die 'candidate runtime is required' ;;
   esac
-  runtime="${engine%/bin/yard-engine}"
 fi
-[ -x "$runtime/bin/yard-engine" ] || die 'candidate engine is missing'
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 TMP="$(mktemp -d /tmp/subyard-sudo-terminal.XXXXXX)"
 chmod 0750 "$TMP"
+if [ -z "$runtime" ]; then
+  runtime="$TMP/local-runtime"
+  install -d -m 0755 "$runtime"
+  tar -xzf "$release/subyard-$LOCAL_VERSION-linux-$arch.tar.gz" -C "$runtime"
+fi
+[ -x "$runtime/bin/yard-engine" ] || die 'candidate engine is missing'
 fixture_repo="$TMP/repository"
 real_repo="$TMP/real-repository"
 fixture_home="$TMP/home"
@@ -317,6 +334,21 @@ REAL_PROJECT="$real_project"
 REAL_INSTANCE="yard-$real_yard"
 REAL_VOLUME="yard-srv-$real_yard"
 stage_runtime "$real_repo"
+real_config="$fixture_home/.config/subyard"
+real_data="$fixture_home/.subyard-real"
+real_storage_path="$(incus storage get default source)"
+# The published runtime commits the metadata required by real init and its boot service.
+cp -a --no-preserve=ownership "$release/." "$TMP/release"
+chmod -R a+rX "$TMP/release"
+candidate_version="$("$real_repo/bin/yard-engine" version)"
+candidate_version="${candidate_version##* }"
+(
+  cd "$fixture_home"
+  run_as_fixture env HOME="$fixture_home" SUBYARD_OPERATOR_HOME="$fixture_home" \
+    SUBYARD_CONFIG_HOME="$real_config" SUBYARD_HOME="$real_data" \
+    SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 YARD_RELEASE_BASE_URL="file://$TMP/release" \
+    bash "$TMP/release/subyard-install.sh" --version "$candidate_version" --yes
+)
 install -d -m 0755 "$real_repo/config/profiles/sudo-smoke"
 cat > "$real_repo/config/profiles/sudo-smoke/profile.conf" <<'EOF'
 # Empty smoke profile: the provision hook only proves lifecycle and adapter continuation.
@@ -330,8 +362,6 @@ printf 'sudo-smoke-hook-ok\n'
 SH
 chmod 0755 "$real_repo/config/profiles/sudo-smoke/provision.sh"
 
-real_config="$fixture_home/.config/subyard"
-real_storage_path="$(incus storage get default source)"
 install -d -m 0700 -o "$FIXTURE_USER" -g "$FIXTURE_USER" \
   "$fixture_home/.config" "$real_config" "$real_config/yards"
 real_ssh_port=$((30000 + ($$ % 20000)))
@@ -420,7 +450,7 @@ exec env -i \\
   SHELL='/bin/bash' \\
   SUBYARD_OPERATOR_HOME='$fixture_home' \\
   SUBYARD_CONFIG_HOME='$real_config' \\
-  SUBYARD_HOME='$fixture_home/.subyard-real' \\
+  SUBYARD_HOME='$real_data' \\
   SUBYARD_NO_AUDIT=1 \\
   SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 \\
   SUBYARD_REPOSITORY_ROOT='$real_repo' \\
