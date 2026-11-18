@@ -72,9 +72,20 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 			verbDone := make(chan int, 1)
 			holderDone := make(chan error, 1)
 			barrier := make(chan struct{})
+			waitHolder := func() {
+				t.Helper()
+				select {
+				case err := <-holderDone:
+					if err != nil {
+						t.Fatalf("barrier holder did not get the yard lock: %v", err)
+					}
+				case <-ctx.Done():
+					t.Fatal("barrier holder did not finish")
+				}
+			}
 			switch order {
 			case "barrier-first":
-				// Native apply needs no pause here; it must only wait for the barrier.
+				// After the retry native apply needs no pause.
 				if err := os.WriteFile(filepath.Join(sync, "go"), nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -82,14 +93,17 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 				go func() { holderDone <- migrateLikeHolder(ctx, program, barrier, proceed) }()
 				<-barrier
 				go func() { verbDone <- program.Run(ctx) }()
-				// The verb has planned; let it reach its admission before the
-				// holder requests the yard lock the legacy path held there.
-				waitForFile(t, ctx, filepath.Join(sync, "prepared"))
-				time.Sleep(300 * time.Millisecond)
-				if _, err := os.Stat(filepath.Join(sync, "applying")); err == nil {
-					t.Fatal("resource apply ran while another process held the owner barrier")
+				select {
+				case code := <-verbDone:
+					if code != 1 || !strings.Contains(output.String(), "release state is changing; retry") {
+						t.Fatalf("contended admission: code=%d output=%s", code, output)
+					}
+				case <-ctx.Done():
+					t.Fatal("admission waited on the owner barrier")
 				}
 				close(proceed)
+				waitHolder()
+				go func() { verbDone <- program.Run(ctx) }()
 			case "verb-first":
 				go func() { verbDone <- program.Run(ctx) }()
 				waitForFile(t, ctx, filepath.Join(sync, "applying"))
@@ -109,13 +123,8 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatalf("resource verb did not finish: %s", output)
 			}
-			select {
-			case err := <-holderDone:
-				if err != nil {
-					t.Fatalf("barrier holder did not get the yard lock: %v", err)
-				}
-			case <-ctx.Done():
-				t.Fatal("barrier holder did not finish")
+			if order == "verb-first" {
+				waitHolder()
 			}
 			// The fixture's native shutdown reports an unverified guest after
 			// closing ingress; reaching it proves the verb was not refused.
@@ -126,8 +135,8 @@ func TestResourceIngressVerbAndBarrierHolderDoNotDeadlock(t *testing.T) {
 	}
 }
 
-// A legacy (v1) plan for a public-ingress lifecycle verb is refused before any
-// lock, so it neither waits on a held owner barrier nor changes anything.
+// A legacy (v1) plan for a public-ingress lifecycle verb is refused before
+// taking the yard lock or running the action.
 func TestResourceIngressRefusesLegacyPlan(t *testing.T) {
 	program, home, output := shutdownGateFixture(t, "attributed-v1")
 	ctx, cancel := context.WithTimeout(context.Background(), lockOrderDeadline)
@@ -136,11 +145,6 @@ func TestResourceIngressRefusesLegacyPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, releaseBarrier, err := uninstall.OwnerLock(ctx, loaded.Context.Paths.DataHome, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer releaseBarrier()
 	unlockYard, err := lockIntegrationYard(ctx, loaded)
 	if err != nil {
 		t.Fatal(err)

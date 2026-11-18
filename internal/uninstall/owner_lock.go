@@ -63,6 +63,15 @@ func borrowOwnerBarriers() ([]*os.File, error) {
 // OwnerLock is stable account coordination state outside installation removal
 // roots. Never unlink it: an already-waiting setup must keep the same inode.
 func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func(), error) {
+	return ownerLock(ctx, dataHome, expected, true)
+}
+
+// TryOwnerLock attempts the owner barrier once and returns EWOULDBLOCK on contention.
+func TryOwnerLock(ctx context.Context, dataHome string) (Tree, func(), error) {
+	return ownerLock(ctx, dataHome, nil, false)
+}
+
+func ownerLock(ctx context.Context, dataHome string, expected *Tree, wait bool) (Tree, func(), error) {
 	uid := uint32(os.Getuid())
 	directory := filepath.Join("/tmp", "subyard-owner-locks-"+strconv.Itoa(os.Getuid()))
 	if err := privateDirectory(directory); err != nil {
@@ -138,6 +147,10 @@ func OwnerLock(ctx context.Context, dataHome string, expected *Tree) (Tree, func
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			file.Close()
 			return Tree{}, nil, err
+		}
+		if !wait {
+			file.Close()
+			return Tree{}, nil, syscall.EWOULDBLOCK
 		}
 		select {
 		case <-ctx.Done():

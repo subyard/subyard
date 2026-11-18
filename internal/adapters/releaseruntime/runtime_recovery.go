@@ -11,6 +11,7 @@ import (
 	"io"
 	"slices"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -49,11 +50,17 @@ func (runtime *Runtime) inspectActivationRecovery(
 		Mode: releasetransition.RecoveryProcessLifecycleCapabilities}
 	capabilities, probeErr := runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
 	if probeErr != nil {
+		if errors.Is(probeErr, domain.ErrPlanStale) {
+			return nil, probeErr
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		probe.Mode = releasetransition.RecoveryProcessCapabilities
 		capabilities, probeErr = runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
+	}
+	if errors.Is(probeErr, domain.ErrPlanStale) {
+		return nil, probeErr
 	}
 	if probeErr != nil || capabilities.Capabilities == nil || capabilities.Capabilities.Validate() != nil {
 		if ctx.Err() != nil {

@@ -2226,6 +2226,7 @@ esac
 	}
 	runtime := New(Config{
 		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		OwnerLockHeld: func() bool { return true },
 	})
 	defer runtime.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -2269,7 +2270,7 @@ esac
 	case observed := <-result:
 		if observed.err != nil || observed.outcome == nil ||
 			observed.outcome.Status != releasetransition.StatusOperatorActionRequired ||
-			observed.outcome.Code != releasetransition.CodeDependencyUnavailable {
+			observed.outcome.Code != releasetransition.CodePlanStale {
 			cause := observed.err
 			for cause != nil && errors.Unwrap(cause) != nil {
 				cause = errors.Unwrap(cause)
@@ -2284,6 +2285,94 @@ esac
 		if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("journal engine executed after replacement: %v", err)
 		}
+	}
+}
+
+func TestJournalGateLaunchTakesOwnerBarrier(t *testing.T) {
+	for _, scenario := range []string{"unchanged", "superseded", "contended"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment())})
+			t.Cleanup(func() { _ = runtime.Close() })
+			called := filepath.Join(filepath.Dir(fixture.runtimeRoot), "journal-gate-called")
+			engine := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    : > %q
+    [ -n "$SUBYARD_OWNER_LOCK_FD" ] || exit 65
+    flock -n -E 77 %q true
+    [ "$?" -eq 77 ] || exit 66
+    cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, called, uninstall.OwnerLockPath(runtime.ownerDataHome()), fixture.recoveringResponse())
+			writeProtectedRuntimeFixtureEngine(t, fixture, engine)
+			store, err := releasetransition.NewPOSIXV2Store(fixture.configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := releasetransition.ParseJournal(snapshot.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := releasetransition.ProcessRequest{
+				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+				RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Yard: "default",
+				Target: journal.Goal.Target, Direction: journal.Goal.Direction,
+				ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ctx = context.WithValue(ctx, journalGateInspectionKey{}, &journalGateInspection{request: request, fingerprint: snapshot.Fingerprint})
+			owner := publishedCandidate{release: request.Target, root: filepath.Dir(filepath.Dir(fixture.engine))}
+			verified, err := runtime.verifyPublishedCandidate(ctx, owner, request.RuntimeRoot, &journal.ArtifactDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verified.Close()
+			if scenario != "unchanged" {
+				_, unlock, err := uninstall.OwnerLock(ctx, runtime.ownerDataHome(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "superseded" {
+					journal.Transaction = "tx-fedcba9876543210"
+					journal.Goal.Target = "1.2.4-bbbbbbbbbbbb"
+					journal.Releases.Target = journal.Goal.Target
+					payload, err := releasetransition.MarshalJournal(journal)
+					if err != nil {
+						unlock()
+						t.Fatal(err)
+					}
+					testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
+					unlock()
+				} else {
+					defer unlock()
+				}
+			}
+			_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
+			if scenario == "unchanged" {
+				if err != nil {
+					t.Fatalf("the selected journal owner could not inspect under the barrier: %v", err)
+				}
+				return
+			}
+			want := "release state changed; retry"
+			if scenario == "contended" {
+				want = "release state is changing; retry"
+			}
+			if !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), want) || ctx.Err() != nil {
+				t.Fatalf("wanted prompt stale result %q, got %v", want, err)
+			}
+			if _, err := os.Lstat(called); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the previous journal owner launched: %v", err)
+			}
+		})
 	}
 }
 

@@ -239,6 +239,14 @@ func (runtime *Runtime) InspectMutationGateInspection(
 	inspection, err := runtime.inspectProtectedTransition(
 		ctx, runtimeRoot, configHome, yard, inheritedSettingIDs,
 	)
+	if err == nil && inspection != nil && yard == "default" &&
+		inspection.journal.Checkpoint != releasetransition.JournalComplete && currentScopeBlocker(inspection.inspection) {
+		before, readErr := runtime.readCurrentSnapshot(runtimeRoot, configHome)
+		if readErr != nil {
+			return nil, redactReleaseInspectionError(readErr)
+		}
+		inspection, err = runtime.recoverCurrentScope(ctx, runtimeRoot, configHome, before, inspection)
+	}
 	if err != nil {
 		var public publicReleaseInspectionError
 		if errors.As(err, &public) {
@@ -248,16 +256,6 @@ func (runtime *Runtime) InspectMutationGateInspection(
 	}
 	if inspection == nil {
 		return nil, nil
-	}
-	if yard == "default" && inspection.journal.Checkpoint != releasetransition.JournalComplete && currentScopeBlocker(inspection.inspection) {
-		before, err := runtime.readCurrentSnapshot(runtimeRoot, configHome)
-		if err != nil {
-			return nil, redactReleaseInspectionError(err)
-		}
-		inspection, err = runtime.recoverCurrentScope(ctx, runtimeRoot, configHome, before, inspection)
-		if err != nil {
-			return nil, redactReleaseInspectionError(err)
-		}
 	}
 	return &inspection.inspection, nil
 }
@@ -411,7 +409,7 @@ func (runtime *Runtime) inspectProtectedTransition(
 			return nil, publicCandidateFailure(err)
 		}
 	}
-	// Command admission must inspect before waiting for the owner barrier.
+	// Command admission tries the owner barrier without waiting.
 	// Bind this read-only launch to the exact journal we already inspected.
 	_, gate := ctx.Value(journalGateInspectionKey{}).(*journalGateInspection)
 	var before currentSnapshot
@@ -424,6 +422,9 @@ func (runtime *Runtime) inspectProtectedTransition(
 	}
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
 	if err != nil {
+		if gate && errors.Is(err, domain.ErrPlanStale) {
+			return nil, err
+		}
 		return nil, publicCandidateFailure(err)
 	}
 	if gate {

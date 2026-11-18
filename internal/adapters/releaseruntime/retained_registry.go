@@ -53,7 +53,7 @@ func (runtime *Runtime) ownerDataHome() string {
 // The installation owner barrier serializes journal and runtime link writers.
 // Borrow it during CLI execution, or acquire it for standalone preparation.
 // The child inherits this barrier and can still acquire its own V2 store lock.
-func (runtime *Runtime) lockReleaseSelection(ctx context.Context) (func(), error) {
+func (runtime *Runtime) lockReleaseSelection(ctx context.Context, nonblocking bool) (func(), error) {
 	home := runtime.ownerDataHome()
 	if runtime.config.OwnerLockHeld != nil && runtime.config.OwnerLockHeld() {
 		lock, err := uninstall.BorrowOwnerLock(home)
@@ -65,13 +65,21 @@ func (runtime *Runtime) lockReleaseSelection(ctx context.Context) (func(), error
 		}
 		return func() { _ = lock.Close() }, nil
 	}
+	if nonblocking {
+		_, unlock, err := uninstall.TryOwnerLock(ctx, home)
+		return unlock, err
+	}
 	_, unlock, err := uninstall.OwnerLock(ctx, home, nil)
 	return unlock, err
 }
 
 func staleRetainedSelection(root string, target releasetransition.ReleaseID) error {
+	return staleReleaseState(root, target, "release state changed; retry", "run yard update --check")
+}
+
+func staleReleaseState(root string, target releasetransition.ReleaseID, message, retry string) error {
 	outcome := observedPublicReleaseOutcome(root, target, nil, releasetransition.CodePlanStale,
-		"release state changed; retry", "run yard update --check")
+		message, retry)
 	return publicReleaseInspectionError{cause: fmt.Errorf("%w: %w", domain.ErrPlanStale, transitionOutcomeError(outcome)), outcome: outcome}
 }
 
@@ -80,7 +88,7 @@ func (runtime *Runtime) captureReleaseSelection(ctx context.Context, target *ver
 }
 
 func (runtime *Runtime) captureTransitionSelection(ctx context.Context, target *verifiedPublishedCandidate, request releasetransition.ProcessRequest, links runtimeLinkSnapshot, freshDraft bool) (*releaseSelection, error) {
-	unlock, err := runtime.lockReleaseSelection(ctx)
+	unlock, err := runtime.lockReleaseSelection(ctx, false)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +283,7 @@ func verifyRetainedHistory(target *verifiedPublishedCandidate, registry releaset
 }
 
 // admitTransitionLaunch is the last admission check before a transition child
-// starts. Selection and execution hold the owner barrier through invocation.
+// starts. The caller holds the owner barrier through invocation.
 func (runtime *Runtime) admitTransitionLaunch(ctx context.Context, engine *verifiedPublishedCandidate, request releasetransition.ProcessRequest) error {
 	if gate := journalGateLaunch(ctx, &request); gate != nil {
 		if runtime.exactJournalTransitionOwner(engine, request, gate.fingerprint) {
