@@ -2002,8 +2002,9 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if err != nil || !ready {
 		return false, err
 	}
+	selectionErr := ValidateBubblewrapSelection(runtime.environmentValue("BWRAP_APPARMOR"), runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))
 	version := runtime.environmentValue("CCUSAGE_VERSION")
-	if runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" && (version == "" || version == "latest") {
+	if selectionErr == nil && runtime.environmentValue("ALLOWS_CODING_TOOLS") != "false" && (version == "" || version == "latest") {
 		return false, nil
 	}
 	state, err := runtime.reconcileState(ctx)
@@ -2011,6 +2012,15 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	instance := state.Instance
+	// An incompatible selection blocks provisioning. Observe service ownership
+	// before returning that refusal, even when other provision work is pending.
+	if selectionErr != nil {
+		if !strings.EqualFold(instance.Status, "running") || runtime.Executor == nil {
+			return false, selectionErr
+		}
+		_, _, err := runtime.integrationServices(ctx, "observe")
+		return false, err
+	}
 	marker, _ := instance.EffectiveConfig("user.subyard.ccusage_version")
 	if !runtime.previewRouteConverged(ctx, instance) {
 		return false, nil

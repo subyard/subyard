@@ -179,7 +179,8 @@ class StockProbeTests(unittest.TestCase):
             start.assert_not_called()
             self.assertEqual(1, run.call_count)
             environment = run.call_args.kwargs["env"]
-            self.assertEqual({"PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"},
+            self.assertEqual({"PATH", "HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                              "ORCA_ELECTRON_NO_SANDBOX"},
                              set(environment))
             self.assertNotEqual(str(Path.home()), environment["HOME"])
 
@@ -190,18 +191,21 @@ class StockProbeTests(unittest.TestCase):
 
         def serve(command, **kwargs):
             self.assertEqual(subprocess.STDOUT, kwargs["stderr"])
+            self.assertEqual(["serve", "--no-pairing", "--bind", "127.0.0.1", "--port"], command[1:-1])
+            self.assertEqual("1", kwargs["env"]["ORCA_ELECTRON_NO_SANDBOX"])
             os.write(kwargs["stdout"], "".join(f"noise {index}\n" for index in range(30)).encode()
                      + f"\x1b[31mfatal: synthetic listen failure \u2014\x1b[0m\nurl orca://pair/{marker}\n"
                        f"authToken={marker}\n{'A' * 64}\n".encode())
             return unittest.mock.Mock(pid=4242, poll=unittest.mock.Mock(return_value=1))
 
         with patch.object(probe.subprocess, "run", return_value=subprocess.CompletedProcess(
-            [], 0, stdout=b"1.4.218\n")), patch.object(probe.subprocess, "Popen", side_effect=serve), \
+            [], 0, stdout=b"1.4.218\n")) as cli, patch.object(probe.subprocess, "Popen", side_effect=serve), \
                 patch.object(probe.os, "killpg"):
             # A strict ASCII stderr must not mask the original failure.
             output = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
             with contextlib.redirect_stderr(output):
                 self.assertEqual(1, probe.stock_probe(arguments))
+            self.assertEqual("1", cli.call_args.kwargs["env"]["ORCA_ELECTRON_NO_SANDBOX"])
         output.flush()
         text = output.buffer.getvalue().decode("ascii")
         lines = text.splitlines()
@@ -221,7 +225,7 @@ class StockProbeTests(unittest.TestCase):
             1, [], output=b"synthetic-private-payload")):
             with contextlib.redirect_stderr(io.StringIO()) as output:
                 self.assertEqual(1, probe.stock_probe(arguments))
-            self.assertEqual("orca-stock-probe: version: failed\n", output.getvalue())
+            self.assertEqual("orca-stock-probe: version: stock CLI exited with status 1\n", output.getvalue())
 
     def test_isolation_recovery_preserves_full_document_for_both_values(self):
         with tempfile.TemporaryDirectory() as directory:

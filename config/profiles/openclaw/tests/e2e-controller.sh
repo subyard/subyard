@@ -17,6 +17,7 @@ printf 'ok: OpenClaw acceptance dispatch, slot requirement and failure propagati
 
 # Capture must precede cleanup and contain only fixed labels, even on native failure.
 owner="$ROOT/config/profiles/openclaw/tests/e2e/owner.sh"
+assert_owner_yard_sg_arguments "$owner"
 diagnostic_fixture="$tmp/subyard-openclaw.failure"
 install -d -m 0700 "$diagnostic_fixture"
 printf 'openclaw-profile-e2e-v1\n' > "$diagnostic_fixture/.marker"

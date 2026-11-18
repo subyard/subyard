@@ -9,4 +9,5 @@ assert_controller_missing_slot
 bash "$tmp/$controller" --slot 7 > "$tmp/calls"
 grep -Fxq -- '--slot 7 --vm-count 1 --purpose subyard-dev-provision --vm 1 -- bash config/profiles/subyard-dev/tests/e2e/owner.sh' "$tmp/calls"
 assert_controller_failure --slot 7
+assert_owner_yard_sg_arguments "$ROOT/config/profiles/subyard-dev/tests/e2e/owner.sh"
 printf 'ok: acceptance dispatch, slot requirement and failure propagation\n'
