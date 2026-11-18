@@ -849,6 +849,19 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		fingerprints = append(fingerprints, string(routeBindings))
 	}
 	causes := []error{}
+	recordFinding := func(ready bool, err error, step, id string) {
+		if phase == "verify" {
+			if err == nil && !ready {
+				err = errors.New("native lifecycle did not converge")
+			}
+			err = runtime.integrationApplyDiagnostic(err, step, id)
+		} else {
+			err = runtime.integrationObservationDiagnostic(err, phase, id)
+		}
+		if err != nil {
+			causes = append(causes, err)
+		}
+	}
 	files, err := runtime.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
 		return plan, observed, err
@@ -874,8 +887,8 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		if err == nil {
 			err = runtime.releasedInstalledDocument(file.destination, observation)
 		}
+		recordFinding(observation.Converged, err, "verify structured config", file.integration)
 		if err != nil {
-			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
 			continue
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
@@ -900,8 +913,10 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			continue
 		}
 		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
+		if err != nil || phase == "verify" && !observation.Converged {
+			recordFinding(observation.Converged, err, "verify retired structured config", runtime.knownIntegrationID(entry.ID))
+		}
 		if err != nil {
-			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, runtime.knownIntegrationID(entry.ID)))
 			continue
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
@@ -914,55 +929,48 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
 		}
 	}
-	if err := domain.CollectRefusals(causes...); err != nil {
-		return plan, observed, err
-	}
-	commands, err := runtime.provisionAgentCommands()
-	if err != nil {
-		return plan, observed, err
-	}
+	commands, err := runtime.provisionAgentCommands(phase)
+	causes = append(causes, err)
 	for _, command := range commands {
 		ready, err := runtime.guestCheck(ctx, []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command.command})
+		recordFinding(ready, err, "verify command", command.integration)
 		if err != nil {
-			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, command.integration))
 			continue
 		}
 		plan.Changed = plan.Changed || !ready
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
 		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
-	checks, err := runtime.provisionAgentChecks()
-	if err != nil {
-		return plan, observed, err
-	}
+	checks, err := runtime.provisionAgentChecks(phase)
+	causes = append(causes, err)
 	for _, check := range checks {
 		ready, err := runtime.guestCheck(ctx, []string{check.command})
+		recordFinding(ready, err, "verify package check", check.integration)
 		if err != nil {
-			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, check.integration))
 			continue
 		}
 		plan.Changed = plan.Changed || !ready
 		fingerprints = append(fingerprints, fmt.Sprint(ready))
 		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
 	}
+	ready, err := runtime.projectHooksConverged(ctx)
+	recordFinding(ready, err, "verify project hooks", "")
+	if err == nil {
+		plan.Changed = plan.Changed || !ready
+		fingerprints = append(fingerprints, fmt.Sprint(ready))
+		plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	}
+	servicesObserved = true
+	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
+	recordFinding(!servicesChanged, err, "verify services", "")
+	if err == nil {
+		plan.Changed = plan.Changed || servicesChanged
+		fingerprints = append(fingerprints, serviceFingerprint)
+		plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
+	}
 	if err := domain.CollectRefusals(causes...); err != nil {
 		return plan, observed, err
 	}
-	ready, err := runtime.projectHooksConverged(ctx)
-	if err != nil {
-		return plan, observed, err
-	}
-	plan.Changed = plan.Changed || !ready
-	fingerprints = append(fingerprints, fmt.Sprint(ready))
-	plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
-	servicesObserved = true
-	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
-	if err != nil {
-		return plan, observed, err
-	}
-	plan.Changed = plan.Changed || servicesChanged
-	fingerprints = append(fingerprints, serviceFingerprint)
-	plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
 	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
 	plan.fingerprints = slices.Clone(fingerprints)
 	plan.pendingOnly = observed.Pending && !plan.Changed
@@ -1660,7 +1668,7 @@ func (runtime Runtime) PrepareAppliedIntegrationSettings(ctx context.Context) (p
 }
 
 func (runtime Runtime) storeAppliedIntegrationSettings(ctx context.Context) error {
-	plan, observed, err := runtime.observeIntegrations(ctx)
+	plan, observed, err := runtime.observeIntegrationsPhase(ctx, "verify")
 	if err != nil {
 		return err
 	}

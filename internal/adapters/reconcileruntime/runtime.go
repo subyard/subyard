@@ -2061,7 +2061,7 @@ func (runtime Runtime) provisionConverged(ctx context.Context) (bool, error) {
 	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-c", "timeout --kill-after=1 10 docker container ls -a --format '{{.Names}}' >/dev/null 2>&1"}); err != nil || !ok {
 		return false, err
 	}
-	commands, err := runtime.provisionAgentCommands()
+	commands, err := runtime.provisionAgentCommands("inspect")
 	if err != nil {
 		return false, err
 	}
@@ -2076,7 +2076,7 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 	if ok, err := runtime.guestCheck(ctx, commandCheck); err != nil || !ok {
 		return false, err
 	}
-	checks, err := runtime.provisionAgentChecks()
+	checks, err := runtime.provisionAgentChecks("inspect")
 	if err != nil {
 		return false, err
 	}
@@ -2217,15 +2217,17 @@ type integrationProbe struct {
 	command     string
 }
 
-func (runtime Runtime) provisionAgentCommands() ([]integrationProbe, error) {
+func (runtime Runtime) provisionAgentCommands(phase string) ([]integrationProbe, error) {
 	commands := make([]integrationProbe, 0)
+	var causes []error
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		provision := runtime.environmentValue("AGENT_" + agent + "_PROVISION")
 		if provision == "" {
 			continue
 		}
 		if !regularFile(provision) {
-			return nil, fmt.Errorf("agent %s provision hook is missing", agent)
+			causes = append(causes, runtime.integrationObservationDiagnostic(fmt.Errorf("agent %s provision hook is missing", agent), phase, agent))
+			continue
 		}
 		command := runtime.environmentValue("AGENT_" + agent + "_COMMAND")
 		if command == "" && safeCommand(runtime.environmentValue("AGENT_"+agent+"_CHECK")) {
@@ -2234,26 +2236,29 @@ func (runtime Runtime) provisionAgentCommands() ([]integrationProbe, error) {
 			continue
 		}
 		if !safeCommand(command) {
-			return nil, fmt.Errorf("agent %s command is invalid", agent)
+			causes = append(causes, runtime.integrationObservationDiagnostic(fmt.Errorf("agent %s command is invalid", agent), phase, agent))
+			continue
 		}
 		commands = append(commands, integrationProbe{integration: agent, command: command})
 	}
-	return commands, nil
+	return commands, domain.CollectRefusals(causes...)
 }
 
-func (runtime Runtime) provisionAgentChecks() ([]integrationProbe, error) {
+func (runtime Runtime) provisionAgentChecks(phase string) ([]integrationProbe, error) {
 	checks := make([]integrationProbe, 0)
+	var causes []error
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		check := runtime.environmentValue("AGENT_" + agent + "_CHECK")
 		if check == "" {
 			continue
 		}
 		if !safeCommand(check) {
-			return nil, fmt.Errorf("agent %s check command is invalid", agent)
+			causes = append(causes, runtime.integrationObservationDiagnostic(fmt.Errorf("agent %s check command is invalid", agent), phase, agent))
+			continue
 		}
 		checks = append(checks, integrationProbe{integration: agent, command: check})
 	}
-	return checks, nil
+	return checks, domain.CollectRefusals(causes...)
 }
 
 func (runtime Runtime) provisionLinksConverged(ctx context.Context, home string) (bool, error) {
@@ -2295,13 +2300,10 @@ func (runtime Runtime) guestObserve(
 ) (ports.InstanceExecResult, bool, error) {
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: command})
-	if err == nil {
-		return result, true, nil
-	}
 	if result.ExitCode != 0 {
 		return result, false, nil
 	}
-	return result, false, err
+	return result, err == nil, err
 }
 
 func regularFile(path string) bool {

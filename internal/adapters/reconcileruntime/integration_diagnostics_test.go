@@ -332,6 +332,27 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 			point = "verify command"
 		case len(args) == 1 && args[0] == "private-native-check":
 			point = "verify check"
+		case len(args) > 3 && strings.Contains(args[3], "dispatcher=$3"):
+			point = "verify project hooks"
+		case len(args) > 5 && args[5] == "observe" && strings.Contains(args[3], "mode=$1"):
+			point = "verify services"
+		}
+	}
+	if point != "" && fixture.cut == point+" exit" {
+		result := ports.InstanceExecResult{ExitCode: 1, Stdout: []byte("private-native-stdout"), Stderr: []byte("private-native-stderr")}
+		if point == "verify command" {
+			return result, nil
+		}
+		return result, &ports.GuestExitError{Code: 1}
+	}
+	if fixture.cut == "verify independent refusals" {
+		switch point {
+		case "verify check":
+			return ports.InstanceExecResult{}, errors.New("private-native-error")
+		case "verify project hooks":
+			return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
+		case "verify services":
+			return ports.InstanceExecResult{ExitCode: 1, Stderr: []byte("subyard-integration-conflict:ccusage\nprivate-native-stderr")}, &ports.GuestExitError{Code: 1}
 		}
 	}
 	if point == fixture.cut {
@@ -352,8 +373,11 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 		{"hooks capture", "integration sample apply hooks capture failed"},
 		{"retire structured config", "integration sample apply retire structured config failed"},
 		{"verify", "integration apply verify failed"},
-		{"verify command", "integration second apply verify failed"},
-		{"verify check", "integration second apply verify failed"},
+		{"verify command", "integration second apply verify command failed"},
+		{"verify check", "integration second apply verify package check failed"},
+		{"verify command exit", "integration second apply verify command failed"},
+		{"verify check exit", "integration second apply verify package check failed"},
+		{"verify independent refusals", "integration second apply verify package check failed"},
 		{"structured observe", "integration codex apply observe failed"},
 		{"structured apply", "unowned invalid configuration preserved"},
 		{"persist approval", "persist transfer state in yard sample changed after the init plan was confirmed; nothing was transferred"},
@@ -378,7 +402,7 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 			switch test.cut {
 			case "persist", "persist approval":
 				runtime.Environment = []string{"AGENT_sample_PERSIST=.memory:/mnt/host/agent-sessions/sample/memory"}
-			case "verify command", "verify check":
+			case "verify command", "verify check", "verify command exit", "verify check exit", "verify independent refusals":
 				secondRoot := filepath.Join(root, "second")
 				if err := os.Mkdir(secondRoot, 0700); err != nil {
 					t.Fatal(err)
@@ -447,6 +471,21 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 			}
 			executor.applyStarted = true
 			err = runtime.ApplyIntegrations(ctx, plan)
+			if test.cut == "verify independent refusals" {
+				var findings *domain.Refusals
+				if !errors.As(err, &findings) || len(findings.Unwrap()) != 3 {
+					t.Fatalf("expected three independent verification refusals: %v", err)
+				}
+				for _, want := range []string{"integration apply verify project hooks failed in yard sample", test.message + " in yard sample", "ownership cannot be verified"} {
+					if !strings.Contains(findings.Error(), want) {
+						t.Errorf("missing verification refusal %q in %v", want, err)
+					}
+				}
+				if strings.Contains(err.Error()+output.String(), "private-native") {
+					t.Fatal("verification leaked native output")
+				}
+				return
+			}
 			var public interface{ ActivationDiagnostic() (string, string) }
 			if !errors.As(err, &public) {
 				t.Fatalf("missing public diagnostic: %v", err)
