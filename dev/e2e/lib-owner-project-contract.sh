@@ -9,6 +9,42 @@ project_contract_clean_tree() { # <fixture-root> <marker>
   [ ! -e "$path" ] || sudo -n find "$path" -depth -delete
 }
 
+project_contract_sync_busy() {
+  [ "$1" = 1 ] \
+    && grep -Eq '^yard: release gate: .+ \(plan-stale\): .+; this command is not run$' "$2" \
+    && grep -Fxq 'yard: cause: release state is changing; retry' "$2"
+}
+
+project_contract_sync_pair() (
+  local root="$1" one two one_status=0 two_status=0
+  shift
+  # Drain both launched copies before the caller tears down the installed runtime.
+  trap 'wait' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  "$@" >/dev/null 2>"$root/sync-one.stderr" &
+  one=$!
+  "$@" >/dev/null 2>"$root/sync-two.stderr" &
+  two=$!
+  wait "$one" || one_status=$?
+  wait "$two" || two_status=$?
+  if [ "$one_status" = 0 ] && [ "$two_status" = 0 ]; then
+    printf '2\n'
+    return 0
+  fi
+  # A busy release gate refuses before dispatch. Require the other original
+  # launch to succeed so a later sequential recovery cannot hide this outcome.
+  if { [ "$one_status" = 0 ] && project_contract_sync_busy "$two_status" "$root/sync-two.stderr"; } \
+    || { [ "$two_status" = 0 ] && project_contract_sync_busy "$one_status" "$root/sync-one.stderr"; }; then
+    printf '1\n'
+    return 0
+  fi
+  printf 'concurrent project sync failed (exits=%s,%s)\n' "$one_status" "$two_status" >&2
+  cat "$root/sync-one.stderr" "$root/sync-two.stderr" >&2
+  [ "$one_status" = 0 ] || return "$one_status"
+  return "$two_status"
+)
+
 owner_project_contract() {
   local target="${1:?project target required}"
   local yard_name="${PROJECT_CONTRACT_YARD:-test-yard}"
@@ -21,7 +57,7 @@ owner_project_contract() {
   local bound="$root/two/P0Project"
   local rejected="$root/three/P0Project"
   local git_url='file:///tmp/P0Project.git'
-  local completions patch project projects reservation replay retried sync_pid_one sync_pid_two
+  local completions copies patch project projects reservation replay retried
   project_contract_clean_tree "$root" "$MARKER"
   install -d -m 0700 "$source" "$bound" "$rejected"
   printf '%s\n' "$MARKER" > "$root/.subyard-p0-marker"
@@ -75,15 +111,17 @@ owner_project_contract() {
     die 'same source changed mode from bind to sync'
   fi
   printf '%s\nconcurrent\n' "$MARKER" > "$source/result.txt"
-  "${project_yard[@]}" sync "$source" --target "$target" --yes >/dev/null &
-  sync_pid_one=$!
-  "${project_yard[@]}" sync "$source" --target "$target" --yes >/dev/null &
-  sync_pid_two=$!
-  wait "$sync_pid_one"
-  wait "$sync_pid_two"
+  copies="$(project_contract_sync_pair "$root" "${project_yard[@]}" sync "$source" --target "$target" --yes)"
   projects="$("${project_yard[@]}" list)"
-  [ "$(awk '$1 == "P0Project-6" || $1 == "P0Project-7" { count++ } END { print count+0 }' <<<"$projects")" = 2 ] \
-    || die 'concurrent same-source syncs did not receive distinct canonical names'
+  awk -v copies="$copies" '
+    $1 == "P0Project-6" { first++ }
+    $1 == "P0Project-7" { second++ }
+    END { exit !(first == 1 && second == copies - 1) }
+  ' <<<"$projects" || die 'concurrent same-source sync inventory disagrees with the launch results'
+  if [ "$copies" = 1 ]; then
+    "${project_yard[@]}" sync "$source" --target "$target" --yes >/dev/null
+    "${project_yard[@]}" shell P0Project-7 --yes -- grep -Fxq concurrent result.txt
+  fi
   "${project_yard[@]}" remove P0Project-5 --soft --yes >/dev/null
   "${project_yard[@]}" sync "$source" --target "$target" --yes >/dev/null
   "${project_yard[@]}" shell P0Project-8 --yes -- grep -Fxq concurrent result.txt

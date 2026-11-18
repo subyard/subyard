@@ -151,7 +151,7 @@ cleanup() {
     capture_staging_failure "$original" || capture_rc=$?
   fi
   if [ -n "$TOKEN" ]; then
-    project_contract_clean_tree "/tmp/subyard-p0-project-$TOKEN" "$MARKER" || cleanup_rc=3
+    (project_contract_clean_tree "/tmp/subyard-p0-project-$TOKEN" "$MARKER") || cleanup_rc=3
   fi
   if [ -n "$YARD_NAME" ] && [ -f "${SUBYARD_CONFIG_HOME:-}/yards/$YARD_NAME/config.env" ]; then
     install -d -m 0700 "$SUBYARD_CONFIG_HOME/yards/platform-sentinel"
@@ -165,11 +165,13 @@ cleanup() {
     sudo -n find "$STATE" -depth -delete || cleanup_rc=3
   fi
   printf 'openclaw_e2e_result original_rc=%s capture_rc=%s cleanup_rc=%s\n' "$original" "$capture_rc" "$cleanup_rc"
-  [ "$cleanup_rc" = 0 ] || rc="$cleanup_rc"
+  [ "$rc" != 0 ] || rc="$cleanup_rc"
   [ "$rc" != 0 ] || rc="$capture_rc"
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 STATE="$(mktemp -d /var/tmp/subyard-openclaw.XXXXXX)"
 printf '%s\n' openclaw-profile-e2e-v1 > "$STATE/.marker"

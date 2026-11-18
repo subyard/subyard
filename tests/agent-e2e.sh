@@ -1853,6 +1853,8 @@ EOF_PEER_INSTALL
 # shellcheck disable=SC2034
 (
   die() { printf '%s\n' "$*" >&2; exit 2; }
+  # shellcheck source=dev/e2e/lib-p0-incus-image.sh
+  . "$ROOT/dev/e2e/lib-p0-incus-image.sh"
   eval "$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" \
     prepare_owner_image_cache_project reclaim_owner_project_if_present reclaim_owner_project_residue write_owner_registration)"
   fingerprint="$(printf 'a%.0s' {1..64})"
@@ -2292,6 +2294,31 @@ set -e
   && [ "$(cat "$owner_image_state")" = $'base-original\nshared-prepared' ] \
   && [ "$(cat "$owner_image_deletes")" = owner-ephemeral ] \
   || fail 'P0 owner cleanup removed a prepared shared image or retained an owner image'
+
+owner_cleanup_rc=0
+(
+  eval "$owner_cleanup_source"
+  eval "$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" reclaim_owner_project_if_present)"
+  # shellcheck disable=SC2034 # Read by the extracted owner cleanup.
+  TOKEN=42 MARKER=subyard-p0-42 OWNER_BASELINE_CAPTURED=0
+  OWNER_YARD_DIR="$TMP/owner-yards" OWNER_ROOT="$TMP/absent-owner-root"
+  SUBYARD_HOME="$TMP/absent-owner-home"
+  clean_tree() { :; }
+  die() { printf '%s\n' "$1" >&2; exit 2; }
+  incus() {
+    [ "$*" = 'project list --format=json' ] || return 91
+    printf 'project-list\n' >> "$TMP/owner-cleanup-calls"
+    return 12
+  }
+  cleanup_owner_capacity_state() { printf 'capacity-cleanup\n' >> "$TMP/owner-cleanup-calls"; }
+  trap owner_cleanup EXIT
+  exit 42
+) >"$TMP/owner-cleanup-refused" 2>&1 || owner_cleanup_rc=$?
+[ "$owner_cleanup_rc" = 42 ] \
+  && [ "$(cat "$TMP/owner-cleanup-calls")" = $'project-list\nproject-list\ncapacity-cleanup' ] \
+  && [ "$(grep -Fxc 'cannot inspect owner projects' "$TMP/owner-cleanup-refused")" = 2 ] \
+  || fail 'P0 owner cleanup lost the original failure or skipped independent cleanup after an unreadable inventory'
+
 source_recovery_function="$(fixture_functions "$ROOT/dev/e2e/p0-guest.sh" recover_stale_source_upgrade_fixture)"
 run_source_recovery_case() {
   local inventory="$1" e2e_marker="$2" test_marker="$3" default_marker="$4"
