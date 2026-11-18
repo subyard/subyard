@@ -83,10 +83,13 @@ PY
 symlink_tar() { python3 - "$1" <<'PY'
 import sys, tarfile
 with tarfile.open(sys.argv[1], 'w:gz') as archive:
-    info = tarfile.TarInfo('bin')
+    info = tarfile.TarInfo('unexpected-link')
     info.type = tarfile.SYMTYPE
     info.linkname = '/etc'
     archive.addfile(info)
+    # The old type-only stream used two bytes per member. Exceed 1 MiB.
+    for i in range(524288):
+        archive.addfile(tarfile.TarInfo(f'benign-{i:05d}'))
 PY
 }
 no_binary_tar() { tar -czf "$1" -C "$tmp/work" --files-from /dev/null; }
@@ -325,6 +328,27 @@ if run_hook amd64 "$root" >/dev/null 2>"$tmp/version.err"; then
   fail "staged version mismatch unexpectedly succeeded"
 fi
 [ "$(sha256sum "$runtime" | cut -d' ' -f1)" = "$before" ] || fail "version failure replaced the runtime"
+# Exercise each scan against an otherwise valid upgrade.
+mkdir "$tmp/failing-grep"
+cat > "$tmp/failing-grep/grep" <<'GREP'
+#!/usr/bin/env bash
+if [ "$1" = -Eq ] && [ "${3##*/}" = "$CODEX_TEST_FAILED_SCAN" ]; then
+  exit 2
+fi
+exec "$CODEX_TEST_REAL_GREP" "$@"
+GREP
+chmod +x "$tmp/failing-grep/grep"
+set_latest 0.149.0 "$sha_149_amd64" "$sha_147_arm64"
+for scan in members names; do
+  if run_hook amd64 "$root" PATH="$tmp/failing-grep:$fake_bin:$original_path" \
+    CODEX_TEST_REAL_GREP="$(command -v grep)" CODEX_TEST_FAILED_SCAN="$scan" \
+    >/dev/null 2>"$tmp/archive.err"; then
+    fail "accepted an archive after the $scan scan failed"
+  fi
+  grep -Fq 'Codex archive listing could not be scanned' "$tmp/archive.err" \
+    || fail "missing diagnostic for failed $scan scan"
+done
+
 set_latest 8.8.8 "$sha_bad_archive" "$sha_147_arm64"
 if run_hook amd64 "$root" >/dev/null 2>"$tmp/archive.err"; then
   fail "corrupt archive unexpectedly succeeded"
@@ -334,6 +358,10 @@ for bad in "8.8.7 $sha_traversal" "8.8.6 $sha_symlink" "8.8.5 $sha_no_binary"; d
   set_latest "${bad% *}" "${bad#* }" "$sha_147_arm64"
   if run_hook amd64 "$root" >/dev/null 2>"$tmp/archive.err"; then
     fail "unsafe archive unexpectedly succeeded: ${bad% *}"
+  fi
+  if [ "${bad% *}" = 8.8.6 ]; then
+    grep -Fq 'Codex archive has a member that is not a contained file or directory' "$tmp/archive.err" \
+      || fail "long archive was not rejected by the member check"
   fi
   [ "$(realpath "$link")" = "$runtime" ] || fail "unsafe archive moved the command: ${bad% *}"
   [ ! -e "$release_root/${bad% *}" ] || fail "unsafe archive was published: ${bad% *}"

@@ -165,14 +165,17 @@ jq -e --arg artifact "$(basename "$BUNDLE")" --arg sha "${actual,,}" --arg versi
   (.sourceRevision | type == "string" and length > 0)' "$PROVENANCE" >/dev/null \
   || { printf 'install-runtime-release: provenance does not match the bundle\n' >&2; exit 1; }
 
-if tar -tzf "$BUNDLE" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+unsafe_path="$(tar -tzf "$BUNDLE" | awk '/^\/|(^|\/)\.\.(\/|$)/ { unsafe=1 } END { if (unsafe) print "yes" }')" \
+  || { printf 'install-runtime-release: could not list bundle paths\n' >&2; exit 1; }
+if [ "$unsafe_path" = yes ]; then
   printf 'install-runtime-release: bundle contains an unsafe path\n' >&2
   exit 1
 fi
-if tar -tvzf "$BUNDLE" | awk '
+unsafe_type="$(tar -tvzf "$BUNDLE" | awk '
   substr($1, 1, 1) != "-" && substr($1, 1, 1) != "d" { invalid=1 }
-  END { exit invalid ? 0 : 1 }
-'; then
+  END { if (invalid) print "yes" }
+')" || { printf 'install-runtime-release: could not list bundle member types\n' >&2; exit 1; }
+if [ "$unsafe_type" = yes ]; then
   printf 'install-runtime-release: bundle contains a non-regular entry\n' >&2
   exit 1
 fi
