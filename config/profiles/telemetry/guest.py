@@ -209,13 +209,19 @@ class Runtime:
             else:
                 expected['Delegate'] = 'yes'
             command = self.starts[unit]
-            legacy = self.assets[self.units/unit][0].replace(b'/usr/bin/setpriv --no-new-privs ', b'', 1)
             legacy_command = command.removeprefix('/usr/bin/setpriv --no-new-privs ')
             start = fields.get('ExecStart', '')
             if start.startswith('{ path='+legacy_command.split()[0]+' ; argv[]='+legacy_command+' ; ignore_errors=no ; '):
-                saved = json.loads(native.snapshot(self.control/'assets.json') or b'{}')
-                if self.asset_snapshot(self.units/unit) == legacy and saved.get(str(self.units/unit)) == hashlib.sha256(legacy).hexdigest():
+                path = self.units/unit
+                desired = self.assets[path][0]
+                legacy = desired.replace(b'/usr/bin/setpriv --no-new-privs ', b'', 1)
+                pinned = self.saved_inventory().get(str(path))
+                content = self.asset_snapshot(path)
+                legacy_hash = hashlib.sha256(legacy).hexdigest()
+                if ((content == legacy and pinned == legacy_hash) or
+                        (content == desired and pinned in (legacy_hash, hashlib.sha256(desired).hexdigest()))):
                     command = legacy_command  # Known pinned previous startup, stale until migrated.
+                    fields['legacy_exec_start'] = True
             valid_start = start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
             nnp = fields.get('NoNewPrivileges')
             if (any(fields.get(key, '') != value for key, value in expected.items()) or not valid_start
@@ -280,6 +286,7 @@ class Runtime:
         active = states[COLLECTOR].get('ActiveState') == 'active'
         enabled = states[COLLECTOR].get('UnitFileState') == 'enabled'
         converged = ready and active == self.selected and enabled == self.selected
+        converged = converged and all(not state.get('legacy_exec_start') for state in states.values())
         converged = converged and all(self.running_no_new_privs(state) for state in states.values())
         if self.selected:
             converged = converged and states[MANAGER].get('ActiveState') == 'active' and states[MANAGER].get('UnitFileState') == 'enabled'
@@ -304,6 +311,8 @@ class Runtime:
             if native_current is not True:
                 diagnostics.append({'parameter': 'telemetry.native', 'installed': 'unknown' if native_current is None else 'changed', 'desired': 'current'})
             for unit in (COLLECTOR, MANAGER):
+                if states[unit].get('legacy_exec_start'):
+                    diagnostics.append({'parameter': 'telemetry.' + unit + '.ExecStart', 'installed': 'legacy', 'desired': 'current'})
                 expected = self.selected if unit == COLLECTOR else True if self.selected else None
                 if expected is None:
                     continue
@@ -350,7 +359,8 @@ class Runtime:
         token = self.token()
         saved = json.loads((self.control/'assets.json').read_text())
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
-                   and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
+                   and (fields.get('legacy_exec_start') or not self.running_no_new_privs(fields))
+                   and (self.selected or unit == MANAGER)]
         binary = self.library/'subyard-telemetry'
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)

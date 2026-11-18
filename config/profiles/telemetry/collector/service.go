@@ -206,7 +206,7 @@ func (s *Store) IngestOutbox(ctx context.Context, path string) error {
 		discard := int64(len(data)) > s.limits.RequestBytes || dec.Decode(&r) != nil || dec.Decode(new(json.RawMessage)) != io.EOF
 		if !discard {
 			err = s.Ingest(ctx, []Record{r})
-			discard = errors.Is(err, errInvalidRecord)
+			discard = errors.Is(err, errInvalidRecord) || errors.Is(err, errIdentityCollision)
 			if err != nil && !discard {
 				return err
 			}

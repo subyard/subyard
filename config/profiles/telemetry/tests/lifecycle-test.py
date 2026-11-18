@@ -231,14 +231,18 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             for directory in ('home', 'units', 'bin'):
                 (root/directory).mkdir()
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
-            states, calls = {}, []
+            states, calls, loaded_commands = {}, [], {}
             def manager(*args):
                 calls.append(args)
+                if args[0] == 'daemon-reload':
+                    loaded_commands.clear()
+                    for path in (root/'units').glob('*.service'):
+                        loaded_commands[path.name] = next(line.removeprefix('ExecStart=') for line in path.read_text().splitlines() if line.startswith('ExecStart='))
                 if args[0] == 'show':
                     unit = args[1]
                     if unit not in states:
                         return 'LoadState=not-found'
-                    command=next(line.removeprefix('ExecStart=') for line in (root/'units'/unit).read_text().splitlines() if line.startswith('ExecStart='))
+                    command=loaded_commands[unit]
                     unit_user=next(line.removeprefix('User=') for line in (root/'units'/unit).read_text().splitlines() if line.startswith('User='))
                     fields=dict(LoadState='loaded',FragmentPath=str(root/'units'/unit),User=unit_user,Group=str(account.pw_gid),
                         Type='simple',UMask='0077',LimitCORE='0',NoNewPrivileges='yes',DropInPaths='',
@@ -296,21 +300,43 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 states[guest.COLLECTOR]['ActiveState'] = 'active'
                 marker = root/'data/retained.db'
                 marker.write_bytes(b'history')
-                # Recover an active interrupted previous install. Unit text and
-                # manifest are exactly the known pre-setpriv version.
-                saved=json.loads((root/'control/assets.json').read_text())
-                for unit in (guest.COLLECTOR,guest.MANAGER):
-                    path=root/'units'/unit
-                    legacy=runtime.assets[path][0].replace(b'/usr/bin/setpriv --no-new-privs ',b'',1)
-                    path.write_bytes(legacy)
-                    saved[str(path)]=hashlib.sha256(legacy).hexdigest()
-                    states[unit].update(DropInPaths='/run/systemd/system/service.d/zzz-lxc-service.conf',NoNewPrivileges='no')
-                (root/'control/assets.json').write_text(json.dumps(saved))
-                self.assertEqual(runtime.observe()['state'],'stale')
-                self.assertEqual(runtime.startup(), {'state': 'ready'})
-                runtime.apply()
-                self.assertIn(('restart',guest.COLLECTOR,guest.MANAGER),calls)
-                self.assertEqual(runtime.observe()['state'],'current')
+                inventory_path = root/'control/assets.json'
+                publish = guest.native.publish
+                for inventory_published in (False, True):
+                    with self.subTest(inventory_published=inventory_published):
+                        saved = json.loads(inventory_path.read_text())
+                        for unit in (guest.COLLECTOR, guest.MANAGER):
+                            path = root/'units'/unit
+                            legacy = runtime.assets[path][0].replace(b'/usr/bin/setpriv --no-new-privs ', b'', 1)
+                            path.write_bytes(legacy)
+                            saved[str(path)] = hashlib.sha256(legacy).hexdigest()
+                            states[unit].update(DropInPaths='/run/systemd/system/service.d/zzz-lxc-service.conf', NoNewPrivileges='no')
+                        inventory_path.write_text(json.dumps(saved))
+                        manager('daemon-reload')
+                        self.assertEqual(runtime.observe()['state'], 'stale')
+                        self.assertEqual(runtime.startup(), {'state': 'ready'})
+
+                        def interrupt_unit_upgrade(path, *args, **kwargs):
+                            if path != inventory_path or inventory_published:
+                                publish(path, *args, **kwargs)
+                            if path == inventory_path:
+                                raise InterruptedError('before daemon-reload')
+
+                        with patch.object(guest.native, 'publish', side_effect=interrupt_unit_upgrade):
+                            with self.assertRaises(InterruptedError):
+                                runtime.apply()
+                        for unit, command in runtime.starts.items():
+                            path = root/'units'/unit
+                            self.assertEqual(path.read_bytes(), runtime.assets[path][0])
+                            self.assertEqual(loaded_commands[unit], command.removeprefix('/usr/bin/setpriv --no-new-privs '))
+                        pinned = json.loads(inventory_path.read_text())
+                        self.assertEqual(pinned, json.loads(runtime.inventory()) if inventory_published else saved)
+                        self.assertEqual(runtime.observe()['state'], 'stale')
+                        calls.clear()
+                        runtime.apply()
+                        self.assertLess(calls.index(('daemon-reload',)),
+                                        calls.index(('restart', guest.COLLECTOR, guest.MANAGER)))
+                        self.assertEqual(runtime.observe()['state'], 'current')
                 restarts=sum(call[0]=='restart' for call in calls)
                 runtime.apply()
                 self.assertEqual(sum(call[0]=='restart' for call in calls),restarts)
@@ -331,7 +357,6 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     saved[str(asset)] = hashlib.sha256(previous).hexdigest()
                 (root/'control/assets.json').write_text(json.dumps(saved))
                 calls.clear()
-                publish = guest.native.publish
                 def interrupt_inventory(path, *args, **kwargs):
                     if path == root/'control/assets.json':
                         raise InterruptedError('before publishing the new inventory')

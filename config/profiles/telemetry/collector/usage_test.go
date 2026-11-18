@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,64 @@ import (
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 )
+
+func usageRecord(kind string, body map[string]any) Record {
+	r := record(kind, body)
+	r.SourceVersion = "1"
+	return r
+}
+
+func TestUsageSourceVersionIngressExportAndReplay(t *testing.T) {
+	ctx := context.Background()
+	for _, kind := range []string{"model_usage", "tool_result"} {
+		t.Run(kind, func(t *testing.T) {
+			s, replayed := fixtureStore(t), fixtureStore(t)
+			body := map[string]any{"client": "claude", "request_identity": "provider", "request_id": "request"}
+			if kind == "tool_result" {
+				body["tool_use_id"], body["tool_result_bytes"] = "tool", 42
+			}
+			r := usageRecord(kind, body)
+			unsupported := r
+			unsupported.SourceVersion = "private-version"
+			if err := s.Ingest(ctx, []Record{unsupported}); !errors.Is(err, errInvalidRecord) {
+				t.Fatalf("unsupported source version: %v", err)
+			}
+			absent := usageRecord(kind, body)
+			absent.SourceVersion = ""
+			if err := s.Ingest(ctx, []Record{r, absent}); err != nil {
+				t.Fatal(err)
+			}
+			var exported bytes.Buffer
+			if _, err := Export(ctx, s.db, &exported, 0, 10); err != nil {
+				t.Fatal(err)
+			}
+			var entry Envelope
+			dec := json.NewDecoder(bytes.NewReader(exported.Bytes()))
+			for _, want := range []Record{r, absent} {
+				if err := dec.Decode(&entry); err != nil || entry.EventID != want.EventID || entry.SourceVersion != want.SourceVersion {
+					t.Fatalf("exported event %q with version %q: %v", entry.EventID, entry.SourceVersion, err)
+				}
+			}
+			entry.EventID, entry.SourceVersion = newID(), unsupported.SourceVersion
+			raw, err := json.Marshal(entry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := replayed.Replay(ctx, bytes.NewReader(raw)); err == nil {
+				t.Fatal("replay accepted unsupported source version")
+			}
+			if err := replayed.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []Record{r, absent} {
+				var version string
+				if err := replayed.db.QueryRow("SELECT source_version FROM records WHERE event_id=?", want.EventID).Scan(&version); err != nil || version != want.SourceVersion {
+					t.Fatalf("replayed version %q, want %q: %v", version, want.SourceVersion, err)
+				}
+			}
+		})
+	}
+}
 
 func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 	ctx := context.Background()
@@ -139,7 +198,7 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, trigger := range []string{"poll_unchanged", "worker_result"} {
-		if err := s.Ingest(ctx, []Record{record("model_usage", map[string]any{
+		if err := s.Ingest(ctx, []Record{usageRecord("model_usage", map[string]any{
 			"client": "claude", "request_identity": "provider", "request_id": "req-" + trigger, "agent_run_id": "claude",
 			"trigger": trigger, "tool_output_bytes": 0, "input_tokens": 2, "transcript": "fixture-private-output",
 		})}); err != nil {
@@ -148,10 +207,10 @@ func TestModelUsageAcrossManagedRunsExportAndRetention(t *testing.T) {
 	}
 	// A second observation of the same provider request can supply a missing field.
 	if err := s.Ingest(ctx, []Record{
-		record("model_usage", map[string]any{
+		usageRecord("model_usage", map[string]any{
 			"client": "claude", "request_identity": "provider", "request_id": "req-main", "trigger": "new_prompt", "input_tokens": 10,
 		}),
-		record("tool_result", map[string]any{
+		usageRecord("tool_result", map[string]any{
 			"client": "claude", "request_identity": "native_log", "request_id": "req-main", "tool_use_id": "tool-1", "tool_result_bytes": 42,
 		}),
 	}); err != nil {
@@ -237,7 +296,7 @@ assert emit(root, 'model_usage', body, event_id='valid')
 	outbox := filepath.Join(root, "outbox")
 	// Older producers could leave malformed JSON or invalid usage bodies behind.
 	testkit.WriteFile(t, filepath.Join(outbox, "bad-json.json"), []byte("{"), 0600)
-	r := record("model_usage", map[string]any{
+	r := usageRecord("model_usage", map[string]any{
 		"client": "codex", "request_identity": "provider", "request_id": "rejected", "input_tokens": "private message here",
 	})
 	data, err := json.Marshal(r)

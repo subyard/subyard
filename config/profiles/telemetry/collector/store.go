@@ -23,6 +23,7 @@ import (
 )
 
 var errInvalidRecord = errors.New("invalid record")
+var errIdentityCollision = errors.New("telemetry event identity collision")
 
 var ErrCapacity = errors.New("telemetry capacity exceeded")
 var ErrStorage = errors.New("telemetry storage unavailable")
@@ -330,14 +331,26 @@ func (s *Store) writer() {
 			}
 		}
 		timer.Stop()
-		err := s.commit(batch)
-		s.mu.Lock()
-		for _, r := range batch {
-			s.pendingBytes -= r.bytes
-			s.pendingRequests--
-			r.result <- err
+		s.writeBatch(batch)
+	}
+}
+
+func (s *Store) writeBatch(batch []writeRequest) {
+	err := s.commit(batch)
+	if errors.Is(err, errIdentityCollision) && len(batch) > 1 {
+		// The batch rolled back. Retry each request atomically to identify
+		// which request collided and commit the others independently.
+		for i := range batch {
+			s.writeBatch(batch[i : i+1])
 		}
-		s.mu.Unlock()
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range batch {
+		s.pendingBytes -= r.bytes
+		s.pendingRequests--
+		r.result <- err
 	}
 }
 func (s *Store) diskSize() (int64, error) {
@@ -395,7 +408,7 @@ func (s *Store) commit(batch []writeRequest) error {
 					return ErrStorage
 				}
 				if !bytes.Equal(body, e.Body) || !bytes.Equal(proto, e.Protobuf) || source != e.SourceID || version != e.SourceVersion || sourceTime != e.SourceTime || kind != e.Kind || encoding != e.Encoding || capturePolicy != e.PolicyVersion {
-					return errors.New("telemetry event identity collision")
+					return errIdentityCollision
 				}
 				continue
 			}

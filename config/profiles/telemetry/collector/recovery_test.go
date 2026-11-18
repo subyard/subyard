@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +16,77 @@ import (
 
 	"github.com/Subyard/Subyard/internal/testkit"
 )
+
+func TestOutboxCollisionIsolationAndStorageRetry(t *testing.T) {
+	s := fixtureStore(t)
+	ctx := context.Background()
+	original := record("run", map[string]any{"agent_run_id": "original"})
+	if err := s.Ingest(ctx, []Record{original}); err != nil {
+		t.Fatal(err)
+	}
+	collision := original
+	collision.Body = map[string]any{"agent_run_id": "collision"}
+	valid := record("run", map[string]any{"agent_run_id": "valid"})
+	outbox := testkit.TempDir(t)
+	for name, r := range map[string]Record{"a-collision.json": collision, "b-valid.json": valid} {
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, filepath.Join(outbox, name), data, 0600)
+	}
+	if _, err := s.db.Exec("CREATE TRIGGER fail_write BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT, 'test storage failure'); END"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestOutbox(ctx, outbox); !errors.Is(err, ErrStorage) {
+		t.Fatalf("outbox storage failure: %v", err)
+	}
+	if entries, err := os.ReadDir(outbox); err != nil || len(entries) != 2 || s.outboxDiscarded.Load() != 0 {
+		t.Fatalf("outbox after storage failure: %v, %v, discarded %d", entries, err, s.outboxDiscarded.Load())
+	}
+	if _, err := s.db.Exec("DROP TRIGGER fail_write"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.IngestOutbox(ctx, outbox); err != nil {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(outbox); err != nil || len(entries) != 0 || s.outboxDiscarded.Load() != 1 {
+		t.Fatalf("outbox after retry: %v, %v, discarded %d", entries, err, s.outboxDiscarded.Load())
+	}
+	if !s.RegisteredRun(ctx, "original") || !s.RegisteredRun(ctx, "valid") || s.RegisteredRun(ctx, "collision") {
+		t.Fatal("unexpected registered runs after draining outbox")
+	}
+}
+
+func TestWriteBatchReturnsCollisionOnlyToOffendingRequest(t *testing.T) {
+	s := fixtureStore(t)
+	envelope := Envelope{
+		OriginID: s.origin, EventID: newID(), Kind: "gap", Encoding: "json",
+		Body: json.RawMessage(`{"reason":"original"}`),
+	}
+	if err := s.submit(context.Background(), []Envelope{envelope}); err != nil {
+		t.Fatal(err)
+	}
+	valid, collision := envelope, envelope
+	valid.EventID = newID()
+	collision.Body = json.RawMessage(`{"reason":"collision"}`)
+	batch := []writeRequest{
+		{entries: []Envelope{valid}, result: make(chan error, 1)},
+		{entries: []Envelope{collision}, result: make(chan error, 1)},
+	}
+	s.pendingRequests = len(batch)
+	s.writeBatch(batch)
+	if err := <-batch[0].result; err != nil {
+		t.Fatalf("valid request: %v", err)
+	}
+	if err := <-batch[1].result; !errors.Is(err, errIdentityCollision) {
+		t.Fatalf("collision request: %v", err)
+	}
+	var count int
+	if err := s.db.QueryRow("SELECT count(*) FROM records WHERE event_id=?", valid.EventID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("committed valid records: %d, %v", count, err)
+	}
+}
 
 func TestCommitSurvivesKilledWriter(t *testing.T) {
 	if dir := os.Getenv("SUBYARD_TELEMETRY_CRASH_FIXTURE"); dir != "" {

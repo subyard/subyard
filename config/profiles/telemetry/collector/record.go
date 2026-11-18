@@ -104,6 +104,9 @@ func sanitizeRecord(r Record) (Record, int64, error) {
 	r.Schema = RecordSchema
 	r.SchemaVersion = 0
 	if usage {
+		if r.SourceVersion != "" && r.SourceVersion != "1" {
+			return r, 0, errors.New("unsupported usage source version")
+		}
 		return sanitizeUsage(r)
 	}
 	body := make(map[string]any, len(r.Body))
