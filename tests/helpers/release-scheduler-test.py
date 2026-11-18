@@ -54,7 +54,7 @@ class Clock:
         self.elapse(min(seconds, self.stop_at - self.now))
 
     def wait_active(self, futures, timeout, **kwargs):
-        self.wait(min(timeout, *(at - self.now for at, future, _ in self.running if future in futures)))
+        self.wait(min([timeout, *(at - self.now for at, future, _ in self.running if future in futures)]))
 
     def drain(self, futures):
         yield from [future for future in futures if future.done()]
@@ -68,6 +68,8 @@ class Clock:
         if self.stop_before_launch:
             self.stop_at = self.now
         outcome = execute(*args)
+        if isinstance(outcome, Future):
+            return outcome
         duration, result = (0, None) if outcome is None else outcome
         future = Future()
         self.running.append((self.now + duration, future, result))
@@ -361,14 +363,18 @@ with a.acceptance_lock(output) as guard:
 
     def test_finished_hosted_split_dispatches_owner_with_a_busy_sibling(self):
         split, owner, sibling = "vm:split", "vm:owner", "vm:sibling"
-        clock, output, calls, _, run = self.fixture([owner, split, sibling],
-            states=lambda _: {2: "available", 4: "available"}, requires={owner: [split]},
-            outcomes={sibling: dict(FAILED, original_attempt=ATTEMPT)},
-            controller=lambda name, *_: (100 if name == sibling else 0, PASSED))
-        clock.events.append((2, lambda: a.request_retry(output, sibling, ATTEMPT["id"])))
-        hosted_pass = dict(PASSED, ci_hosted={"run_id": 456, "job_id": 789})
-        self.assertEqual(run(only=[owner], hosted=[split], collect_hosted=lambda *_: (4, {split: hosted_pass})), 0)
-        self.assertEqual(calls, [(2, sibling, 2), (4, owner, 4)])
+        for sibling_at in (0, 2):
+            with self.subTest(sibling_at=sibling_at):
+                clock, output, calls, _, run = self.fixture([owner, split, sibling],
+                    states=lambda _: {2: "available", 4: "available"}, requires={owner: [split]},
+                    outcomes={sibling: dict(FAILED, original_attempt=ATTEMPT)} if sibling_at else {},
+                    controller=lambda name, *_: (100 if name == sibling else 0, PASSED))
+                if sibling_at:
+                    clock.events.append((sibling_at, lambda: a.request_retry(output, sibling, ATTEMPT["id"])))
+                hosted_pass = dict(PASSED, execution="ci-hosted", ci_hosted={"run_id": 456, "job_id": 789})
+                only = [owner] if sibling_at else [owner, sibling]
+                self.assertEqual(run(only=only, hosted=[split], collect_hosted=lambda *_: (4, {split: hosted_pass})), 0)
+                self.assertEqual(calls, [(sibling_at, sibling, 2), (4, owner, 4)])
 
     def test_retry_after_failed_local_phase_keeps_hosted_reservation(self):
         local, hosted = "vm:local", "vm:hosted"
@@ -377,12 +383,42 @@ with a.acceptance_lock(output) as guard:
             controller=lambda name, slot, now: (0, FAILED if name == local and now == 0 else PASSED))
         clock.events.append((2, lambda: a.request_retry(output, local, ATTEMPT["id"])))
 
-        def collect(failed, *_):
-            self.assertTrue(failed)
+        def collect(root, receipt, wake, cancelled):
+            clock.events.append((2, lambda: self.assertTrue(wake.is_set())))
             return 4, {}
 
         self.assertEqual(run(hosted=[hosted], collect_hosted=collect), 1)
         self.assertEqual(calls, [(0, local, 2), (2, local, 2)])
+        self.assertEqual(read()["checks"][hosted], {"status": "pending"})
+
+    def test_failed_late_retry_wakes_hosted_wait_after_recording_failure(self):
+        local, hosted = "vm:local", "vm:hosted"
+        clock, output, calls, read, run = self.fixture([local, hosted],
+            states=lambda _: {2: "available", 4: "available"},
+            outcomes={local: dict(FAILED, original_attempt=ATTEMPT)},
+            controller=lambda *_: (0, dict(FAILED, exit_code=24)))
+        clock.events.append((20, lambda: a.request_retry(output, local, ATTEMPT["id"])))
+        waiter = Future()
+
+        def collect(root, receipt, wake, cancelled):
+            self.assertEqual(clock.now, 0)
+            self.assertFalse(wake.is_set())
+            set_wake = wake.set
+
+            def collect_finished():
+                set_wake()
+                if not cancelled.is_set():
+                    self.assertEqual(read()["checks"][local]["exit_code"], 24)
+                    waiter.set_result({})
+
+            wake.set = collect_finished
+            # Model the full wait allowance as the deadline if the wake never arrives.
+            clock.events.append((21600, lambda: waiter.set_result({})))
+            return waiter
+
+        self.assertEqual(run(only=[hosted], hosted=[hosted], collect_hosted=collect), 1)
+        self.assertEqual(clock.now, 20)
+        self.assertEqual(calls, [(20, local, 2)])
         self.assertEqual(read()["checks"][hosted], {"status": "pending"})
 
     def test_local_owner_can_reopen_a_historical_split_failure_once(self):
@@ -412,9 +448,11 @@ with a.acceptance_lock(output) as guard:
                 def controller(name, slot, now):
                     if name == sibling:
                         return 8, PASSED
-                    return 0, FAILED if during_sibling and name == lane and now == 0 else PASSED
+                    return 0, PASSED
 
-                outcomes = {} if during_sibling else {lane: dict(FAILED, original_attempt=ATTEMPT), sibling: PASSED}
+                outcomes = {lane: dict(FAILED, original_attempt=ATTEMPT)}
+                if not during_sibling:
+                    outcomes[sibling] = PASSED
                 clock, output, calls, read, run = self.fixture([lane, sibling, hosted], outcomes=outcomes,
                     states=lambda _: {2: "available", 4: "available"}, controller=controller, capacity="0s")
                 def submit_retry():
@@ -425,17 +463,17 @@ with a.acceptance_lock(output) as guard:
                     clock.events.append((late_at, submit_retry))
                 hosted_calls = []
 
-                def collect(failed, *_):
-                    hosted_calls.append((clock.now, failed))
+                def collect(root, receipt, wake, cancelled):
+                    hosted_calls.append((clock.now, wake.is_set()))
                     if not late_at:
                         submit_retry()
                     return 20, {}  # The hosted lane falls back to local execution.
 
-                self.assertEqual(run(only=[lane, sibling, hosted] if during_sibling else [hosted],
+                self.assertEqual(run(only=[sibling, hosted] if during_sibling else [hosted],
                                      hosted=[hosted], collect_hosted=collect), 0)
-                self.assertEqual(hosted_calls, [(8 if during_sibling else 0, False)])
-                initial = [(0, lane, 2), (0, sibling, 4)] if during_sibling else []
-                self.assertEqual(calls, [*initial, (late_at, lane, 2), (28 if during_sibling else 20, hosted, 2)])
+                self.assertEqual(hosted_calls, [(0, False)])
+                initial = [(0, sibling, 2)] if during_sibling else []
+                self.assertEqual(calls, [*initial, (late_at, lane, 4 if during_sibling else 2), (20, hosted, 2)])
                 self.assertEqual(a.load_schedule(output, read())[lane]["id"], ATTEMPT["id"])
                 self.assertFalse((output / "retries").exists())
 

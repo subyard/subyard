@@ -36,6 +36,7 @@ KILL_GRACE_SECONDS = 10
 DEFAULT_SLOTS = (1, 2, 3, 4)
 SLOT_POLL_SECONDS = 5
 SLOT_STATES = {"available", "held", "provisioning", "draining", "quarantined", "recovering", "unavailable"}
+CI_HOSTED_ATTEMPTS = "ci-hosted-attempts"
 
 
 def slot_list(value):
@@ -1473,7 +1474,7 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
                   persist_schedule, start_hosted, finish_hosted):
     active, idle_since, last_states = {}, {}, {}
     hosted_future = None
-    cancel_hosted = threading.Event()
+    wake_hosted, cancel_hosted = threading.Event(), threading.Event()
 
     def complete(future):
         name, _ = active.pop(future)
@@ -1484,6 +1485,8 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
         entry = schedule[name]
         refusal = local_broker_refusal(result)
         record(name, result, dict(entry, state="queued" if refusal else "done"))
+        if result["status"] == "failed":
+            wake_hosted.set()
         if result.get("capture_status") == "failed":
             raise OSError("live check capture failed")
         if refusal:
@@ -1502,16 +1505,15 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
                     refresh({name for name, _ in active.values()})
                     ready = {name for name, _ in work if prerequisite(name) is None}
                     if hosted_future is not None and hosted_future.done():
-                        finish_hosted(hosted_future.result())
+                        finish_hosted(hosted_future.result(), wake_hosted.is_set())
                         hosted_future = None
                         continue
-                if not ready and not active:
-                    if hosted_future is None and start_hosted:
-                        hosted_future = start_hosted(pool, cancel_hosted)
-                        if hosted_future is not None:
-                            start_hosted = None
-                    if hosted_future is None:
-                        break
+                if start_hosted and not STOP.is_set():
+                    hosted_future = start_hosted(pool, wake_hosted, cancel_hosted)
+                    if hosted_future is not None:
+                        start_hosted = None
+                if not ready and not active and hosted_future is None:
+                    break
                 busy = {slot for _, slot in active.values()}
                 states = broker_slots(env) if ready and len(busy) < len(slots) else {}
                 last_states.update(states)
@@ -1573,11 +1575,15 @@ def dispatch_live(output, slots, env, schedule, work, refresh, prerequisite, beg
                     STOP.wait(max(0, wake - time.monotonic()))
         finally:
             cancel_hosted.set()
+            wake_hosted.set()
             # Capture failure and stop both leave running controllers responsible for cleanup.
             # Try every sibling even when one result cannot be persisted.
             for future in as_completed(active):
                 with suppress(Exception):
                     complete(future)
+    if hosted_future is not None:
+        with retry_lock(output):
+            finish_hosted(hosted_future.result(), True)
 
 
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=(),
@@ -1836,20 +1842,17 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             save_schedule(output, schedule)
             invocation.write()
 
-        hosted_wait_skipped = False
-
-        def phase_failed():
-            return any(receipt["checks"][name]["status"] == "failed" for name in invocation.attempted)
-
-        def start_hosted(pool, cancelled):
-            nonlocal hosted_wait_skipped
+        def start_hosted(pool, wake, cancelled):
             if not withheld.intersection(selected):
                 return None
-            hosted_wait_skipped = phase_failed() or source_fingerprint(root) != receipt["source_fingerprint"]
-            return pool.submit(collect_hosted, hosted_wait_skipped, root, copy.deepcopy(receipt), cancelled)
+            if (any(receipt["checks"][name]["status"] == "failed" for name in invocation.attempted)
+                or source_fingerprint(root) != receipt["source_fingerprint"]):
+                wake.set()
+            return pool.submit(collect_hosted, root, copy.deepcopy(receipt), wake, cancelled)
 
-        def finish_hosted(collected):
+        def finish_hosted(collected, wait_stopped):
             applied, fulfilled = {}, set()
+            merge_retry_submissions(output, receipt, schedule)
             for name, result in collected.items():
                 if not transfer_target_open(name, receipt["checks"][name]):
                     continue
@@ -1864,7 +1867,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                         invocation.record(name, result)
             work[:] = [item for item in work if item[0] not in fulfilled]
             withheld.difference_update(fulfilled)
-            if not hosted_wait_skipped and not phase_failed():
+            if not wait_stopped:
                 withheld.clear()
             if applied:
                 save(output, receipt)
@@ -2111,7 +2114,12 @@ def original_attempt(output, receipt, name, result):
         or not isinstance(reference["id"], str) or not re.fullmatch(r"[0-9a-f]{32}", reference["id"])
         or not is_sha(reference["sha256"])):
         raise ValueError("invalid original attempt reference")
+    hosted = result.get("execution") == "ci-hosted"
     path = output / "attempts" / (reference["id"] + ".json")
+    if hosted:
+        staged = output / CI_HOSTED_ATTEMPTS / path.name
+        if staged.exists():
+            path = staged
     if digest(path) != reference["sha256"]:
         raise ValueError("original attempt record changed")
     record = read_transfer_json(path)
@@ -2122,7 +2130,6 @@ def original_attempt(output, receipt, name, result):
         raise ValueError("original candidate manifest changed")
     manifest = read_transfer_json(manifest_path)
     validate_attempt(record, manifest, name, result.get("command"), result.get("log_sha256"))
-    hosted = result.get("execution") == "ci-hosted"
     if hosted:
         validate_hosted_binding(name, result, transfer_candidate(receipt), manifest)
         if result["ci_hosted"]["head_sha"] != receipt.get("preparation", {}).get("commit"):

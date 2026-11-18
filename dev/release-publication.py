@@ -1402,14 +1402,16 @@ def hosted_open(directory, output):
 
 
 def accept_checks(github, directory, identity, slots, only, with_vms, previous, wait_seconds):
-    """Reserve hosted work until the local phase finishes, then collect or fall back."""
+    """Collect hosted evidence alongside local work, then run eligible fallbacks."""
     output = directory / "acceptance"
 
-    def collect_hosted(failed, root, receipt, cancelled):
-        if failed:
+    def collect_hosted(root, receipt, wake, cancelled):
+        if wait_seconds and not wake.is_set():
+            wait_ci_hosted(github, directory, identity, wait_seconds, cancelled=wake)
+        if cancelled.is_set() or a.STOP.is_set():
+            return {}
+        if wake.is_set():
             print("CI-HOSTED-SKIP all: a local check failed; collecting finished jobs", flush=True)
-        elif wait_seconds:
-            wait_ci_hosted(github, directory, identity, wait_seconds, cancelled=cancelled)
         return collect_ci(github, directory, identity, snapshot=(root, receipt), cancelled=cancelled)
 
     with a.acceptance_lock(output) as guard:
@@ -1449,6 +1451,23 @@ def wait_ci_hosted(github, directory, identity, seconds, *, cancelled=None):
             print(f"WAIT CI-HOSTED request={state['request']} status={run.get('status') if run else 'not-discovered'} remaining={int(remaining)}s", flush=True)
             last_report = time.monotonic()
         wake.wait(min(20, remaining))
+
+
+def copy_hosted_evidence(source, target):
+    if target.exists():
+        if a.digest(target) != a.digest(source):
+            raise ValueError("conflicting hosted immutable evidence")
+        a.sync_directory(target.parent)
+        return
+    target.parent.mkdir(mode=0o700, exist_ok=True)
+    a.sync_directory(target.parent.parent)
+    temporary = target.with_suffix(target.suffix + ".next")
+    with source.open("rb") as incoming, a.private_file(temporary, "wb") as stream:
+        shutil.copyfileobj(incoming, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(target)
+    a.sync_directory(target.parent)
 
 
 def collect_ci(github, directory, identity, *, snapshot=None, cancelled=None):
@@ -1550,15 +1569,15 @@ def collect_ci(github, directory, identity, *, snapshot=None, cancelled=None):
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
-            # Persist the immutable original evidence before publishing the result reference.
-            for relative in ("attempts/" + record["id"] + ".json", "manifests/" + record["manifest_sha256"] + ".json"):
-                target = output / relative
-                if target.exists() and target.read_bytes() != (cached / relative).read_bytes():
-                    raise ValueError("conflicting hosted immutable evidence")
-                if not target.exists():
-                    a.immutable_json(target, json.loads((cached / relative).read_text()))
+            # Downloaded attempts are staging until the receipt references them. A stop
+            # here must leave an untouched optional check eligible for attestation.
+            attempt_file = record["id"] + ".json"
+            copy_hosted_evidence(cached / "attempts" / attempt_file, output / a.CI_HOSTED_ATTEMPTS / attempt_file)
+            manifest_path = Path("manifests") / (record["manifest_sha256"] + ".json")
+            with a.MANIFEST_LOCK:
+                copy_hosted_evidence(cached / manifest_path, output / manifest_path)
             log = "ci-hosted-" + record["id"] + ".log"
-            shutil.copyfile(cached / result["log"], output / log)
+            copy_hosted_evidence(cached / result["log"], output / log)
             result["log"] = log
             if snapshot is None:
                 receipt["checks"][name] = result

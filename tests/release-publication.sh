@@ -2430,7 +2430,7 @@ class HostedChecks(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="subyard-ci-hosted-", dir="/tmp")
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        _, self.prepared, self.identity = fixture(self.directory)
+        _, self.prepared, self.identity = fixture(self.directory, optional_vms=True)
         self.output, self.root, _ = accepted(self.directory, self.prepared, self.identity)
         remote = self.directory / "remote"
         remote.mkdir()
@@ -2521,6 +2521,54 @@ class HostedChecks(unittest.TestCase):
         self.assertTrue(m.publish_remote(self.github, self.prepared, document, self.root)["immutable"])
         self.assertFalse((self.directory / "ci-hosted-downloads/456-1-99/source").exists())
         self.assertEqual(self.collect()[1], "")
+
+        attempt_file = record["id"] + ".json"
+        legacy = self.output / "attempts" / attempt_file
+        legacy.parent.mkdir(exist_ok=True)
+        (self.output / m.a.CI_HOSTED_ATTEMPTS / attempt_file).rename(legacy)
+        self.assertEqual(m.attestation(self.output, self.identity), document)
+
+    def test_interruption_after_hosted_copy_leaves_optional_evidence_loadable(self):
+        name = "profile:sample"
+        _, receipt = m.a.load_bound(self.output)
+        (self.output / self.local_prior["log"]).unlink()
+        receipt["checks"][name] = m.a.OPTIONAL_VM_NOT_RUN.copy()
+        m.a.save(self.output, receipt)
+        original = m.attestation(self.output, self.identity)
+        copy_evidence = m.copy_hosted_evidence
+
+        def stop_after_copy(source, target):
+            copy_evidence(source, target)
+            if target.suffix == ".log":
+                raise SystemExit("after hosted copy, before receipt commit")
+
+        with patch.object(m, "copy_hosted_evidence", side_effect=stop_after_copy), \
+             self.assertRaisesRegex(SystemExit, "after hosted copy"):
+            m.collect_ci(self.github, self.directory, self.identity, snapshot=(self.root, receipt))
+        _, retained = m.a.load_bound(self.output)
+        self.assertEqual(retained["checks"][name], m.a.OPTIONAL_VM_NOT_RUN)
+        self.assertEqual(m.attestation(self.output, self.identity), original)
+        self.assertEqual(self.collect()[0]["execution"], "ci-hosted")
+        m.validate_attestation(m.attestation(self.output, self.identity), self.identity, self.root)
+
+    def test_accept_records_a_hosted_result_copied_before_stop(self):
+        name = "profile:sample"
+        _, receipt = m.a.load_bound(self.output)
+        copy_evidence = m.copy_hosted_evidence
+        stop = threading.Event()
+
+        def stop_after_copy(source, target):
+            copy_evidence(source, target)
+            if target.suffix == ".log":
+                stop.set()
+
+        with patch.object(m.a, "STOP", stop), \
+             patch.object(m.a, "execution_environment", return_value=receipt["environment"]), \
+             patch.object(m, "copy_hosted_evidence", side_effect=stop_after_copy):
+            self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [name], False, [], 0), 1)
+        _, retained = m.a.load_bound(self.output)
+        self.assertEqual(retained["checks"][name]["execution"], "ci-hosted")
+        m.validate_attestation(m.attestation(self.output, self.identity), self.identity, self.root)
 
     def test_wrong_sha_failed_job_unknown_policy_foreign_candidate_missing_cleanup_and_stale_attempt_stay_open(self):
         def foreign(receipt):
@@ -2968,28 +3016,42 @@ class HostedChecks(unittest.TestCase):
                 if recorded_split or state == "late-retry":
                     receipt["checks"][full if recorded_split else local] = dict(failure, original_attempt=attempt)
                 m.a.save(output, receipt)
-                (directory / "ci-hosted.json").touch()
+                m.write_json(directory / "ci-hosted.json", self.state)
                 calls = []
                 priming = recorded_split
-                retry_started = threading.Event()
+                repeated = False
+                wait_started, local_started = threading.Event(), threading.Event()
+                native_wait = m.wait_ci_hosted
                 refusal = {"status": "blocked", "exit_code": 4, "termination": "exit", "reason": "capacity_memory"}
 
                 def execute(name, *args, **kwargs):
+                    if name == local:
+                        self.assertTrue(wait_started.wait(5), "hosted wait did not start alongside local work")
                     calls.append(name)
                     if name == split and (priming or state == "fallback-failure"):
                         return dict(failure)
                     if name == local:
-                        if state == "late-retry":
-                            retry_started.set()
-                        else:
+                        local_started.set()
+                        if state != "late-retry":
                             return dict(failure if state == "failed" else refusal)
                     return {"status": "passed", "exit_code": 0}
 
                 def wait_hosted(*args, **kwargs):
                     calls.append("wait")
+                    if state == "failed" and not repeated:
+                        def running(*_):
+                            wait_started.set()
+                            return {"status": "in_progress", "head_sha": self.identity["commit"]}
+
+                        with patch.object(m, "discover", side_effect=running):
+                            native_wait(*args[:3], 5, **kwargs)
+                        self.assertTrue(kwargs["cancelled"].is_set(), "local failure did not wake hosted wait")
+                        return
+                    wait_started.set()
                     if state == "late-retry":
                         m.a.request_retry(output, local, attempt["id"])
-                        self.assertTrue(retry_started.wait(5), "local retry did not launch during the hosted wait")
+                    if not repeated:
+                        self.assertTrue(local_started.wait(5), "local work did not launch during the hosted wait")
 
                 def collect(*args, **kwargs):
                     calls.append("collect")
@@ -3020,13 +3082,14 @@ class HostedChecks(unittest.TestCase):
                     code = 0 if state == "late-retry" else 1
                     self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], only, True, [], 60), code)
                     first = m.a.load_schedule(output, {})
-                    expected = {"failed": [local, "collect"], "refused": [local, "wait", "collect", split, full],
-                                "hosted-pass": [local, "wait", "collect", full],
-                                "recorded-split-failure": [local, "wait", "collect", split, full],
-                                "fallback-failure": [local, "wait", "collect", split],
+                    expected = {"failed": ["wait", local, "collect"], "refused": ["wait", local, "collect", split, full],
+                                "hosted-pass": ["wait", local, "collect", full],
+                                "recorded-split-failure": ["wait", local, "collect", split, full],
+                                "fallback-failure": ["wait", local, "collect", split],
                                 "late-retry": ["wait", local, "collect", split, full]}
                     self.assertEqual(calls, expected[state])
                     calls.clear()
+                    repeated = True
                     self.assertEqual(m.accept_checks(self.github, directory, self.identity, [1], only, True, [], 60), code)
                     last = json.loads((output / "receipt.json").read_text())
                     last_schedule = m.a.load_schedule(output, last)

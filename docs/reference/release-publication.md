@@ -57,9 +57,10 @@ commit and a reviewed workflow blob in `CI_HOSTED_POLICIES`; otherwise it report
 leaves those checks open. It downloads the exact preparation run/attempt artifact, uses the shared
 hosted pool setup, and runs one fresh collector selection per job (12 jobs at once, each bounded to
 350 minutes). Repeating preparation discovers the durable request instead of dispatching another.
-`accept` waits up to six hours for that request, then collects only completed successful jobs before
-running the remaining requested checks. `--ci-wait-seconds 0` collects the current snapshot immediately;
-a nonzero override is bounded to 86400 seconds. Failed, running, missing or refused results stay open
+`accept` waits up to six hours for that request alongside eligible local checks. It collects completed
+successful jobs before running the remaining requested hosted checks locally.
+`--ci-wait-seconds 0` collects the current snapshot immediately. A nonzero override is bounded to
+86400 seconds. Failed, running, missing or refused results stay open
 for local execution when requested. After a local check fails, `accept` neither waits nor runs hosted
 checks locally: it counts finished hosted results and leaves the rest pending for a later `accept`. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
 `CI-HOSTED-SKIP CHECK: REASON`.
@@ -563,6 +564,8 @@ mode 0600, followed by file and directory fsync. Their hashes bind the exact sav
 is a protocol, not a claim that local files cannot be edited. Validation rejects changed records/logs,
 foreign candidates and differences from the current authoritative receipt result. Historical receipts
 without these references remain readable. Package retains its final bundle or CI preparation binding.
+Hosted attempts use `ci-hosted-attempts/ID.json` and become evidence when `receipt.json` references
+them. Previously counted hosted attempts in `attempts/` remain readable.
 
 A manifest contains exactly `schema_version`, `candidate`, `source_entries` and `environment`.
 `candidate` is the full `transfer_candidate(receipt)` identity; `source_entries` maps every public
