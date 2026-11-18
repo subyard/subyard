@@ -24,7 +24,7 @@ export PATH="$fixture/bin:$PATH"
 
 output="$(bash "$ROOT/dev/shellcheck.sh")"
 [[ -z "$output" ]] || exit 1
-touch 'scripts/z warning.sh' scripts/a.sh
+touch 'scripts/z warning.sh' scripts/a.sh tests/success.sh
 if output="$(bash "$ROOT/dev/shellcheck.sh" 2>&1)"; then
   printf 'expected ShellCheck findings to fail the check\n' >&2
   exit 1
