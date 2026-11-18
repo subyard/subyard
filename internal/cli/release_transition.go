@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/adapters/hostruntime"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
@@ -1060,27 +1059,17 @@ func pendingIntegrationConfiguration(err error) bool {
 // Keep independent public adapter findings independent at the release boundary.
 // Wrapping their aggregate in one diagnostic would expose only its first cause.
 func (err materializedConfigActivationError) collected() error {
-	var refusals *domain.Refusals
-	if !errors.As(err.cause, &refusals) {
-		return err
-	}
-	causes := []error{}
-	for _, cause := range refusals.Unwrap() {
-		finding := err
-		finding.cause = cause
-		causes = append(causes, finding.collected())
-	}
-	return domain.CollectRefusals(causes...)
+	return domain.CollectRefusals(err.appendTo(nil)...)
 }
 
 // appendTo adds each collected finding as its own activation refusal.
 func (err materializedConfigActivationError) appendTo(refusals []error) []error {
-	collected := err.collected()
-	var findings *domain.Refusals
-	if errors.As(collected, &findings) {
-		return append(refusals, findings.Unwrap()...)
+	for _, cause := range domain.RefusalCauses(err.cause) {
+		finding := err
+		finding.cause = cause
+		refusals = append(refusals, finding)
 	}
-	return append(refusals, collected)
+	return refusals
 }
 
 func (err materializedConfigActivationError) ActivationDiagnostic() (string, string) {
@@ -1098,8 +1087,8 @@ func (err materializedConfigActivationError) ActivationFinding() domain.Finding 
 		if finding.Recovery != "" {
 			retry = finding.Recovery
 		}
-		if err.action == "reconcile" && err.phase == "integrations" {
-			retry = integrationActivationRetry(err.cause, retry)
+		if err.action == "reconcile" && finding.ReleaseRecovery != "" {
+			retry = finding.ReleaseRecovery
 		}
 		if finding.Message != "" {
 			finding.Recovery = retry
@@ -1120,6 +1109,7 @@ func (err materializedConfigActivationError) ActivationFinding() domain.Finding 
 	var integration *integrationActivationFailure
 	if errors.As(err.cause, &integration) {
 		message += integration.diagnostic()
+		retry = "run yard migrate"
 	}
 	return domain.Finding{Message: message, Recovery: retry}
 }
@@ -1138,24 +1128,6 @@ type integrationComparison struct {
 
 func (failure *integrationActivationFailure) Error() string { return failure.cause.Error() }
 func (failure *integrationActivationFailure) Unwrap() error { return failure.cause }
-func (failure *integrationActivationFailure) ActivationFinding() domain.Finding {
-	if finding, ok := domain.PublicFinding(failure.cause); ok {
-		finding.Recovery = integrationActivationRetry(failure.cause, finding.Recovery)
-		return finding
-	}
-	return domain.Finding{Recovery: "run yard migrate"}
-}
-
-func integrationActivationRetry(cause error, retry string) string {
-	var conflict interface{ ActivationConflict() bool }
-	if reconcileruntime.IntegrationOwnershipConflict(cause) || errors.As(cause, &conflict) && conflict.ActivationConflict() {
-		return retry
-	}
-	if strings.Contains(retry, " integration status") {
-		return "run yard migrate"
-	}
-	return retry
-}
 func (failure *integrationActivationFailure) diagnostic() string {
 	text := fmt.Sprintf(" (stage=%s projected=%t", failure.stage, failure.projected)
 	if facts := failure.comparison; facts != nil {
@@ -1517,14 +1489,30 @@ type pendingBesideDrift struct {
 }
 
 func (err pendingBesideDrift) Error() string                    { return err.refusals.Error() }
-func (err pendingBesideDrift) Unwrap() error                    { return err.refusals }
 func (pendingBesideDrift) ActivationPendingConfiguration() bool { return false }
-func (err pendingBesideDrift) ActivationDiagnostic() (string, string) {
-	message := "release activation cannot be observed safely"
-	if diagnostic, ok := err.refusals.(interface{ ActivationDiagnostic() (string, string) }); ok {
-		message, _ = diagnostic.ActivationDiagnostic()
+
+func (err pendingBesideDrift) Unwrap() []error {
+	causes := domain.RefusalCauses(err.refusals)
+	for index, cause := range causes {
+		causes[index] = activationRecoveryRefusal{cause, err.retry}
 	}
-	return message, err.retry
+	return causes
+}
+
+type activationRecoveryRefusal struct {
+	error
+	retry string
+}
+
+func (err activationRecoveryRefusal) Unwrap() error { return err.error }
+
+func (err activationRecoveryRefusal) ActivationFinding() domain.Finding {
+	finding, _ := domain.PublicFinding(err.error)
+	if finding.Message == "" {
+		finding.Message = "release activation cannot be observed safely"
+	}
+	finding.Recovery = err.retry
+	return finding
 }
 
 // pendingYardDeferral is the one record of yards deferred for pending
@@ -1655,63 +1643,6 @@ func (refusals *activationRefusals) Error() string {
 }
 
 func (refusals *activationRefusals) Unwrap() []error { return refusals.causes }
-
-// ActivationDiagnostic lists each public refusal in observation order and retries
-// the first. Over the protocol text bound, it keeps the first refusal, names how
-// many were omitted and the status views that report them in full.
-func (refusals *activationRefusals) ActivationDiagnostic() (string, string) {
-	const limit, firstBudget = 512, 160
-	findings := make([]domain.Finding, 0, len(refusals.causes))
-	var joined strings.Builder
-	for _, cause := range refusals.causes {
-		finding, ok := domain.PublicFinding(cause)
-		if !ok {
-			finding = domain.Finding{Message: "release activation cannot be observed safely", Recovery: "run yard update --check"}
-		}
-		findings = append(findings, finding)
-		if joined.Len() != 0 {
-			joined.WriteString("; ")
-		}
-		joined.WriteString(finding.Message)
-	}
-	retry := findings[0].Recovery
-	if joined.Len() <= limit {
-		return joined.String(), retry
-	}
-	omitted := len(findings) - 1
-	const separator = "; first: "
-	// The first refusal keeps at least firstBudget characters; status views take
-	// only the remaining space and an oversized first retry is left to the action.
-	head := fmt.Sprintf("%d release activation refusals, %d omitted; complete detail: %s", len(findings), omitted, retry)
-	if len(head)+len(separator)+firstBudget > limit {
-		head = fmt.Sprintf("%d release activation refusals, %d omitted", len(findings), omitted)
-	} else {
-		actions := map[string]bool{retry: true}
-		for index, finding := range findings[1:] {
-			action := finding.Recovery
-			if actions[action] {
-				continue
-			}
-			actions[action] = true
-			rest := fmt.Sprintf(", and %d more", omitted-index)
-			if len(head)+len(", ")+len(action)+len(rest)+len(separator)+firstBudget > limit {
-				head += rest
-				break
-			}
-			head += ", " + action
-		}
-	}
-	prefix := head + separator
-	first := findings[0].Message
-	if budget := limit - len(prefix); len(first) > budget {
-		end := budget - len("...")
-		for end > 0 && !utf8.RuneStart(first[end]) {
-			end--
-		}
-		first = strings.TrimSpace(first[:end]) + "..."
-	}
-	return prefix + first, retry
-}
 
 func (cli *CLI) appliedIntegrationTarget(ctx context.Context, target configTarget) (configTarget, error) {
 	applied, _, err := cli.appliedIntegrationTargetBaseline(ctx, target)
@@ -2443,12 +2374,12 @@ func (reconciler *materializedConfigActivationReconciler) reconcileIntegrationTa
 	if reconciler.projectedIntegrationPlans {
 		stage = "compare-projected"
 		if err := reconcileruntime.CheckIntegrationPlan(approved, compared); err != nil {
-			return err
+			return runtime.IntegrationPlanDiagnostic(err, approved, compared)
 		}
 	} else {
 		stage = "compare-exact"
 		if compared.Fingerprint != approved.Fingerprint {
-			return fmt.Errorf("%w: yard %s integrations changed", domain.ErrPlanStale, target.Name)
+			return runtime.IntegrationPlanDiagnostic(domain.ErrPlanStale, approved, compared)
 		}
 	}
 	stage, comparison = "apply", nil

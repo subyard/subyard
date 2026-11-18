@@ -2,8 +2,10 @@ package reconcileruntime
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 
@@ -16,6 +18,8 @@ import (
 var bubblewrapPolicy string
 
 var errBubblewrapSelection = errors.New("BWRAP_APPARMOR=off requires deselecting Codex; keep BWRAP_APPARMOR=on or remove codex from CODING_TOOL_INTEGRATIONS")
+
+const bubblewrapPolicyRefusal = "Bubblewrap AppArmor: policy state or ownership could not be verified. Inspect the yard policy before retrying"
 
 // ValidateBubblewrapSelection rejects a selection incompatible with Codex's
 // provisioning check before setup can change the yard.
@@ -88,12 +92,18 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 		}
 		retry := "run " + shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 		refusals := []error{settingsErr}
-		for _, line := range strings.Split(string(result.Stderr), "\n") {
-			if line == "subyard-integration-conflict:ccusage" {
-				refusals = append(refusals, integrationOwnershipFailure("this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry, false))
-			}
-			if strings.HasPrefix(line, "Bubblewrap AppArmor: ") {
-				refusals = append(refusals, errors.New(line))
+		if completedGuestFailure(result, err) {
+			for _, line := range strings.Split(string(result.Stderr), "\n") {
+				if line == "subyard-integration-conflict:ccusage" {
+					finding := integrationOwnershipFailure("this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry, false)
+					finding.Input = "services ccusage ownership"
+					refusals = append(refusals, finding)
+				}
+				if strings.HasPrefix(line, "Bubblewrap AppArmor: ") {
+					finding := integrationOwnershipFailure(bubblewrapPolicyRefusal, retry, false)
+					finding.Input = fmt.Sprintf("services Bubblewrap AppArmor policy %x", sha256.Sum256([]byte(line)))
+					refusals = append(refusals, finding)
+				}
 			}
 		}
 		if len(refusals) == 1 {

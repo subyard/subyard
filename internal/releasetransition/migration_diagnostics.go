@@ -72,7 +72,7 @@ func recordMigrationDiagnostics(ctx context.Context, err error) {
 	if capture == nil || capture.writer == nil {
 		return
 	}
-	for _, cause := range refusalCauses(err) {
+	for _, cause := range domain.RefusalCauses(err) {
 		var dependency *nativeDependencyError
 		if errors.As(cause, &dependency) {
 			capture.messages["release transition dependency: "+dependency.Error()] = true
@@ -148,7 +148,7 @@ func scopedNativeRefusals(owner string, err error) error {
 	if len(yard) > 63 || !domain.SafeName(yard) {
 		yard = "unrecognized"
 	}
-	causes := refusalCauses(err)
+	causes := domain.RefusalCauses(err)
 	for index, cause := range causes {
 		if !hasMigrationRefusal(cause) {
 			causes[index] = &nativeDependencyError{yard: yard, cause: cause}

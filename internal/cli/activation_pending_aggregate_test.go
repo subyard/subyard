@@ -159,7 +159,13 @@ func TestActivationAggregateIsPendingOnlyWhenEveryCauseIs(t *testing.T) {
 		message string
 	}{
 		"all-pending": {causes: []error{adoption, finding("work", pendingIntegrationFinding("adoption pending"))}, pending: true},
-		"mixed":       {causes: []error{adoption, finding("work", errors.New("transport failed"))}},
+		"independent recoveries": {
+			causes: []error{finding("default", independentOwnershipTestError("/home/dev/first")),
+				finding("default", independentOwnershipTestError("/home/dev/second"))},
+			message: "ownership conflict at /home/dev/first; ownership conflict at /home/dev/second; Additional recovery: inspect /home/dev/second",
+			retry:   "inspect /home/dev/first",
+		},
+		"mixed": {causes: []error{adoption, finding("work", errors.New("transport failed"))}},
 		// Without release repair the pending yard is not deferred: the activation
 		// stops with the pending refusal and its own next step, with or without
 		// other yards' changes.

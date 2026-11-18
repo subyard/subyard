@@ -15,6 +15,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/shellquote"
@@ -527,23 +528,24 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 			if strings.HasPrefix(desired, "release") {
 				// An independent conflict keeps the release as one refusal with it.
 				var release pendingInitOwnershipRelease
-				if !errors.As(err, &release) || release.yard != "default" || !slices.Equal(release.paths, []string{"/home/dev/.codex/config.toml"}) || !release.ActivationPendingConfiguration() {
+				if !errors.As(err, &release) || release.yard != "default" || len(release.paths) != 0 || !release.ActivationPendingConfiguration() ||
+					strings.Contains(err.Error(), "/home/dev/.codex/config.toml") || strings.Contains(err.Error(), "/home/dev/.codex/unproven.json") {
 					t.Fatalf("repair would rewrite fields pending init releases: %#v %v", observation, err)
 				}
 				message, retry := release.ActivationDiagnostic()
 				if !strings.HasPrefix(message, released) || retry != shellquote.Command([]string{"yard", "-Y", "default", "init"}) || len(message) > 512 {
 					t.Fatalf("diagnostic=%q retry=%q", message, retry)
 				}
-				var diagnostic interface{ ActivationDiagnostic() (string, string) }
-				if !errors.As(err, &diagnostic) {
-					t.Fatal("refusal has no public diagnostic")
+				leaves := domain.RefusalCauses(err)
+				if len(leaves) != 2 {
+					t.Fatalf("release hid an independent conflict: %v", err)
 				}
-				combined, _ := diagnostic.ActivationDiagnostic()
-				// Both independent findings are reported, the conflict first.
+				first, _ := domain.PublicFinding(leaves[0])
+				second, _ := domain.PublicFinding(leaves[1])
 				var conflict pendingInitConflictError
-				if !errors.As(err, &conflict) || !conflict.conflict ||
-					!strings.HasPrefix(combined, "yard default: integration configuration awaiting yard init has an ownership conflict") || !strings.Contains(combined, "; "+released) {
-					t.Fatalf("release hid an independent conflict: %v %q", err, combined)
+				if !errors.As(leaves[0], &conflict) || !conflict.conflict ||
+					!strings.HasPrefix(first.Message, "yard default: integration configuration awaiting yard init has an ownership conflict") || second.Message != message {
+					t.Fatalf("unexpected independent findings: %v / %v", first, second)
 				}
 				return
 			}
@@ -564,9 +566,13 @@ func TestRepairRefusesToRewriteStateThatPendingInitCannotRetire(t *testing.T) {
 				t.Fatalf("diagnostic=%q retry=%q", message, retry)
 			}
 			if named {
-				var read materializedConfigActivationError
-				if !errors.As(err, &read) || read.yard != "named" || !strings.Contains(message, "; yard named: cannot inspect materialized config") {
-					t.Fatalf("independent refusal of another yard was not reported: %v %q", err, message)
+				leaves := domain.RefusalCauses(err)
+				if len(leaves) != 2 {
+					t.Fatalf("independent refusal of another yard was not reported: %v", err)
+				}
+				read, ok := domain.PublicFinding(leaves[1])
+				if !ok || !strings.Contains(read.Message, "yard named: cannot inspect materialized config") {
+					t.Fatalf("unexpected independent finding: %v", read)
 				}
 			}
 		})
@@ -734,39 +740,29 @@ func mustHashConfigSource(t *testing.T, path string) string {
 	return hash
 }
 
-func TestActivationRefusalsStayWithinDiagnosticBound(t *testing.T) {
-	causes := []error{}
-	for index := range 6 {
-		causes = append(causes, pendingInitConflictError{yard: fmt.Sprintf("yard-%02d", index), conflict: index%2 == 0, cause: errors.New("synthetic")})
+func TestActivationRefusalsPreserveIndependentRecoveries(t *testing.T) {
+	cause := fmt.Errorf("private details: %w", errors.Join(
+		independentOwnershipTestError("/home/dev/first"),
+		independentOwnershipTestError("/home/dev/second"),
+	))
+	boundary := materializedConfigActivationError{
+		cause: &integrationActivationFailure{cause: cause, stage: "apply"},
+		yard:  "default", phase: "integrations", action: "reconcile", command: "integration status",
+	}
+	causes := boundary.appendTo(nil)
+	if len(causes) != 2 {
+		t.Fatalf("wanted two independent refusals, got %v", causes)
 	}
 	if single := collectActivationRefusals(causes[:1]); single != causes[0] {
 		t.Fatalf("single refusal was wrapped: %#v", single)
 	}
-	message, retry := collectActivationRefusals(causes).(interface{ ActivationDiagnostic() (string, string) }).ActivationDiagnostic()
-	want := "6 release activation refusals, 5 omitted; complete detail: run yard -Y yard-00 integration status, run yard -Y yard-01 integration status"
-	if len(message) > 512 || !strings.HasPrefix(message, want) || !strings.Contains(message, "; first: yard yard-00: ") || retry != "run yard -Y yard-00 integration status" {
-		t.Fatalf("diagnostic=%q retry=%q", message, retry)
-	}
-	// Every omitted yard is named while its status view fits the bound.
-	for _, yard := range []string{"yard-01", "yard-05"} {
-		if !strings.Contains(message, "run yard -Y "+yard+" integration status") {
-			t.Fatalf("omitted %s has no status view: %q", yard, message)
+	leaves := domain.RefusalCauses(collectActivationRefusals(causes))
+	for index, path := range []string{"/home/dev/first", "/home/dev/second"} {
+		finding, ok := domain.PublicFinding(leaves[index])
+		if !ok || finding.Owner != "sample" || finding.Input != "default:"+path ||
+			finding.Message != "ownership conflict at "+path || finding.Recovery != "inspect "+path {
+			t.Fatalf("finding %d: %#v", index, finding)
 		}
-	}
-	many := []error{}
-	for index := range 40 {
-		many = append(many, pendingInitConflictError{yard: fmt.Sprintf("yard-%02d", index), cause: errors.New("synthetic")})
-	}
-	message, _ = collectActivationRefusals(many).(interface{ ActivationDiagnostic() (string, string) }).ActivationDiagnostic()
-	if len(message) > 512 || !strings.HasPrefix(message, "40 release activation refusals, 39 omitted; ") || !strings.Contains(message, " more; first: yard yard-00: ") ||
-		len(message)-strings.Index(message, "; first: ")-len("; first: ") < 160 {
-		t.Fatalf("overflowing status views not counted or first refusal starved: %q", message)
-	}
-	// An oversized first retry never starves or breaks the first refusal.
-	long := []error{materializedConfigActivationError{yard: strings.Repeat("y", 450), command: "update --check", cause: errors.New("synthetic")}, many[1]}
-	message, _ = collectActivationRefusals(long).(interface{ ActivationDiagnostic() (string, string) }).ActivationDiagnostic()
-	if len(message) > 512 || !strings.HasPrefix(message, "2 release activation refusals, 1 omitted; first: yard "+strings.Repeat("y", 50)) {
-		t.Fatalf("oversized first retry: %q", message)
 	}
 }
 

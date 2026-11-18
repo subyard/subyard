@@ -211,7 +211,7 @@ func nativeMigrationRefusal(err error) bool {
 	if err == nil {
 		return false
 	}
-	for _, cause := range refusalCauses(err) {
+	for _, cause := range domain.RefusalCauses(err) {
 		var refusal interface{ MigrationRefusal() bool }
 		if !errors.As(cause, &refusal) || !refusal.MigrationRefusal() {
 			return false
@@ -221,7 +221,7 @@ func nativeMigrationRefusal(err error) bool {
 }
 
 func hasMigrationRefusal(err error) bool {
-	for _, cause := range refusalCauses(err) {
+	for _, cause := range domain.RefusalCauses(err) {
 		var refusal interface{ MigrationRefusal() bool }
 		if errors.As(cause, &refusal) && refusal.MigrationRefusal() {
 			return true
@@ -244,7 +244,7 @@ func nativeRefusalBlocker(resource string, err error, contexts ...context.Contex
 	messages, actions := []string{}, []string{}
 	classes := []migrationReasonClass{}
 	otherMessages := []string{}
-	for _, cause := range refusalCauses(err) {
+	for _, cause := range domain.RefusalCauses(err) {
 		message, action := publicActivationDiagnostic(cause, "registered yard state cannot be assessed safely", "run yard update --check")
 		var dependency *nativeDependencyError
 		if errors.As(cause, &dependency) {
@@ -360,20 +360,4 @@ type migrationBlockerError struct{ Blocker }
 func (failure migrationBlockerError) Error() string { return failure.Message }
 func (failure migrationBlockerError) ActivationDiagnostic() (string, string) {
 	return failure.Message, failure.Retry
-}
-
-func refusalCauses(err error) []error {
-	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
-		if _, public := domain.DirectFinding(cause); public {
-			break
-		}
-		if refusals, ok := cause.(*domain.Refusals); ok {
-			var causes []error
-			for _, refusal := range refusals.Unwrap() {
-				causes = append(causes, refusalCauses(refusal)...)
-			}
-			return causes
-		}
-	}
-	return []error{err}
 }

@@ -104,8 +104,8 @@ func (cause resumeConflictCause) Unwrap() error      { return cause.error }
 type resumeTransientCause struct{}
 
 func (resumeTransientCause) Error() string { return "private dependency error" }
-func (resumeTransientCause) ActivationDiagnostic() (string, string) {
-	return "native dependency unavailable", "run yard -Y default integration status"
+func (resumeTransientCause) ActivationFinding() domain.Finding {
+	return domain.Finding{Message: "native dependency unavailable", Recovery: "run yard -Y default integration status", ReleaseRecovery: "run yard migrate"}
 }
 
 func TestIntegrationApplyFailurePreservesPublicCauseAndExecutableRetry(t *testing.T) {

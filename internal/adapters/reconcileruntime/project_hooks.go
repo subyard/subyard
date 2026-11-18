@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/application"
@@ -84,30 +85,52 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 		}
 	}
 	var approved []string
-	declared := map[string][]integrationWorkItem{}
+	byPath := map[string][]integrationWorkItem{}
 	if runtime.HookPlan != nil {
 		for _, hook := range runtime.HookPlan.allowedHooks {
 			if path := runtime.HookPlan.current.Resolved[hook]; path != "" {
 				approved = append(approved, path)
 			}
 		}
-	} else if runtime.PersistFinishOnly {
+	}
+	if runtime.PersistFinishOnly {
+		add := func(path string, item integrationWorkItem) {
+			if filepath.IsAbs(path) && filepath.Clean(path) == path {
+				approved = append(approved, path)
+				byPath[path] = append(byPath[path], item)
+			}
+		}
+		profiles, err := runtime.profileRuntimeDefinitions()
+		if err != nil {
+			return err
+		}
+		selected := strings.Fields(runtime.environmentValue("ENVIRONMENT_PROFILES"))
+		for _, definition := range profiles {
+			if slices.Contains(selected, definition.Name) {
+				for _, path := range definition.Runtime.ProjectsChangedHooks {
+					add(path, runtime.integrationItem("apply hooks run", definition.Name).atDestination(path))
+				}
+			}
+		}
+		declared := map[string][]integrationWorkItem{}
 		for _, owner := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 			hook := runtime.environmentValue("AGENT_" + owner + "_PROJECTS_CHANGED")
 			if safeCommand(hook) {
 				item := runtime.integrationItem("apply hooks run", owner).forSource(hook)
 				declared[hook] = append(declared[hook], item)
+			} else {
+				add(hook, runtime.integrationItem("apply hooks run", owner).atDestination(hook))
 			}
 		}
-	}
-	byPath := map[string][]integrationWorkItem{}
-	if len(declared) != 0 {
-		if observation, err := runtime.observeProjectHookInputs(ctx); err == nil {
-			for hook, items := range declared {
-				path := observation.Resolved[hook]
-				if filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Base(path) == hook {
-					approved = append(approved, path)
-					byPath[path] = items
+		if len(declared) != 0 {
+			if observation, err := runtime.observeProjectHookInputs(ctx); err == nil {
+				for hook, items := range declared {
+					path := observation.Resolved[hook]
+					if filepath.Base(path) == hook {
+						for _, item := range items {
+							add(path, item)
+						}
+					}
 				}
 			}
 		}
@@ -119,7 +142,7 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 		return runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	}, approved...); err != nil {
 		var failure *application.ProjectHookFailure
-		if errors.As(err, &failure) {
+		if runtime.PersistFinishOnly && errors.As(err, &failure) {
 			var findings []error
 			for _, path := range failure.Hooks {
 				for _, item := range byPath[path] {
@@ -129,6 +152,7 @@ func (runtime Runtime) RunProjectHooks(ctx context.Context) error {
 			if reported := domain.CollectRefusals(findings...); reported != nil {
 				return reported
 			}
+			failure.Hooks = nil // Only declared hook names may be rendered by activation.
 		}
 		return err
 	}

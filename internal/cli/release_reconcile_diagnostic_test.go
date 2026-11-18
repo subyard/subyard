@@ -35,7 +35,7 @@ func TestMaterializedConfigReconcileIdentifiesFailedYard(t *testing.T) {
 	}{
 		{"raw", errors.New("private transport detail"), "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard migrate"},
 		{"stale", domain.ErrPlanStale, "yard default: cannot reconcile integrations for release activation (stage=observe-fresh projected=false)", "run yard migrate"},
-		{"public", fmt.Errorf("private wrapper: %w", publicReconcileTestError{}), "known integration ownership conflict", "run yard migrate"},
+		{"public", fmt.Errorf("private wrapper: %w", publicReconcileTestError{releaseRecovery: "run yard migrate"}), "known integration ownership conflict", "run yard migrate"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, _, configHome, environment := configCommandFixture(t)
@@ -418,11 +418,16 @@ func (fixture *activationApplyFailureExecutor) Exec(ctx context.Context, project
 	return fixture.activationIntegrationExecutor.Exec(ctx, project, instance, request)
 }
 
-type publicReconcileTestError struct{}
+type publicReconcileTestError struct{ releaseRecovery string }
 
 func (publicReconcileTestError) Error() string { return "private cause" }
-func (publicReconcileTestError) ActivationDiagnostic() (string, string) {
-	return "known integration ownership conflict", "run yard -Y default integration status"
+func (err publicReconcileTestError) ActivationFinding() domain.Finding {
+	return domain.Finding{Message: "known integration ownership conflict", Recovery: "run yard -Y default integration status", ReleaseRecovery: err.releaseRecovery}
+}
+
+func (err publicReconcileTestError) ActivationDiagnostic() (string, string) {
+	finding := err.ActivationFinding()
+	return finding.Message, finding.Recovery
 }
 
 // Direct integration status retains the full public hint outside the frozen
@@ -458,7 +463,7 @@ func TestActivationProjectsNativeOwnershipExitError(t *testing.T) {
 		{},
 		{Result: ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false}`)}},
 		{},
-		{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte("private guest detail\nsubyard-integration-conflict:ccusage\n")}, Err: errors.New("private guest exit error")},
+		{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte("private guest detail\nsubyard-integration-conflict:ccusage\n")}, Err: &ports.GuestExitError{Code: 1}},
 	}}
 	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: fake, Executor: fake, Integrations: []profile.IntegrationDefinition{}, Yard: domain.Context{YardName: "example"}}
 	_, cause := runtime.IntegrationPlan(context.Background())

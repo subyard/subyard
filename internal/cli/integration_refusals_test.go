@@ -11,8 +11,8 @@ import (
 type independentOwnershipTestError string
 
 func (err independentOwnershipTestError) Error() string { return string(err) }
-func (err independentOwnershipTestError) ActivationDiagnostic() (string, string) {
-	return "ownership conflict at " + string(err), "inspect " + string(err)
+func (err independentOwnershipTestError) ActivationFinding() domain.Finding {
+	return domain.Finding{Owner: "sample", Input: string(err), Message: "ownership conflict at " + string(err), Recovery: "inspect " + string(err)}
 }
 
 func TestIntegrationRefusalsRemainIndependentAcrossReleaseBoundary(t *testing.T) {

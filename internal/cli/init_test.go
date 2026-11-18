@@ -1329,7 +1329,8 @@ func TestNativeInitRefusesBubblewrapOptOutWithCodexBeforeChanges(t *testing.T) {
 }
 
 func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
-	const conflict = "Bubblewrap AppArmor: modified policy loader"
+	const guestDetail = "Bubblewrap AppArmor: private guest policy path"
+	const conflict = "Bubblewrap AppArmor: policy state or ownership could not be verified"
 	root, environment, _ := nativeFixture(t)
 	dir := filepath.Join(root, "state", "yards", "default")
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -1340,7 +1341,7 @@ func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
 	writeCLIFile(t, settings, content, 0600)
 	incus := &testkit.Incus{
 		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
-		ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}}},
+		ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(guestDetail + "\n")}}},
 	}
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--yes"},
@@ -1350,7 +1351,7 @@ func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
 	}
 	if code := program.Run(context.Background()); code == 0 ||
 		strings.Count(stderr.String(), "BWRAP_APPARMOR=off requires deselecting Codex") != 1 ||
-		!strings.Contains(stderr.String(), conflict) {
+		!strings.Contains(stderr.String(), conflict) || strings.Contains(stderr.String(), guestDetail) {
 		t.Fatalf("expected both refusals once: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if len(incus.ExecCalls) != 1 || incus.ExecCalls[0].Request.Command[5] != "observe" ||

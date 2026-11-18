@@ -470,7 +470,11 @@ func (cli *CLI) pendingInitIntegrationRefusal(ctx context.Context, installed con
 		runtime.SourceReader = files.ReadAsset
 	}
 	refusal := func(err error) error {
-		return pendingInitConflictError{yard: installed.Name, conflict: reconcileruntime.IntegrationOwnershipConflict(err), cause: err}
+		var causes []error
+		for _, cause := range domain.RefusalCauses(err) {
+			causes = append(causes, pendingInitConflictError{yard: installed.Name, conflict: reconcileruntime.IntegrationOwnershipConflict(cause), cause: cause})
+		}
+		return domain.CollectRefusals(causes...)
 	}
 	platform, _, err = prepareLegacyIntegrationAdoption(ctx, desired.Loaded.Integrations, runtime)
 	if err != nil {
@@ -481,12 +485,9 @@ func (cli *CLI) pendingInitIntegrationRefusal(ctx context.Context, installed con
 	}
 	// Report a release together with any independent inspection refusal.
 	plan, err := runtime.IntegrationPlan(ctx)
-	var causes []error
-	if err != nil {
-		causes = append(causes, refusal(err))
-	}
-	if releases := plan.OwnershipReleases(); len(releases) != 0 {
-		causes = append(causes, pendingInitOwnershipRelease{yard: installed.Name, paths: releases})
+	causes := domain.RefusalCauses(refusal(err))
+	if plan.HasOwnershipReleases() {
+		causes = append(causes, pendingInitOwnershipRelease{yard: installed.Name, paths: plan.OwnershipReleases()})
 	}
 	return collectActivationRefusals(causes)
 }
@@ -500,6 +501,9 @@ type pendingInitOwnershipRelease struct {
 }
 
 func (err pendingInitOwnershipRelease) Error() string {
+	if len(err.paths) == 0 {
+		return fmt.Sprintf("yard %s: pending yard init releases ownership of a structured configuration", err.yard)
+	}
 	return fmt.Sprintf("yard %s: pending yard init releases ownership of %s", err.yard, strings.Join(err.paths, ", "))
 }
 
@@ -527,9 +531,26 @@ func (err pendingInitConflictError) Error() string {
 func (err pendingInitConflictError) Unwrap() error { return err.cause }
 
 func (err pendingInitConflictError) ActivationDiagnostic() (string, string) {
-	retry := "run yard -Y " + err.yard + " integration status"
-	if err.conflict {
-		return "yard " + err.yard + ": integration configuration awaiting yard init has an ownership conflict; the release repair would overwrite the changed owned configuration; fix the conflict that yard integration status reports, then run yard migrate", retry
+	finding := err.ActivationFinding()
+	return finding.Message, finding.Recovery
+}
+
+func (err pendingInitConflictError) ActivationFinding() domain.Finding {
+	finding, _ := domain.PublicFinding(err.cause)
+	if finding.Input != "" {
+		finding.Input = err.yard + ":" + finding.Input
 	}
-	return "yard " + err.yard + ": integration configuration awaiting yard init cannot be inspected; the release repair stops rather than overwrite owned configuration that init may be unable to retire; check yard integration status, then run yard migrate", retry
+	finding.Recovery = "run yard -Y " + err.yard + " integration status"
+	finding.ReleaseRecovery = ""
+	prefix := "yard " + err.yard + ": integration configuration awaiting yard init"
+	suffix := " cannot be inspected"
+	if err.conflict {
+		suffix = " has an ownership conflict"
+	}
+	message := prefix + suffix
+	if finding.Message != "" {
+		message += ": " + finding.Message
+	}
+	finding.Message = message + "; inspect before rerunning yard migrate"
+	return finding
 }

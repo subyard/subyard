@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
@@ -554,7 +555,14 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 }
 
 func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
-	return shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
+	exec := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--"}
+	direct := shellquote.RecoveryCommand(append(slices.Clone(exec), "mv", "--backup=numbered", "--", path, path+".subyard-invalid"))
+	// Pass a long destination once so it fits in the release retry field.
+	compact := shellquote.RecoveryCommand(append(exec, "sh", "-c", `mv --backup=numbered -- "$1" "$1.subyard-invalid"`, "subyard", path))
+	if len(compact) < len(direct) {
+		return compact
+	}
+	return direct
 }
 
 func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
@@ -572,8 +580,7 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err != nil || result.ExitCode != 0 {
-		var completed *ports.GuestExitError
-		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
+		if result.ExitCode == 2 && completedGuestFailure(result, err) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
 			preserve := runtime.preserveInvalidConfigCommand(file.destination)
 			repair := "yard config apply"
 			if domain.SafeName(runtime.Yard.YardName) {
@@ -582,7 +589,7 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 			if runtime.PersistFinishOnly {
 				repair = "yard migrate"
 			}
-			return integrationOwnershipFailure("unowned invalid configuration preserved. Move it aside first, then run "+repair,
+			return integrationOwnershipFailure(fmt.Sprintf("unowned invalid configuration preserved at %q. Move it aside first, then run %s", file.destination, repair),
 				"run "+preserve, false)
 		}
 		return errors.New("structured configuration apply failed")

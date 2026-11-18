@@ -50,11 +50,18 @@ func (integrationOwnershipRefusal) integrationOwnershipConflict() bool { return 
 // guest completed reports ownership state; transport and host failures remain
 // inspection failures with the same text.
 func ownershipRefusal(message string, result ports.InstanceExecResult, err error) error {
-	var completed *ports.GuestExitError
-	if err == nil && result.ExitCode != 0 || errors.As(err, &completed) {
+	if completedGuestFailure(result, err) {
 		return integrationOwnershipRefusal(message)
 	}
 	return errors.New(message)
+}
+
+func completedGuestFailure(result ports.InstanceExecResult, err error) bool {
+	var completed *ports.GuestExitError
+	if err == nil {
+		return result.ExitCode != 0
+	}
+	return errors.As(err, &completed) && completed.Code != 0 && (result.ExitCode == 0 || completed.Code == result.ExitCode)
 }
 
 // IntegrationOwnershipConflict reports whether an integration observation
@@ -88,8 +95,7 @@ type IntegrationPlan struct {
 	persist             persistObservation
 	sources             string
 
-	// ownershipReleases lists structured documents whose retirement releases
-	// changed or missing owned configuration instead of removing it.
+	// ownershipReleases lists declared destinations for the releases we observed.
 	ownershipReleases       []string
 	ownershipReleaseNotices []string
 
@@ -106,9 +112,14 @@ type IntegrationPlan struct {
 // Changed still requires that tail for authorized apply and recovery.
 func (plan IntegrationPlan) InstalledChanged() bool { return plan.Changed && !plan.pendingOnly }
 
-// OwnershipReleases lists structured documents whose retirement releases changed
-// owned fields in place. Rewriting them first would discard the operator's change.
+// OwnershipReleases lists declared structured destinations whose retirement releases ownership.
 func (plan IntegrationPlan) OwnershipReleases() []string { return slices.Clone(plan.ownershipReleases) }
+
+// HasOwnershipReleases reports whether a retirement releases changed or missing
+// owned configuration, including historical documents with no current declaration.
+func (plan IntegrationPlan) HasOwnershipReleases() bool {
+	return len(plan.ownershipReleaseNotices) != 0
+}
 
 type integrationProfileRoute struct {
 	Owner, MarkerKey, DeviceName, Marker string
@@ -134,6 +145,8 @@ type integrationArtifact struct {
 	FileTarget   bool   `json:"file_target,omitempty"`
 	Content      string `json:"content,omitempty"`
 	Mode         int    `json:"mode,omitempty"`
+
+	declaredPath, declaredOwner string
 }
 
 type integrationObservation struct {
@@ -592,7 +605,9 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 	}
 	legacy := []string{}
 	pathOwners := map[string][]string{}
+	declaredPaths := map[string]string{}
 	addOwner := func(path, owner string) {
+		declaredPaths[path] = path
 		if !slices.Contains(pathOwners[path], owner) {
 			pathOwners[path] = append(pathOwners[path], owner)
 		}
@@ -607,10 +622,35 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		return integrationObservation{}, err
 	}
 	for _, definition := range definitions {
+		configIDs := []string{"config", "rules"}
 		for _, artifact := range definition.Artifacts {
 			path := home + "/" + artifact.Destination
 			legacy = append(legacy, path)
 			addOwner(path, definition.Name)
+			if artifact.Kind == "config" && !slices.Contains(configIDs, artifact.ID) {
+				configIDs = append(configIDs, artifact.ID)
+			}
+		}
+		// A deselected owner can still have a declared destination in its settings.
+		for _, asset := range configIDs {
+			if relative, err := safeGuestRelativePath(runtime.environmentValue("AGENT_" + definition.Name + "_" + strings.ToUpper(asset) + "_DEST")); err == nil {
+				addOwner(home+"/"+relative, definition.Name)
+			}
+		}
+	}
+	bindReportedArtifacts := func(artifacts []integrationArtifact) {
+		for index := range artifacts {
+			entry := &artifacts[index]
+			for _, definition := range definitions {
+				if definition.Name == entry.ID {
+					entry.declaredOwner = definition.Name
+					break
+				}
+			}
+			if slices.Contains(pathOwners[entry.Path], entry.ID) {
+				entry.declaredOwner = entry.ID
+				entry.declaredPath = declaredPaths[entry.Path]
+			}
 		}
 	}
 	// Explicit operator links have no integration ownership and are preserved.
@@ -691,7 +731,11 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 	}
 	payload, _ := json.Marshal(request)
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", IntegrationInventoryReader(), mode}, Stdin: payload})
+	const unavailable = "integration ownership conflict or unavailable evidence; managed artifacts were preserved"
 	if err != nil || result.ExitCode != 0 {
+		if !completedGuestFailure(result, err) {
+			return integrationObservation{}, ownershipRefusal(unavailable, result, err)
+		}
 		type conflictRecord struct{ Reason, Path, Detail string }
 		var report struct {
 			conflictRecord
@@ -700,7 +744,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			Retired   []integrationArtifact `json:"retired"`
 		}
 		if json.Unmarshal(result.Stderr, &report) != nil {
-			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
+			return integrationObservation{}, ownershipRefusal(unavailable, result, err)
 		}
 		conflicts := report.Conflicts
 		if len(conflicts) == 0 && report.Reason != "" {
@@ -708,7 +752,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		}
 		causes := []error{}
 		if len(conflicts) == 0 {
-			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
+			return integrationObservation{}, ownershipRefusal(unavailable, result, err)
 		}
 		item := capture.item
 		if item.Input == "" {
@@ -719,25 +763,26 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		}
 		for _, conflict := range conflicts {
 			owners := pathOwners[conflict.Path]
+			path := declaredPaths[conflict.Path]
 			cause := func() error {
 				knownPath := len(owners) != 0
 				switch conflict.Reason {
 				case "artifact evidence unavailable":
 					if knownPath {
 						return integrationOwnershipFailure(
-							fmt.Sprintf("integration ownership evidence in yard %s is unavailable at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Path),
-							shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path}), false)
+							fmt.Sprintf("integration ownership evidence in yard %s is unavailable at %q; managed artifacts were preserved", runtime.Yard.YardName, path),
+							shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", path}), false)
 					}
 				case "owned artifact drift", "unowned selected artifact", "legacy integration artifact has no ownership evidence":
-					if knownPath && conflict.Path != "" {
+					if knownPath && path != "" {
 						if conflict.Reason == "unowned selected artifact" &&
-							(conflict.Path == "/usr/local/libexec/subyard/projects-changed" || conflict.Path == "/etc/subyard/agent-project-hooks") {
+							(path == "/usr/local/libexec/subyard/projects-changed" || path == "/etc/subyard/agent-project-hooks") {
 							detail := ""
-							probe := []string{"namei", "-l", "--", conflict.Path}
+							probe := []string{"namei", "-l", "--", path}
 							switch conflict.Detail {
 							case "unrecognized core content":
 								detail = "contents do not match the current or a recognized legacy Subyard file; compare with the shipped file before replacing it"
-								probe = []string{"sha256sum", "--", conflict.Path}
+								probe = []string{"sha256sum", "--", path}
 							case "unsafe core metadata":
 								detail = "file must be regular, owned by root:root, with mode 0755 for projects-changed or 0644 for agent-project-hooks"
 							case "unsafe core ancestor":
@@ -746,40 +791,42 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 							if detail != "" {
 								command := append([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--"}, probe...)
 								return integrationOwnershipFailure(
-									fmt.Sprintf("integration ownership conflict in yard %s at %q: %s. File preserved.", runtime.Yard.YardName, conflict.Path, detail),
+									fmt.Sprintf("integration ownership conflict in yard %s at %q: %s. File preserved.", runtime.Yard.YardName, path, detail),
 									shellquote.RecoveryCommand(command), false)
 							}
 						}
-						command := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--no-clobber", "--", conflict.Path, conflict.Path + ".subyard-preserved"}
-						if !strings.HasPrefix(conflict.Path, home+"/") {
-							command = []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path}
+						command := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--no-clobber", "--", path, path + ".subyard-preserved"}
+						if !strings.HasPrefix(path, home+"/") {
+							command = []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", path}
 						}
 						return integrationOwnershipFailure(
-							fmt.Sprintf("integration ownership conflict in yard %s: %s at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Reason, conflict.Path),
-							shellquote.RecoveryCommand(command), strings.HasPrefix(conflict.Path, home+"/"))
+							fmt.Sprintf("integration ownership conflict in yard %s: %s at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Reason, path),
+							shellquote.RecoveryCommand(command), strings.HasPrefix(path, home+"/"))
 					}
 				}
-				return ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
+				return ownershipRefusal(unavailable, result, err)
 			}()
 			if len(owners) == 0 {
 				causes = append(causes, cause)
 				continue
 			}
-			finding := item.atDestination(conflict.Path)
+			finding := item.atDestination(path)
 			if len(owners) == 1 {
 				finding = finding.withOwner(owners[0])
 			}
 			causes = append(causes, finding.refusal(cause))
 		}
+		bindReportedArtifacts(report.Retired)
 		return integrationObservation{Initial: report.Initial, Retired: report.Retired}, domain.CollectRefusals(causes...)
 	}
-
 	var observed integrationObservation
 	if mode == "observe" || mode == "observe-applied" || mode == "selection" || mode == "settings" {
 		if json.Unmarshal(result.Stdout, &observed) != nil || (mode == "observe" || mode == "observe-applied") && len(observed.Fingerprint) != 64 {
 			return integrationObservation{}, errors.New("invalid integration ownership observation")
 		}
 	}
+	bindReportedArtifacts(observed.Retired)
+	bindReportedArtifacts(observed.Adopted)
 	if observed.Diagnostics != nil {
 		catalog, err := config.LoadCatalog(runtime.RepositoryRoot)
 		if err != nil {
@@ -889,9 +936,14 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			fingerprints = append(fingerprints, observation.Fingerprint)
 			record(item, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
 			if observation.Release != "" {
-				notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
+				if runtime.PersistFinishOnly {
+					observation.Released = nil
+				}
+				notice := ownershipReleaseNotice(entry.declaredOwner, entry.declaredPath, observation)
 				plan.Warnings = append(plan.Warnings, notice)
-				plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
+				if entry.declaredPath != "" {
+					plan.ownershipReleases = append(plan.ownershipReleases, entry.declaredPath)
+				}
 				plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
 			}
 		})
@@ -981,14 +1033,25 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			plan.Steps = append(plan.Steps, step.Consequence)
 		}
 		for _, entry := range observed.Retired {
-			if entry.Kind == "package" {
+			switch {
+			case runtime.PersistFinishOnly && entry.declaredOwner == "":
+				plan.Steps = append(plan.Steps, "retire an owned integration artifact")
+			case runtime.PersistFinishOnly && entry.Kind == "package":
+				plan.Steps = append(plan.Steps, "disable managed startup for "+entry.declaredOwner+"; preserve binaries and user data")
+			case runtime.PersistFinishOnly && entry.declaredPath == "":
+				plan.Steps = append(plan.Steps, "retire an owned artifact for "+entry.declaredOwner)
+			case runtime.PersistFinishOnly:
+				plan.Steps = append(plan.Steps, "retire an owned artifact for "+entry.declaredOwner+": "+entry.declaredPath)
+			case entry.Kind == "package":
 				plan.Steps = append(plan.Steps, "disable managed startup for "+entry.ID+"; preserve binaries and user data")
-			} else {
+			default:
 				plan.Steps = append(plan.Steps, "retire owned "+entry.Kind+" for "+entry.ID+": "+entry.Path)
 			}
 		}
-		for _, entry := range observed.Adopted {
-			plan.Steps = append(plan.Steps, "adopt existing "+entry.Kind+" for "+entry.ID+" under integration management: "+entry.Path)
+		if !runtime.PersistFinishOnly {
+			for _, entry := range observed.Adopted {
+				plan.Steps = append(plan.Steps, "adopt existing "+entry.Kind+" for "+entry.ID+" under integration management: "+entry.Path)
+			}
 		}
 		if runtime.environmentValue("ALLOWS_CODING_TOOLS") == "false" {
 			plan.Steps = append(plan.Steps, "remove ownership-proven ccusage utility for the special yard role")
@@ -1094,12 +1157,14 @@ func (runtime Runtime) observeDesiredIntegrationConfigs(ctx context.Context, pha
 		if os.IsNotExist(err) {
 			continue
 		}
+		if err != nil {
+			source := runtime.integrationRead(phase, "config source", file.integration).atDestination(file.destination)
+			causes = append(causes, source.refusal(err))
+			continue
+		}
+		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
 		if err == nil {
-			var observation configmaterial.Observation
-			observation, err = runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
-			if err == nil {
-				err = visit(item, file, payload, observation)
-			}
+			err = visit(item, file, payload, observation)
 		}
 		causes = append(causes, item.refusal(err))
 	}
@@ -1114,8 +1179,8 @@ func (runtime Runtime) observeRetiredIntegrationConfigs(ctx context.Context, pha
 		if entry.Kind != "structured" {
 			continue
 		}
-		item := runtime.integrationRead(phase, "retired structured config", runtime.knownIntegrationID(entry.ID)).atDestination(entry.Path)
-		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
+		item := runtime.integrationRead(phase, "retired structured config", entry.declaredOwner).forReportedArtifact(entry)
+		observation, err := runtime.observeIntegrationConfigAt(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, entry.declaredPath, nil)
 		if err != nil {
 			causes = append(causes, item.refusal(err))
 		} else if visit != nil {
@@ -1196,13 +1261,16 @@ func (runtime Runtime) legacyIntegrationConfigDigest(file guestConfigFile) (stri
 }
 
 func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mode, path string, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
+	return runtime.observeIntegrationConfigAt(ctx, format, mode, path, path, payload, legacyTemplates...)
+}
+
+func (runtime Runtime) observeIntegrationConfigAt(ctx context.Context, format, mode, path, declaredPath string, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
 	request, err := configmaterial.Request(format, mode, runtime.devUser(), path, runtime.Yard.DevUID, payload, legacyTemplates...)
 	if err != nil {
 		return configmaterial.Observation{}, err
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 	if err != nil || result.ExitCode != 0 {
-		var completed *ports.GuestExitError
 		detail := ""
 		switch strings.TrimSpace(string(result.Stderr)) {
 		case "config materialization: adoption ownership evidence unavailable":
@@ -1218,13 +1286,13 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 		if unownedInvalid {
 			detail = "invalid current " + strings.ToUpper(format)
 		}
-		if detail != "" && result.ExitCode == 2 && (err == nil || (errors.As(err, &completed) && completed.Code == 2)) {
-			retry := shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "sha256sum", "--", path})
+		if declaredPath != "" && detail != "" && result.ExitCode == 2 && completedGuestFailure(result, err) {
+			retry := shellquote.RecoveryCommand([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "sha256sum", "--", declaredPath})
 			if unownedInvalid {
-				retry = runtime.preserveInvalidConfigCommand(path)
+				retry = runtime.preserveInvalidConfigCommand(declaredPath)
 			}
 			return configmaterial.Observation{}, integrationOwnershipFailure(
-				fmt.Sprintf("integration ownership conflict in yard %s at %q: %s; file preserved. Compare with the integration's shipped legacy templates before retrying", runtime.Yard.YardName, path, detail),
+				fmt.Sprintf("integration ownership conflict in yard %s at %q: %s; file preserved. Compare with the integration's shipped legacy templates before retrying", runtime.Yard.YardName, declaredPath, detail),
 				retry, detail == "no protected baseline or exact recognized legacy template" || detail == "owned fields or protected evidence changed")
 		}
 		return configmaterial.Observation{}, ownershipRefusal("integration structured configuration ownership conflict", result, err)
@@ -1232,7 +1300,14 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 	observation, err := configmaterial.ParseObservation(result.Stdout)
 	if err == nil && mode == configmaterial.ModeRetire && observation.Release != "" && runtime.Stdout != nil {
 		// Report the completed release once, from the call that performed it.
-		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+path+": ", observation, "; Subyard no longer manages it"))
+		if runtime.PersistFinishOnly {
+			observation.Released = nil
+		}
+		document := "a structured configuration"
+		if declaredPath != "" {
+			document = declaredPath
+		}
+		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+document+": ", observation, "; Subyard no longer manages it"))
 	}
 	return observation, err
 }
@@ -1257,7 +1332,14 @@ func (runtime Runtime) releasedInstalledDocument(path string, observation config
 // changed owned fields no longer prove Subyard's values, and a missing document
 // has nothing to remove. The document itself stays unchanged.
 func ownershipReleaseNotice(integration, path string, observation configmaterial.Observation) string {
-	return boundedNotice("retiring "+integration+" releases ownership of "+path+": ", observation, "")
+	prefix := "retirement releases ownership of "
+	if integration != "" {
+		prefix = "retiring " + integration + " releases ownership of "
+	}
+	if path == "" {
+		path = "a structured configuration"
+	}
+	return boundedNotice(prefix+path+": ", observation, "")
 }
 
 // Activation warnings share the release diagnostic bound: the notice lists the
@@ -1508,7 +1590,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 		return runtime.integrationApplyDiagnostic(err, "observe")
 	}
 	if err := CheckIntegrationPlan(plan, fresh); err != nil {
-		return runtime.integrationPlanDiagnostic(err, plan, fresh)
+		return runtime.integrationApplyDiagnostic(runtime.IntegrationPlanDiagnostic(err, plan, fresh), "compare plan")
 	}
 	if err := runtime.checkIntegrationHookScope(); err != nil {
 		return runtime.integrationApplyDiagnostic(err, "hooks scope")
@@ -1559,8 +1641,8 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	// state, which the next successful init retires.
 	for _, entry := range observed.Retired {
 		if entry.Kind == "structured" {
-			item := runtime.integrationItem("apply retire structured config", runtime.knownIntegrationID(entry.ID)).atDestination(entry.Path)
-			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
+			item := runtime.integrationItem("apply retire structured config", entry.declaredOwner).forReportedArtifact(entry)
+			if _, err := runtime.observeIntegrationConfigAt(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, entry.declaredPath, nil); err != nil {
 				return item.refusal(err)
 			}
 		}

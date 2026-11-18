@@ -1992,7 +1992,7 @@ func (transition *V2Transition) newerReleaseReplacementBlockers(observation v2Ob
 	}
 	var blockers []Blocker
 	if collected := domain.CollectRefusals(causes...); collected != nil {
-		for _, cause := range refusalCauses(collected) {
+		for _, cause := range domain.RefusalCauses(collected) {
 			blockers = append(blockers, cause.(migrationBlockerError).Blocker)
 		}
 	}
@@ -4053,6 +4053,8 @@ func pendingConfiguration(err error) bool {
 	switch typed := err.(type) {
 	case nil:
 		return false
+	case interface{ ActivationPendingConfiguration() bool }:
+		return typed.ActivationPendingConfiguration()
 	case interface{ Unwrap() []error }:
 		causes := typed.Unwrap()
 		for _, cause := range causes {
@@ -4061,8 +4063,6 @@ func pendingConfiguration(err error) bool {
 			}
 		}
 		return len(causes) != 0
-	case interface{ ActivationPendingConfiguration() bool }:
-		return typed.ActivationPendingConfiguration()
 	}
 	return pendingConfiguration(errors.Unwrap(err))
 }
@@ -4120,7 +4120,7 @@ func nativeTargetRefusalsOnly(err error) bool {
 }
 
 func activationObservationBlocker(ctx context.Context, id string, err error) Blocker {
-	for _, cause := range refusalCauses(err) {
+	for _, cause := range domain.RefusalCauses(err) {
 		var nativeTarget *domain.NativeTargetRefusal
 		if errors.As(cause, &nativeTarget) {
 			recordMigrationDiagnostics(ctx, nativeTarget)
@@ -4157,7 +4157,7 @@ func publicActivationDiagnostic(err error, message, retry string) (string, strin
 	fallback := domain.Finding{Message: message, Recovery: retry}
 	var findings []domain.Finding
 	seen := map[[2]string]bool{}
-	for _, cause := range refusalCauses(err) {
+	for _, cause := range domain.RefusalCauses(err) {
 		finding, ok := domain.PublicFinding(cause)
 		if !ok || !utf8.ValidString(finding.Message) || validateText(finding.Message, "activation diagnostic", maxDiagnosticText, true) != nil {
 			finding = fallback
@@ -4192,6 +4192,9 @@ func publicActivationDiagnostic(err error, message, retry string) (string, strin
 func renderActivationFindings(findings []domain.Finding) (string, string) {
 	retry := findings[0].Recovery
 	omitted := func(count int) string {
+		if count == 1 {
+			return "and 1 more finding; full details: stderr of yard update --check --json"
+		}
 		return fmt.Sprintf("and %d more findings; full details: stderr of yard update --check --json", count)
 	}
 	join := func(message, next string) string {

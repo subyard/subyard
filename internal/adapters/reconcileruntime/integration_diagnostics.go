@@ -2,6 +2,7 @@ package reconcileruntime
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -137,17 +138,21 @@ func (runtime Runtime) integrationDiagnostic(cause error, definition profile.Int
 		cause = fmt.Errorf("%w: %w", domain.ErrPlanStale, cause)
 	}
 	item.Message, item.Recovery = message+": "+lifecycleReasons[reason], retry+" --json"
+	conflict := reason == "ambiguous-ownership" || reason == "foreign-ownership"
+	if !conflict {
+		item.ReleaseRecovery = "run yard migrate"
+	}
 	if _, ok := domain.PublicFinding(cause); ok {
 		return item.refusal(cause)
 	}
-	return integrationFailure{Finding: item.Finding, cause: cause, conflict: reason == "ambiguous-ownership" || reason == "foreign-ownership"}
+	return integrationFailure{Finding: item.Finding, cause: cause, conflict: conflict}
 }
 
 // Bind the input before reading native state. The same finding identifies a
 // failed read or a successful read that proves the input is still drifting.
 type integrationWorkItem struct {
 	domain.Finding
-	yard string
+	yard, step, location string
 }
 
 func (runtime Runtime) integrationItem(step, owner string) integrationWorkItem {
@@ -159,7 +164,7 @@ func (runtime Runtime) integrationItem(step, owner string) integrationWorkItem {
 	if runtime.PersistFinishOnly {
 		retry = "run yard migrate"
 	}
-	return (integrationWorkItem{Finding: domain.Finding{Input: step, Recovery: retry}, yard: yard}).withOwner(owner)
+	return (integrationWorkItem{Finding: domain.Finding{Input: step, Recovery: retry}, yard: yard, step: step}).withOwner(owner)
 }
 
 func (item integrationWorkItem) withOwner(owner string) integrationWorkItem {
@@ -187,33 +192,47 @@ func (runtime Runtime) integrationRead(phase, step, owner string) integrationWor
 
 // Only paths from the declaring work item may be rendered.
 func (item integrationWorkItem) atDestination(path string) integrationWorkItem {
-	if len(path) <= 256 && filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsFunc(path, unicode.IsControl) {
-		item.Input += fmt.Sprintf(" at %q", path)
+	if filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsFunc(path, unicode.IsControl) {
+		return item.forSource(path)
 	}
 	return item
 }
 
 func (item integrationWorkItem) forSource(path string) integrationWorkItem {
-	item.Input += fmt.Sprintf(" at %q", path)
+	location := fmt.Sprintf("%q", path)
+	item.Input += " at " + location
+	if len(location) <= 256 {
+		item.location = location
+	}
+	return item
+}
+
+func (item integrationWorkItem) forReportedArtifact(entry integrationArtifact) integrationWorkItem {
+	if entry.declaredPath != "" {
+		return item.atDestination(entry.declaredPath)
+	}
+	// Unmatched evidence can distinguish failures without being displayed.
+	item.Input += fmt.Sprintf(" %x", sha256.Sum256([]byte(entry.Path)))
 	return item
 }
 
 func (item integrationWorkItem) label() string {
-	step, _, _ := strings.Cut(item.Input, " at ")
 	if item.Owner == "" {
-		return "integration " + step
+		return "integration " + item.step
 	}
-	return "integration " + item.Owner + " " + step
+	return "integration " + item.Owner + " " + item.step
 }
 
 func (item integrationWorkItem) refusal(cause error) error {
 	if cause == nil || item.Input == "" {
 		return cause
 	}
-	if refusals, ok := cause.(*domain.Refusals); ok {
+	if leaves, aggregate := domain.IndependentRefusals(cause); aggregate {
 		var public []error
-		for _, finding := range refusals.Unwrap() {
-			public = append(public, item.refusal(finding))
+		for index, leaf := range leaves {
+			part := item
+			part.Input += fmt.Sprintf(" [%d]", index+1)
+			public = append(public, part.refusal(leaf))
 		}
 		return domain.CollectRefusals(public...)
 	}
@@ -221,14 +240,13 @@ func (item integrationWorkItem) refusal(cause error) error {
 		if existing.Input != "" {
 			return cause
 		}
-		item.Message = existing.Message
+		existing.Owner, existing.Input = item.Owner, item.Input
 		if item.Owner != "" {
-			item.Message = item.label() + ": " + item.Message
+			existing.Message = item.label() + ": " + existing.Message
 		}
-		item.Recovery = existing.Recovery
 		var pending interface{ PendingIntegrationConfiguration() bool }
 		var conflict interface{ ActivationConflict() bool }
-		return integrationFailure{Finding: item.Finding, cause: cause, ownership: IntegrationOwnershipConflict(cause),
+		return integrationFailure{Finding: existing, cause: cause, ownership: IntegrationOwnershipConflict(cause),
 			pending:  errors.As(cause, &pending) && pending.PendingIntegrationConfiguration(),
 			conflict: errors.As(cause, &conflict) && conflict.ActivationConflict()}
 	}
@@ -240,8 +258,8 @@ func (item integrationWorkItem) failure(cause error, detail string) error {
 	if item.yard != "" {
 		item.Message += " in yard " + item.yard
 	}
-	if _, input, ok := strings.Cut(item.Input, " at "); ok {
-		item.Message += " at " + input
+	if item.location != "" {
+		item.Message += " at " + item.location
 	}
 	item.Message += detail
 	return integrationFailure{Finding: item.Finding, cause: cause}
@@ -251,7 +269,7 @@ func (item integrationWorkItem) failure(cause error, detail string) error {
 // supply public names and paths. Deferred paths had no independent observation.
 func (runtime Runtime) bindInventoryFacts(facts []integrationFact, desired, retired []integrationArtifact, projection map[string]string, item integrationWorkItem) {
 	items := make(map[string]integrationWorkItem, len(desired)+len(retired))
-	bind := func(entry integrationArtifact, owner string) {
+	bind := func(entry integrationArtifact, work integrationWorkItem) {
 		if projection[entry.Path] == "deferred" {
 			return
 		}
@@ -259,15 +277,15 @@ func (runtime Runtime) bindInventoryFacts(facts []integrationFact, desired, reti
 		if key == "" {
 			key = entry.ID
 		}
-		items[entry.Kind+":"+key] = item.withOwner(owner).atDestination(entry.Path)
+		items[entry.Kind+":"+key] = work
 	}
 	for _, entry := range retired {
-		if owner := runtime.knownIntegrationID(entry.ID); owner != "" {
-			bind(entry, owner)
+		if entry.declaredOwner != "" {
+			bind(entry, item.withOwner(entry.declaredOwner).forReportedArtifact(entry))
 		}
 	}
 	for _, entry := range desired {
-		bind(entry, entry.ID)
+		bind(entry, item.withOwner(entry.ID).atDestination(entry.Path))
 	}
 	for i := range facts {
 		facts[i].item = items[facts[i].Key]
@@ -295,30 +313,13 @@ func (runtime Runtime) integrationApplyDiagnostic(cause error, step string) erro
 func collectIntegrationRefusals(causes ...error) error {
 	var findings []error
 	for _, cause := range causes {
-		if refusals, ok := cause.(*domain.Refusals); ok {
-			findings = append(findings, refusals.Unwrap()...)
-		} else {
-			findings = append(findings, cause)
-		}
+		findings = append(findings, domain.RefusalCauses(cause)...)
 	}
 	return domain.CollectRefusals(findings...)
 }
 
-func (runtime Runtime) knownIntegrationID(id string) string {
-	if id == "" {
-		return ""
-	}
-	definitions, err := runtime.integrationDefinitions()
-	if err == nil && slices.ContainsFunc(definitions, func(definition profile.IntegrationDefinition) bool {
-		return definition.Name == id
-	}) {
-		return id
-	}
-	return ""
-}
-
-// Attribute a guard refusal using the same input identity as verification.
-func (runtime Runtime) integrationPlanDiagnostic(cause error, approved, fresh IntegrationPlan) error {
+// IntegrationPlanDiagnostic attributes a stale guard to the inputs that changed.
+func (runtime Runtime) IntegrationPlanDiagnostic(cause error, approved, fresh IntegrationPlan) error {
 	var findings []error
 	for name, binding := range approved.packageSources {
 		if fresh.packageSources[name] != binding {
@@ -332,12 +333,12 @@ func (runtime Runtime) integrationPlanDiagnostic(cause error, approved, fresh In
 	}
 	changed, missing := unapprovedIntegrationFacts(approved, fresh)
 	for _, fact := range slices.Concat(changed, missing) {
-		if fact.item.Owner != "" {
+		if fact.item.Input != "" {
 			findings = append(findings, fact.item.failure(cause, ": "+lifecycleReasons["observation-changed"]))
 		}
 	}
 	if result := domain.CollectRefusals(findings...); result != nil {
 		return result
 	}
-	return runtime.integrationDiagnostic(cause, profile.IntegrationDefinition{}, "apply", "observation-changed")
+	return cause
 }

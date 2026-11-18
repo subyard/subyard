@@ -16,6 +16,7 @@ import (
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -96,6 +97,9 @@ func TestRetirementReleasesChangedOwnedFieldsWithNotice(t *testing.T) {
 			executor := &ownershipReleaseExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}, path: path, pointers: scenario.pointers}
 			var output bytes.Buffer
 			runtime := ownershipReleaseRuntime(t, executor, &output)
+			testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "integration.json"), []byte("{}"), 0600)
+			runtime.Integrations = []profile.IntegrationDefinition{{Name: "sample", Root: runtime.RepositoryRoot}}
+			runtime.Environment = []string{"AGENT_sample_CONFIG_DEST=.sample/settings.json"}
 			plan, err := runtime.IntegrationPlan(context.Background())
 			if err != nil {
 				t.Fatalf("changed owned fields blocked the plan: %v", err)
@@ -130,7 +134,8 @@ func TestCompletedReleaseStillMarksThePlanBeforeInventoryCommit(t *testing.T) {
 	executor := &ownershipReleaseExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}, path: path, pointers: []string{"/kept"}, released: true}
 	var output bytes.Buffer
 	plan, err := ownershipReleaseRuntime(t, executor, &output).IntegrationPlan(context.Background())
-	if err != nil || !slices.Equal(plan.OwnershipReleases(), []string{path}) || len(plan.Warnings) != 1 {
+	if err != nil || !plan.HasOwnershipReleases() || len(plan.OwnershipReleases()) != 0 || len(plan.Warnings) != 1 ||
+		strings.Contains(plan.Warnings[0], path) {
 		t.Fatalf("completed release lost its plan signal: %v releases=%v warnings=%q", err, plan.OwnershipReleases(), plan.Warnings)
 	}
 }
@@ -170,6 +175,9 @@ func TestIntegrationOwnershipNoticesPreviewOwnershipRelease(t *testing.T) {
 	executor := &ownershipReleaseExecutor{retryableIntegrationExecutor: &retryableIntegrationExecutor{}, path: path, pointers: []string{"/kept"}}
 	var output bytes.Buffer
 	runtime := ownershipReleaseRuntime(t, executor, &output)
+	testkit.WriteFile(t, filepath.Join(runtime.RepositoryRoot, "integration.json"), []byte("{}"), 0600)
+	runtime.Integrations = []profile.IntegrationDefinition{{Name: "sample", Root: runtime.RepositoryRoot}}
+	runtime.Environment = []string{"AGENT_sample_CONFIG_DEST=.sample/settings.json"}
 	warnings, err := runtime.IntegrationOwnershipNotices(context.Background())
 	notice := "retiring sample releases ownership of " + path + ": owned fields changed after Subyard applied them; fields left in place: /kept"
 	if err != nil || !slices.Equal(warnings, []string{notice}) {

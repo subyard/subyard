@@ -6,6 +6,8 @@ import "errors"
 // Owner and Input identify it independently of its wording.
 type Finding struct {
 	Owner, Input, Message, Recovery string
+	// ReleaseRecovery overrides Recovery when applying a release activation.
+	ReleaseRecovery string
 }
 
 func (finding Finding) Key() [2]string { return [2]string{finding.Owner, finding.Input} }
@@ -30,4 +32,33 @@ func PublicFinding(err error) (Finding, bool) {
 		}
 	}
 	return Finding{}, false
+}
+
+// RefusalCauses walks independent causes in order. An explicit public finding
+// owns its cause, so its implementation detail stays behind that boundary.
+func RefusalCauses(err error) []error {
+	if err == nil {
+		return nil
+	}
+	if causes, ok := IndependentRefusals(err); ok {
+		return causes
+	}
+	return []error{err}
+}
+
+// IndependentRefusals reports the leaves of an aggregate before a diagnostic boundary.
+func IndependentRefusals(err error) ([]error, bool) {
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if _, public := DirectFinding(cause); public {
+			break
+		}
+		if aggregate, ok := cause.(interface{ Unwrap() []error }); ok {
+			var causes []error
+			for _, child := range aggregate.Unwrap() {
+				causes = append(causes, RefusalCauses(child)...)
+			}
+			return causes, true
+		}
+	}
+	return nil, false
 }

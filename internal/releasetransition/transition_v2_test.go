@@ -3261,9 +3261,15 @@ func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
 		t.Fatalf("distinct inputs or omitted recovery misreported: %q / %q", message, retry)
 	}
 
+	second.Recovery = "inspect /home/dev/instructions"
+	message, retry = publicActivationDiagnostic(fmt.Errorf("private wrapper: %w", errors.Join(first, second)), "fallback", "run yard update --check")
+	if message != "source unavailable; source unavailable; Additional recovery: "+second.Recovery || retry != first.Recovery {
+		t.Fatalf("joined findings lost recovery: %q / %q", message, retry)
+	}
+
 	second.Message = "unavailable " + strings.Repeat("x", maxDiagnosticText-len("unavailable "))
 	message, retry = publicActivationDiagnostic(domain.CollectRefusals(first, second), "fallback", "run yard update --check")
-	if !strings.HasPrefix(message, "source unavailable; and 1 more findings") || retry != first.Recovery {
+	if !strings.HasPrefix(message, "source unavailable; and 1 more finding;") || retry != first.Recovery {
 		t.Fatalf("omitted finding misreported: %q / %q", message, retry)
 	}
 }

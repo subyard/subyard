@@ -586,13 +586,13 @@ func TestIntegrationPlanReportsServiceConflictWithoutSubstrate(t *testing.T) {
 	incus := &testkit.Incus{
 		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
 		ExecSteps: []testkit.IncusExecStep{
-			{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing /srv/agents")},
+			{Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}},
 			{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}},
 		},
 	}
 	runtime := Runtime{Incus: incus, Executor: incus}
 	_, err := runtime.IntegrationPlan(context.Background())
-	if !errors.Is(err, errIntegrationSubstrateUnavailable) || !strings.Contains(err.Error(), conflict) {
+	if !errors.Is(err, errIntegrationSubstrateUnavailable) || !strings.Contains(err.Error(), bubblewrapPolicyRefusal) || strings.Contains(err.Error(), conflict) {
 		t.Fatalf("expected substrate and service refusals, got %v", err)
 	}
 	if len(incus.ExecCalls) != 2 || incus.ExecCalls[1].Request.Command[5] != "observe" {
