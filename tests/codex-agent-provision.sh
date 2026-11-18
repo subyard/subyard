@@ -159,8 +159,11 @@ chmod +x "$fake_bin/curl"
 cat > "$fake_bin/bwrap" <<'BWRAP'
 #!/usr/bin/env bash
 [ -f "$CODEX_TEST_BWRAP_READY" ] || exit 1
-[ "$*" = --version ] || exit 2
-printf 'bubblewrap 0.11.0\n'
+case "$*" in
+  --version) printf 'bubblewrap 0.11.0\n' ;;
+  '--unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/true') ;;
+  *) exit 2 ;;
+esac
 BWRAP
 cat > "$fake_bin/apt-get" <<'APT'
 #!/usr/bin/env bash

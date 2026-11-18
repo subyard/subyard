@@ -85,6 +85,18 @@ as_dev() {
   if [ "$(id -u)" -eq 0 ]; then runuser -u "$DEV_USER" -- "$@"; else "$@"; fi
 }
 
+apparmor_restricts_userns() {
+  local enabled
+  [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] \
+    && read -r enabled < /proc/sys/kernel/apparmor_restrict_unprivileged_userns \
+    && [ "$enabled" = 1 ]
+}
+
+bwrap_sandbox_works() {
+  "$@" bwrap --unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/true \
+    >/dev/null 2>&1
+}
+
 # Developer-tree repairs apply only where the developer can make them; anything else is a conflict.
 dev_owned_directory() {
   [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%U' "$1")" = "$DEV_USER" ] \
@@ -253,6 +265,7 @@ run_as_dev() {
     runuser -u "\$dev_user" -- env HOME="\$dev_home" CODEX_HOME="\$dev_home/.codex" "\$@"
   fi
 }
+$(declare -f apparmor_restricts_userns bwrap_sandbox_works)
 can_run_as_dev=1
 if [ -z "\$dev_home" ]; then
   refuse "could not resolve home for \$dev_user"
@@ -263,8 +276,11 @@ elif [ "\$(id -un)" != "\$dev_user" ] && ! command -v runuser >/dev/null 2>&1; t
 fi
 version=''
 if [ "\$can_run_as_dev" = 1 ]; then
-  run_as_dev bwrap --version >/dev/null 2>&1 \
-    || refuse "bubblewrap sandbox runtime is unavailable; run yard init"
+  if ! run_as_dev bwrap --version >/dev/null 2>&1; then
+    refuse "bubblewrap sandbox runtime is unavailable; run yard init"
+  elif apparmor_restricts_userns && ! bwrap_sandbox_works run_as_dev; then
+    refuse "bubblewrap cannot start a user and network namespace under AppArmor; run yard init"
+  fi
   if [ "\$runtime_present" = 1 ]; then
     if output="\$(run_as_dev "\$runtime" --version 2>/dev/null)"; then
       if [[ "\$output" =~ ^codex-cli\ ([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)\$ ]]; then
@@ -342,6 +358,37 @@ if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --version >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq --no-install-recommends bubblewrap
   command -v bwrap >/dev/null 2>&1 && bwrap --version >/dev/null 2>&1 \
     || die 'bubblewrap sandbox runtime is unavailable after package installation'
+fi
+
+# Install the distro's per-executable policy in the yard's AppArmor namespace.
+# It lets Bubblewrap set up the sandbox and drops capabilities from its payload.
+if apparmor_restricts_userns && ! bwrap_sandbox_works as_dev; then
+  bwrap_profile=/etc/apparmor.d/bwrap-userns-restrict
+  bwrap_package_profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+  for bwrap_override in /etc/apparmor.d/{disable,force-complain}/bwrap-userns-restrict; do
+    [ ! -e "$bwrap_override" ] && [ ! -L "$bwrap_override" ] \
+      || die 'the yard administrator disabled enforcement of the Bubblewrap AppArmor profile'
+  done
+  if [ -e "$bwrap_profile" ] || [ -L "$bwrap_profile" ]; then
+    [ -L "$bwrap_profile" ] && [ "$(readlink "$bwrap_profile")" = "$bwrap_package_profile" ] \
+      || die 'the yard has an administrator-managed Bubblewrap AppArmor profile'
+  fi
+  [ -w /sys/kernel/security/apparmor/.load ] \
+    || die 'the yard cannot load AppArmor profiles'
+  if [ ! -r "$bwrap_package_profile" ]; then
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq --no-install-recommends apparmor-profiles
+  fi
+  bwrap_profile_created=0
+  if [ ! -L "$bwrap_profile" ]; then
+    ln -s -- "$bwrap_package_profile" "$bwrap_profile"
+    bwrap_profile_created=1
+  fi
+  if ! apparmor_parser --add "$bwrap_profile"; then
+    [ "$bwrap_profile_created" = 0 ] || rm -- "$bwrap_profile"
+    die 'could not load the distribution Bubblewrap AppArmor profile in the yard'
+  fi
+  bwrap_sandbox_works as_dev || die 'the Bubblewrap AppArmor profile did not restore sandbox execution'
 fi
 
 install -d -m 0755 "$INSTALL_ROOT" "$RELEASES_ROOT"
