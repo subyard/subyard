@@ -462,6 +462,28 @@ def projection_digest(current, entries, file_format=None):
     return hashlib.sha256(payload).hexdigest()
 
 
+def read_field_digests(path, baseline):
+    # Retained writers read the ownership receipt with an exact schema.
+    if not os.path.lexists(path):
+        return None
+    validate_regular(path, STATE_UID, 0o600)
+    try:
+        with open(path, "rb") as source:
+            evidence = parse_json(source.read())
+    except ValueError:
+        raise MaterializationError("invalid materialization field evidence") from None
+    if not isinstance(evidence, dict) or set(evidence) != {"projection_digest", "fields"}:
+        raise MaterializationError("invalid materialization field evidence")
+    if evidence["projection_digest"] != baseline["projection_digest"]:
+        return None
+    fields = evidence["fields"]
+    if (not isinstance(fields, dict) or set(fields) != {entry["path"] for entry in baseline["owned"]} or
+            any(not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                for digest in fields.values())):
+        raise MaterializationError("invalid materialization field evidence")
+    return fields
+
+
 def legacy_json_matches(current, baseline):
     # Schema1 recorded the old template's semantic digest and owned pointers.
     # Reconstruct only those values; unrelated current fields are not evidence.
@@ -584,6 +606,13 @@ def exchange_destination(directory, source, destination, source_directory, uid):
     if uid is not None:
         repair_mode_at(directory, destination, uid, narrow_only=True)
     rename_destination(directory, source, destination, 2, source_directory)  # RENAME_EXCHANGE
+    if uid is not None:
+        try:
+            repair_mode_at(source_directory, source, uid)
+        except (OSError, MaterializationError):
+            # The caller must still check for a raced save and retry the repair
+            # on whichever inode it ultimately keeps in the private directory.
+            pass
 
 
 class PublicationRefusal(MaterializationError):
@@ -1008,24 +1037,28 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
                          if owned else section in current and not group and (section,) not in template_paths)
     # Strip only previously published template values from the captured user
     # prior. A developer edit at a template-owned path is still a user value.
-    template_projection = None
-    if baseline is not None and baseline.get("phase") == "applied":
-        for candidate in (template, current):
-            if projection_digest(candidate, baseline["owned"], file_format) == baseline["projection_digest"]:
-                template_projection = candidate
-                break
+    field_digests = {}
+    if enabled and baseline is not None and baseline.get("phase") == "applied":
+        field_digests = read_field_digests(asset+".ownership-fields", baseline)
+        if field_digests is None:
+            field_digests = {}
+            for candidate in (template, current):
+                if projection_digest(candidate, baseline["owned"], file_format) == baseline["projection_digest"]:
+                    field_digests = {item["path"]: projection_digest(candidate, [item], file_format)
+                                     for item in baseline["owned"]}
+                    break
 
     final = {}
     for key, value in (wanted or {}).items():
         found = key in group
         prior = {"value": copy.deepcopy(group[key])} if found else {}
-        if key not in owned and template_projection is not None:
+        if key not in owned and field_digests:
             for parts, kind in template_paths.items():
                 if parts[:2] != (section, key):
                     continue
-                found_actual, actual = lookup(current, parts)
-                found_template, template_value = lookup(template_projection, parts)
-                if found_actual and found_template and json_equal(actual, template_value, file_format):
+                path = "".join("/" + pointer_part(part) for part in parts)
+                entry = {"path": path, "kind": kind}
+                if field_digests.get(path) == projection_digest(current, [entry], file_format):
                     pointer = "/value" + "".join("/" + pointer_part(part) for part in parts[2:])
                     remove_owned(prior, {"path": pointer, "kind": kind})
         old = owned.get(key, {"present": "value" in prior, "value": prior.get("value"), "managed": value})
@@ -1399,6 +1432,9 @@ def main():
                     "format": FORMAT, "phase": "applied",
                     "projection_digest": projection_digest(current, wanted_owned),
                     "retired_digest": "", "owned": wanted_owned}
+        fields = {"projection_digest": evidence["projection_digest"],
+                  "fields": {item["path"]: projection_digest(current, [item]) for item in wanted_owned}}
+        atomic_write(key + ".ownership-fields", semantic_payload(fields) + b"\n", STATE_UID, 0o600)
         atomic_write(baseline_path, semantic_payload(compatible_baseline(evidence)) + b"\n", STATE_UID, 0o600)
         atomic_write(receipt_path, semantic_payload(evidence) + b"\n", STATE_UID, 0o600)
         if not repair and document_mode_drift(destination):

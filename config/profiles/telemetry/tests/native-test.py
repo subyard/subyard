@@ -496,20 +496,27 @@ class NativeTest(unittest.TestCase):
         for agent, section, field, value, encode, decode in (
                 ('claude', 'env', 'OTEL_LOGS_EXPORTER', 'otlp', json.dumps, json.loads),
                 ('codex', 'otel', 'log_user_prompt', False, tomli_w.dumps, tomllib.loads)):
-            for retire, remove_source in ((False, False), (True, False), (True, True)):
-                with self.subTest(agent=agent, retire=retire, remove_source=remove_source), tempfile.TemporaryDirectory(dir='/tmp') as name:
+            for retire, remove_source, edit_theme in ((False, False, False), (True, False, False),
+                                                     (True, True, False), (False, True, True)):
+                with self.subTest(agent=agent, retire=retire, remove_source=remove_source, edit_theme=edit_theme), tempfile.TemporaryDirectory(dir='/tmp') as name:
                     root = Path(name)
                     path, state = native.agent_path(root, agent), root/'native.json'
-                    template = encode({section: {field: value}}).encode()
+                    document = {section: {field: value}}
+                    if edit_theme:
+                        document['theme'] = 'template'
+                    template = encode(document).encode()
                     result = self.materialize(agent, path, template)
                     self.assertEqual(result.returncode, 0, result.stderr)
+                    remaining = {'theme': 'edited'} if edit_theme else {}
+                    if edit_theme:
+                        path.write_text(encode({**document, **remaining}))
                     args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
                     native.reconcile(*args, templates={} if remove_source else {agent: template})
-                    result = self.materialize(agent, path, encode({}).encode(), 'retire' if retire else 'apply')
+                    result = self.materialize(agent, path, encode(remaining).encode(), 'retire' if retire else 'apply')
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(decode(path.read_text())[section][field], value)
                     native.reconcile(*args[:2], [], *args[3:])
-                    self.assertEqual(decode(path.read_text()), {})
+                    self.assertEqual(decode(path.read_text()), remaining)
 
     def test_format_only_native_changes_preserve_bytes(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -821,23 +828,33 @@ class NativeTest(unittest.TestCase):
                 args = (root, root/'native.json', [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
                 native.reconcile(*args)
                 exchange = native.materializer.exchange_destination
+                rename = native.materializer.rename_destination
                 original = path.read_bytes()
+                editor = path.with_name('editor-save')
+                editor.write_bytes(original + b'\n')
+                editor.chmod(0o644)
+                editor_inode = editor.stat().st_ino
+
+                def replace_at_rename(*arguments):
+                    editor.replace(path)
+                    rename(*arguments)
 
                 def interrupt(*arguments):
-                    path.chmod(0o644)
                     exchange(*arguments)
                     os._exit(57)
 
                 child = os.fork()
                 if child == 0:
                     try:
-                        with patch.object(native.materializer, 'exchange_destination', side_effect=interrupt):
+                        with (patch.object(native.materializer, 'exchange_destination', side_effect=interrupt),
+                              patch.object(native.materializer, 'rename_destination', side_effect=replace_at_rename)):
                             native.reconcile(*args[:4], 'y'*64, *args[5:])
                     finally:
                         os._exit(1)
                 self.assertEqual(os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]), 57)
                 saved, = path.parent.glob('.subyard-config-recovery.*/document')
-                self.assertEqual(saved.read_bytes(), original)
+                self.assertEqual(saved.read_bytes(), original + b'\n')
+                self.assertEqual(saved.stat().st_ino, editor_inode)
                 self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(saved.parent.stat().st_mode & 0o777, 0o700)
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
