@@ -18,6 +18,28 @@ workspace_two=/srv/workspaces/codex-policy-two/src
 
 [ -f "$helper" ] || die 'Codex permissions helper is unavailable'
 
+if guest_root test -d /opt/subyard/codex/apparmor; then
+  stage 'repairing live Bubblewrap policy and boot registration drift'
+  profiles=/sys/kernel/security/apparmor/profiles
+  boot_link=/etc/systemd/system/multi-user.target.wants/subyard-codex-bwrap.service
+  guest_root unlink "$boot_link"
+  if guest_root codex-policy-check >"$STATE/bwrap-boot-check.log" 2>&1; then
+    die 'Codex readiness accepted missing Bubblewrap boot registration'
+  fi
+  grep -Fq 'boot registration drifted' "$STATE/bwrap-boot-check.log" \
+    || die 'Codex readiness did not diagnose missing Bubblewrap boot registration'
+  yard init --yes >/dev/null || die 'yard init did not repair Bubblewrap boot registration'
+  guest_root test -L "$boot_link" || die 'yard init omitted Bubblewrap boot registration'
+  guest_root codex-policy-check >/dev/null || die 'restored Bubblewrap boot registration failed readiness'
+
+  guest_root sh -c 'printf %s bwrap > /sys/kernel/security/apparmor/.remove'
+  if guest_root grep -Fxq 'bwrap (enforce)' "$profiles"; then die 'Bubblewrap attachment stayed loaded'; fi
+  guest_root grep -Fxq 'unpriv_bwrap (enforce)' "$profiles" || die 'Bubblewrap payload policy was also removed'
+  yard init --yes >/dev/null || die 'yard init did not repair the partial Bubblewrap policy'
+  guest_root grep -Fxq 'bwrap (enforce)' "$profiles" || die 'yard init omitted the Bubblewrap attachment'
+  guest_root codex-policy-check >/dev/null || die 'repaired Bubblewrap policy failed readiness'
+fi
+
 # The narrow lane rechecks approvals without repeating independently owned delivery/drift checks.
 if [ "${CODEX_APPROVALS_ONLY:-0}" = 0 ]; then
 stage 'checking installed Claude policy delivery and repeat reconciliation'

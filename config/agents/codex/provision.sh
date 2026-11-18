@@ -17,6 +17,9 @@ DEV_USER="${DEV_USER:-dev}"
 DEV_HOME="${CODEX_DEV_HOME:-}"
 MANAGED_CHECK_MARKER='# Managed by Subyard Codex provision.'
 GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
+BWRAP_POLICY_DIR="$INSTALL_ROOT/apparmor"
+BWRAP_BOOT_UNIT=/etc/systemd/system/subyard-codex-bwrap.service
+BWRAP_BOOT_LINK=/etc/systemd/system/multi-user.target.wants/subyard-codex-bwrap.service
 
 # BEGIN generated Git approval hook
 git_approval_hook() {
@@ -288,6 +291,11 @@ bwrap_sandbox_works() {
     >/dev/null 2>&1
 }
 
+bwrap_boot_registered() {
+  [ -f "$BWRAP_BOOT_UNIT" ] && [ ! -L "$BWRAP_BOOT_UNIT" ] \
+    && [ "$(readlink "$BWRAP_BOOT_LINK")" = "$BWRAP_BOOT_UNIT" ]
+}
+
 # Developer-tree repairs apply only where the developer can make them; anything else is a conflict.
 dev_owned_directory() {
   [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%U' "$1")" = "$DEV_USER" ] \
@@ -422,6 +430,9 @@ install_check() {
 $MANAGED_CHECK_MARKER
 set -euo pipefail
 install_root=$q_root
+BWRAP_POLICY_DIR="\$install_root/apparmor"
+BWRAP_BOOT_UNIT=$BWRAP_BOOT_UNIT
+BWRAP_BOOT_LINK=$BWRAP_BOOT_LINK
 link=$q_link
 dev_user="\${CODEX_CHECK_DEV_USER:-$q_user}"
 DEV_USER="\$dev_user"
@@ -472,7 +483,10 @@ run_as_dev() {
     runuser -u "\$dev_user" -- env HOME="\$dev_home" CODEX_HOME="\$dev_home/.codex" "\$@"
   fi
 }
-$(declare -f apparmor_restricts_userns bwrap_sandbox_works)
+$(declare -f apparmor_restricts_userns bwrap_sandbox_works bwrap_boot_registered)
+if apparmor_restricts_userns && [ -d "\$BWRAP_POLICY_DIR" ] && ! bwrap_boot_registered; then
+  refuse "managed Bubblewrap AppArmor boot registration drifted; run yard init"
+fi
 can_run_as_dev=1
 if [ -z "\$dev_home" ]; then
   refuse "could not resolve home for \$dev_user"
@@ -483,10 +497,8 @@ elif [ "\$(id -un)" != "\$dev_user" ] && ! command -v runuser >/dev/null 2>&1; t
 fi
 version=''
 if [ "\$can_run_as_dev" = 1 ]; then
-  if ! run_as_dev bwrap --version >/dev/null 2>&1; then
-    refuse "bubblewrap sandbox runtime is unavailable; run yard init"
-  elif apparmor_restricts_userns && ! bwrap_sandbox_works run_as_dev; then
-    refuse "bubblewrap cannot start a user and network namespace under AppArmor; run yard init"
+  if ! bwrap_sandbox_works run_as_dev; then
+    refuse "bubblewrap cannot start a user and network namespace; run yard init"
   fi
   if [ "\$runtime_present" = 1 ]; then
     if output="\$(run_as_dev "\$runtime" --version 2>/dev/null)"; then
@@ -567,47 +579,156 @@ if ! command -v bwrap >/dev/null 2>&1 || ! bwrap --version >/dev/null 2>&1; then
     || die 'bubblewrap sandbox runtime is unavailable after package installation'
 fi
 
-# Install the distro's per-executable policy in the yard's AppArmor namespace.
-# It lets Bubblewrap set up the sandbox and drops capabilities from its payload.
-if apparmor_restricts_userns && ! bwrap_sandbox_works as_dev; then
-  bwrap_profile=/etc/apparmor.d/bwrap-userns-restrict
-  bwrap_package_profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
-  for bwrap_override in /etc/apparmor.d/{disable,force-complain}/bwrap-userns-restrict; do
-    [ ! -e "$bwrap_override" ] && [ ! -L "$bwrap_override" ] \
-      || die 'the yard administrator disabled enforcement of the Bubblewrap AppArmor profile'
-  done
-  if [ -e "$bwrap_profile" ] || [ -L "$bwrap_profile" ]; then
-    [ -L "$bwrap_profile" ] && [ "$(readlink "$bwrap_profile")" = "$bwrap_package_profile" ] \
-      || die 'the yard has an administrator-managed Bubblewrap AppArmor profile'
-  fi
-  [ -w /sys/kernel/security/apparmor/.load ] \
-    || die 'the yard cannot load AppArmor profiles'
-  if [ ! -r "$bwrap_package_profile" ]; then
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a apt-get install -y -qq --no-install-recommends apparmor-profiles
-  fi
-  bwrap_profile_created=0
-  if [ ! -L "$bwrap_profile" ]; then
-    ln -s -- "$bwrap_package_profile" "$bwrap_profile"
-    bwrap_profile_created=1
-  fi
-  if ! apparmor_parser --add "$bwrap_profile"; then
-    [ "$bwrap_profile_created" = 0 ] || rm -- "$bwrap_profile"
-    die 'could not load the distribution Bubblewrap AppArmor profile in the yard'
-  fi
-  bwrap_sandbox_works as_dev || die 'the Bubblewrap AppArmor profile did not restore sandbox execution'
-fi
-
 install -d -m 0755 "$INSTALL_ROOT" "$RELEASES_ROOT"
 if [ "$(id -u)" -eq 0 ]; then chown 0:0 "$INSTALL_ROOT" "$RELEASES_ROOT"; fi
 
 tmp="$(mktemp -d)"
 stage=""
+apparmor_stage=""
 cleanup() {
   rm -rf "$tmp"
   [ -z "$stage" ] || rm -rf "$stage"
+  [ -z "$apparmor_stage" ] || rm -rf "$apparmor_stage"
 }
 trap cleanup EXIT
+
+# Extract the parser, feature ABI and two definitions without running package install scripts.
+apparmor_package_member() {
+  dpkg-deb --fsys-tarfile "$1" | tar -xOf - ".$2"
+}
+
+stage_bwrap_policy() {
+  local abi name
+  apparmor_stage="$(mktemp -d "$INSTALL_ROOT/.apparmor.XXXXXX")"
+  mkdir "$tmp/apparmor"
+  (
+    cd "$tmp/apparmor"
+    apt-get update -qq
+    apt-get download apparmor
+    if ! apparmor_package_member ./apparmor_*.deb /etc/apparmor.d/bwrap-userns-restrict > profile 2>/dev/null; then
+      apt-get download apparmor-profiles
+      apparmor_package_member ./apparmor-profiles_*.deb \
+        /usr/share/apparmor/extra-profiles/bwrap-userns-restrict > profile \
+        || die 'the distribution package has no Bubblewrap AppArmor policy'
+    fi
+    abi="$(sed -nE 's/^abi <abi\/([0-9]+\.[0-9]+)>,$/\1/p' profile)"
+    [[ "$abi" =~ ^[0-9]+\.[0-9]+$ ]] || die 'the Bubblewrap AppArmor policy ABI is unavailable'
+    install -d -m 0755 "$apparmor_stage/abi"
+    apparmor_package_member ./apparmor_*.deb "/etc/apparmor.d/abi/$abi" > "$apparmor_stage/abi/$abi"
+    apparmor_package_member ./apparmor_*.deb /usr/sbin/apparmor_parser > "$apparmor_stage/apparmor_parser"
+    chmod 0644 "$apparmor_stage/abi/$abi"
+    chmod 0755 "$apparmor_stage/apparmor_parser"
+  )
+  for name in unpriv_bwrap bwrap; do
+    # These definitions use no tunable variables. Keep site-wide tunables and local overrides
+    # outside the managed policy. Split the profiles so either one can be added independently.
+    awk -v name="$name" '
+      /^abi / { print }
+      $1 == "profile" && $2 == name { selected = 1 }
+      selected && !/^[[:space:]]*include if exists <local\/(bwrap-userns-restrict|unpriv_bwrap)>/ { print }
+      /^}/ { selected = 0 }
+    ' "$tmp/apparmor/profile" > "$apparmor_stage/$name"
+    chmod 0644 "$apparmor_stage/$name"
+    [ "$("$apparmor_stage/apparmor_parser" --config-file /dev/null --base "$apparmor_stage" \
+      --skip-cache --names "$apparmor_stage/$name")" = "$name" ] \
+      || die "unexpected definition for the Bubblewrap AppArmor profile $name"
+  done
+  (cd "$apparmor_stage" && sha256sum apparmor_parser bwrap unpriv_bwrap abi/* > SHA256SUMS)
+  chmod 0644 "$apparmor_stage/SHA256SUMS"
+  chmod 0755 "$apparmor_stage"
+  mv -T -- "$apparmor_stage" "$BWRAP_POLICY_DIR"
+  apparmor_stage=''
+}
+
+bwrap_boot_unit() {
+  cat <<EOF
+$MANAGED_CHECK_MARKER
+[Unit]
+Description=Load Subyard's Bubblewrap AppArmor policy
+After=apparmor.service
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=$BWRAP_POLICY_DIR
+ExecStartPre=/usr/bin/sha256sum --check --status SHA256SUMS
+ExecStart=$BWRAP_POLICY_DIR/apparmor_parser --config-file /dev/null --base $BWRAP_POLICY_DIR --skip-cache --add $BWRAP_POLICY_DIR/unpriv_bwrap
+ExecStart=$BWRAP_POLICY_DIR/apparmor_parser --config-file /dev/null --base $BWRAP_POLICY_DIR --skip-cache --add $BWRAP_POLICY_DIR/bwrap
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+reconcile_bwrap_policy() {
+  local aa=/sys/kernel/security/apparmor path name entry loaded
+  local missing=()
+  local distro_profile=/etc/apparmor.d/bwrap-userns-restrict
+  [ -w "$aa/.load" ] || refuse 'the yard cannot load AppArmor profiles'
+  for path in "$distro_profile" /etc/apparmor.d/{disable,force-complain}/bwrap-userns-restrict; do
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      refuse "the yard has an administrator-managed Bubblewrap AppArmor definition at $path"
+    fi
+  done
+  bwrap_boot_unit > "$tmp/bwrap.service"
+  if [ -e "$BWRAP_BOOT_UNIT" ] || [ -L "$BWRAP_BOOT_UNIT" ]; then
+    [ -f "$BWRAP_BOOT_UNIT" ] && [ ! -L "$BWRAP_BOOT_UNIT" ] \
+      && cmp -s "$BWRAP_BOOT_UNIT" "$tmp/bwrap.service" \
+      || refuse "the yard has an administrator-managed unit at $BWRAP_BOOT_UNIT"
+  fi
+  if [ -e "$BWRAP_BOOT_LINK" ] || [ -L "$BWRAP_BOOT_LINK" ]; then
+    [ "$(readlink "$BWRAP_BOOT_LINK")" = "$BWRAP_BOOT_UNIT" ] \
+      || refuse "the yard has an administrator-managed registration at $BWRAP_BOOT_LINK"
+  fi
+  [ -d "$aa/policy/profiles" ] || refuse 'the yard cannot inspect AppArmor profiles'
+  if [ ! -d "$BWRAP_POLICY_DIR" ]; then
+    for name in unpriv_bwrap bwrap; do
+      for entry in "$aa/policy/profiles/$name".*; do
+        [ -d "$entry" ] || continue
+        refuse "the yard already has a loaded AppArmor profile named $name"
+      done
+    done
+  fi
+  [ "$refusals" = 0 ] || exit 1
+  if [ ! -e "$BWRAP_POLICY_DIR" ] && [ ! -L "$BWRAP_POLICY_DIR" ]; then
+    stage_bwrap_policy
+  fi
+  [ -d "$BWRAP_POLICY_DIR" ] && [ ! -L "$BWRAP_POLICY_DIR" ] \
+    && [ "$(stat -c '%a:%u:%g' "$BWRAP_POLICY_DIR")" = 755:0:0 ] \
+    && [ -z "$(find "$BWRAP_POLICY_DIR" \( ! -user root -o ! -group root -o -perm /022 -o -type l \) -print -quit)" ] \
+    && (cd "$BWRAP_POLICY_DIR" && sha256sum --check --status SHA256SUMS) \
+    || die "$BWRAP_POLICY_DIR is not an intact managed AppArmor policy directory"
+  local parser=("$BWRAP_POLICY_DIR/apparmor_parser" --config-file /dev/null --base "$BWRAP_POLICY_DIR" --skip-cache)
+  for name in unpriv_bwrap bwrap; do
+    "${parser[@]}" --stdout "$BWRAP_POLICY_DIR/$name" > "$tmp/$name.bin"
+    loaded=0
+    for entry in "$aa/policy/profiles/$name".*; do
+      [ -d "$entry" ] || continue
+      loaded=1
+      cmp -s "$tmp/$name.bin" "$entry/raw_data" \
+        || refuse "the loaded AppArmor profile $name does not match the managed policy"
+    done
+    [ "$loaded" = 1 ] || missing+=("$name")
+  done
+  [ "$refusals" = 0 ] || exit 1
+  for name in "${missing[@]}"; do
+    "${parser[@]}" --binary --add "$tmp/$name.bin" \
+      || die "could not add the managed Bubblewrap AppArmor profile $name"
+  done
+  bwrap_sandbox_works as_dev || die 'the Bubblewrap AppArmor policy did not restore sandbox execution'
+  if ! bwrap_boot_registered; then
+    if [ ! -e "$BWRAP_BOOT_UNIT" ]; then install -m 0644 "$tmp/bwrap.service" "$BWRAP_BOOT_UNIT"; fi
+    systemctl enable subyard-codex-bwrap.service
+    bwrap_boot_registered || die 'could not register the Bubblewrap AppArmor policy for guest boot'
+  fi
+}
+
+if apparmor_restricts_userns; then
+  if [ -e "$BWRAP_POLICY_DIR" ] || [ -L "$BWRAP_POLICY_DIR" ] || ! bwrap_sandbox_works as_dev; then
+    reconcile_bwrap_policy
+  fi
+fi
 
 artifact="codex-package-${TARGET}.tar.gz"
 # Public release URLs avoid GitHub's shared anonymous REST quota. Retry transient

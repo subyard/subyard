@@ -616,10 +616,12 @@ An interactive `codex` from an SSH or VS Code shell prefers upstream's shared ap
 - **Disconnects:** when a plain client's terminal dies during a slow tool, the tool finishes on the daemon
   and its result reaches the model. Under `--no-daemon` the tool stops with the client.
 
-On kernels with AppArmor user namespace restrictions, Codex provisioning tests Bubblewrap as the
-yard developer. If the sandbox cannot start, provisioning loads the distribution's
-`bwrap-userns-restrict` profile inside the yard. AppArmor reloads it on guest boot.
-`codex-policy-check` verifies that Bubblewrap can create the user and network namespaces.
+Codex readiness tests that Bubblewrap can create user and network namespaces as the yard
+developer. On kernels with AppArmor user namespace restrictions, provisioning can restore a
+failing sandbox by extracting the distribution's two Bubblewrap profiles into a Subyard-managed
+directory. A dedicated systemd unit loads those profiles inside the yard at boot. Provisioning
+repairs missing boot registration and adds missing managed profiles without replacing loaded
+administrator policy.
 
 #### Codex version drift
 

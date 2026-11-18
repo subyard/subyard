@@ -291,7 +291,15 @@ def restricted_tool_check(app, provider, workspace):
     assert result is not None, 'read-only command did not report completion'
     assert result['status'] == 'completed' and result['exitCode'] == 0, 'read-only command failed: ' + repr(result)
     assert (result.get('aggregatedOutput') or '').strip() == proof, 'read-only command did not read fixture'
-    print('ok: native Codex read-only tool execution for ' + workspace.name, flush=True)
+    marker = workspace / ('read-only-write-' + uuid.uuid4().hex)
+    result = app.request('command/exec', {
+        'command': ['touch', str(marker)], 'cwd': str(workspace), 'sandboxPolicy': started['sandbox'],
+    })
+    assert result['exitCode'] != 0, 'read-only write was not denied: ' + repr(result)
+    assert any(error in result['stderr'] for error in ('Read-only file system', 'Permission denied')), \
+        'read-only write failed outside the filesystem check: ' + repr(result)
+    assert not marker.exists(), 'read-only command wrote to the workspace'
+    print('ok: native Codex read-only tool read succeeded and write was denied for ' + workspace.name, flush=True)
 
 
 def main():

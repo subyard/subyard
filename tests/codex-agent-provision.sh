@@ -164,7 +164,8 @@ cat > "$fake_bin/bwrap" <<'BWRAP'
 [ -f "$CODEX_TEST_BWRAP_READY" ] || exit 1
 case "$*" in
   --version) printf 'bubblewrap 0.11.0\n' ;;
-  '--unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/true') ;;
+  '--unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/true')
+    [ "${CODEX_TEST_BWRAP_NAMESPACE_FAIL:-0}" = 0 ] ;;
   *) exit 2 ;;
 esac
 BWRAP
@@ -233,6 +234,10 @@ run_hook amd64 "$root" >/dev/null
 [ "$("$link" --version)" = 'codex-cli 0.147.0' ] || fail "fresh install reports the wrong version"
 "$link" app-server --help >/dev/null || fail "fresh install has no app-server command"
 CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "package check rejected a valid install"
+if CODEX_TEST_BWRAP_NAMESPACE_FAIL=1 CODEX_CHECK_DEV_USER="$(id -un)" "$check" +    >/dev/null 2>"$tmp/bwrap-namespace.err"; then
+  fail "working bwrap --version hid broken namespace execution"
+fi
+grep -Fq 'bubblewrap cannot start a user and network namespace' "$tmp/bwrap-namespace.err" +  || fail "failed namespace probe reported something else"
 python3 - "$requirements" <<'PY'
 import pathlib, shlex, sys, tomllib
 path = pathlib.Path(sys.argv[1])
