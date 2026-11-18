@@ -75,7 +75,9 @@ def main():
                                  ("Linux memory probe accounting", "dev/measure-veranda-memory-test.py"),
                                  ("Linux bundle packaging", "dev/package-veranda-test.py"),
                                  ("Cargo cache reuse", "dev/cargo-cache-test.py")):
-                code = check(name, [sys.executable, script], env)
+                # The cache test runs plain cargo; pin the stable toolchain the Rust checks use.
+                child = dict(env, RUSTUP_TOOLCHAIN="stable") if script == "dev/cargo-cache-test.py" else env
+                code = check(name, [sys.executable, script], child)
                 if code:
                     return code
         else:
