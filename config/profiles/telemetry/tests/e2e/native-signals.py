@@ -399,6 +399,14 @@ def codex_app_class(base):
         command_started = False
         app_error_seen = False
 
+        def start_fixture_thread(self, project):
+            # The local provider sends only fixture commands. Exercise telemetry
+            # without depending on the VM's Bubblewrap/AppArmor compatibility.
+            started = self.request('thread/start', {'cwd': str(project), 'sandbox': 'danger-full-access'})
+            self.effective_sandbox = started.get('sandbox', {}).get('type')
+            assert self.effective_sandbox == 'dangerFullAccess', 'fixture tool permissions were not applied'
+            return started['thread']['id']
+
         def observe(self, frame):
             item = frame.get('params', {}).get('item', {})
             if frame.get('method') == 'error':
@@ -537,10 +545,7 @@ def exercise(args):
             (state/'codex/config.toml').chmod(0o600)
             app = codex_app_class(fixture.App)(['subyard-telemetry-run', '--agent', agent, '--scope-mode', 'require', '--project-id', 'telemetry-fixture', '--', str(binaries/agent), 'app-server'], env, project)
             try:
-                started = app.request('thread/start', {'cwd': str(project)})
-                sandbox = started.get('sandbox', {}).get('type')
-                app.effective_sandbox = sandbox if sandbox in ('readOnly', 'workspaceWrite', 'dangerFullAccess', 'externalSandbox') else 'unknown'
-                session = started['thread']['id']
+                session = app.start_fixture_thread(project)
                 run_codex_command(app, provider, session, project, tool_command, receipt)
             finally:
                 app.close()
@@ -703,10 +708,7 @@ def main():
     threads = set()
     try:
         for index in range(2):
-            started = app.request('thread/start', {'cwd': str(state/'project')})
-            sandbox = started.get('sandbox', {}).get('type')
-            app.effective_sandbox = sandbox if sandbox in ('readOnly', 'workspaceWrite', 'dangerFullAccess', 'externalSandbox') else 'unknown'
-            thread = started['thread']['id']
+            thread = app.start_fixture_thread(state/'project')
             threads.add(thread)
             if index == 0:
                 command = native_context_command(state/'home', args.data_dir)

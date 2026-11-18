@@ -298,9 +298,11 @@ def stock_probe(arguments):
                 # Each start owns the log, so a failure tail shows only that start.
                 log = os.open(server_log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
                 try:
+                    # The disposable loopback probe can fall back to Electron on
+                    # hosts where the Chromium user namespace sandbox is unavailable.
                     server = subprocess.Popen(
-                        [arguments.binary, "serve", "--no-pairing", "--port", str(port)],
-                        env=environment, stdout=log, stderr=subprocess.STDOUT,
+                        [arguments.binary, "serve", "--no-pairing", "--bind", "127.0.0.1", "--port", str(port)],
+                        env={**environment, "ORCA_ELECTRON_NO_SANDBOX": "1"}, stdout=log, stderr=subprocess.STDOUT,
                         start_new_session=True,
                     )
                 finally:

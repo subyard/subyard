@@ -190,18 +190,21 @@ class StockProbeTests(unittest.TestCase):
 
         def serve(command, **kwargs):
             self.assertEqual(subprocess.STDOUT, kwargs["stderr"])
+            self.assertEqual(["serve", "--no-pairing", "--bind", "127.0.0.1", "--port"], command[1:-1])
+            self.assertEqual("1", kwargs["env"]["ORCA_ELECTRON_NO_SANDBOX"])
             os.write(kwargs["stdout"], "".join(f"noise {index}\n" for index in range(30)).encode()
                      + f"\x1b[31mfatal: synthetic listen failure \u2014\x1b[0m\nurl orca://pair/{marker}\n"
                        f"authToken={marker}\n{'A' * 64}\n".encode())
             return unittest.mock.Mock(pid=4242, poll=unittest.mock.Mock(return_value=1))
 
         with patch.object(probe.subprocess, "run", return_value=subprocess.CompletedProcess(
-            [], 0, stdout=b"1.4.218\n")), patch.object(probe.subprocess, "Popen", side_effect=serve), \
+            [], 0, stdout=b"1.4.218\n")) as cli, patch.object(probe.subprocess, "Popen", side_effect=serve), \
                 patch.object(probe.os, "killpg"):
             # A strict ASCII stderr must not mask the original failure.
             output = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
             with contextlib.redirect_stderr(output):
                 self.assertEqual(1, probe.stock_probe(arguments))
+            self.assertNotIn("ORCA_ELECTRON_NO_SANDBOX", cli.call_args.kwargs["env"])
         output.flush()
         text = output.buffer.getvalue().decode("ascii")
         lines = text.splitlines()

@@ -17,7 +17,7 @@ STAGING_STEP_STATE=unknown
 die() { printf 'openclaw-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
 [ "$(id -un)" = dev ] || die 'run as the allocated dev user'
-for command in go incus jq sudo timeout; do
+for command in go incus jq python3 sg sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
@@ -34,8 +34,8 @@ yard() {
   if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
     local command
-    printf -v command '%q ' "$YARD_BIN" -Y "$YARD_NAME" "$@"
-    sg incus-admin -c "$command"
+    command="$(python3 -c 'import shlex, sys; print(shlex.join(sys.argv[1:]))' "$YARD_BIN" -Y "$YARD_NAME" "$@")" || return
+    sg incus-admin -c "exec $command"
   else
     "$YARD_BIN" -Y "$YARD_NAME" "$@"
   fi
@@ -305,7 +305,7 @@ cat > "$STATE/project-yard" <<'PROJECT_YARD'
 set -euo pipefail
 if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
   && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
-  printf -v command '%q ' "$SUBYARD_TEST_PROJECT_ENGINE" "$@"
+  command="$(python3 -c 'import shlex, sys; print(shlex.join(sys.argv[1:]))' "$SUBYARD_TEST_PROJECT_ENGINE" "$@")"
   exec sg incus-admin -c "exec $command"
 fi
 exec "$SUBYARD_TEST_PROJECT_ENGINE" "$@"

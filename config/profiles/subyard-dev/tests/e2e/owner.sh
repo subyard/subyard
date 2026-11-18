@@ -10,14 +10,14 @@ CANDIDATE_ENGINE=''
 die() { printf 'subyard-dev-e2e: %s\n' "$*" >&2; exit 2; }
 [ "${SUBYARD_E2E_VM:-}" = 1 ] || die 'run on VM1 through dev/agent-e2e.sh'
 [ "$(id -un)" = dev ] || die 'run as the allocated dev user'
-for command in go incus jq sg sudo timeout; do
+for command in go incus jq python3 sg sudo timeout; do
   command -v "$command" >/dev/null 2>&1 || die "$command is required"
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
 if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
   && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
-  printf -v reexec 'exec bash %q' "$ROOT/config/profiles/subyard-dev/tests/e2e/owner.sh"
-  exec sg incus-admin -c "$reexec"
+  reexec="$(python3 -c 'import shlex, sys; print(shlex.join(sys.argv[1:]))' bash "$ROOT/config/profiles/subyard-dev/tests/e2e/owner.sh")"
+  exec sg incus-admin -c "exec $reexec"
 fi
 
 incus() {
@@ -32,7 +32,7 @@ yard() {
   # Init refreshes its child session; the fixture's parent keeps the old groups.
   if ! id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin \
     && id -nG "$(id -un)" | tr ' ' '\n' | grep -Fx >/dev/null incus-admin; then
-    printf -v command '%q ' "$engine" -Y "$YARD_NAME" "$@"
+    command="$(python3 -c 'import shlex, sys; print(shlex.join(sys.argv[1:]))' "$engine" -Y "$YARD_NAME" "$@")" || return
     sg incus-admin -c "exec $command"
   else
     "$engine" -Y "$YARD_NAME" "$@"
