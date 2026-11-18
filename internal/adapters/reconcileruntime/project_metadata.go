@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/Subyard/Subyard/internal/application"
@@ -269,23 +270,28 @@ func (plan *ProjectHookPlan) MetadataOperationStep(target string) *domain.Operat
 }
 
 func (runtime Runtime) metadataRequest(ctx context.Context, mode string, plan *projectMetadataPlan) (projectMetadataObservation, error) {
+	parsedUID, err := strconv.ParseUint(strconv.Itoa(runtime.Yard.DevUID), 10, 32)
+	if err != nil {
+		return projectMetadataObservation{}, fmt.Errorf("project metadata requires a UID in the uint32 range")
+	}
+	uid := uint32(parsedUID)
 	payload, err := json.Marshal(struct {
 		Mode string `json:"mode"`
-		UID  int    `json:"uid"`
+		UID  uint32 `json:"uid"`
 		*projectMetadataPlan
-	}{mode, runtime.Yard.DevUID, plan})
+	}{mode, uid, plan})
 	if err != nil {
 		return projectMetadataObservation{}, err
 	}
 	callContext, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	user := uint32(runtime.Yard.DevUID)
+	user := uid
 	if mode == "apply" && plan.needsPrivilegedMetadataPublication(runtime.Yard.DevUID) {
 		user = 0
 	}
 	result, err := runtime.Executor.Exec(callContext, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{
 		Command: []string{"python3", "-B", "-c", projectMetadataProgram}, Stdin: payload,
-		User: user, Group: uint32(runtime.Yard.DevUID),
+		User: user, Group: uid,
 	})
 	if result.ExitCode != 0 {
 		return projectMetadataObservation{}, metadataFailure(plan, result.Stdout)

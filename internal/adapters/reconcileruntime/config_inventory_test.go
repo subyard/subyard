@@ -211,39 +211,32 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 }
 
 func TestInstalledGitApprovalPackageRecordsSurviveDefaultChange(t *testing.T) {
-	const root = "../../.."
-	runtime := Runtime{
-		RepositoryRoot: root,
-		Yard:           domain.Context{DevUser: "dev"},
-		Environment: []string{
-			"CODING_TOOL_INTEGRATIONS=claude codex",
-			"AGENT_claude_PROVISION=" + root + "/config/agents/claude/provision.sh",
-			"AGENT_codex_PROVISION=" + root + "/config/agents/codex/provision.sh",
-			"CODING_TOOL_GIT_APPROVAL=prompt",
-		},
-	}
-	// Receipts produced by the predecessor, 5fb5bd17, for the inputs above.
-	historical := map[string]string{
-		"claude": "a38c41425a72dbc9c4062dd2deb1dd15aa0d64b725474a83d53f4cc933f7b68b",
-		"codex":  "e32388e7c869e34350bade6e695e21ca2753636b24c6c5e4e542a9136f2ff32b",
-	}
-	current, err := runtime.integrationPackageArtifacts("observe", nil)
-	if err != nil || len(current) != len(historical) {
-		t.Fatalf("installed prompt packages: %#v, error: %v", current, err)
-	}
-	for _, entry := range current {
-		if entry.Digest != historical[entry.ID] {
-			t.Fatalf("%s prompt package receipt changed: %s, want %s", entry.ID, entry.Digest, historical[entry.ID])
+	provision := testkit.TempDir(t) + "/provision.sh"
+	testkit.WriteFile(t, provision, []byte("#!/bin/sh\nexit 0\n"), 0755)
+
+	// The predecessor's receipts were generated with these fixed provision bytes.
+	const promptReceipt = "e6cc90fce6371301d8cb40a272df8ce7e80a792279a24b9b43f0f686d09dd971"
+	const offReceipt = "32e8bcb8d3a44a0de61d405e8650d6a09e85732aebaea0eeb7e0e077356e86b6"
+	for _, test := range []struct{ setting, receipt string }{
+		{"prompt", promptReceipt},
+		{"off", offReceipt},
+		{"", offReceipt},
+	} {
+		runtime := Runtime{
+			Integrations: []profile.IntegrationDefinition{},
+			Yard:         domain.Context{DevUser: "dev"},
+			Environment: []string{
+				"CODING_TOOL_INTEGRATIONS=fixture",
+				"AGENT_fixture_PROVISION=" + provision,
+				"CODING_TOOL_GIT_APPROVAL=" + test.setting,
+			},
 		}
-	}
-	runtime.Environment[3] = "CODING_TOOL_GIT_APPROVAL=off"
-	desired, err := runtime.integrationPackageArtifacts("observe", nil)
-	if err != nil || len(desired) != len(historical) {
-		t.Fatalf("desired packages: %#v, %v", desired, err)
-	}
-	for _, entry := range desired {
-		if entry.Digest == historical[entry.ID] {
-			t.Fatalf("%s package did not need reconciliation for off", entry.ID)
+		entries, err := runtime.integrationPackageArtifacts("observe", nil)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("package receipt for %q: %#v, error: %v", test.setting, entries, err)
+		}
+		if entries[0].Digest != test.receipt {
+			t.Fatalf("package receipt for %q: %s, want %s", test.setting, entries[0].Digest, test.receipt)
 		}
 	}
 }
