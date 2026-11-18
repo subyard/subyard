@@ -20,6 +20,7 @@ import (
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 const (
@@ -118,10 +119,10 @@ func WriteRefusal(result ports.InstanceExecResult, err error) string {
 }
 
 // RepairModes tightens each destination independently without reading content.
-func RepairModes(ctx context.Context, executor ports.InstanceExecutor, yard domain.Context, destinations []string) error {
+func RepairModes(ctx context.Context, executor ports.InstanceExecutor, yard domain.Context, destinations []string, profiles []profile.Definition) error {
 	var refusals []error
 	for _, path := range destinations {
-		request, err := Request("json", ModeRepair, yard.DevUser, path, yard.DevUID, nil)
+		request, err := RequestWithContributions("json", ModeRepair, yard.DevUser, path, yard.DevUID, nil, profiles)
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("repair permissions for %q: %w", path, err))
 			continue
@@ -162,6 +163,31 @@ func Request(format, mode, developer, destination string, uid int, payload []byt
 	}
 	return materializationRequest(format, mode, developer, destination, uid, payload,
 		guestStateRoot, 0, "/home/"+developer, legacyTemplates...)
+}
+
+// RequestWithContributions includes shipped legacy receipt locations for the document.
+func RequestWithContributions(format, mode, developer, destination string, uid int, payload []byte, profiles []profile.Definition, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
+	request, err := Request(format, mode, developer, destination, uid, payload, legacyTemplates...)
+	if err != nil {
+		return request, err
+	}
+	relative := strings.TrimPrefix(destination, "/home/"+developer+"/")
+	var entries []profile.ConfigContribution
+	for _, definition := range profiles {
+		for _, entry := range definition.ConfigContributions {
+			if entry.Destination == relative {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	if len(entries) != 0 {
+		payload, err := json.Marshal(entries)
+		if err != nil {
+			return ports.InstanceExecRequest{}, err
+		}
+		request.Command[3] = "LEGACY_CONTRIBUTIONS = " + string(payload) + "\n" + request.Command[3]
+	}
+	return request, nil
 }
 
 func DesiredDigest(payload []byte) (string, error) {

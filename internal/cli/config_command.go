@@ -1170,7 +1170,7 @@ func (cli *CLI) repairStructuredConfigModes(ctx context.Context, loaded config.L
 		return err
 	}
 	defer unlock()
-	return configmaterial.RepairModes(ctx, executor, yard, paths)
+	return configmaterial.RepairModes(ctx, executor, yard, paths, loaded.Catalog.Profiles())
 }
 
 type dispatcherConfigApplier struct {

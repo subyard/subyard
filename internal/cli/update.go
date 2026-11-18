@@ -86,7 +86,7 @@ func (adapter releaseAdapter) Run(ctx context.Context, request domain.AdapterReq
 }
 
 func (cli *CLI) runUpdate(ctx context.Context, loaded config.Loaded, definition command.Definition, arguments []string) int {
-	prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments})
+	prepared, err := cli.prepareCommand(ctx, prepareCommandRequest{Loaded: loaded, Definition: definition, Arguments: arguments, RepairModes: true})
 	if err != nil {
 		return cli.reportPreparationError(definition, err)
 	}

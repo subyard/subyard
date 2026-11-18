@@ -68,6 +68,7 @@ type Definition struct {
 	Settings                   []Setting                      `json:"settings,omitempty"`
 	Runtime                    *RuntimeHook                   `json:"runtime,omitempty"`
 	GuestEnvironment           *GuestEnvironmentHook          `json:"guest_environment,omitempty"`
+	ConfigContributions        []ConfigContribution           `json:"-"`
 	validationInputs           []string
 }
 
@@ -173,6 +174,9 @@ func (definition *Definition) validatePackage() error {
 		}
 	}
 	if _, err := definition.DeveloperIdentityContract(); err != nil {
+		return err
+	}
+	if err := definition.loadConfigContributions(); err != nil {
 		return err
 	}
 	if definition.GuestEnvironment != nil {

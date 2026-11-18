@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """CAS ownership of native exporter leaves; preserve unrelated settings and analytics intent."""
+import hashlib
 import json
 import os
 import stat
@@ -55,11 +56,7 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
         if snapshot(path, max_bytes=max_bytes) != expected:
             raise ValueError('native configuration changed')
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -121,6 +118,87 @@ def read_baseline(state):
     return original, baseline
 
 
+def receipt(value):
+    try:
+        payload = materializer.semantic_payload(value, compact_numbers=True, typed_floats=True) + b'\n'
+    except (TypeError, ValueError):
+        raise ValueError('invalid native ownership value') from None
+    if len(payload) > CONFIG_LIMIT:
+        raise ValueError('native ownership exceeds size bound')
+    return payload
+
+
+def sync_directory(path):
+    directory = os.open(path, os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def save_intent(journal, state_before, agent, path, owned, retired, projection, staged):
+    record = {'schema': 1, 'agent': agent, 'destination': str(path),
+              'receipt': hashlib.sha256(state_before or b'').hexdigest(),
+              'inode': [staged.st_dev, staged.st_ino], 'owned': owned,
+              'retired': retired, 'projection': projection}
+    publish(journal, receipt(record), snapshot(journal))
+    # The control directory itself may have been created on this first apply.
+    sync_directory(journal.parent.parent)
+
+
+def recover_intent(journal, state, original, baseline, home, uid, developer, check):
+    pending = snapshot(journal)
+    if pending is None:
+        return original, baseline
+    materializer.validate_regular(journal, os.getuid(), 0o600)
+    intent = json.loads(pending, parse_float=Decimal, parse_constant=Decimal)
+    if not isinstance(intent, dict) or intent.get('schema') != 1 or intent.get('agent') not in ('claude', 'codex'):
+        raise ValueError('invalid native publication intent')
+    agent = intent['agent']
+    path = agent_path(home, agent)
+    if intent['destination'] != str(path) or intent['receipt'] != hashlib.sha256(original or b'').hexdigest():
+        return original, baseline
+    owned = materializer.published_contribution(intent['owned'])
+    retired = materializer.published_contribution(intent['retired'])
+    file_format = 'json' if agent == 'claude' else 'toml'
+    section = 'env' if agent == 'claude' else 'otel'
+    entries = materializer.contribution_entries(section, owned.keys() | retired.keys())
+    asset = materializer.asset_key(developer, str(path))
+    with materializer.asset_lock(asset+'.lock', check, allow_missing=True):
+        if not materializer.validate_destination_parent(str(path), str(home), uid, False):
+            return original, baseline
+        try:
+            before = path.lstat()
+            current, _ = materializer.read_current(path, allow_invalid=True, file_format=file_format, private=True)
+            after = path.lstat()
+        except FileNotFoundError:
+            return original, baseline
+        if current is None or not os.path.samestat(before, after) or after.st_uid != uid:
+            return original, baseline
+        # A surviving staged inode witnesses publication despite in-place edits.
+        # An editor can also atomically save unrelated changes after publication.
+        # A changed, matching owned projection witnesses that case.
+        group = current.get(section)
+        matching_inode = [after.st_dev, after.st_ino] == intent['inode'] and isinstance(group, dict) and any(
+            key in group and materializer.json_equal(group[key], record['managed'], file_format)
+            for key, record in owned.items())
+        matching_projection = (intent['projection'] and
+                               materializer.projection_digest(current, entries, file_format) == intent['projection'])
+        if not matching_inode and not matching_projection:
+            return original, baseline
+        agents = baseline['agents'].copy()
+        if owned:
+            agents[agent] = owned
+        else:
+            agents.pop(agent, None)
+        recovered = {**baseline, 'agents': agents}
+        if not check:
+            completed = receipt(recovered)
+            publish(state, completed, original)
+            original = completed
+        return original, recovered
+
+
 def receipt_lock(state, read_only):
     # The receipt covers both destinations, even for disjoint selections.
     path = materializer.asset_key('telemetry', str(state)) + '.lock'
@@ -163,22 +241,18 @@ def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=Fals
 
 def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, check, templates, developer, locks):
     original, baseline = read_baseline(state)
+    journal = state.with_suffix('.intent')
     if not check:
         repair_receipted_modes(home, baseline, agents, uid)
         if token is None:
             raise ValueError('collector token required')
+    original, recovered = recover_intent(journal, state, original, baseline, home, uid, developer, check)
+    if not check and recovered is not baseline:
+        repair_receipted_modes(home, recovered, agents, uid)
+    baseline, recovered_receipt = recovered, recovered is not baseline
     next_state = {**baseline, 'agents': baseline['agents'].copy()}
     publications = []
     failures = []
-
-    def receipt(value):
-        try:
-            payload = materializer.semantic_payload(value, compact_numbers=True, typed_floats=True) + b'\n'
-        except (TypeError, ValueError):
-            raise ValueError('invalid native ownership value') from None
-        if len(payload) > CONFIG_LIMIT:
-            raise ValueError('native ownership exceeds size bound')
-        return payload
 
     for agent in ('claude', 'codex'):
         section, file_format = ('env', 'json') if agent == 'claude' else ('otel', 'toml')
@@ -196,7 +270,9 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
             want = desired(agent, endpoint, token) if enabled else None
             final, edit, register = materializer.prepare_contribution(
                 locks, str(path), str(home), uid, file_format, developer, entry, owned, want,
-                templates.get(agent), check=check, writer=writer.dumps, gid=gid)
+                templates.get(agent), check=check, writer=writer.dumps, gid=gid,
+                save_intent=lambda final, retired, projection, staged, agent=agent, path=path:
+                    save_intent(journal, original, agent, path, final, retired, projection, staged))
             if enabled:
                 next_state['agents'][agent] = final
             else:
@@ -209,7 +285,8 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
     raise_refusals(failures)
 
     if check:
-        return all(edit is None and register is None for _, edit, register, _ in publications) and receipt(baseline) == receipt(next_state)
+        return (not recovered_receipt and all(edit is None and register is None for _, edit, register, _ in publications)
+                and receipt(baseline) == receipt(next_state))
     for agent, edit, register, final in publications:
         if register is not None:
             register()
@@ -224,4 +301,7 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
         original = final
         if edit is not None and agent in agents:
             repair_receipted_modes(home, next_state, [agent], uid)
+    if journal.exists():
+        journal.unlink()
+        sync_directory(journal.parent)
     return True

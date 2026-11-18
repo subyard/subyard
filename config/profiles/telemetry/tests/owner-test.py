@@ -43,6 +43,10 @@ if os.environ.get('TELEMETRY_FIXTURE_TRANSPORT_FAIL')=='1': sys.exit(1)
 if args[0]=='list': assert args[-2:]==['-c','ns']; print(args[1]+'-neighbour,STOPPED'); print(args[1]+',RUNNING'); sys.exit()
 assert args[0]=='exec'
 arguments=args[args.index('subyard')+1:]
+if os.environ.get('TELEMETRY_FIXTURE_REPAIR_FAIL')=='1':
+    assert arguments[0]=='repair-modes'
+    print('telemetry-agent-config-unavailable-v1 claude', file=sys.stderr)
+    sys.exit(2)
 with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') as temporary:
     stage=pathlib.Path(temporary)
     with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
@@ -127,6 +131,11 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             prefix = 'subyard-profile-observation-refusal-v1 '
             refusal = next(json.loads(line[len(prefix):]) for line in result.stderr.decode().splitlines() if line.startswith(prefix))
             self.assertEqual(refusal['retry'], 'run yard -Y secondary config paths')
+            result = invoke('--yes', CODING_TOOL_INTEGRATIONS='claude', AGENT_claude_CONFIG=str(missing_source),
+                            AGENT_claude_CONFIG_DEST='.claude/settings.json', TELEMETRY_FIXTURE_REPAIR_FAIL='1')
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn(b'managed agent source missing, unsafe or unreadable', result.stderr)
+            self.assertIn(b'agent configuration unavailable: claude', result.stderr)
             self.assertEqual((root/'applied').read_text(),'1')
             # A guest that init never provisioned is not entered for removal,
             # pause or resume.

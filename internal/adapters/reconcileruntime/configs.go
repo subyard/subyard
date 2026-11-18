@@ -367,7 +367,7 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 		}
 		request := ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}}
 		if file.ownedFormat != "" {
-			request, err = configmaterial.Request(file.ownedFormat, configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+			request, err = runtime.configMaterializationRequest(file.ownedFormat, configmaterial.ModeObserve, file.destination, payload)
 			if err != nil {
 				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 				continue
@@ -562,7 +562,7 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 		// An installed-view repair never takes back released ownership.
 		mode = configmaterial.ModeApplyInstalled
 	}
-	request, err := configmaterial.Request(file.ownedFormat, mode, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+	request, err := runtime.configMaterializationRequest(file.ownedFormat, mode, file.destination, payload)
 	if err != nil {
 		return err
 	}
@@ -586,6 +586,14 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 		return errors.New("structured configuration apply failed")
 	}
 	return nil
+}
+
+func (runtime Runtime) configMaterializationRequest(format, mode, destination string, payload []byte, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
+	profiles, err := runtime.profileDefinitions()
+	if err != nil {
+		return ports.InstanceExecRequest{}, err
+	}
+	return configmaterial.RequestWithContributions(format, mode, runtime.devUser(), destination, runtime.Yard.DevUID, payload, profiles, legacyTemplates...)
 }
 
 func (runtime Runtime) writeGuestFile(ctx context.Context, destination string, payload []byte) error {

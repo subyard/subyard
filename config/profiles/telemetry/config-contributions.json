@@ -1,0 +1,4 @@
+[
+  {"destination":".claude/settings.json","receipt":"/var/lib/subyard/telemetry-control/native.json","path":"/agents/claude","section":"env"},
+  {"destination":".codex/config.toml","receipt":"/var/lib/subyard/telemetry-control/native.json","path":"/agents/codex","section":"otel"}
+]

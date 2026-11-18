@@ -340,6 +340,11 @@ func (cli *CLI) repairModesBeforeReleaseInspection(ctx context.Context, yard, ha
 			}
 		}
 		allLocal = true
+	case "@update":
+		if updateCheckInvocation(arguments) || commandHelpRequested(arguments) {
+			return nil
+		}
+		allLocal = true
 	default:
 		return nil
 	}

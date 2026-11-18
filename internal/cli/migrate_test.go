@@ -140,10 +140,27 @@ func TestMigrateCheckReadsInstalledRuntimeWithoutLoadingYardConfiguration(t *tes
 	}
 }
 
-func TestMigrateRepairsSelectedConfigOnlyForMutation(t *testing.T) {
-	for _, readOnly := range []bool{false, true} {
-		t.Run(fmt.Sprintf("check=%t", readOnly), func(t *testing.T) {
-			root, environment, _ := migrateCLIFixture(t, false)
+func TestReleasePreparationRepairsSelectedConfigOnlyForMutation(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		arguments []string
+		rpcPlan   bool
+		want      int
+	}{
+		{"migrate", []string{"migrate"}, false, 1},
+		{"migrate check", []string{"migrate", "--check"}, false, 0},
+		{"migrate exact plan", nil, true, 0},
+		{"update candidate refusal", []string{"update", "--version", "1.2.3"}, false, 1},
+		{"update check candidate refusal", []string{"update", "--check", "--version", "1.2.3"}, false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, environment, _ := migrateCLIFixture(t, tc.rpcPlan)
+			update := len(tc.arguments) != 0 && tc.arguments[0] == "update"
+			if update {
+				var runtimeRoot string
+				root, environment, runtimeRoot = updateReleaseFixture(t)
+				environment = append(environment, "YARD_RUNTIME_ROOT="+runtimeRoot, "UPDATE_BLOCK_INSPECTION=1")
+			}
 			yard := filepath.Join(root, "state", "yards", "default")
 			agent := filepath.Join(root, "config", "agents", "fixture")
 			for _, directory := range []string{yard, agent} {
@@ -159,27 +176,35 @@ func TestMigrateRepairsSelectedConfigOnlyForMutation(t *testing.T) {
 			instance := incus.Instances["subyard/yard"]
 			instance.Status = "Running"
 			incus.Instances["subyard/yard"] = instance
-			arguments := []string{"migrate"}
-			if readOnly {
-				arguments = append(arguments, "--check")
-			}
 			var output bytes.Buffer
-			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: tc.arguments,
 				Environment: environment, Incus: incus, Executor: incus, Stdout: &output, Stderr: &output})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if code := program.Run(context.Background()); code != 0 {
-				t.Fatalf("migrate exit=%d: %s", code, &output)
+			if tc.rpcPlan {
+				loaded, err := program.currentMigrationContext()
+				if err != nil {
+					t.Fatal(err)
+				}
+				handler := &rpcHandler{cli: program, loaded: loaded}
+				if _, err := handler.Handle(context.Background(), rpc.Call{
+					Method: "operation.plan", OperationID: "migrate-read-only",
+					Params: json.RawMessage(`{"command":"migrate","arguments":[],"exact":true}`),
+				}, nil); err != nil {
+					t.Fatalf("plan migrate: %v", err)
+				}
+			} else if code := program.Run(context.Background()); update {
+				if (code == 0) != updateCheckInvocation(tc.arguments) || !strings.Contains(output.String(), "candidate resource changed") {
+					t.Fatalf("expected candidate refusal, exit=%d: %s", code, &output)
+				}
+			} else if code != 0 {
+				t.Fatalf("release preparation exit=%d: %s", code, &output)
 			}
-			want := 1
-			if readOnly {
-				want = 0
+			if got := len(incus.ConfigModeRepairs); got != tc.want {
+				t.Fatalf("permission repair count=%d, want %d", got, tc.want)
 			}
-			if got := len(incus.ConfigModeRepairs); got != want {
-				t.Fatalf("permission repair count=%d, want %d", got, want)
-			}
-			if !readOnly && incus.ConfigModeRepairs[0].Request.Command[6] != "/home/dev/.sample/settings.json" {
+			if tc.want != 0 && incus.ConfigModeRepairs[0].Request.Command[6] != "/home/dev/.sample/settings.json" {
 				t.Fatal("unexpected destination in permission repair")
 			}
 		})

@@ -1155,7 +1155,7 @@ func (runtime Runtime) legacyIntegrationConfigDigest(file guestConfigFile) (stri
 }
 
 func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mode, path string, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
-	request, err := configmaterial.Request(format, mode, runtime.devUser(), path, runtime.Yard.DevUID, payload, legacyTemplates...)
+	request, err := runtime.configMaterializationRequest(format, mode, path, payload, legacyTemplates...)
 	if err != nil {
 		return configmaterial.Observation{}, err
 	}

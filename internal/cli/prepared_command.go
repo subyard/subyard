@@ -1238,6 +1238,11 @@ func (prepared *preparedCommand) prepareRemote(ctx context.Context, _ *initBoots
 }
 
 func (prepared *preparedCommand) prepareUpdate(ctx context.Context, _ *initBootstrap) error {
+	if prepared.repairModes {
+		if err := prepared.CLI.repairModesBeforeReleaseInspection(ctx, prepared.Loaded.Context.YardName, "@update", prepared.Arguments); err != nil {
+			return err
+		}
+	}
 	execution, err := prepared.CLI.prepareRelease(ctx, prepared.Loaded, prepared.Arguments)
 	if err != nil {
 		return err

@@ -170,8 +170,14 @@ def main():
             archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     remaining = os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')
     startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
-    output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
-                  GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
+    try:
+        output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
+                      GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if not refusals:
+            raise
+        detail = str(error) if isinstance(error, Refusal) else 'agent configuration permission repair failed'
+        raise Refusal([*refusals, detail]) from None
     if refusals:
         raise Refusal(refusals)
     if operation == 'check':

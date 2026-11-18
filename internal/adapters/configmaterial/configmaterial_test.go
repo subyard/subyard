@@ -1365,7 +1365,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				}
 				h.apply(t, []byte(desired))
 				h.writeDestination(t, drifted)
-				if err := os.Chmod(h.destination, 0o640); err != nil {
+				if err := os.Chmod(h.destination, 0o400); err != nil {
 					t.Fatal(err)
 				}
 				document := snapshotMaterialization(t, filepath.Dir(h.destination))
@@ -1404,8 +1404,8 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
 					t.Fatal("release changed the destination document")
 				}
-				if info, err := os.Stat(h.destination); err != nil || info.Mode().Perm() != 0o600 {
-					t.Fatalf("release did not repair document permissions: %v", err)
+				if info, err := os.Stat(h.destination); err != nil || info.Mode().Perm() != 0o400 {
+					t.Fatalf("release changed document permissions: %v %v", info, err)
 				}
 				// The shared schema1 baseline is the released form older runtimes read.
 				var baseline, receipt map[string]any
@@ -1846,32 +1846,6 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 				t.Fatalf("retry changed runtime fields: %#v", got)
 			}
 		})
-	}
-}
-
-func TestRetirementChecksFreshModeOnForeignDocument(t *testing.T) {
-	h := newGuestHarness(t)
-	h.apply(t, []byte(`{"managed":true}`))
-	h.writeDestination(t, `{"managed":"edited"}`)
-	request, err := h.request(nil, ModeRetire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Command[7] = fmt.Sprint(os.Getuid() + 1)
-	needle := "        repair_document_mode(destination, allowed_home, uid)\n        if document_mode_drift(destination):"
-	request.Command[3] = strings.Replace(request.Command[3], needle,
-		"        os.chmod(destination, 0o644)\n"+needle, 1)
-	command := exec.Command(request.Command[0], request.Command[1:]...)
-	command.Stdin = bytes.NewReader(request.Stdin)
-	output, err := command.CombinedOutput()
-	if err == nil || !bytes.Contains(output, []byte("configuration permissions could not be tightened to 0600")) {
-		t.Fatalf("retire misreported successful permission repair: %v %s", err, output)
-	}
-	if h.observeMode(t, nil, ModeAssessRetire).Converged {
-		t.Fatal("retirement assessment missed the remaining mode drift")
-	}
-	if !h.observeMode(t, nil, ModeRetire).Converged {
-		t.Fatal("retirement did not converge after an authorized repair")
 	}
 }
 
