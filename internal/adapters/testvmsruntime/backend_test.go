@@ -94,8 +94,8 @@ func TestBackendApplyInstallsCurrentEngineAndPublishesRoute(t *testing.T) {
 		}
 		joined := strings.Join(arguments, " ")
 		switch {
-		case joined == "list yard-test --project subyard-test -f csv -c s":
-			return []byte("STOPPED\n"), nil, nil
+		case joined == "list yard-test --project subyard-test -f csv -c ns":
+			return []byte("yard-test,STOPPED\n"), nil, nil
 		case strings.HasPrefix(joined, "file push "):
 			if memory.Devices[hostMemoryDevice] == nil {
 				return nil, nil, errors.New("engine staged before physical source installation")
@@ -233,8 +233,8 @@ func TestBackendConvergenceUsesExactBundleAndLiveRoute(t *testing.T) {
 		switch strings.Join(arguments, " ") {
 		case "config get yard-test user.subyard.test_vms_revision --project subyard-test":
 			return []byte(state.marker + "\n"), nil, nil
-		case "list yard-test --project subyard-test -f csv -c s":
-			return []byte(outer + "\n"), nil, nil
+		case "list yard-test --project subyard-test -f csv -c ns":
+			return []byte("yard-test," + outer + "\n"), nil, nil
 		case "exec yard-test --project subyard-test -- ip -4 -o route show default":
 			return []byte("default via 10.10.0.1 dev eth0\n"), nil, nil
 		case "exec yard-test --project subyard-test -- ip -4 -o address show dev eth0 scope global":
@@ -336,8 +336,8 @@ func TestDisabledBackendRemovesPublishedRoute(t *testing.T) {
 				}
 				joined := strings.Join(arguments, " ")
 				switch {
-				case joined == "list yard-test --project subyard-test -f csv -c s":
-					return []byte("RUNNING\n"), nil, nil
+				case joined == "list yard-test --project subyard-test -f csv -c ns":
+					return []byte("yard-test,RUNNING\n"), nil, nil
 				case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
 					return nil, nil, nil
 				case strings.HasPrefix(joined, "file push "):
@@ -428,8 +428,8 @@ func TestBackendRejectsUnsafePhysicalSourceBeforeEnginePublication(t *testing.T)
 				}
 				joined := strings.Join(arguments, " ")
 				switch {
-				case joined == "list yard-test --project subyard-test -f csv -c s":
-					return []byte("RUNNING\n"), nil, nil
+				case joined == "list yard-test --project subyard-test -f csv -c ns":
+					return []byte("yard-test,RUNNING\n"), nil, nil
 				case strings.HasPrefix(joined, "file push "):
 					return nil, nil, nil
 				case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
@@ -505,8 +505,8 @@ func TestProfileHostMemoryReadinessChecksLiveSource(t *testing.T) {
 		switch {
 		case joined == "config get yard-test user.subyard.test_vms_revision --project subyard-test":
 			return []byte(state.marker), nil, nil
-		case joined == "list yard-test --project subyard-test -f csv -c s":
-			return []byte("RUNNING\n"), nil, nil
+		case joined == "list yard-test --project subyard-test -f csv -c ns":
+			return []byte("yard-test,RUNNING\n"), nil, nil
 		case strings.HasSuffix(joined, "_test-vms-host-memory-check"):
 			if !verified {
 				return nil, nil, errors.New("unverified live physical source")

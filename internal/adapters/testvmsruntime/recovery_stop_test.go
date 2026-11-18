@@ -68,7 +68,7 @@ func TestForceStopRecoveryRequiresDurableEvidenceAndFreshOwnership(t *testing.T)
 				case strings.HasPrefix(joined, "list e2e-vm-1 "):
 					stateReads++
 					if scenario == "concurrent stop" {
-						return []byte("STOPPED\n"), nil, nil
+						return []byte(args[1] + ",STOPPED\n"), nil, nil
 					}
 					if scenario == "state unavailable" || (forced && scenario == "verification unavailable") {
 						return nil, nil, errors.New("state probe unavailable")
@@ -77,9 +77,9 @@ func TestForceStopRecoveryRequiresDurableEvidenceAndFreshOwnership(t *testing.T)
 						return []byte("FROZEN\n"), nil, nil
 					}
 					if forced && scenario != "still running" && scenario != "force failed" {
-						return []byte("STOPPED\n"), nil, nil
+						return []byte(args[1] + ",STOPPED\n"), nil, nil
 					}
-					return []byte("RUNNING\n"), nil, nil
+					return []byte(args[1] + ",RUNNING\n"), nil, nil
 				case strings.HasPrefix(joined, "project get "):
 					if scenario == "project changed" {
 						return []byte("foreign"), nil, nil

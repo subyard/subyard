@@ -86,7 +86,7 @@ func TestQuarantineReadinessFailurePrioritizesFailedVMAndRetainsSafeTiming(t *te
 			t.Fatal("diagnostics required the unavailable guest agent")
 		}
 		if strings.HasPrefix(joined, "list e2e-vm-") {
-			return []byte("RUNNING"), nil, nil
+			return []byte(args[1] + ",RUNNING"), nil, nil
 		}
 		return nil, nil, errors.New("private argument and stderr")
 	}}

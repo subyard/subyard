@@ -170,9 +170,9 @@ func TestBackendVerifyReportsDriftAndSafeDoctorReasons(t *testing.T) {
 					return []byte(state.marker), nil, nil
 				case strings.HasPrefix(call, "list "):
 					if test.stage == "power" {
-						return []byte("STOPPED"), nil, nil
+						return []byte(args[1] + ",STOPPED"), nil, nil
 					}
-					return []byte("RUNNING"), nil, nil
+					return []byte(args[1] + ",RUNNING"), nil, nil
 				case strings.HasSuffix(call, "_test-vms-worker doctor"):
 					doctorCalls++
 					var runErr error

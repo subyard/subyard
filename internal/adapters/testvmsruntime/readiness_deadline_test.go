@@ -101,7 +101,7 @@ func TestSSHReadinessProbesUseTheirBootBudget(t *testing.T) {
 				if strings.Contains(strings.Join(args, " "), "ip -4 route show default") {
 					return []byte("default via 10.0.0.1 dev eth0"), nil, nil
 				}
-				return []byte(`[{"state":{"network":{"eth0":{"addresses":[{"family":"inet","scope":"global","address":"10.0.0.2"}]}}}}]`), nil, nil
+				return []byte(`{"network":{"eth0":{"addresses":[{"family":"inet","scope":"global","address":"10.0.0.2"}]}}}`), nil, nil
 			}
 			rt := &Runtime{Config: Config{Incus: "incus", BootTimeout: 20 * time.Millisecond}, Runner: runner, Stdout: io.Discard, Now: time.Now, Sleep: sleepContext}
 			parent, cancel := context.WithTimeout(context.Background(), time.Second)

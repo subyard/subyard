@@ -362,7 +362,7 @@ func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, grac
 		return errors.Join(gracefulErr, err)
 	}
 	stateCtx, cancelState := context.WithTimeout(ctx, 5*time.Second)
-	state, stateErr := runtime.incus(stateCtx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+	state, stateErr := instanceColumn(stateCtx, runtime.incus, runtime.Config.Project, vm, "s")
 	cancelState()
 	if stateErr != nil {
 		return errors.Join(gracefulErr, stateErr)
@@ -405,7 +405,7 @@ func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, grac
 	if err := runtime.requireAllocationMarker(guardCtx, vm); err != nil {
 		return errors.Join(gracefulErr, err)
 	}
-	state, stateErr = runtime.incus(guardCtx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+	state, stateErr = instanceColumn(guardCtx, runtime.incus, runtime.Config.Project, vm, "s")
 	if stateErr != nil {
 		return errors.Join(gracefulErr, stateErr)
 	}
@@ -423,7 +423,7 @@ func (runtime *Runtime) forceStopRecoveryVM(ctx context.Context, vm string, grac
 	_, forceErr := runtime.incus(forceCtx, "stop", vm, "--project", runtime.Config.Project, "--force")
 	cancelForce()
 	verifyCtx, cancelVerify := context.WithTimeout(ctx, 5*time.Second)
-	state, stateErr = runtime.incus(verifyCtx, "list", vm, "--project", runtime.Config.Project, "-f", "csv", "-c", "s")
+	state, stateErr = instanceColumn(verifyCtx, runtime.incus, runtime.Config.Project, vm, "s")
 	cancelVerify()
 	var result error
 	if stateErr != nil || strings.TrimSpace(state) != "STOPPED" {
@@ -462,17 +462,7 @@ func (runtime *Runtime) removeQuarantinedGuestKeys(ctx context.Context) error {
 			result = errors.Join(result, err)
 			continue
 		}
-		state, err := runtime.incus(
-			ctx,
-			"list",
-			vm,
-			"--project",
-			runtime.Config.Project,
-			"-f",
-			"csv",
-			"-c",
-			"s",
-		)
+		state, err := instanceColumn(ctx, runtime.incus, runtime.Config.Project, vm, "s")
 		if err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -507,14 +497,14 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 	}
 	// Native state, console and QMP evidence do not depend on a responsive guest agent.
 	// Give each probe its own ceiling so a stalled probe cannot consume all later evidence.
-	probe := func(section string, args ...string) {
+	probe := func(section string, read func(context.Context) (string, error)) {
 		if ctx.Err() != nil {
 			diagnostics[section] = "unavailable: diagnostic budget exhausted"
 			return
 		}
 		probeCtx, cancelProbe := context.WithTimeout(ctx, time.Second)
 		defer cancelProbe()
-		value, err := runtime.incus(probeCtx, args...)
+		value, err := read(probeCtx)
 		if err != nil {
 			diagnostics[section] = "unavailable: " + readinessProbeMetadata(err)
 		} else if strings.TrimSpace(value) == "" {
@@ -524,6 +514,11 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 		} else {
 			diagnostics[section] = value
 		}
+	}
+	probeIncus := func(section string, args ...string) {
+		probe(section, func(ctx context.Context) (string, error) {
+			return runtime.incus(ctx, args...)
+		})
 	}
 	selectors := []int{1}
 	if cfg.guestCount() == 2 {
@@ -544,18 +539,20 @@ func (runtime *Runtime) recoveryDiagnostics(ctx context.Context, firstVM string)
 			}
 			cancelVerify()
 		}
-		probe(fmt.Sprintf("vm_%d_state", selector), "list", vm, "--project", cfg.Project, "-f", "csv", "-c", "s")
-		probe(fmt.Sprintf("vm_%d_console_log", selector), "console", vm, "--show-log", "--project", cfg.Project)
+		probe(fmt.Sprintf("vm_%d_state", selector), func(ctx context.Context) (string, error) {
+			return instanceColumn(ctx, runtime.incus, cfg.Project, vm, "s")
+		})
+		probeIncus(fmt.Sprintf("vm_%d_console_log", selector), "console", vm, "--show-log", "--project", cfg.Project)
 		qmpPath := "/1.0/instances/" + url.PathEscape(vm) + "/logs/qemu.qmp.log?project=" + url.QueryEscape(cfg.Project)
-		probe(fmt.Sprintf("vm_%d_qmp_log", selector), "query", qmpPath)
+		probeIncus(fmt.Sprintf("vm_%d_qmp_log", selector), "query", qmpPath)
 		instancePath := "/1.0/instances/" + url.PathEscape(vm) + "?project=" + url.QueryEscape(cfg.Project)
-		probe(fmt.Sprintf("vm_%d_instance", selector), "query", instancePath)
-		probe(fmt.Sprintf("vm_%d_info_log", selector), "info", "--show-log", vm, "--project", cfg.Project)
+		probeIncus(fmt.Sprintf("vm_%d_instance", selector), "query", instancePath)
+		probeIncus(fmt.Sprintf("vm_%d_info_log", selector), "info", "--show-log", vm, "--project", cfg.Project)
 	}
 	capacityCtx, cancelCapacity := context.WithTimeout(ctx, time.Second)
 	diagnostics["capacity"] = runtime.capacityEvidence(capacityCtx)
 	cancelCapacity()
-	probe("project", "project", "show", cfg.Project)
+	probeIncus("project", "project", "show", cfg.Project)
 	journalCtx, cancelJournal := context.WithTimeout(ctx, time.Second)
 	defer cancelJournal()
 	stdout, _, err := runtime.Runner.Run(journalCtx, "journalctl", []string{

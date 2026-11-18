@@ -44,15 +44,21 @@ if grep -rnE 'incus list "\$(YARD_INSTANCE_NAME|instance|INSTANCE)"' \
   fail 'a product script reads an instance by prefix; use power_state or incus_instance_columns'
 fi
 # Python and Go read one named instance only together with its name column.
+# Include the test-VM runtime's Incus runner wrappers.
 python3 -I - "$ROOT" <<'PY' || fail 'a Python or Go call site reads an instance by prefix; list it with -c n... and match the name'
 import pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 call = re.compile(r'''["']incus["'],\s*["']list["'],\s*[A-Za-z_][^,)]*,(?P<rest>[^)\]]*)''')
+wrapped_call = re.compile(r'''\bincus\(\s*\w+,\s*"list",\s*[A-Za-z_][\w.]*,(?P<rest>[^)]*)''')
 found = []
 for path in sorted([*root.glob('config/**/*.py'), *root.glob('internal/**/*.go'), *root.glob('cmd/**/*.go')]):
     if path.name.endswith('_test.go') or '/tests/' in str(path):
         continue
-    for match in call.finditer(path.read_text(errors='replace')):
+    source = path.read_text(errors='replace')
+    matches = list(call.finditer(source))
+    if path.parent == root / 'internal/adapters/testvmsruntime':
+        matches.extend(wrapped_call.finditer(source))
+    for match in matches:
         if not re.search(r'''["']-c["'],\s*["']n''', match.group('rest')):
             found.append(f"{path.relative_to(root)}: {match.group(0).splitlines()[0]}")
 if found:
