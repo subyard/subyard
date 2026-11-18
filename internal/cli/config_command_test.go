@@ -3263,7 +3263,7 @@ func TestConfigSetRefusesSharedAssignmentRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 			if code := program.Run(context.Background()); code == 0 ||
-				!strings.Contains(stderr.String(), "record can also assign GIT_USER_NAME") {
+				!strings.Contains(stderr.String(), "edit changes effective setting GIT_USER_NAME") {
 				t.Fatalf("config set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 			}
 			if stored, err := os.ReadFile(path); err != nil || string(stored) != initial {

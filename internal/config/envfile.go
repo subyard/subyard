@@ -278,9 +278,7 @@ func (evaluation envEvaluation) applyRecord(record string) error {
 }
 
 func (evaluation envEvaluation) assign(name, value string) {
-	if !evaluation.possible {
-		evaluation.values[name] = value
-	}
+	evaluation.values[name] = value
 	if evaluation.observe != nil {
 		evaluation.observe(name, value)
 	}
@@ -385,7 +383,7 @@ func (evaluation envEvaluation) expandParameter(expression string) (string, erro
 	case "":
 		return current, nil
 	case ":-", ":=", ":?":
-		if current != "" && !evaluation.possible {
+		if current != "" {
 			return current, nil
 		}
 		if operator == ":?" && (evaluation.possible || evaluation.policy.ignores(name)) {

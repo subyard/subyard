@@ -72,7 +72,11 @@ func TestPersistentAssignmentRefusesSharedRecords(t *testing.T) {
 			value := "replacement"
 			_, err := EditPersistentAssignmentContent("config.env", []byte(initial), name, &value)
 			var source *SourceError
-			if !errors.As(err, &source) || source.Key != name || !strings.Contains(source.Reason, "record can also assign") {
+			reason := "edit changes effective setting"
+			if strings.HasPrefix(initial, "GIT_USER_NAME=") {
+				reason = "record can also assign"
+			}
+			if !errors.As(err, &source) || source.Key != name || !strings.Contains(source.Reason, reason) {
 				t.Fatalf("editing %s in %q: %v", name, initial, err)
 			}
 		}
@@ -90,6 +94,37 @@ func TestPersistentAssignmentRefusesLatentSharedRecordForEitherSetting(t *testin
 				t.Fatalf("expected refusal for shared record, got %v", err)
 			}
 		})
+	}
+}
+
+func TestPersistentAssignmentRefusesSameValueEditWithCollateralChanges(t *testing.T) {
+	const initial = "GIT_USER_NAME=Jane\n" +
+		": ${GIT_USER_NAME:-${GIT_USER_EMAIL:=x@example.invalid}}\n" +
+		": ${GIT_USER_EMAIL:-${SSH_PORT:=2222}}\n" +
+		"GIT_USER_NAME=Jane\n"
+	root := testkit.TempDir(t)
+	path := filepath.Join(root, "config.env")
+	testkit.WriteFile(t, path, []byte(initial), 0o600)
+
+	value := "Jane"
+	err := WritePersistentAssignment(root, path, "GIT_USER_NAME", &value)
+	var source *SourceError
+	if !errors.As(err, &source) || source.Key != "GIT_USER_NAME" ||
+		!strings.Contains(err.Error(), "edit changes effective setting GIT_USER_EMAIL") ||
+		!strings.Contains(err.Error(), "edit changes effective setting SSH_PORT") {
+		t.Fatalf("expected typed refusal for both collateral changes, got %v", err)
+	}
+	if stored, err := os.ReadFile(path); err != nil || string(stored) != initial {
+		t.Fatalf("refused edit changed content: %q, %v", stored, err)
+	}
+}
+
+func TestPersistentAssignmentCanReplaceRecordWithUnreachableDefault(t *testing.T) {
+	const initial = `: "${GIT_USER_NAME:=Jane}${GIT_USER_NAME:-${SSH_PORT:=2222}}"` + "\n"
+	value := "replacement"
+	content, err := EditPersistentAssignmentContent("config.env", []byte(initial), "GIT_USER_NAME", &value)
+	if err != nil || string(content) != "GIT_USER_NAME='replacement'\n" {
+		t.Fatalf("edited content = %q, %v", content, err)
 	}
 }
 

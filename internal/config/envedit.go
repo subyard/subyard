@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 
@@ -463,14 +462,6 @@ func CreatePersistentFile(configHome, path string, content []byte, guards ...fun
 	return persistFile(configHome, path, content, false)
 }
 
-type envEditRecord struct {
-	envRecord
-	assigned []string
-	// Dormant defaults count for shared-record refusals. Only actual
-	// assignments are candidates for replacement.
-	possible []string
-}
-
 func editAssignmentContent(
 	path string,
 	content []byte,
@@ -478,100 +469,106 @@ func editAssignmentContent(
 	value *string,
 	settings Catalog,
 ) ([]byte, error) {
-	records, err := parseEnvEditRecords(path, content, settings)
-	if err != nil {
+	name = canonicalSettingName(name)
+	policy := operatorDiscardPolicy(nil, settings)
+	before := environment{}
+	assigned := make(map[int]map[string]bool)
+	last := 0
+	observe := func(key, _ string, line int) {
+		key = canonicalSettingName(key)
+		if assigned[line] == nil {
+			assigned[line] = make(map[string]bool)
+		}
+		assigned[line][key] = true
+		if key == name {
+			last = line
+		}
+	}
+	if err := applyEnvReaderObservedRetired(bytes.NewReader(content), path, before, observe, policy, observe); err != nil {
 		return nil, err
 	}
-	name = canonicalSettingName(name)
-	replacement := []byte(name + "=" + quotePersistentValue(dereference(value)) + "\n")
-	last := -1
+
+	var result bytes.Buffer
 	var refusals []error
-	for index := range records {
-		record := records[index]
-		if slices.Contains(record.assigned, name) {
-			last = index
-		}
-		if !slices.Contains(record.possible, name) {
-			continue
-		}
-		for _, other := range record.possible {
-			if other != name {
-				refusals = append(refusals, sourceError(path, record.line, name, "persistent settings", "record can also assign "+other+"; split the assignments before editing", nil))
+	replacement := name + "=" + quotePersistentValue(dereference(value)) + "\n"
+	err := scanEnvRecords(bytes.NewReader(content), path, "persistent settings", func(record envRecord) error {
+		actual := assigned[record.line]
+		if record.text != "" {
+			// A record can also be loaded over a different input layer.
+			// The whole-file comparison covers assignments observed here.
+			possible := make(map[string]bool)
+			observe := func(key, _ string) { possible[canonicalSettingName(key)] = true }
+			probe := envEvaluation{values: environment{}, observe: observe, policy: policy, possible: true}
+			probe.policy.report = observe
+			if err := probe.applyRecord(record.text); err != nil {
+				return err
 			}
+			if actual[name] || possible[name] {
+				for other := range possible {
+					if other != name && !(actual[name] && actual[other]) {
+						refusals = append(refusals, sourceError(path, record.line, name, "persistent settings", "record can also assign "+other+"; split the assignments before editing", nil))
+					}
+				}
+			}
+		}
+		if !actual[name] {
+			result.WriteString(record.raw)
+		} else if value != nil && record.line == last {
+			result.WriteString(replacement)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, domain.CollectRefusals(append(refusals, err)...)
+	}
+	if value != nil && last == 0 {
+		if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
+			result.WriteByte('\n')
+		}
+		result.WriteString(replacement)
+	}
+
+	if result.Len() > 8<<20 {
+		err := sourceError(path, 0, name, "persistent settings", "edited content exceeds its size bound", nil)
+		return nil, domain.CollectRefusals(append(refusals, err)...)
+	}
+	after := environment{}
+	var effective PersistentAssignment
+	observe = func(key, assignedValue string, line int) {
+		if canonicalSettingName(key) != name {
+			return
+		}
+		if value == nil || key != name {
+			refusals = append(refusals, sourceError(path, line, name, "persistent settings", "setting is still assigned by a preserved record; simplify conditional assignments before authoring", nil))
+		}
+		effective = PersistentAssignment{Name: key, Value: assignedValue, Line: line}
+	}
+	if err := applyEnvReaderObservedRetired(bytes.NewReader(result.Bytes()), path, after, observe, policy, observe); err != nil {
+		return nil, domain.CollectRefusals(append(refusals, err)...)
+	}
+	if value != nil && (effective.Name == "" || effective.Value != *value) {
+		refusals = append(refusals, sourceError(path, effective.Line, name, "persistent settings", "a preserved record changes the requested setting; simplify conditional assignments before authoring", nil))
+	}
+
+	changed := func(key string) {
+		if canonicalSettingName(key) != name {
+			refusals = append(refusals, sourceError(path, 0, name, "persistent settings", "edit changes effective setting "+key+"; simplify dependent assignments before authoring", nil))
+		}
+	}
+	for key, previous := range before {
+		if current, exists := after[key]; !exists || current != previous {
+			changed(key)
+		}
+	}
+	for key := range after {
+		if _, existed := before[key]; !existed {
+			changed(key)
 		}
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return nil, err
 	}
-	var result bytes.Buffer
-	for index, record := range records {
-		if !slices.Contains(record.assigned, name) {
-			result.WriteString(record.raw)
-			continue
-		}
-		if value != nil && index == last {
-			result.Write(replacement)
-		}
-	}
-	if value != nil && last == -1 {
-		if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
-			result.WriteByte('\n')
-		}
-		result.Write(replacement)
-	}
-	// Removing a direct assignment can activate a conditional default in a
-	// preserved record. Reject that ambiguity rather than deleting unrelated
-	// settings or saving a file that will conflict on its next load.
-	assignments, err := settings.ParsePersistentAssignments(path, result.Bytes())
-	if err != nil {
-		return nil, err
-	}
-	var effective PersistentAssignment
-	for _, assignment := range assignments {
-		if canonicalSettingName(assignment.Name) != name {
-			continue
-		}
-		if value == nil || assignment.Name != name {
-			return nil, sourceError(path, assignment.Line, name, "persistent settings", "setting is still assigned by a preserved record; simplify conditional assignments before authoring", nil)
-		}
-		effective = assignment
-	}
-	if value != nil && effective.Value != *value {
-		return nil, sourceError(path, effective.Line, name, "persistent settings", "a preserved record changes the requested setting; simplify conditional assignments before authoring", nil)
-	}
 	return result.Bytes(), nil
-}
-
-func parseEnvEditRecords(path string, content []byte, settings Catalog) ([]envEditRecord, error) {
-	var records []envEditRecord
-	evaluation := envEvaluation{values: environment{}, policy: operatorDiscardPolicy(nil, settings)}
-	err := scanEnvRecords(bytes.NewReader(content), path, "persistent settings", func(record envRecord) error {
-		edit := envEditRecord{envRecord: record}
-		if record.text != "" {
-			actual := evaluation
-			actual.observe = func(name, _ string) {
-				edit.assigned = append(edit.assigned, canonicalSettingName(name))
-			}
-			actual.policy.report = actual.observe
-			if err := actual.applyRecord(record.text); err != nil {
-				return err
-			}
-			observe := func(name, _ string) {
-				name = canonicalSettingName(name)
-				if !slices.Contains(edit.possible, name) {
-					edit.possible = append(edit.possible, name)
-				}
-			}
-			possible := envEvaluation{observe: observe, policy: actual.policy, possible: true}
-			possible.policy.report = observe
-			if err := possible.applyRecord(record.text); err != nil {
-				return err
-			}
-		}
-		records = append(records, edit)
-		return nil
-	})
-	return records, err
 }
 
 func quotePersistentValue(value string) string {
