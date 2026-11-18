@@ -2,11 +2,11 @@ name: Veranda native client contracts
 
 on:
   pull_request:
-    paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'cmd/**', 'internal/**', 'go.mod', 'go.sum', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'cmd/**', 'internal/**', 'go.mod', 'go.sum', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', 'dev/package-veranda*.py', 'dev/cargo*', 'dev/veranda_*.py', '.github/workflows/veranda.yml']
   push:
     branches: [master, 'release/**']
     tags: ['v*']
-    paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'cmd/**', 'internal/**', 'go.mod', 'go.sum', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', '.github/workflows/veranda.yml']
+    paths: ['rust-toolchain.toml', 'veranda/**', 'api/yard-rpc/**', 'cmd/**', 'internal/**', 'go.mod', 'go.sum', 'dev/check-veranda*.py', 'dev/measure-veranda*.py', 'dev/package-veranda*.py', 'dev/cargo*', 'dev/veranda_*.py', '.github/workflows/veranda.yml']
   workflow_dispatch:
 
 permissions:

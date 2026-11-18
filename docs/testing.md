@@ -850,7 +850,8 @@ including when `RUSTUP_TOOLCHAIN` is set.
 The target and entrypoint do not install toolchains. `make verify` retains its
 separate core and shipped-profile scope.
 
-The runner temporary-path contract runs first, then Linux resource probe isolation;
+The runner temporary-path contract runs first, then on Linux the resource probe isolation,
+memory probe accounting, bundle packaging and Cargo cache reuse tests;
 a failed prerequisite stops the run. Next, Rust formatting, Clippy, and native client
 tests with `--locked` run in that order, reporting every independent failure.
 Python fixtures use the entrypoint's own interpreter.
