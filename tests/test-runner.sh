@@ -290,18 +290,21 @@ awk -F '\t' '$1 == "check" && $3 == "syntax" && $4 == "failed" { found=1 }
 
 # Profiles own their test entrypoints; discovery does not require core registration.
 cp "$ROOT/dev/test-profiles.sh" "$fixture/dev/test-profiles.sh"
+cp "$ROOT/dev/run-profile-tests.py" "$fixture/dev/run-profile-tests.py"
 mkdir -p "$fixture/config/profiles/example/tests"
 printf '#!/usr/bin/env bash\n[ "$TMPDIR" = /tmp ] || exit 25\nprintf "profile check ran\\n"\n' \
   > "$fixture/config/profiles/example/tests/run.sh"
 (umask 0002; TMPDIR="$fixture/.build" bash "$fixture/dev/test-profiles.sh") > "$tmp/profiles.out" 2>&1
-grep -q 'profile check ran' "$tmp/profiles.out" || fail 'profile tests were not discovered'
+grep -Fxq 'PROFILE TESTS example passed' "$tmp/profiles.out" || fail 'profile tests were not discovered'
+grep -Fxq 'profile check ran' "$fixture"/.build/profile-test-runs/run.*/example.log \
+  || fail 'successful profile output was not retained'
 cp "$ROOT/Makefile" "$fixture/Makefile"
 cp "$fixture/tests/preflight.sh" "$fixture/tests/agent-skills.sh"
 TMPDIR="$fixture/.build" PATH="$tmp/tools:$PATH" RUNNER_BASIC_GO_LOG="$tmp/make-test.go" \
   make -s -C "$fixture" test > "$tmp/make-test.out" 2>&1
 grep -Fxq 'test -count=1 -timeout=20m ./cmd/... ./internal/...' "$tmp/make-test.go" \
   || fail 'make test must rerun core Go checks to detect changed repository inventories'
-grep -q 'profile check ran' "$tmp/make-test.out" || fail 'make test skipped profile tests'
+grep -Fxq 'PROFILE TESTS example passed' "$tmp/make-test.out" || fail 'make test skipped profile tests'
 
 # The Go helper is also a supported direct entrypoint, without the profile wrapper.
 mkdir -p "$fixture/tests/helpers"
@@ -385,17 +388,55 @@ printf 'remaining profile checks\n'
 SH
 (umask 0077; bash "$fixture/dev/test-profiles.sh") > "$tmp/profile-order.out"
 [ "$(grep -c '^permission preflight$' "$tmp/profile-order.out")" -eq 1 ] || fail 'profile preflight repeated'
-[ "$(tail -n 1 "$tmp/profile-order.out")" = 'remaining profile checks' ] || fail 'profile ordering lost'
+[ "$(tail -n 1 "$tmp/profile-order.out")" = 'PROFILE TESTS example passed' ] || fail 'profile ordering lost'
 bash "$fixture/dev/test-profiles.sh" --permissions-only > "$tmp/profile-split.out"
 bash "$fixture/dev/test-profiles.sh" --after-permissions >> "$tmp/profile-split.out"
 [ "$(grep -c '^permission preflight$' "$tmp/profile-split.out")" -eq 1 ] || fail 'split preflight repeated'
 rc=0
 RUNNER_PERMISSION_FAILURE=33 bash "$fixture/dev/test-profiles.sh" > "$tmp/profile-permission-fail.out" 2>&1 || rc=$?
 [ "$rc" -eq 33 ] || fail 'profile preflight hid native exit'
-! grep -q '^remaining profile checks$' "$tmp/profile-permission-fail.out" || fail 'failed preflight ran profile suite'
+! grep -q '^PROFILE TESTS example starting$' "$tmp/profile-permission-fail.out" || fail 'failed preflight ran profile suite'
 rc=0
 bash "$fixture/dev/test-profiles.sh" --e2e --permissions-only > /dev/null 2>&1 || rc=$?
 [ "$rc" -eq 2 ] || fail 'host-free preflight changed E2E execution'
+
+# The second profile can start while the first is still running, and a failure
+# prints its output while preserving both logs and the original exit code.
+mkdir -p "$fixture/config/profiles/second/tests"
+cat > "$fixture/config/profiles/example/tests/run.sh" <<'SH'
+#!/usr/bin/env bash
+[[ "$#" == 2 && "$1" == --after-permissions && "$2" == 'forwarded argument' ]] || exit 32
+if [[ "${SUBYARD_PROFILE_TESTS_SERIAL:-}" != 1 ]]; then
+  for ((i=0; i<100; i++)); do
+    [[ ! -f "$PROFILE_MARKER" ]] || break
+    sleep 0.1
+  done
+  [[ -f "$PROFILE_MARKER" ]] || exit 34
+fi
+printf 'failure stdout\n'
+printf 'failure stderr\n' >&2
+exit 29
+SH
+cat > "$fixture/config/profiles/second/tests/run.sh" <<'SH'
+#!/usr/bin/env bash
+[[ "$#" == 1 && "$1" == 'forwarded argument' ]] || exit 32
+: > "$PROFILE_MARKER"
+printf 'second profile output\n'
+SH
+rc=0
+SUBYARD_PROFILE_TESTS_SERIAL=0 PROFILE_MARKER="$tmp/parallel-started" \
+  bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' > "$tmp/parallel.out" 2>&1 || rc=$?
+[ "$rc" -eq 29 ] || fail 'parallel runner lost the failing profile exit'
+grep -Fxq 'failure stdout' "$tmp/parallel.out" && grep -Fxq 'failure stderr' "$tmp/parallel.out" \
+  || fail 'parallel runner lost failing profile output'
+grep -Fxq 'PROFILE TESTS second passed' "$tmp/parallel.out" || fail 'parallel runner missed a sibling result'
+logs="$(sed -n 's/^PROFILE TESTS logs: //p' "$tmp/parallel.out")"
+grep -Fxq 'failure stderr' "$logs/example.log" && grep -Fxq 'second profile output' "$logs/second.log" \
+  || fail 'parallel runner did not keep separate profile logs'
+rc=0
+SUBYARD_PROFILE_TESTS_SERIAL=1 PROFILE_MARKER="$tmp/serial-started" \
+  bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' > "$tmp/serial.out" 2>&1 || rc=$?
+[ "$rc" -eq 29 ] && [ ! -e "$tmp/serial-started" ] || fail 'serial opt-out lost fail-fast execution'
 
 # The selected matrix uses real children/masks, rejects empty/missing checks,
 # and preserves the first operation failure before later masks.

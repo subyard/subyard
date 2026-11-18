@@ -707,7 +707,11 @@ only when that runner is mutually exclusive with the declaration. The reserved `
 the only built-in exception. A requested incomplete live runner keeps release acceptance incomplete.
 
 Run all profile host-free checks with `bash dev/test-profiles.sh`, or invoke one profile's runner
-directly. Core tests exercise generic APIs with synthetic fixtures; profile tests check their preset
+directly. The shared host-free runner, including under `make verify`, runs up to three profiles
+at once and reports every result. Each invocation keeps a combined stdout/stderr log per profile
+under `.build/profile-test-runs/run.*/` and prints the log on failure. CI retains those logs for
+seven days. Set `SUBYARD_PROFILE_TESTS_SERIAL=1` to run one profile at a time and stop at the first
+failure. Core tests exercise generic APIs with synthetic fixtures; profile tests check their preset
 and runtime through those APIs. Profile test directories are excluded from runtime release bundles.
 For profile-owned live checks, use `bash dev/test-profiles.sh --e2e --slot N` or a profile's
 `tests/e2e/acceptance.sh` directly, following the VM allocation guide below. The shared runner

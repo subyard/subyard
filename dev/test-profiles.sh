@@ -78,11 +78,10 @@ if [ "$suite" = run.sh ] && [ "$permissions" != passed ]; then
   done
 fi
 [ "$permissions" != only ] || exit 0
+if [ "$suite" = run.sh ]; then
+  exec python3 "$ROOT/dev/run-profile-tests.py" "${#runners[@]}" "${runners[@]}" "$@"
+fi
 for runner in "${runners[@]}"; do
   printf 'PROFILE TESTS %s\n' "${runner#"$ROOT/"}"
-  if [ "$suite" = run.sh ] && [ -f "${runner%run.sh}permissions.sh" ]; then
-    bash "$runner" --after-permissions "$@"
-  else
-    bash "$runner" "$@"
-  fi
+  bash "$runner" "$@"
 done
