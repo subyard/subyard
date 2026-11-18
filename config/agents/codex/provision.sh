@@ -16,7 +16,7 @@ ARCH="${CODEX_ARCH:-}"
 DEV_USER="${DEV_USER:-dev}"
 DEV_HOME="${CODEX_DEV_HOME:-}"
 MANAGED_CHECK_MARKER='# Managed by Subyard Codex provision.'
-GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-off}"
+GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
 
 # BEGIN generated Git approval hook
 git_approval_hook() {

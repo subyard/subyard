@@ -287,9 +287,9 @@ run_hook amd64 "$root" >/dev/null
 [ "$(fetch_count)" -eq 8 ] || fail "older release metadata downloaded an artifact"
 [ "$("$link" --version)" = 'codex-cli 0.148.0' ] || fail "older release metadata downgraded a working runtime"
 
-# Upgrade a previously managed prompt policy with the setting unset, then restore prompt.
+# Apply off to a previously managed prompt policy, then restore prompt.
 cp "$check" "$tmp/prompt-check"
-(unset CODING_TOOL_GIT_APPROVAL; run_hook amd64 "$root") >/dev/null
+run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL=off >/dev/null
 python3 - "$requirements" <<'PY'
 import pathlib, sys, tomllib
 policy = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())

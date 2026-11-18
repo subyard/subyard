@@ -47,6 +47,7 @@ fi
 
 # --- 3. provision enabled agent CLIs ----------------------------------------
 # Hooks live under config/agents/<name> and run as root in the yard.
+# Resolve the Git approval default here so installed prompt package hashes stay valid.
 echo "Coding integrations:"
 for _agent in ${CODING_TOOL_INTEGRATIONS:-}; do
   _provision_var="AGENT_${_agent}_PROVISION"

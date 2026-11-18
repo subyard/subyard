@@ -49,7 +49,11 @@ func TestAppliedIntegrationSettingsPreserveAbsentInputs(t *testing.T) {
 	if desired["DEV_USER"] != "other" || desired["AGENT_sample_PROJECTS_CHANGED"] != "new-hook" {
 		t.Fatal("applied inspection changed desired inputs")
 	}
+	desired["CODING_TOOL_GIT_APPROVAL"] = "off"
 	legacy := catalog.WithAppliedIntegrationInitSettings(desired, nil)
+	if legacy["CODING_TOOL_GIT_APPROVAL"] != "prompt" {
+		t.Fatal("legacy inventory without a snapshot lost its installed prompt mode")
+	}
 	if legacy["AGENT_sample_PROJECTS_CHANGED"] != "new-hook" {
 		t.Fatal("legacy unknown baseline was treated as a complete snapshot")
 	}

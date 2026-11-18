@@ -7,7 +7,7 @@ fixture="$(mktemp -d /tmp/subyard-claude-native.XXXXXX)"
 trap 'rm -rf -- "$fixture"' EXIT
 if [ "${1:-}" != --installed-policy ]; then
   if [ "${1:-}" = --install-only ]; then
-    sudo -n bash "$ROOT/config/agents/claude/provision.sh"
+    sudo -n env CODING_TOOL_GIT_APPROVAL=off bash "$ROOT/config/agents/claude/provision.sh"
   else
     sudo -n env CODING_TOOL_GIT_APPROVAL=prompt bash "$ROOT/config/agents/claude/provision.sh"
   fi
@@ -16,7 +16,7 @@ if [ "${1:-}" = --install-only ]; then
   version="$(claude --version)"
   claude --help >/dev/null
   before="$(sha256sum /opt/subyard/claude/claude)"
-  sudo -n bash "$ROOT/config/agents/claude/provision.sh"
+  sudo -n env CODING_TOOL_GIT_APPROVAL=off bash "$ROOT/config/agents/claude/provision.sh"
   [ "$before" = "$(sha256sum /opt/subyard/claude/claude)" ]
   claude-policy-check
   sudo -n chmod 0777 /opt/subyard/claude

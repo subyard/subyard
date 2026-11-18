@@ -160,9 +160,11 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 	for _, step := range []struct {
 		mode, want string
 		applied    bool
+		settings   map[string]string
 	}{
 		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
 		{mode: "", want: "{\"approval\":\"ask\"}\n", applied: true},
+		{mode: "", want: "{\"approval\":\"ask\"}\n", applied: true, settings: map[string]string{}},
 		{mode: "", want: "{\"approval\":\"allow\"}\n"},
 		{mode: "prompt", want: "{\"approval\":\"ask\"}\n"},
 	} {
@@ -170,7 +172,7 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 		if step.applied {
 			// The older inventory snapshot omitted its implicit prompt mode.
 			projected := (config.Catalog{}).WithAppliedIntegrationInitSettings(
-				map[string]string{"CODING_TOOL_GIT_APPROVAL": "off"}, map[string]string{},
+				map[string]string{"CODING_TOOL_GIT_APPROVAL": "off"}, step.settings,
 			)
 			mode = projected["CODING_TOOL_GIT_APPROVAL"]
 		}
@@ -204,6 +206,47 @@ func TestConfigInventoryUpgradesImplicitGitApprovalAndRestoresPrompt(t *testing.
 		got, err := os.ReadFile(f.home + "/settings")
 		if err != nil || string(got) != step.want {
 			t.Fatalf("%s: installed %q, want %q, read error: %v", step.mode, got, step.want, err)
+		}
+	}
+}
+
+func TestInstalledGitApprovalPackageRecordsSurviveDefaultChange(t *testing.T) {
+	const root = "../../.."
+	runtime := Runtime{
+		RepositoryRoot: root,
+		Yard:           domain.Context{DevUser: "dev"},
+		Environment: []string{
+			"CODING_TOOL_INTEGRATIONS=claude codex",
+			"AGENT_claude_PROVISION=" + root + "/config/agents/claude/provision.sh",
+			"AGENT_codex_PROVISION=" + root + "/config/agents/codex/provision.sh",
+			"CODING_TOOL_GIT_APPROVAL=prompt",
+		},
+	}
+	// Reconstruct the historical fallback line in the actual package sources.
+	// The default must change at the runtime handoff without replacing the
+	// provision bytes that participate in installed prompt package identity.
+	previous := func(asset config.MaterializedAsset) ([]byte, error) {
+		payload, err := asset.ReadSource()
+		return []byte(strings.ReplaceAll(string(payload),
+			`GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-off}"`,
+			`GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"`)), err
+	}
+	historical, err := runtime.integrationPackageArtifacts("observe", previous)
+	if err != nil || len(historical) != 2 {
+		t.Fatalf("historical packages: %#v, %v", historical, err)
+	}
+	current, err := runtime.integrationPackageArtifacts("observe", nil)
+	if err != nil || !reflect.DeepEqual(current, historical) {
+		t.Fatalf("installed prompt package identity changed: %#v, want %#v, error: %v", current, historical, err)
+	}
+	runtime.Environment[3] = "CODING_TOOL_GIT_APPROVAL=off"
+	desired, err := runtime.integrationPackageArtifacts("observe", nil)
+	if err != nil || len(desired) != len(historical) {
+		t.Fatalf("desired packages: %#v, %v", desired, err)
+	}
+	for index, entry := range desired {
+		if entry.Digest == historical[index].Digest {
+			t.Fatalf("%s package did not need reconciliation for off", entry.ID)
 		}
 	}
 }

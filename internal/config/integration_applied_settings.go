@@ -36,7 +36,7 @@ func (catalog Catalog) IntegrationInitSettings(values map[string]string) map[str
 }
 
 // WithAppliedIntegrationInitSettings projects the complete applied input domain
-// without allowing newly authored absent-to-present fields to enter inspection.
+// for an installed inventory. Legacy inventories retain other unknown inputs.
 func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[string]string) map[string]string {
 	result := make(map[string]string, len(values)+len(applied))
 	for name, value := range values {
@@ -45,10 +45,9 @@ func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[st
 		}
 		result[name] = value
 	}
-	if applied != nil {
-		// Snapshots from the prompt-by-default release omitted prompt.
-		result["CODING_TOOL_GIT_APPROVAL"] = "prompt"
-	}
+	// Both legacy inventories without a snapshot and snapshots that omit the
+	// setting record the installed prompt mode. Explicit off overrides it below.
+	result["CODING_TOOL_GIT_APPROVAL"] = "prompt"
 	for name, value := range applied {
 		result[name] = value
 	}

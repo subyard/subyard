@@ -190,9 +190,9 @@ grep -Fq 'Git approval hook permissions drifted' "$tmp/hook-drift.err"
 grep -Fq 'Git approval hook content drifted' "$tmp/hook-drift.err"
 run_hook "$root" >/dev/null
 
-# Upgrade a previously managed prompt policy with the setting unset, then restore prompt.
+# Apply off to a previously managed prompt policy, then restore prompt.
 jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'prompt mode lacks the Git ask rules'
-(unset CODING_TOOL_GIT_APPROVAL; run_hook "$root") >/dev/null
+CODING_TOOL_GIT_APPROVAL=off run_hook "$root" >/dev/null
 jq -e '. == {"$comment":"Subyard Claude permission policy","env":{DISABLE_UPDATES:"1"}}' "$policy" >/dev/null \
   || fail 'off mode kept the Git ask rules or dropped the update lock'
 [ "$(stat -c '%a' "$policy")" = 644 ] || fail 'off mode policy mode drifted'
