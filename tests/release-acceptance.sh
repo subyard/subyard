@@ -4,6 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import copy
 import importlib.util
+from functools import partial
 import hashlib
 import io
 import json
@@ -2793,7 +2794,7 @@ while True: time.sleep(1)
                 record, _ = m.original_attempt(output, persisted, blocked, persisted["checks"][blocked])
                 self.assertEqual(record["result"]["status"], "passed")
 
-    def test_capacity_queue_stops_for_unknown_refusals_failures_and_started_work(self):
+    def test_unknown_refusals_and_started_work_require_broker_confirmation(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         typed = "agent-e2e: retryable capacity refusal for slot-1: resource=memory; retry after resources become available\n"
@@ -2812,8 +2813,10 @@ while True: time.sleep(1)
                            "checks": {name: {"status": "passed" if name == "verify" else "pending"} for name in checks}}
                 with patch.object(m, "load_bound", return_value=(output, receipt)), \
                      patch.object(m, "commands", return_value=checks), \
-                     patch.object(m, "source_fingerprint", return_value="a" * 64):
+                     patch.object(m, "source_fingerprint", return_value="a" * 64), \
+                     patch.object(m, "broker_slots", return_value={1: "available"}) as broker:
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
+                broker.assert_called_once()
                 persisted = json.loads((output / "receipt.json").read_text())
                 attempt = persisted["checks"][blocked]
                 self.assertEqual(attempt["status"], "failed")
@@ -2822,16 +2825,17 @@ while True: time.sleep(1)
                 self.assertEqual(attempt["failure_class"], "unknown")
                 self.assertNotIn("reason", attempt)
                 self.assertEqual(persisted["result"], "failed")
-                self.assertEqual(persisted["checks"][following]["status"], "pending")
+                self.assertEqual(persisted["checks"][following]["status"], "passed")
                 events = [json.loads(line) for line in (output / "events.jsonl").read_text().splitlines()]
-                self.assertEqual([item["check"] for item in events if item["event"] == "check-start"], [blocked])
+                self.assertEqual([item["check"] for item in events if item["event"] == "check-start"], [blocked, following])
                 results = [item for item in events if item["event"] == "check-result"]
-                self.assertEqual([(item["status"], item["exit_code"], item["failure_class"]) for item in results],
-                                 [("failed", code, "unknown")])
+                self.assertEqual([(item["check"], item["status"]) for item in results],
+                                 [(blocked, "failed"), (following, "passed")])
+                self.assertEqual((results[0]["exit_code"], results[0]["failure_class"]), (code, "unknown"))
                 self.assertNotIn("reason", results[0])
                 self.assertEqual(events[-1]["status"], "failed")
 
-    def test_interrupted_attempt_saved_and_untyped_blocked_worker_stops_queue(self):
+    def test_interrupted_attempt_saved_and_untyped_block_leaves_queue_pending_at_deadline(self):
         # This scheduler/reporting fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         with tempfile.TemporaryDirectory() as temporary:
@@ -2849,7 +2853,8 @@ while True: time.sleep(1)
                  patch.object(m, "commands", return_value=checks), \
                  patch.object(m, "source_fingerprint", return_value="a" * 64), \
                  patch.object(m, "execute", side_effect=execute):
-                self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
+                with patch.object(m, "dispatch_live", partial(m.dispatch_live, recovery_wait_seconds=0)):
+                    self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
                 self.assertEqual(calls, ["profile:sample/one"])
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(persisted["checks"]["profile:sample/two"]["status"], "pending")
@@ -3253,13 +3258,13 @@ while True: time.sleep(1)
                 self.assertEqual((code, argv), (2, []), arguments)
                 self.assertIn("release-vm-check:", error)
 
-    def test_live_failure_inside_a_clean_lease_keeps_the_slot_for_later_checks(self):
+    def test_live_failure_reuses_slot_after_clean_release_or_broker_confirmation(self):
         # This scheduler fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         lease = {"status": "failed", "termination": "exit", "exit_code": 1, "duration_seconds": 1,
                  "environment_evidence": "recorded", "environments": [], "cleanup_status": "recorded",
                  "cleanup": {"guest-cleanup": {"exit_code": 0}, "lease-release": {"exit_code": 0}}}
-        for name, failure, continues in (("lease", lease, True),
+        for name, failure, clean_release in (("lease", lease, True),
                                          ("cleanup", {**lease, "exit_code": 3}, False),
                                          ("cleanup-phase", {**lease, "cleanup": {**lease["cleanup"], "guest-cleanup": {"exit_code": 1}}}, False),
                                          ("no-cleanup-witness", {**lease, "cleanup": {}, "cleanup_status": "unknown"}, False),
@@ -3281,12 +3286,14 @@ while True: time.sleep(1)
                 with patch.object(m, "load_bound", return_value=(output / "source", receipt)), \
                      patch.object(m, "commands", return_value=checks), \
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
-                     patch.object(m, "execute", side_effect=execute):
+                     patch.object(m, "execute", side_effect=execute), \
+                     patch.object(m, "broker_slots", return_value={1: "available"}) as broker:
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                self.assertEqual(calls, ["vm:one", "vm:two"] if continues else ["vm:one"])
+                self.assertEqual(broker.call_count, 0 if clean_release else 1)
+                self.assertEqual(calls, ["vm:one", "vm:two"])
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(persisted["checks"]["vm:one"]["status"], "failed")
-                self.assertEqual(persisted["checks"]["vm:two"]["status"], "passed" if continues else "pending")
+                self.assertEqual(persisted["checks"]["vm:two"]["status"], "passed")
                 self.assertEqual(persisted["result"], "failed")
 
     def test_single_collector_lock(self):

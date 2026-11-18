@@ -34,7 +34,7 @@ TERM_GRACE_SECONDS = 30
 KILL_GRACE_SECONDS = 10
 
 
-DEFAULT_SLOTS = (1, 2, 3, 4)
+SLOT_COUNTS = (1, 2, 3, 4)
 SLOT_POLL_SECONDS = 5
 SLOT_STATES = {"available", "held", "provisioning", "draining", "quarantined", "recovering", "unavailable"}
 
@@ -59,13 +59,13 @@ class SlotSelection(argparse.Action):
 def add_slot_arguments(parser):
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--slots", type=slot_list, action=SlotSelection, metavar="slot-N[,slot-N...]",
-                       help="use exactly these slots (default: slots 1–4)")
-    group.add_argument("--slot-count", type=int, choices=DEFAULT_SLOTS, action=SlotSelection,
+                       help="use exactly these slots")
+    group.add_argument("--slot-count", type=int, choices=SLOT_COUNTS, action=SlotSelection,
                        help="use slots 1 through N")
 
 
 def selected_slots(args):
-    return tuple(range(1, args.slot_count + 1)) if args.slot_count else args.slots or DEFAULT_SLOTS
+    return tuple(range(1, args.slot_count + 1)) if args.slot_count else args.slots or ()
 
 
 @contextmanager
@@ -1149,7 +1149,7 @@ def slot_continues_after(result):
             and all(item.get("exit_code") == 0 for item in cleanup.values()))
 
 
-def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=DEFAULT_SLOTS, types=(), with_vms=False):
+def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=(), with_vms=False):
     if len(set(slots)) != len(slots) or any(type(slot) is not int or slot < 1 or slot > 999 for slot in slots):
         raise ValueError("slots must be unique integers from 1 to 999")
     if any(not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", kind) for kind in types):
@@ -1368,7 +1368,7 @@ def broker_slots(env):
     return {}
 
 
-def dispatch_live(live, slots, env, attempt):
+def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
     if not live:
         return
     pending = deque(live)
@@ -1379,8 +1379,9 @@ def dispatch_live(live, slots, env, attempt):
     completion = 0
     next_probe = 0
     deadline = None
-    duration = re.fullmatch(r"([0-9]{1,6})([sm])", env["SUBYARD_E2E_CAPACITY_WAIT"])
-    capacity_wait = int(duration[1]) * (60 if duration[2] == "m" else 1) if duration else 0
+    if recovery_wait_seconds is None:
+        duration = re.fullmatch(r"([0-9]{1,6})([sm])", env["SUBYARD_E2E_CAPACITY_WAIT"])
+        recovery_wait_seconds = int(duration[1]) * (60 if duration[2] == "m" else 1) if duration else 0
 
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
         while pending or active or blocked:
@@ -1433,7 +1434,7 @@ def dispatch_live(live, slots, env, attempt):
             if active:
                 deadline = None
             elif deadline is None:
-                deadline = now + capacity_wait
+                deadline = now + recovery_wait_seconds
             if deadline is not None and now >= deadline:
                 print("INCOMPLETE: no selected slot returned within the capacity wait", flush=True)
                 break

@@ -58,13 +58,17 @@ class FakeControllers:
 
 
 class SchedulerTests(unittest.TestCase):
-    def dispatch(self, slots, attempts, broker=None, capacity_wait="30s"):
+    def dispatch(self, slots, attempts, broker=None, recovery_wait_seconds=None):
         controllers = FakeControllers(attempts, broker)
-        env = {"SUBYARD_E2E_CAPACITY_WAIT": capacity_wait}
-        with patch.multiple(acceptance, ThreadPoolExecutor=lambda **_: controllers,
-                            wait=controllers.wait, time=SimpleNamespace(monotonic=lambda: controllers.now),
-                            broker_slots=controllers.status),              patch.object(acceptance.STOP, "wait", side_effect=controllers.advance):
-            acceptance.dispatch_live(attempts, slots, env, lambda name, slot: next(controllers.attempts[name]))
+        env = {"SUBYARD_E2E_CAPACITY_WAIT": acceptance.LIVE_CAPACITY_WAIT}
+        with (
+            patch.multiple(acceptance, ThreadPoolExecutor=lambda **_: controllers,
+                           wait=controllers.wait, time=SimpleNamespace(monotonic=lambda: controllers.now),
+                           broker_slots=controllers.status),
+            patch.object(acceptance.STOP, "wait", side_effect=controllers.advance),
+        ):
+            acceptance.dispatch_live(attempts, slots, env, lambda name, slot: next(controllers.attempts[name]),
+                                     recovery_wait_seconds=recovery_wait_seconds)
         return controllers
 
     def test_all_selected_slots_start_and_free_slots_keep_working(self):
@@ -93,7 +97,7 @@ class SchedulerTests(unittest.TestCase):
     def test_pending_lane_stays_pending_when_no_slot_returns(self):
         controllers = self.dispatch((4,), {
             "a": [(3, FAILED)], "b": [(1, PASSED)],
-        }, lambda now: {1: "available", 4: "draining"}, capacity_wait="12s")
+        }, lambda now: {1: "available", 4: "draining"}, recovery_wait_seconds=12)
         self.assertEqual(controllers.started, [(0, "a", 4)])
         self.assertEqual(controllers.probes, [3, 8, 13])
         self.assertEqual(controllers.now, 15)
@@ -128,7 +132,7 @@ class SchedulerTests(unittest.TestCase):
         parser = argparse.ArgumentParser(exit_on_error=False)
         acceptance.add_slot_arguments(parser)
         for flags, slots in (
-            ([], (1, 2, 3, 4)),
+            ([], ()),
             (["--slot-count", "2"], (1, 2)),
             (["--slots", "slot-4,slot-2"], (4, 2)),
         ):

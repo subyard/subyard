@@ -114,7 +114,7 @@ python3 dev/release-acceptance.py run --output .build/release-local \
   --only p0-release-smoke --slots slot-1
 ```
 
-Local VM execution uses slots 1–4 by default. Use `--slots slot-2,slot-4` for an exact set,
+Select slots explicitly for local VM execution. Use `--slots slot-2,slot-4` for an exact set,
 or `--slot-count 2` for slots 1 and 2. Slot flags alone do not request local VM execution.
 Checks without counted hosted evidence or an explicit local request remain `not-run` in acceptance
 and publication. Once requested, incomplete or failed checks block the candidate, including after
@@ -416,10 +416,10 @@ Agents preparing a release apply the
 
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).
-  Long VM smoke and shipped-profile VM checks run only on explicit operator request:
-  `accept --with-vms` or collector `run --only CHECK`. Slot selection defaults to slots 1–4.
-  Core `p0-release-smoke` is mandatory: local-only acceptance remains incomplete until it passes, and it cannot be excluded
-  or waived as optional. Unrequested shipped-profile VM checks remain `not-run`,
+  Request long VM smoke and shipped-profile VM checks using `accept --with-vms` or collector
+  `run --only CHECK` and select slots with `--slots` or `--slot-count`.
+  Core `p0-release-smoke` is mandatory and cannot be excluded or waived as optional. Local-only
+  acceptance remains incomplete until it passes. Unrequested shipped-profile VM checks remain `not-run`,
   never passed; requested incomplete or failed checks block acceptance/publication.
   Optional external checks follow [external checks](#external-checks).
   Existing CI/merge checks and risk-based development validation are unchanged.
@@ -463,7 +463,7 @@ python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
 Add `--with-vms` to `preflight`/`run` to request all VM smoke, core and profile checks,
-or use `run --only p0-release-smoke --slots slot-1` for one check. Select an exact set
+or use `run --only p0-release-smoke --slots slot-1` for one check. For local VM execution, select an exact set
 with `--slots slot-2,slot-4` or the first N slots with `--slot-count N` (1–4).
 Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
 (full P0 and its split lanes, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
