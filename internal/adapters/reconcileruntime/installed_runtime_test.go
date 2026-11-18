@@ -52,7 +52,7 @@ func TestInstalledGuestMarkerWithMissingHelperIsStaleAndRejectsChangedAssessment
 	prepare := func(payload string) {
 		incus.ExecSteps = []testkit.IncusExecStep{
 			{Result: ports.InstanceExecResult{Stdout: []byte(payload)}},
-			{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("fixture helper missing")},
+			{Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}},
 		}
 	}
 	runtime := Runtime{RepositoryRoot: root, Incus: incus, Executor: incus, Environment: []string{"ALLOWS_CODING_TOOLS=false"}, Yard: domain.Context{IncusProject: "p", YardInstanceName: "i", Paths: domain.RuntimePaths{DataHome: private, OperatorHome: private}}}
@@ -201,7 +201,7 @@ func TestInstalledReleaseReadinessUsesAppliedInitSettings(t *testing.T) {
 				var previewErr error
 				if stale {
 					preview.ExitCode = 1
-					previewErr = errors.New("fixture helper stale")
+					previewErr = &ports.GuestExitError{Code: 1}
 				}
 				return []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: projection}}, {}, {Result: preview, Err: previewErr}, {Result: ports.InstanceExecResult{Stdout: []byte("ccusage-current\n")}}, {}}
 			}

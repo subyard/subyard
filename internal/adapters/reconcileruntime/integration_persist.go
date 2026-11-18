@@ -30,6 +30,7 @@ type PersistMapping struct {
 }
 
 type persistEntry struct {
+	owner         string   // declared mapping owner, independent of the plan binding
 	Integration   string   `json:"integration"`
 	Source        string   `json:"source"`
 	Target        string   `json:"target"`
@@ -79,10 +80,10 @@ func (observation persistObservation) changedIntegration() string {
 		if len(entry.Ops) == 0 {
 			continue
 		}
-		if entry.Integration == "" || id != "" && id != entry.Integration {
+		if entry.owner == "" || id != "" && id != entry.owner {
 			return ""
 		}
-		id = entry.Integration
+		id = entry.owner
 	}
 	return id
 }
@@ -232,7 +233,7 @@ func (runtime Runtime) persistMappings(entries []integrationArtifact) ([]Persist
 	return result, nil
 }
 
-func (runtime Runtime) runPersist(ctx context.Context, mode string, mappings []PersistMapping, extra map[string]any) ([]byte, error) {
+func (runtime Runtime) runPersist(ctx context.Context, mode string, mappings []PersistMapping, extra map[string]any, item integrationWorkItem) ([]byte, error) {
 	uid := runtime.Yard.DevUID
 	if uid <= 0 {
 		uid = 1000
@@ -247,41 +248,60 @@ func (runtime Runtime) runPersist(ctx context.Context, mode string, mappings []P
 		return result.Stdout, nil
 	}
 	if refusal := ownershipRefusal("persist transfer evidence is unavailable; data was preserved", result, err); !IntegrationOwnershipConflict(refusal) {
-		return nil, refusal
+		return nil, item.refusal(refusal)
 	}
-	return nil, runtime.persistRefusal(result.Stderr)
+	return nil, runtime.persistRefusal(result.Stderr, mappings, item)
 }
 
-func (runtime Runtime) observePersist(ctx context.Context, entries []integrationArtifact) (persistObservation, error) {
+func (runtime Runtime) observePersist(ctx context.Context, entries []integrationArtifact, phase string) (persistObservation, error) {
+	item := runtime.integrationRead(phase, "persist", "")
 	mappings, err := runtime.persistMappings(entries)
 	if err != nil || len(mappings) == 0 {
-		return persistObservation{}, err
+		return persistObservation{}, item.refusal(err)
 	}
-	output, err := runtime.runPersist(ctx, "observe", mappings, nil)
+	output, err := runtime.runPersist(ctx, "observe", mappings, nil, item)
+	var observation persistObservation
 	if err != nil {
-		// A refused or deferred transfer still keeps its paths out of artifact conflicts.
+		// A refused transfer can still supply inventory projections.
 		var refused persistRefused
 		if errors.As(err, &refused) {
-			return persistObservation{Entries: refused.entries}, err
+			observation.Entries, err = refused.entries, refused.error
 		}
-		return persistObservation{}, err
+	} else if json.Unmarshal(output, &observation) != nil || len(observation.Fingerprint) != 64 {
+		observation = persistObservation{}
+		err = item.refusal(errors.New("invalid persist transfer observation"))
 	}
-	var observation persistObservation
-	if json.Unmarshal(output, &observation) != nil || len(observation.Fingerprint) != 64 {
-		return persistObservation{}, errors.New("invalid persist transfer observation")
+	owners := make(map[string]string, len(mappings))
+	for _, mapping := range mappings {
+		owners[mapping.Source] = mapping.Integration
 	}
-	return observation, nil
+	for i, entry := range observation.Entries {
+		observation.Entries[i].owner = owners[entry.Source]
+		delete(owners, entry.Source)
+	}
+	if err != nil {
+		// Skip inventory reads for paths whose persist evidence was unavailable.
+		// The remainder of the inventory can still be observed.
+		for _, mapping := range mappings {
+			if _, missing := owners[mapping.Source]; missing {
+				observation.Entries = append(observation.Entries, persistEntry{Source: mapping.Source, Persist: "deferred"})
+			}
+		}
+	}
+
+	return observation, err
 }
 
 func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationArtifact, approved persistObservation) error {
 	if !approved.changed() {
 		return nil
 	}
+	item := runtime.integrationItem("apply persist", approved.changedIntegration())
 	mappings, err := runtime.persistMappings(entries)
 	if err != nil {
-		return err
+		return item.refusal(err)
 	}
-	output, err := runtime.runPersist(ctx, "apply", mappings, map[string]any{"expected": approved.Fingerprint, "retire": approved.retireSources()})
+	output, err := runtime.runPersist(ctx, "apply", mappings, map[string]any{"expected": approved.Fingerprint, "retire": approved.retireSources()}, item)
 	if err != nil {
 		return err
 	}
@@ -289,7 +309,7 @@ func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationAr
 		Results []persistOutcome `json:"results"`
 	}
 	if json.Unmarshal(output, &applied) != nil {
-		return errors.New("invalid persist transfer result")
+		return item.refusal(errors.New("invalid persist transfer result"))
 	}
 	if runtime.Stderr != nil {
 		for _, line := range persistOutcomeLines(applied.Results) {
@@ -325,7 +345,7 @@ func (runtime Runtime) ReadPersistRetained(ctx context.Context) ([]PersistRetain
 	if err != nil || len(mappings) == 0 {
 		return nil, err
 	}
-	output, err := runtime.runPersist(ctx, "retained", mappings, nil)
+	output, err := runtime.runPersist(ctx, "retained", mappings, nil, integrationWorkItem{})
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +417,7 @@ type persistRefused struct {
 func (err persistRefused) Unwrap() error { return err.error }
 
 // Only typed persist conflicts are pending configuration.
-func (runtime Runtime) persistRefusal(stderr []byte) error {
+func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, item integrationWorkItem) error {
 	var report struct {
 		Conflicts []struct{ Reason, Path, Detail, Integration string } `json:"conflicts"`
 		Entries   []persistEntry                                       `json:"entries"`
@@ -411,13 +431,17 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 		if report.Error != "" && len(report.Error) <= 63 && domain.SafeID(report.Error) {
 			message = fmt.Sprintf("persist transfer program failed (%s); data was preserved", report.Error)
 		}
-		return errors.New(message)
+		return item.refusal(errors.New(message))
 	}
 	inspect := func(path string) string {
 		return shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "namei", "-l", "--", path})
 	}
 	causes := []error{}
 	for _, conflict := range report.Conflicts {
+		finding := item
+		if slices.ContainsFunc(mappings, func(mapping PersistMapping) bool { return mapping.Integration == conflict.Integration }) {
+			finding = runtime.integrationItem(item.step, conflict.Integration)
+		}
 		message, retry := "", shellquote.Command([]string{"yard", "-Y", yard, "init"})
 		switch conflict.Reason {
 		case "persist adoption pending":
@@ -453,13 +477,13 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 			message = fmt.Sprintf("persist transfer in yard %s: the transfer descriptor %q is not a complete Subyard record; data was preserved. Inspect it and move it aside, then repeat yard init", yard, conflict.Path)
 			retry = inspect(conflict.Path)
 		case "integration plan is stale":
-			causes = append(causes, fmt.Errorf("%w: persist transfer state changed after planning", domain.ErrPlanStale))
+			causes = append(causes, finding.refusal(fmt.Errorf("%w: persist transfer state changed after planning", domain.ErrPlanStale)))
 			continue
 		default:
 			message = fmt.Sprintf("persist transfer in yard %s refused (%s) at %q; data was preserved. Inspect the pending transfers, then repeat", yard, conflict.Reason, conflict.Path)
 			retry = status
 		}
-		causes = append(causes, integrationOwnershipError{pendingConfiguration: true, message: message, retry: retry})
+		causes = append(causes, finding.refusal(integrationOwnershipError{pendingConfiguration: true, message: message, retry: retry}))
 	}
 	if len(report.Entries) != 0 {
 		return persistRefused{domain.CollectRefusals(causes...), report.Entries}
@@ -487,7 +511,7 @@ func (runtime Runtime) InspectPersistTransfers(ctx context.Context) (plan Integr
 	if err != nil {
 		return IntegrationPlan{}, false, err
 	}
-	observation, err := runtime.observePersist(ctx, entries)
+	observation, err := runtime.observePersist(ctx, entries, "inspect")
 	return persistInspectionPlan(observation, err, func() (IntegrationPlan, error) { return runtime.IntegrationPlan(ctx) })
 }
 

@@ -88,7 +88,7 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 		}
 		if len(paths) != 0 {
 			output := runtime.Stderr
-			if runtime.applyingIntegrations && runtime.PersistFinishOnly {
+			if runtime.applyingIntegrations {
 				output = nil
 			}
 			if err := runtime.runScript(ctx, output, "refresh-agent-skills.sh", "apply"); err != nil {
@@ -181,7 +181,12 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 			continue
 		}
 		if err != nil {
-			refusals = append(refusals, runtime.integrationConfigApplyError(file, fmt.Errorf("%s: %w", file.label, err)))
+			if runtime.applyingIntegrations {
+				err = runtime.integrationItem("apply configs", file.integration).refusal(err)
+			} else {
+				err = fmt.Errorf("%s: %w", file.label, err)
+			}
+			refusals = append(refusals, err)
 			continue
 		}
 		bytes += len(payload)
@@ -263,8 +268,12 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			fmt.Fprintf(output, "  [ ok ] %s: no source — skipping\n", file.label)
 			continue
 		}
+		item := runtime.integrationItem("apply configs", file.integration)
 		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
-			return runtime.integrationConfigApplyError(file, fmt.Errorf("apply %s: %w", file.label, err))
+			if runtime.applyingIntegrations {
+				return item.refusal(err)
+			}
+			return fmt.Errorf("apply %s: %w", file.label, err)
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
@@ -282,13 +291,6 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	}
 	fmt.Fprintln(output, "  [ ok ] Agent instructions and configs refreshed.")
 	return nil
-}
-
-func (runtime Runtime) integrationConfigApplyError(file guestConfigFile, err error) error {
-	if runtime.applyingIntegrations {
-		return runtime.integrationApplyDiagnostic(err, "configs", file.integration)
-	}
-	return err
 }
 
 func (runtime Runtime) prepareConfigDiagnostics(ctx context.Context, prepared *PreparedConfigs) (*configDiagnosticCapture, error) {

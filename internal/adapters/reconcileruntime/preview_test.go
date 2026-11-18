@@ -34,8 +34,10 @@ func (fixture previewFileExecutor) Exec(ctx context.Context, _, _ string, reques
 		"regular file|644|0:0", "regular file|644|"+fixture.endpointOwner).Replace(command[3])
 	output, err := exec.CommandContext(ctx, command[0], command[1:]...).CombinedOutput()
 	result := ports.InstanceExecResult{Stdout: output}
-	if err != nil {
-		result.ExitCode = 1
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		result.ExitCode = exit.ExitCode()
+		err = &ports.GuestExitError{Code: result.ExitCode}
 	}
 	return result, err
 }

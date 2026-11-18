@@ -2213,8 +2213,8 @@ exec "$1" --version
 }
 
 type integrationProbe struct {
-	integration string
-	command     string
+	item    integrationWorkItem
+	command string
 }
 
 func (runtime Runtime) provisionAgentCommands(phase string) ([]integrationProbe, error) {
@@ -2225,8 +2225,9 @@ func (runtime Runtime) provisionAgentCommands(phase string) ([]integrationProbe,
 		if provision == "" {
 			continue
 		}
+		item := runtime.integrationRead(phase, "command", agent)
 		if !regularFile(provision) {
-			causes = append(causes, runtime.integrationObservationDiagnostic(fmt.Errorf("agent %s provision hook is missing", agent), phase, agent))
+			causes = append(causes, item.refusal(errors.New("provision hook is missing")))
 			continue
 		}
 		command := runtime.environmentValue("AGENT_" + agent + "_COMMAND")
@@ -2236,10 +2237,10 @@ func (runtime Runtime) provisionAgentCommands(phase string) ([]integrationProbe,
 			continue
 		}
 		if !safeCommand(command) {
-			causes = append(causes, runtime.integrationObservationDiagnostic(fmt.Errorf("agent %s command is invalid", agent), phase, agent))
+			causes = append(causes, item.refusal(errors.New("invalid provision command")))
 			continue
 		}
-		commands = append(commands, integrationProbe{integration: agent, command: command})
+		commands = append(commands, integrationProbe{item: item, command: command})
 	}
 	return commands, domain.CollectRefusals(causes...)
 }
@@ -2252,11 +2253,12 @@ func (runtime Runtime) provisionAgentChecks(phase string) ([]integrationProbe, e
 		if check == "" {
 			continue
 		}
+		item := runtime.integrationRead(phase, "package check", agent)
 		if !safeCommand(check) {
-			causes = append(causes, runtime.integrationObservationDiagnostic(fmt.Errorf("agent %s check command is invalid", agent), phase, agent))
+			causes = append(causes, item.refusal(errors.New("invalid package check command")))
 			continue
 		}
-		checks = append(checks, integrationProbe{integration: agent, command: check})
+		checks = append(checks, integrationProbe{item: item, command: check})
 	}
 	return checks, domain.CollectRefusals(causes...)
 }
@@ -2300,10 +2302,14 @@ func (runtime Runtime) guestObserve(
 ) (ports.InstanceExecResult, bool, error) {
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName,
 		ports.InstanceExecRequest{Command: command})
-	if result.ExitCode != 0 {
-		return result, false, nil
+	if err != nil {
+		var exit *ports.GuestExitError
+		if errors.As(err, &exit) && exit.Code != 0 && (result.ExitCode == 0 || result.ExitCode == exit.Code) {
+			return result, false, nil
+		}
+		return result, false, err
 	}
-	return result, err == nil, err
+	return result, result.ExitCode == 0, nil
 }
 
 func regularFile(path string) bool {

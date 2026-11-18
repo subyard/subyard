@@ -1002,7 +1002,7 @@ func (executor *selectionOnlyIntegrationExecutor) Exec(_ context.Context, _, _ s
 		return ports.InstanceExecResult{Stdout: []byte(hash + "  " + request.Command[2] + "\n")}, nil
 	}
 	if executor.missingCommand && slices.Contains(request.Command, "synthetic-cli") {
-		return ports.InstanceExecResult{ExitCode: 1}, errors.New("synthetic integration command is not installed")
+		return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
 	}
 	return ports.InstanceExecResult{}, nil
 }

@@ -988,7 +988,7 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 		{"reason": "a future reason", "path": "/home/dev/.claude/projects/x", "integration": "claude"},
 		{"reason": "persist target entry refused", "path": "/mnt/host/agent-sessions/claude/projects/p1/x", "detail": "Permission denied", "integration": "claude"},
 	}, "entries": []map[string]any{{"source": "/home/dev/.claude-memory", "persist": "deferred"}}})
-	err := runtime.persistRefusal(stderr)
+	err := runtime.persistRefusal(stderr, nil, integrationWorkItem{})
 	text := err.Error()
 	for _, want := range []string{"projects.subyard-transfer.json", "not a complete Subyard record", "'disable' 'claude'", "release activation does not start", "init", "Permission denied",
 		"'namei' '-l' '--' '/home/dev/.claude/projects/p'", "'findmnt'", "AGENT_claude_PERSIST", "a future reason", "'integration' 'status'",
@@ -1449,7 +1449,7 @@ func TestPersistFailuresAreClassifiedByWhatTheGuestReported(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime := Runtime{Executor: &testkit.Incus{ExecSteps: []testkit.IncusExecStep{test.step}}, Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"}}
-			_, err := runtime.runPersist(context.Background(), "observe", []PersistMapping{{Integration: "claude", Source: "/home/dev/.claude-memory", Target: "/mnt/host/agent-sessions/claude/memory"}}, nil)
+			_, err := runtime.runPersist(context.Background(), "observe", []PersistMapping{{Integration: "claude", Source: "/home/dev/.claude-memory", Target: "/mnt/host/agent-sessions/claude/memory"}}, nil, integrationWorkItem{})
 			var pending interface{ PendingIntegrationConfiguration() bool }
 			var diagnostic interface{ ActivationDiagnostic() (string, string) }
 			if err == nil || (errors.As(err, &pending) && pending.PendingIntegrationConfiguration()) != test.pending ||

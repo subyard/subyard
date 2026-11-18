@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -96,12 +98,8 @@ func (protocol nativeDiagnosticProtocol) failure(stderr []byte, phase string) (s
 }
 
 func (runtime Runtime) integrationDiagnostic(cause error, definition profile.IntegrationDefinition, phase, reason string) error {
-	if cause == nil {
+	if cause == nil && reason != "convergence-failed" {
 		return nil
-	}
-	var existing interface{ ActivationDiagnostic() (string, string) }
-	if errors.As(cause, &existing) {
-		return cause
 	}
 	if _, ok := lifecycleReasons[reason]; !ok {
 		reason = "operation-failed"
@@ -109,63 +107,157 @@ func (runtime Runtime) integrationDiagnostic(cause error, definition profile.Int
 	if phase != "inspect" && phase != "apply" && phase != "verify" {
 		phase = "inspect"
 	}
-	message, retry := "integration lifecycle "+phase, "yard integration status --json"
-	validComponent := len(definition.Name) <= 63 && domain.SafeName(definition.Name)
-	validYard := len(runtime.Yard.YardName) <= 63 && domain.SafeName(runtime.Yard.YardName)
-	if validComponent {
-		message = "integration " + definition.Name + " " + phase
-		retry = "yard integration status " + definition.Name + " --json"
+	item := runtime.integrationItem(phase, definition.Name)
+	message, command := "integration lifecycle "+phase, "yard"
+	if item.yard != "" {
+		command += " -Y " + item.yard
 	}
-	if validYard {
-		message += " in yard " + runtime.Yard.YardName
-		retry = "yard -Y " + runtime.Yard.YardName + " integration status --json"
-		if validComponent {
-			retry = "yard -Y " + runtime.Yard.YardName + " integration status " + definition.Name + " --json"
-		}
+	retry := command + " integration status"
+	if item.owner != "" {
+		message = item.label()
+		retry += " " + item.owner
+	}
+	if item.yard != "" {
+		message += " in yard " + item.yard
 	}
 	if reason == "observation-changed" && !errors.Is(cause, domain.ErrPlanStale) {
 		cause = fmt.Errorf("%w: %w", domain.ErrPlanStale, cause)
 	}
-	return &integrationLifecycleError{cause: cause, message: message + ": " + lifecycleReasons[reason], retry: retry, conflict: reason == "ambiguous-ownership" || reason == "foreign-ownership"}
+	return item.diagnostic(cause, &integrationLifecycleError{cause: cause, message: message + ": " + lifecycleReasons[reason], retry: retry + " --json", conflict: reason == "ambiguous-ownership" || reason == "foreign-ownership"})
 }
 
-// integrationApplyDiagnostic publishes only the failed substep and a known
-// component ID. Keep refusals separate so activation can render each finding.
-func (runtime Runtime) integrationApplyDiagnostic(cause error, step, id string) error {
-	if cause == nil {
-		return nil
+// integrationWorkItem binds the declaring owner and step before a native read
+// or effect. The same item describes a refusal and successfully observed drift.
+type integrationWorkItem struct {
+	step, owner, yard, retry, destination string
+}
+
+func (runtime Runtime) integrationItem(step, owner string) integrationWorkItem {
+	if len(owner) > 63 || !domain.SafeName(owner) {
+		owner = ""
+	}
+	yard := runtime.Yard.YardName
+	if len(yard) > 63 || !domain.SafeName(yard) {
+		yard = ""
+	}
+	retry := "run yard init"
+	if runtime.PersistFinishOnly {
+		retry = "run yard migrate"
+	}
+	return integrationWorkItem{step: step, owner: owner, yard: yard, retry: retry}
+}
+
+func (runtime Runtime) integrationRead(phase, step, owner string) integrationWorkItem {
+	switch phase {
+	case "apply":
+		phase = "apply observe"
+	case "verify":
+		phase = "apply verify"
+	default:
+		phase = "inspect"
+	}
+	if step != "" {
+		phase += " " + step
+	}
+	return runtime.integrationItem(phase, owner)
+}
+
+// Only paths from the declaring work item may be rendered.
+func (item integrationWorkItem) atDestination(path string) integrationWorkItem {
+	if len(path) <= 256 && filepath.IsAbs(path) && filepath.Clean(path) == path && !strings.ContainsFunc(path, unicode.IsControl) {
+		item.destination = path
+	}
+	return item
+}
+
+func (item integrationWorkItem) label() string {
+	if item.owner == "" {
+		return "integration " + item.step
+	}
+	return "integration " + item.owner + " " + item.step
+}
+
+type scopedIntegrationDiagnostic struct {
+	cause          error
+	message, retry string
+}
+
+func (failure *scopedIntegrationDiagnostic) Error() string {
+	return failure.message + " Next, on the owner host: " + failure.retry
+}
+func (failure *scopedIntegrationDiagnostic) Unwrap() error { return failure.cause }
+func (failure *scopedIntegrationDiagnostic) ActivationDiagnostic() (string, string) {
+	return failure.message, failure.retry
+}
+
+func (item integrationWorkItem) diagnostic(cause, fallback error) error {
+	var existing interface{ ActivationDiagnostic() (string, string) }
+	if !errors.As(cause, &existing) {
+		return fallback
+	}
+	if item.owner == "" {
+		return cause
+	}
+	// An enclosing batch must preserve a diagnostic already bound at dispatch.
+	var scoped *scopedIntegrationDiagnostic
+	if errors.As(cause, &scoped) {
+		return cause
+	}
+	message, retry := existing.ActivationDiagnostic()
+	return &scopedIntegrationDiagnostic{cause, item.label() + ": " + message, retry}
+}
+
+func (item integrationWorkItem) refusal(cause error) error {
+	if cause == nil || item.step == "" {
+		return cause
 	}
 	if refusals, ok := cause.(*domain.Refusals); ok {
 		var public []error
 		for _, finding := range refusals.Unwrap() {
-			public = append(public, runtime.integrationApplyDiagnostic(finding, step, id))
+			public = append(public, item.refusal(finding))
 		}
 		return domain.CollectRefusals(public...)
 	}
-	var existing interface{ ActivationDiagnostic() (string, string) }
-	if errors.As(cause, &existing) {
-		return cause
-	}
-	message := "integration"
-	if len(id) <= 63 && domain.SafeName(id) {
-		message += " " + id
-	}
-	message += " apply " + step + " failed"
-	if yard := runtime.Yard.YardName; len(yard) <= 63 && domain.SafeName(yard) {
-		message += " in yard " + yard
-	}
-	return &integrationLifecycleError{cause: cause, message: message, retry: "run yard migrate"}
+	return item.diagnostic(cause, item.failure(cause, ""))
 }
 
-func (runtime Runtime) integrationObservationDiagnostic(cause error, phase, id string) error {
-	switch phase {
-	case "apply":
-		return runtime.integrationApplyDiagnostic(cause, "observe", id)
-	case "verify":
-		return runtime.integrationApplyDiagnostic(cause, "verify", id)
-	default:
-		return cause
+func (item integrationWorkItem) failure(cause error, detail string) error {
+	message := item.label() + " failed"
+	if item.yard != "" {
+		message += " in yard " + item.yard
 	}
+	if item.destination != "" {
+		message += fmt.Sprintf(" at %q", item.destination)
+	}
+	return &integrationLifecycleError{cause: cause, message: message + detail, retry: item.retry}
+}
+
+func (runtime Runtime) integrationVerificationRefusals(plan IntegrationPlan, readErr, driftCause error) error {
+	findings := []error{readErr}
+	for _, item := range plan.drift {
+		findings = append(findings, item.failure(driftCause, ": "+lifecycleReasons["convergence-failed"]))
+	}
+	if plan.Changed && len(plan.drift) == 0 {
+		findings = append(findings, runtime.integrationDiagnostic(driftCause, profile.IntegrationDefinition{}, "verify", "convergence-failed"))
+	}
+	return collectIntegrationRefusals(findings...)
+}
+
+func (runtime Runtime) integrationApplyDiagnostic(cause error, step string) error {
+	return runtime.integrationItem("apply "+step, "").refusal(cause)
+}
+
+// Flatten read results after their refusal leaves have been scoped.
+func collectIntegrationRefusals(causes ...error) error {
+	var findings []error
+	for _, cause := range causes {
+		if aggregate, ok := cause.(*domain.Refusals); ok {
+			findings = append(findings, aggregate.Unwrap()...)
+		} else {
+			findings = append(findings, cause)
+		}
+	}
+	return domain.CollectRefusals(findings...)
 }
 
 func (runtime Runtime) knownIntegrationID(id string) string {

@@ -428,13 +428,17 @@ func (runtime Runtime) captureProvisionedProjectHooks(ctx context.Context) error
 	if err := runtime.checkIntegrationHookScope(); err != nil {
 		return err
 	}
-	var hooks []struct{ agent, command string }
+	type provisionedHook struct {
+		item    integrationWorkItem
+		command string
+	}
+	var hooks []provisionedHook
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if runtime.environmentValue("AGENT_"+agent+"_PROVISION") == "" {
 			continue
 		}
 		if hook := runtime.environmentValue("AGENT_" + agent + "_PROJECTS_CHANGED"); hook != "" {
-			hooks = append(hooks, struct{ agent, command string }{agent, hook})
+			hooks = append(hooks, provisionedHook{runtime.integrationItem("apply hooks capture", agent), hook})
 		}
 	}
 	if len(hooks) == 0 {
@@ -449,7 +453,7 @@ func (runtime Runtime) captureProvisionedProjectHooks(ctx context.Context) error
 	for _, declared := range hooks {
 		hook := declared.command
 		if !slices.Contains(observation.Hooks, hook) || !profileRuntimeDigest.MatchString(observation.Facts[hook]) || !filepath.IsAbs(observation.Resolved[hook]) {
-			refusals = append(refusals, runtime.integrationApplyDiagnostic(domain.ErrPlanStale, "hooks capture", declared.agent))
+			refusals = append(refusals, declared.item.refusal(domain.ErrPlanStale))
 			continue
 		}
 		sources.Facts[hook] = observation.Facts[hook]

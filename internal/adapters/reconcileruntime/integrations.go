@@ -25,7 +25,6 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerroute"
 	"github.com/Subyard/Subyard/internal/ports"
-	"github.com/Subyard/Subyard/internal/profile"
 	"github.com/Subyard/Subyard/internal/resource"
 	"github.com/Subyard/Subyard/internal/shellquote"
 )
@@ -103,6 +102,7 @@ type IntegrationPlan struct {
 	Scope               string   `json:"-"`
 	facts               []integrationFact
 	persist             persistObservation
+	drift               []integrationWorkItem
 	sources             string
 
 	// ownershipReleases lists structured documents whose retirement releases
@@ -447,22 +447,23 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 	}
 	entries := []integrationArtifact{}
 	for _, file := range files {
+		item := runtime.integrationRead(phase, "config source", file.integration)
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, item.refusal(err)
 		}
 		entry := integrationArtifact{ID: file.integration, Kind: "file", Path: file.destination, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
 		entry.SourceDigest, err = file.legacySourceHash()
 		if err != nil {
-			return nil, err
+			return nil, item.refusal(err)
 		}
 		if file.ownedFormat == "" && entry.SourceDigest == "" {
 			entry.SourceDigest, err = runtime.legacyIntegrationConfigDigest(file)
 			if err != nil {
-				return nil, err
+				return nil, item.refusal(err)
 			}
 		}
 		if file.ownedFormat != "" {
@@ -758,7 +759,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 	var observed integrationObservation
 	if mode == "observe" || mode == "observe-applied" || mode == "selection" || mode == "settings" {
 		if json.Unmarshal(result.Stdout, &observed) != nil || (mode == "observe" || mode == "observe-applied") && len(observed.Fingerprint) != 64 {
-			return observed, errors.New("invalid integration ownership observation")
+			return integrationObservation{}, errors.New("invalid integration ownership observation")
 		}
 	}
 	if observed.Diagnostics != nil {
@@ -786,50 +787,154 @@ func (runtime Runtime) observeIntegrations(ctx context.Context) (IntegrationPlan
 func (runtime Runtime) observeIntegrationsPhase(ctx context.Context, phase string) (IntegrationPlan, integrationObservation, error) {
 	return runtime.observeIntegrationsWithSourceReader(ctx, phase, runtime.SourceReader)
 }
-func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (_ IntegrationPlan, _ integrationObservation, refusal error) {
+func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error)) (IntegrationPlan, integrationObservation, error) {
 	instance, err := runtime.integrationPrecondition(ctx)
 	if err != nil {
-		return IntegrationPlan{}, integrationObservation{}, err
-	}
-	// Service ownership is independent of the structured documents and integration
-	// inventory. A refusal in any of those checks must still report service refusals.
-	servicesObserved := false
-	defer func() {
-		if refusal != nil && !servicesObserved {
-			_, _, serviceErr := runtime.integrationServices(ctx, "observe")
-			refusal = domain.CollectRefusals(refusal, serviceErr)
+		if phase == "verify" {
+			err = runtime.integrationRead(phase, "", "").refusal(err)
 		}
-	}()
-	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
-		return IntegrationPlan{}, integrationObservation{}, firstError(err, errIntegrationSubstrateUnavailable)
-	}
-	entries, err := runtime.integrationArtifactsWithSourceReader(phase, reader)
-	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
 	}
-	// Persist transfer state is independent of the inventory. Its projection
-	// tells the inventory which links the approved transfer will publish.
-	persist, persistErr := runtime.observePersist(ctx, entries)
-	runtime.persistProjection = persist.projection()
-	observed, err := runtime.integrationInventory(ctx, "observe", entries, "")
-	if err != nil {
-		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, phase, reader, observed, err))
+	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
+		_, _, serviceErr := runtime.integrationServices(ctx, "observe")
+		return IntegrationPlan{}, integrationObservation{}, collectIntegrationRefusals(
+			runtime.integrationRead(phase, "", "").refusal(firstError(err, errIntegrationSubstrateUnavailable)),
+			runtime.integrationRead(phase, "services", "").refusal(serviceErr),
+		)
 	}
-	if persistErr != nil {
-		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, phase, reader, observed, nil))
+	entries, artifactsErr := runtime.integrationArtifactsWithSourceReader(phase, reader)
+	causes := []error{runtime.integrationRead(phase, "inventory prepare", "").refusal(artifactsErr)}
+	var persist persistObservation
+	var observed integrationObservation
+	var inventoryErr error
+	if artifactsErr == nil {
+		// Persist supplies the link projection for inventory. A refusal can
+		// still supply a projection for the mappings it observed.
+		var persistErr error
+		persist, persistErr = runtime.observePersist(ctx, entries, phase)
+		causes = append(causes, persistErr)
+		runtime.persistProjection = persist.projection()
+		observed, inventoryErr = runtime.integrationInventory(ctx, "observe", entries, "")
+		causes = append(causes, runtime.integrationRead(phase, "", "").refusal(inventoryErr))
+		if inventoryErr == nil {
+			persist = persist.retireUnrecordedLinks(observed.Retired)
+		}
 	}
-	persist = persist.retireUnrecordedLinks(observed.Retired)
-	// Passive installed admission may ignore redundant labels, but apply must
-	// still finish hooks, commit and verification before capturing settings.
-	plan := IntegrationPlan{Changed: observed.Changed || persist.changed(), persist: persist}
+
+	plan := IntegrationPlan{persist: persist, Changed: inventoryErr == nil && observed.Changed}
 	plan.sources, plan.packageSources, err = runtime.integrationSourceBindingsWithSourceReader(phase, reader)
-	if err != nil {
+	causes = append(causes, runtime.integrationRead(phase, "source binding", "").refusal(err))
+	plan.facts = append(slices.Clone(observed.Facts), persist.facts()...)
+	record := func(item integrationWorkItem, converged bool, err error) {
+		if err != nil {
+			causes = append(causes, item.refusal(err))
+		} else if !converged {
+			plan.Changed = true
+			plan.drift = append(plan.drift, item)
+		}
+	}
+	for _, entry := range persist.Entries {
+		if len(entry.Ops) != 0 && entry.Persist != "deferred" {
+			item := runtime.integrationRead(phase, "persist", entry.owner)
+			if entry.owner != "" {
+				item = item.atDestination(entry.Source)
+			}
+			record(item, false, nil)
+		}
+	}
+
+	var fingerprints []string
+	structuredAdoptionEvidence := []string{}
+	mode := configmaterial.ModeObserve
+	if observed.Initial && runtime.AdoptLegacyIntegrations {
+		mode = configmaterial.ModeAssessAdopt
+	}
+	filesErr := runtime.observeDesiredIntegrationConfigs(ctx, phase, mode, reader,
+		func(item integrationWorkItem, file guestConfigFile, payload []byte, observation configmaterial.Observation) error {
+			if err := runtime.releasedInstalledDocument(file.destination, observation); err != nil {
+				return err
+			}
+			record(item, observation.Converged, nil)
+			fingerprints = append(fingerprints, observation.Fingerprint)
+			digest := fmt.Sprintf("%x", sha256.Sum256(payload))
+			plan.facts = append(plan.facts, integrationFact{Key: "structured:" + file.destination, Desired: digest, Observed: observation.Fingerprint, AtDesired: observation.Converged})
+			if mode == configmaterial.ModeAssessAdopt && observation.Adoptable {
+				observed.Adopted = append(observed.Adopted, integrationArtifact{
+					ID: file.integration, Kind: "structured", Path: file.destination,
+					Format: file.ownedFormat, Digest: digest,
+				})
+				structuredAdoptionEvidence = append(structuredAdoptionEvidence, file.destination+"\x00"+observation.Fingerprint)
+			}
+			return nil
+		})
+	causes = append(causes, filesErr)
+	adoption, _ := adoptionPlan(observed, structuredAdoptionEvidence)
+	plan.Adoption = adoption.Adoption
+	plan.AdoptionFingerprint = adoption.AdoptionFingerprint
+	if artifactsErr == nil && inventoryErr == nil && filesErr == nil && observed.Initial &&
+		runtime.LegacyIntegrationFingerprint != "" && plan.AdoptionFingerprint != runtime.LegacyIntegrationFingerprint {
+		causes = append(causes, errors.New("legacy integration adoption changed after planning"))
+	}
+	retiredErr := runtime.observeRetiredIntegrationConfigs(ctx, phase, observed.Retired,
+		func(item integrationWorkItem, entry integrationArtifact, observation configmaterial.Observation) {
+			record(item, observation.Converged, nil)
+			fingerprints = append(fingerprints, observation.Fingerprint)
+			plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
+			if observation.Release != "" {
+				notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
+				plan.Warnings = append(plan.Warnings, notice)
+				plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
+				plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
+			}
+		})
+	causes = append(causes, retiredErr)
+	commands, err := runtime.provisionAgentCommands(phase)
+	causes = append(causes, err)
+	for _, command := range commands {
+		ready, err := runtime.guestCheck(ctx, []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command.command})
+		record(command.item, ready, err)
+		if err != nil {
+			continue
+		}
+		fingerprints = append(fingerprints, fmt.Sprint(ready))
+		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	}
+	checks, err := runtime.provisionAgentChecks(phase)
+	causes = append(causes, err)
+	for _, check := range checks {
+		ready, err := runtime.guestCheck(ctx, []string{check.command})
+		record(check.item, ready, err)
+		if err != nil {
+			continue
+		}
+		fingerprints = append(fingerprints, fmt.Sprint(ready))
+		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	}
+	hooks := runtime.integrationRead(phase, "project hooks", "")
+	ready, err := runtime.projectHooksConverged(ctx)
+	record(hooks, ready, err)
+	if err == nil {
+		fingerprints = append(fingerprints, fmt.Sprint(ready))
+		plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	}
+	services := runtime.integrationRead(phase, "services", "")
+	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
+	record(services, !servicesChanged, err)
+	if err == nil {
+		fingerprints = append(fingerprints, serviceFingerprint)
+		plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
+	}
+	// Passive installed admission may ignore redundant labels. Apply must
+	// still finish hooks, commit and verification before capturing settings.
+	pending := inventoryErr == nil && observed.Pending
+	plan.pendingOnly = pending && !plan.Changed
+	plan.Changed = plan.Changed || pending
+	if err := collectIntegrationRefusals(causes...); err != nil {
 		return plan, observed, err
 	}
-	plan.facts = append(slices.Clone(observed.Facts), persist.facts()...)
 	scope, _, err := runtime.integrationScopeFromInputs(entries, plan.sources)
 	if err != nil {
-		return plan, observed, err
+		return plan, observed, runtime.integrationRead(phase, "scope", "").refusal(err)
 	}
 	instanceBytes, _ := json.Marshal(instance)
 	var guardInstance ports.InstanceInfo
@@ -843,138 +948,14 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	plan.instance, plan.instanceScope = guardInstance, scope
 	plan.profileRoutes = runtime.integrationProfileRoutes(ctx, guardInstance)
 	plan.Scope = integrationInstanceScope(scope, guardInstance)
-	fingerprints := []string{plan.Scope, plan.sources, observed.Fingerprint, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), persist.Fingerprint}
+	bindings := []string{plan.Scope, plan.sources, observed.Fingerprint, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), persist.Fingerprint}
 	if len(plan.profileRoutes) != 0 {
 		routeBindings, _ := json.Marshal(plan.profileRoutes)
-		fingerprints = append(fingerprints, string(routeBindings))
+		bindings = append(bindings, string(routeBindings))
 	}
-	causes := []error{}
-	recordFinding := func(ready bool, err error, step, id string) {
-		if phase == "verify" {
-			if err == nil && !ready {
-				err = errors.New("native lifecycle did not converge")
-			}
-			err = runtime.integrationApplyDiagnostic(err, step, id)
-		} else {
-			err = runtime.integrationObservationDiagnostic(err, phase, id)
-		}
-		if err != nil {
-			causes = append(causes, err)
-		}
-	}
-	files, err := runtime.guestConfigFilesWithSourceReader(reader)
-	if err != nil {
-		return plan, observed, err
-	}
-	structuredAdoptionEvidence := []string{}
-	for _, file := range files {
-		if file.ownedFormat == "" {
-			continue
-		}
-		payload, err := file.readSource()
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
-			continue
-		}
-		mode := configmaterial.ModeObserve
-		if observed.Initial && runtime.AdoptLegacyIntegrations {
-			mode = configmaterial.ModeAssessAdopt
-		}
-		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
-		if err == nil {
-			err = runtime.releasedInstalledDocument(file.destination, observation)
-		}
-		recordFinding(observation.Converged, err, "verify structured config", file.integration)
-		if err != nil {
-			continue
-		}
-		fingerprints = append(fingerprints, observation.Fingerprint)
-		plan.facts = append(plan.facts, integrationFact{Key: "structured:" + file.destination, Desired: fmt.Sprintf("%x", sha256.Sum256(payload)), Observed: observation.Fingerprint, AtDesired: observation.Converged})
-		plan.Changed = plan.Changed || !observation.Converged
-		if mode == configmaterial.ModeAssessAdopt && observation.Adoptable {
-			observed.Adopted = append(observed.Adopted, integrationArtifact{
-				ID: file.integration, Kind: "structured", Path: file.destination,
-				Format: file.ownedFormat, Digest: fmt.Sprintf("%x", sha256.Sum256(payload)),
-			})
-			structuredAdoptionEvidence = append(structuredAdoptionEvidence, file.destination+"\x00"+observation.Fingerprint)
-		}
-	}
-	adoption, _ := adoptionPlan(observed, structuredAdoptionEvidence)
-	plan.Adoption = adoption.Adoption
-	plan.AdoptionFingerprint = adoption.AdoptionFingerprint
-	if len(causes) == 0 && observed.Initial && runtime.LegacyIntegrationFingerprint != "" && plan.AdoptionFingerprint != runtime.LegacyIntegrationFingerprint {
-		return plan, observed, errors.New("legacy integration adoption changed after planning")
-	}
-	for _, entry := range observed.Retired {
-		if entry.Kind != "structured" {
-			continue
-		}
-		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
-		if err != nil || phase == "verify" && !observation.Converged {
-			recordFinding(observation.Converged, err, "verify retired structured config", runtime.knownIntegrationID(entry.ID))
-		}
-		if err != nil {
-			continue
-		}
-		fingerprints = append(fingerprints, observation.Fingerprint)
-		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
-		plan.Changed = plan.Changed || !observation.Converged
-		if observation.Release != "" {
-			notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
-			plan.Warnings = append(plan.Warnings, notice)
-			plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
-			plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
-		}
-	}
-	commands, err := runtime.provisionAgentCommands(phase)
-	causes = append(causes, err)
-	for _, command := range commands {
-		ready, err := runtime.guestCheck(ctx, []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command.command})
-		recordFinding(ready, err, "verify command", command.integration)
-		if err != nil {
-			continue
-		}
-		plan.Changed = plan.Changed || !ready
-		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
-	}
-	checks, err := runtime.provisionAgentChecks(phase)
-	causes = append(causes, err)
-	for _, check := range checks {
-		ready, err := runtime.guestCheck(ctx, []string{check.command})
-		recordFinding(ready, err, "verify package check", check.integration)
-		if err != nil {
-			continue
-		}
-		plan.Changed = plan.Changed || !ready
-		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check.command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
-	}
-	ready, err := runtime.projectHooksConverged(ctx)
-	recordFinding(ready, err, "verify project hooks", "")
-	if err == nil {
-		plan.Changed = plan.Changed || !ready
-		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
-	}
-	servicesObserved = true
-	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
-	recordFinding(!servicesChanged, err, "verify services", "")
-	if err == nil {
-		plan.Changed = plan.Changed || servicesChanged
-		fingerprints = append(fingerprints, serviceFingerprint)
-		plan.facts = append(plan.facts, integrationFact{Key: "services", Desired: "yard Bubblewrap policy reconciled; role-forbidden utility absent", Observed: serviceFingerprint, AtDesired: !servicesChanged})
-	}
-	if err := domain.CollectRefusals(causes...); err != nil {
-		return plan, observed, err
-	}
-	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(fingerprints, "\x00"))))
-	plan.fingerprints = slices.Clone(fingerprints)
-	plan.pendingOnly = observed.Pending && !plan.Changed
-	plan.Changed = plan.Changed || observed.Pending
+	bindings = append(bindings, fingerprints...)
+	plan.Fingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(bindings, "\x00"))))
+	plan.fingerprints = bindings
 	if plan.Changed {
 		plan.Steps = []string{reconcileIntegrationsStep(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))}
 		switch {
@@ -1054,44 +1035,30 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 	if err != nil {
 		return runtime, IntegrationPlan{}, err
 	}
-	persist, persistErr := candidate.observePersist(ctx, entries)
+	persist, persistErr := candidate.observePersist(ctx, entries, "inspect")
 	candidate.persistProjection = persist.projection()
-	observed, err := candidate.integrationInventory(ctx, "observe", entries, "")
-	if err != nil {
-		return runtime, IntegrationPlan{}, domain.CollectRefusals(persistErr, candidate.collectIntegrationConfigRefusals(ctx, "inspect", reader, observed, err))
-	}
-	files, err := candidate.guestConfigFilesWithSourceReader(reader)
-	if err != nil {
-		return runtime, IntegrationPlan{}, err
-	}
+	observed, inventoryErr := candidate.integrationInventory(ctx, "observe", entries, "")
 	structuredEvidence := []string{}
-	causes := []error{}
-	for _, file := range files {
-		if file.ownedFormat == "" {
-			continue
-		}
-		payload, err := file.readSource()
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			causes = append(causes, err)
-			continue
-		}
-		observation, err := candidate.observeIntegrationConfigFile(ctx, configmaterial.ModeAssessAdopt, file, payload)
-		if err != nil {
-			causes = append(causes, err)
-			continue
-		}
-		if observation.Adoptable {
-			observed.Adopted = append(observed.Adopted, integrationArtifact{
-				ID: file.integration, Kind: "structured", Path: file.destination,
-				Format: file.ownedFormat, Digest: fmt.Sprintf("%x", sha256.Sum256(payload)),
-			})
-			structuredEvidence = append(structuredEvidence, file.destination+"\x00"+observation.Fingerprint)
-		}
+	mode := configmaterial.ModeAssessAdopt
+	if inventoryErr != nil && !observed.Initial {
+		mode = configmaterial.ModeObserve
 	}
-	if err := domain.CollectRefusals(causes...); err != nil {
+	filesErr := candidate.observeDesiredIntegrationConfigs(ctx, "inspect", mode, reader,
+		func(_ integrationWorkItem, file guestConfigFile, payload []byte, observation configmaterial.Observation) error {
+			if mode == configmaterial.ModeAssessAdopt && observation.Adoptable {
+				observed.Adopted = append(observed.Adopted, integrationArtifact{
+					ID: file.integration, Kind: "structured", Path: file.destination,
+					Format: file.ownedFormat, Digest: fmt.Sprintf("%x", sha256.Sum256(payload)),
+				})
+				structuredEvidence = append(structuredEvidence, file.destination+"\x00"+observation.Fingerprint)
+			}
+			return nil
+		})
+	var retiredErr error
+	if inventoryErr != nil {
+		retiredErr = candidate.observeRetiredIntegrationConfigs(ctx, "inspect", observed.Retired, nil)
+	}
+	if err := collectIntegrationRefusals(persistErr, inventoryErr, filesErr, retiredErr); err != nil {
 		return runtime, IntegrationPlan{}, err
 	}
 	plan, legacy := adoptionPlan(observed, structuredEvidence)
@@ -1102,44 +1069,52 @@ func (runtime Runtime) prepareLegacyIntegrationAdoptionWithSourceReader(ctx cont
 	return candidate, plan, nil
 }
 
-// An inventory refusal does not prevent reading independent structured documents.
-// Keep all causes visible, while withholding the unusable operation plan.
-func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, phase string, reader func(config.MaterializedAsset) ([]byte, error), observed integrationObservation, inventoryError error) error {
-	causes := []error{inventoryError}
+func (runtime Runtime) observeDesiredIntegrationConfigs(ctx context.Context, phase, mode string, reader func(config.MaterializedAsset) ([]byte, error),
+	visit func(integrationWorkItem, guestConfigFile, []byte, configmaterial.Observation) error,
+) error {
 	files, err := runtime.guestConfigFilesWithSourceReader(reader)
 	if err != nil {
-		return domain.CollectRefusals(append(causes, err)...)
+		return runtime.integrationRead(phase, "structured configs", "").refusal(err)
 	}
+	var causes []error
 	for _, file := range files {
 		if file.ownedFormat == "" {
 			continue
 		}
+		item := runtime.integrationRead(phase, "structured config", file.integration).atDestination(file.destination)
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
 			continue
 		}
-		if err != nil {
-			causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
-			continue
-		}
-		mode := configmaterial.ModeObserve
-		if observed.Initial && runtime.AdoptLegacyIntegrations {
-			mode = configmaterial.ModeAssessAdopt
-		}
-		observation, err := runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
 		if err == nil {
-			err = runtime.releasedInstalledDocument(file.destination, observation)
+			var observation configmaterial.Observation
+			observation, err = runtime.observeIntegrationConfigFile(ctx, mode, file, payload)
+			if err == nil {
+				err = visit(item, file, payload, observation)
+			}
 		}
-		causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, file.integration))
+		causes = append(causes, item.refusal(err))
 	}
-	for _, entry := range observed.Retired {
+	return collectIntegrationRefusals(causes...)
+}
+
+func (runtime Runtime) observeRetiredIntegrationConfigs(ctx context.Context, phase string, retired []integrationArtifact,
+	visit func(integrationWorkItem, integrationArtifact, configmaterial.Observation),
+) error {
+	var causes []error
+	for _, entry := range retired {
 		if entry.Kind != "structured" {
 			continue
 		}
-		_, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
-		causes = append(causes, runtime.integrationObservationDiagnostic(err, phase, runtime.knownIntegrationID(entry.ID)))
+		item := runtime.integrationRead(phase, "retired structured config", runtime.knownIntegrationID(entry.ID))
+		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
+		if err != nil {
+			causes = append(causes, item.refusal(err))
+		} else if visit != nil {
+			visit(item, entry, observation)
+		}
 	}
-	return domain.CollectRefusals(causes...)
+	return collectIntegrationRefusals(causes...)
 }
 
 func (runtime Runtime) observeIntegrationConfigFile(ctx context.Context, mode string, file guestConfigFile, payload []byte) (configmaterial.Observation, error) {
@@ -1526,25 +1501,25 @@ func (runtime Runtime) PrepareSourceIntegrationPlan(ctx context.Context, reader 
 func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPlan) error {
 	fresh, observed, err := runtime.observeIntegrationsPhase(ctx, "apply")
 	if err != nil {
-		return runtime.integrationApplyDiagnostic(err, "observe", "")
+		return runtime.integrationApplyDiagnostic(err, "observe")
 	}
 	if err := CheckIntegrationPlan(plan, fresh); err != nil {
 		return runtime.integrationPlanDiagnostic(err, plan, fresh)
 	}
 	if err := runtime.checkIntegrationHookScope(); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "hooks scope", "")
+		return runtime.integrationApplyDiagnostic(err, "hooks scope")
 	}
 	if !fresh.Changed {
-		return runtime.integrationApplyDiagnostic(runtime.storeAppliedIntegrationSettings(ctx), "inventory capture settings", "")
+		return runtime.storeAppliedIntegrationSettings(ctx)
 	}
 	execution := runtime
 	runtime.applyingIntegrations = true
 	if err := runtime.reconcileIntegrationServices(ctx); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "integration services", "")
+		return runtime.integrationApplyDiagnostic(err, "integration services")
 	}
 	entries, err := runtime.integrationArtifactsPhase("apply")
 	if err != nil {
-		return runtime.integrationApplyDiagnostic(err, "inventory prepare", "")
+		return runtime.integrationApplyDiagnostic(err, "inventory prepare")
 	}
 	expectedInventory := ""
 	if observed.Initial {
@@ -1554,16 +1529,16 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	// exact link that transfer published (the projection bound in the plan).
 	runtime.persistProjection = fresh.persist.projection()
 	if err := runtime.checkApprovedPersist(fresh.persist); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "persist approval", runtime.knownIntegrationID(fresh.persist.changedIntegration()))
+		return runtime.integrationItem("apply persist approval", fresh.persist.changedIntegration()).refusal(err)
 	}
 	if err := runtime.applyPersist(ctx, entries, fresh.persist); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "persist", runtime.knownIntegrationID(fresh.persist.changedIntegration()))
+		return err
 	}
 	if _, err := runtime.integrationInventory(ctx, "apply", entries, expectedInventory); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "inventory apply", "")
+		return runtime.integrationApplyDiagnostic(err, "inventory apply")
 	}
 	if err := runtime.RefreshConfigs(ctx); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "configs", "")
+		return runtime.integrationApplyDiagnostic(err, "configs")
 	}
 	if err := execution.reconcileIntegrationScript(ctx); err != nil {
 		return err
@@ -1571,45 +1546,39 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	// Keep the inventory pending until hooks succeed so the same requested
 	// selection remains retryable after a transient hook failure.
 	if err := execution.captureProvisionedProjectHooks(ctx); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "hooks capture", "")
+		return runtime.integrationApplyDiagnostic(err, "hooks capture")
 	}
 	if err := execution.RunProjectHooks(ctx); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "hooks run", "")
+		return runtime.integrationApplyDiagnostic(err, "hooks run")
 	}
 	// Retirement effects follow the hooks: a failed init leaves the installed
 	// state, which the next successful init retires.
 	for _, entry := range observed.Retired {
 		if entry.Kind == "structured" {
+			item := runtime.integrationItem("apply retire structured config", runtime.knownIntegrationID(entry.ID))
 			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
-				return runtime.integrationApplyDiagnostic(err, "retire structured config", runtime.knownIntegrationID(entry.ID))
+				return item.refusal(err)
 			}
 		}
 	}
 	if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
-		return runtime.integrationApplyDiagnostic(err, "inventory commit", "")
+		return runtime.integrationApplyDiagnostic(err, "inventory commit")
 	}
 	verified, _, err := execution.observeIntegrationsPhase(ctx, "verify")
-	if err != nil {
-		return runtime.integrationApplyDiagnostic(err, "verify", "")
+	if err := execution.integrationVerificationRefusals(verified, err, nil); err != nil {
+		return err
 	}
-	if verified.Changed {
-		return runtime.integrationDiagnostic(errors.New("integration reconcile verification failed; desired selection retained for retry"),
-			profile.IntegrationDefinition{}, "verify", "convergence-failed")
-	}
-	return runtime.integrationApplyDiagnostic(runtime.storeAppliedIntegrationSettings(ctx), "inventory capture settings", "")
+	return runtime.storeAppliedIntegrationSettings(ctx)
 }
 
 func (runtime Runtime) reconcileIntegrationScript(ctx context.Context) error {
-	if !runtime.PersistFinishOnly {
-		return runtime.integrationApplyDiagnostic(runtime.runScript(ctx, runtime.Stderr, "reconcile-integrations.sh"), "script", "")
-	}
 	var report bytes.Buffer
 	err := runtime.runScript(ctx, &report, "reconcile-integrations.sh", "--activation-diagnostics")
 	id, complete := strings.CutSuffix(report.String(), "\n")
 	if !complete || !slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), id) {
 		id = ""
 	}
-	return runtime.integrationApplyDiagnostic(err, "script", id)
+	return runtime.integrationItem("apply script", id).refusal(err)
 }
 
 type appliedIntegrationSettingsCapture struct {
@@ -1624,11 +1593,11 @@ type appliedIntegrationSettingsCapture struct {
 func (capture *appliedIntegrationSettingsCapture) Binding() string { return capture.plan }
 
 func (capture *appliedIntegrationSettingsCapture) Apply(ctx context.Context) error {
-	plan, _, err := capture.runtime.observeIntegrations(ctx)
-	if err != nil {
+	plan, _, err := capture.runtime.observeIntegrationsPhase(ctx, "verify")
+	if err := capture.runtime.integrationVerificationRefusals(plan, err, domain.ErrPlanStale); err != nil {
 		return err
 	}
-	if plan.Changed || plan.StateBinding() != capture.plan {
+	if plan.StateBinding() != capture.plan {
 		return domain.ErrPlanStale
 	}
 	// The inventory fingerprint binds the persist projection it was observed with.
@@ -1669,21 +1638,18 @@ func (runtime Runtime) PrepareAppliedIntegrationSettings(ctx context.Context) (p
 
 func (runtime Runtime) storeAppliedIntegrationSettings(ctx context.Context) error {
 	plan, observed, err := runtime.observeIntegrationsPhase(ctx, "verify")
-	if err != nil {
+	if err := runtime.integrationVerificationRefusals(plan, err, domain.ErrPlanStale); err != nil {
 		return err
-	}
-	if plan.Changed {
-		return domain.ErrPlanStale
 	}
 	sources := newDiagnosticSourceSnapshot(runtime.SourceReader)
 	entries, err := runtime.integrationArtifactsWithSourceReader("verify", sources.read)
 	if err != nil {
-		return err
+		return runtime.integrationApplyDiagnostic(err, "inventory capture settings")
 	}
 	runtime.SourceReader = sources.read
 	runtime.persistProjection = plan.persist.projection()
 	_, err = runtime.integrationInventory(ctx, "capture-settings", entries, observed.Fingerprint, integrationInventoryCapture{baseline: observed.Diagnostics, verifySources: sources.verify})
-	return err
+	return runtime.integrationApplyDiagnostic(err, "inventory capture settings")
 }
 
 type diagnosticSourceSnapshot struct {

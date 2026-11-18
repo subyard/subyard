@@ -476,7 +476,7 @@ func TestGitIdentityProbeUsesTypedInstanceState(t *testing.T) {
 		t.Fatalf("unexpected git identity probe: %#v", calls)
 	}
 	incus.ExecSteps = []testkit.IncusExecStep{{
-		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing"),
+		Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1},
 	}}
 	assertStage(t, runtime, "git-identity", false, "running yard without git config")
 
@@ -1091,9 +1091,9 @@ func TestProvisionProbeRequiresDockerBeforeIntegrationOwnership(t *testing.T) {
 		step    testkit.IncusExecStep
 		wantErr error
 	}{
-		{name: "command missing", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 127}, Err: errors.New("native exit")}},
-		{name: "API not ready", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("native exit")}},
-		{name: "API deadline", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 124}, Err: errors.New("native timeout")}},
+		{name: "command missing", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 127}, Err: &ports.GuestExitError{Code: 127}}},
+		{name: "API not ready", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}}},
+		{name: "API deadline", step: testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 124}, Err: &ports.GuestExitError{Code: 124}}},
 		{name: "transport unavailable", step: testkit.IncusExecStep{Err: transport}, wantErr: transport},
 		{name: "caller cancelled", step: testkit.IncusExecStep{Err: context.Canceled}, wantErr: context.Canceled},
 		{name: "caller deadline", step: testkit.IncusExecStep{Err: context.DeadlineExceeded}, wantErr: context.DeadlineExceeded},
@@ -1255,7 +1255,7 @@ func (fixture provisionLifecycleExecutor) Exec(ctx context.Context, project, ins
 	if len(command) != 0 {
 		switch command[0] {
 		case "readlink":
-			return ports.InstanceExecResult{ExitCode: 1}, errors.New("not a link")
+			return ports.InstanceExecResult{ExitCode: 1}, &ports.GuestExitError{Code: 1}
 		}
 	}
 	return fixture.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
@@ -1266,13 +1266,13 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	steps := func(stat, configHash string) []testkit.IncusExecStep {
 		usage := testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: []byte("ccusage 1.2.3\n")}}
 		if stat != "regular file|755|0:0" {
-			usage = testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("ccusage metadata drift")}
+			usage = testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}}
 		}
 		return []testkit.IncusExecStep{
 			{}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}}, usage,
 			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("skills-current\n")}},
-			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {}, {},
+			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}}, {}, {}, {}, {},
 		}
 	}
 	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
@@ -1319,7 +1319,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	for _, index := range []int{1, 2, 3} {
 		for _, wantErr := range []error{nil, transport} {
 			incus.ExecSteps = steps("regular file|755|0:0", digest)
-			failure := testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("native drift")}
+			failure := testkit.IncusExecStep{Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}}
 			if wantErr != nil {
 				failure = testkit.IncusExecStep{Err: wantErr}
 			}
@@ -1355,13 +1355,13 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	missing := steps("regular file|755|0:0", digest)
 	missing[4] = testkit.IncusExecStep{
-		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing config"),
+		Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1},
 	}
 	incus.ExecSteps = missing
 	assertStage(t, runtime, "provision", false, "missing materialized agent config")
 	forwardDrop := steps("regular file|755|0:0", digest)
 	forwardDrop[1] = testkit.IncusExecStep{
-		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("FORWARD DROP"),
+		Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1},
 	}
 	incus.ExecSteps = forwardDrop
 	assertStage(t, runtime, "provision", false, "stale Docker forwarding policy")
@@ -1390,7 +1390,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	incus.ExecSteps = steps("regular file|755|0:0", linkedDigest)
 	incus.ExecSteps[8] = testkit.IncusExecStep{
 		Result: ports.InstanceExecResult{ExitCode: 1},
-		Err:    errors.New("dispatcher drift"),
+		Err:    &ports.GuestExitError{Code: 1},
 	}
 	assertStage(t, runtime, "provision", false, "missing or stale project dispatcher")
 
@@ -1455,7 +1455,7 @@ func TestProvisionAgentCommandsAreValidated(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=opencode", "AGENT_opencode_PROVISION=" + hook, "AGENT_opencode_COMMAND=opencode",
 	}}
 	commands, err := runtime.provisionAgentCommands("inspect")
-	if err != nil || len(commands) != 1 || commands[0] != (integrationProbe{integration: "opencode", command: "opencode"}) {
+	if err != nil || len(commands) != 1 || commands[0] != (integrationProbe{item: runtime.integrationRead("inspect", "command", "opencode"), command: "opencode"}) {
 		t.Fatalf("valid agent command rejected: %v, %v", commands, err)
 	}
 	runtime.Environment[2] = "AGENT_opencode_COMMAND=bad command"
@@ -1469,7 +1469,7 @@ func TestProvisionAgentChecksAreValidated(t *testing.T) {
 		"CODING_TOOL_INTEGRATIONS=relay", "AGENT_relay_CHECK=relay-check",
 	}}
 	checks, err := runtime.provisionAgentChecks("inspect")
-	if err != nil || len(checks) != 1 || checks[0] != (integrationProbe{integration: "relay", command: "relay-check"}) {
+	if err != nil || len(checks) != 1 || checks[0] != (integrationProbe{item: runtime.integrationRead("inspect", "package check", "relay"), command: "relay-check"}) {
 		t.Fatalf("valid agent check rejected: %v, %v", checks, err)
 	}
 	runtime.Environment[1] = "AGENT_relay_CHECK=bad check"

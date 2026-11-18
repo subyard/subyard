@@ -130,7 +130,7 @@ func TestIntegrationApplyFailurePreservesPublicCauseAndExecutableRetry(t *testin
 
 func TestIntegrationApplySubstepRendersAtActivationBoundary(t *testing.T) {
 	root, _, _, _ := configCommandFixture(t)
-	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Executor: resumeConflictExecutor{"apply"},
+	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Executor: resumeConflictExecutor{"apply"}, PersistFinishOnly: true,
 		Incus:        &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}},
 		Yard:         domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
 		Integrations: []profile.IntegrationDefinition{}}

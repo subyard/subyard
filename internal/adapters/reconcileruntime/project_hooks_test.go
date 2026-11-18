@@ -2,6 +2,7 @@ package reconcileruntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -26,8 +27,10 @@ func (fixture projectHooksFileExecutor) Exec(ctx context.Context, _, _ string, r
 	command[10] = fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
 	output, err := exec.CommandContext(ctx, command[0], command[1:]...).CombinedOutput()
 	result := ports.InstanceExecResult{Stdout: output}
-	if err != nil {
-		result.ExitCode = 1
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		result.ExitCode = exit.ExitCode()
+		err = &ports.GuestExitError{Code: result.ExitCode}
 	}
 	return result, err
 }

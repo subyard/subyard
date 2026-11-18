@@ -928,6 +928,7 @@ func (fixture packageReadinessExecutor) Exec(ctx context.Context, project, insta
 	var exit *exec.ExitError
 	if errors.As(err, &exit) {
 		result.ExitCode = exit.ExitCode()
+		err = &ports.GuestExitError{Code: result.ExitCode}
 	}
 	return result, err
 }
