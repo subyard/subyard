@@ -82,10 +82,11 @@ guest_root runuser -u dev -- sh -eu -c '
 if yard_declined integration enable claude >"$STATE/claude-adoption-existing-plan.out" 2>&1; then
   fail_with 'declined Claude enable was applied' "$STATE/claude-adoption-existing-plan.out"
 fi
-grep -Fq 'already exist in the target and will not be transferred' "$STATE/claude-adoption-existing-plan.out" \
-  && grep -Fq 'orca-existing/session.jsonl' "$STATE/claude-adoption-existing-plan.out" \
-  && grep -Fq 'MEMORY.md' "$STATE/claude-adoption-existing-plan.out" \
-  || fail_with 'plan did not disclose the entries the target keeps' "$STATE/claude-adoption-existing-plan.out"
+for source in /home/dev/.claude/projects /home/dev/.claude-memory; do
+  grep -F "copy $source into " "$STATE/claude-adoption-existing-plan.out" \
+    | grep -F '1 entry already exists in the target and will not be transferred' >/dev/null \
+    || fail_with 'plan did not disclose how many entries the target keeps' "$STATE/claude-adoption-existing-plan.out"
+done
 guest_root grep -Fxq 'retained session' /home/dev/.claude/projects/orca-existing/session.jsonl \
   || fail_with 'declined enable changed the projects source' "$STATE/claude-adoption-existing-plan.out"
 guest_root grep -Fxq 'retained memory' /home/dev/.claude-memory/MEMORY.md \

@@ -130,9 +130,10 @@ func (plan IntegrationPlan) OperationSteps(target string) []domain.OperationStep
 		}
 		id := fmt.Sprintf("integration.fact.%d", index)
 		consequence := "converge " + label
-		if source, text, transfer := persistStepText(fact); transfer {
+		if fact.persist != nil {
 			id = fmt.Sprintf("integration.persist.%d", index)
-			label, desired, consequence = source, text, text
+			label, desired = fact.persist.Source, fact.persist.text()
+			consequence = desired
 		}
 		steps = append(steps, domain.OperationStep{ID: id, Target: target + ":" + label,
 			Observed: observed, Desired: desired, Decision: decision,

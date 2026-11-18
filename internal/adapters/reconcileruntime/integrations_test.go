@@ -583,20 +583,45 @@ func TestPrepareLegacyIntegrationAdoptionSkipsUnavailableIncus(t *testing.T) {
 
 func TestIntegrationPlanReportsServiceConflictWithoutSubstrate(t *testing.T) {
 	const conflict = "Bubblewrap AppArmor: modified policy loader"
-	incus := &testkit.Incus{
-		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
-		ExecSteps: []testkit.IncusExecStep{
-			{Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}},
-			{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}},
-		},
-	}
-	runtime := Runtime{Incus: incus, Executor: incus}
-	_, err := runtime.IntegrationPlan(context.Background())
-	if !errors.Is(err, errIntegrationSubstrateUnavailable) || !strings.Contains(err.Error(), bubblewrapPolicyRefusal) || strings.Contains(err.Error(), conflict) {
-		t.Fatalf("expected substrate and service refusals, got %v", err)
-	}
-	if len(incus.ExecCalls) != 2 || incus.ExecCalls[1].Request.Command[5] != "observe" {
-		t.Fatalf("expected substrate probe and read-only service observation, got %d guest calls", len(incus.ExecCalls))
+	for _, test := range []struct {
+		name     string
+		service  ports.InstanceExecResult
+		deferred bool
+	}{
+		{name: "defer to provisioning", service: ports.InstanceExecResult{Stdout: []byte("changed=0\n")}, deferred: true},
+		{name: "report independent refusal", service: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(conflict + "\n")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			incus := &testkit.Incus{
+				Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
+				ExecSteps: []testkit.IncusExecStep{
+					{Result: ports.InstanceExecResult{ExitCode: 1}, Err: &ports.GuestExitError{Code: 1}},
+					{Result: test.service},
+				},
+			}
+			runtime := Runtime{Incus: incus, Executor: incus}
+			plan, err := runtime.IntegrationPlan(context.Background())
+			if !errors.Is(err, errIntegrationSubstrateUnavailable) {
+				t.Fatalf("missing substrate was not identified: %v", err)
+			}
+			converged, provisionErr := integrationPlanConverged(plan, err)
+			_, inspected, inspectErr := persistInspectionPlan(persistObservation{}, err, func() (IntegrationPlan, error) { return plan, err })
+			if converged || inspected {
+				t.Fatal("missing substrate was reported as ready")
+			}
+			for _, refusal := range []error{provisionErr, inspectErr} {
+				if test.deferred {
+					if refusal != nil {
+						t.Fatalf("missing substrate blocked init: %v", refusal)
+					}
+				} else if refusal == nil || !strings.Contains(refusal.Error(), bubblewrapPolicyRefusal) || strings.Contains(refusal.Error(), conflict) {
+					t.Fatalf("expected safe service refusal, got %v", refusal)
+				}
+			}
+			if len(incus.ExecCalls) != 2 || incus.ExecCalls[1].Request.Command[5] != "observe" {
+				t.Fatalf("expected substrate probe and read-only service observation, got %d guest calls", len(incus.ExecCalls))
+			}
+		})
 	}
 }
 

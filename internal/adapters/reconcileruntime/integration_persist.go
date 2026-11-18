@@ -2,7 +2,9 @@ package reconcileruntime
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,34 +32,62 @@ type PersistMapping struct {
 	Selected    bool   `json:"selected"`
 }
 
+// Guest text is evidence for lookups and comparisons. Formatting it must
+// never disclose its contents, even if a whole response is logged by mistake.
+type persistGuestText struct{ value string }
+
+func (field *persistGuestText) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &field.value)
+}
+
+func (persistGuestText) Format(out fmt.State, _ rune) {
+	_, _ = out.Write([]byte("[guest evidence]"))
+}
+
+type persistGuestEntry struct {
+	Source        persistGuestText   `json:"source"`
+	Ops           []persistGuestText `json:"ops"`
+	Persist       persistGuestText   `json:"persist"`
+	ExistingCount int                `json:"existing_count"`
+	Retirable     bool               `json:"retirable"`
+	evidence      [sha256.Size]byte
+}
+
+func (entry *persistGuestEntry) UnmarshalJSON(data []byte) error {
+	type wireEntry persistGuestEntry
+	if err := json.Unmarshal(data, (*wireEntry)(entry)); err != nil {
+		return err
+	}
+	entry.evidence = sha256.Sum256(data)
+	return nil
+}
+
+type persistGuestObservation struct {
+	Fingerprint persistGuestText    `json:"fingerprint"`
+	Entries     []persistGuestEntry `json:"entries"`
+}
+
 type persistEntry struct {
+	PersistMapping
 	item          integrationWorkItem
-	Integration   string   `json:"integration"`
-	Source        string   `json:"source"`
-	Target        string   `json:"target"`
-	Selected      bool     `json:"selected"`
-	Ops           []string `json:"ops"`
-	ID            string   `json:"id"`
-	State         string   `json:"state"`
-	Persist       string   `json:"persist"`
-	Files         int      `json:"files"`
-	Bytes         int64    `json:"bytes"`
-	Existing      []string `json:"existing"`
-	ExistingCount int      `json:"existing_count"`
+	Ops           []string
+	Persist       string
+	ExistingCount int
 	// Retirable marks the exact own link of a deselected mapping.
-	Retirable bool `json:"retirable"`
+	Retirable bool
+	evidence  [sha256.Size]byte
 }
 
 type persistObservation struct {
-	Fingerprint string         `json:"fingerprint"`
-	Entries     []persistEntry `json:"entries"`
+	Fingerprint string
+	Entries     []persistEntry
 }
 
-// persistOutcome is what one applied transfer did not move or could not remove.
-type persistOutcome struct {
-	Source         string   `json:"source"`
-	NotTransferred []string `json:"not_transferred"`
-	Retained       []string `json:"retained"`
+// The public outcome uses only the counts of discarded or retained entries.
+type persistGuestOutcome struct {
+	Source         persistGuestText   `json:"source"`
+	NotTransferred []persistGuestText `json:"not_transferred"`
+	Retained       []persistGuestText `json:"retained"`
 }
 
 // PersistRetained is a backup or stage that a finished transfer could not
@@ -138,10 +168,10 @@ func (observation persistObservation) facts() []integrationFact {
 		if len(entry.Ops) == 0 {
 			continue
 		}
-		desired, _ := json.Marshal(persistStep{entry.Ops, entry.Source, entry.Target, entry.Selected, entry.Existing, entry.ExistingCount})
-		observed, _ := json.Marshal(entry)
+		step := persistStep{entry.Ops, entry.Source, entry.Target, entry.Selected, entry.ExistingCount}
+		desired, _ := json.Marshal(step)
 		facts = append(facts, integrationFact{item: entry.item, Key: "persist:" + strings.Join(entry.Ops, "+") + ":" + entry.Source,
-			Desired: string(desired), Observed: string(observed)})
+			Desired: string(desired), Observed: hex.EncodeToString(entry.evidence[:]), persist: &step})
 	}
 	return facts
 }
@@ -152,27 +182,21 @@ type persistStep struct {
 	Source        string   `json:"source"`
 	Target        string   `json:"target"`
 	Selected      bool     `json:"selected"`
-	Existing      []string `json:"existing"`
 	ExistingCount int      `json:"existing_count"`
 }
 
-// persistStepText states what one persist plan step does to the operator's data.
-func persistStepText(fact integrationFact) (string, string, bool) {
-	var step persistStep
-	if !strings.HasPrefix(fact.Key, "persist:") || json.Unmarshal([]byte(fact.Desired), &step) != nil {
-		return "", "", false
-	}
+// text states what this step does to the operator's data.
+func (step persistStep) text() string {
 	var parts []string
 	for _, op := range step.Ops {
 		switch op {
 		case "adopt":
 			text := "copy " + step.Source + " into " + step.Target + " without replacing target entries, then atomically exchange it for a link to that target and delete the original directory"
-			if step.ExistingCount != 0 {
-				text += fmt.Sprintf("; %d entries already exist in the target and will not be transferred; their source copies are deleted with the backup: %s",
-					step.ExistingCount, strings.Join(step.Existing, ", "))
-				if step.ExistingCount > len(step.Existing) {
-					text += fmt.Sprintf(" and %d more", step.ExistingCount-len(step.Existing))
-				}
+			switch {
+			case step.ExistingCount == 1:
+				text += "; 1 entry already exists in the target and will not be transferred; its source copy is deleted with the backup"
+			case step.ExistingCount > 1:
+				text += fmt.Sprintf("; %d entries already exist in the target and will not be transferred; their source copies are deleted with the backup", step.ExistingCount)
 			}
 			parts = append(parts, text)
 		case "finish":
@@ -187,7 +211,7 @@ func persistStepText(fact integrationFact) (string, string, bool) {
 			parts = append(parts, "remove the link "+step.Source+" to "+step.Target+" that an interrupted adoption published without recording it; the data remains in "+step.Target)
 		}
 	}
-	return step.Source, strings.Join(parts, "; "), true
+	return strings.Join(parts, "; ")
 }
 
 // PersistMappings lists every declared directory persist link of the catalog
@@ -268,38 +292,73 @@ func (runtime Runtime) observePersist(ctx context.Context, entries []integration
 		item = item.withOwner(owner)
 	}
 	output, err := runtime.runPersist(ctx, "observe", mappings, nil, item)
-	var observation persistObservation
+	var guest persistGuestObservation
 	if err != nil {
 		// A refused transfer can still supply inventory projections.
 		var refused persistRefused
 		if errors.As(err, &refused) {
-			observation.Entries, err = refused.entries, refused.error
+			guest.Entries, err = refused.Entries, refused.error
 		}
-	} else if json.Unmarshal(output, &observation) != nil || len(observation.Fingerprint) != 64 {
-		observation = persistObservation{}
+	} else if json.Unmarshal(output, &guest) != nil || !validPersistHex(guest.Fingerprint.value, sha256.Size) {
+		guest = persistGuestObservation{}
 		err = item.refusal(errors.New("invalid persist transfer observation"))
 	}
-	owners := make(map[string]string, len(mappings))
+	return guest.bind(mappings, item, err != nil), err
+}
+
+func validPersistHex(value string, size int) bool {
+	return len(value) == size*2 && strings.IndexFunc(value, func(char rune) bool {
+		return !(char >= '0' && char <= '9' || char >= 'a' && char <= 'f')
+	}) == -1
+}
+
+// bind resolves guest evidence to host declarations before the observation can
+// be used by a plan, a diagnostic or an inventory projection.
+func (guest persistGuestObservation) bind(mappings []PersistMapping, item integrationWorkItem, refused bool) persistObservation {
+	result := persistObservation{Fingerprint: guest.Fingerprint.value}
+	declared := make(map[string]PersistMapping, len(mappings))
 	for _, mapping := range mappings {
-		owners[mapping.Source] = mapping.Integration
+		declared[mapping.Source] = mapping
 	}
-	for i, entry := range observation.Entries {
-		if owner, declared := owners[entry.Source]; declared && entry.Persist != "deferred" {
-			observation.Entries[i].item = item.withOwner(owner).atDestination(entry.Source)
+	for _, evidence := range guest.Entries {
+		mapping, known := declared[evidence.Source.value]
+		if !known {
+			continue
 		}
-		delete(owners, entry.Source)
+		delete(declared, mapping.Source)
+		entry := persistEntry{PersistMapping: mapping, ExistingCount: evidence.ExistingCount, Retirable: !mapping.Selected && evidence.Retirable, evidence: evidence.evidence}
+		switch evidence.Persist.value {
+		case "projected":
+			entry.Persist = "projected"
+		case "deferred":
+			entry.Persist = "deferred"
+		}
+		if entry.Persist != "deferred" {
+			entry.item = item.withOwner(mapping.Integration).atDestination(mapping.Source)
+		}
+		for _, op := range evidence.Ops {
+			switch op.value {
+			case "adopt":
+				entry.Ops = append(entry.Ops, "adopt")
+			case "finish":
+				entry.Ops = append(entry.Ops, "finish")
+			case "cancel":
+				entry.Ops = append(entry.Ops, "cancel")
+			}
+		}
+		result.Entries = append(result.Entries, entry)
 	}
-	if err != nil {
+	if refused {
 		// Skip inventory reads for paths whose persist evidence was unavailable.
 		// The remainder of the inventory can still be observed.
 		for _, mapping := range mappings {
-			if _, missing := owners[mapping.Source]; missing {
-				observation.Entries = append(observation.Entries, persistEntry{Source: mapping.Source, Persist: "deferred"})
+			if _, missing := declared[mapping.Source]; missing {
+				result.Entries = append(result.Entries, persistEntry{PersistMapping: mapping, Persist: "deferred"})
 			}
 		}
 	}
 
-	return observation, err
+	return result
 }
 
 func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationArtifact, approved persistObservation) error {
@@ -316,7 +375,7 @@ func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationAr
 		return err
 	}
 	var applied struct {
-		Results []persistOutcome `json:"results"`
+		Results []persistGuestOutcome `json:"results"`
 	}
 	if json.Unmarshal(output, &applied) != nil {
 		return item.refusal(errors.New("invalid persist transfer result"))
@@ -330,10 +389,10 @@ func (runtime Runtime) applyPersist(ctx context.Context, entries []integrationAr
 }
 
 // persistOutcomeLines states, bounded, what a transfer left behind.
-func persistOutcomeLines(results []persistOutcome, mappings []PersistMapping) []string {
+func persistOutcomeLines(results []persistGuestOutcome, mappings []PersistMapping) []string {
 	var lines []string
 	for _, result := range results {
-		index := slices.IndexFunc(mappings, func(mapping PersistMapping) bool { return mapping.Source == result.Source })
+		index := slices.IndexFunc(mappings, func(mapping PersistMapping) bool { return mapping.Source == result.Source.value })
 		if index < 0 {
 			continue
 		}
@@ -360,12 +419,32 @@ func (runtime Runtime) ReadPersistRetained(ctx context.Context) ([]PersistRetain
 		return nil, err
 	}
 	var report struct {
-		Retained []PersistRetained `json:"retained"`
+		Retained []struct {
+			Kind, Path persistGuestText
+			Bytes      *int64
+		} `json:"retained"`
 	}
 	if json.Unmarshal(output, &report) != nil {
 		return nil, errors.New("invalid persist retained listing")
 	}
-	return report.Retained, nil
+	retained := []PersistRetained{}
+	for _, evidence := range report.Retained {
+		for _, mapping := range mappings {
+			var kind, prefix string
+			switch evidence.Kind.value {
+			case "backup":
+				kind, prefix = "backup", mapping.Source+".subyard-backup-"
+			case "stage":
+				kind, prefix = "stage", filepath.Dir(mapping.Target)+"/.subyard-stage-"+runtime.Yard.YardName+"-"
+			}
+			id, matched := strings.CutPrefix(evidence.Path.value, prefix)
+			if prefix != "" && matched && validPersistHex(id, 8) {
+				retained = append(retained, PersistRetained{Integration: mapping.Integration, Kind: kind, Path: prefix + id, Bytes: evidence.Bytes})
+				break
+			}
+		}
+	}
+	return retained, nil
 }
 
 // PersistRetainedLines states retained data with a manual next step, never as a warning.
@@ -412,14 +491,15 @@ func (plan IntegrationPlan) PersistFingerprint() string {
 
 type persistRefused struct {
 	error
-	entries []persistEntry
+	Entries []persistGuestEntry
 }
 
 func (err persistRefused) Unwrap() error { return err.error }
 
 // persistConflictMapping resolves evidence against the request, even when the
 // guest returned no entries. Only declared paths enter the public diagnostic.
-func persistConflictMapping(mappings []PersistMapping, owner, path string) (PersistMapping, string) {
+func persistConflictMapping(mappings []PersistMapping, reportedOwner, reportedPath persistGuestText) (PersistMapping, string) {
+	owner, path := reportedOwner.value, reportedPath.value
 	var matched PersistMapping
 	var matchedPath string
 	for _, mapping := range mappings {
@@ -453,18 +533,28 @@ func persistConflictMapping(mappings []PersistMapping, owner, path string) (Pers
 	return matched, ""
 }
 
+var persistInspectionReasons = map[string]string{
+	"unsafe persist data":          "unsafe persist data",
+	"unsupported persist entry":    "unsupported persist entry",
+	"unsafe persist target":        "unsafe persist target",
+	"session mount is unavailable": "session mount is unavailable",
+	"persist filesystem error":     "persist filesystem error",
+	"persist target entry refused": "persist target entry refused",
+	"persist target filesystem":    "persist target filesystem",
+}
+
 // Only typed persist conflicts are pending configuration.
 func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, item integrationWorkItem) error {
 	var report struct {
-		Conflicts []struct{ Reason, Path, Integration string } `json:"conflicts"`
-		Entries   []persistEntry                               `json:"entries"`
-		Error     string                                       `json:"error"`
+		Conflicts []struct{ Reason, Path, Integration persistGuestText } `json:"conflicts"`
+		Entries   []persistGuestEntry                                    `json:"entries"`
+		Error     persistGuestText                                       `json:"error"`
 	}
 	yard, instance, project := runtime.Yard.YardName, runtime.Yard.YardInstanceName, runtime.Yard.IncusProject
 	status := shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 	if json.Unmarshal(stderr, &report) != nil || len(report.Conflicts) == 0 {
 		message := "persist transfer program failed; data was preserved"
-		if report.Error == "MemoryError" {
+		if report.Error.value == "MemoryError" {
 			message = "persist transfer program failed (MemoryError); data was preserved"
 		}
 		if item.Input == "" {
@@ -482,47 +572,49 @@ func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, 
 		if mapping.Integration != "" {
 			finding = finding.withOwner(mapping.Integration)
 		}
-		if path == "" && conflict.Path != "" {
+		if path == "" && conflict.Path.value != "" {
 			path = mapping.Source
 		}
 		message, retry := "", status
-		switch conflict.Reason {
-		case "persist adoption pending":
+		switch reason := conflict.Reason.value; {
+		case reason == "persist adoption pending":
 			message = "persist adoption is pending: release activation does not start data transfers"
 			retry = shellquote.Command([]string{"yard", "-Y", yard, "init"})
-		case "unsafe persist data", "unsupported persist entry", "unsafe persist target", "session mount is unavailable",
-			"persist filesystem error", "persist target entry refused", "persist target filesystem":
-			message = conflict.Reason
+		case persistInspectionReasons[reason] != "":
+			message = persistInspectionReasons[reason]
 			if path != "" {
 				retry = inspect("namei", "-l", "--", path)
 			}
-		case "persist mount boundary":
+		case reason == "persist mount boundary":
 			message = "a mount point lies inside persist data"
 			if path != "" {
 				retry = inspect("findmnt", "--submounts", "--target", path)
 			}
-		case "persist paths overlap":
-			message = conflict.Reason
+		case reason == "persist paths overlap":
+			message = "persist paths overlap"
 			if finding.Owner != "" {
 				retry = shellquote.Command([]string{"yard", "-Y", yard, "config", "show", "AGENT_" + finding.Owner + "_PERSIST"})
 			}
-		case "persist space unavailable":
+		case reason == "persist space unavailable":
 			message = "not enough space on the sessions volume"
 			if path != "" {
 				retry = inspect("df", "-h", "--", filepath.Dir(path))
 			}
-		case "atomic exchange unsupported", "no-replace rename unsupported":
-			message = conflict.Reason + "; nothing was copied"
+		case reason == "atomic exchange unsupported" || reason == "no-replace rename unsupported":
+			message = "atomic exchange unsupported; nothing was copied"
+			if reason == "no-replace rename unsupported" {
+				message = "no-replace rename unsupported; nothing was copied"
+			}
 			if finding.Owner != "" && !runtime.PersistFinishOnly {
 				retry = shellquote.Command([]string{"yard", "-Y", yard, "integration", "disable", finding.Owner})
 			}
-		case "persist transfer identity unavailable":
+		case reason == "persist transfer identity unavailable":
 			message = "the transfer descriptor is not a complete Subyard record"
 			if mapping.Source != "" {
 				path = mapping.Source + ".subyard-transfer.json"
 				retry = inspect("namei", "-l", "--", path)
 			}
-		case "integration plan is stale":
+		case reason == "integration plan is stale":
 			causes = append(causes, finding.atDestination(path).failure(domain.ErrPlanStale, ": persist transfer state changed after planning"))
 			continue
 		default:
@@ -535,7 +627,7 @@ func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping, 
 		if finding.Input != "" {
 			finding.Message = finding.label() + ": " + finding.Message
 		}
-		finding.Input += ": " + conflict.Reason + " " + conflict.Path
+		finding.Input += fmt.Sprintf(": %x", sha256.Sum256([]byte(conflict.Reason.value+"\x00"+conflict.Path.value)))
 		finding.Recovery = retry
 		causes = append(causes, integrationFailure{Finding: finding.Finding, ownership: true, pending: true})
 	}
@@ -579,9 +671,7 @@ func persistInspectionPlan(observation persistObservation, err error, full func(
 		return IntegrationPlan{}, true, nil
 	}
 	plan, err := full()
-	// Only the bare substrate precondition (it fails first, alone) defers to
-	// provisioning, which recreates the substrate and then plans uninspected.
-	if err == errIntegrationSubstrateUnavailable {
+	if onlyMissingIntegrationSubstrate(err) {
 		return IntegrationPlan{}, false, nil
 	}
 	return plan, err == nil, err

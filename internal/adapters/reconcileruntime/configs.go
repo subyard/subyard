@@ -557,7 +557,7 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
 	exec := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--"}
 	direct := shellquote.RecoveryCommand(append(slices.Clone(exec), "mv", "--backup=numbered", "--", path, path+".subyard-invalid"))
-	// Pass a long destination once so it fits in the release retry field.
+	// Pass a long destination once to keep the recovery command short.
 	compact := shellquote.RecoveryCommand(append(exec, "sh", "-c", `mv --backup=numbered -- "$1" "$1.subyard-invalid"`, "subyard", path))
 	if len(compact) < len(direct) {
 		return compact
@@ -589,7 +589,7 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 			if runtime.PersistFinishOnly {
 				repair = "yard migrate"
 			}
-			return integrationOwnershipFailure(fmt.Sprintf("unowned invalid configuration preserved at %q. Move it aside first, then run %s", file.destination, repair),
+			return integrationOwnershipFailure(fmt.Sprintf("unowned invalid configuration preserved. Move it aside first, then run %s. Destination: %q", repair, file.destination),
 				"run "+preserve, false)
 		}
 		return errors.New("structured configuration apply failed")

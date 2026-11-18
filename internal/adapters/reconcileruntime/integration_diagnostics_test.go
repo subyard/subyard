@@ -324,9 +324,9 @@ func (fixture *applyDiagnosticExecutor) Exec(ctx context.Context, project, insta
 				if fixture.applyStarted && (fixture.cut == "persist observe" || fixture.cut == "source and persist") {
 					return ports.InstanceExecResult{}, errors.New("private-native-error")
 				}
-				observed := persistObservation{Fingerprint: strings.Repeat("b", 64)}
+				observed := map[string]any{"fingerprint": strings.Repeat("b", 64)}
 				if !fixture.persistApplied || fixture.cut == "persist verify drift" || fixture.cut == "persist capture drift" && fixture.verifiedReads != 0 {
-					observed.Entries = []persistEntry{{Integration: "sample", Source: "/home/dev/.memory", Ops: []string{"finish"}}}
+					observed["entries"] = []map[string]any{{"source": "/home/dev/.memory", "ops": []string{"finish"}}}
 				}
 				payload, _ := json.Marshal(observed)
 				return ports.InstanceExecResult{Stdout: payload}, nil
@@ -703,7 +703,7 @@ func TestIntegrationApplySubstepDiagnostics(t *testing.T) {
 			wantMessage, wantRetry := test.message+" in yard sample", "run yard migrate"
 			switch test.cut {
 			case "structured apply", "structured apply long":
-				wantMessage = fmt.Sprintf("integration codex apply configs: %s at %q. Move it aside first, then run yard migrate", test.message, configDestination)
+				wantMessage = fmt.Sprintf("integration codex apply configs: %s. Move it aside first, then run yard migrate. Destination: %q", test.message, configDestination)
 				wantRetry = "run " + runtime.preserveInvalidConfigCommand(configDestination)
 				if err := (releasetransition.Blocker{Code: releasetransition.CodeVerificationFailed, Message: message, Retry: retry}).Validate(); err != nil {
 					t.Fatalf("release protocol rejected the recovery: %v", err)

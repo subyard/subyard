@@ -517,7 +517,7 @@ an existing target must be owned by the developer and not writable by group or o
 3. It renames the copies into the target without replacing anything. The target wins:
    an entry that already exists there is not transferred, and where the target has a
    non-directory in place of a source directory, that whole subtree is not transferred.
-   The plan lists, bounded with a count, the entries that already exist in the target;
+   The plan reports how many entries already exist in the target;
    their source copies are deleted with the backup. Only directories the transfer
    creates get the source modes; existing target directories are never changed. If the
    target refuses entries (permissions or space), every refused path is reported as

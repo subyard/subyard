@@ -3275,24 +3275,36 @@ func TestPublicActivationDiagnosticCollectsIndependentFailures(t *testing.T) {
 }
 
 func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
+	longPath := "/home/dev/" + strings.Repeat("d", 205) + "/" + strings.Repeat("e", 205) + "/settings&notes.json"
+	longAction := "run " + shellquote.RecoveryCommand([]string{"incus", "exec", "demo", "--project", "subyard-demo", "--", "sh", "-c",
+		`mv --backup=numbered -- "$1" "$1.subyard-invalid"`, "subyard", longPath})
+	longMessage := "unowned invalid configuration preserved. Move it aside first, then run yard migrate. Destination: " + longPath
 	for _, test := range []struct {
 		name           string
 		cause          error
 		message, retry string
+		stderrAction   string
 	}{
 		{"public", fmt.Errorf("private wrapper: %w", v2PublicActivationError{
 			"yard demo: integration reconciliation failed", "run yard -Y demo integration status",
-		}), "yard demo: integration reconciliation failed", "run yard -Y demo integration status"},
-		{"raw", errors.New("private failure"), "", ""},
-		{"empty", v2PublicActivationError{}, "", ""},
-		{"multiline", v2PublicActivationError{"unsafe\nmessage", "run yard update"}, "", ""},
-		{"oversized", v2PublicActivationError{strings.Repeat("x", maxDiagnosticText+1), "run yard update"}, "", ""},
-		{"unsafe action", v2PublicActivationError{"known message", "inspect; mutate"}, "", ""},
+		}), "yard demo: integration reconciliation failed", "run yard -Y demo integration status", ""},
+		{"raw", errors.New("private failure"), "", "", ""},
+		{"empty", v2PublicActivationError{}, "", "", ""},
+		{"multiline", v2PublicActivationError{"unsafe\nmessage", "run yard update"}, "", "", ""},
+		{"oversized", v2PublicActivationError{strings.Repeat("x", maxDiagnosticText+1), "run yard update"}, "", "", ""},
+		{"unsafe action", v2PublicActivationError{"known message", "inspect; mutate"}, "", "", ""},
+		{"unsafe long action", v2PublicActivationError{"known message", longAction + " && yard migrate"}, "", "", ""},
 		{"preserve invalid config", v2PublicActivationError{
 			"unowned invalid configuration preserved. Move it aside first, then run yard -Y demo config apply",
 			"run incus exec demo -- mv --backup=numbered -- /home/dev/settings.json /home/dev/settings.json.subyard-invalid",
 		}, "unowned invalid configuration preserved. Move it aside first, then run yard -Y demo config apply",
-			"run incus exec demo -- mv --backup=numbered -- /home/dev/settings.json /home/dev/settings.json.subyard-invalid"},
+			"run incus exec demo -- mv --backup=numbered -- /home/dev/settings.json /home/dev/settings.json.subyard-invalid", ""},
+		{"preserve long invalid config", fmt.Errorf("private wrapper: %w", v2FindingError{domain.Finding{
+			Owner: "fixture", Input: "config apply", Message: longMessage, Recovery: longAction,
+		}}), boundedFailureText(longMessage, maxDiagnosticText), "follow the recovery command printed on stderr", longAction},
+		{"long message with bounded recovery", v2FindingError{domain.Finding{
+			Owner: "fixture", Input: "config apply", Message: longMessage, Recovery: "run incus exec demo -- mv settings.json settings.json.subyard-invalid",
+		}}, boundedFailureText(longMessage, maxDiagnosticText), "run incus exec demo -- mv settings.json settings.json.subyard-invalid", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			transition, _, _ := v2TransitionFixture(t, nil)
@@ -3303,7 +3315,9 @@ func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			outcome, err := transition.Converge(context.Background(), Execution{
+			var stderr bytes.Buffer
+			ctx := WithMigrationDiagnosticWriter(context.Background(), &stderr)
+			outcome, err := transition.Converge(ctx, Execution{
 				Plan: inspection.Plan, Authorization: v2TestAuthorization(inspection.Plan),
 			})
 			message, retry := test.message, test.retry
@@ -3313,6 +3327,13 @@ func TestV2TransitionPreservesPublicReconcileDiagnostic(t *testing.T) {
 			if err != nil || outcome.Status != StatusRecovering || outcome.Code != CodeDependencyUnavailable ||
 				outcome.Message != message || outcome.Retry != retry || strings.Contains(outcome.Message, "private") {
 				t.Fatalf("reconcile diagnostic = %#v, err=%v", outcome, err)
+			}
+			if test.stderrAction == "" && stderr.Len() != 0 ||
+				test.stderrAction != "" && (len(test.stderrAction) <= maxDiagnosticText || strings.Count(stderr.String(), "retry: "+test.stderrAction) != 1) {
+				t.Fatalf("stderr recovery = %q", &stderr)
+			}
+			if _, err := json.Marshal(ProcessResponse{SchemaVersion: 1, ActivationReconciliationOwned: true, Outcome: &outcome}); err != nil {
+				t.Fatalf("process v1 rejected recovery: %v", err)
 			}
 		})
 	}
@@ -3405,7 +3426,7 @@ func TestV2TransitionBoundsPublicCauseAndRecoveryExplanation(t *testing.T) {
 			recovery := "protected recovery: " + strings.Repeat(character, (maxDiagnosticText-20)/len(character))
 			guard := v2OperatorOutcome(ReleaseLinks{Active: "release-a", Previous: releaseIDPointer("release-old")},
 				goal.Target, transactionIDPointer("tx-test-001"), CodeRecoveryAmbiguous, recovery, "run yard update --check")
-			outcome := withPublicFailureCause(guard, v2PublicActivationError{primary, "run yard -Y hermes status"}, "")
+			outcome := withPublicFailureCause(context.Background(), guard, v2PublicActivationError{primary, "run yard -Y hermes status"}, "")
 			if len(outcome.Message) > maxDiagnosticText || !utf8.ValidString(outcome.Message) ||
 				!strings.HasPrefix(outcome.Message, "yard hermes: ") ||
 				!strings.Contains(outcome.Message, "; protected recovery: ") {

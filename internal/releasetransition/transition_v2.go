@@ -723,7 +723,7 @@ func (transition *V2Transition) resolveConvergeGoal(
 	observation, err := transition.observe(ctx, candidate)
 	if err != nil {
 		message, retry := publicActivationDiagnostic(err,
-			"the release transition facts could not be reobserved safely", "run yard update --check")
+			"the release transition facts could not be reobserved safely", "run yard update --check", ctx)
 		return Goal{}, false, &Blocker{Code: CodePlanStale, Message: message, Retry: retry}, nil, nil
 	}
 	if len(observation.blockers) != 0 {
@@ -1349,7 +1349,7 @@ func (transition *V2Transition) reducePostMutationFailure(
 ) (outcome Outcome, resultErr error) {
 	defer func() {
 		if outcome.Status == StatusOperatorActionRequired || outcome.Status == StatusRecovering {
-			outcome = withPublicFailureCause(outcome, cause, "")
+			outcome = withPublicFailureCause(ctx, outcome, cause, "")
 		}
 	}()
 	links, linksErr := transition.options.ObserveLinks(ctx)
@@ -1444,7 +1444,7 @@ func (transition *V2Transition) reducePostMutationFailure(
 		transactionIDPointer(journal.Transaction), CodeVerificationFailed,
 		"the release transition was interrupted after a durable mutation checkpoint",
 	)
-	outcome.Message, outcome.Retry = publicActivationDiagnostic(cause, outcome.Message, outcome.Retry)
+	outcome.Message, outcome.Retry = publicActivationDiagnostic(cause, outcome.Message, outcome.Retry, ctx)
 	return outcome, nil
 }
 
@@ -2510,7 +2510,7 @@ func (transition *V2Transition) observeResume(
 					Message: "the journaled owner registration identity changed outside the authorized transition",
 					Retry:   "run yard update --check",
 				}
-				blocker.Message, blocker.Retry = publicActivationDiagnostic(bindErr, blocker.Message, blocker.Retry)
+				blocker.Message, blocker.Retry = publicActivationDiagnostic(bindErr, blocker.Message, blocker.Retry, ctx)
 				recordMigrationDiagnostics(ctx, bindErr)
 				observation.blockers = append(observation.blockers, blocker)
 				continue
@@ -2526,7 +2526,7 @@ func (transition *V2Transition) observeResume(
 					Message: "the journaled owner registration cannot be observed safely",
 					Retry:   "repair the test-yard owner topology, then run yard update",
 				}
-				blocker.Message, blocker.Retry = publicActivationDiagnostic(observeErr, blocker.Message, blocker.Retry)
+				blocker.Message, blocker.Retry = publicActivationDiagnostic(observeErr, blocker.Message, blocker.Retry, ctx)
 				recordMigrationDiagnostics(ctx, observeErr)
 				observation.blockers = append(observation.blockers, blocker)
 				continue
@@ -3890,7 +3890,7 @@ func (transition *V2Transition) reconcileActivationOwners(
 			}
 			if guardErr != nil || guardOutcome.Code != "" {
 				if err != nil {
-					guardOutcome = withPublicFailureCause(guardOutcome, err,
+					guardOutcome = withPublicFailureCause(ctx, guardOutcome, err,
 						fmt.Sprintf("activation reconciler %q failed during verification", id))
 				}
 				return guardOutcome, guardErr
@@ -3940,7 +3940,7 @@ func (transition *V2Transition) reconcileActivationOwners(
 	}
 	if guardErr != nil || guardOutcome.Code != "" {
 		if verifyErr != nil {
-			guardOutcome = withPublicFailureCause(guardOutcome, verifyErr,
+			guardOutcome = withPublicFailureCause(ctx, guardOutcome, verifyErr,
 				fmt.Sprintf("activation reconciler %q failed during aggregate verification", id))
 		}
 		return withActivationWarnings(guardOutcome, warnings), guardErr
@@ -3989,7 +3989,7 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 ) (outcome Outcome) {
 	defer func() {
 		if outcome.Status == StatusOperatorActionRequired {
-			outcome = withPublicFailureCause(outcome, reconcileErr,
+			outcome = withPublicFailureCause(ctx, outcome, reconcileErr,
 				fmt.Sprintf("activation reconciler %q failed during %s", id, phase))
 		}
 	}()
@@ -4041,7 +4041,7 @@ func (transition *V2Transition) reduceActivationReconcilerFailure(
 		transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
 		fmt.Sprintf("activation reconciler %q failed during %s", id, phase),
 	)
-	outcome.Message, outcome.Retry = publicActivationDiagnostic(reconcileErr, outcome.Message, outcome.Retry)
+	outcome.Message, outcome.Retry = publicActivationDiagnostic(reconcileErr, outcome.Message, outcome.Retry, ctx)
 	return withActivationWarnings(outcome, observation.activationWarnings)
 }
 
@@ -4138,7 +4138,7 @@ func activationObservationBlocker(ctx context.Context, id string, err error) Blo
 		message = fmt.Sprintf("activation reconciler %q cannot inspect native state: %v", id, domain.ErrIncusAccessDenied)
 		retry = domain.IncusAccessNextStep
 	}
-	message, retry = publicActivationDiagnostic(err, message, retry)
+	message, retry = publicActivationDiagnostic(err, message, retry, ctx)
 	resource := "activation." + id
 	if nativeTargetRefusalsOnly(err) {
 		resource += ".native-target"
@@ -4152,15 +4152,27 @@ func activationObservationBlocker(ctx context.Context, id string, err error) Blo
 	}
 }
 
-func publicActivationDiagnostic(err error, message, retry string) (string, string) {
+func publicActivationDiagnostic(err error, message, retry string, contexts ...context.Context) (string, string) {
 	// Only explicitly public diagnostics cross this boundary.
 	fallback := domain.Finding{Message: message, Recovery: retry}
 	var findings []domain.Finding
 	seen := map[[2]string]bool{}
 	for _, cause := range domain.RefusalCauses(err) {
 		finding, ok := domain.PublicFinding(cause)
-		if !ok || !utf8.ValidString(finding.Message) || validateText(finding.Message, "activation diagnostic", maxDiagnosticText, true) != nil {
+		recorded := ok && len(contexts) != 0 && recordLongActivationRecovery(contexts[0], finding)
+		if recorded {
+			finding.Recovery = "follow the recovery command printed on stderr"
+		}
+		// A long finding must not discard its usable recovery. Legacy
+		// diagnostics without an input keep the bounded fallback.
+		maximum := maxDiagnosticText
+		if finding.Input != "" || recorded {
+			maximum = max(maximum, len(finding.Message))
+		}
+		if !ok || !utf8.ValidString(finding.Message) || validateText(finding.Message, "activation diagnostic", maximum, true) != nil {
 			finding = fallback
+		} else {
+			finding.Message = boundedFailureText(finding.Message, maxDiagnosticText)
 		}
 		if !utf8.ValidString(finding.Recovery) || validateSafeAction(finding.Recovery) != nil {
 			if finding.Input == "" {
@@ -4238,8 +4250,8 @@ func renderActivationFindings(findings []domain.Finding) (string, string) {
 	return message, retry
 }
 
-func withPublicFailureCause(outcome Outcome, cause error, fallback string) Outcome {
-	message, _ := publicActivationDiagnostic(cause, fallback, "")
+func withPublicFailureCause(ctx context.Context, outcome Outcome, cause error, fallback string) Outcome {
+	message, _ := publicActivationDiagnostic(cause, fallback, "", ctx)
 	if message == "" || message == outcome.Message {
 		return outcome
 	}

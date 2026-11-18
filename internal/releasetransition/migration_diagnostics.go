@@ -125,6 +125,20 @@ func recordMigrationDiagnostics(ctx context.Context, err error) {
 	}
 }
 
+// A valid recovery can exceed the frozen response limit, for example when it
+// passes a nested guest path. Keep the full finding available on stderr.
+func recordLongActivationRecovery(ctx context.Context, finding domain.Finding) bool {
+	capture, _ := ctx.Value(migrationDiagnosticCaptureKey{}).(*migrationDiagnosticCapture)
+	if capture == nil || capture.writer == nil || len(finding.Recovery) <= maxDiagnosticText ||
+		!utf8.ValidString(finding.Recovery) || !utf8.ValidString(finding.Message) ||
+		validateActionText(finding.Recovery, len(finding.Recovery)) != nil ||
+		validateText(finding.Message, "activation diagnostic", len(finding.Message), true) != nil {
+		return false
+	}
+	capture.messages["release transition refusal: "+finding.Message+"; retry: "+finding.Recovery] = true
+	return true
+}
+
 // Attach the protected owner name before flattening a multi-cause error. Raw
 // dependency text remains confined to Error()/the engine diagnostic stream.
 type nativeDependencyError struct {

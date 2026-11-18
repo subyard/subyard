@@ -85,7 +85,11 @@ func validateText(value, field string, maximum int, required bool) error {
 }
 
 func validateSafeAction(value string) error {
-	if err := validateText(value, "retry action", maxDiagnosticText, true); err != nil {
+	return validateActionText(value, maxDiagnosticText)
+}
+
+func validateActionText(value string, maximum int) error {
+	if err := validateText(value, "retry action", maximum, true); err != nil {
 		return err
 	}
 	if strings.ContainsAny(value, ";&|") {

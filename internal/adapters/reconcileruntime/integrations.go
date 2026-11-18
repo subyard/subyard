@@ -128,6 +128,7 @@ type integrationProfileRoute struct {
 
 type integrationFact struct {
 	item      integrationWorkItem
+	persist   *persistStep
 	Key       string `json:"key"`
 	Desired   string `json:"desired"`
 	Observed  string `json:"observed"`
@@ -415,6 +416,11 @@ func (runtime Runtime) integrationStateNeverInstalled(ctx context.Context) (bool
 
 // errIntegrationSubstrateUnavailable is the precondition that init provisioning repairs.
 var errIntegrationSubstrateUnavailable = errors.New("integration substrate is unavailable; run yard init")
+
+// Provisioning repairs a missing substrate, but independent refusals still block init.
+func onlyMissingIntegrationSubstrate(err error) bool {
+	return errors.Is(err, errIntegrationSubstrateUnavailable) && len(domain.RefusalCauses(err)) == 1
+}
 
 func (runtime Runtime) integrationPrecondition(ctx context.Context) (ports.InstanceInfo, error) {
 	state, err := runtime.reconcileState(ctx)

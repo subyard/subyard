@@ -202,6 +202,34 @@ func TestUnownedInvalidConfigRefusalNamesNativePreservationStep(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "'incus' 'exec' 'sample-yard' '--project' 'sample'") || !strings.Contains(err.Error(), "--backup=numbered") || !strings.Contains(err.Error(), "then run yard -Y default config apply") || strings.Contains(err.Error(), "private document") || strings.Contains(err.Error(), "yard shell") {
 		t.Fatal("unreachable or unsafe preservation hint", err)
 	}
+
+	t.Run("nested destination", func(t *testing.T) {
+		root := testkit.TempDir(t)
+		destination := filepath.Join(root, strings.Repeat("d", 205), strings.Repeat("e", 205), "settings&notes.json")
+		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, destination, []byte("keep this document"), 0600)
+		testkit.WriteFile(t, destination+".subyard-invalid", []byte("keep the earlier backup"), 0600)
+		testkit.WriteFile(t, filepath.Join(root, "incus"), []byte("#!/bin/sh\nshift 5\nexec \"$@\"\n"), 0700)
+		t.Setenv("PATH", root+":"+os.Getenv("PATH"))
+		recovery := runtime.preserveInvalidConfigCommand(destination)
+		if len(recovery) <= 512 || strings.ContainsAny(recovery, ";&|") {
+			t.Fatalf("expected a long single recovery action, got %q", recovery)
+		}
+		if output, err := exec.Command("sh", "-c", recovery).CombinedOutput(); err != nil {
+			t.Fatalf("preservation command failed: %v %s", err, output)
+		}
+		if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("invalid configuration was not moved: %v", err)
+		}
+		if actual := read(t, destination+".subyard-invalid"); actual != "keep this document" {
+			t.Fatalf("invalid document changed: %q", actual)
+		}
+		if actual := read(t, destination+".subyard-invalid.~1~"); actual != "keep the earlier backup" {
+			t.Fatalf("existing backup changed: %q", actual)
+		}
+	})
 }
 
 func TestConfigApplyReadFailureDoesNotClaimUnownedPreservation(t *testing.T) {

@@ -2186,10 +2186,9 @@ jq -e '."ip-forward-no-drop" == true' /etc/docker/daemon.json >/dev/null \
 }
 
 // integrationPlanConverged reports whether the integration plan has no work.
-// The provision stage recreates a missing integration substrate (the bare
-// precondition), so that is pending work, not a refusal.
+// A missing integration substrate is pending work for the provision stage.
 func integrationPlanConverged(plan IntegrationPlan, err error) (bool, error) {
-	if err == errIntegrationSubstrateUnavailable {
+	if onlyMissingIntegrationSubstrate(err) {
 		return false, nil
 	}
 	if err != nil {

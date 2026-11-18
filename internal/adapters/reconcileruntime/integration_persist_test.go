@@ -374,8 +374,8 @@ func TestPersistDeselectAfterTheExchangeRemovesOnlyOwnLink(t *testing.T) {
 		f := newPersistFixture(t)
 		f.interrupt(persistCuts["exchanged"])
 		f.mappings[0].Selected = false
-		facts := (persistObservation{Entries: []persistEntry{{Source: f.source, Target: f.target, Ops: []string{"finish"}}}}).facts()
-		if _, text, _ := persistStepText(facts[0]); !strings.Contains(text, "then remove the link; the data remains in "+f.target) {
+		facts := f.observation().facts()
+		if text := facts[0].persist.text(); !strings.Contains(text, "then remove the link; the data remains in "+f.target) {
 			t.Fatal("deselect finish step does not disclose the link removal", text)
 		}
 		f.mustApply()
@@ -412,6 +412,42 @@ func TestPersistDeselectAfterTheExchangeRemovesOnlyOwnLink(t *testing.T) {
 		f.mustApply()
 		f.assertDone()
 	})
+}
+
+func TestPersistPlanBindsGuestEvidenceToHostMappings(t *testing.T) {
+	const source, target = "/home/dev/.sample", "/mnt/host/agent-sessions/sample"
+	const marker = "guest-only-marker"
+	output := []byte(`{"fingerprint":"` + strings.Repeat("b", 64) + `","entries":[
+		{"source":"` + source + `","target":"/mnt/host/` + marker + `","integration":"` + marker + `","selected":true,
+		 "persist":"projected","ops":["finish","` + marker + `"]},
+		{"source":"/home/dev/` + marker + `","target":"` + target + `","persist":"projected","ops":["finish"]}
+	]}`)
+	incus := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{Stdout: output}}}}
+	root := testkit.TempDir(t)
+	runtime := Runtime{Executor: incus, Yard: domain.Context{YardName: "default", DevUser: "dev"},
+		Integrations: []profile.IntegrationDefinition{{Name: "sample", Root: root}},
+		Environment:  []string{"AGENT_sample_PERSIST=.sample:" + target}, PersistFinishOnly: true}
+	observation, err := runtime.observePersist(context.Background(), nil, "inspect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps := (IntegrationPlan{facts: observation.facts()}).PersistOperationSteps("yard")
+	if len(steps) != 1 || !strings.Contains(steps[0].Consequence, "then remove the link; the data remains in "+target) ||
+		strings.Contains(fmt.Sprint(steps), marker) {
+		t.Fatalf("persist plan did not use declared paths and bounded evidence: %v", steps)
+	}
+	if projection := observation.projection(); len(projection) != 1 || projection[source] != "projected" {
+		t.Fatalf("invalid inventory projection: %v", projection)
+	}
+	var evidence persistGuestObservation
+	if err := json.Unmarshal(output, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	for _, format := range []string{"%v", "%#v", "%+v"} {
+		if strings.Contains(fmt.Sprintf(format, evidence), marker) {
+			t.Fatal("formatted guest evidence exposed guest text")
+		}
+	}
 }
 
 func TestPersistRemnantFinishDiscardsOnlyOwnState(t *testing.T) {
@@ -470,6 +506,12 @@ func TestPersistTargetWinsAndThePlanDisclosesIt(t *testing.T) {
 	if fmt.Sprint(entry["existing"]) != "[p1/empty p1/s.jsonl]" || entry["existing_count"] != 2.0 {
 		t.Fatal("intersection not disclosed", entry["existing"], entry["existing_count"])
 	}
+	// The public plan discloses the count while the bound evidence includes the names.
+	facts := f.observation().facts()
+	if text := facts[0].persist.text(); !strings.Contains(text, "2 entries already exist in the target and will not be transferred; their source copies are deleted with the backup") ||
+		strings.Contains(text, "p1/empty") || strings.Contains(text, "p1/s.jsonl") {
+		t.Fatal("plan disclosure", text)
+	}
 	result := f.mustApply()
 	outcome := result["results"].([]any)[0].(map[string]any)
 	if fmt.Sprint(outcome["not_transferred"]) != "[p1/empty p1/s.jsonl]" {
@@ -484,18 +526,7 @@ func TestPersistTargetWinsAndThePlanDisclosesIt(t *testing.T) {
 	if len(f.backups()) != 0 {
 		t.Fatal("backup kept after success")
 	}
-	// The disclosure is bounded and counts the rest.
-	existing := make([]string, 20)
-	for i := range existing {
-		existing[i] = fmt.Sprintf("e%02d", i)
-	}
-	desired, _ := json.Marshal(persistStep{Ops: []string{"adopt"}, Source: f.source, Target: f.target, Existing: existing, ExistingCount: 25})
-	source, text, ok := persistStepText(integrationFact{Key: "persist:adopt:" + f.source, Desired: string(desired)})
-	if !ok || source != f.source || !strings.Contains(text, "25 entries already exist in the target and will not be transferred; their source copies are deleted with the backup") ||
-		!strings.Contains(text, "e19 and 5 more") {
-		t.Fatal("plan disclosure", text)
-	}
-	lines := persistOutcomeLines([]persistOutcome{{Source: f.source, NotTransferred: append(existing, "x1", "x2"), Retained: []string{"/b"}}}, f.mappings)
+	lines := persistOutcomeLines([]persistGuestOutcome{{Source: persistGuestText{f.source}, NotTransferred: make([]persistGuestText, 22), Retained: []persistGuestText{{"/b"}}}}, f.mappings)
 	if len(lines) != 2 || !strings.Contains(lines[0], "22 entries not transferred") || !strings.Contains(lines[1], "1 backup or stage paths retained") || strings.Contains(lines[1], "/b") {
 		t.Fatal("outcome lines", lines)
 	}
@@ -1006,7 +1037,7 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 		}
 	}
 	var refused persistRefused
-	if !errors.As(err, &refused) || len(refused.entries) != 1 || refused.entries[0].Persist != "deferred" {
+	if !errors.As(err, &refused) || len(refused.Entries) != 1 || refused.Entries[0].Persist.value != "deferred" {
 		t.Fatal("refused entries not carried for the inventory projection")
 	}
 	var refusals *domain.Refusals
@@ -1023,15 +1054,13 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 			t.Fatalf("refusal is not pending configuration: %v", cause)
 		}
 	}
-	desired, _ := json.Marshal(persistStep{Ops: []string{"finish"}, Source: "/home/dev/.claude/projects"})
-	if source, text, ok := persistStepText(integrationFact{Key: "persist:finish:/home/dev/.claude/projects", Desired: string(desired)}); !ok ||
-		source != "/home/dev/.claude/projects" || !strings.Contains(text, "removing its stage copies and the original directory") {
+	finish := persistStep{Ops: []string{"finish"}, Source: "/home/dev/.claude/projects"}
+	if text := finish.text(); !strings.Contains(text, "removing its stage copies and the original directory") {
 		t.Fatal("finish step text", text)
 	}
 	// The Orca adoption lane greps a deselect (integration disable) plan for this text.
-	desired, _ = json.Marshal(persistStep{Ops: []string{"cancel"}, Source: "/home/dev/.claude/projects"})
-	if _, text, ok := persistStepText(integrationFact{Key: "persist:cancel:/home/dev/.claude/projects", Desired: string(desired)}); !ok ||
-		!strings.Contains(text, "cancel the interrupted adoption of /home/dev/.claude/projects") {
+	cancel := persistStep{Ops: []string{"cancel"}, Source: "/home/dev/.claude/projects"}
+	if text := cancel.text(); !strings.Contains(text, "cancel the interrupted adoption of /home/dev/.claude/projects") {
 		t.Fatal("cancel step text", text)
 	}
 }
@@ -1067,11 +1096,11 @@ func TestInventoryReportsAllIndependentForeignFiles(t *testing.T) {
 func (f *persistFixture) observation() persistObservation {
 	f.t.Helper()
 	payload, _ := json.Marshal(f.observe())
-	var observation persistObservation
+	var observation persistGuestObservation
 	if err := json.Unmarshal(payload, &observation); err != nil {
 		f.t.Fatal(err)
 	}
-	return observation
+	return observation.bind(f.mappings, integrationWorkItem{}, false)
 }
 
 // Other guest commands have stable synthetic observations; persist executes its
@@ -1227,7 +1256,7 @@ func TestPersistDisableRemovesTheUnrecordedLinkOfAnInterruptedAdoption(t *testin
 	}
 	disclosed := false
 	for _, fact := range planned.facts() {
-		if source, text, _ := persistStepText(fact); source == memory &&
+		if text := fact.persist.text(); fact.persist.Source == memory &&
 			strings.Contains(text, "remove the link "+memory+" to "+memoryTarget) && strings.Contains(text, "the data remains in "+memoryTarget) {
 			disclosed = true
 		}
@@ -1411,12 +1440,17 @@ func TestPersistInitInspectionWithoutTheSubstrateDefersToProvisioning(t *testing
 	for name, f := range map[string]*persistFixture{"retirable": retire, "cancel": pending} {
 		t.Run(name, func(t *testing.T) {
 			observation := f.observation()
-			unavailable := func() (IntegrationPlan, error) { return IntegrationPlan{}, errIntegrationSubstrateUnavailable }
+			unavailable := func() (IntegrationPlan, error) {
+				return IntegrationPlan{}, fmt.Errorf("inspect: %w", errIntegrationSubstrateUnavailable)
+			}
 			if plan, inspected, err := persistInspectionPlan(observation, nil, unavailable); err != nil || inspected || plan.persist.changed() {
 				t.Fatalf("missing substrate is a dead end: inspected=%v err=%v", inspected, err)
 			}
 			other := errors.New("integration reconcile requires a running yard; start it explicitly first")
-			if _, inspected, err := persistInspectionPlan(observation, nil, func() (IntegrationPlan, error) { return IntegrationPlan{}, other }); !errors.Is(err, other) || inspected {
+			independent := func() (IntegrationPlan, error) {
+				return IntegrationPlan{}, errors.Join(errIntegrationSubstrateUnavailable, other)
+			}
+			if _, inspected, err := persistInspectionPlan(observation, nil, independent); !errors.Is(err, other) || inspected {
 				t.Fatalf("other full-plan error swallowed: inspected=%v err=%v", inspected, err)
 			}
 		})
@@ -1426,7 +1460,7 @@ func TestPersistInitInspectionWithoutTheSubstrateDefersToProvisioning(t *testing
 // The provision stage recreates the integration substrate, so its missing
 // precondition means "not converged", never an init refusal; other errors propagate.
 func TestProvisionConvergenceTreatsAMissingSubstrateAsPending(t *testing.T) {
-	if ok, err := integrationPlanConverged(IntegrationPlan{}, errIntegrationSubstrateUnavailable); ok || err != nil {
+	if ok, err := integrationPlanConverged(IntegrationPlan{}, fmt.Errorf("inspect: %w", errIntegrationSubstrateUnavailable)); ok || err != nil {
 		t.Fatalf("missing substrate aborts init before provisioning: ok=%v err=%v", ok, err)
 	}
 	other := errors.New("integration reconcile requires a running yard; start it explicitly first")
