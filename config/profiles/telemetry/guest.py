@@ -148,6 +148,17 @@ class Runtime:
     def saved_inventory(self):
         return json.loads(native.snapshot(self.control/'assets.json') or b'{}')
 
+    def skill_delivery(self, mode):
+        result = subprocess.run([sys.executable, '-B', self.source/'agent-skills.py', mode,
+                                 '--provider', 'profile-telemetry', '--source', self.source/'skills',
+                                 '--home', self.home, '--uid', str(self.uid), '--gid', str(self.gid)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        if mode == 'check-registered' and result.returncode == 10:
+            return False
+        if result.returncode:
+            raise ValueError('telemetry skill delivery failed')
+        return True
+
     def retained_current(self, saved):
         """A retained path is absent, or exactly what the inventory recorded with its mode."""
         for path, mode in self.retained.items():
@@ -292,7 +303,9 @@ class Runtime:
             # damaged input block that owner through activation readiness.
             return self.pending_agent_config(native_diagnostics)
         converged = converged and native_current is True
-        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'states': states, 'native_current': converged}, sort_keys=True).encode()).hexdigest()
+        skill_current = not self.selected or self.skill_delivery('check-registered')
+        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'states': states, 'native_current': converged, 'skill_current': skill_current}, sort_keys=True).encode()).hexdigest()
+        converged = converged and skill_current
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
         if not converged:
@@ -307,6 +320,8 @@ class Runtime:
                     diagnostics.append({'parameter': 'telemetry.mode.' + path.name, 'installed': 'mismatch', 'desired': 'matched'})
             if native_current is not True:
                 diagnostics.append({'parameter': 'telemetry.native', 'installed': 'unknown' if native_current is None else 'changed', 'desired': 'current'})
+            if not skill_current:
+                diagnostics.append({'parameter': 'telemetry.skill', 'installed': 'absent', 'desired': 'registered'})
             for unit in (COLLECTOR, MANAGER):
                 expected = self.selected if unit == COLLECTOR else True if self.selected else None
                 if expected is None:
@@ -355,6 +370,8 @@ class Runtime:
         saved = json.loads((self.control/'assets.json').read_text())
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
                    and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
+        service_assets = {self.library/'subyard-telemetry': COLLECTOR, self.library/'records.py': MANAGER}
+        replace_active = []
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
             if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
@@ -363,7 +380,15 @@ class Runtime:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
+            if self.selected and path in service_assets and before != self.assets[path][0]:
+                unit = service_assets[path]
+                if before_states[unit].get('ActiveState') == 'active':
+                    replace_active.append(unit)
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
+        # Stop before replacing loaded code. A retry after publication starts the
+        # inactive services even when the installed files already match.
+        if replace_active:
+            systemctl('stop', *replace_active)
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)
             if before != content:
@@ -383,8 +408,10 @@ class Runtime:
             systemctl('disable', '--now', COLLECTOR)
             systemctl('disable', MANAGER)
             native.publish(self.data/'drain.json', b'{"drain":true}\n', native.snapshot(self.data/'drain.json'), self.uid, self.gid)
+        restart = [unit for unit in restart if unit not in replace_active]
         if restart:
             systemctl('restart', *restart)
+        self.skill_delivery('apply' if self.selected else 'remove')
 
 
 def main():

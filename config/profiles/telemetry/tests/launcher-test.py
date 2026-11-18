@@ -79,7 +79,9 @@ class LauncherTest(unittest.TestCase):
             launcher.records.atomic_json(runs/'invalid.json',dict(private='PRIVATE_SECRET_INVALID'))
             (runs/'invalid.json').chmod(0o644)
             launcher.records.atomic_json(outbox/'event.json',dict(private='PRIVATE_SECRET_OUTBOX'))
-            with contextlib.closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+            database = data/'telemetry.sqlite'
+            with contextlib.closing(sqlite3.connect(database)) as db:
+                database.chmod(0o600)
                 db.execute('CREATE TABLE runs (agent_run_id TEXT, body TEXT)')
                 db.execute('INSERT INTO runs VALUES (?,?)',(records.opaque_id(records.identity_key(data), 'active'),json.dumps(dict(state='main_exited',main_exited=True,agent_exited=True,resource_completed=False,private='PRIVATE_SECRET_DB'))))
                 db.commit()

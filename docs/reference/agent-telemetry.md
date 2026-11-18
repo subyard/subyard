@@ -26,8 +26,11 @@ optional-field semantics, rather than flattening usage into model/token/cost row
 Source and receive times, policy and source versions remain distinct.
 Export/replay preserves the original capture-policy fingerprint separately from
 the trusted local import-policy fingerprint. Imported policy claims cannot relax
-sanitization. SQLite schema 2 transactionally migrates version 1 stores while
-read-only legacy export leaves them unchanged.
+sanitization. The schema 4 writer archives schema 1–3 stores as
+`archive/telemetry.sqlite` under the data directory and creates an empty active
+store. Archive query and export retain the historical schema, identifiers, and
+sequences. Active stores store a key verifier in SQLite and require the matching
+private identity key for writes.
 
 One bounded writer batches requests into SQLite WAL transactions with
 `synchronous=FULL`. OTLP acknowledges only a completed commit. Capacity or storage

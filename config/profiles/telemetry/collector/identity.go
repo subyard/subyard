@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -27,6 +28,31 @@ func (key identityKey) digest(value string) []byte {
 	return mac.Sum(nil)
 }
 
+func (key identityKey) verifier() string {
+	return hex.EncodeToString(key.digest("subyard.telemetry/identity-key/v1"))
+}
+
+func storeIdentityKey(db *sql.DB, dir string, version int) (identityKey, error) {
+	if version == 0 {
+		return loadIdentityKey(dir)
+	}
+	key, err := readIdentityKey(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, errors.New("telemetry identity key is missing from an existing store")
+	}
+	if err != nil {
+		return nil, err
+	}
+	var verifier string
+	if err = db.QueryRow("SELECT value FROM metadata WHERE key='identity_key_verifier'").Scan(&verifier); err != nil {
+		return nil, errors.New("telemetry identity key verifier is unavailable")
+	}
+	if !hmac.Equal([]byte(key.verifier()), []byte(verifier)) {
+		return nil, errors.New("telemetry identity key does not match the store")
+	}
+	return key, nil
+}
+
 func (key identityKey) legacy(value string) string {
 	if recordPatterns["legacy_opaque"].MatchString(value) {
 		return value
@@ -38,8 +64,7 @@ func (key identityKey) id(value string) string {
 	if !legacyID.MatchString(value) {
 		return ""
 	}
-	// The prior producer may already have transformed the input. Either
-	// spelling has the same preimage here. Neither spelling bypasses HMAC.
+	// Pending records can use the prior producer's spelling.
 	return "h1:" + hex.EncodeToString(key.digest(key.legacy(value)))
 }
 

@@ -56,6 +56,7 @@ class LifecycleTest(unittest.TestCase):
             runtime.saved_inventory = lambda: {}
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
             runtime.running_no_new_privs = lambda state: True
+            runtime.skill_delivery = lambda mode: True
             runtime.desired = lambda: 'a'*64
             runtime.token = lambda: 'x'*64
             (root/'.claude').mkdir()
@@ -83,6 +84,7 @@ class LifecycleTest(unittest.TestCase):
             runtime.saved_inventory = lambda: {str(path): hashlib.sha256(path.read_bytes()).hexdigest()}
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
             runtime.running_no_new_privs = lambda state: True
+            runtime.skill_delivery = lambda mode: True
             runtime.desired = lambda: 'a'*64
             observation = runtime.observe()
             self.assertIn({'parameter': 'telemetry.asset.collector.py', 'installed': 'changed', 'desired': 'current'}, observation['diagnostics'])
@@ -234,6 +236,14 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 (root/directory).mkdir()
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             states, calls = {}, []
+            registered = False
+            def skill_delivery(mode):
+                nonlocal registered
+                if mode == 'apply':
+                    registered = True
+                elif mode == 'remove':
+                    registered = False
+                return registered
             def manager(*args):
                 calls.append(args)
                 if args[0] == 'show':
@@ -265,6 +275,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
+                 patch.object(guest.Runtime, 'skill_delivery', side_effect=skill_delivery), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
                 runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
                 for command in runtime.starts.values():
@@ -274,10 +285,16 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     self.assertEqual(actual.strip(),b'1')
                 self.assertEqual(runtime.observe()['state'], 'stale')
                 runtime.apply()
+                self.assertTrue(registered)
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'],'current runtime must satisfy the generic activation digest contract')
                 self.assertEqual(runtime.startup(), {'state': 'ready'})
+                registered = False
+                self.assertIn({'parameter': 'telemetry.skill', 'installed': 'absent', 'desired': 'registered'},
+                              runtime.observe()['diagnostics'])
+                runtime.apply()
+                self.assertTrue(registered)
                 for unit in (guest.COLLECTOR, guest.MANAGER):
                     states[unit].update(ActiveState='inactive', Job='17')
                     self.assertEqual(runtime.startup()['state'], 'starting')
@@ -333,8 +350,24 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     states[guest.COLLECTOR].update(changed)
                     with self.assertRaises(ValueError):runtime.apply()
                     states[guest.COLLECTOR]=original
+                # Replacing files used by running services must start new processes
+                # even when the service definitions are unchanged.
+                for asset in ('records.py', 'subyard-telemetry'):
+                    installed = runtime.library/asset
+                    before, mode = runtime.assets[installed]
+                    (source/asset).write_bytes(before + b'\n')
+                    runtime.assets[installed] = before + b'\n', mode
+                start = len(calls)
+                runtime.apply()
+                upgrade_calls = calls[start:]
+                self.assertLess(upgrade_calls.index(('stop', guest.MANAGER, guest.COLLECTOR)),
+                                upgrade_calls.index(('enable', '--now', guest.COLLECTOR, guest.MANAGER)))
+                self.assertEqual(runtime.observe()['state'], 'current')
+
+                start = len(calls)
                 runtime.selected = False
                 runtime.apply()
+                self.assertFalse(registered)
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'])
@@ -373,7 +406,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(json.loads((root/'control/assets.json').read_text())[str(installed_binary)],
                                  hashlib.sha256(kept).hexdigest())
                 self.assertEqual(states[guest.MANAGER]['ActiveState'], 'active')
-                self.assertFalse(any(call[0] == 'stop' and guest.MANAGER in call for call in calls))
+                self.assertFalse(any(call[0] == 'stop' and guest.MANAGER in call for call in calls[start:]))
                 self.assertTrue((root/'bin/subyard-telemetry-run').read_text().startswith('#!/bin/sh\n'))
                 self.assertNotIn('analytics', (root/'home/.codex/config.toml').read_text())
                 token=(root/'data/auth.token').read_bytes()

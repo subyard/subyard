@@ -43,7 +43,9 @@ class ProcessTest(unittest.TestCase):
     def test_short_run_waits_for_both_objects_baseline_and_final_samples(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             data = Path(name)
-            with closing(sqlite3.connect(data/'telemetry.sqlite')) as writer:
+            database = data/'telemetry.sqlite'
+            with closing(sqlite3.connect(database)) as writer:
+                database.chmod(0o600)
                 writer.execute('CREATE TABLE samples(object_id TEXT,source_time INTEGER,body TEXT)')
                 def sample(suffix, at, final):
                     writer.execute('INSERT INTO samples VALUES(?,?,?)',

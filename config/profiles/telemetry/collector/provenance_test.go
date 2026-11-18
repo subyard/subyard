@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -127,54 +128,6 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 	}
 }
 
-func TestCapturePolicyV1MigrationAndLegacyExport(t *testing.T) {
-	dir := testkit.TempDir(t)
-	s, err := Open(dir, DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	const at = "2026-01-01T00:00:00.000000000Z"
-	seedRetained(t, s, Envelope{OriginID: "producer:old-source", EventID: "old-run", SourceID: "old-source",
-		SourceVersion: "1", SourceTime: at, Kind: "run", Body: json.RawMessage(`{"agent_run_id":"legacy"}`),
-		Encoding: "json", PolicyVersion: PolicyVersion, ReceivedTime: at})
-	if _, err := s.db.Exec(`INSERT INTO runs VALUES('legacy','{"agent_run_id":"legacy"}',?)`, at); err != nil {
-		t.Fatal(err)
-	}
-	// Reconstruct the historical v1 records layout while preserving a real row.
-	if _, err := s.db.Exec("ALTER TABLE records DROP COLUMN import_policy_version; PRAGMA user_version=1;"); err != nil {
-		t.Fatal(err)
-	}
-	s.Close()
-	db, err := OpenReadOnly(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var exported bytes.Buffer
-	_, err = Export(context.Background(), db, &exported, 0, 10)
-	var version int
-	db.QueryRow("PRAGMA user_version").Scan(&version)
-	db.Close()
-	if err != nil || version != 1 || bytes.Contains(exported.Bytes(), []byte("import_policy_version")) {
-		t.Fatalf("legacy read-only export changed schema: version=%d err=%v", version, err)
-	}
-	s, err = Open(dir, DefaultLimits())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	var capture, applied string
-	if err := s.db.QueryRow("SELECT policy_version,import_policy_version FROM records").Scan(&capture, &applied); err != nil || capture != PolicyVersion || applied != "" {
-		t.Fatalf("migration altered original policy claim: %q %q %v", capture, applied, err)
-	}
-	if err := s.Replay(context.Background(), bytes.NewReader(exported.Bytes())); err != nil {
-		t.Fatal("legacy JSONL replay failed", err)
-	}
-	s.db.QueryRow("PRAGMA user_version").Scan(&version)
-	if version != 3 || !s.RegisteredRun(context.Background(), "legacy") {
-		t.Fatal("migration lost lifecycle data or schema version")
-	}
-}
-
 func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	ctx := context.Background()
 	store := fixtureStore(t)
@@ -233,22 +186,12 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyStore := fixtureStore(t)
-	seedRetained(t, legacyStore, producer)
-	if err := migrate(legacyStore.db, legacyStore.key, 2); err != nil {
-		t.Fatal(err)
-	}
-	if err := legacyStore.Ingest(ctx, []Record{r}); err != nil {
-		t.Fatal("legacy producer retry failed", err)
-	}
 	var legacy bytes.Buffer
 	if err := json.NewEncoder(&legacy).Encode(producer); err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []*Store{legacyStore, store} {
-		if err := target.Replay(ctx, bytes.NewReader(legacy.Bytes())); err != nil {
-			t.Fatal("legacy replay failed", err)
-		}
+	if err := store.Replay(ctx, &legacy); err != nil {
+		t.Fatal("legacy replay failed", err)
 	}
 	for i := 0; i < 2; i++ {
 		if err := destination.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
@@ -296,6 +239,29 @@ func TestReplayLegacyOutOfRangeTimestamps(t *testing.T) {
 	}
 	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("replayed count=%d, err=%v", count, err)
+	}
+}
+
+func TestReplayConflictingProducerTimestamp(t *testing.T) {
+	ctx := context.Background()
+	store := fixtureStore(t)
+	r := record("gap", map[string]any{})
+	r.SourceTime = "2026-01-01T00:00:00Z"
+	if err := store.Ingest(ctx, []Record{r}); err != nil {
+		t.Fatal(err)
+	}
+	var data bytes.Buffer
+	if _, err := Export(ctx, store.db, &data, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	var e Envelope
+	if err := json.Unmarshal(data.Bytes(), &e); err != nil {
+		t.Fatal(err)
+	}
+	e.SourceTime = unknownSourceTime
+	collision, _ := json.Marshal(e)
+	if err := store.Replay(ctx, bytes.NewReader(collision)); !errors.Is(err, errEventCollision) {
+		t.Fatalf("replay accepted a changed timestamp: %v", err)
 	}
 }
 

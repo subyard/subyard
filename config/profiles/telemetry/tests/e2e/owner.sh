@@ -55,6 +55,8 @@ export SUBYARD_TELEMETRY_FIXTURE_ASSETS="$fixture_assets"
 asset="$fixture_assets/subyard-telemetry"
 mkdir "$state/source"
 cp config/profiles/telemetry/*.py config/profiles/telemetry/record-policy.txt "$state/source/"
+cp -R config/profiles/telemetry/skills "$state/source/skills"
+cp config/skills/deliver.py "$state/source/agent-skills.py"
 cp internal/adapters/configmaterial/tomli_w.py "$state/source/"
 cp "$asset" "$state/source/subyard-telemetry"
 chmod 0755 "$state/source/subyard-telemetry"
@@ -326,8 +328,10 @@ for _ in range(2):
     command('replay', target, '--input', str(archive))
     replayed = json.loads(command('stats', target))
     assert replayed['records'] == count and replayed['kinds'] == before['kinds'], 'replay duplicated or lost records'
-sql = 'SELECT origin_id,event_id,object_id,source_time,cpu_ns,io_read_bytes,io_write_bytes FROM sample_values ORDER BY origin_id,event_id LIMIT 100'
-assert json.loads(command('query', source, '--sql', sql)) == json.loads(command('query', target, '--sql', sql))
+sql = ('SELECT s.source_time,s.cpu_ns,s.io_read_bytes,s.io_write_bytes '
+       'FROM sample_values s JOIN records r USING(origin_id,event_id) ORDER BY r.sequence LIMIT 100')
+samples = json.loads(command('query', source, '--sql', sql))
+assert samples and samples == json.loads(command('query', target, '--sql', sql))
 assert any(key.startswith('otlp/') for key in before['kinds']) and before['kinds'].get('allocation')
 print(json.dumps({'schema': 'subyard.telemetry.export-acceptance/v1', 'records': count,
                   'kinds': before['kinds'], 'replay_passes': 2, 'sample_sql_equal': True,

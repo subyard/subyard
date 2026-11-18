@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -133,7 +134,7 @@ func TestBoundsAndFutureSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = other.db.Exec("PRAGMA user_version=4"); err != nil {
+	if _, err = other.db.Exec(fmt.Sprintf("PRAGMA user_version=%d", storeVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	other.Close()

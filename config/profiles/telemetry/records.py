@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Private, bounded producer outbox. Collection failures never fail workloads."""
+from contextlib import closing
 import datetime
 import fcntl
 import hmac
@@ -9,11 +10,13 @@ import os
 from pathlib import Path
 import re
 import socket
+import sqlite3
 import stat
 import tempfile
 import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
+STORE_VERSION = 4
 KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
 BODY_ID = {'run': 'agent_run_id', **dict.fromkeys(('scope', 'process', 'sample', 'allocation', 'association'), 'object_id')}
 BODY_RULES = {}
@@ -136,6 +139,36 @@ def outbox_record(key, kind, body, source_id, event_id, source_time):
             'source_time': source_time, 'kind': kind, 'body': body, 'redactions': removed}
 
 
+def filter_session(record, attributes):
+    if record['kind'] not in ('session', 'relation'):
+        return True
+    body = record['body']
+    if not body.get('session_id'):
+        return (record['kind'] != 'session' and body.get('relation') != 'native_session'
+                and not (body.get('source') or '').startswith('native-otlp-attribute'))
+    names = body.get('session_attributes')
+    if isinstance(names, list):
+        retained = [name for name in names if name in attributes]
+        if not retained:
+            return False
+        body['session_attributes'] = retained
+        record['redactions'] += len(names) - len(retained)
+    elif not set(BODY_RULES['session_attributes'][1]).issubset(attributes):
+        return False
+    keep_run = 'subyard.agent_run.id' in attributes
+    if not keep_run:
+        for field in ('agent_run_id', 'relation'):
+            if field in body:
+                del body[field]
+                record['redactions'] += 1
+        record['kind'] = 'session'
+    if not keep_run or 'subyard.agent_run.evidence' not in attributes:
+        source = 'native-otlp-attribute'
+        record['redactions'] += 'source' in body and body['source'] != source
+        body['source'] = source
+    return True
+
+
 def private_directory(path):
     """Create/check the private leaf, never repair existing objects.
 
@@ -204,15 +237,48 @@ def read_outbox(path):
     return value.get('record', value)
 
 
+def store_settings(directory):
+    path = directory/'telemetry.sqlite'
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {}
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError('private telemetry store required')
+    with closing(sqlite3.connect(path.absolute().as_uri()+'?mode=ro', uri=True, timeout=0.05)) as db:
+        version, = db.execute('PRAGMA user_version').fetchone()
+        if 0 <= version < STORE_VERSION:
+            return {}
+        if version != STORE_VERSION:
+            raise ValueError('unsupported telemetry schema')
+        settings = dict(db.execute("SELECT key,value FROM metadata WHERE key IN ('identity_key_verifier','session_capture_attributes')"))
+        if not settings.get('identity_key_verifier'):
+            raise ValueError('telemetry identity key verifier is unavailable')
+        return settings
+
+
+def capture_attributes(directory):
+    selected = store_settings(directory).get('session_capture_attributes')
+    if selected is None:
+        return {*BODY_RULES['session_attributes'][1], 'subyard.agent_run.id', 'subyard.agent_run.evidence'}
+    return set(json.loads(selected))
+
+
 def identity_key(directory):
+    verifier = store_settings(directory).get('identity_key_verifier')
     path = directory/'.identity-key'
     try:
         with open_private(path) as source:
             key = source.read(33)
             if len(key) != 32:
                 raise ValueError('invalid telemetry identity key')
+            if verifier is not None and not hmac.compare_digest(
+                    verifier, hmac.digest(key, b'subyard.telemetry/identity-key/v1', 'sha256').hex()):
+                raise ValueError('telemetry identity key does not match the store')
             return key
     except FileNotFoundError:
+        if verifier is not None:
+            raise ValueError('telemetry identity key is missing from an existing store') from None
         # Serialize only initialization with the collector. Existing keys are
         # read without a lock and are never replaced.
         parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -220,6 +286,8 @@ def identity_key(directory):
             fcntl.flock(parent, fcntl.LOCK_EX | fcntl.LOCK_NB)
             if path.exists() or path.is_symlink():
                 return identity_key(directory)
+            if store_settings(directory).get('identity_key_verifier') is not None:
+                raise ValueError('telemetry identity key is missing from an existing store')
             key = os.urandom(32)
             with tempfile.NamedTemporaryFile(dir=directory, prefix='.key-', delete=False) as temporary:
                 try:
@@ -315,6 +383,9 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
                 if source_time is None and generated_event_id:
                     source_time = datetime.datetime.now(datetime.timezone.utc).isoformat()
             record = outbox_record(key, kind, body, source_id, event_id, source_time)
+            attributes = capture_attributes(directory) if kind in ('session', 'relation') else ()
+            if not filter_session(record, attributes):
+                return True
             if existing is not None:
                 if existing.get('schema') != SCHEMA and not (
                         not existing.get('schema') and existing.get('schema_version') == 1):
@@ -322,6 +393,8 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
                 old = existing if authenticated else outbox_record(
                     key, existing['kind'], existing['body'], existing['source_id'],
                     existing['event_id'], existing.get('source_time'))
+                if not filter_session(old, attributes):
+                    return False
                 if {k: v for k, v in old.items() if k != 'redactions'} != {
                         k: v for k, v in record.items() if k != 'redactions'}:
                     return False
@@ -367,5 +440,5 @@ def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, eve
         if kind == 'run' and record['body'].get('state') == 'starting' and record['body'].get('agent'):
             deliver(directory, signed_record(key, record))
         return True
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
         return False

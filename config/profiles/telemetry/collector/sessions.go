@@ -81,35 +81,46 @@ func sessionEnvelopes(signal map[string]any) []Envelope {
 	return entries
 }
 
-func filterSessionRelation(r *Record, policy Policy) bool {
+func filterSessionRelation(r *Record, policy Policy) (bool, int64) {
 	if r.Kind != "session" && r.Kind != "relation" {
-		return true
+		return true, 0
 	}
 	if stringValue(r.Body, "session_id") == "" {
 		return r.Kind != "session" && stringValue(r.Body, "relation") != "native_session" &&
-			!strings.HasPrefix(stringValue(r.Body, "source"), "native-otlp-attribute")
+			!strings.HasPrefix(stringValue(r.Body, "source"), "native-otlp-attribute"), 0
 	}
+	var removed int64
 	if names, ok := r.Body["session_attributes"].([]any); ok {
+		before := len(names)
 		names = slices.DeleteFunc(names, func(name any) bool { return !slices.Contains(policy.Attributes, name.(string)) })
 		if len(names) == 0 {
-			return false
+			return false, 0
 		}
+		removed += int64(before - len(names))
 		r.Body["session_attributes"] = names
 	} else {
 		// Legacy relations do not identify the contributing attribute.
 		for _, name := range sessionAttributeNames {
 			if !slices.Contains(policy.Attributes, name) {
-				return false
+				return false, 0
 			}
 		}
 	}
 	if !slices.Contains(policy.Attributes, "subyard.agent_run.id") {
-		delete(r.Body, "agent_run_id")
-		delete(r.Body, "relation")
+		for _, field := range []string{"agent_run_id", "relation"} {
+			if _, exists := r.Body[field]; exists {
+				delete(r.Body, field)
+				removed++
+			}
+		}
 		r.Kind = "session"
-		r.Body["source"] = "native-otlp-attribute"
-	} else if !slices.Contains(policy.Attributes, "subyard.agent_run.evidence") {
-		r.Body["source"] = "native-otlp-attribute"
 	}
-	return true
+	if !slices.Contains(policy.Attributes, "subyard.agent_run.id") || !slices.Contains(policy.Attributes, "subyard.agent_run.evidence") {
+		const source = "native-otlp-attribute"
+		if old, exists := r.Body["source"]; exists && old != source {
+			removed++
+		}
+		r.Body["source"] = source
+	}
+	return true, removed
 }

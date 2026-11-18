@@ -313,6 +313,9 @@ func (key identityKey) sanitizeOTLP(e *Envelope, p Policy, id identity, rekeyBin
 	})
 	e.Protobuf = protobuf
 	e.PolicyVersion = policyFingerprint(p)
+	for i := range relations {
+		relations[i].PolicyVersion = e.PolicyVersion
+	}
 	e.Redactions += policy.removed
 	return relations, err
 }

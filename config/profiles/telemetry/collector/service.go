@@ -45,6 +45,9 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	if err = privateDir(spool); err != nil {
 		return err
 	}
+	if err = s.publishCapturePolicy(spool, options.Policy); err != nil {
+		return err
+	}
 	socket := filepath.Join(s.dir, "control.sock")
 	if st, e := os.Lstat(socket); e == nil {
 		if st.Mode()&os.ModeSocket == 0 {
@@ -172,6 +175,30 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 		cancel()
 		return <-finished
 	}
+}
+
+func (s *Store) publishCapturePolicy(spool string, policy Policy) error {
+	// Producers hold the same lock from policy lookup through outbox publication.
+	path := filepath.Join(spool, ".lock")
+	if err := privateFile(path); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(path, os.O_RDWR|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		return err
+	}
+	names := append(slices.Clone(sessionAttributeNames), "subyard.agent_run.id", "subyard.agent_run.evidence")
+	names = slices.DeleteFunc(names, func(name string) bool { return !slices.Contains(policy.Attributes, name) })
+	data, err := json.Marshal(names)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("INSERT INTO metadata(key,value) VALUES('session_capture_attributes',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", string(data))
+	return err
 }
 
 func (s *Store) IngestOutbox(ctx context.Context, path string) error {

@@ -105,12 +105,16 @@ func privateFile(path string) error {
 	if !os.IsExist(err) {
 		return err
 	}
+	return checkPrivateFile(path, 0600)
+}
+
+func checkPrivateFile(path string, mode os.FileMode) error {
 	st, err := os.Lstat(path)
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm() != 0600 {
-		return errors.New("telemetry file must be regular with mode 0600")
+	if !st.Mode().IsRegular() || st.Mode().Perm() != mode {
+		return fmt.Errorf("telemetry file must be regular with mode %04o", mode)
 	}
 	if x, ok := st.Sys().(*syscall.Stat_t); !ok || int(x.Uid) != os.Geteuid() || x.Nlink != 1 {
 		return errors.New("telemetry file has unsafe ownership or links")
@@ -142,19 +146,27 @@ func Open(dir string, limits Limits) (*Store, error) {
 		return nil, errors.New("telemetry writer already running")
 	}
 	fail := func(e error) (*Store, error) { lock.Close(); return nil, e }
-	path := filepath.Join(dir, "telemetry.sqlite")
-	if err = privateFile(path); err != nil {
+	if err = sealArchive(dir); err != nil {
 		return fail(err)
 	}
-	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path}).String()+"?_pragma=busy_timeout(1000)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)")
+	path := filepath.Join(dir, databaseName)
+	db, version, err := openWriterDatabase(path)
 	if err != nil {
 		return fail(err)
 	}
-	db.SetMaxOpenConns(1)
 	bad := func(e error) (*Store, error) { db.Close(); return fail(e) }
-	var version int
-	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version > 3 {
-		return bad(errors.New("unsupported telemetry schema"))
+	if version != 0 && version < storeVersion {
+		if err = archiveStore(dir, db); err != nil {
+			return bad(err)
+		}
+		db, version, err = openWriterDatabase(path)
+		if err != nil {
+			return fail(err)
+		}
+	}
+	key, err := storeIdentityKey(db, dir, version)
+	if err != nil {
+		return bad(err)
 	}
 	var journal string
 	if err = db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journal); err != nil || journal != "wal" {
@@ -182,25 +194,56 @@ func Open(dir string, limits Limits) (*Store, error) {
 	if _, err = db.Exec("PRAGMA wal_autocheckpoint=128"); err != nil {
 		return bad(err)
 	}
-	key, err := loadIdentityKey(dir)
-	if err != nil {
-		return bad(err)
-	}
-	if err = migrate(db, key, version); err != nil {
-		return bad(err)
+	if version == 0 {
+		if err = initializeStore(db, key); err != nil {
+			return bad(err)
+		}
 	}
 	var origin string
-	err = db.QueryRow("SELECT value FROM metadata WHERE key='origin_id'").Scan(&origin)
-	if errors.Is(err, sql.ErrNoRows) {
-		origin = newID()
-		_, err = db.Exec("INSERT INTO metadata(key,value) VALUES('origin_id',?)", origin)
-	}
-	if err != nil {
+	if err = db.QueryRow("SELECT value FROM metadata WHERE key='origin_id'").Scan(&origin); err != nil {
 		return bad(err)
 	}
 	s := &Store{db: db, dir: dir, origin: origin, key: key, limits: limits, lock: lock, queue: make(chan writeRequest, limits.QueueRequests), done: make(chan struct{})}
 	go s.writer()
 	return s, nil
+}
+
+const databaseName = "telemetry.sqlite"
+const storeVersion = 4
+
+func openWriterDatabase(path string) (*sql.DB, int, error) {
+	if err := privateFile(path); err != nil {
+		return nil, 0, err
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path}).String()+"?_pragma=busy_timeout(1000)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)")
+	if err != nil {
+		return nil, 0, err
+	}
+	db.SetMaxOpenConns(1)
+	var version int
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version < 0 || version > storeVersion {
+		db.Close()
+		return nil, 0, errors.New("unsupported telemetry schema")
+	}
+	return db, version, nil
+}
+
+func initializeStore(db *sql.DB, key identityKey) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(schema); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("INSERT INTO metadata(key,value) VALUES('origin_id',?),('identity_key_verifier',?)", newID(), key.verifier()); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", storeVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 const schema = `CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -215,8 +258,7 @@ CREATE INDEX IF NOT EXISTS associations_run ON associations(agent_run_id);
 CREATE TABLE IF NOT EXISTS allocations(object_id TEXT PRIMARY KEY,body TEXT NOT NULL,source_time TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS gaps(origin_id TEXT NOT NULL,event_id TEXT NOT NULL,object_id TEXT,agent_run_id TEXT,source_time TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(origin_id,event_id));
 CREATE TABLE IF NOT EXISTS relations(origin_id TEXT NOT NULL,event_id TEXT NOT NULL,agent_run_id TEXT,session_id TEXT,body TEXT NOT NULL,PRIMARY KEY(origin_id,event_id));
-CREATE VIEW IF NOT EXISTS sample_values AS SELECT origin_id,event_id,object_id,source_time,json_extract(body,'$.cpu_ns') AS cpu_ns,json_extract(body,'$.memory_bytes') AS memory_bytes,json_extract(body,'$.rss_bytes') AS rss_bytes,json_extract(body,'$.pss_bytes') AS pss_bytes,json_extract(body,'$.io_read_bytes') AS io_read_bytes,json_extract(body,'$.io_write_bytes') AS io_write_bytes,json_extract(body,'$.generation') AS generation,json_extract(body,'$.counter_generation') AS counter_generation,json_extract(body,'$.monotonic_ns') AS monotonic_ns FROM samples;
-PRAGMA user_version=3;`
+CREATE VIEW IF NOT EXISTS sample_values AS SELECT origin_id,event_id,object_id,source_time,json_extract(body,'$.cpu_ns') AS cpu_ns,json_extract(body,'$.memory_bytes') AS memory_bytes,json_extract(body,'$.rss_bytes') AS rss_bytes,json_extract(body,'$.pss_bytes') AS pss_bytes,json_extract(body,'$.io_read_bytes') AS io_read_bytes,json_extract(body,'$.io_write_bytes') AS io_write_bytes,json_extract(body,'$.generation') AS generation,json_extract(body,'$.counter_generation') AS counter_generation,json_extract(body,'$.monotonic_ns') AS monotonic_ns FROM samples;`
 
 func (s *Store) OriginID() string { return s.origin }
 func (s *Store) Limits() Limits   { return s.limits }
@@ -282,7 +324,7 @@ func (s *Store) capture(ctx context.Context, input []Envelope, p Policy) error {
 			return fmt.Errorf("%w: %v", errInvalidRecord, err)
 		}
 		if e.replay {
-			e.ImportPolicyVersion, e.PolicyVersion = e.PolicyVersion, claim
+			e.ImportPolicyVersion, e.PolicyVersion = policyFingerprint(p), claim
 		}
 		if e.Kind != "" {
 			entries = append(entries, e)
@@ -384,7 +426,7 @@ func (s *Store) writer() {
 func (s *Store) diskSize() (int64, error) {
 	var total int64
 	for _, suffix := range []string{"", "-wal", "-shm"} {
-		st, err := os.Stat(filepath.Join(s.dir, "telemetry.sqlite") + suffix)
+		st, err := os.Stat(filepath.Join(s.dir, databaseName) + suffix)
 		if os.IsNotExist(err) {
 			continue
 		}
@@ -486,8 +528,8 @@ func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error
 }
 
 func samePayload(a, b Envelope) bool {
-	// A stable producer event may acquire an unknown time on retry after an upgrade.
-	producerRetry := b.Encoding == "json" && b.ImportPolicyVersion == "" && b.OriginID == "producer:"+b.SourceID
+	// A live producer retry with a stable ID may no longer know the source time.
+	producerRetry := !b.replay && b.Encoding == "json" && b.OriginID == "producer:"+b.SourceID
 	sameTime := a.SourceTime == b.SourceTime || (producerRetry && b.SourceTime == unknownSourceTime)
 	return a.SourceVersion == b.SourceVersion && sameTime &&
 		bytes.Equal(a.Body, b.Body) && bytes.Equal(a.Protobuf, b.Protobuf)
@@ -720,7 +762,7 @@ func OpenReadOnly(dir string) (*sql.DB, error) {
 	if absoluteErr != nil {
 		return nil, absoluteErr
 	}
-	db, err := sql.Open("subyard_telemetry_readonly", (&url.URL{Scheme: "file", Path: filepath.Join(dir, "telemetry.sqlite")}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
+	db, err := sql.Open("subyard_telemetry_readonly", (&url.URL{Scheme: "file", Path: filepath.Join(dir, databaseName)}).String()+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(500)")
 	if err != nil {
 		return nil, err
 	}
@@ -735,7 +777,7 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return after, err
 	}
-	// Read-only export remains usable before a v1 database's writer migration.
+	// A v1 archive predates import policy metadata.
 	importPolicyColumn := "import_policy_version"
 	if version == 1 {
 		importPolicyColumn = "''"
@@ -828,7 +870,8 @@ func (s *Store) sanitizePayload(e *Envelope, p Policy, id identity, rekeyBinary 
 			return nil, err
 		}
 		// The envelope has already been mapped. Only map body identities.
-		if !filterSessionRelation(&clean, p) {
+		keep, removed := filterSessionRelation(&clean, p)
+		if !keep {
 			e.Kind = ""
 			return nil, nil
 		}
@@ -836,8 +879,11 @@ func (s *Store) sanitizePayload(e *Envelope, p Policy, id identity, rekeyBinary 
 		e.Body, _ = json.Marshal(clean.Body)
 		e.SourceTime = clean.SourceTime
 		e.SourceVersion = clean.SourceVersion
-		e.Redactions += n
+		e.Redactions += n + removed
 		e.PolicyVersion = PolicyVersion
+		if e.Kind == "session" || e.Kind == "relation" {
+			e.PolicyVersion = policyFingerprint(p)
+		}
 		return nil, nil
 	}
 	if e.Kind != e.Encoding {

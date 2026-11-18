@@ -67,7 +67,9 @@ class Resources(unittest.TestCase):
 
     def test_outbox_drain_requires_actual_canonical_commit_when_collector_unlinks(self):
         import contextlib
-        with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
+        database = self.root/'telemetry.sqlite'
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            database.chmod(0o600)
             db.execute('CREATE TABLE records(event_id TEXT, source_id TEXT, origin_id TEXT, encoding TEXT)')
             db.commit()
         records.atomic_json(self.root/'producer.json',dict(source_id='fixture-source'))

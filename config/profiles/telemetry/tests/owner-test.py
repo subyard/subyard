@@ -14,6 +14,13 @@ import tempfile
 import unittest
 
 
+def copy_skill_assets(repository, profile):
+    shutil.copytree(repository/'config/profiles/telemetry/skills', profile/'skills')
+    helper = profile.parents[1]/'skills/deliver.py'
+    helper.parent.mkdir(parents=True)
+    shutil.copyfile(repository/'config/skills/deliver.py', helper)
+
+
 class OwnerTest(unittest.TestCase):
     def test_exact_owner_check_distinguishes_fresh_drift_from_failure_and_applies(self):
         source = Path(__file__).resolve().parents[1]
@@ -26,6 +33,7 @@ class OwnerTest(unittest.TestCase):
                 shutil.copyfile(path,profile/path.name)
             shutil.copyfile(source/'record-policy.txt', profile/'record-policy.txt')
             shutil.copyfile(source/'profile.sh',profile/'profile.sh')
+            copy_skill_assets(repository, profile)
             (root/'scripts/lib').mkdir(parents=True)
             shutil.copyfile(repository/'scripts/lib/engine-context.sh',root/'scripts/lib/engine-context.sh')
             (root/'internal/adapters/configmaterial').mkdir(parents=True)
@@ -47,8 +55,12 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
     stage=pathlib.Path(temporary)
     with tarfile.open(fileobj=sys.stdin.buffer,mode='r|') as archive:
         for member in archive:
-            assert member.isfile() and pathlib.Path(member.name).name==member.name
-            (stage/member.name).write_bytes(archive.extractfile(member).read())
+            skill = 'skills/subyard-telemetry/SKILL.md'
+            assert member.isfile() and (pathlib.Path(member.name).name==member.name or member.name==skill)
+            destination = stage/member.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(archive.extractfile(member).read())
+    assert (stage/'agent-skills.py').is_file() and (stage/skill).is_file()
     if arguments[0]=='startup':
         assert not (stage/'subyard-telemetry').exists()
         assert '--env' in args and 'SUBYARD_STARTUP_REMAINING_MS=1234' in args
@@ -154,6 +166,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         for path in source.glob('*.py'):
             shutil.copyfile(path, profile/path.name)
         shutil.copyfile(source/'record-policy.txt', profile/'record-policy.txt')
+        copy_skill_assets(repository, profile)
         for name in ('profile.sh', 'runtime.sh'):
             shutil.copyfile(source/name, profile/name)
             (profile/name).chmod(0o755)

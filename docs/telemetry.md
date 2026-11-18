@@ -19,7 +19,8 @@ yard -Y default profile status telemetry --json
 These are operator actions; building and testing the profile does not enable it
 on an existing deployment. The profile installs separate collector and delegated
 run-manager services. Data lives in `/var/lib/subyard/telemetry`, owned by the
-yard's developer account with directory mode `0700` and files `0600`. The service
+yard's developer account with directory mode `0700`, active files `0600` and
+archive files `0400`. The service
 listens on `127.0.0.1:14318`, authenticates native exporters and provides a private
 Unix control socket. SQLite and the endpoint are not published on the owner host.
 
@@ -150,10 +151,33 @@ data=/var/lib/subyard/telemetry
 
 Readers open SQLite with read-only/query-only restrictions; they neither create a
 missing database nor run migrations. Queries have finite row, response-size and
-time limits. A native SQLite limit rejects scalar values and encoded rows above
+time limits. The installed `subyard-telemetry` skill provides these commands
+for agents. A native SQLite limit rejects scalar values and encoded rows above
 16 MiB before result materialization; this is not a total SQLite working-memory
 budget for arbitrary SQL. Large histories must be inspected in bounded windows rather than
 held in an indefinite WAL reader transaction.
+
+### Pre-upgrade archive
+
+The first schema 4 writer open moves a schema 1–3 database to
+`/var/lib/subyard/telemetry/archive/telemetry.sqlite` and initializes an empty
+active database at `/var/lib/subyard/telemetry/telemetry.sqlite`. For a
+standalone store the paths are relative to its `--data-dir`. The archive keeps
+all telemetry that was still retained at upgrade time, including run and session
+metadata, resource measurements, and native OTLP signals. It keeps the old
+schema, identifiers, capture rules and sequence numbers. The new writer never
+prunes the archive.
+
+```sh
+"$collector" stats --data-dir "$data/archive"
+"$collector" query --data-dir "$data/archive" --sql \
+  'SELECT agent_run_id,source_time FROM runs ORDER BY source_time DESC LIMIT 20'
+"$collector" show-run --data-dir "$data/archive" --run STORED_RUN_ID
+"$collector" export --data-dir "$data/archive" --after 0 --limit 1000
+```
+
+Use the store's own identifiers and export cursor for each database. Keep
+archive exports private under the previous release's capture rules.
 
 `show-run` returns sessions, child runs, processes, temporal object links, gaps and
 separate `local_direct`, `local_inclusive`, `broker_actual`, `shared` and `unknown`
@@ -247,8 +271,6 @@ ORDER BY s.source_time
 LIMIT 1000;
 ```
 
-The profile's collector source defines SQLite schema version 2. Opening a version
-1 store for writing migrates it transactionally; read-only export never migrates it.
 Do not write derived calculations back into canonical records. A future usage
 projection can be rebuilt from these records without combining incompatible token
 counters, per-request events or cache/reasoning subsets.
@@ -335,16 +357,20 @@ OTLP integer value, including the decimal representation used by OTLP JSON.
 
 An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with
 `attributes`, `span_names` and `event_names` allowlists that narrow the built-in
-vocabularies. The policy identity and redaction count accompany each record.
+vocabularies. On startup, `serve` publishes its selected session allowlist in
+the data store. Local producers apply it before writing session metadata to the
+outbox, including while the collector is stopped. Producers use the default
+policy until the first collector startup. Capture policy metadata and the
+redaction count accompany retained records.
 
 Identifiers from callers are keyed digests, including IDs with the same shape as
 generated IDs, session attributes and trace or span IDs. The local producer outbox
 authenticates its prepared records to avoid mapping those digests twice. Retain
 the private `.identity-key` with the database when backing up or restoring a store.
-The writer migrates historical join and event identities on first open. It retains
-the recorded rows, non-identity metadata and observation times. Export files already
-on disk keep their historical contents. `show-run` accepts the launcher run ID or
-the stored run reference.
+The writer refuses to open an established store with a missing or mismatched
+key, and local producers refuse to spool into it. Read-only SQL and export work
+without the key. `show-run` accepts the stored run reference and can resolve
+a launcher run ID in the active store when its key is available.
 
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, share 16 pre-decode admissions between OTLP and
@@ -388,8 +414,9 @@ policy identity, record identities and provenance are retained.
 ```
 
 Continue export with `--after` equal to the last exported `sequence`; each command
-is a bounded snapshot, not an endless transaction. Export sequence is local to the
-store. Replay uses the source pair `(origin_id,event_id)` as input to the receiving
+is a bounded snapshot, not an endless transaction. Continue a pre-upgrade export
+against the archive and start a new cursor at zero for the active store. Replay
+uses the source pair `(origin_id,event_id)` as input to the receiving
 store's keyed mapping. The destination preserves relationships within the imported
 history. Replaying the same input adds no projections. A matching identity with
 different data is an error. Two records with different identities remain separate
