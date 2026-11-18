@@ -76,10 +76,14 @@ declare -A VM_IP=()
 declare -A VM_HOST_KEY=()
 
 die() { printf '%s: %s\n' "$E2E_PROGRAM" "$*" >&2; exit 2; }
-# Log parsers match the fixed refusal line; the preceding cause line names the die point.
 die_acquire_unknown() {
-  printf '%s: lease acquire unknown-outcome cause=%s\n' "$E2E_PROGRAM" "$1" >&2
+  local slot="$LEASE_REQUESTED_SLOT"
+  [ -z "$LEASE_ID" ] || slot="$LEASE_SLOT"
+  printf '%s: lease acquire unknown-outcome cause=%s slot=%s run=%s\n' "$E2E_PROGRAM" "$1" "$slot" "$LEASE_RUN" >&2
   die "lease acquire outcome is unknown; refusing a second allocation"
+}
+lease_allocation_refused() {
+  printf 'E2E lease allocation refused: slot=%s run=%s reason=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" "$1" >&2
 }
 info() { printf '  [ .. ] %s\n' "$*"; }
 ok() { printf '  [ ok ] %s\n' "$*"; }
@@ -878,10 +882,12 @@ acquire_lease() {
   if jq -e '(.capabilities // []) | index("process-acquire-v4") != null' <<<"$status_response" >/dev/null; then
     LEASE_ACQUIRE_PROTOCOL=acquire-v4
   fi
-  # --wait bounds both busy and capacity retries. Without it, a collector may bound
-  # capacity retries alone; a busy slot still fails at once.
+  # --wait bounds both busy and capacity retries. A collector can disable capacity
+  # retries with 0s so another check can use the slot immediately.
   capacity_wait=$WAIT_SECONDS
-  if [ "$capacity_wait" -eq 0 ] && [ -n "${SUBYARD_E2E_CAPACITY_WAIT:-}" ]; then
+  if [ "${SUBYARD_E2E_CAPACITY_WAIT:-}" = 0s ]; then
+    capacity_wait=0
+  elif [ "$capacity_wait" -eq 0 ] && [ -n "${SUBYARD_E2E_CAPACITY_WAIT:-}" ]; then
     [[ "$SUBYARD_E2E_CAPACITY_WAIT" =~ ^([0-9]{1,6})([sm])$ ]] || die 'SUBYARD_E2E_CAPACITY_WAIT must be a duration such as 30m or 90s'
     capacity_wait=$((10#${BASH_REMATCH[1]}))
     [ "${BASH_REMATCH[2]}" = s ] || capacity_wait=$((capacity_wait * 60))
@@ -889,9 +895,11 @@ acquire_lease() {
   request="$(lease_acquire_request "$client" "$fingerprint" "$type" "$blob")"
   started=$SECONDS
   last_report=-30
+  printf 'E2E lease allocation started: slot=%s run=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
   while true; do
     elapsed=$((SECONDS - started))
     if [ "$attempt" -gt 0 ] && [ "$last_state" != capacity ] && [ "$elapsed" -ge "$WAIT_SECONDS" ]; then
+      lease_allocation_refused slot
       printf '%s: timed out waiting for %s: state=%s reason=%s\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$last_state" "$last_reason" >&2
       [ -z "$last_owner_summary" ] || printf '%s: %s\n' "$E2E_PROGRAM" "$last_owner_summary" >&2
@@ -977,6 +985,7 @@ acquire_lease() {
         sleep "$sleep_seconds"
         continue
       fi
+      lease_allocation_refused "$reason"
       printf '%s: retryable capacity refusal for %s: resource=%s; retry after resources become available\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$reason" >&2
       local admission_snapshot
@@ -987,7 +996,13 @@ acquire_lease() {
     fi
     if [ "$code" != busy ]; then
       reason="$(jq -r '.reason // .message // empty' <<<"$response")"
-      die "lease acquire failed (${code:-invalid_response}: ${reason:-unspecified})"
+      [ -n "$code" ] && [ "$(jq -r '.status' <<<"$response")" = error ] \
+        || die_acquire_unknown invalid-envelope
+      case "$code:$reason" in
+        invalid_request:invalid_slot) lease_allocation_refused slot ;;
+        *) lease_allocation_refused other ;;
+      esac
+      die "lease acquire failed ($code: ${reason:-unspecified})"
     fi
     validate_exact_busy_response "$response" \
       || die_acquire_unknown invalid-busy-refusal
@@ -1005,6 +1020,7 @@ acquire_lease() {
     last_reason="$reason"
     last_owner_summary="$owner_summary"
     if [ "$WAIT_SECONDS" -eq 0 ]; then
+      lease_allocation_refused slot
       die "requested E2E slot $LEASE_REQUESTED_SLOT is unavailable: state=$state reason=$reason${owner_summary:+; $owner_summary}"
     fi
     elapsed=$((SECONDS - started))

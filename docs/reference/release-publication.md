@@ -473,9 +473,10 @@ passed for the candidate, so `run --only vm:p0-full --slot-count 3` runs the ful
 result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
 runs per selected slot and takes the next eligible check as soon as the slot is free. The default set
 is slots 1–4. Use `--slot-count 2` for slots 1 and 2, or `--slots slot-2,slot-4` for those exact
-slots. The flags are mutually exclusive and `--slots 2` is invalid. The broker admits each
-request against current memory and disk capacity. The collector reports each explicitly selected
-slot that the broker refuses while work is waiting and returns exit 2. A pending VM check remains
+slots. Each flag can be given once, the flags are mutually exclusive, and `--slots 2` is invalid.
+The broker admits each request against current memory and disk capacity. The collector reports
+broker slot refusals while work is waiting and returns exit 2 if any explicitly selected slot
+still lacks a subsequent grant on that slot. A pending VM check remains
 required on continuation once explicitly requested, including after interruption or exclusion.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
@@ -513,7 +514,8 @@ A repeated `run` executes checks without a validated PASS. Use `--only profile:N
 when the collector is idle. During an active local VM run, queue one exact selected lane with
 `python3 dev/release-acceptance.py retry --output DIR --check CHECK`. For `release.sh accept`,
 use the candidate's `acceptance` directory as DIR. The collector acknowledges a retry after saving
-it as pending in the receipt and invocation. The collector refuses requests for lanes outside the
+it in the receipt and invocation. A saved retry remains pending for local execution on continuation
+and is ineligible for hosted or prior-candidate evidence. The collector refuses requests for lanes outside the
 active local selection, lanes already queued or running, and lanes with unconfirmed cleanup in
 that run. Sibling attempts and counted results remain in place.
 After capacity changes, inspect a new supplied snapshot with `preflight --output DIR`, then continue
@@ -536,13 +538,15 @@ remain exempt for fresh targeted jobs, whose explicit selections remain unchange
 every runnable release lane; `--only profile:NAME/ID` requests one release lane and refuses a
 periodic-only lane as an unknown check. After an attempt with confirmed lease cleanup, or a refusal
 that acquired no lease, the slot can take more work. A typed slot refusal lets another selected
-slot try that check. Memory and disk refusals defer the lane across the pool. Deferred work follows
-waiting work and becomes eligible again when a lease is granted or released.
+slot try that check. A later grant makes the recovered slot eligible to retry the check. Controllers
+return memory and disk refusals immediately so waiting lanes can use free slots. Capacity refusals
+defer the lane across the pool until further lease releases. Replaying the same sequence of lease
+releases on a retry does not reopen other deferred lanes.
 A refusal can follow an earlier lease if that lease was released. Each attempt retains its log and
 immutable record. A slot with unconfirmed cleanup stays out of dispatch for the rest of the run.
 
-The collector requires named release evidence for each handle granted in the attempt log.
-A broker response that a handle already ended also closes that handle. Reuse, evidence import and
+The collector requires an outcome for every allocation start. A grant or unknown outcome requires
+a named release for that handle or a broker response that the same handle already ended. Reuse, evidence import and
 operator acceptance validate the same log against its recorded hash. A historical live PASS
 without confirmed cleanup is incomplete and reruns when selected locally. A newer local failure
 remains authoritative over any previously available hosted PASS.

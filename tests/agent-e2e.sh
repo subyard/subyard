@@ -141,6 +141,9 @@ assert_phase_markers() {
   local output="$1" expected="$2" line events='' phase state duration rc vm
   while IFS= read -r line; do
     case "$line" in E2E_PHASE*) ;; *) continue ;; esac
+    if [[ "$line" == 'E2E_PHASE phase=allocation state=start '* ]]; then
+      line="${line% scope=timing}"
+    fi
     [[ "$line" =~ ^E2E_PHASE\ phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release)\ state=(start|end)\ duration_seconds=([0-9]+)\ exit_code=([0-9]+)(\ vm=([12]))?$ ]] \
       || fail "unsafe or malformed phase marker: $line"
     phase="${BASH_REMATCH[1]}" state="${BASH_REMATCH[2]}" duration="${BASH_REMATCH[3]}"

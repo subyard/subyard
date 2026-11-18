@@ -649,6 +649,10 @@ class Contracts(unittest.TestCase):
             target_dir.mkdir()
             target, root, _ = accepted(target_dir, prepared, identity)
             _, current = m.a.load_bound(target)
+            current["checks"]["profile:sample"] = m.a.QUEUED_RETRY.copy()
+            m.a.save(target, current)
+            self.assertEqual(m.a.reuse_isolated_tests(target, [source]), [])
+            self.assertEqual(m.a.load_bound(target)[1]["checks"]["profile:sample"], m.a.QUEUED_RETRY)
             current["checks"]["profile:sample"] = {"status": "pending"}
             m.a.save(target, current)
             with redirect_stdout(io.StringIO()):
@@ -1669,7 +1673,7 @@ class Contracts(unittest.TestCase):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
         originals = {role: file.read_bytes() for role, file in files.items()}
-        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release", "outstanding lease"):
+        for change in ("nonterminal", "pass", "signal", "timing", "transport", "cleanup", "release", "outstanding lease", "unresolved allocation"):
             for role, content in originals.items():
                 files[role].write_bytes(content)
             if change in ("nonterminal", "pass", "signal"):
@@ -1690,6 +1694,9 @@ class Contracts(unittest.TestCase):
                     content = content.replace("exit_code=0 vm=2", "exit_code=1 vm=2")
                 elif change == "release":
                     content = content.replace("E2E lease released:", "missing release:")
+                elif change == "unresolved allocation":
+                    content = ("E2E_PHASE phase=allocation state=start duration_seconds=0 exit_code=0\n" * 2
+                               + content)
                 else:
                     second_grant = content.splitlines(keepends=True)[0].replace("run=fixture", "run=other")
                     content = second_grant + content
@@ -1697,7 +1704,7 @@ class Contracts(unittest.TestCase):
             declaration["artifacts"] = {role: {"path": str(file), "sha256": m.a.digest(file)} for role, file in files.items()}
             m.write_json(path, declaration)
             with self.subTest(change=change), self.assertRaisesRegex(ValueError, "cleanup or release unconfirmed"
-                    if change == "outstanding lease" else "."):
+                    if change in ("outstanding lease", "unresolved allocation") else "."):
                 m.attestation(self.output, self.identity, [path])
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
@@ -2522,14 +2529,14 @@ class HostedChecks(unittest.TestCase):
         self.assertEqual([call.args[0] for call in execute.call_args_list], [name])
         self.assertEqual(m.a.load_bound(self.remote)[1]["checks"][name]["status"], "passed")
 
-    def test_hosted_pass_does_not_replace_newer_local_failure(self):
+    def test_hosted_pass_does_not_replace_newer_local_result_or_queued_retry(self):
         self.collect()
         _, receipt = m.a.load_bound(self.output)
-        failure = {"status": "failed", "exit_code": 23}
-        receipt["checks"]["profile:sample"] = failure
-        m.a.save(self.output, receipt)
-        self.assertEqual(m.hosted_open(self.directory, self.output), [])
-        self.assertEqual(self.collect()[0], failure)
+        for result in ({"status": "failed", "exit_code": 23}, m.a.QUEUED_RETRY):
+            receipt["checks"]["profile:sample"] = result
+            m.a.save(self.output, receipt)
+            self.assertEqual(m.hosted_open(self.directory, self.output), [])
+            self.assertEqual(self.collect()[0], result)
 
     def test_wrong_sha_failed_job_unknown_policy_foreign_candidate_missing_cleanup_and_stale_attempt_stay_open(self):
         def foreign(receipt):

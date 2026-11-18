@@ -50,7 +50,7 @@ def slot_list(value):
 class SlotSelection(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         if getattr(namespace, self.dest) is not None:
-            parser.error("--slots can only be given once; use a comma-separated list")
+            parser.error(f"{option_string} can only be given once")
         setattr(namespace, self.dest, values)
 
 
@@ -58,7 +58,7 @@ def add_slot_arguments(parser):
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--slots", type=slot_list, action=SlotSelection, metavar="slot-N[,slot-N...]",
                        help="use exactly these slots; default: slots 1–4")
-    group.add_argument("--slot-count", type=int, choices=DEFAULT_SLOTS,
+    group.add_argument("--slot-count", type=int, choices=DEFAULT_SLOTS, action=SlotSelection,
                        help="use slots 1 through N")
 
 
@@ -326,7 +326,7 @@ def defer_external(output, obligations, reason, authorization_reference):
     return 0
 
 
-LIVE_CAPACITY_WAIT = "120m"
+QUEUED_RETRY = {"status": "pending", "reason": "retry-queued"}
 # Successful release preparation jobs run these exact commands on the exact
 # candidate commit and assets; a prepared candidate counts them instead of
 # repeating them locally. Publication rechecks the job and workflow policy.
@@ -551,7 +551,7 @@ def core_vm_catalog(root):
 def transfer_target_open(name, result):
     # load_bound rejects an optional not-run that hides a request, attempt or log,
     # so the exact value is as untouched as pending. Any other not-run stays closed.
-    return result["status"] == "pending" or optional_vm_not_run(name, result)
+    return result == {"status": "pending"} or optional_vm_not_run(name, result)
 
 
 def validate_optional_vm_history(output, names):
@@ -678,7 +678,8 @@ class Invocation:
         self.path = output / "runs" / (self.id + ".json")
         self.selected, self.pending = sorted(selected), set(pending)
         self.attempted, self.outcomes = set(), {}
-        self.not_started_reasons = {}
+        self.not_started_reasons = {name: "retry-queued" for name in pending
+                                    if receipt["checks"][name] == QUEUED_RETRY}
         self.reused = sorted(name for name in selected - self.pending
                              if receipt["checks"][name]["status"] == "passed")
         self.document = {"schema_version": 1, "invocation_id": self.id,
@@ -696,7 +697,7 @@ class Invocation:
         self.attempted.discard(name)
         self.mark_pending(name)
         self.not_started_reasons[name] = "retry-queued"
-        self.receipt["checks"][name] = {"status": "pending"}
+        self.receipt["checks"][name] = QUEUED_RETRY.copy()
         save(self.output, self.receipt)
         self.write()
 
@@ -784,7 +785,7 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
     cleanup_status = None
     markers = set()
     phases = {}
-    offset = 0
+    scan = LeaseLedger()
     next_heartbeat = start + HEARTBEAT_SECONDS
     process, code, capture_error = None, None, False
     try:
@@ -801,14 +802,13 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
                     event(output, "heartbeat", check=name, slot=slot,
                           duration_seconds=round(time.monotonic() - start, 2))
                     next_heartbeat = time.monotonic() + HEARTBEAT_SECONDS
-                offset = phase_events(output, name, log, offset, markers, phases=phases, observe_lease=observe_lease)
+                phase_events(output, name, log, scan, markers, phases=phases, observe_lease=observe_lease)
             if STOP.is_set() and not interrupted:
                 interrupted = True
                 cleanup_status = interrupt_group(process)
             code = process.poll() if cleanup_status == "unconfirmed" else process.wait()
             stream.flush()
             os.fsync(stream.fileno())
-        phase_events(output, name, log, offset, markers, final=True, phases=phases, observe_lease=observe_lease)
     except (OSError, subprocess.SubprocessError):
         capture_error = True
         if process is not None:
@@ -816,10 +816,15 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
                 cleanup_status = interrupt_group(process)
             code = process.poll()
     try:
-        ledger = lease_ledger(log) if slot else None
-        log_sha256 = ledger.sha256 if ledger else digest(log)
+        phase_events(output, name, log, scan, markers, final=True, phases=phases, observe_lease=observe_lease)
+        log_sha256 = scan.sha256
+        ledger = scan if slot else None
     except OSError:
-        ledger, log_sha256, capture_error = None, None, True
+        ledger, capture_error = None, True
+        try:
+            log_sha256 = digest(log)
+        except OSError:
+            log_sha256 = None
     refusal = ledger.refusal if ledger and not interrupted else None
     blocked = refusal if (code, refusal) in ((4, "memory"), (4, "disk"), (2, "slot"), (4, "slot")) else None
     result = {"status": "interrupted" if interrupted else "blocked" if blocked else "passed" if code == 0 and not capture_error else "failed", "exit_code": code,
@@ -855,7 +860,7 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
         if (not ledger or not ledger.safe or not ledger.granted
             and (code == 3 or not interrupted and result["termination"] != "exit")):
             result["cleanup_status"] = "unconfirmed"
-        if result["status"] == "passed" and (not ledger.granted or result["cleanup_status"] == "unconfirmed"):
+        if result["status"] == "passed" and (not ledger or not ledger.granted or result["cleanup_status"] == "unconfirmed"):
             result.update(status="failed", reason="lease-cleanup-unproven")
     try:
         event(output, "check-result", check=name, **{key: value for key, value in result.items() if key != "command"})
@@ -867,193 +872,228 @@ def execute(name, command, root, output, env, slot=None, observe_lease=None):
     return result
 
 
-PHASE_MARKER = re.compile(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?\n")
+PHASE_MARKER = re.compile(rb"E2E_PHASE phase=(allocation|packing|transport|guest|guest-cleanup|cleanup/release|fixture/[a-z0-9-]{1,60}) state=(start|end) duration_seconds=([0-9]{1,9}) exit_code=([0-9]{1,3})(?: vm=([12]))?( scope=timing)?\n")
 ENVIRONMENT_MARKER = re.compile(rb"E2E lease: [^\r\n]{0,2000} type=(subyard-pair|android-test) vms=([12]) base=([0-9a-f]{64})\n")
 RELEASE_TIMING = re.compile(rb"E2E_RELEASE state=(start|end) duration_seconds=([0-9]{1,9}) budget_seconds=180 grace_seconds=5 exit_code=([0-9]{1,3})\n")
 
 
-def phase_events(output, name, log, offset, seen, final=False, phases=None, observe_lease=None):
-    offset, discard = offset if isinstance(offset, tuple) else (offset, False)
-    with log.open("rb") as stream:
-        stream.seek(offset)
-        count = 0
-        while final or count < 200:
-            count += 1
-            line = stream.readline(4097)
-            if not line:
-                break
-            if discard or len(line) > 4096:
-                discard = not line.endswith(b"\n")
-                offset = stream.tell()
-                continue
-            if not line.endswith(b"\n"):
-                break
-            offset = stream.tell()
-            marker = re.fullmatch(rb"  \[( \.\. | ok |fail)\] phase=([a-zA-Z0-9_./-]{1,100})(?: [^\r\n]*)?\n", line)
-            if marker:
-                key = (marker[1], marker[2])
-                if key not in seen:
-                    seen.add(key)
-                    event(output, "phase", check=name, phase=marker[2].decode(),
-                          state={b" .. ": "started", b" ok ": "passed", b"fail": "failed"}[marker[1]])
-            if observe_lease:
-                lease = lease_marker(line)
-                if lease and (lease[0] == "refusal" or lease not in seen):
-                    seen.add(lease)
-                    observe_lease(lease[0])
-            stage = PHASE_MARKER.fullmatch(line)
-            if (stage and int(stage[4]) <= 255
-                and (stage[2] != b"start" or (stage[3] == b"0" and stage[4] == b"0"))
-                and bool(stage[5]) == (stage[1] in (b"transport", b"guest", b"guest-cleanup"))):
-                event(output, "controller-phase", check=name, phase=stage[1].decode(),
-                      state=stage[2].decode(), duration_seconds=int(stage[3]),
-                      exit_code=int(stage[4]), **({"vm": int(stage[5])} if stage[5] else {}))
-                if phases is not None and stage[2] == b"end":
-                    phase = stage[1].decode()
-                    if phase == "cleanup/release" or "cleanup" in phase:
-                        key = phase + ("/vm" + stage[5].decode() if stage[5] else "")
-                        phases.setdefault("cleanup", {})[key] = {"exit_code": int(stage[4]), "duration_seconds": int(stage[3])}
-                    elif stage[4] == b"0":
-                        phases["last_completed_phase"] = phase
-            failure = re.fullmatch(rb"E2E_FAILURE class=(product|fixture|environment|timeout|unknown)\n", line)
-            if failure and phases is not None:
-                phases["failure_class"] = failure[1].decode()
-            budget = re.fullmatch(rb"E2E_BUDGET phase=(guest-cleanup|fixture/[a-z0-9-]{1,60}) budget_seconds=([0-9]{1,5}) grace_seconds=([0-9]{1,4})(?: vm=([12]))?\n", line)
-            if budget and phases is not None and bool(budget[4]) == (budget[1] == b"guest-cleanup"):
-                key = budget[1].decode() + ("/vm" + budget[4].decode() if budget[4] else "")
-                phases.setdefault("budgets", {})[key] = {"budget_seconds": int(budget[2]), "grace_seconds": int(budget[3])}
-            release = RELEASE_TIMING.fullmatch(line)
-            if release and int(release[3]) <= 255 and (release[1] != b"start" or (release[2] == b"0" and release[3] == b"0")):
-                event(output, "lease-release", check=name, state=release[1].decode(), duration_seconds=int(release[2]),
-                      budget_seconds=180, grace_seconds=5, exit_code=int(release[3]))
-                if phases is not None:
-                    phases.setdefault("budgets", {})["lease-release"] = {"budget_seconds":180, "grace_seconds":5}
-                    if release[1] == b"end":
-                        phases.setdefault("cleanup", {})["lease-release"] = {"exit_code":int(release[3]), "duration_seconds":int(release[2])}
-            environment = ENVIRONMENT_MARKER.fullmatch(line)
-            if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
-                key = ("environment", environment[1].decode(), int(environment[2]), environment[3].decode())
-                if key not in seen:
-                    seen.add(key)
-                    event(output, "environment", check=name, type=key[1], vm_count=key[2], base_fingerprint=key[3])
-    return offset, discard
+def phase_events(output, name, log, scan, seen, final=False, phases=None, observe_lease=None):
+    for line, stage, environment, lease in scan.read(log, final):
+        marker = re.fullmatch(rb"  \[( \.\. | ok |fail)\] phase=([a-zA-Z0-9_./-]{1,100})(?: [^\r\n]*)?\n", line)
+        if marker:
+            key = (marker[1], marker[2])
+            if key not in seen:
+                seen.add(key)
+                event(output, "phase", check=name, phase=marker[2].decode(),
+                      state={b" .. ": "started", b" ok ": "passed", b"fail": "failed"}[marker[1]])
+        if observe_lease and lease:
+            observe_lease(lease)
+        if stage:
+            event(output, "controller-phase", check=name, phase=stage[1].decode(),
+                  state=stage[2].decode(), duration_seconds=int(stage[3]),
+                  exit_code=int(stage[4]), **({"vm": int(stage[5])} if stage[5] else {}))
+            if phases is not None and stage[2] == b"end":
+                phase = stage[1].decode()
+                if phase == "cleanup/release" or "cleanup" in phase:
+                    key = phase + ("/vm" + stage[5].decode() if stage[5] else "")
+                    phases.setdefault("cleanup", {})[key] = {"exit_code": int(stage[4]), "duration_seconds": int(stage[3])}
+                elif stage[4] == b"0":
+                    phases["last_completed_phase"] = phase
+        failure = re.fullmatch(rb"E2E_FAILURE class=(product|fixture|environment|timeout|unknown)\n", line)
+        if failure and phases is not None:
+            phases["failure_class"] = failure[1].decode()
+        budget = re.fullmatch(rb"E2E_BUDGET phase=(guest-cleanup|fixture/[a-z0-9-]{1,60}) budget_seconds=([0-9]{1,5}) grace_seconds=([0-9]{1,4})(?: vm=([12]))?\n", line)
+        if budget and phases is not None and bool(budget[4]) == (budget[1] == b"guest-cleanup"):
+            key = budget[1].decode() + ("/vm" + budget[4].decode() if budget[4] else "")
+            phases.setdefault("budgets", {})[key] = {"budget_seconds": int(budget[2]), "grace_seconds": int(budget[3])}
+        release = RELEASE_TIMING.fullmatch(line)
+        if release and int(release[3]) <= 255 and (release[1] != b"start" or (release[2] == b"0" and release[3] == b"0")):
+            event(output, "lease-release", check=name, state=release[1].decode(), duration_seconds=int(release[2]),
+                  budget_seconds=180, grace_seconds=5, exit_code=int(release[3]))
+            if phases is not None:
+                phases.setdefault("budgets", {})["lease-release"] = {"budget_seconds":180, "grace_seconds":5}
+                if release[1] == b"end":
+                    phases.setdefault("cleanup", {})["lease-release"] = {"exit_code":int(release[3]), "duration_seconds":int(release[2])}
+        if environment:
+            key = ("environment", *environment)
+            if key not in seen:
+                seen.add(key)
+                event(output, "environment", check=name, type=key[1], vm_count=key[2], base_fingerprint=key[3])
 
 
-class LeaseLedger(NamedTuple):
-    safe: bool
-    granted: bool
-    refusal: str | None
-    sha256: str
-    environments: set
-    guest_cleanup: list
-    controller_cleanup: list
+class LeaseEvent(NamedTuple):
+    kind: str
+    handle: bytes | None = None
+    slot: int | None = None
+    reason: str | None = None
 
 
-def lease_marker(line):
-    if line.startswith(b"E2E lease:") and line.endswith(b"\n"):
+def lease_event(line, stage):
+    if stage and stage.group(1, 2) == (b"allocation", b"start") and not stage[6]:
+        return LeaseEvent("start")
+    if not line.startswith((b"E2E lease", b"agent-e2e: ", b"subyard-test-vms: ")):
+        return None
+    if line.startswith(b"E2E lease:"):
         slot, run = (re.search(rb" " + key + rb"=(\S+)", line) for key in (b"slot", b"run"))
-        if slot and run:
-            return "grant", run[1], slot[1]
-    elif line.startswith(b"E2E lease "):
-        controller = re.fullmatch(rb"E2E lease released: slot=(\S+) run=(\S+)\n", line)
-        if controller:
-            return "release", controller[2], controller[1]
-        client = re.fullmatch(rb"E2E lease (released: handle=(\S+) slot=(\S+) reason=\S+|had already ended: handle=(\S+) slot=(\S+))\n", line)
-        if client:
-            return "release", client[2] or client[4], client[3] or client[5]
-    elif line.startswith((b"agent-e2e: ", b"subyard-test-vms: ")):
-        message = line.split(b": ", 1)[1]
-        capacity = re.fullmatch(rb"retryable capacity refusal for slot-[0-9]{1,3}: resource=(memory|disk); retry after resources become available\n", message)
-        if capacity:
-            return "refusal", capacity[1].decode()
-        if re.match(rb"(?:requested E2E slot .* is unavailable:|timed out waiting for slot-|lease acquire failed \(invalid_request: invalid_slot\)$)", message):
-            return "refusal", "slot"
+        return named_lease_event("grant", slot[1], run[1]) if slot and run else LeaseEvent("unknown")
+    for prefix, kind in ((b"allocation started:", "start"), (b"released:", "release")):
+        marker = re.fullmatch(b"E2E lease " + prefix + rb" slot=(\S+) run=(\S+)\n", line)
+        if marker:
+            return named_lease_event(kind, *marker.groups())
+    refused = re.fullmatch(rb"E2E lease allocation refused: slot=(\S+) run=(\S+) reason=(memory|disk|slot|other)\n", line)
+    if refused:
+        return named_lease_event("refused", refused[1], refused[2], None if refused[3] == b"other" else refused[3].decode())
+    client = re.fullmatch(rb"E2E lease (?:released: handle=(\S+) slot=(\S+) reason=\S+|had already ended: handle=(\S+) slot=(\S+))\n", line)
+    if client:
+        return named_lease_event("release", client[2] or client[4], client[1] or client[3])
+    if not line.startswith((b"agent-e2e: ", b"subyard-test-vms: ")):
+        return None
+    message = line.split(b": ", 1)[1]
+    capacity = re.fullmatch(rb"retryable capacity refusal for slot-([0-9]{1,3}): resource=(memory|disk); retry after resources become available\n", message)
+    if capacity:
+        return LeaseEvent("refused", slot=int(capacity[1]), reason=capacity[2].decode())
+    busy = re.match(rb"(?:requested E2E slot |timed out waiting for )slot-([0-9]{1,3}):", message)
+    if busy or message == b"lease acquire failed (invalid_request: invalid_slot)\n":
+        return LeaseEvent("refused", slot=int(busy[1]) if busy else None, reason="slot")
+    lost = re.fullmatch(rb"release rejected for slot=(\S+) run=(\S+) \(lease_lost\)\n", message)
+    if lost:
+        return named_lease_event("release", *lost.groups())
+    uncertain = re.fullmatch(
+        rb"(?:lease acquire unknown-outcome cause=[^\r\n]+?|lease acquire handoff is unknown; cleanup required|"
+        rb"(?:interrupted )?acquire cleanup remains unconfirmed:|release (?:failed|rejected) for)"
+        rb"(?: slot=(\S+) run=(\S+))?(?: \([^\r\n]+\))?\n", message)
+    if uncertain:
+        return named_lease_event("unknown", *uncertain.groups()) if uncertain[1] else LeaseEvent("unknown")
     return None
 
 
-def lease_ledger(log, expected_sha256=None):
-    """Bind every lease closure to its handle and collect cleanup evidence."""
-    checksum = hashlib.sha256()
-    held, closed = {}, set()
-    environments, guest_cleanup, controller_cleanup = set(), [], []
-    granted = allocating = uncertain = False
-    legacy_handoffs = 0
-    legacy_release = False
-    refusal = None
-    with log.open("rb") as stream:
-        for line in stream:
-            checksum.update(line)
-            follows_release = legacy_release
-            legacy_release = False
-            if legacy_handoffs and line.startswith(b"E2E_RELEASE"):
-                timing = RELEASE_TIMING.fullmatch(line)
-                legacy_release = bool(timing and timing[1] == b"end" and timing[3] == b"0")
-            if not line.startswith((b"E2E", b"agent-e2e: ", b"subyard-test-vms: ")):
-                continue
-            marker = lease_marker(line)
-            if marker and marker[0] == "release":
-                _, handle, slot = marker
-                if held.get(handle) == slot:
-                    del held[handle]
-                    closed.add(handle)
-                elif handle not in held and handle not in closed:
-                    if legacy_handoffs and follows_release:
-                        # Older clients named the handle only after the release timing line.
-                        legacy_handoffs -= 1
-                    closed.add(handle)
-            elif line.startswith(b"E2E lease:"):
-                if marker:
-                    _, handle, slot = marker
-                    uncertain |= handle in closed or held.setdefault(handle, slot) != slot
-                    granted = True
-                    environment = ENVIRONMENT_MARKER.fullmatch(line)
-                    if environment:
-                        environments.add((environment[1].decode(), int(environment[2]), environment[3].decode()))
-                else:
-                    uncertain = True
-                allocating, refusal = False, None
-            elif marker and marker[0] == "refusal":
-                refusal, allocating = marker[1], False
-            elif line.startswith(b"E2E_PHASE"):
-                stage = PHASE_MARKER.fullmatch(line)
-                if not stage:
+def named_lease_event(kind, slot, handle, reason=None):
+    number = slot.removeprefix(b"slot-")
+    if not number.isdigit() or len(number) > 3 or int(number) == 0:
+        return LeaseEvent("unknown")
+    return LeaseEvent(kind, handle, int(number), reason)
+
+
+class LeaseLedger:
+    """Interpret lease transitions as the log is read, including during live execution."""
+
+    def __init__(self):
+        self.offset = 0
+        self.discard = False
+        self.checksum = hashlib.sha256()
+        self.handles = {}
+        self.legacy_start = self.named_starts = self.invalid = self.granted = False
+        self.last_refusal = None
+        self.environments, self.guest_cleanup, self.controller_cleanup = set(), [], []
+
+    @property
+    def sha256(self):
+        return self.checksum.hexdigest()
+
+    @property
+    def safe(self):
+        return (not self.invalid and not self.legacy_start
+                and all(state in ("released", "refused") for _, state in self.handles.values()))
+
+    @property
+    def refusal(self):
+        return self.last_refusal if self.safe else None
+
+    def apply(self, lease):
+        kind, handle, slot, reason = lease
+        if handle is None:
+            if kind == "start":
+                self.invalid |= self.legacy_start
+                self.legacy_start, self.last_refusal = True, None
+                return None
+            if kind == "refused":
+                if self.legacy_start or not self.named_starts:
+                    self.legacy_start = False
+                    self.last_refusal = reason
+                    return lease
+                return None
+            self.invalid = True
+            return None
+
+        current = self.handles.get(handle)
+        if kind == "start":
+            self.invalid |= current is not None
+            self.named_starts, self.last_refusal = True, None
+            self.handles[handle] = slot, "starting"
+        elif kind == "refused":
+            if current == (slot, "starting"):
+                self.handles[handle] = slot, "refused"
+                self.last_refusal = reason
+                return lease
+        elif kind == "release":
+            if current in ((slot, "grant"), (slot, "unknown")):
+                self.handles[handle] = slot, "released"
+                return lease
+        elif kind in ("grant", "unknown"):
+            state = current[1] if current else ("starting" if self.legacy_start or not self.named_starts else None)
+            if state == "starting" or kind == "unknown" and current in ((slot, "grant"), (slot, "unknown")):
+                if current is None:
+                    self.legacy_start = False
+                self.handles[handle] = slot, kind
+                self.last_refusal = None
+                if kind == "grant":
+                    self.granted = True
+                    return lease
+            else:
+                self.invalid = True
+        return None
+
+    def read(self, log, final):
+        with log.open("rb") as stream:
+            stream.seek(self.offset)
+            count = 0
+            while final or count < 200:
+                count += 1
+                line = stream.readline(4097)
+                if not line:
+                    break
+                complete = line.endswith(b"\n")
+                bounded = not self.discard and len(line) <= 4096
+                if bounded and not complete and not final:
+                    break
+                self.offset = stream.tell()
+                self.checksum.update(line)
+                self.discard = not complete
+                if not bounded or not complete:
                     continue
-                phase, state = stage.group(1, 2)
-                if phase == b"allocation":
-                    if state == b"start":
-                        allocating, refusal = True, None
-                    else:
-                        uncertain |= allocating and int(stage[4]) == 0
-                        allocating = False
-                elif phase == b"guest" and state == b"start":
-                    uncertain |= not held
-                    refusal = None
-                elif phase == b"guest-cleanup" and state == b"end":
-                    guest_cleanup.append((int(stage[5]) if stage[5] else None, int(stage[4])))
-                elif phase == b"cleanup/release" and state == b"end":
-                    controller_cleanup.append(int(stage[4]))
-            elif line.startswith((b"agent-e2e: ", b"subyard-test-vms: ")):
-                message = line.split(b": ", 1)[1]
-                handoff = re.fullmatch(rb"lease acquire handoff is unknown; cleanup required(?: slot=(\S+) run=(\S+))?\n", message)
-                unconfirmed = re.fullmatch(rb"(?:(?:interrupted )?acquire cleanup remains unconfirmed:|release (?:failed|rejected) for) slot=(\S+) run=(\S+)(?: \([^\r\n]+\))?\n", message)
-                if handoff:
-                    if handoff[1]:
-                        uncertain |= handoff[2] in closed or held.setdefault(handoff[2], handoff[1]) != handoff[1]
-                    else:
-                        legacy_handoffs += 1
-                    allocating, refusal = False, None
-                elif unconfirmed:
-                    slot, handle = unconfirmed.groups()
-                    if handle not in closed:
-                        uncertain |= held.setdefault(handle, slot) != slot
-                elif message.startswith((b"lease acquire unknown-outcome ", b"acquire cleanup remains unconfirmed",
-                                         b"interrupted acquire cleanup remains unconfirmed")):
-                    uncertain = True
-    sha256 = checksum.hexdigest()
-    if expected_sha256 is not None and sha256 != expected_sha256:
+                stage = PHASE_MARKER.fullmatch(line)
+                if stage and (int(stage[4]) > 255
+                              or stage[2] == b"start" and (stage[3] != b"0" or stage[4] != b"0")
+                              or stage[6] and stage.group(1, 2) != (b"allocation", b"start")
+                              or bool(stage[5]) != (stage[1] in (b"transport", b"guest", b"guest-cleanup"))):
+                    stage = None
+                lease = lease_event(line, stage)
+                transition = self.apply(lease) if lease else None
+                environment = ENVIRONMENT_MARKER.fullmatch(line)
+                if environment and (environment[1], environment[2]) in ((b"subyard-pair", b"1"), (b"subyard-pair", b"2"), (b"android-test", b"1")):
+                    environment = environment[1].decode(), int(environment[2]), environment[3].decode()
+                    if transition and transition.kind == "grant":
+                        self.environments.add(environment)
+                else:
+                    environment = None
+                if stage:
+                    if stage.group(1, 2) == (b"guest", b"start"):
+                        self.invalid |= not any(state == "grant" for _, state in self.handles.values())
+                        self.last_refusal = None
+                    elif stage.group(1, 2) == (b"guest-cleanup", b"end"):
+                        self.guest_cleanup.append((int(stage[5]), int(stage[4])))
+                    elif stage.group(1, 2) == (b"cleanup/release", b"end"):
+                        self.controller_cleanup.append(int(stage[4]))
+                yield line, stage, environment, transition
+
+
+def lease_ledger(log, expected_sha256=None):
+    ledger = LeaseLedger()
+    for _ in ledger.read(log, final=True):
+        pass
+    if expected_sha256 is not None and ledger.sha256 != expected_sha256:
         raise ValueError("attempt log changed")
-    safe = not (held or allocating or uncertain or legacy_handoffs)
-    return LeaseLedger(safe, granted, refusal if safe else None, sha256, environments, guest_cleanup, controller_cleanup)
+    return ledger
 
 
 class UnprovenLease(ValueError):
@@ -1324,6 +1364,11 @@ def is_live(name):
     return name == "p0-release-smoke" or name.startswith(("profile:", "vm:"))
 
 
+def default_selection(checks, with_vms):
+    return {name for name, result in checks.items()
+            if with_vms or not is_live(name) or result == QUEUED_RETRY}
+
+
 def slot_continues_after(result):
     return result.get("cleanup_status") != "unconfirmed"
 
@@ -1349,7 +1394,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                 if command and optional_vm_not_run(name, OPTIONAL_VM_NOT_RUN):
                     receipt["checks"][name] = OPTIONAL_VM_NOT_RUN.copy()
     checks = receipt["checks"]
-    selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
+    selected = select_checks(checks, only) if only else default_selection(checks, with_vms)
     selected |= selected_requirements(receipt, selected)
     excluded = select_checks(checks, exclude)
     if "p0-release-smoke" in excluded:
@@ -1530,18 +1575,28 @@ def print_acceptance_summary(output, receipt):
 def run_live(output, live, eligible, slots, start, execute_check, record, queue_retry):
     pending, free, active = list(live), set(slots or DEFAULT_SLOTS), {}
     deferred, unsafe, slot_refused, reported = {}, set(), set(), set()
-    availability, availability_lock = 0, threading.Lock()
+    availability = dict.fromkeys([None, *free], 0)
+    progress, availability_lock = {}, threading.Lock()
 
     def execute_attempt(name, slot, observed):
-        def observe_lease(kind):
-            nonlocal availability, observed
-            with availability_lock:
-                if kind != "refusal":
-                    availability += 1
-                # Defer a refusal against the availability observed at its marker.
-                observed = availability
+        refused_at = {key: observed[key] for key in (None, slot)}
+        counts = {}
 
-        return execute_check(name, slot, observe_lease), observed
+        def observe_lease(lease):
+            with availability_lock:
+                if lease.kind == "refused" and lease.reason:
+                    key = slot if lease.reason == "slot" else None
+                    refused_at[key] = availability[key]
+                elif lease.kind == "release" or lease.kind == "grant" and lease.slot == slot:
+                    # A release can free pool capacity. Only a grant on this slot proves it
+                    # recovered. Replaying the same prefix on a retry adds no progress.
+                    key = None if lease.kind == "release" else slot
+                    counts[key] = counts.get(key, 0) + 1
+                    if counts[key] > progress.get((name, key), 0):
+                        progress[name, key] = counts[key]
+                        availability[key] += 1
+
+        return execute_check(name, slot, observe_lease), refused_at, slot in counts
 
     with retry_socket(output, listen=True) as listener, ThreadPoolExecutor(max_workers=len(free)) as pool:
         while not STOP.is_set():
@@ -1567,15 +1622,18 @@ def run_live(output, live, eligible, slots, start, execute_check, record, queue_
                         queue_retry(name)
                         pending.insert(0, name)
                         deferred.pop(name, None)
+                        with availability_lock:
+                            for key in availability:
+                                progress.pop((name, key), None)
                         try:
                             channel.sendall(b"queued")
                         except OSError:
                             pass
             with availability_lock:
-                current = availability
+                current = availability.copy()
             for slot in sorted(free):
                 name = next((item for item in pending
-                             if all(deferred.get(item, {}).get(key) != current for key in (None, slot))), None)
+                             if all(deferred.get(item, {}).get(key) != current[key] for key in (None, slot))), None)
                 if name is not None and start(name):
                     pending.remove(name)
                     free.remove(slot)
@@ -1585,26 +1643,29 @@ def run_live(output, live, eligible, slots, start, execute_check, record, queue_
             done, _ = wait(active, timeout=0.2, return_when=FIRST_COMPLETED)
             for future in done:
                 slot, name = active.pop(future)
-                result, observed = future.result()
+                result, refused_at, granted = future.result()
                 record(name, result)
-                slot_refused.discard(name)
                 if not slot_continues_after(result):
                     unsafe.add(name)
                     print(f"SLOT-CLEANUP-UNCONFIRMED slot=slot-{slot} check={name} log={result.get('log')}", flush=True)
                     continue
                 free.add(slot)
-                if result.get("reason") == "slot-unavailable":
-                    deferred.setdefault(name, {})[slot] = observed
-                    slot_refused.add(name)
+                reason = result.get("reason")
+                if reason == "slot-unavailable":
+                    deferred.setdefault(name, {})[slot] = refused_at[slot]
+                    slot_refused.add(slot)
                     pending.append(name)
                     if slots and slot not in reported:
                         reported.add(slot)
                         print(f"SLOT-UNAVAILABLE slot=slot-{slot} check={name} log={result['log']}", flush=True)
-                elif result.get("reason") in ("capacity_memory", "capacity_disk"):
-                    deferred.setdefault(name, {})[None] = observed
-                    pending.append(name)
                 else:
-                    deferred.pop(name, None)
+                    if granted:
+                        slot_refused.discard(slot)
+                    if reason in ("capacity_memory", "capacity_disk"):
+                        deferred.setdefault(name, {})[None] = refused_at[None]
+                        pending.append(name)
+                    else:
+                        deferred.pop(name, None)
         for future, (_, name) in active.items():
             record(name, future.result()[0])
     return bool(slots and slot_refused)
@@ -1618,7 +1679,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     if measured_environment != receipt.get("environment", measured_environment):
         raise ValueError("execution environment changed since candidate preparation")
     checks = commands(root, receipt["version"], receipt["profiles"])
-    selected = select_checks(checks, only) if only else {name for name in checks if with_vms or not is_live(name)}
+    selected = select_checks(checks, only) if only else default_selection(receipt["checks"], with_vms) & checks.keys()
     prioritized = select_checks(checks, first)
     selected |= prioritized
     # A selected check also runs what it requires, such as vm:p0-full its split checks; a
@@ -1640,7 +1701,7 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                       if name in prioritized and (name == selector or name.startswith(selector + "/"))]
     order = list(dict.fromkeys([*priority_order, *checks]))
     env = clean_environment()
-    capacity_wait = env.pop("SUBYARD_E2E_CAPACITY_WAIT", LIVE_CAPACITY_WAIT)
+    env.pop("SUBYARD_E2E_CAPACITY_WAIT", None)
     pending = [name for name in order if checks[name] and name in selected
                and (name != "process-coverage" or receipt["checks"][name] != PROCESS_COVERAGE_DIAGNOSTIC or only or name in prioritized)
                and ((rerun and name not in dependencies) or receipt["checks"][name]["status"] != "passed")]
@@ -1739,11 +1800,9 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
             # For example, an excluded local gate: name it instead of leaving preflights silently not run.
             print("INCOMPLETE: profile preflights await successful local gates; not passed: " + ", ".join(unready_local), flush=True)
             failure_reason = "prerequisite-stop"
-        # Only live checks wait for broker memory or disk instead of draining the queue on a
-        # transient refusal; a refusal that outlasts this bound still blocks visibly.
-        env["SUBYARD_E2E_CAPACITY_WAIT"] = capacity_wait
         # Physical controllers consume the frozen transport; local tests keep normal bundling.
-        env.update(SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
+        env.update(SUBYARD_E2E_CAPACITY_WAIT="0s",
+                   SUBYARD_E2E_CANDIDATE_BUNDLE=str(output / "candidate-bundle.tar.gz"),
                    SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
                    SUBYARD_E2E_LOCAL_EVIDENCE=str(output),
                    SUBYARD_E2E_CONTROLLER_WORKSPACE=str(ROOT))

@@ -164,7 +164,7 @@ for mode in drained live; do
   marker=parent-waits
   [ "$mode" = live ] || marker=parent-saw-eof
   [ "$rc" = 2 ] && [ -e "$TMP/refusal-guard-$mode/$marker" ] &&
-    grep -Fqx 'agent-e2e: lease acquire unknown-outcome cause=refusal-guard-rc=23' "$TMP/refusal-guard-$mode/stderr" ||
+    grep -Fqx 'agent-e2e: lease acquire unknown-outcome cause=refusal-guard-rc=23 slot=slot-001 run=abcdef13' "$TMP/refusal-guard-$mode/stderr" ||
     { cat "$TMP/refusal-guard-$mode/stderr" >&2; fail "refusal guard failure ($mode) rc=$rc lost its unknown outcome or cause"; }
 done
 
