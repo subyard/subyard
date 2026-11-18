@@ -11,6 +11,7 @@ import (
 	"io"
 	"slices"
 
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -49,11 +50,17 @@ func (runtime *Runtime) inspectActivationRecovery(
 		Mode: releasetransition.RecoveryProcessLifecycleCapabilities}
 	capabilities, probeErr := runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
 	if probeErr != nil {
+		if errors.Is(probeErr, domain.ErrPlanStale) {
+			return nil, probeErr
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		probe.Mode = releasetransition.RecoveryProcessCapabilities
 		capabilities, probeErr = runtime.invokeVerifiedRecoveryTransition(ctx, verifiedOwner, protected.request.RuntimeRoot, probe, "")
+	}
+	if errors.Is(probeErr, domain.ErrPlanStale) {
+		return nil, probeErr
 	}
 	if probeErr != nil || capabilities.Capabilities == nil || capabilities.Capabilities.Validate() != nil {
 		if ctx.Err() != nil {
@@ -150,8 +157,19 @@ func (runtime *Runtime) invokeVerifiedRecoveryTransition(
 		// An older owner may reject the optional probe before V1 fallback.
 		processRuntime.config.Stderr = io.Discard
 	}
+	launch := request.TransitionRequest()
+	if capabilityProbe {
+		launch.RuntimeRoot = runtimeRoot
+		launch.Target = owner.candidate.release
+		if selection, _ := ctx.Value(releaseSelectionKey{}).(*releaseSelection); selection != nil {
+			launch.ConfigHome = selection.request.ConfigHome
+		}
+		if gate, _ := ctx.Value(journalGateInspectionKey{}).(*journalGateInspection); gate != nil {
+			launch = gate.request
+		}
+	}
 	if err := processRuntime.runVerifiedRuntimeEngine(ctx, owner, owner, runtimeRoot, []string{"_release-transition"},
-		bytes.NewReader(append(payload, '\n')), &stdout, grant); err != nil {
+		bytes.NewReader(append(payload, '\n')), &stdout, grant, &launch); err != nil {
 		return releasetransition.RecoveryProcessResponse{}, fmt.Errorf("verified recovery process failed: %w", err)
 	}
 	response, err := releasetransition.ParseRecoveryProcessResponse(stdout.Bytes())

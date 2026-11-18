@@ -87,6 +87,9 @@ Subyard retains the previous verified runtime. Swap back to it with:
 yard update --rollback
 ```
 
+Switching releases requires matching migration registries and readable active migration history.
+If the selected release or active history changes during the operation, retry from a fresh inspection.
+
 An installed release can also report migrations or runtime repairs that still need to finish.
 Inspect them without changing state, then apply them with the already installed release:
 

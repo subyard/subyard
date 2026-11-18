@@ -32,6 +32,9 @@ import (
 )
 
 type Config struct {
+	// OwnerLockHeld reports whether the calling operation already owns the
+	// installation barrier that the transition child inherits.
+	OwnerLockHeld             func() bool
 	Inputs                    CommandInputs
 	Context                   RuntimeContext
 	Installer                 string
@@ -232,9 +235,18 @@ func (runtime *Runtime) InspectMutationGateInspection(
 	ctx context.Context, runtimeRoot, configHome, yard string,
 ) (*releasetransition.Inspection, error) {
 	inheritedSettingIDs := runtime.config.Inputs.InheritedSettingIDs()
+	ctx = context.WithValue(ctx, journalGateInspectionKey{}, &journalGateInspection{})
 	inspection, err := runtime.inspectProtectedTransition(
 		ctx, runtimeRoot, configHome, yard, inheritedSettingIDs,
 	)
+	if err == nil && inspection != nil && yard == "default" &&
+		inspection.journal.Checkpoint != releasetransition.JournalComplete && currentScopeBlocker(inspection.inspection) {
+		before, readErr := runtime.readCurrentSnapshot(runtimeRoot, configHome)
+		if readErr != nil {
+			return nil, redactReleaseInspectionError(readErr)
+		}
+		inspection, err = runtime.recoverCurrentScope(ctx, runtimeRoot, configHome, before, inspection)
+	}
 	if err != nil {
 		var public publicReleaseInspectionError
 		if errors.As(err, &public) {
@@ -244,16 +256,6 @@ func (runtime *Runtime) InspectMutationGateInspection(
 	}
 	if inspection == nil {
 		return nil, nil
-	}
-	if yard == "default" && inspection.journal.Checkpoint != releasetransition.JournalComplete && currentScopeBlocker(inspection.inspection) {
-		before, err := runtime.readCurrentSnapshot(runtimeRoot, configHome)
-		if err != nil {
-			return nil, redactReleaseInspectionError(err)
-		}
-		inspection, err = runtime.recoverCurrentScope(ctx, runtimeRoot, configHome, before, inspection)
-		if err != nil {
-			return nil, redactReleaseInspectionError(err)
-		}
 	}
 	return &inspection.inspection, nil
 }
@@ -398,16 +400,38 @@ func (runtime *Runtime) inspectProtectedTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       journal.SourceIngress,
 	}
-	if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
-		var public publicReleaseInspectionError
-		if errors.As(err, &public) {
+	if request.Direction == releasetransition.DirectionActivatePrevious {
+		if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request, nil); err != nil {
+			var public publicReleaseInspectionError
+			if errors.As(err, &public) {
+				return nil, err
+			}
+			return nil, publicCandidateFailure(err)
+		}
+	}
+	// Command admission tries the owner barrier without waiting.
+	// Bind this read-only launch to the exact journal we already inspected.
+	_, gate := ctx.Value(journalGateInspectionKey{}).(*journalGateInspection)
+	var before currentSnapshot
+	if gate {
+		before, err = runtime.readCurrentSnapshot(root, configHome)
+		if err != nil || !sameProtectedSnapshot(before.journal, snapshot) {
+			return nil, staleRetainedSelection(root, request.Target)
+		}
+		ctx = context.WithValue(ctx, journalGateInspectionKey{}, &journalGateInspection{request: request, fingerprint: snapshot.Fingerprint})
+	}
+	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
+	if err != nil {
+		if gate && errors.Is(err, domain.ErrPlanStale) {
 			return nil, err
 		}
 		return nil, publicCandidateFailure(err)
 	}
-	response, err := runtime.invokeVerifiedCandidateTransition(ctx, verifiedOwner, request, "")
-	if err != nil {
-		return nil, publicCandidateFailure(err)
+	if gate {
+		after, err := runtime.readCurrentSnapshot(root, configHome)
+		if err != nil || !sameCurrentSnapshot(before, after) {
+			return nil, staleRetainedSelection(root, request.Target)
+		}
 	}
 	if response.Inspection == nil && response.Outcome != nil &&
 		journal.Goal.Direction == releasetransition.DirectionActivatePrevious {
@@ -636,7 +660,7 @@ func (runtime *Runtime) PrepareTransition(
 			); qualified {
 				defer recovery.candidate.Close()
 				return runtime.prepareVerifiedReplacementTransition(
-					ctx, parsed, recovery.candidate, recovery.request, recovery.revalidation,
+					ctx, parsed, recovery.candidate, recovery.request, &recovery.revalidation,
 				)
 			}
 			if unfinished {
@@ -666,12 +690,7 @@ func (runtime *Runtime) PrepareTransition(
 		if verified, standalone := runtime.verifiedStandaloneCandidateRoot(ctx, parsed.root); standalone {
 			defer verified.Close()
 			if verified.version == parsed.version {
-				linksBefore, err := runtime.inspectRuntimeLinks(parsed.root)
-				if err != nil {
-					return Prepared{}, err
-				}
-				parsed.expectedLinks = &linksBefore
-				return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, releasetransition.ProcessRequest{
+				prepared, err := runtime.prepareVerifiedReplacementTransition(ctx, parsed, verified, releasetransition.ProcessRequest{
 					SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
 					Mode:          releasetransition.ProcessInspect,
 					RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
@@ -680,6 +699,10 @@ func (runtime *Runtime) PrepareTransition(
 					InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 					SourceIngress:       sourceIngress, Replacement: newerRelease,
 				}, nil)
+				if err != nil {
+					return runtime.inspectionFailure(parsed, err)
+				}
+				return prepared, nil
 			}
 		}
 	}
@@ -774,6 +797,7 @@ func (runtime *Runtime) PrepareTransition(
 		return Prepared{}, errors.New("published release name does not match the verified engine version")
 	}
 	canonicalCandidate := publishedCandidate{release: candidate.release, root: filepath.Join(parsed.root, "releases", string(candidate.release))}
+	retainedTarget := linksBefore.previous.target == "releases/"+string(candidate.release)
 	canonicalPresent := false
 	inspectionCandidate := verified
 	inspectionRoot := draftRoot
@@ -781,6 +805,9 @@ func (runtime *Runtime) PrepareTransition(
 		canonicalPresent = true
 		existing, err := runtime.verifyPublishedCandidate(ctx, canonicalCandidate, parsed.root, &verified.manifestDigest)
 		if err != nil {
+			if retainedTarget && ctx.Err() == nil {
+				return runtime.inspectionFailure(parsed, staleRetainedSelection(parsed.root, candidate.release))
+			}
 			return Prepared{}, fmt.Errorf("existing release differs from candidate: %w", err)
 		}
 		matching := existing.version == verified.version && existing.registryDigest == verified.registryDigest
@@ -794,6 +821,8 @@ func (runtime *Runtime) PrepareTransition(
 		inspectionRoot = parsed.root
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Prepared{}, err
+	} else if retainedTarget {
+		return runtime.inspectionFailure(parsed, staleRetainedSelection(parsed.root, candidate.release))
 	}
 	request := releasetransition.ProcessRequest{
 		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
@@ -804,6 +833,11 @@ func (runtime *Runtime) PrepareTransition(
 		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
 		SourceIngress:       sourceIngress, Replacement: newerRelease,
 	}
+	parsed.selection, err = runtime.captureTransitionSelection(ctx, inspectionCandidate, request, linksBefore, !canonicalPresent)
+	if err != nil {
+		return runtime.inspectionFailure(parsed, err)
+	}
+	ctx = selectionContext(ctx, parsed.selection)
 	runtime.progress(parsed, "Checking update requirements...")
 	prepared, err := runtime.prepareVerifiedCandidateTransition(ctx, parsed, inspectionCandidate, request)
 	if err == nil && completedAdmission != nil {
@@ -826,6 +860,9 @@ func (runtime *Runtime) PrepareTransition(
 		// existing release lock. An older candidate without that observation
 		// remains unsupported for this NEW admission path.
 		response, inspectErr := runtime.invokeVerifiedCandidateTransition(ctx, inspectionCandidate, request, "")
+		if errors.Is(inspectErr, domain.ErrPlanStale) {
+			return runtime.inspectionFailure(parsed, inspectErr)
+		}
 		if inspectErr != nil || response.Inspection == nil || response.Inspection.Resume != nil || !slices.ContainsFunc(response.Inspection.Decisions, func(decision releasetransition.RedactedDecision) bool {
 			return decision.Resource == "transition.source-metadata" && decision.Decision == releasetransition.DecisionPreserve && decision.Result == completedAdmission.Binding
 		}) {
@@ -855,12 +892,16 @@ func (runtime *Runtime) PrepareTransition(
 			return errors.Join(closeErr, os.RemoveAll(draftRoot))
 		}
 		prepared.run = func(ctx context.Context) error {
+			ctx = selectionContext(ctx, parsed.selection)
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err
 			}
 			if parsed.expectedLinks != nil {
 				links, err := runtime.inspectRuntimeLinks(parsed.root)
 				if err != nil || links != *parsed.expectedLinks {
+					if parsed.selection != nil {
+						return staleRetainedSelection(request.RuntimeRoot, request.Target)
+					}
 					return fmt.Errorf("%w: runtime links changed after inspection", domain.ErrPlanStale)
 				}
 			}
@@ -875,9 +916,15 @@ func (runtime *Runtime) PrepareTransition(
 			}
 			fresh, err := runtime.verifyPublishedCandidate(ctx, inspectionCandidate.candidate, inspectionRoot, &verified.manifestDigest)
 			if err != nil {
+				if parsed.selection != nil && ctx.Err() == nil {
+					return staleRetainedSelection(request.RuntimeRoot, request.Target)
+				}
 				return fmt.Errorf("reverify draft candidate: %w", err)
 			}
 			defer fresh.Close()
+			if err := runtime.inspectRollbackCompatibility(ctx, fresh, request, parsed.selection); err != nil {
+				return err
+			}
 			rechecked, err := runtime.invokeVerifiedCandidateTransition(ctx, fresh, request, "")
 			if err != nil {
 				return err
@@ -896,17 +943,7 @@ func (runtime *Runtime) PrepareTransition(
 					if !errors.Is(err, unix.EEXIST) {
 						return fmt.Errorf("publish approved release: %w", err)
 					}
-					existing, verifyErr := runtime.verifyPublishedCandidate(ctx, publishedCandidate{release: candidate.release, root: canonical}, parsed.root, &fresh.manifestDigest)
-					if verifyErr != nil {
-						return fmt.Errorf("%w: existing release differs from approved draft", domain.ErrPlanStale)
-					}
-					defer existing.Close()
-					if existing.version != fresh.version || existing.registryDigest != fresh.registryDigest {
-						return fmt.Errorf("%w: existing release differs from approved draft", domain.ErrPlanStale)
-					}
-					if err := runtime.Close(); err != nil {
-						return err
-					}
+					return staleRetainedSelection(request.RuntimeRoot, request.Target)
 				}
 				if runtime.relocatedCandidates == nil {
 					runtime.relocatedCandidates = map[string]string{}
@@ -1255,34 +1292,29 @@ func (runtime *Runtime) prepareRetainedTransition(
 			TargetRelease: string(verified.candidate.release), TargetVersion: verified.version,
 		}}
 	}
-	owner := verified
-	var active *verifiedPublishedCandidate
-	if verified.registryDigest == "" {
-		activeCandidate := publishedCandidate{
-			release: releasetransition.ReleaseID(
-				strings.TrimPrefix(links.current.target, "releases/"),
-			),
-			root: filepath.Join(parsed.root, links.current.target),
-		}
-		active, err = runtime.verifyPublishedCandidate(ctx, activeCandidate, parsed.root, nil)
-		if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-			return Prepared{}, verifiedPreparation(err)
-		}
-		if err != nil || active.registryDigest == "" {
-			if active != nil {
-				active.Close()
-			}
-			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
-				observed, release, nil, releasetransition.CodeRollbackIncompatible,
-				"the active release cannot own a transition to the retained release",
-				"restore a compatible retained release, then run yard update --rollback",
-			)))
-		}
-		defer active.Close()
-		owner = active
-	}
+	parsed.expectedLinks = &links
 	if err := sourceVersionError(verified.version); err != nil {
 		return Prepared{}, err
+	}
+	request := releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		Mode:          releasetransition.ProcessInspect,
+		RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
+		Target: release, Direction: releasetransition.DirectionActivatePrevious,
+		ArtifactDigest:      verified.manifestDigest,
+		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
+	}
+	parsed.selection, err = runtime.captureReleaseSelection(ctx, verified, request, links)
+	if err != nil {
+		return Prepared{}, verifiedPreparation(err)
+	}
+	ctx = selectionContext(ctx, parsed.selection)
+	if err := runtime.inspectRollbackCompatibility(ctx, verified, request, parsed.selection); err != nil {
+		var refusal publicReleaseInspectionError
+		if parsed.check && errors.As(err, &refusal) {
+			return runtime.preparePublicInspectionOutcome(parsed, refusal.outcome), nil
+		}
+		return Prepared{}, verifiedPreparation(err)
 	}
 	activeRoot := filepath.Join(parsed.root, links.current.target)
 	// Absence of the optional query advertises no profile owners. Identical
@@ -1298,7 +1330,7 @@ func (runtime *Runtime) prepareRetainedTransition(
 			for _, id := range capabilities.ActivationOwners {
 				targetOwners[id] = true
 			}
-		} else if errors.Is(capabilityErr, context.Canceled) || errors.Is(capabilityErr, context.DeadlineExceeded) {
+		} else if errors.Is(capabilityErr, domain.ErrPlanStale) || errors.Is(capabilityErr, context.Canceled) || errors.Is(capabilityErr, context.DeadlineExceeded) {
 			return Prepared{}, verifiedPreparation(capabilityErr)
 		}
 	}
@@ -1311,49 +1343,13 @@ func (runtime *Runtime) prepareRetainedTransition(
 		return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(observed, release, nil,
 			releasetransition.CodeRollbackIncompatible, "the retained release cannot verify installed runtime activation", "retain a release with compatible component activation owners, then run yard update --check")))
 	}
-	request := releasetransition.ProcessRequest{
-		SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
-		Mode:          releasetransition.ProcessInspect,
-		RuntimeRoot:   parsed.root, ConfigHome: configHome, Yard: yard,
-		Target: release, Direction: releasetransition.DirectionActivatePrevious,
-		ArtifactDigest:      verified.manifestDigest,
-		InheritedSettingIDs: slices.Clone(inheritedSettingIDs),
-	}
-	// A pre-v2 target remains the verified rollback artifact, but it has no
-	// transition registry. The verified active v2 release owns that exact goal.
-	// Preserve the frozen target-owner convention. An unaware target is safe
-	// only while its projection agrees with the authoritative checkpoint.
-	store, err := releasetransition.NewPOSIXV2Store(configHome)
-	if err != nil {
-		return Prepared{}, verifiedPreparation(err)
-	}
-	checkpoint, err := store.ReadMigrationCheckpoint()
-	if err != nil {
-		return Prepared{}, verifiedPreparation(err)
-	}
-	var projection releasetransition.ProtectedSnapshot
-	guardCheckpoint := false
-	if checkpoint.Exists && verified.registryDigest != "" {
-		reader, err := verifiedMigrationCheckpointReader(verified)
-		if err == nil && !reader {
-			projection, err = verifyCheckpointProjectionRollback(verified, store, checkpoint)
-			guardCheckpoint = true
-		}
-		if err != nil {
-			return Prepared{}, verifiedPreparation(transitionOutcomeError(publicReleaseOutcome(
-				observed, release, nil, releasetransition.CodeRollbackIncompatible,
-				"the retained release cannot verify the authoritative migration checkpoint",
-				"retain a compatible checkpoint-reader release, then run yard update --check",
-			)))
-		}
-	}
-	prepared, err := runtime.prepareVerifiedTransition(ctx, parsed, owner, verified, request, nil)
+	prepared, err := runtime.inspectVerifiedTransition(ctx, parsed, verified, verified, request, nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return Prepared{}, verifiedPreparation(err)
 		}
 		var refusal publicReleaseInspectionError
-		if errors.As(err, &refusal) && refusal.outcome.Code == releasetransition.CodeRollbackIncompatible {
+		if errors.As(err, &refusal) && (refusal.outcome.Code == releasetransition.CodeRollbackIncompatible || refusal.outcome.Code == releasetransition.CodePlanStale) {
 			// These outcomes were validated at the process boundary or constructed
 			// by a caller-side guard. Preserve their specific safe next action.
 			return Prepared{}, verifiedPreparation(err)
@@ -1364,27 +1360,11 @@ func (runtime *Runtime) prepareRetainedTransition(
 			"restore a compatible retained release, then run yard update --rollback",
 		)))
 	}
-	if guardCheckpoint {
-		execute := prepared.run
-		prepared.run = func(ctx context.Context) error {
-			currentCheckpoint, err := store.ReadMigrationCheckpoint()
-			if err != nil {
-				return err
-			}
-			currentProjection, err := store.ReadLedger()
-			if err != nil {
-				return err
-			}
-			if !sameProtectedSnapshot(checkpoint, currentCheckpoint) || !sameProtectedSnapshot(projection, currentProjection) {
-				return fmt.Errorf("%w: migration history changed after rollback inspection; run yard update --check", domain.ErrPlanStale)
-			}
-			return execute(ctx)
-		}
-	}
 	return runtime.guardRetainedRuntimeInputs(prepared, runtimeBinding, activeRoot, candidate.root, configHome, targetOwners), nil
 }
 
 type candidateVerification struct {
+	selection      *releaseSelection
 	candidate      publishedCandidate
 	digest         releasetransition.Fingerprint
 	version        string
@@ -1452,25 +1432,6 @@ func verifiedMigrationCheckpointReader(verified *verifiedPublishedCandidate) (bo
 	return true, nil
 }
 
-func verifyCheckpointProjectionRollback(verified *verifiedPublishedCandidate, store *releasetransition.POSIXV2Store, checkpoint releasetransition.ProtectedSnapshot) (releasetransition.ProtectedSnapshot, error) {
-	registry, digest, err := readVerifiedTransitionRegistry(verified)
-	if err != nil {
-		return releasetransition.ProtectedSnapshot{}, err
-	}
-	projection, err := store.ReadLedger()
-	if err != nil {
-		return releasetransition.ProtectedSnapshot{}, err
-	}
-	state, err := releasetransition.ParseMigrationLedger(projection, checkpoint, registry, digest)
-	if err != nil {
-		return releasetransition.ProtectedSnapshot{}, err
-	}
-	if state.DiffersFromProjection(registry) {
-		return releasetransition.ProtectedSnapshot{}, errors.New("authoritative migration epochs differ from the retained projection")
-	}
-	return projection, nil
-}
-
 func (runtime *Runtime) prepareVerifiedCandidateTransition(
 	ctx context.Context,
 	parsed options,
@@ -1485,11 +1446,18 @@ func (runtime *Runtime) prepareVerifiedReplacementTransition(
 	parsed options,
 	verified *verifiedPublishedCandidate,
 	request releasetransition.ProcessRequest,
-	revalidation replacementRevalidation,
+	revalidation *replacementRevalidation,
 ) (Prepared, error) {
-	return runtime.prepareVerifiedTransition(
-		ctx, parsed, verified, verified, request, &revalidation,
-	)
+	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
+	if err != nil {
+		return Prepared{}, err
+	}
+	parsed.expectedLinks = &links
+	parsed.selection, err = runtime.captureReleaseSelection(ctx, verified, request, links)
+	if err != nil {
+		return Prepared{}, err
+	}
+	return runtime.prepareVerifiedTransition(ctx, parsed, verified, verified, request, revalidation)
 }
 
 func (runtime *Runtime) prepareVerifiedTransition(
@@ -1500,13 +1468,21 @@ func (runtime *Runtime) prepareVerifiedTransition(
 	request releasetransition.ProcessRequest,
 	revalidation *replacementRevalidation,
 ) (Prepared, error) {
-	if err := runtime.inspectRollbackCompatibility(ctx, target, request); err != nil {
-		var public publicReleaseInspectionError
-		if parsed.check && errors.As(err, &public) {
-			return runtime.preparePublicInspectionOutcome(parsed, public.outcome), nil
-		}
+	if err := runtime.inspectRollbackCompatibility(ctx, target, request, parsed.selection); err != nil {
 		return Prepared{}, err
 	}
+	return runtime.inspectVerifiedTransition(ctx, parsed, owner, target, request, revalidation)
+}
+
+func (runtime *Runtime) inspectVerifiedTransition(
+	ctx context.Context,
+	parsed options,
+	owner *verifiedPublishedCandidate,
+	target *verifiedPublishedCandidate,
+	request releasetransition.ProcessRequest,
+	revalidation *replacementRevalidation,
+) (Prepared, error) {
+	ctx = selectionContext(ctx, parsed.selection)
 	response, err := runtime.invokeVerifiedCandidateTransition(ctx, owner, request, "")
 	if err != nil {
 		return Prepared{}, err
@@ -1661,6 +1637,7 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			return checked, err
 		},
 		run: func(ctx context.Context) error {
+			ctx = selectionContext(ctx, parsed.selection)
 			*convergedOutcome = releasetransition.Outcome{}
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
 				return err
@@ -1669,6 +1646,9 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 				ctx, target.candidate, request.RuntimeRoot, &target.digest,
 			)
 			if err != nil {
+				if parsed.selection != nil && ctx.Err() == nil {
+					return staleRetainedSelection(request.RuntimeRoot, request.Target)
+				}
 				return fmt.Errorf("reverify target runtime: %w", err)
 			}
 			defer verifiedTarget.Close()
@@ -1678,8 +1658,10 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			if verifiedTarget.registryDigest != target.registryDigest {
 				return fmt.Errorf("%w: target runtime registry changed after inspection", domain.ErrPlanStale)
 			}
-			if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request); err != nil {
-				return err
+			if parsed.selection != nil || inspection.Resume == nil || request.Direction == releasetransition.DirectionActivatePrevious {
+				if err := runtime.inspectRollbackCompatibility(ctx, verifiedTarget, request, parsed.selection); err != nil {
+					return err
+				}
 			}
 			verifiedOwner := verifiedTarget
 			if owner.candidate.release != target.candidate.release {
@@ -1721,6 +1703,9 @@ func (runtime *Runtime) prepareInspectedCandidateTransitionWithDelegate(
 			if parsed.expectedLinks != nil {
 				observed, err := runtime.inspectRuntimeLinks(parsed.root)
 				if err != nil || observed != *parsed.expectedLinks {
+					if parsed.selection != nil {
+						return staleRetainedSelection(request.RuntimeRoot, request.Target)
+					}
 					return fmt.Errorf("%w: runtime links changed after inspection", domain.ErrPlanStale)
 				}
 			}
@@ -1954,6 +1939,7 @@ func (failure transitionOutcomeFailure) Error() string {
 }
 
 type options struct {
+	selection                                               *releaseSelection
 	expectedLinks                                           *runtimeLinkSnapshot
 	channel, version, root, cache, repository, baseURL, tag string
 	offline, check, rollback, force, versionExplicit, json  bool

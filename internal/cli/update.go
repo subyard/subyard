@@ -122,6 +122,7 @@ func (cli *CLI) prepareRelease(ctx context.Context, loaded config.Loaded, argume
 func (cli *CLI) releaseRuntimeConfig(runtimeContext releaseruntime.RuntimeContext) releaseruntime.Config {
 	operatorInput, _ := cli.options.Stdin.(*os.File)
 	return releaseruntime.Config{
+		OwnerLockHeld:  func() bool { return cli.ownerMutationLock != nil },
 		OperatorInput:  operatorInput,
 		Inputs:         cli.commandInputs,
 		Context:        runtimeContext,

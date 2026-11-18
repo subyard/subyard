@@ -435,8 +435,8 @@ func TestRepairRedecidesWhenAHostCauseAppearsDuringConsent(t *testing.T) {
 	}
 }
 
-// A journal writer holds the owner barrier. If it holds it first, the repair
-// waits in Execute and is refused when the writer left an unfinished journal;
+// A journal writer holds the owner barrier. If it acquires it after admission
+// and before Execute, the repair waits and refuses the unfinished journal;
 // if the repair holds it first, its effect completes before the writer can
 // write.
 func TestRepairAndConcurrentJournalWriterInBothOrders(t *testing.T) {
@@ -468,16 +468,24 @@ func TestRepairAndConcurrentJournalWriterInBothOrders(t *testing.T) {
 			var code int
 			var output string
 			if order == "writer-first" {
-				go writer(held, release)
-				<-held
 				confirmed := make(chan struct{})
 				go func() {
 					defer close(done)
-					code, output = harness.run(t, func() { close(confirmed) }, "-Y", "named", "stop")
+					code, output = harness.run(t, func() {
+						go writer(held, release)
+						<-held
+						close(confirmed)
+					}, "-Y", "named", "stop")
 				}()
 				// After consent the stop waits for the barrier in Execute; the
 				// writer then leaves another journal and releases it.
-				<-confirmed
+				select {
+				case <-confirmed:
+				case <-done:
+					t.Fatalf("repair did not reach confirmation: code=%d output=%s", code, output)
+				case <-time.After(60 * time.Second):
+					t.Fatal("repair did not reach confirmation")
+				}
 				time.Sleep(200 * time.Millisecond)
 				close(release)
 			} else {
@@ -1147,25 +1155,25 @@ func TestRepairNeedsTheInstalledReleaseTooling(t *testing.T) {
 	}
 }
 
-// runWhileWriterHoldsBarrier runs an admitted command while a journal writer
-// holds the owner barrier: once the command is admitted, the writer writes and
-// releases the barrier the command waits for in Execute.
+// runWhileWriterHoldsBarrier takes the writer's barrier after read-only
+// admission so Execute waits for the journal change.
 func (harness *repairHarness) runWhileWriterHoldsBarrier(t *testing.T, environment []string, write func(), arguments ...string) (int, string) {
 	t.Helper()
-	_, unlock, err := uninstall.OwnerLock(context.Background(), harness.scenario.fixture.cli.env["SUBYARD_HOME"], nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	admitted := make(chan struct{})
 	var once sync.Once
-	harness.admittedSignal = func() { once.Do(func() { close(admitted) }) }
+	harness.admittedSignal = func() {
+		once.Do(func() {
+			_, unlock, err := uninstall.OwnerLock(context.Background(), harness.scenario.fixture.cli.env["SUBYARD_HOME"], nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func() {
+				defer unlock()
+				time.Sleep(200 * time.Millisecond)
+				write()
+			}()
+		})
+	}
 	defer func() { harness.admittedSignal = nil }()
-	go func() {
-		<-admitted
-		time.Sleep(200 * time.Millisecond)
-		write()
-		unlock()
-	}()
 	return harness.runWith(t, environment, func() {}, arguments...)
 }
 
@@ -1431,10 +1439,6 @@ func TestReadAdmissionRunsNoEffect(t *testing.T) {
 func TestRPCPlannedRepairBindingIsComparedUnderTheBarrier(t *testing.T) {
 	harness := newRepairHarness(t)
 	harness.scenario.fixture.cli.options.AdapterRunner = harness.adapter
-	_, unlock, err := uninstall.OwnerLock(context.Background(), harness.scenario.fixture.cli.env["SUBYARD_HOME"], nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	flipped := harness.flippedJournal(t)
 	var once sync.Once
 	var output string
@@ -1448,10 +1452,15 @@ func TestRPCPlannedRepairBindingIsComparedUnderTheBarrier(t *testing.T) {
 			// barrier; meanwhile another migration writes history.
 			harness.admittedSignal = func() {
 				once.Do(func() {
+					_, unlock, err := uninstall.OwnerLock(context.Background(), harness.scenario.fixture.cli.env["SUBYARD_HOME"], nil)
+					if err != nil {
+						t.Error(err)
+						return
+					}
 					go func() {
+						defer unlock()
 						time.Sleep(200 * time.Millisecond)
 						testkit.WriteFile(t, harness.scenario.fixture.journalPath, flipped, 0o600)
-						unlock()
 					}()
 				})
 			}
@@ -1478,7 +1487,12 @@ func TestConfigSyncConsumerRefreshIsAConsumerRepair(t *testing.T) {
 		testkit.WriteFile(t, scenario.runtime.state("default"), []byte(strings.Repeat("d", 64)), 0o600)
 	})
 	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, func(nestedCall, io.Writer) int { return 0 })
-	program.ownerMutationLock = &uninstall.Tree{} // held by the publishing sync
+	owner, unlock, err := uninstall.OwnerLock(context.Background(), program.env["SUBYARD_HOME"], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unlock)
+	program.ownerMutationLock = &owner
 	program.sourceBinding = harness.bindSources
 	inProcess, finish, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default"})
 	if err != nil || !inProcess || finish == nil || finish() != nil {

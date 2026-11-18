@@ -89,11 +89,9 @@ func TestOptionalRuntimeQueryRequiresIndependentRollbackProof(t *testing.T) {
 			if scenario == "profile-owner-loss" {
 				testkit.WriteFile(t, installed, []byte("installed profile runtime"), 0o700)
 			}
+			writeRollbackFixtureBaselineLedger(t, home)
 			if scenario == "history" {
 				path := filepath.Join(home, "release-transition/v2/history-checkpoint.json")
-				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-					t.Fatal(err)
-				}
 				testkit.WriteFile(t, path, []byte("{invalid"), 0o600)
 			}
 			prepared, err := runtime.PrepareTransition(context.Background(), []string{"--rollback", "--runtime-root", runtimeRoot}, home, "default")

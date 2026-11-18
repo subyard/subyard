@@ -20,6 +20,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
+	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -697,9 +698,13 @@ func TestFrozenRollbackRequiresMatchingCheckpointProjection(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = verifyCheckpointProjectionRollback(verified, store, checkpoint)
-			if (err == nil) != (scenario == "equal") {
-				t.Fatalf("frozen rollback %s: %v", scenario, err)
+			raw, err = store.ReadLedger()
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason, err := verifyRetainedHistory(verified, registry, raw, checkpoint)
+			if (reason == "" && err == nil) != (scenario == "equal") {
+				t.Fatalf("frozen rollback %s: %s, %v", scenario, reason, err)
 			}
 			after, err := store.ReadMigrationCheckpoint()
 			if err != nil || !sameProtectedSnapshot(checkpoint, after) {
@@ -927,6 +932,7 @@ esac
 func TestCandidateTransitionRejectsTrailingResponseJSON(t *testing.T) {
 	root := t.TempDir()
 	candidate := writeRuntimeCandidateFixture(t, root, `{"schemaVersion":1}{}`)
+	linkActiveTransitionFixture(t, root, candidate)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
 	verified, err := runtime.verifyPublishedCandidate(
 		context.Background(), candidate, root, nil,
@@ -1000,6 +1006,7 @@ esac
 `, capture, response)
 	candidate := writeRuntimeCandidatePayload(t, root, payload)
 	registry := []byte("{}\n")
+	linkActiveTransitionFixture(t, root, candidate)
 	runtime := New(Config{Stderr: &bytes.Buffer{}})
 	verified, err := runtime.verifyPublishedCandidate(
 		context.Background(), candidate, root, nil,
@@ -2184,10 +2191,11 @@ func TestMutationGateVerifiesJournalSelectedEngineBeforeExecution(t *testing.T) 
 	}
 }
 
-func TestMutationGateExecutesTheVerifiedEngineAcrossPathReplacement(t *testing.T) {
+func TestMutationGateRefusesJournalEngineReplacedAfterVerification(t *testing.T) {
 	fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
 	started := filepath.Join(filepath.Dir(fixture.runtimeRoot), "verified-engine-started")
 	proceed := filepath.Join(filepath.Dir(fixture.runtimeRoot), "verified-engine-proceed")
+	originalCalled := filepath.Join(filepath.Dir(fixture.runtimeRoot), "original-engine-called")
 	replacementCalled := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-engine-called")
 	original := fmt.Sprintf(`#!/bin/sh
 case "${1:-}" in
@@ -2196,10 +2204,10 @@ case "${1:-}" in
     while [ ! -e %q ]; do sleep 0.01; done
     printf 'yard-engine 1.2.3\n'
     ;;
-  _release-transition) cat >/dev/null; printf '%%s\n' %q ;;
+  _release-transition) : > %q; cat >/dev/null; printf '%%s\n' %q ;;
   *) exit 64 ;;
 esac
-`, started, proceed, fixture.recoveringResponse())
+`, started, proceed, originalCalled, fixture.recoveringResponse())
 	writeProtectedRuntimeFixtureEngine(t, fixture, original)
 	replacement := filepath.Join(filepath.Dir(fixture.runtimeRoot), "replacement-yard-engine")
 	replacementPayload := fmt.Sprintf(`#!/bin/sh
@@ -2218,7 +2226,16 @@ esac
 	}
 	runtime := New(Config{
 		Inputs: fixtureCommandInputs(fixture.environment()), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{},
+		OwnerLockHeld: func() bool { return true },
 	})
+	defer runtime.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, releaseOwner, err := uninstall.OwnerLock(ctx, runtime.ownerDataHome(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseOwner()
 	type gateResult struct {
 		outcome *releasetransition.Outcome
 		err     error
@@ -2226,7 +2243,7 @@ esac
 	result := make(chan gateResult, 1)
 	go func() {
 		outcome, err := runtime.InspectMutationGate(
-			context.Background(), fixture.runtimeRoot, fixture.configHome, "default",
+			ctx, fixture.runtimeRoot, fixture.configHome, "default",
 		)
 		result <- gateResult{outcome: outcome, err: err}
 	}()
@@ -2252,7 +2269,8 @@ esac
 	select {
 	case observed := <-result:
 		if observed.err != nil || observed.outcome == nil ||
-			observed.outcome.Status != releasetransition.StatusRecovering {
+			observed.outcome.Status != releasetransition.StatusOperatorActionRequired ||
+			observed.outcome.Code != releasetransition.CodePlanStale {
 			cause := observed.err
 			for cause != nil && errors.Unwrap(cause) != nil {
 				cause = errors.Unwrap(cause)
@@ -2263,8 +2281,175 @@ esac
 	case <-time.After(5 * time.Second):
 		t.Fatal("mutation gate did not finish after releasing the verified engine")
 	}
-	if _, err := os.Stat(replacementCalled); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("replacement engine executed after verification: %v", err)
+	for _, called := range []string{originalCalled, replacementCalled} {
+		if _, err := os.Stat(called); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("journal engine executed after replacement: %v", err)
+		}
+	}
+}
+
+func TestJournalGateLaunchTakesOwnerBarrier(t *testing.T) {
+	for _, scenario := range []string{"unchanged", "superseded", "contended"} {
+		t.Run(scenario, func(t *testing.T) {
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment())})
+			t.Cleanup(func() { _ = runtime.Close() })
+			called := filepath.Join(filepath.Dir(fixture.runtimeRoot), "journal-gate-called")
+			engine := fmt.Sprintf(`#!/bin/sh
+case "${1:-}" in
+  --version) printf 'yard-engine 1.2.3\n' ;;
+  _release-transition)
+    : > %q
+    [ -n "$SUBYARD_OWNER_LOCK_FD" ] || exit 65
+    flock -n -E 77 %q true
+    [ "$?" -eq 77 ] || exit 66
+    cat >/dev/null; printf '%%s\n' %q ;;
+  *) exit 64 ;;
+esac
+`, called, uninstall.OwnerLockPath(runtime.ownerDataHome()), fixture.recoveringResponse())
+			writeProtectedRuntimeFixtureEngine(t, fixture, engine)
+			store, err := releasetransition.NewPOSIXV2Store(fixture.configHome)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := store.ReadCurrentJournal()
+			if err != nil {
+				t.Fatal(err)
+			}
+			journal, err := releasetransition.ParseJournal(snapshot.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := releasetransition.ProcessRequest{
+				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+				RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Yard: "default",
+				Target: journal.Goal.Target, Direction: journal.Goal.Direction,
+				ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ctx = context.WithValue(ctx, journalGateInspectionKey{}, &journalGateInspection{request: request, fingerprint: snapshot.Fingerprint})
+			owner := publishedCandidate{release: request.Target, root: filepath.Dir(filepath.Dir(fixture.engine))}
+			verified, err := runtime.verifyPublishedCandidate(ctx, owner, request.RuntimeRoot, &journal.ArtifactDigest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verified.Close()
+			if scenario != "unchanged" {
+				_, unlock, err := uninstall.OwnerLock(ctx, runtime.ownerDataHome(), nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "superseded" {
+					journal.Transaction = "tx-fedcba9876543210"
+					journal.Goal.Target = "1.2.4-bbbbbbbbbbbb"
+					journal.Releases.Target = journal.Goal.Target
+					payload, err := releasetransition.MarshalJournal(journal)
+					if err != nil {
+						unlock()
+						t.Fatal(err)
+					}
+					testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
+					unlock()
+				} else {
+					defer unlock()
+				}
+			}
+			_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
+			if scenario == "unchanged" {
+				if err != nil {
+					t.Fatalf("the selected journal owner could not inspect under the barrier: %v", err)
+				}
+				return
+			}
+			want := "release state changed; retry"
+			if scenario == "contended" {
+				want = "release state is changing; retry"
+			}
+			if !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), want) || ctx.Err() != nil {
+				t.Fatalf("wanted prompt stale result %q, got %v", want, err)
+			}
+			if _, err := os.Lstat(called); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the previous journal owner launched: %v", err)
+			}
+		})
+	}
+}
+
+func TestJournalOwnerLaunchRevalidatesInstalledEngine(t *testing.T) {
+	for _, sourceOwner := range []bool{false, true} {
+		name := "changed target registry"
+		if sourceOwner {
+			name = "replaced historical source directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			fixture := newProtectedRuntimeTransitionFixture(t, releasetransition.JournalAuthorized)
+			owner := publishedCandidate{
+				release: releasetransition.ReleaseID(fixture.target),
+				root:    filepath.Dir(filepath.Dir(fixture.engine)),
+			}
+			called := filepath.Join(filepath.Dir(fixture.runtimeRoot), "journal-owner-calls")
+			engine := fmt.Sprintf("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.3\\n';; _release-transition) cat >/dev/null; printf 'called\\n' >> %q; printf '%%s\\n' %q;; *) exit 64;; esac\n", called, fixture.recoveringResponse())
+			writeProtectedRuntimeFixtureEngine(t, fixture, engine)
+			journal, err := releasetransition.ParseJournal(mustReadFile(t, fixture.journalPath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := New(Config{Inputs: fixtureCommandInputs(fixture.environment()), Stderr: &bytes.Buffer{}})
+			defer runtime.Close()
+			if sourceOwner {
+				// The historical rollback's target is now current. Its registryless
+				// artifact is bound separately from the source engine's registry.
+				target := writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, "release-a", "1.2.3", engine)
+				unbindCandidateRegistry(t, target, true)
+				journal.Goal = releasetransition.Goal{Target: target.release, Direction: releasetransition.DirectionActivatePrevious}
+				journal.Releases = releasetransition.ReleasePair{From: owner.release, Target: target.release}
+				journal.Checkpoint = releasetransition.JournalComplete
+				journal.ArtifactDigest = releasetransition.Fingerprint(fmt.Sprintf("%x", sha256.Sum256(mustReadFile(t, filepath.Join(target.root, "runtime-files.sha256")))))
+				if err := os.Symlink("releases/"+string(owner.release), filepath.Join(fixture.runtimeRoot, "previous")); err != nil {
+					t.Fatal(err)
+				}
+				payload, err := releasetransition.MarshalJournal(journal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, fixture.journalPath, payload, 0o600)
+			}
+			request := releasetransition.ProcessRequest{
+				SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+				RuntimeRoot: fixture.runtimeRoot, ConfigHome: fixture.configHome, Yard: "default",
+				Target: journal.Goal.Target, Direction: journal.Goal.Direction,
+				ArtifactDigest: journal.ArtifactDigest, RegistryDigest: journal.RegistryDigest,
+			}
+			verified, err := runtime.verifyPublishedCandidate(ctx, owner, fixture.runtimeRoot, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer verified.Close()
+			if _, err := runtime.invokeVerifiedCandidateTransition(ctx, verified, request, ""); err != nil {
+				t.Fatalf("unchanged journal owner refused: %v", err)
+			}
+
+			if sourceOwner {
+				if err := os.Rename(owner.root, owner.root+".pinned"); err != nil {
+					t.Fatal(err)
+				}
+				writeVersionedRuntimeCandidate(t, fixture.runtimeRoot, string(owner.release), "1.2.3", engine)
+				replacement, err := runtime.verifyPublishedCandidateFiles(owner, fixture.runtimeRoot, &verified.manifestDigest, false)
+				if err != nil {
+					t.Fatalf("replacement must preserve the manifest digest: %v", err)
+				}
+				replacement.Close()
+			} else {
+				testkit.WriteFile(t, filepath.Join(owner.root, "config", "release-transition.json"), []byte(sourceAdmissionRegistry), 0o600)
+			}
+			_, err = runtime.invokeVerifiedCandidateTransition(ctx, verified, request, "")
+			assertReleaseSelectionStale(t, err)
+			if got := string(mustReadFile(t, called)); got != "called\n" {
+				t.Fatalf("changed journal owner received an inspection: %q", got)
+			}
+		})
 	}
 }
 
@@ -2821,6 +3006,13 @@ esac
 	return writeRuntimeCandidatePayload(t, root, payload)
 }
 
+func linkActiveTransitionFixture(t *testing.T, root string, candidate publishedCandidate) {
+	t.Helper()
+	if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(root, "current")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func prepareCandidateTransitionForTest(
 	runtime *Runtime,
 	ctx context.Context,
@@ -2839,6 +3031,23 @@ func prepareCandidateTransitionForTest(
 	defer verified.Close()
 	if request.ArtifactDigest == "" {
 		request.ArtifactDigest = verified.manifestDigest
+	}
+	links, err := runtime.inspectRuntimeLinks(request.RuntimeRoot)
+	if err != nil {
+		return Prepared{}, err
+	}
+	// Protocol fixtures with no runtime links exercise the active engine.
+	if !links.current.present && !links.previous.present {
+		if err := os.Symlink("releases/"+string(candidate.release), filepath.Join(request.RuntimeRoot, "current")); err != nil {
+			return Prepared{}, err
+		}
+	}
+	if links.previous.target == "releases/"+string(candidate.release) {
+		selection, err := runtime.captureReleaseSelection(ctx, verified, request, links)
+		if err != nil {
+			return Prepared{}, err
+		}
+		parsed.selection = selection
 	}
 	return runtime.prepareVerifiedCandidateTransition(ctx, parsed, verified, request)
 }
@@ -2962,6 +3171,10 @@ esac
 	fixture.candidate = writeVersionedRuntimeCandidate(
 		t, fixture.runtimeRoot, fixture.candidateID, fixture.candidateVersion, candidatePayload,
 	)
+
+	bindRollbackFixtureRegistry(t, fixture.source, []byte(sourceAdmissionRegistry))
+	bindRollbackFixtureRegistry(t, fixture.candidate, []byte(sourceAdmissionRegistry))
+	writeRollbackFixtureBaselineLedger(t, fixture.configHome)
 
 	sourceManifest, err := os.ReadFile(filepath.Join(fixture.source.root, "runtime-files.sha256"))
 	if err != nil {
@@ -3153,6 +3366,7 @@ esac
 	writeVersionedRuntimeCandidate(
 		t, fixture.runtimeRoot, fixture.candidateID, fixture.candidateVersion, candidatePayload,
 	)
+	bindRollbackFixtureRegistry(t, fixture.candidate, []byte(sourceAdmissionRegistry))
 }
 
 func (fixture *v0111CandidateRoutingFixture) writeSourceBlocker(

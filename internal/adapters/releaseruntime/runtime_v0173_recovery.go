@@ -94,7 +94,13 @@ func (runtime *Runtime) inspectV0173ActivationOnlyRecovery(
 		return protected, nil
 	}
 	defer assets.Close()
-	response, err := runtime.invokeVerifiedRuntimeTransition(ctx, assets, delegate, protected.request, "")
+	selectionRequest := protected.request
+	selectionRequest.Target, selectionRequest.ArtifactDigest = delegate.candidate.release, delegate.manifestDigest
+	selection, err := runtime.captureReleaseSelection(ctx, delegate, selectionRequest, before.links)
+	if err != nil || selection.refusal != "" {
+		return protected, nil
+	}
+	response, err := runtime.invokeVerifiedRuntimeTransition(selectionContext(ctx, selection), assets, delegate, protected.request, "")
 	if err != nil || response.Inspection == nil || response.Outcome != nil || !response.ActivationReconciliationOwned {
 		return protected, nil
 	}
@@ -109,7 +115,7 @@ func (runtime *Runtime) inspectV0173ActivationOnlyRecovery(
 	recovered := *protected
 	recovered.inspection = inspection
 	receipt := candidateVerification{
-		candidate: delegate.candidate, digest: delegate.manifestDigest,
+		selection: selection, candidate: delegate.candidate, digest: delegate.manifestDigest,
 		version: delegate.version, registryDigest: delegate.registryDigest,
 	}
 	return &recovered, &receipt
@@ -133,7 +139,7 @@ func (runtime *Runtime) invokeTransitionExecution(
 	if verified.version != delegate.version || verified.registryDigest != delegate.registryDigest {
 		return releasetransition.ProcessResponse{}, fmt.Errorf("%w: recovery engine changed after inspection", domain.ErrPlanStale)
 	}
-	return runtime.invokeVerifiedRuntimeTransition(ctx, assets, verified, request, grant)
+	return runtime.invokeVerifiedRuntimeTransition(selectionContext(ctx, delegate.selection), assets, verified, request, grant)
 }
 
 func delegatedReleaseOperationBinding(binding string, delegate *candidateVerification) string {

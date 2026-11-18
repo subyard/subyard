@@ -137,15 +137,27 @@ func (runtime *Runtime) prepareMigrationOwnerReplacement(ctx context.Context, pa
 	if err != nil || !version.GT(semver.MustParse("0.21.0")) || candidate.version != parsed.version {
 		return Prepared{}, false, nil
 	}
-	probe := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessMigrationOwnerCapabilities}
-	response, err := runtime.invokeVerifiedRecoveryTransition(ctx, candidate, parsed.root, probe, "")
-	if err != nil || response.Capabilities == nil || *response.Capabilities != releasetransition.MigrationOwnerReplacementCapabilities() {
-		return Prepared{}, true, errors.New("standalone candidate does not negotiate migration owner replacement")
-	}
 	request := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessInspect,
 		Contract: releasetransition.MigrationOwnerReplacementContractV1, RuntimeRoot: parsed.root, ConfigHome: configHome, Yard: yard,
 		Target: candidate.candidate.release, Direction: releasetransition.DirectionActivateTarget, ArtifactDigest: candidate.manifestDigest, RegistryDigest: candidate.registryDigest,
 		InheritedSettingIDs: inherited, MigrationOwner: &releasetransition.MigrationOwnerReplacementRequest{Transaction: journal.Transaction, Fingerprint: snapshot.Fingerprint}}
+	links, err := runtime.inspectRuntimeLinks(parsed.root)
+	if err != nil {
+		return Prepared{}, true, err
+	}
+	parsed.selection, err = runtime.captureReleaseSelection(ctx, candidate, request.TransitionRequest(), links)
+	if err != nil {
+		return Prepared{}, true, err
+	}
+	ctx = selectionContext(ctx, parsed.selection)
+	probe := releasetransition.RecoveryProcessRequest{SchemaVersion: releasetransition.ProcessRecoverySchemaV2, Mode: releasetransition.RecoveryProcessMigrationOwnerCapabilities}
+	response, err := runtime.invokeVerifiedRecoveryTransition(ctx, candidate, parsed.root, probe, "")
+	if err != nil {
+		return Prepared{}, true, err
+	}
+	if response.Capabilities == nil || *response.Capabilities != releasetransition.MigrationOwnerReplacementCapabilities() {
+		return Prepared{}, true, errors.New("standalone candidate does not negotiate migration owner replacement")
+	}
 	response, err = runtime.invokeVerifiedRecoveryTransition(ctx, candidate, parsed.root, request, "")
 	if err != nil {
 		return Prepared{}, true, err

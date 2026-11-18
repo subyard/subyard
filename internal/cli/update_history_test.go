@@ -133,6 +133,13 @@ func TestUpdateProtectedOwnerReceivesOnlyExplicitSettingOverrides(t *testing.T) 
 				environment = append(environment, test.override)
 			}
 			journalPath := installCompletedUpdateOwnerFixture(t, environment, runtimeRoot)
+			if test.blocked {
+				// This fixture exercises the journal owner's exact-target guard
+				// without the complete ledger needed for metadata fallback.
+				if err := os.Remove(filepath.Join(filepath.Dir(journalPath), "ledger.json")); err != nil {
+					t.Fatal(err)
+				}
+			}
 			before, err := os.ReadFile(journalPath)
 			if err != nil {
 				t.Fatal(err)
@@ -305,7 +312,7 @@ func TestUpdateHistoryRecordsActivationRollbackFailureAndDecline(t *testing.T) {
 	}
 	// Install the fixture's verified retained pair for the next independent rollback attempt.
 	// The history lives under SUBYARD_HOME and must survive changes to the runtime links.
-	prepareCLIReleaseLinks(t, runtimeRoot, true)
+	prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
 	if code := run("op-history-rollback", nil,
 		"update", "--yes", "--rollback", "--runtime-root", runtimeRoot); code != 0 {
 		t.Fatalf("rollback code=%d stderr=%q", code, lastStderr)
@@ -404,7 +411,7 @@ func TestPostVerificationPreparationCancellationKeepsTargetAndStatus(t *testing.
 
 func TestPostVerificationRollbackFailureKeepsVerifiedTarget(t *testing.T) {
 	root, environment, runtimeRoot := updateReleaseFixture(t)
-	prepareCLIReleaseLinks(t, runtimeRoot, true)
+	prepareCLIReleaseLinks(t, runtimeRoot, environmentValue(environment, "SUBYARD_CONFIG_HOME"), true)
 	releaseRoot := filepath.Join(runtimeRoot, "releases", "previous-b")
 	enginePath := filepath.Join(releaseRoot, "bin", "yard-engine")
 	engine := []byte("#!/bin/sh\ncase \"${1:-}\" in --version) printf 'yard-engine 1.2.3\\n' ;; _release-transition) cat >/dev/null; printf '{}\\n' ;; *) exit 64 ;; esac\n")

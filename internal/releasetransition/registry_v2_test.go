@@ -1,6 +1,7 @@
 package releasetransition
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -19,6 +20,53 @@ const validRegistryV2 = `{
     {"id":"settings-v3","domain":"settings","fromEpoch":2,"toEpoch":3,"kind":"settings-fixture-v2-to-v3","dependsOn":["project-v2"]}
   ]
 }`
+
+func TestRegistryV2CanonicalDigestBindsEveryField(t *testing.T) {
+	registry, _, err := ParseRegistryV2([]byte(validRegistryV2), registryV2TestCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.RetiredPrefixes = map[string]RetiredMigrationPrefixV2{
+		"settings": {ThroughEpoch: 1, Digest: Fingerprint(strings.Repeat("a", 64))},
+	}
+	digest, err := registry.CanonicalDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string]func(*RegistryV2){
+		"schema":        func(r *RegistryV2) { r.SchemaVersion++ },
+		"minimum epoch": func(r *RegistryV2) { r.MinimumEpochs["settings"]++ },
+		"maximum epoch": func(r *RegistryV2) { r.CurrentEpochs["settings"]++ },
+		"migration ID":  func(r *RegistryV2) { r.Migrations[0].ID = "different" },
+		"kind":          func(r *RegistryV2) { r.Migrations[0].Kind = "different" },
+		"domain":        func(r *RegistryV2) { r.Migrations[0].Domain = "project-state" },
+		"from epoch":    func(r *RegistryV2) { r.Migrations[0].FromEpoch++ },
+		"to epoch":      func(r *RegistryV2) { r.Migrations[0].ToEpoch++ },
+		"dependency":    func(r *RegistryV2) { r.Migrations[1].DependsOn[0] = "different" },
+		"retired epoch": func(r *RegistryV2) {
+			r.RetiredPrefixes["settings"] = RetiredMigrationPrefixV2{ThroughEpoch: 2, Digest: registry.RetiredPrefixes["settings"].Digest}
+		},
+		"retired digest": func(r *RegistryV2) {
+			r.RetiredPrefixes["settings"] = RetiredMigrationPrefixV2{ThroughEpoch: 1, Digest: Fingerprint(strings.Repeat("b", 64))}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var changed RegistryV2
+			if err := json.Unmarshal(payload, &changed); err != nil {
+				t.Fatal(err)
+			}
+			change(&changed)
+			got, err := changed.CanonicalDigest()
+			if err != nil || got == digest {
+				t.Fatalf("field change did not change digest: %s, %v", got, err)
+			}
+		})
+	}
+}
 
 func TestParseRegistryV2ValidatesAndReturnsExactBytesDigest(t *testing.T) {
 	catalog := registryV2TestCatalog(t)
@@ -295,7 +343,9 @@ func TestNetworkManagerDeviceGuardForbidsRollbackToReleasedReaders(t *testing.T)
 	if !ok || descriptor.Domain != "power-metadata" || descriptor.RollbackCompatibility != "" {
 		t.Fatalf("NetworkManager device guard descriptor = %#v, %v", descriptor, ok)
 	}
-	if _, supported := SupportedBuiltinCatalog(registeredYardsCapabilityCatalog().Digest()); !supported {
+	const publishedSixKindDigest Fingerprint = "ed0b321ebbdcc81f039d6d25ff67800736be13af18b048ba837ea79fae8ccd3c"
+	catalog, supported := SupportedBuiltinCatalog(publishedSixKindDigest)
+	if !supported || len(catalog.Descriptors()) != 6 {
 		t.Fatal("journals sealed by the previous catalog are no longer recognized")
 	}
 }

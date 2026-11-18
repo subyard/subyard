@@ -591,6 +591,9 @@ func (runtime *Runtime) recoverCurrentScope(ctx context.Context, root, configHom
 			continue
 		}
 		candidate, err := runtime.inspectProtectedTransition(ctx, root, configHome, name, original.request.InheritedSettingIDs)
+		if errors.Is(err, domain.ErrPlanStale) {
+			return nil, err
+		}
 		if err := runtime.revalidateCurrentSnapshot(root, configHome, before); err != nil {
 			return nil, err
 		}

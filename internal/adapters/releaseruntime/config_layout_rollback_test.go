@@ -73,7 +73,7 @@ func TestConfigLayoutRollbackWithoutManifestPreservesExistingRootModes(t *testin
 				t.Fatalf("existing root mode changed: %v", err)
 			}
 			entries, err := os.ReadDir(request.ConfigHome)
-			if err != nil || len(entries) != 0 {
+			if err != nil || len(entries) != 1 || entries[0].Name() != "release-transition" {
 				t.Fatalf("rollback inspection mutated config root: %v", err)
 			}
 		})
@@ -153,7 +153,17 @@ func configLayoutRollbackFixture(t *testing.T, metadata string) (*Runtime, optio
 	}
 	runtime := New(Config{Inputs: fixtureCommandInputs(map[string]string{"HOME": root}), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 	request := releasetransition.ProcessRequest{SchemaVersion: 1, Mode: releasetransition.ProcessInspect, RuntimeRoot: runtimeRoot, ConfigHome: configHome, Target: candidate.release, Direction: releasetransition.DirectionActivatePrevious}
+	writeMigrationRollbackSource(t, candidate, request, []byte(sourceAdmissionRegistry))
+	writeRollbackFixtureBaselineLedger(t, configHome)
 	return runtime, options{root: runtimeRoot}, candidate, request, called
+}
+
+func writeRollbackFixtureBaselineLedger(t *testing.T, configHome string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(configHome, "release-transition/v2"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(configHome, "release-transition/v2/ledger.json"), []byte(`{"schemaVersion":2,"domains":{"settings":{"epoch":1,"applied":[]}}}`), 0o600)
 }
 
 func writeConfigLayoutManifest(t *testing.T, root string, schema int, files bool) {
