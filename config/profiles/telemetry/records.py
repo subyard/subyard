@@ -17,6 +17,8 @@ import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
 POLICY_VERSION = 'subyard.telemetry.capture/v1'
+# Matches the collector's default fingerprint before it publishes settings.
+DEFAULT_CAPTURE_POLICY = POLICY_VERSION + ':71626c7f614522a2d0ffb6b15ef86fc45334322dd94e86f704a104b545b9c6db'
 STORE_VERSION = 4
 KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
 BODY_ID = {'run': 'agent_run_id', **dict.fromkeys(('scope', 'process', 'sample', 'allocation', 'association'), 'object_id')}
@@ -293,9 +295,8 @@ def capture_policy(directory):
     selected = settings.get('session_capture_attributes')
     if selected is None:
         attributes = {*BODY_RULES['session_attributes'][1], 'subyard.agent_run.id', 'subyard.agent_run.evidence'}
-    else:
-        attributes = set(json.loads(selected))
-    return attributes, settings.get('session_capture_policy', POLICY_VERSION)
+        return attributes, DEFAULT_CAPTURE_POLICY
+    return set(json.loads(selected)), settings.get('session_capture_policy', POLICY_VERSION)
 
 
 def identity_key(directory):

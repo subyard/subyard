@@ -49,7 +49,8 @@ class Runtime:
         # Paths whose contents an unselected run neither needs nor installs. They
         # stay known so that leftovers are detected and kept unchanged.
         self.retained = {}
-        for name in ('native.py', 'launcher.py', 'processes.py', 'records.py', 'record-policy.txt', 'forward.py',
+        # Running launchers can import records during publication.
+        for name in ('record-policy.txt', 'records.py', 'native.py', 'launcher.py', 'processes.py', 'forward.py',
                      'resources.py', 'sources.py', 'broker-correlation.py', 'tomli_w.py', 'subyard-telemetry'):
             mode = 0o755 if name in ('subyard-telemetry', 'broker-correlation.py') else 0o644
             if name == 'subyard-telemetry' and not selected:

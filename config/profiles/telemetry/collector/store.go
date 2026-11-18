@@ -510,8 +510,9 @@ func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error
 	if err != nil {
 		return false, ErrStorage
 	}
-	policyMatches := old.PolicyVersion == e.PolicyVersion || (e.local && !e.replay)
-	if old.SourceID != e.SourceID || old.Kind != e.Kind || old.Encoding != e.Encoding || !policyMatches {
+	producerRetry := e.local && !e.replay && e.Encoding == "json"
+	if old.SourceID != e.SourceID || old.Encoding != e.Encoding ||
+		(!producerRetry && (old.Kind != e.Kind || old.PolicyVersion != e.PolicyVersion)) {
 		return false, errEventCollision
 	}
 	if !samePayload(old, e) {
@@ -536,7 +537,7 @@ func samePayload(a, b Envelope) bool {
 	// A live producer retry with a stable ID may no longer know the source time.
 	producerRetry := !b.replay && b.Encoding == "json" && b.OriginID == "producer:"+b.SourceID
 	sameTime := a.SourceTime == b.SourceTime || (producerRetry && b.SourceTime == unknownSourceTime)
-	return a.SourceVersion == b.SourceVersion && sameTime &&
+	return a.Kind == b.Kind && a.SourceVersion == b.SourceVersion && sameTime &&
 		bytes.Equal(a.Body, b.Body) && bytes.Equal(a.Protobuf, b.Protobuf)
 }
 func (s *Store) prune() error {
@@ -602,7 +603,7 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 		}
 		// Outbox filenames and replay delivery order are independent of source
 		// chronology. Older records fill missing metadata beneath newer state.
-		merged, at, err := key.mergeTimedProjection(tx, "SELECT body,source_time FROM runs WHERE agent_run_id=?", run, b, e.SourceTime)
+		merged, at, err := mergeTimedProjection(tx, "SELECT body,source_time FROM runs WHERE agent_run_id=?", run, b, e.SourceTime)
 		if err != nil {
 			return err
 		}
@@ -637,7 +638,7 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 				kind = oldKind
 			}
 		}
-		merged, err := key.mergeProjection(oldBody, b, newer)
+		merged, err := mergeProjection(oldBody, b, newer)
 		if err != nil {
 			return err
 		}
@@ -649,7 +650,7 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 			return err
 		}
 		if e.Kind == "allocation" {
-			merged, at, err := key.mergeTimedProjection(tx, "SELECT body,source_time FROM allocations WHERE object_id=?", object, b, e.SourceTime)
+			merged, at, err := mergeTimedProjection(tx, "SELECT body,source_time FROM allocations WHERE object_id=?", object, b, e.SourceTime)
 			if err != nil {
 				return err
 			}
@@ -696,7 +697,7 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 		}
 		start := firstNonempty(canonicalTimestamp(oldStart.String), stringValue(b, "start_time"))
 		end := firstNonempty(stringValue(b, "end_time"), canonicalTimestamp(oldEnd.String))
-		merged, err := key.mergeProjection(oldBody, b, true)
+		merged, err := mergeProjection(oldBody, b, true)
 		if err != nil {
 			return err
 		}
@@ -715,18 +716,18 @@ func (key identityKey) project(tx *sql.Tx, e Envelope) error {
 	return nil
 }
 
-func (key identityKey) mergeTimedProjection(tx *sql.Tx, query, id string, body map[string]any, at string) (string, string, error) {
+func mergeTimedProjection(tx *sql.Tx, query, id string, body map[string]any, at string) (string, string, error) {
 	var oldBody, oldTime string
 	err := tx.QueryRow(query, id).Scan(&oldBody, &oldTime)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", "", err
 	}
 	oldTime = canonicalTimestamp(oldTime)
-	merged, err := key.mergeProjection(oldBody, body, at >= oldTime)
+	merged, err := mergeProjection(oldBody, body, at >= oldTime)
 	return merged, max(at, oldTime), err
 }
 
-func (key identityKey) mergeProjection(oldBody string, incoming map[string]any, newer bool) (string, error) {
+func mergeProjection(oldBody string, incoming map[string]any, newer bool) (string, error) {
 	merged := incoming
 	if oldBody != "" {
 		old, err := decodeBody([]byte(oldBody))
@@ -737,8 +738,7 @@ func (key identityKey) mergeProjection(oldBody string, incoming map[string]any, 
 		if !newer {
 			base, patch = incoming, old
 		}
-		merged = make(map[string]any, len(bodyRules))
-		maps.Copy(merged, base)
+		merged = maps.Clone(base)
 		// The schema retains only scalars and lists. Match JSON Merge Patch's
 		// deletion semantics for an explicitly null field in the newer patch.
 		for name, value := range patch {
@@ -749,8 +749,7 @@ func (key identityKey) mergeProjection(oldBody string, incoming map[string]any, 
 			}
 		}
 	}
-	clean, _ := identity(keepID).body(merged)
-	data, err := json.Marshal(clean)
+	data, err := json.Marshal(merged)
 	return string(data), err
 }
 
@@ -900,12 +899,15 @@ func (s *Store) sanitizePayload(e *Envelope, p Policy, id identity, rekeyBinary 
 		if err != nil {
 			return nil, err
 		}
-		if e.replay && !e.local && clean.Kind == "association" && stringValue(clean.Body, "association_id") == "" {
-			// Pre-upgrade stores allowed free-form explicit interval IDs.
-			// Preserve their distinction while keeping the input private.
+		if !e.local && clean.Kind == "association" && stringValue(clean.Body, "association_id") == "" {
+			// Legacy intervals could use free-form IDs or sources. Keep
+			// their distinction without retaining the original strings.
 			if legacy := stringValue(body, "association_id"); legacy != "" {
 				clean.Body["association_id"] = "h1:" + fmt.Sprintf("%x", s.key.digest("legacy-association/v1\x00"+legacy))
 				n--
+			} else if source := stringValue(body, "source"); source != "" && stringValue(clean.Body, "source") == "" {
+				clean.Body["association_id"] = s.key.projectionID(e.OriginID,
+					stringValue(clean.Body, "object_id"), stringValue(clean.Body, "agent_run_id"), source)
 			}
 		}
 		// The envelope has already been mapped. Only map body identities.

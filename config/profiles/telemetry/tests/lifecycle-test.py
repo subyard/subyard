@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import json
 import hashlib
+import fcntl
 import importlib.util
 import io
 from contextlib import redirect_stderr
 import os
 from pathlib import Path
+import select
 import shutil
 import signal
 import subprocess
@@ -17,6 +19,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]/'internal/adapters/configmaterial'))
 import guest
+import launcher
 import records
 spec = importlib.util.spec_from_file_location('profile_lifecycle', Path(__file__).parent/'e2e/profile-lifecycle.py')
 fixture = importlib.util.module_from_spec(spec)
@@ -59,11 +62,21 @@ class LifecycleTest(unittest.TestCase):
                             directory.mkdir(mode=0o700)
                         os.chown(data, runtime.uid, runtime.gid)
                         (control/'marker').write_bytes(guest.MARKER)
+                        launch_boundary = target == runtime.library/'records.py'
+                        launch_assets = {runtime.library/'launcher.py', runtime.library/'processes.py',
+                                         runtime.commands/'subyard-telemetry-run'}
                         for path in [*runtime.assets, *runtime.retained]:
-                            path.write_bytes(b'previous '+path.name.encode())
+                            if path.name == 'record-policy.txt':
+                                continue  # Released installations lack the new import dependency.
+                            if launch_boundary and path in launch_assets:
+                                content, mode = runtime.assets[path]
+                                path.write_bytes(content)
+                                path.chmod(mode)
+                            else:
+                                path.write_bytes(b'previous '+path.name.encode())
                         (control/'assets.json').write_text(json.dumps({
                             str(path): hashlib.sha256(path.read_bytes()).hexdigest()
-                            for path in [*runtime.assets, *runtime.retained]}))
+                            for path in [*runtime.assets, *runtime.retained] if path.exists()}))
                         states = {unit: dict(LoadState='loaded', ActiveState='active',
                                               UnitFileState='enabled' if selected else 'disabled')
                                   for unit in (guest.COLLECTOR, guest.MANAGER)}
@@ -109,6 +122,16 @@ class LifecycleTest(unittest.TestCase):
                             _, status = os.waitpid(pid, 0)
                             self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
                             self.assertEqual(runtime.observe()['state'], 'stale')
+                            if launch_boundary:
+                                launch_data = records.private_directory(root/'launch-data')
+                                # Keep this boundary probe focused on import and native execution.
+                                (launch_data/'runs').touch()
+                                result = subprocess.run([runtime.commands/'subyard-telemetry-run', '--agent', 'other',
+                                    '--data-dir', launch_data, '--scope-mode', 'partial', '--',
+                                    sys.executable, '-c', 'print("workload ran"); raise SystemExit(23)'],
+                                    capture_output=True, timeout=5)
+                                self.assertEqual(result.returncode, 23, result.stderr)
+                                self.assertEqual(result.stdout, b'workload ran\n')
                             runtime.apply()
                             self.assertEqual(runtime.observe()['state'], 'current')
                         states = json.loads(state_path.read_text())
@@ -147,6 +170,70 @@ with (outbox/'.lock').open('r+b') as lock:
             self.assertCountEqual(outbox.glob('*.json'), pending)
             self.assertTrue(records.emit(data, 'run', {'agent_run_id': 'new-run'}, event_id='new'))
             self.assertEqual(len(list(outbox.glob('*.json'))), 2)
+
+    def test_new_manager_finishes_run_while_fenced_observer_holds_legacy_lock(self):
+        # Run a loaded observer with the released serializer's exact-mode
+        # admission rule and its legacy flock, in a process we can reap.
+        old_observer = """
+import fcntl, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import launcher, records
+data = Path(sys.argv[2])
+private_directory = records.private_directory
+def legacy_directory(path, **_):
+    return private_directory(path)
+records.private_directory = legacy_directory
+assert records.emit(data, 'gap', {}, event_id='before-handoff')
+print('loaded', flush=True)
+with (data/'manager.lock').open('rb') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    assert not records.emit(data, 'gap', {}, event_id='after-handoff')
+    launcher.observe(data, once=True)
+    print('fenced', flush=True)
+    sys.stdin.read()
+"""
+        profile = Path(launcher.__file__).parent
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            data = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.data, runtime.uid, runtime.gid = data, os.getuid(), os.getgid()
+            runs = records.private_directory(data/'runs')
+            with subprocess.Popen([sys.executable, '-Bc', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE) as workload, \
+                 (data/'manager.lock').open('wb') as legacy_manager:
+                manifest = runs/'fixture-run.json'
+                records.atomic_json(manifest, dict(agent_run_id='fixture-run', host_id='fixture-host',
+                    boot_id=launcher.boot_id(), pid=workload.pid, start_ticks=launcher.processes.start_ticks(workload.pid)))
+                fcntl.flock(legacy_manager, fcntl.LOCK_EX)
+                with subprocess.Popen([sys.executable, '-Bc', old_observer, str(profile), str(data)],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE) as old:
+                    try:
+                        self.assertTrue(select.select([old.stdout], [], [], 5)[0], 'legacy observer did not load')
+                        self.assertEqual(old.stdout.readline(), b'loaded\n')
+                        runtime.fence_legacy_producers()
+                        self.assertEqual((data/'outbox').stat().st_mode & 0o7777, 0o1700)
+                        fcntl.flock(legacy_manager, fcntl.LOCK_UN)
+                        self.assertTrue(select.select([old.stdout], [], [], 5)[0], 'legacy observer did not acquire lock')
+                        self.assertEqual(old.stdout.readline(), b'fenced\n')
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(legacy_manager, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        self.assertTrue(manifest.exists())
+
+                        records.atomic_json(data/'drain.json', {'drain': True})
+                        command = [sys.executable, '-B', launcher.__file__, 'manager', '--data-dir', str(data),
+                                   '--sample-interval', '0.1']
+                        workload.communicate(timeout=5)
+                        subprocess.run(command, check=True, timeout=8)
+                        self.assertIsNone(old.poll())
+                        self.assertFalse(manifest.exists())
+                        body = [records.read_outbox(path)['body'] for path in (data/'outbox').glob('*.json')]
+                        self.assertTrue(any(entry.get('final') is True for entry in body))
+                        self.assertTrue(any(entry.get('resource_completed') is True for entry in body))
+                        old.communicate(timeout=5)
+                        self.assertEqual(old.returncode, 0)
+                    finally:
+                        if old.poll() is None:
+                            old.kill()
 
     def test_missing_managed_document_waits_before_first_telemetry_install(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:

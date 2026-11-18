@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -41,9 +42,6 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	spool := filepath.Join(s.dir, "outbox")
 	if options.Spool != "" && filepath.Clean(options.Spool) != spool {
 		return errors.New("spool must be the data directory outbox")
-	}
-	if err = privateDir(spool); err != nil {
-		return err
 	}
 	if err = s.publishCapturePolicy(spool, options.Policy); err != nil {
 		return err
@@ -178,6 +176,29 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 }
 
 func (s *Store) publishCapturePolicy(spool string, policy Policy) error {
+	const fencedMode = os.ModeSticky | 0700
+	if err := os.Mkdir(spool, fencedMode); err == nil {
+		if err = os.Chmod(spool, fencedMode); err != nil {
+			return err
+		}
+	} else if !os.IsExist(err) {
+		return err
+	}
+	dir, err := os.OpenFile(spool, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	info, err := dir.Stat()
+	if err != nil {
+		return err
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Geteuid() {
+		return errors.New("producer outbox has another owner")
+	}
+	if info.Mode() != os.ModeDir|0700 && info.Mode() != os.ModeDir|fencedMode {
+		return errors.New("invalid producer outbox mode")
+	}
 	// Producers hold the same lock from policy lookup through outbox publication.
 	path := filepath.Join(spool, ".lock")
 	if err := privateFile(path); err != nil {
@@ -190,6 +211,16 @@ func (s *Store) publishCapturePolicy(spool string, policy Policy) error {
 	defer lock.Close()
 	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
 		return err
+	}
+	// Legacy serializers check for exactly 0700, including before writing.
+	// Keep the same outbox and its queued records for the current collector.
+	if info.Mode() == os.ModeDir|0700 {
+		if err = dir.Chmod(fencedMode); err != nil {
+			return err
+		}
+		if err = dir.Sync(); err != nil {
+			return err
+		}
 	}
 	names := append(slices.Clone(sessionAttributeNames), "subyard.agent_run.id", "subyard.agent_run.evidence")
 	names = slices.DeleteFunc(names, func(name string) bool { return !slices.Contains(policy.Attributes, name) })

@@ -376,9 +376,10 @@ key, and local producers refuse to spool into it. Read-only SQL and export work
 without the key. `show-run` accepts the stored run reference and can resolve
 a launcher run ID in the active store when its key is available.
 
-Profile upgrades preserve queued records and close the outbox to producers
-still running pre-upgrade code. Workloads continue, though an old launcher may
-lose its exit record. The updated run manager continues final resource sampling.
+Profile upgrades and standalone collector startup preserve queued records and
+close the outbox to producers still running pre-upgrade code. Workloads continue,
+though an old launcher may lose its exit record. The updated run manager
+continues final resource sampling.
 
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, share 16 pre-decode admissions between OTLP and

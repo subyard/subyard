@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,32 @@ class Delivery(unittest.TestCase):
         self.run_mode('remove')
         self.assertEqual(self.run_mode('check-removed'), 0)
         self.assertEqual((user_skill/'SKILL.md').read_text(), 'keep')
+
+    def test_apply_recovers_after_kill_before_skill_rename(self):
+        target = self.installed/'SKILL.md'
+        command = ['apply', '--provider', self.args.provider, '--root', str(self.root),
+                   '--home', str(self.home), '--uid', str(self.args.uid), '--gid', str(self.args.gid),
+                   '--source', str(self.source)]
+        code = """
+import os, runpy, signal, sys
+script, target, *args = sys.argv[1:]
+def interrupt(event, values):
+    if event == 'os.rename' and values[1] == target:
+        os.kill(os.getpid(), signal.SIGKILL)
+sys.addaudithook(interrupt)
+sys.argv = [script, *args]
+runpy.run_path(script, run_name='__main__')
+"""
+        script = str(SOURCE/'deliver.py')
+        result = subprocess.run([sys.executable, '-B', '-c', code, script, str(target), *command], timeout=5)
+        self.assertEqual(result.returncode, -signal.SIGKILL)
+        self.assertEqual(len(list(self.installed.glob('.skill-*'))), 1)
+        self.assertFalse(target.exists())
+        self.assertEqual(self.run_mode('check'), 10)
+        subprocess.run([sys.executable, '-B', script, *command], check=True, timeout=5)
+        self.assertEqual(target.read_bytes(), (self.skill/'SKILL.md').read_bytes())
+        self.assertFalse(list(self.installed.glob('.skill-*')))
+        self.assertEqual(self.run_mode('check'), 0)
 
     def test_core_native_extra_links_and_repair(self):
         self.args.provider = 'core'

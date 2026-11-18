@@ -324,13 +324,21 @@ def removed_scope(run):
     return None
 
 
-def observe(data_dir, once=False, until_empty=False, interval=5):
+def observe(data_dir, once=False, until_empty=False, interval=5, manager_intent=None):
     samplers = {}
     sampled_sources = 0
     source_thread = None
     scan = None
     deferred = []
     while True:
+        if manager_intent is not None:
+            try:
+                fcntl.flock(manager_intent, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                if scan is not None:
+                    scan.close()
+                return 0
+            fcntl.flock(manager_intent, fcntl.LOCK_UN)
         root = records.private_directory(Path(data_dir)/'runs')
         pending = []
         total = 0
@@ -434,6 +442,10 @@ def observe(data_dir, once=False, until_empty=False, interval=5):
         time.sleep(interval)
 
 
+def open_observer_lock(data_dir, name):
+    return os.fdopen(os.open(Path(data_dir)/name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600), 'rb')
+
+
 def detached_observer(data_dir):
     # Standalone fallback has no service lifetime guarantee; its scope is partial.
     pid = os.fork()
@@ -449,9 +461,10 @@ def detached_observer(data_dir):
     if null > 2:
         os.close(null)
     try:
-        lock_fd = os.open(Path(data_dir)/'manager.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        observe(data_dir, until_empty=True)
+        with open_observer_lock(data_dir, 'observer-v2.lock') as observer, \
+                open_observer_lock(data_dir, 'manager-v2.lock') as intent:
+            fcntl.flock(observer, fcntl.LOCK_EX)
+            observe(data_dir, until_empty=True, manager_intent=intent)
     finally:
         os._exit(0)
 
@@ -655,11 +668,16 @@ def main():
             enable_delegation(args.data_dir)
         except (OSError, ValueError):
             records.emit(args.data_dir, 'gap', {'reason': 'delegation_unavailable', 'quality': 'partial'})
-    lock_fd = os.open(Path(args.data_dir)/'manager.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    fcntl.flock(lock_fd, fcntl.LOCK_EX)
     if not 0.1 <= args.sample_interval <= 300:
         parser.error('sample interval must be between 0.1 and 300 seconds')
-    return observe(args.data_dir, interval=args.sample_interval)
+    # Legacy detached observers can stay on manager.lock after their outbox is
+    # fenced. The new manager announces intent before waiting for a v2 observer
+    # to finish its current scan and yield.
+    with open_observer_lock(args.data_dir, 'manager-v2.lock') as intent, \
+            open_observer_lock(args.data_dir, 'observer-v2.lock') as observer:
+        fcntl.flock(intent, fcntl.LOCK_EX)
+        fcntl.flock(observer, fcntl.LOCK_EX)
+        return observe(args.data_dir, interval=args.sample_interval)
 
 
 if __name__ == '__main__':

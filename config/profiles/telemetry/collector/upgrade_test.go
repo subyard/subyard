@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -173,7 +175,7 @@ assert record['redactions'] == 5  # Four fields or entries, plus the unknown sou
 key = records.identity_key(root)
 record['event_id'] = records.opaque_id(key, 'previous-format')
 del record['policy_version']
-records.atomic_json(root/'outbox'/(record['event_id']+'.json'), records.signed_record(key, record))
+records.atomic_json(root/'outbox'/(record['event_id']+'.json'), records.signed_record(key, record), outbox=True)
 `
 	if output, err := exec.Command("python3", "-B", "-c", producer, store.dir).CombinedOutput(); err != nil {
 		t.Fatalf("producer: %v\n%s", err, output)
@@ -196,6 +198,72 @@ records.atomic_json(root/'outbox'/(record['event_id']+'.json'), records.signed_r
 	}
 	if entries, err := os.ReadDir(outbox); err != nil || len(entries) != 1 || entries[0].Name() != ".lock" {
 		t.Fatalf("outbox did not drain: %v (%v)", entries, err)
+	}
+}
+
+func TestPreStartupOutboxRelationDrainsAfterPolicyTightens(t *testing.T) {
+	ctx := context.Background()
+	dir := testkit.TempDir(t)
+	const producer = `
+from pathlib import Path
+import sys
+sys.path.insert(0, '..')
+import records
+root = Path(sys.argv[1])
+assert records.emit(root, 'relation', dict(session_id='fixture-session', agent_run_id='fixture-run',
+    relation='native_session', source='native-otlp-attribute/authenticated-header',
+    session_attributes=['session.id', 'thread.id']), event_id='first-relation')
+`
+	if output, err := exec.Command("python3", "-B", "-c", producer, dir).CombinedOutput(); err != nil {
+		t.Fatalf("producer: %v\n%s", err, output)
+	}
+	store, err := Open(dir, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	outbox := filepath.Join(dir, "outbox")
+	path := filepath.Join(outbox, store.key.id("first-relation")+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, err := store.key.decodeRecord(data)
+	want := policyFingerprint(DefaultPolicy())
+	if err != nil || !signed.authenticated || signed.Kind != "relation" || signed.capturePolicy != want {
+		t.Fatalf("pre-startup capture policy = %q, want %q (%v)", signed.capturePolicy, want, err)
+	}
+	// Commit as the original drain would, leaving the file for redelivery.
+	if err = store.Ingest(ctx, []Record{signed}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(dir, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	narrow := Policy{Schema: PolicyVersion, Attributes: []string{"session.id"}}
+	if err := restarted.publishCapturePolicy(outbox, narrow); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.ingestOutbox(ctx, outbox, narrow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("committed relation still in the outbox: %v", err)
+	}
+	var count int
+	var kind, policy string
+	if err := restarted.db.QueryRow("SELECT count(*),min(kind),min(policy_version) FROM records").
+		Scan(&count, &kind, &policy); err != nil || count != 1 || kind != "relation" || policy != want {
+		t.Fatalf("retry changed the committed record: %d %s %s (%v)", count, kind, policy, err)
+	}
+	signed.Body["session_id"] = restarted.key.id("different-session")
+	if err := restarted.ingest(ctx, []Record{signed}, narrow); !errors.Is(err, errEventCollision) {
+		t.Fatalf("different session must still collide: %v", err)
 	}
 }
 
@@ -340,36 +408,67 @@ func TestReplayRestoresPrunedSampleToItsOriginalRun(t *testing.T) {
 	}
 }
 
-func TestReplayArchivePreservesSeparateExplicitAssociationIntervals(t *testing.T) {
+func TestLegacyAssociationIntervalsStaySeparate(t *testing.T) {
 	ctx := context.Background()
-	archive := fixtureStore(t)
-	for _, row := range []struct{ kind, event, body string }{
+	rows := []struct{ kind, event, body string }{
 		{"allocation", "object", `{"object_id":"object"}`},
 		{"association", "start-a", `{"association_id":"interval A","object_id":"object","agent_run_id":"run","source":"validated-grant","start_time":"2026-01-01T00:00:00Z"}`},
 		{"association", "end-a", `{"association_id":"interval A","object_id":"object","agent_run_id":"run","source":"validated-grant","end_time":"2026-01-01T01:00:00Z"}`},
 		{"association", "start-b", `{"association_id":"interval B","object_id":"object","agent_run_id":"run","source":"validated-grant","start_time":"2026-01-01T02:00:00Z"}`},
-	} {
-		seedRetained(t, archive, Envelope{OriginID: "archive", SourceID: "legacy", SourceVersion: "1",
-			EventID: row.event, Kind: row.kind, Encoding: "json", Body: json.RawMessage(row.body)})
+		{"association", "start-c", `{"object_id":"object","agent_run_id":"run","source":"private source C","start_time":"2026-01-01T03:00:00Z"}`},
+		{"association", "end-c", `{"object_id":"object","agent_run_id":"run","source":"private source C","end_time":"2026-01-01T04:00:00Z"}`},
+		{"association", "start-d", `{"object_id":"object","agent_run_id":"run","source":"private source D","start_time":"2026-01-01T05:00:00Z"}`},
 	}
-	if _, err := archive.db.Exec("PRAGMA user_version=2"); err != nil {
-		t.Fatal(err)
-	}
-	var exported bytes.Buffer
-	if _, err := Export(ctx, archive.db, &exported, 0, 10); err != nil {
-		t.Fatal(err)
-	}
-	destination := fixtureStore(t)
-	for range 2 {
-		if err := destination.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var count, closed int
-	var history string
-	if err := destination.db.QueryRow(`SELECT count(*),sum(end_time<>''),group_concat(associations.body)
-			FROM associations JOIN objects USING(object_id) WHERE agent_run_id=?`, destination.key.id("run")).
-		Scan(&count, &closed, &history); err != nil || count != 2 || closed != 1 || strings.Contains(history, "interval") {
-		t.Fatalf("legacy intervals were merged or exposed: count=%d closed=%d (%v)", count, closed, err)
+	for _, input := range []string{"archive", "unsigned outbox"} {
+		t.Run(input, func(t *testing.T) {
+			destination := fixtureStore(t)
+			if input == "archive" {
+				archive := fixtureStore(t)
+				for _, row := range rows {
+					seedRetained(t, archive, Envelope{OriginID: "archive", SourceID: "legacy", SourceVersion: "1",
+						EventID: row.event, Kind: row.kind, Encoding: "json", Body: json.RawMessage(row.body)})
+				}
+				if _, err := archive.db.Exec("PRAGMA user_version=2"); err != nil {
+					t.Fatal(err)
+				}
+				var exported bytes.Buffer
+				if _, err := Export(ctx, archive.db, &exported, 0, 10); err != nil {
+					t.Fatal(err)
+				}
+				for range 2 {
+					if err := destination.Replay(ctx, bytes.NewReader(exported.Bytes())); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				outbox := filepath.Join(destination.dir, "outbox")
+				if err := privateDir(outbox); err != nil {
+					t.Fatal(err)
+				}
+				for i, row := range rows {
+					body, err := decodeBody([]byte(row.body))
+					if err != nil {
+						t.Fatal(err)
+					}
+					data, err := json.Marshal(Record{SchemaVersion: 1, SourceID: "legacy",
+						EventID: row.event, Kind: row.kind, Body: body})
+					if err != nil {
+						t.Fatal(err)
+					}
+					testkit.WriteFile(t, filepath.Join(outbox, strconv.Itoa(i)+".json"), data, 0600)
+				}
+				if err := destination.IngestOutbox(ctx, outbox); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var count, closed int
+			var history string
+			if err := destination.db.QueryRow(`SELECT count(*),sum(end_time<>''),group_concat(associations.body)
+					FROM associations JOIN objects USING(object_id) WHERE agent_run_id=?`, destination.key.id("run")).
+				Scan(&count, &closed, &history); err != nil || count != 4 || closed != 2 ||
+				strings.Contains(history, "interval") || strings.Contains(history, "private source") {
+				t.Fatalf("legacy intervals were merged or exposed: count=%d closed=%d (%v)", count, closed, err)
+			}
+		})
 	}
 }

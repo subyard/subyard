@@ -264,6 +264,10 @@ func TestNonoverlappingAttribution(t *testing.T) {
 }
 func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	s := fixtureStore(t)
+	outbox := filepath.Join(s.dir, "outbox")
+	if err := privateDir(outbox); err != nil {
+		t.Fatal(err)
+	}
 	token := strings.Repeat("a", 32)
 	authFile := filepath.Join(s.dir, "auth")
 	testkit.WriteFile(t, authFile, []byte(token), 0600)
@@ -310,6 +314,9 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	}
 	if code != 401 {
 		t.Fatalf("authentication status %d", code)
+	}
+	if info, err := os.Stat(outbox); err != nil || info.Mode() != os.ModeDir|os.ModeSticky|0700 {
+		t.Fatalf("standalone serve opened without fencing the legacy outbox: %v (%v)", info, err)
 	}
 	if code = post("logs", nil, token, "pending"); code != 503 {
 		t.Fatalf("pending registration status %d", code)
