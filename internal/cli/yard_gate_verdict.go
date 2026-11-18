@@ -439,7 +439,7 @@ func (admission *gateAdmission) bindingCurrent(ctx context.Context, cli *CLI) er
 	if admission.sources != nil {
 		_, sources, err := cli.repairPrerequisites(ctx)
 		if err != nil {
-			return fmt.Errorf("%w: %w; next: yard update --check", domain.ErrPlanStale, err)
+			return cli.repairSourceRefusal(admission, err)
 		}
 		if *sources != *admission.sources {
 			return stale

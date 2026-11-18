@@ -51,7 +51,7 @@ func (consumers *configSyncConsumers) observe(ctx context.Context, cli *CLI, pla
 		})
 	}
 	observed, discovery, err := cli.assessConfigTargets(ctx, targets, phase, required)
-	consumers.discovery = append(consumers.discovery, discovery...)
+	consumers.discovery = discovery
 	if err != nil {
 		return nil, err
 	}

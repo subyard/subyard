@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -138,12 +139,14 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 		}
 	}
 	// A source failure can block init while a different yard blocks update.
+	const serviceBlocker = "yard named: guest service fixture-health readiness check failed"
+	const inspectSource = "yard migrate --check"
 	mixedEngine := strings.Replace(engine, `{"resource":"activation.materialized-config","scope":"yard-attribution","decision":"preserve","result":"drift named"}],"outcome"`,
 		`{"resource":"activation.core-guest-runtime","scope":"yard-attribution","decision":"preserve","result":"failed named"}],
-"blockers":[{"code":"dependency-unavailable","resource":"activation.core-guest-runtime","message":"yard named: activation failed","retry":"yard -Y named init"}],"outcome"`, 1)
+"blockers":[{"code":"dependency-unavailable","resource":"activation.core-guest-runtime","message":"`+serviceBlocker+`","retry":"yard -Y named init"}],"outcome"`, 1)
 	mixedEngine = strings.ReplaceAll(mixedEngine, `"status":"migration-required"`, `"status":"operator-action-required","transaction":"tx-0123456789abcdef"`)
 	mixedEngine = strings.ReplaceAll(mixedEngine, `"code":"transition-required","message":"activation drift","retry":"run yard update"`,
-		`"code":"dependency-unavailable","message":"yard named: activation failed","retry":"yard -Y named init"`)
+		`"code":"dependency-unavailable","message":"`+serviceBlocker+`","retry":"yard -Y named init"`)
 	sealCurrentEngine(t, fixture, mixedEngine)
 	for _, check := range []struct {
 		exit int
@@ -159,14 +162,20 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 		output := run(check.exit, check.args...)
 		if slices.Contains(check.args, "--check") {
 			var report struct {
-				Advice json.RawMessage `json:"advice"`
+				Advice struct {
+					Message string `json:"message"`
+					Retry   string `json:"retry"`
+				} `json:"advice"`
 			}
 			if err := json.Unmarshal([]byte(output), &report); err != nil {
 				t.Fatalf("decode update check: %v\n%s", err, output)
 			}
-			output = string(report.Advice)
+			if report.Advice.Retry != inspectSource {
+				t.Fatalf("update check did not give one diagnostic command: %s", output)
+			}
+			output = report.Advice.Message + "\n" + report.Advice.Retry
 		}
-		if !strings.Contains(output, refusal) || !strings.Contains(output, "resolve the protected release source failure") ||
+		if !strings.Contains(output, serviceBlocker) || !strings.Contains(output, refusal) || !strings.Contains(output, inspectSource) ||
 			strings.Contains(output, "yard -Y named init") || strings.Contains(output, "next: yard update") {
 			t.Fatalf("%v sent the operator back to a blocked command: %s", check.args, output)
 		}
@@ -182,14 +191,14 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	for _, execute := range []bool{false, true} {
 		fault := program.admitRPCOperation(context.Background(), named, command.Definition{Handler: "@provision", Name: "provision"}, nil, execute)
 		var report mutationGateOutcome
-		if fault == nil || json.Unmarshal([]byte(fault.Message), &report) != nil || !strings.Contains(report.Action, "resolve the protected release source failure") ||
+		if fault == nil || json.Unmarshal([]byte(fault.Message), &report) != nil || report.Action != inspectSource ||
 			strings.Contains(report.Message, "yard -Y named init") {
 			t.Fatalf("RPC admission advice: %#v", fault)
 		}
 	}
 	ctx := context.Background()
-	if readiness := program.ownerReleaseReadiness(ctx); !strings.Contains(readiness.Message, refusal) ||
-		!strings.Contains(readiness.Next, "resolve the protected release source failure") {
+	if readiness := program.ownerReleaseReadiness(ctx); !strings.Contains(readiness.Message, serviceBlocker) ||
+		!strings.Contains(readiness.Message, refusal) || readiness.Next != inspectSource {
 		t.Fatalf("owner readiness advised a blocked repair: %#v", readiness)
 	}
 	outcome, inspection, err := program.inspectMutationGateInspection(ctx, "named")
@@ -216,7 +225,7 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 	options.Prompt = recheckPrompt
 	options.Executor = &selectionOnlyIntegrationExecutor{source: published, staleFiles: true}
 	if output := run(1, "-Y", "named", "config", "apply"); len(recheckPrompt.requests) != 1 || len(applier.yards) != 0 ||
-		!strings.Contains(output, refusal) || !strings.Contains(output, "resolve the protected release source failure") {
+		!strings.Contains(output, refusal) || !strings.Contains(output, "next: "+inspectSource) {
 		t.Fatalf("post-consent source refusal or effects: %s, %v", output, applier.yards)
 	}
 	options.Prompt, options.Executor = nil, fake
@@ -248,6 +257,31 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 		if deadline.IsZero() || deadline.After(started.Add(profile.ReadinessTimeout+time.Second)) || deadline != probe.deadlines[0] {
 			t.Fatalf("status file probes did not share the release readiness deadline: %v", probe.deadlines)
 		}
+	}
+	const privateDiagnostic = "synthetic private guest probe detail"
+	probe.failure = errors.New(privateDiagnostic)
+	for _, invocation := range []struct {
+		code int
+		yard string
+		args []string
+	}{
+		{0, "named", []string{"-Y", "named", "status"}},
+		{0, "default", []string{"update", "--check", "--offline"}},
+		{1, "named", []string{"-Y", "named", "provision"}},
+	} {
+		output := run(invocation.code, invocation.args...)
+		if strings.Contains(output, privateDiagnostic) || !strings.Contains(output, "yard "+invocation.yard+": cannot inspect materialized config") ||
+			!strings.Contains(output, "yard -Y "+invocation.yard+" config status") {
+			t.Fatalf("%v did not redact its probe failure: %s", invocation.args, output)
+		}
+	}
+	program, err = New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness := program.ownerReleaseReadiness(ctx); strings.Contains(readiness.Message, privateDiagnostic) ||
+		!strings.Contains(readiness.Message, "yard default: cannot inspect materialized config") || readiness.Next != "yard -Y default config status" {
+		t.Fatalf("owner readiness did not redact its probe failure: %#v", readiness)
 	}
 	options.Executor = fake
 
@@ -368,19 +402,30 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 
 	fake.ExecSteps = nil
 	applier.yards = nil
-	for range 2 {
+	appendFailedDiscovery := func() {
+		start := len(fake.ExecSteps)
 		for _, target := range []config.Loaded{defaultTarget, namedTarget} {
-			start := len(fake.ExecSteps)
 			appendHashSteps(t, fake, target)
-			for i := start; i < len(fake.ExecSteps); i++ {
-				fake.ExecSteps[i] = testkit.IncusExecStep{Err: fmt.Errorf("guest agent is unreachable")}
-			}
+		}
+		for i := start; i < len(fake.ExecSteps); i++ {
+			fake.ExecSteps[i] = testkit.IncusExecStep{Err: fmt.Errorf("guest agent is unreachable")}
 		}
 	}
+	appendFailedDiscovery()
+	appendFailedDiscovery()
 	output = run(1, "config", "sync", "pull", "--apply", "--yes")
 	if strings.Contains(output, "already converged") || !strings.Contains(output, "configuration refresh is incomplete") ||
 		!strings.Contains(output, "yard default materialized config") || !strings.Contains(output, "yard named materialized config") || len(applier.yards) != 0 {
 		t.Fatalf("no-change pull hid unreadable consumers: %s, %v", output, applier.yards)
+	}
+	appendFailedDiscovery()
+	for _, yard := range []string{"default", "named"} {
+		appendHashSteps(t, fake, loadConfigCommandContext(t, active, options.Environment, yard))
+	}
+	output = run(0, "config", "sync", "pull", "--apply", "--yes")
+	if !strings.Contains(output, "already converged") || strings.Contains(output, "configuration refresh is incomplete") ||
+		len(fake.ExecSteps) != 0 || len(applier.yards) != 0 {
+		t.Fatalf("no-change pull retained recovered discovery failures: %s, %v", output, applier.yards)
 	}
 
 	for _, scenario := range []struct{ verb, result string }{
@@ -424,6 +469,7 @@ func TestConfigSyncPullRetriesPublishedMaterializedDrift(t *testing.T) {
 type readinessProbeExecutor struct {
 	ports.InstanceExecutor
 	deadlines []time.Time
+	failure   error
 }
 
 func (executor *readinessProbeExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
@@ -431,6 +477,9 @@ func (executor *readinessProbeExecutor) Exec(ctx context.Context, project, insta
 	if len(command) > 2 && command[0] == "sha256sum" || len(command) == 11 && command[0] == "python3" && command[4] == "observe" {
 		deadline, _ := ctx.Deadline()
 		executor.deadlines = append(executor.deadlines, deadline)
+		if executor.failure != nil {
+			return ports.InstanceExecResult{}, executor.failure
+		}
 	}
 	return executor.InstanceExecutor.Exec(ctx, project, instance, request)
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -20,6 +21,7 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/rpc"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 	"github.com/Subyard/Subyard/internal/yardnetwork"
@@ -795,9 +797,9 @@ func TestNetworkCommandsAreGatedByTheYardsTheyActOn(t *testing.T) {
 		t.Run("repair endpoint "+test.a+"-"+test.b+" from "+test.selected, func(t *testing.T) {
 			harness := newRepairHarness(t)
 			code, output, host := link(t, harness.scenario, "-Y", test.selected, "network", "link", test.a, test.b)
+			launcher := shellquote.Word(filepath.Join(harness.scenario.request.RuntimeRoot, "current", "bin", "yard"))
 			if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first") ||
-				!strings.Contains(output, "next: resolve the protected release source failure with the sealed active release owner") ||
-				strings.Contains(output, "yard -Y named init") || strings.Contains(output, "Operation plan") {
+				!strings.Contains(output, "next: "+launcher+" -Y named init") || strings.Contains(output, "Operation plan") {
 				t.Fatalf("link to a yard that needs repair: code=%d writes=%d\n%s", code, host.writes, output)
 			}
 		})
@@ -894,6 +896,24 @@ func TestUnfinishedActivationAdmitsBoundedStop(t *testing.T) {
 	if journal := harness.scenario.journal(t); journal.Checkpoint != releasetransition.JournalReconciling ||
 		readiness.Inspection.Outcome.Status != releasetransition.StatusOperatorActionRequired || readiness.Inspection.Resume == nil {
 		t.Fatalf("journal %s, readiness %#v", journal.Checkpoint, readiness.Inspection.Outcome)
+	}
+	program, _, _, _ := harness.scenario.fixture.program(t, nil, nil, nil)
+	ledger := filepath.Join(filepath.Dir(harness.scenario.fixture.journalPath), "ledger.json")
+	request := gateRequest{yard: "named", handler: "@lifecycle", name: "stop"}
+	admitted, _, _, _, _, err := program.admitGate(context.Background(), request, func() (*releasetransition.Outcome, *releasetransition.Inspection, error) {
+		// The first history read succeeded. Only the ledger becomes unreadable
+		// to the protected store after the inspection.
+		if err := os.Chmod(ledger, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return readiness.Inspection.Outcome, readiness.Inspection, nil
+	})
+	if err := os.Chmod(ledger, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if admitted != nil || !errors.Is(err, domain.ErrPlanStale) ||
+		!strings.Contains(err.Error(), "protected release history could not be read; next: yard migrate --check") || harness.effects() != 0 {
+		t.Fatalf("bounded stop did not refuse unreadable history: admission=%#v, err=%v", admitted, err)
 	}
 	for _, arguments := range [][]string{{"-Y", "named", "stop"}, {"-Y", "named", "stop", "--force"}} {
 		harness.scenario.fixture.setPower(t, "named", "Running")
@@ -1131,6 +1151,7 @@ func TestConfigWritesReachingEveryYardOrGit(t *testing.T) {
 // while the operator confirms refuses the repair under the owner barrier.
 func TestRepairNeedsTheInstalledReleaseTooling(t *testing.T) {
 	harness := newRepairHarness(t)
+	launcher := shellquote.Word(filepath.Join(harness.scenario.request.RuntimeRoot, "current", "bin", "yard"))
 	for _, arguments := range [][]string{{"-Y", "named", "init"}, {"-Y", "named", "teardown"}, {"-Y", "named", "stop"}} {
 		var stdout, stderr bytes.Buffer
 		options := harness.scenario.fixture.cli.options
@@ -1141,7 +1162,7 @@ func TestRepairNeedsTheInstalledReleaseTooling(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "running tooling does not match the sealed completed release; next: resolve the protected release source failure with the sealed active release owner") ||
+		if code := program.Run(context.Background()); code == 0 || !strings.Contains(stderr.String(), "running tooling does not match the sealed completed release; next: "+launcher+" -Y named "+arguments[2]) ||
 			harness.effects() != 0 {
 			t.Fatalf("%v outside the installed runtime: code=%d effects=%d\n%s%s", arguments, code, harness.effects(), stdout.String(), stderr.String())
 		}
@@ -1504,8 +1525,9 @@ func TestConfigSyncConsumerRefreshIsAConsumerRepair(t *testing.T) {
 		t.Fatalf("failed consumer: %v", err)
 	}
 	program.sourceBinding = nil // the real proof refuses this fixture CLI
+	launcher := shellquote.Word(filepath.Join(harness.scenario.request.RuntimeRoot, "current", "bin", "yard"))
 	if _, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default"}); err == nil ||
-		!strings.Contains(err.Error(), "running tooling does not match the sealed completed release; next: resolve the protected release source failure with the sealed active release owner") {
+		!strings.Contains(err.Error(), "running tooling does not match the sealed completed release; next: "+launcher+" -Y default config apply") {
 		t.Fatalf("consumer refresh with other tooling: %v", err)
 	}
 	testkit.WriteFile(t, harness.inspect, harness.ready, 0o600)

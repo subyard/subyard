@@ -194,7 +194,7 @@ func TestLostGuestAgentIsThatYardsFinding(t *testing.T) {
 	}
 	gate, ok := program.yardScopedGate(outcome, inspection)
 	if !ok || !gate.state("named").unreachable || gate.state("default").repairOnly() ||
-		!strings.HasPrefix(yardNextStep("named", gate.state("named")), "yard migrate;") {
+		yardNextStep("named", gate.state("named")).command != "yard migrate" {
 		t.Fatalf("lost agent gate: ok=%t %#v", ok, gate)
 	}
 }

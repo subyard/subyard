@@ -103,14 +103,12 @@ func (cli *CLI) ownerReleaseReadiness(ctx context.Context) *domain.ReleaseReadin
 	defer cancel()
 	readiness := cli.releaseReadiness(ctx)
 	if gate, ok := cli.statusYardGate(ctx, readiness); ok && len(gate.order) != 0 {
-		cause, next := gate.releaseAdvice()
+		message, next := gate.releaseAdvice()
 		readiness.Next = next
-		if cause != nil {
-			if message := cause.Error(); len(message) <= 8192 {
-				readiness.Message = message
-			} else {
-				readiness.Message = "inspect the release readiness findings on the owner host with yard status"
-			}
+		if len(message) <= 8192 {
+			readiness.Message = message
+		} else {
+			readiness.Message += "; full details: yard status on the owner host"
 		}
 	}
 	return readiness
