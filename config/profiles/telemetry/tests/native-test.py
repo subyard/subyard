@@ -5,8 +5,10 @@ import os
 from pathlib import Path
 import sys
 import subprocess
+import tarfile
 import tempfile
 import tomllib
+import types
 import unittest
 from decimal import Decimal
 from unittest.mock import patch
@@ -23,9 +25,10 @@ class NativeTest(unittest.TestCase):
         self.enterContext(patch.object(native.materializer, 'STATE_ROOT', str(self.state_root)))
         self.enterContext(patch.object(native.materializer, 'STATE_UID', os.getuid()))
 
-    def materialize(self, agent, path, payload, mode='apply'):
+    def materialize(self, agent, path, payload, mode='apply', program=None):
         file_format = 'json' if agent == 'claude' else 'toml'
-        program = Path(native.materializer.__file__).read_text()
+        if program is None:
+            program = Path(native.materializer.__file__).read_text()
         program = program.replace('@STATE_ROOT@', str(self.state_root)).replace('@STATE_UID@', str(os.getuid())).replace('@FORMAT@', file_format)
         if file_format == 'toml':
             program = '_toml_writer = {}\nexec('+repr(Path(tomli_w.__file__).read_text())+', _toml_writer)\n'+program
@@ -71,17 +74,25 @@ class NativeTest(unittest.TestCase):
                     applied = self.materialize(agent, path, payload)
                     self.assertEqual(applied.returncode, 0, applied.stderr)
                     native.reconcile(*args, templates=templates)
-                    for damaged in (None, b'', b'[broken'):
+                    damaged_with_token = path.read_bytes() + b'\n[broken'
+                    for damaged in (None, b'', b'[broken', damaged_with_token):
                         if damaged is None:
                             path.unlink()
                         else:
                             path.write_bytes(damaged)
-                        self.assertTrue(native.reconcile(*args, check=True, templates=templates))
+                        exposed = damaged == damaged_with_token
+                        if exposed:
+                            path.chmod(0o644)
+                        self.assertEqual(native.reconcile(*args, check=True, templates=templates), not exposed)
                         observed = self.materialize(agent, path, payload, 'observe')
                         self.assertEqual(observed.returncode, 0, observed.stderr)
                         self.assertFalse(json.loads(observed.stdout)['converged'])
-                        repaired = self.materialize(agent, path, payload)
-                        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                        if exposed:
+                            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+                            native.reconcile(*args, templates=templates)
+                        else:
+                            repaired = self.materialize(agent, path, payload)
+                            self.assertEqual(repaired.returncode, 0, repaired.stderr)
                         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
                         values = json.loads(path.read_bytes()) if agent == 'claude' else tomllib.loads(path.read_text())
                         self.assertIs(values['unrelated'], True)
@@ -111,6 +122,12 @@ class NativeTest(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), before)
 
     def test_migrate_legacy_ownership_and_retry_interrupted_registration(self):
+        archive = Path(__file__).with_name('fixtures')/'v0.30.0-agent-writers.tar.gz'
+        with tarfile.open(archive) as files:
+            retained_template = files.extractfile('internal/adapters/configmaterial/guest_json.py').read().decode()
+            retained_native = types.ModuleType('retained_native')
+            exec(files.extractfile('config/profiles/telemetry/native.py').read(), retained_native.__dict__)
+
         for agent in ('claude', 'codex'):
             with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
                 root = Path(name)
@@ -118,31 +135,62 @@ class NativeTest(unittest.TestCase):
                 endpoint, token = 'http://localhost:14318', 'x'*64
                 args = (root, state, [agent], endpoint, token, tomli_w, os.getuid(), os.getgid())
                 path = native.agent_path(root, agent)
-                path.parent.mkdir()
-                managed = native.desired(agent, endpoint, token)
                 section, field, prior = ('env', 'OTEL_LOGS_EXPORTER', 'console') if agent == 'claude' else ('otel', 'log_user_prompt', True)
-                values = {section: managed}
-                path.write_text(json.dumps(values) if agent == 'claude' else tomli_w.dumps(values))
-                path.chmod(0o644)
-                owned = {key: {'managed': value, 'present': key == field, 'value': prior if key == field else None}
-                         for key, value in managed.items()}
-                native.publish(state, json.dumps({'schema': 1, 'agents': {agent: owned}}).encode(), None)
+                encode = json.dumps if agent == 'claude' else tomli_w.dumps
+                decode = json.loads if agent == 'claude' else tomllib.loads
+                templates = [encode({'unrelated': value}).encode() for value in range(4)]
+
+                def template(payload, *, retained=False, mode='apply'):
+                    result = self.materialize(agent, path, payload, mode, retained_template if retained else None)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    return json.loads(result.stdout) if mode == 'observe' else None
+
+                def assert_mode(expected):
+                    self.assertEqual(path.stat().st_mode & 0o777, expected)
+
+                template(templates[0], retained=True)
+                path.write_text(encode({'unrelated': 0, section: {field: prior}}))
+                retained_native.reconcile(*args)
+                assert_mode(0o600)
+                owned = json.loads(state.read_bytes())['agents'][agent]
+                template(templates[1], retained=True)
+                assert_mode(0o644)
+                self.assertTrue(retained_native.reconcile(*args, check=True))
+                self.assertFalse(template(templates[1], mode='observe')['converged'])
+                reference = Path(native.materializer.asset_key(root.name, str(path)) + '.contribution')
+                self.assertFalse(reference.exists())
+                template(templates[2])
+                assert_mode(0o600)
+                self.assertEqual(decode(path.read_text())[section], native.desired(agent, endpoint, token))
                 with patch.object(native.materializer, 'replace_destination', side_effect=OSError('synthetic interruption')):
+                    # A retained write can also race the handoff before registration.
+                    template(templates[2], retained=True)
                     with self.assertRaises(OSError):
                         native.reconcile(*args)
                 self.assertFalse(native.reconcile(*args, check=True))
                 native.reconcile(*args)
                 self.assertTrue(native.reconcile(*args, check=True))
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                assert_mode(0o600)
                 self.assertEqual(json.loads(state.read_bytes())['agents'][agent], owned)
-                # A retained release reads and writes the same schema, including
-                # the original values. Its release leaves no active contribution.
-                values = {section: {field: prior}}
-                path.write_text(json.dumps(values) if agent == 'claude' else tomli_w.dumps(values))
-                native.publish(state, b'{"schema":1,"agents":{}}', state.read_bytes())
-                payload = b'{"env":{"OTEL_LOGS_EXPORTER":"console"}}' if agent == 'claude' else b'[otel]\nlog_user_prompt = true\n'
-                result = self.materialize(agent, path, payload)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                template(templates[3], retained=True)
+                assert_mode(0o644)
+                self.assertTrue(retained_native.reconcile(*args, check=True))
+                self.assertFalse(native.reconcile(*args, check=True))
+                self.assertFalse(template(templates[3], mode='observe')['converged'])
+                native.reconcile(*args)
+                assert_mode(0o600)
+                self.assertTrue(template(templates[3], mode='observe')['converged'])
+
+                template(templates[3], retained=True)
+                assert_mode(0o644)
+                retained_native.reconcile(*args[:2], [], *args[3:])
+                self.assertEqual(decode(path.read_text()), {'unrelated': 3, section: {field: prior}})
+                self.assertEqual(json.loads(state.read_bytes())['agents'], {})
+                template(templates[3], retained=True)
+                self.assertFalse(template(templates[3], mode='observe')['converged'])
+                template(templates[3])
+                assert_mode(0o600)
+                self.assertEqual(decode(path.read_text()), {'unrelated': 3, section: {field: prior}})
 
     def test_unmanaged_empty_documents_converge_and_invalid_documents_name_preservation(self):
         for agent in ('claude', 'codex'):
@@ -311,7 +359,23 @@ class NativeTest(unittest.TestCase):
                 state = self.root/(agent+'.receipt')
                 path = native.agent_path(self.root, agent)
                 args = (self.root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
-                native.reconcile(*args)
+                template = b'{"unrelated":true}' if agent == 'claude' else b'unrelated = true\n'
+                result = self.materialize(agent, path, template)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                templates = {agent: template}
+                applied = path.read_bytes()
+                for first_enable in (True, False):
+                    if not first_enable:
+                        path.write_bytes(applied)
+                        native.reconcile(*args, templates=templates)
+                    path.write_bytes(replacement)
+                    before = native.snapshot(state)
+                    for check in (True, False):
+                        with self.subTest(first_enable=first_enable, check=check), self.assertRaisesRegex(
+                                native.materializer.ContributionConflict, '/env' if agent == 'claude' else '/otel'):
+                            native.reconcile(*args, check=check, templates=templates)
+                        self.assertEqual(path.read_bytes(), replacement)
+                        self.assertEqual(native.snapshot(state), before)
                 path.write_bytes(replacement)
                 native.reconcile(*args[:2], [], *args[3:])
                 self.assertEqual(path.read_bytes(), replacement)
@@ -321,6 +385,9 @@ class NativeTest(unittest.TestCase):
         state = self.root/'native.json'
         path = native.agent_path(self.root, 'codex')
         args = (self.root, state, ['codex'], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+        prior = {'Authorization': 'previous', 'X-Tenant': 'previous-tenant', 'User-Header': 'old-value'}
+        path.parent.mkdir(mode=0o700)
+        native.publish(path, tomli_w.dumps({'otel': {'exporter': {'otlp-http': {'headers': prior}}}}).encode(), None)
         native.reconcile(*args)
         values = tomllib.loads(path.read_text())
         exporter = values['otel']['exporter']['otlp-http']
@@ -330,9 +397,52 @@ class NativeTest(unittest.TestCase):
         path.chmod(0o644)
         native.reconcile(*args[:2], [], *args[3:])
         self.assertEqual(tomllib.loads(path.read_text()), {'otel': {'exporter': {'otlp-http': {
-            'endpoint': 'http://localhost:23456/v1/logs', 'headers': {'User-Header': 'keep'}}}}})
+            'endpoint': 'http://localhost:23456/v1/logs', 'headers': {**prior, 'User-Header': 'keep'}}}}})
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(state.read_bytes())['agents'], {})
+
+    def test_opt_out_preserves_template_fields_without_its_source(self):
+        for agent, template in [
+            ('claude', b'{"env":{"OTEL_LOG_USER_PROMPTS":"0"}}'),
+            ('codex', b'[otel]\nlog_user_prompt = false\n[otel.exporter.otlp-http]\nprotocol = "binary"\n'),
+        ]:
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                path, state = native.agent_path(root, agent), root/'native.json'
+                args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                native.reconcile(*args)
+                result = self.materialize(agent, path, template)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                native.reconcile(*args[:2], [], *args[3:])
+                decode = json.loads if agent == 'claude' else tomllib.loads
+                self.assertEqual(decode(path.read_text()), decode(template.decode()))
+                result = self.materialize(agent, path, template, 'observe')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(json.loads(result.stdout)['converged'])
+
+    def test_concurrent_edit_during_staging_is_preserved(self):
+        for agent, edit in [('claude', b'{"unrelated":"editor"}'), ('codex', b'unrelated = "editor"\n')]:
+            with self.subTest(agent=agent), tempfile.TemporaryDirectory(dir='/tmp') as name:
+                root = Path(name)
+                path, state = native.agent_path(root, agent), root/'native.json'
+                path.parent.mkdir(mode=0o700)
+                native.publish(path, b'{}' if agent == 'claude' else b'', None)
+                args = (root, state, [agent], 'http://localhost:14318', 'x'*64, tomli_w, os.getuid(), os.getgid())
+                fsync = os.fsync
+
+                def editor_after_fsync(fd):
+                    fsync(fd)
+                    staged = Path(os.readlink(f'/proc/self/fd/{fd}'))
+                    if staged.parent == path.parent and staged.name.startswith('.subyard-config.'):
+                        path.write_bytes(edit)
+
+                with patch.object(os, 'fsync', side_effect=editor_after_fsync):
+                    with self.assertRaisesRegex(ValueError, 'concurrent destination change'):
+                        native.reconcile(*args)
+                self.assertEqual(path.read_bytes(), edit)
+                native.reconcile(*args)
+                decode = json.loads if agent == 'claude' else tomllib.loads
+                self.assertEqual(decode(path.read_text())['unrelated'], 'editor')
 
     def test_claude_strict_parse_and_precise_round_trip(self):
         state = self.root/'native.json'

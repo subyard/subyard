@@ -533,8 +533,8 @@ def exercise(args):
                       'otel': native.desired('codex', 'http://127.0.0.1:14318', token), 'analytics': {'enabled': True},
                       'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                           'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
-            (state/'codex/config.toml').write_text(tomli_w.dumps(config))
-            (state/'codex/config.toml').chmod(0o600)
+            path = state/'codex/config.toml'
+            native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
             app = codex_app_class(fixture.App)(['subyard-telemetry-run', '--agent', agent, '--scope-mode', 'require', '--project-id', 'telemetry-fixture', '--', str(binaries/agent), 'app-server'], env, project)
             try:
                 started = app.request('thread/start', {'cwd': str(project)})
@@ -603,8 +603,8 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
               'projects': {str(project): {'trust_level': 'trusted'}},
               'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                   'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
-    (codex_home/'config.toml').write_text(tomli_w.dumps(config))
-    (codex_home/'config.toml').chmod(0o600)
+    path = codex_home/'config.toml'
+    native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
     environment = dict(env, HOME=str(home), CODEX_HOME=str(codex_home), TERM='xterm-256color')
 
     class Client(fixture.Terminal):
@@ -697,8 +697,8 @@ def main():
               'analytics': {'enabled': True}, # Explicit isolated fixture opt-in; production intent remains untouched.
               'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                   'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
-    (state/'codex/config.toml').write_text(tomli_w.dumps(config))
-    (state/'codex/config.toml').chmod(0o600)
+    path = state/'codex/config.toml'
+    native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
     app = codex_app_class(fixture.App)(['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--shared-backend', '--', str(binaries/'codex'), 'app-server'], env, state/'project')
     threads = set()
     try:

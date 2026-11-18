@@ -35,6 +35,10 @@ class InvalidContributionDestination(MaterializationError):
     pass
 
 
+class GeneratedValue(str):
+    """A preview string of the correct size whose real value is chosen at apply."""
+
+
 def fail(category):
     print("config materialization: " + category, file=sys.stderr)
     raise SystemExit(2)
@@ -304,9 +308,9 @@ def validate_state_root():
     return True
 
 
-def read_destination(destination, private):
+def read_destination(destination, private, dir_fd=None):
     try:
-        descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
     except OSError as error:
@@ -503,7 +507,7 @@ def toml_fingerprint_payload(value):
     return json.dumps(typed(value), ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def atomic_write(path, payload, uid, mode, gid=None):
+def atomic_write(path, payload, uid, mode, gid=None, verify=None):
     directory = os.path.dirname(path)
     directory_flags = os.O_RDONLY | os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
@@ -524,6 +528,8 @@ def atomic_write(path, payload, uid, mode, gid=None):
             output.seek(0)
             if output.read() != payload:
                 raise MaterializationError("temporary payload verification failed")
+        if verify is not None:
+            verify(directory_descriptor)
         os.replace(temporary, os.path.basename(path),
                    src_dir_fd=directory_descriptor, dst_dir_fd=directory_descriptor)
         os.fsync(directory_descriptor)
@@ -537,18 +543,25 @@ def atomic_write(path, payload, uid, mode, gid=None):
         os.close(directory_descriptor)
 
 
-def replace_destination(destination, allowed_home, uid, original, payload, create, file_mode=None, private=False, gid=None):
+def replace_destination(destination, allowed_home, uid, original, payload, create, private=False, gid=None):
     directory_mode = 0o700 if private else 0o755
     validate_destination_parent(destination, allowed_home, uid, create, gid, directory_mode)
-    if read_destination(destination, private) != original:
-        raise MaterializationError("concurrent destination change")
-    if private:
-        file_mode = 0o600
-    elif file_mode is None:
-        file_mode = 0o644 if original is None else stat.S_IMODE(os.lstat(destination).st_mode) & 0o644
-    atomic_write(destination, payload, uid, file_mode, gid)
+
+    def verify(directory):
+        parent = os.stat(os.path.dirname(destination), follow_symlinks=False)
+        if (not os.path.samestat(parent, os.fstat(directory)) or
+                read_destination(os.path.basename(destination), private, dir_fd=directory) != original):
+            raise MaterializationError("concurrent destination change")
+
+    # Agent documents can carry credentials even before a contributor registers
+    # or after a retained writer has changed the document or its ownership.
+    atomic_write(destination, payload, uid, 0o600, gid, verify)
     if read_destination(destination, private) != payload:
         raise MaterializationError("destination verification failed")
+
+
+def document_mode_drift(destination, original):
+    return original is not None and stat.S_IMODE(os.lstat(destination).st_mode) != 0o600
 
 
 def document_payload(current, previous, original, file_format=None, writer=None, private=False):
@@ -642,10 +655,8 @@ def check_contribution(template, contribution, file_format=None):
     conflicts = []
 
     def compatible(wanted, supplied, path):
-        if isinstance(supplied, re.Pattern):
-            # During preflight the owner can constrain a value it will generate later.
-            if not isinstance(wanted, str) or supplied.fullmatch(wanted) is None:
-                conflicts.append(path)
+        if isinstance(supplied, GeneratedValue):
+            conflicts.append(path)
         elif isinstance(wanted, dict) and isinstance(supplied, dict):
             for key in sorted(wanted):
                 child = path + "/" + pointer_part(key)
@@ -685,22 +696,21 @@ def set_contribution_reference(path, entry):
         atomic_write(path, semantic_payload(entry) + b"\n", STATE_UID, 0o600)
 
 
-def template_owns_document(key, developer, destination, file_format):
+def template_ownership(key, developer, destination, file_format):
     baseline = key + ".json"
     if not os.path.lexists(baseline):
-        return False
+        return None
     validate_regular(baseline, STATE_UID, 0o600)
     with open(baseline, "rb") as source:
         saved = validate_baseline(source.read(), developer, destination, file_format)
-    evidence = read_ownership(key + ".ownership", saved, developer, destination, file_format)
-    return evidence is not None and evidence["phase"] == "applied"
+    return read_ownership(key + ".ownership", saved, developer, destination, file_format) or saved
 
 
-def restore_contribution(group, key, present, prior, managed, file_format):
-    if key not in group:
+def restore_contribution(group, key, present, prior, managed, file_format, template_owned):
+    if key not in group or template_owned.get(()) == "value":
         return
     actual = group[key]
-    if any(json_equal(actual, value, file_format) for value in managed):
+    if not template_owned and any(json_equal(actual, value, file_format) for value in managed):
         if present:
             group[key] = prior
         else:
@@ -709,10 +719,15 @@ def restore_contribution(group, key, present, prior, managed, file_format):
     tables = [value for value in managed if isinstance(value, dict)]
     if isinstance(actual, dict) and actual and tables:
         prior_table = prior if isinstance(prior, dict) else {}
-        for child in sorted(set().union(*tables)):
+        managed_keys = set().union(*tables)
+        for child in sorted(managed_keys):
             restore_contribution(actual, child, child in prior_table, prior_table.get(child),
-                                 [table[child] for table in tables if child in table], file_format)
-        if not actual:
+                                 [table[child] for table in tables if child in table], file_format,
+                                 {parts[1:]: kind for parts, kind in template_owned.items()
+                                  if parts and parts[0] == child})
+        for child in prior_table.keys() - managed_keys:
+            actual.setdefault(child, prior_table[child])
+        if not actual and () not in template_owned:
             if isinstance(prior, dict) and not prior:
                 group[key] = {}
             else:
@@ -720,7 +735,7 @@ def restore_contribution(group, key, present, prior, managed, file_format):
 
 
 def prepare_contribution(locks, destination, home, uid, file_format, developer, entry, owned, wanted,
-                         template_payload, *, check, preflight, writer, gid):
+                         template_payload, *, check, writer, gid):
     """Hold the asset lock through publication of the caller's receipt and prepared edit."""
     enabled = wanted is not None
     section = entry["section"]
@@ -735,8 +750,15 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
     parent = validate_destination_parent(destination, home, uid, False)
     current, original = read_current(destination, allow_invalid=True, file_format=file_format,
                                      private=True) if parent else ({}, None)
+    mode_drift = document_mode_drift(destination, original)
+    repair_mode = (partial(replace_destination, destination, home, uid, original, original,
+                           False, private=True, gid=gid) if mode_drift else None)
     blank = original is not None and not original.strip()
     previous = current
+    baseline = template_ownership(asset, developer, destination, file_format) if owned or template_payload is not None else None
+    template_paths = {}
+    if baseline is not None and baseline.get("phase", "applied") == "applied":
+        template_paths = {tuple(pointer_parts(item["path"])): item["kind"] for item in baseline["owned"]}
     template, template_owned = {}, False
     if enabled and template_payload is not None:
         try:
@@ -746,7 +768,7 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
         except ValueError:
             raise MaterializationError("invalid contribution template") from None
         check_contribution(template, {section: wanted}, file_format)
-        template_owned = template_owns_document(asset, developer, destination, file_format)
+        template_owned = baseline is not None and baseline.get("phase") == "applied"
 
     if current is None and not blank and not (enabled and (owned or template_owned)):
         raise InvalidContributionDestination("invalid contribution destination")
@@ -754,11 +776,11 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
     group = current.get(section, {})
     if not enabled and (not current or not isinstance(group, dict)):
         # A missing document or a replaced section contains no owned fields.
-        return {}, {}, None, register
-    if not isinstance(group, dict) and not (owned or template_owned):
-        raise InvalidContributionDestination("invalid contribution destination")
+        return {}, {}, repair_mode, register
+    if enabled:
+        check_contribution_sections(current, {section: wanted})
 
-    if check and enabled and reference is not None and template_owned and not current and owned.keys() == wanted.keys() and all(
+    if check and not mode_drift and enabled and reference is not None and template_owned and not current and owned.keys() == wanted.keys() and all(
             json_equal(value, owned[key]["managed"], file_format) for key, value in wanted.items()):
         # The template owner can reconstruct both inputs in its ordinary pass.
         return owned, owned, None, register
@@ -779,30 +801,28 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
         if found and not (old["present"] and json_equal(group[key], old["value"], file_format)) and not any(
                 json_equal(group[key], candidate, file_format) for candidate in allowed):
             raise MaterializationError("native exporter ownership conflict")
-        if not preflight:
-            final[key] = {"present": old["present"], "value": old["value"], "managed": value}
-            previous_values = []
-            for candidate in allowed:
-                if not json_equal(value, candidate, file_format) and not any(
-                        json_equal(candidate, prior, file_format) for prior in previous_values):
-                    previous_values.append(candidate)
-            intent[key] = {**final[key], "previous": previous_values}
-            group[key] = value
-    if preflight:
-        return owned, owned, None, register
+        final[key] = {"present": old["present"], "value": old["value"], "managed": value}
+        previous_values = []
+        for candidate in allowed:
+            if not json_equal(value, candidate, file_format) and not any(
+                    json_equal(candidate, prior, file_format) for prior in previous_values):
+                previous_values.append(candidate)
+        intent[key] = {**final[key], "previous": previous_values}
+        group[key] = value
 
     for key, old in owned.items():
         if key not in final:
             restore_contribution(group, key, old["present"], old["value"],
-                                 [old["managed"], *old.get("previous", [])], file_format)
-    if group:
+                                 [old["managed"], *old.get("previous", [])], file_format,
+                                 {parts[2:]: kind for parts, kind in template_paths.items()
+                                  if parts[:2] == (section, key)})
+    if group or template_paths.get((section,)) == "empty-object":
         current[section] = group
     elif enabled or had_fields:
         current.pop(section, None)
     payload = document_payload(current, previous, original, file_format, writer, private=True)
-    if payload == original and (not enabled or
-            original is not None and stat.S_IMODE(os.lstat(destination).st_mode) == 0o600):
-        return final, intent, None, register
+    if payload == original:
+        return final, intent, repair_mode, register
     edit = partial(replace_destination, destination, home, uid, original, payload, enabled, private=True, gid=gid)
     return final, intent, edit, register
 
@@ -810,6 +830,10 @@ def prepare_contribution(locks, destination, home, uid, file_format, developer, 
 def contribution_owns(entry, contribution):
     parts = pointer_parts(entry["path"])
     return parts[0] in contribution and (len(parts) == 1 or parts[1] in contribution[parts[0]])
+
+
+def check_contribution_sections(current, contribution):
+    check_contribution(current, {section: {} for section in contribution})
 
 
 def read_release_marker(path, evidence=None):
@@ -864,7 +888,7 @@ def printable_paths(paths):
     return paths
 
 
-def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution):
+def retire(mode, baseline, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution, mode_drift):
     if baseline is None or baseline["schema"] != 2:
         raise MaterializationError("retirement ownership evidence unavailable")
     marker = read_release_marker(release_path, baseline)
@@ -920,13 +944,16 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
             # Convert an earlier candidate's schema2 before any document edit.
             atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
             replace_destination(destination, allowed_home, uid, original, payload, False,
-                                stat.S_IMODE(os.lstat(destination).st_mode),
                                 private=bool(contribution))
+            mode_drift = False
         atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline, True)) + b"\n", STATE_UID, 0o600)
         baseline["phase"] = "retired"
         atomic_write(receipt_path, semantic_payload(baseline) + b"\n", STATE_UID, 0o600)
         phase = "retired"
-    report = {"converged": phase == "retired",
+    if mode == "retire" and mode_drift:
+        replace_destination(destination, allowed_home, uid, original, original, False, private=bool(contribution))
+        mode_drift = False
+    report = {"converged": phase == "retired" and not mode_drift,
               "fingerprint": fingerprint(current, {}, baseline["projection_digest"],
                                          "release-" + release if release else phase,
                                          [] if phase == "retired" else baseline["owned"])}
@@ -980,6 +1007,7 @@ def main():
             print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
                   hashlib.sha256(original).hexdigest(), "invalid-destination", [])}))
             return
+        check_contribution_sections(current, contribution)
         if mode == "assess-adopt" and original is not None:
             # Recognize exact pre-baseline templates, or JSON documents whose
             # fields are disjoint from our declaration. Existing managed fields
@@ -996,7 +1024,7 @@ def main():
             if (info.st_uid != uid or info.st_nlink != 1 or
                     os.path.lexists(receipt_path) or
                     not (contribution and disjoint_fields(unclaimed, desired) or
-                         stat.S_IMODE(info.st_mode) == 0o644 and not os.path.lexists(lock_path) and
+                         stat.S_IMODE(info.st_mode) in (0o600, 0o644) and not os.path.lexists(lock_path) and
                          (FORMAT == 'json' and disjoint_fields(current, desired) or (
                         any(original == payload.encode() for payload in globals().get("LEGACY_TEMPLATES", [])) and
                         all(entry in wanted_owned for entry in ownership(current)))))):
@@ -1040,20 +1068,22 @@ def main():
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         allow_invalid = mode in ("observe", "apply") or mode == "assess-adopt" and bool(contribution)
         current, original = read_current(destination, allow_invalid=allow_invalid, private=bool(contribution)) if parent_exists else ({}, None)
+        mode_drift = document_mode_drift(destination, original)
         previous = current
         if current is None:
             if evidence is None and not contribution:
                 raise unowned_invalid_destination(destination)
             if read_only:
                 print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
-                      hashlib.sha256(original).hexdigest(), "invalid-destination", evidence["owned"] if evidence else [])}))
+                      hashlib.sha256(original).hexdigest(), "mode-drift" if mode_drift else "invalid-destination",
+                      evidence["owned"] if evidence else [])}))
                 return
             current = {}
-
         if mode in ("assess-retire", "retire"):
-            retire(mode, evidence, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution)
+            retire(mode, evidence, baseline_path, receipt_path, release_path, current, original, destination, allowed_home, uid, contribution, mode_drift)
             return
 
+        check_contribution_sections(current, contribution)
         if evidence is not None:
             baseline = evidence
 
@@ -1061,8 +1091,7 @@ def main():
             baseline_current = (baseline["desired_digest"] == desired_digest and
                                 baseline["owned"] == wanted_owned and
                                 baseline.get("phase", "applied") == "applied")
-            managed_current = original is not None and (not contribution or
-                bool(current) and stat.S_IMODE(os.lstat(destination).st_mode) == 0o600)
+            managed_current = original is not None and (not contribution or bool(current))
             for entry in wanted_owned:
                 found_current, current_value = lookup(current, pointer_parts(entry["path"]))
                 found_desired, desired_value = lookup(desired, pointer_parts(entry["path"]))
@@ -1072,7 +1101,7 @@ def main():
                     managed_current = managed_current and isinstance(current_value, dict)
                 else:
                     managed_current = managed_current and json_equal(current_value, desired_value)
-            converged = baseline_current and managed_current
+            converged = baseline_current and managed_current and not mode_drift
             if mode == "observe" and (evidence is None or not compatible):
                 converged = False
             adoptable = False
@@ -1087,13 +1116,13 @@ def main():
                     elif FORMAT == "json":
                         adoptable = legacy_json_matches(current, baseline)
                     else:
-                        adoptable = converged or legacy_toml_matches(current, baseline)
+                        adoptable = baseline_current and managed_current or legacy_toml_matches(current, baseline)
                     if not adoptable:
                         raise MaterializationError("adoption owned fields or evidence changed")
                 bound_digest += ":" + desired_digest
             report = {"converged": converged,
                       "fingerprint": fingerprint(current, desired, bound_digest,
-                                                 "converged" if converged else "drift",
+                                                 "mode-drift" if mode_drift else "converged" if converged else "drift",
                                                  baseline["owned"])}
             if mode == "assess-adopt":
                 report["adoptable"] = adoptable

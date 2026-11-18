@@ -2,7 +2,6 @@
 """CAS ownership of native exporter leaves; preserve unrelated settings and analytics intent."""
 import json
 import os
-import re
 import stat
 import tempfile
 from contextlib import ExitStack
@@ -11,6 +10,7 @@ from decimal import Decimal
 import guest_json as materializer
 
 CONFIG_LIMIT = 4*1024*1024
+TOKEN_BYTES = 32
 
 
 def safe(path):
@@ -66,14 +66,19 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
 
 
 def desired(agent, endpoint, token):
+    def bearer(prefix):
+        if token is None:
+            return materializer.GeneratedValue(prefix + '0'*(TOKEN_BYTES*2))
+        return prefix + token
+
     if agent == 'codex':
-        header = re.compile(r'Bearer [0-9a-f]{64}') if token is None else 'Bearer '+token
+        header = bearer('Bearer ')
         result = {'log_user_prompt': False}
         for key, path in [('exporter', 'logs'), ('metrics_exporter', 'metrics'), ('trace_exporter', 'traces')]:
             result[key] = {'otlp-http': {'endpoint': endpoint+'/v1/'+path, 'protocol': 'binary',
                                        'headers': {'Authorization': header}}}
         return result
-    header = re.compile(r'Authorization=Bearer [0-9a-f]{64}') if token is None else 'Authorization=Bearer '+token
+    header = bearer('Authorization=Bearer ')
     result = {'CLAUDE_CODE_ENABLE_TELEMETRY': '1', 'CLAUDE_CODE_ENHANCED_TELEMETRY_BETA': '1',
               'OTEL_LOG_USER_PROMPTS': '0', 'OTEL_LOG_TOOL_DETAILS': '0', 'OTEL_LOG_TOOL_CONTENT': '0'}
     for signal in ('LOGS', 'METRICS', 'TRACES'):
@@ -101,6 +106,8 @@ class AgentConfigRefusals(ValueError):
 
 
 def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=False, templates=None, developer=None):
+    if token is None and not check:
+        raise ValueError('collector token required')
     templates = templates or {}
     developer = developer or home.name
     with ExitStack() as locks:
@@ -137,8 +144,7 @@ def reconcile_locked(home, state, agents, endpoint, token, writer, uid, gid, che
             want = desired(agent, endpoint, token) if enabled else None
             final, transitional, edit, register = materializer.prepare_contribution(
                 locks, str(path), str(home), uid, file_format, developer, entry, owned, want,
-                templates.get(agent), check=check,
-                preflight=token is None, writer=writer.dumps, gid=gid)
+                templates.get(agent), check=check, writer=writer.dumps, gid=gid)
             if enabled:
                 next_state['agents'][agent] = final
                 pending['agents'][agent] = transitional

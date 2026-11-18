@@ -183,7 +183,7 @@ class Runtime:
         if value is None or path.stat().st_uid != self.uid or stat.S_IMODE(path.stat().st_mode) != 0o600:
             raise ValueError('private collector token required')
         token = value.decode().strip()
-        if len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
+        if len(token) != native.TOKEN_BYTES*2 or any(c not in '0123456789abcdef' for c in token):
             raise ValueError('invalid collector token')
         return token
 
@@ -265,7 +265,8 @@ class Runtime:
             raise ValueError('unmanaged collector assets')
         if not installed:
             if self.selected and self.agents:
-                self.reconcile_native(None, check=True)
+                token = self.token() if native.snapshot(self.data/'auth.token') is not None else None
+                self.reconcile_native(token, check=True)
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
                 result['diagnostics'] = [{'parameter': 'telemetry.runtime', 'installed': 'absent', 'desired': 'present'}]
@@ -326,8 +327,9 @@ class Runtime:
         if not self.selected and not installed:
             return
         token_path = self.data/'auth.token'
-        if self.selected and self.agents and native.snapshot(token_path) is None:
-            self.reconcile_native(None, check=True)
+        if self.selected and self.agents:
+            token = self.token() if native.snapshot(token_path) is not None else None
+            self.reconcile_native(token, check=True)
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         if not installed:
             if self.library.exists():
@@ -344,7 +346,7 @@ class Runtime:
         os.chmod(self.data, 0o700)
         os.chown(self.data, self.uid, self.gid)
         if not token_path.exists():
-            native.publish(token_path, (secrets.token_hex(32)+'\n').encode(), None, self.uid, self.gid)
+            native.publish(token_path, (secrets.token_hex(native.TOKEN_BYTES)+'\n').encode(), None, self.uid, self.gid)
         token = self.token()
         saved = json.loads((self.control/'assets.json').read_text())
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'

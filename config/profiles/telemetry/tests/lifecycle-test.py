@@ -38,15 +38,35 @@ class LifecycleTest(unittest.TestCase):
             runtime.endpoint = 'http://localhost:14318'
             runtime.uid, runtime.gid = os.getuid(), os.getgid()
             runtime.templates = {'codex': b'[otel]\nlog_user_prompt = true\n'
-                                 b'[otel.exporter.otlp-http.headers]\nAuthorization = "template-value"\n'}
+                                 b'[otel.exporter.otlp-http.headers]\nAuthorization = "Bearer '+b'a'*64+b'"\n'}
             for operation in (runtime.observe, runtime.apply):
                 with self.assertRaisesRegex(guest.native.materializer.ContributionConflict, '/otel/log_user_prompt') as error:
                     operation()
                 self.assertIn('/otel/exporter/otlp-http/headers/Authorization', str(error.exception))
-                self.assertNotIn('template-value', str(error.exception))
+                self.assertNotIn('Bearer', str(error.exception))
                 self.assertFalse(runtime.control.exists())
                 self.assertFalse(runtime.data.exists())
                 self.assertFalse(guest.native.agent_path(root, 'codex').exists())
+
+            # A matching-looking fixed bearer must also fail on its own.
+            runtime.templates['codex'] = runtime.templates['codex'].split(b'true\n', 1)[1]
+            for operation in (runtime.observe, runtime.apply):
+                with self.assertRaisesRegex(guest.native.materializer.ContributionConflict, '/otel/exporter/otlp-http/headers/Authorization'):
+                    operation()
+                self.assertFalse(runtime.control.exists())
+                self.assertFalse(runtime.data.exists())
+
+            runtime.agents, runtime.templates = ['claude'], {}
+            path = guest.native.agent_path(root, 'claude')
+            path.parent.mkdir(mode=0o700)
+            original = b'{"unrelated":"' + b'x'*(4*1024*1024-22) + b'"}'
+            guest.native.publish(path, original, None)
+            for operation in (runtime.observe, runtime.apply):
+                with self.assertRaisesRegex(ValueError, 'destination exceeds size bound'):
+                    operation()
+                self.assertFalse(runtime.control.exists())
+                self.assertFalse(runtime.data.exists())
+                self.assertTrue(path.read_bytes() == original)
 
     def test_disable_does_not_require_missing_owned_agent_documents_or_valid_templates(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:

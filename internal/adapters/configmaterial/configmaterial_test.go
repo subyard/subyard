@@ -32,7 +32,7 @@ func TestTOMLMaterializationPreservesRuntimeFields(t *testing.T) {
 		t.Fatalf("adoption changed otherwise converged TOML: err=%v", err)
 	}
 	info, err := os.Stat(h.destination)
-	if err != nil || info.Mode().Perm() != 0o644 {
+	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("TOML adoption did not enforce materialized file mode: err=%v", err)
 	}
 	h.writeDestination(t, strings.Replace(original, "notifications = true", "notifications = false", 1))
@@ -1335,8 +1335,8 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
 					t.Fatal("release changed the destination document")
 				}
-				if info, err := os.Stat(h.destination); err != nil || info.Mode().Perm() != 0o640 {
-					t.Fatalf("release changed document permissions: %v", err)
+				if info, err := os.Stat(h.destination); err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("release did not repair document permissions: %v", err)
 				}
 				// The shared schema1 baseline is the released form older runtimes read.
 				var baseline, receipt map[string]any
@@ -1357,6 +1357,12 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				}
 				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
 					t.Fatal("repeated retirement changed files")
+				}
+				if err := os.Chmod(h.destination, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if h.observeMode(t, nil, ModeAssessRetire).Converged || !h.observeMode(t, nil, ModeRetire).Converged {
+					t.Fatal("retired document mode drift did not reconcile")
 				}
 				// Re-enabling establishes fresh ownership over the retained document.
 				h.apply(t, []byte(desired))
@@ -1659,7 +1665,7 @@ func TestStaleReleaseRecordDoesNotChangeOrdinaryRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, file_mode, gid)"
+	needle := "    atomic_write(destination, payload, uid, 0o600, gid, verify)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1685,7 +1691,7 @@ func TestInterruptedRetirementStillRefusesChangedOwnedFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	needle := "    atomic_write(destination, payload, uid, file_mode, gid)"
+	needle := "    atomic_write(destination, payload, uid, 0o600, gid, verify)"
 	request.Command[3] = strings.Replace(request.Command[3], needle, "    raise MaterializationError(\"synthetic interruption\")\n"+needle, 1)
 	command := exec.Command(request.Command[0], request.Command[1:]...)
 	command.Stdin = bytes.NewReader(request.Stdin)
@@ -1726,7 +1732,7 @@ func TestRetirementResumesInterruptedReplacement(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			needle := "    atomic_write(destination, payload, uid, file_mode, gid)"
+			needle := "    atomic_write(destination, payload, uid, 0o600, gid, verify)"
 			injected := "    raise MaterializationError(\"synthetic interruption\")\n" + needle
 			if stage == "after" {
 				injected = needle + "\n    raise MaterializationError(\"synthetic interruption\")"

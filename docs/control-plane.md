@@ -2566,7 +2566,9 @@ materializer strictly parses, compares, validates and replaces documents under t
 destination lock for contributions and agent templates. The profile supplies desired fields
 and retains prior values in its protected receipt. A protected per-document
 reference lets the template writer detect overlapping values and reconstruct an active
-contribution when it repairs a damaged document. Contribution writes use mode `0600`.
+contribution when it repairs a damaged document. Structured agent documents use mode
+`0600` for template and contribution writes, including before registration and after
+handoff from a retained writer. Observation treats a mode mismatch as drift.
 On opt-out, the materializer restores or removes unchanged contributed fields and preserves
 later edits, including edits within a contributed table. Conflict output identifies field paths.
 Unpublished `.subyard-config.*` files left by an interrupted materializer are outside its explicit
