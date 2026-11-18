@@ -57,25 +57,24 @@ def mkdir(path, mode, uid, gid):
 def write(path, data, mode, uid, gid, staging_root=None):
     safe(path)
     if staging_root is None:
-        # Preview migration writes into the developer's home.
+        # Keep preview staging private inside the developer's home.
         with tempfile.TemporaryDirectory(prefix='.staging-', dir=path.parent) as directory:
             write(path, data, mode, uid, gid, Path(directory))
         return
-    # The delivery lock serializes writes across providers. Reuse its reserved
-    # staging name on each destination filesystem after an interruption.
-    temporary = staging_root/'.subyard-skill-staging'
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    with os.fdopen(fd, 'wb') as stream:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1 or info.st_mode & 0o022:
-            raise ValueError('unsafe skill staging file')
-        os.ftruncate(fd, 0)
-        os.fchmod(fd, mode)
-        os.fchown(fd, uid, gid)
-        stream.write(data)
-        stream.flush()
-        os.fsync(fd)
-    os.replace(temporary, path)
+    # mkstemp creates a fresh inode with O_EXCL, even after interruption.
+    fd, name = tempfile.mkstemp(prefix='.subyard-skill-staging-', dir=staging_root)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            os.fchmod(fd, mode)
+            os.fchown(fd, uid, gid)
+            stream.write(data)
+            stream.flush()
+            os.fsync(fd)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
     sync_directory(path.parent)
 
 

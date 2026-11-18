@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -43,7 +44,6 @@ func DefaultLimits() Limits {
 
 type writeRequest struct {
 	entries []Envelope
-	policy  Policy
 	bytes   int64
 	result  chan error
 	advance *spoolAdvance
@@ -321,16 +321,9 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 	var replay bool
 	for _, e := range input {
 		replay = e.replay
-		if e.replay && e.InputProof == "" {
-			// Older exports lack a trusted input fingerprint. Check their
-			// asserted identities against the retained payload.
-			exists, err := s.checkDuplicate(s.db, e, p)
-			if err != nil {
-				return err
-			}
-			if exists {
-				continue
-			}
+		input := e
+		if e.replay && !e.local {
+			e.claimedOrigin, e.claimedEvent = e.OriginID, e.EventID
 		}
 		id := identity(s.key.id)
 		if e.local {
@@ -343,6 +336,13 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 			(e.Encoding == "json" && e.EventID == "") {
 			return errInvalidRecord
 		}
+		if e.native {
+			var err error
+			e.inputID, err = s.key.inputFingerprint(e)
+			if err != nil {
+				return err
+			}
+		}
 		claim := e.PolicyVersion
 		projected, err := s.sanitizePayload(&e, p, id, !e.local)
 		if err != nil {
@@ -353,15 +353,26 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 		} else if e.local && claim != "" {
 			e.PolicyVersion = claim
 		}
+		if !e.replay && e.inputID == "" && e.Encoding == "json" && strings.HasPrefix(input.OriginID, "producer:") && !input.local {
+			// Retain the pre-policy input identity for stable producer IDs.
+			input.SourceTime, input.PolicyVersion = e.SourceTime, PolicyVersion
+			e.inputID, err = s.key.inputFingerprint(input)
+			if err != nil {
+				return err
+			}
+			if input.SourceTime == unknownSourceTime {
+				e.untimedProducer = &input
+			}
+		}
 		if e.Kind != "" || e.inputID != "" {
 			entries = append(entries, e)
 		}
 		entries = append(entries, projected...)
 	}
-	return s.submit(ctx, entries, p, replay, advance)
+	return s.submit(ctx, entries, replay, advance)
 }
 
-func (s *Store) submit(ctx context.Context, entries []Envelope, p Policy, replay bool, advance *spoolAdvance) error {
+func (s *Store) submit(ctx context.Context, entries []Envelope, replay bool, advance *spoolAdvance) error {
 	if len(entries) == 0 && advance == nil {
 		return nil
 	}
@@ -379,11 +390,14 @@ func (s *Store) submit(ctx context.Context, entries []Envelope, p Policy, replay
 			e.ReceivedTime = time.Now().UTC().Format(timestampLayout)
 		}
 		size += int64(len(e.Body) + len(e.Protobuf) + 512)
+		if e.untimedProducer != nil {
+			size += int64(len(e.untimedProducer.Body))
+		}
 	}
 	if !replay && size > s.limits.RequestBytes {
 		return ErrCapacity
 	}
-	r := writeRequest{entries, p, size, make(chan error, 1), advance}
+	r := writeRequest{entries, size, make(chan error, 1), advance}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -497,16 +511,12 @@ func (s *Store) commit(batch []writeRequest) error {
 	defer tx.Rollback()
 	for _, r := range batch {
 		if r.advance != nil {
-			duplicate, err := r.advance.apply(tx)
-			if err != nil {
+			if err = r.advance.apply(tx); err != nil {
 				return err
-			}
-			if duplicate {
-				continue
 			}
 		}
 		for _, e := range r.entries {
-			if err = s.putRecord(tx, e, r.policy); err != nil {
+			if err = s.putRecord(tx, e); err != nil {
 				return err
 			}
 		}
@@ -517,12 +527,40 @@ func (s *Store) commit(batch []writeRequest) error {
 	return nil
 }
 
-func (s *Store) putRecord(tx *sql.Tx, e Envelope, policy Policy) error {
-	if e.inputID != "" {
-		duplicate, err := registerInput(tx, e.OriginID, e.EventID, e.inputID)
-		if err != nil || duplicate || e.Kind == "" {
+func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
+	if e.claimedOrigin != "" && (e.claimedOrigin != e.OriginID || e.claimedEvent != e.EventID) {
+		// An unsigned export cannot claim a retained local identity with
+		// different input, even though import rekeys its identifiers.
+		match, err := s.checkPriorInput(tx, e.claimedOrigin, e.claimedEvent, e.inputID)
+		if err != nil || match {
 			return err
 		}
+	}
+	if e.inputID == "" {
+		var err error
+		e.inputID, err = s.key.inputFingerprint(e)
+		if err != nil {
+			return err
+		}
+	}
+	duplicate, err := registerInput(tx, e.OriginID, e.EventID, e.inputID)
+	if errors.Is(err, errEventCollision) && e.untimedProducer != nil {
+		// A legacy outbox retry may omit its original source time.
+		input := *e.untimedProducer
+		if scanErr := tx.QueryRow("SELECT source_time FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).
+			Scan(&input.SourceTime); scanErr == nil {
+			fingerprint, err := s.key.inputFingerprint(input)
+			if err != nil {
+				return err
+			}
+			_, err = registerInput(tx, e.OriginID, e.EventID, fingerprint)
+			return err
+		} else if !errors.Is(scanErr, sql.ErrNoRows) {
+			return ErrStorage
+		}
+	}
+	if err != nil || duplicate || e.Kind == "" {
+		return err
 	}
 	res, err := tx.Exec(`INSERT INTO records(origin_id,event_id,received_time,source_id,source_version,source_time,kind,encoding,policy_version,redactions,body,protobuf,import_policy_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID, e.ReceivedTime, e.SourceID, e.SourceVersion, e.SourceTime, e.Kind, e.Encoding, e.PolicyVersion, e.Redactions, []byte(e.Body), e.Protobuf, e.ImportPolicyVersion)
 	if err != nil {
@@ -530,12 +568,14 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope, policy Policy) error {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		exists, err := s.checkDuplicate(tx, e, policy)
+		// Rows written before every writer supplied a fingerprint still have
+		// their original retained input. Register the proof on the first retry.
+		fingerprint, err := s.retainedFingerprint(tx, e.OriginID, e.EventID)
 		if err != nil {
-			return err
-		}
-		if !exists {
 			return ErrStorage
+		}
+		if fingerprint != e.inputID {
+			return errEventCollision
 		}
 		return nil
 	}
@@ -552,56 +592,35 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope, policy Policy) error {
 	return nil
 }
 
-type rowQuerier interface {
-	QueryRow(string, ...any) *sql.Row
-}
-
-func (s *Store) checkDuplicate(db rowQuerier, e Envelope, p Policy) (bool, error) {
-	old := Envelope{OriginID: e.OriginID, EventID: e.EventID}
-	err := db.QueryRow("SELECT body,protobuf,source_id,source_version,source_time,kind,encoding,policy_version FROM records WHERE origin_id=? AND event_id=?", e.OriginID, e.EventID).
-		Scan((*[]byte)(&old.Body), &old.Protobuf, &old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion)
+func (s *Store) checkPriorInput(tx *sql.Tx, origin, event, fingerprint string) (bool, error) {
+	var old string
+	err := tx.QueryRow("SELECT payload FROM spool_inputs WHERE origin=? AND event=?", origin, event).Scan(&old)
+	if errors.Is(err, sql.ErrNoRows) {
+		old, err = s.retainedFingerprint(tx, origin, event)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, ErrStorage
 	}
-	producerRetry := e.local && !e.replay && e.Encoding == "json"
-	// An unsigned outbox retry can get a new fingerprint for the same payload.
-	legacyRetry := old.PolicyVersion != e.PolicyVersion && !e.replay && e.Encoding == "json" &&
-		e.OriginID == "producer:"+e.SourceID && samePayload(old, e)
-	if old.SourceID != e.SourceID || old.Encoding != e.Encoding ||
-		(!producerRetry && !legacyRetry && (old.Kind != e.Kind || old.PolicyVersion != e.PolicyVersion)) {
+	if old != fingerprint {
 		return false, errEventCollision
-	}
-	if !samePayload(old, e) {
-		// Retained rows may have been captured under an older policy. This
-		// comparison never writes either payload.
-		if _, err = s.sanitizePayload(&old, p, keepID, false); err != nil {
-			return false, errEventCollision
-		}
-		if e.replay && e.ImportPolicyVersion == "" {
-			if _, err = s.sanitizePayload(&e, p, keepID, false); err != nil {
-				return false, errEventCollision
-			}
-		}
-		if !samePayload(old, e) {
-			return false, errEventCollision
-		}
 	}
 	return true, nil
 }
 
-func samePayload(a, b Envelope) bool {
-	return a.Kind == b.Kind && a.SourceVersion == b.SourceVersion && sameSourceTime(a, b) &&
-		bytes.Equal(a.Body, b.Body) && bytes.Equal(a.Protobuf, b.Protobuf)
+func (s *Store) retainedFingerprint(tx *sql.Tx, origin, event string) (string, error) {
+	var old Envelope
+	err := tx.QueryRow(`SELECT source_id,source_version,source_time,kind,encoding,policy_version,body,protobuf
+		FROM records WHERE origin_id=? AND event_id=?`, origin, event).
+		Scan(&old.SourceID, &old.SourceVersion, &old.SourceTime, &old.Kind, &old.Encoding, &old.PolicyVersion, (*[]byte)(&old.Body), &old.Protobuf)
+	if err != nil {
+		return "", err
+	}
+	return s.key.inputFingerprint(old)
 }
 
-func sameSourceTime(a, b Envelope) bool {
-	// A live producer retry with a stable ID may no longer know the source time.
-	producerRetry := !b.replay && b.Encoding == "json" && b.OriginID == "producer:"+b.SourceID
-	return a.SourceTime == b.SourceTime || (producerRetry && b.SourceTime == unknownSourceTime)
-}
 func (s *Store) prune() error {
 	cutoff := time.Now().Add(-s.limits.Retention).UTC().Format(timestampLayout)
 	tx, err := s.db.Begin()
@@ -813,6 +832,12 @@ func Export(ctx context.Context, db *sql.DB, w io.Writer, after int64, limit int
 		}
 		e.Body = body
 		if len(key) != 0 {
+			if e.InputProof == "" {
+				e.InputProof, err = key.inputFingerprint(e)
+				if err != nil {
+					return after, err
+				}
+			}
 			proof, err := key.exportProof(storeOrigin, e)
 			if err != nil {
 				return after, err
@@ -893,20 +918,11 @@ func (s *Store) replayEnvelope(data []byte) (Envelope, error) {
 		e.inputID = e.InputProof
 	} else {
 		e.InputProof = ""
-		var body map[string]any
-		if e.Encoding == "json" {
-			var err error
-			body, err = decodeBody(e.Body)
-			if err != nil {
-				return Envelope{}, err
-			}
-		}
-		payload, err := json.Marshal([]any{e.SourceID, e.SourceVersion, e.SourceTime,
-			e.Kind, e.Encoding, e.PolicyVersion, body, e.Protobuf})
+		var err error
+		e.inputID, err = s.key.inputFingerprint(e)
 		if err != nil {
 			return Envelope{}, err
 		}
-		e.inputID = hex.EncodeToString(s.key.digest("replay-input/v1\x00" + string(payload)))
 	}
 	e.ImportPolicyVersion = ""
 	e.Redactions = min(max(e.Redactions, 0), math.MaxInt64/2)
@@ -916,6 +932,26 @@ func (s *Store) replayEnvelope(data []byte) (Envelope, error) {
 		e.Redactions++
 	}
 	return e, nil
+}
+
+func (key identityKey) inputFingerprint(e Envelope) (string, error) {
+	var body map[string]any
+	if e.Encoding == "json" {
+		var err error
+		body, err = decodeBody(e.Body)
+		if err != nil {
+			return "", err
+		}
+	} else if e.Protobuf == nil {
+		// The wire format omits empty protobufs; older replay used "".
+		e.Protobuf = []byte{}
+	}
+	payload, err := json.Marshal([]any{e.SourceID, e.SourceVersion, e.SourceTime,
+		e.Kind, e.Encoding, e.PolicyVersion, body, e.Protobuf})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(key.digest("replay-input/v1\x00" + string(payload))), nil
 }
 
 func (s *Store) sanitizePayload(e *Envelope, p Policy, id identity, rekeyBinary bool) ([]Envelope, error) {

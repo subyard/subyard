@@ -171,7 +171,8 @@ the old producer path in place, checkpoints the schema 1–4 database and
 publishes it read-only at `/var/lib/subyard/telemetry/archive/telemetry.sqlite`
 (or the next numbered archive if the path is already occupied by a sealed
 store). The new active schema 5 store imports verified pending records and
-legacy health markers. Unreadable run manifests and health markers produce a
+legacy health markers. Read failures leave the cutover pending so a retry can
+import the original evidence. Invalid manifest or marker contents produce a
 `legacy_history_unreadable` gap in the active store. A retired manifest's
 filename can still identify an interrupted run in the archive. A disabled
 collector finishes the store transition when enabled. Fresh installs and

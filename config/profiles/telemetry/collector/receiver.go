@@ -367,7 +367,10 @@ func (s *Store) nativeLoss(tx *sql.Tx, run, readyAt string) error {
 		json_extract(r.body,'$.end_time') IS NOT NULL OR json_extract(r.body,'$.start_time') >= o.start
 		FROM receiver_outages o JOIN runs r ON json_extract(r.body,'$.start_time') < o.end
 		AND coalesce(json_extract(r.body,'$.end_time'),o.end) > o.start
-		WHERE coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')`
+		WHERE coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')
+		AND (json_extract(r.body,'$.state') IS NOT 'resources_observing' OR EXISTS(
+			SELECT 1 FROM records WHERE kind='run' AND import_policy_version=''
+			AND json_extract(body,'$.agent_run_id')=r.agent_run_id AND json_extract(body,'$.state')='running'))`
 	var args []any
 	if run == "" {
 		query += ` AND o.end=? AND r.agent_run_id IN (
@@ -399,7 +402,7 @@ func (s *Store) nativeLoss(tx *sql.Tx, run, readyAt string) error {
 				"coverage_start": first, "coverage_end": last})
 		e.ReceivedTime, e.PolicyVersion = last, PolicyVersion
 		if confirmed {
-			err = s.putRecord(tx, e, DefaultPolicy())
+			err = s.putRecord(tx, e)
 		} else {
 			err = s.key.project(tx, e)
 		}

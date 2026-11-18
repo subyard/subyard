@@ -9,6 +9,7 @@ import pwd
 import re
 import records
 import select
+import shutil
 import signal
 import sqlite3
 import grp
@@ -17,6 +18,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 import native
@@ -299,7 +301,8 @@ class Runtime:
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
         saved = self.saved_inventory()
         cutover_pending = self.selected and (self.data/CUTOVER).exists()
-        policy_current = not self.selected or (self.data/'spool-policy.json').exists()
+        policy_status = self.policy_status() if self.selected else 'present'
+        policy_current = policy_status == 'present'
         inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
         ready = ready and not cutover_pending and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
@@ -326,7 +329,7 @@ class Runtime:
             if cutover_pending:
                 diagnostics.append({'parameter': 'telemetry.cutover', 'installed': 'pending', 'desired': 'complete'})
             if not policy_current:
-                diagnostics.append({'parameter': 'telemetry.spool-policy', 'installed': 'missing', 'desired': 'present'})
+                diagnostics.append({'parameter': 'telemetry.spool-policy', 'installed': policy_status, 'desired': 'present'})
             if not inventory_current:
                 diagnostics.append({'parameter': 'telemetry.inventory', 'installed': 'changed', 'desired': 'current'})
             for path, (content, mode) in self.assets.items():
@@ -440,6 +443,55 @@ class Runtime:
                         'prepare', '--data-dir', self.data], check=True, timeout=30,
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def policy_status(self):
+        def validate():
+            records.capture_policy(self.data, records.identity_key(self.data))
+
+        try:
+            (self.data/'spool-policy.json').lstat()
+        except FileNotFoundError:
+            return 'missing'
+        except OSError:
+            return 'invalid'
+        try:
+            self.as_developer(validate)
+        except (OSError, ValueError, KeyError, TypeError):
+            return 'invalid'
+        return 'present'
+
+    def inspect_archive(self, archive):
+        def inspect():
+            directory = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(directory)
+                if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise ValueError('foreign archive directory')
+                fd = os.open('telemetry.sqlite', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            finally:
+                os.close(directory)
+            with os.fdopen(fd, 'rb') as source:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o400):
+                    raise ValueError('foreign archive database')
+                # SQLite resolves /proc/self/fd paths before opening them.
+                # Inspect a private copy read from the validated descriptor.
+                with tempfile.TemporaryDirectory(prefix='subyard-telemetry-archive-', dir='/tmp') as work:
+                    copy = Path(work)/'archive.sqlite'
+                    with copy.open('xb') as target:
+                        shutil.copyfileobj(source, target)
+                    db = sqlite3.connect(copy.as_uri()+'?mode=ro&immutable=1', uri=True)
+                    try:
+                        if not db.execute("SELECT value FROM metadata WHERE key='origin_id'").fetchone():
+                            raise ValueError('missing archive origin')
+                    finally:
+                        db.close()
+
+        try:
+            self.as_developer(inspect)
+        except (OSError, ValueError, sqlite3.Error):
+            raise ValueError('legacy archive collision') from None
+
     def cutover_receipt(self):
         receipt = self.data/CUTOVER
         database = self.data/'telemetry.sqlite'
@@ -469,19 +521,7 @@ class Runtime:
                 archive = self.data/name
                 if not archive.exists() and not archive.is_symlink():
                     break
-                if archive.is_symlink() or not archive.is_dir() or archive.stat().st_uid != self.uid or stat.S_IMODE(archive.stat().st_mode) != 0o700:
-                    raise ValueError('legacy archive collision')
-                target = archive/database.name
-                if target.is_symlink() or not target.is_file() or target.stat().st_uid != self.uid or stat.S_IMODE(target.stat().st_mode) != 0o400 or target.stat().st_nlink != 1:
-                    raise ValueError('legacy archive collision')
-                db = sqlite3.connect(target.absolute().as_uri()+'?mode=ro&immutable=1', uri=True)
-                try:
-                    if not db.execute("SELECT value FROM metadata WHERE key='origin_id'").fetchone():
-                        raise ValueError('legacy archive collision')
-                except sqlite3.Error:
-                    raise ValueError('legacy archive collision') from None
-                finally:
-                    db.close()
+                self.inspect_archive(archive)
                 name = f'archive-{number}'
             else:
                 raise ValueError('legacy archive capacity')
@@ -612,7 +652,7 @@ class Runtime:
             if before is not None and before != candidate and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
                 raise ValueError('managed asset changed')
             changed |= path in self.assets and before != candidate
-        prepared = (self.data/'spool-policy.json').exists()
+        prepared = self.policy_status() == 'present' if self.selected else (self.data/'spool-policy.json').exists()
         cutover = (installed and not prepared or (self.data/CUTOVER).exists()) and self.cutover_receipt()
         retiring = cutover and not prepared
         native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))

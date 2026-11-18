@@ -5,6 +5,7 @@ from contextlib import closing
 import hashlib
 import http.server
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -202,8 +203,39 @@ def install_agents(args, state):
     return binaries
 
 
+def managed_agent_matches(data, run, agent):
+    import re
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+    import records
+    if not re.fullmatch('[A-Za-z0-9_.:-]{1,128}', run):
+        return False
+    data = Path(data)
+    try:
+        manifest = records.read_private(data/'runs-v5'/(run+'.json'))
+        if manifest.get('agent_run_id') != run or manifest.get('manifest_state') == 'reserved':
+            return False
+        stored = records.opaque_id(records.identity_key(data), run)
+        deadline = time.monotonic()+2
+        with closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=.2)) as db:
+            while time.monotonic() < deadline:
+                row = db.execute("SELECT json_extract(body,'$.agent') FROM runs WHERE agent_run_id=?", (stored,)).fetchone()
+                if row and row[0]:
+                    return row[0] == agent
+                time.sleep(.05)
+    except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
+        pass
+    return False
+
+
+def run_probe_code():
+    profile = Path(__file__).resolve().parents[2]
+    return 'import sys,time\nsys.path.insert(0, '+repr(str(profile))+')\n'+inspect.getsource(managed_agent_matches)+'\n'
+
+
 def command_with_receipt(command, receipt, expected=None):
-    code = '''import hashlib,json,os,pathlib,re,signal,subprocess,sys
+    code = run_probe_code()+'''import hashlib,json,os,pathlib,re,signal,subprocess,sys
 expected=json.loads(sys.argv[2])
 context={}
 for name,value in expected.get('environment',{}).items():
@@ -211,12 +243,7 @@ for name,value in expected.get('environment',{}).items():
     context[name.lower()+'_matches']=os.environ.get(name)==value
 run=os.environ.get('SUBYARD_AGENT_RUN_ID','')
 context['agent_run_present']=bool(run)
-context['managed_agent_matches']=False
-if re.fullmatch('[A-Za-z0-9_.:-]{1,128}',run) and expected.get('data_dir'):
-    try:
-        manifest=json.loads((pathlib.Path(expected['data_dir'])/'runs-v5'/(run+'.json')).read_text())
-        context['managed_agent_matches']=isinstance(manifest,dict) and manifest.get('agent')==expected.get('agent') and manifest.get('agent_run_id')==run
-    except (OSError,ValueError,TypeError): pass
+context['managed_agent_matches']=bool(expected.get('data_dir') and managed_agent_matches(expected['data_dir'],run,expected.get('agent')))
 yard=expected.get('yard','test-yard')
 registry=pathlib.Path(os.environ.get('SUBYARD_E2E_ROUTE_REGISTRY','/var/lib/subyard/e2e-routes'))/yard/'current'
 context['route_registry_readable']=all(os.access(registry/name,os.R_OK) for name in ('route.tsv','known_hosts'))
@@ -456,13 +483,9 @@ def codex_app_class(base):
 
 
 def native_context_command(home, data_dir):
-    code = '''import json,os,pathlib,sys,time
+    code = run_probe_code()+'''import json,os,sys,time
 run=os.environ.get('SUBYARD_AGENT_RUN_ID','')
-proof=dict(schema='subyard.telemetry.native-context/v1',agent_run_present=bool(run),managed_agent_matches=False,home_matches=os.environ.get('HOME')==sys.argv[1],data_dir_matches=os.environ.get('SUBYARD_TELEMETRY_DATA_DIR')==sys.argv[2])
-try:
-    manifest=json.loads((pathlib.Path(sys.argv[2])/'runs-v5'/(run+'.json')).read_text())
-    proof['managed_agent_matches']=manifest.get('agent')=='codex' and manifest.get('agent_run_id')==run
-except (OSError,ValueError,TypeError): pass
+proof=dict(schema='subyard.telemetry.native-context/v1',agent_run_present=bool(run),managed_agent_matches=managed_agent_matches(sys.argv[2],run,'codex'),home_matches=os.environ.get('HOME')==sys.argv[1],data_dir_matches=os.environ.get('SUBYARD_TELEMETRY_DATA_DIR')==sys.argv[2])
 time.sleep(3)
 print(json.dumps(proof,sort_keys=True))
 '''

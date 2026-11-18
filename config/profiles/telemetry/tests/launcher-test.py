@@ -239,6 +239,7 @@ assert not records.emit(sys.argv[2], 'gap', {})
             root = Path(name)
             run = {'agent_run_id':'one', 'boot_id':launcher.boot_id(), 'pid':42, 'start_ticks':123,
                    'project_id':'private-project', 'task_id':'private-task', 'agent_version':'private-version',
+                   'host_id':'private-host', 'scope_baselines':[{'body':{'host_id':'private-host', 'cpu_ns':42}}],
                    'worktree_id':'private-worktree', 'start_time':'2026-01-01T00:00:00Z'}
             path = root/'runs-v5/one.json'
             with patch.object(launcher, 'MAX_RUN_BYTES', launcher.MAX_RUN_PAYLOAD):
@@ -247,8 +248,10 @@ assert not records.emit(sys.argv[2], 'gap', {})
                     'agent_run_id', 'boot_id', 'manifest_state', 'launcher_pid', 'launcher_start_ticks'})
                 self.assertFalse(launcher.admit_manifest(root, {**run,'agent_run_id':'two'}, reserve=True))
                 launcher.finish_manifest(root, run)
-                self.assertEqual(records.read_private(path), {field: run[field] for field in (
-                    'agent_run_id', 'boot_id', 'pid', 'start_ticks')})
+                expected = {field: run[field] for field in ('agent_run_id', 'boot_id', 'pid', 'start_ticks')}
+                expected.update(host_id=launcher.host_id(), scope_baselines=[{'body':{'host_id':launcher.host_id(), 'cpu_ns':42}}])
+                self.assertEqual(records.read_private(path), expected)
+                self.assertNotIn(b'private-', path.read_bytes())
                 self.assertEqual(launcher.environment(root, {**run, 'agent':'other'}, {})['SUBYARD_TASK_ID'], 'private-task')
                 self.assertTrue(launcher.admit_manifest(root, {**run,'agent_run_id':'two'}))
             args = types.SimpleNamespace(command=['/bin/true'], data_dir=str(root), agent='other', agent_version='fixture', scope_mode='require',

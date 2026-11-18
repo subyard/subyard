@@ -127,6 +127,7 @@ class ProcessTest(unittest.TestCase):
             with patch.object(processes.records, 'emit', side_effect=emit), patch.object(Path, 'rmdir') as remove:
                 sampler = processes.Sampler(root, run, root)
                 self.assertFalse(sampler.capture_baseline())
+                self.assertFalse(any(kind == 'run' for kind, _, _ in events))
                 self.assertEqual(len(run['scope_baselines']), 2)
                 self.assertFalse(sampler.poll())
                 remove.assert_not_called()

@@ -66,6 +66,10 @@ class Delivery(unittest.TestCase):
             (root/'.staging/notes').write_text('operator notes')
         self.installed.parent.chmod(0o755)
         state.chmod(0o700)
+        foreign = self.installed.parent/'.subyard-skill-staging'
+        foreign.write_text('operator staging file')
+        foreign.chmod(0o644)
+        inode = foreign.stat().st_ino
         command = ['apply', '--provider', self.args.provider, '--root', str(self.root),
                    '--home', str(self.home), '--uid', str(self.args.uid), '--gid', str(self.args.gid),
                    '--source', str(self.source)]
@@ -99,13 +103,16 @@ runpy.run_path(script, run_name='__main__')
         script = str(SOURCE/'deliver.py')
         result = subprocess.run([sys.executable, '-B', '-c', code, script, str(target), *command], timeout=5)
         self.assertEqual(result.returncode, -signal.SIGKILL)
-        unfinished = self.installed.parent/'.subyard-skill-staging'
+        unfinished, = self.installed.parent.glob('.subyard-skill-staging-*')
         self.assertEqual(unfinished.read_bytes(), (self.skill/'SKILL.md').read_bytes())
         self.assertFalse(target.exists())
         self.assertEqual(self.run_mode('check'), 10)
         subprocess.run([sys.executable, '-B', script, *command], check=True, timeout=5)
         self.assertEqual(target.read_bytes(), (self.skill/'SKILL.md').read_bytes())
-        self.assertFalse(unfinished.exists())
+        self.assertEqual(foreign.stat().st_ino, inode)
+        self.assertEqual(foreign.read_text(), 'operator staging file')
+        self.assertEqual(list(self.installed.parent.glob('.subyard-skill-staging-*')), [unfinished])
+        self.assertNotEqual(unfinished.stat().st_ino, target.stat().st_ino)
         for root in staging_roots:
             self.assertEqual((root/'.staging/notes').read_text(), 'operator notes')
         self.assertEqual(self.run_mode('check'), 0)

@@ -39,9 +39,9 @@ var (
 )
 
 type spoolAdvance struct {
-	id, origin, event, payload string
-	old, next                  int64
-	terminal                   bool
+	id        string
+	old, next int64
+	terminal  bool
 }
 
 const spoolSchema = `
@@ -49,21 +49,18 @@ CREATE TABLE IF NOT EXISTS spool_offsets(id TEXT PRIMARY KEY, offset INTEGER NOT
 CREATE TABLE IF NOT EXISTS spool_inputs(origin TEXT NOT NULL,event TEXT NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(origin,event));
 `
 
-func (a spoolAdvance) apply(tx *sql.Tx) (bool, error) {
+func (a spoolAdvance) apply(tx *sql.Tx) error {
 	if _, err := tx.Exec("INSERT INTO spool_offsets VALUES(?,0,0) ON CONFLICT DO NOTHING", a.id); err != nil {
-		return false, ErrStorage
+		return ErrStorage
 	}
 	res, err := tx.Exec("UPDATE spool_offsets SET offset=?,terminal=? WHERE id=? AND offset=?", a.next, a.terminal, a.id, a.old)
 	if err != nil {
-		return false, ErrStorage
+		return ErrStorage
 	}
 	if count, err := res.RowsAffected(); err != nil || count != 1 {
-		return false, ErrStorage
+		return ErrStorage
 	}
-	if a.payload == "" {
-		return false, nil
-	}
-	return registerInput(tx, a.origin, a.event, a.payload)
+	return nil
 }
 
 func registerInput(tx *sql.Tx, origin, event, input string) (bool, error) {
@@ -393,7 +390,7 @@ func (s *Store) drainSegment(ctx context.Context, f *os.File, name string, polic
 			case length > 0:
 				err = s.captureAt(ctx, []Envelope{s.spoolGap(id, a.next, "broker", "spool_torn_tail", 1, "", "")}, policy, &a)
 			default:
-				err = s.submit(ctx, nil, policy, false, &a)
+				err = s.submit(ctx, nil, false, &a)
 			}
 			if err != nil {
 				return err
@@ -449,12 +446,12 @@ func (s *Store) ingestFrame(ctx context.Context, a spoolAdvance, stream string, 
 	if stream != "broker" && bodyRun != "" && bodyRun != stream {
 		return errInvalidRecord
 	}
-	a.origin, a.event, a.payload = "producer:"+r.SourceID, r.EventID, r.inputID
 	if r.filtered {
 		if len(r.Body) != 0 || !r.hasSessionMetadata() {
 			return errInvalidRecord
 		}
-		return s.submit(ctx, nil, policy, false, &a)
+		e := Envelope{OriginID: "producer:" + r.SourceID, EventID: r.EventID, inputID: r.inputID}
+		return s.submit(ctx, []Envelope{e}, false, &a)
 	}
 	id := identity(func(value string) string {
 		if preparedID.MatchString(value) {
@@ -469,6 +466,7 @@ func (s *Store) ingestFrame(ctx context.Context, a spoolAdvance, stream string, 
 	if err != nil {
 		return err
 	}
+	e.inputID = r.inputID
 	return s.captureAt(ctx, []Envelope{e}, policy, &a)
 }
 

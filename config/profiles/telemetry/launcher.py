@@ -27,7 +27,7 @@ MAX_RUNS = 4096
 MAX_RUN_BYTES = 16*1024*1024
 MAX_RUN_PAYLOAD = 16384
 OBSERVER_FIELDS = (
-    'agent_run_id', 'boot_id', 'host_id', 'pid', 'start_ticks', 'shared',
+    'agent_run_id', 'boot_id', 'pid', 'start_ticks', 'shared',
     'cgroup', 'cgroup_identity', 'scope_root', 'scope_root_identity',
     'parent_scope_id', 'scope_start_time', 'scope_baselines',
 )
@@ -60,11 +60,12 @@ def admit_manifest(data_dir, run, reserve=False):
         identity = run['agent_run_id']
         if not records.IDENTITY.fullmatch(identity):
             raise ValueError('invalid run identity')
-        fields = ('agent_run_id', 'boot_id') if reserve else OBSERVER_FIELDS
-        value = {field: run[field] for field in fields if field in run}
         if reserve:
+            value = {field: run[field] for field in ('agent_run_id', 'boot_id') if field in run}
             value.update(manifest_state='reserved', launcher_pid=os.getpid(),
                          launcher_start_ticks=processes.start_ticks(os.getpid()))
+        else:
+            value = observer_manifest(run)
         size = len(records.compact_json(value))+1
         with manifest_lock(root):
             path = root/(identity+'.json')
@@ -105,7 +106,7 @@ def finish_manifest(data_dir, run):
         previous = records.read_private(path)
         if not isinstance(previous, dict) or previous.get('manifest_state') != 'reserved' or previous.get('launcher_pid') != os.getpid() or previous.get('launcher_start_ticks') != processes.start_ticks(os.getpid()):
             raise ValueError('run reservation identity')
-        value = {field: run[field] for field in OBSERVER_FIELDS if field in run}
+        value = observer_manifest(run)
         if len(records.compact_json(value))+1 > MAX_RUN_PAYLOAD:
             raise ValueError('run payload limit')
         records.atomic_json(path, value)
@@ -132,6 +133,15 @@ def host_id():
         return hashlib.sha256(Path('/etc/machine-id').read_bytes().strip()).hexdigest()
     except OSError:
         return 'boot-'+boot_id()
+
+
+def observer_manifest(run):
+    value = {field: run[field] for field in OBSERVER_FIELDS if field in run}
+    value['host_id'] = host_id()
+    if 'scope_baselines' in value:
+        value['scope_baselines'] = [{**entry, 'body': {**entry['body'], 'host_id': value['host_id']}}
+                                    for entry in value['scope_baselines']]
+    return value
 
 
 def context(args, environ):
@@ -518,7 +528,10 @@ def launch(args):
     if group:
         try:
             run['scope_start_time'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds')
-            processes.Sampler(data_dir, run).capture_baseline()
+            baseline = {**run, 'host_id': host_id()}
+            processes.Sampler(data_dir, baseline).capture_baseline()
+            if 'scope_baselines' in baseline:
+                run['scope_baselines'] = baseline['scope_baselines']
         except (OSError, ValueError, KeyError):
             records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'scope_baseline_unavailable', 'quality': 'partial'})
     env = environment(data_dir, run, os.environ)
@@ -589,10 +602,10 @@ def launch(args):
                 pid, write_fd = gated_child(command, env)
             except OSError:
                 return 127
+        os.write(write_fd, b'1')
         if registered:
             records.emit(data_dir, 'run', {'agent_run_id': run['agent_run_id'], 'state': 'running',
                          'scope_quality': 'managed' if group else 'partial'})
-        os.write(write_fd, b'1')
     except (OSError, ValueError, KeyError):
         if write_fd >= 0:
             os.close(write_fd)

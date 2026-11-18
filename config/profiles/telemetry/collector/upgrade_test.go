@@ -55,16 +55,11 @@ func TestReplayUsesAuthenticatedFingerprintAcrossPolicyChanges(t *testing.T) {
 	logs := plogotlp.NewExportRequest()
 	entry := logs.Logs().ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
 	entry.Attributes().PutStr("session.id", "fixture-session")
-	raw, err := logs.MarshalProto()
+	consumer, _, _, err := store.Consumers(DefaultPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
-	input, err := json.Marshal(Envelope{Schema: ExportSchema, OriginID: "foreign", EventID: "logs",
-		SourceID: "native-otlp", SourceVersion: "1", Kind: "otlp/logs", Encoding: "otlp/logs", Protobuf: raw})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = store.Replay(ctx, bytes.NewReader(input)); err != nil {
+	if err = consumer.ConsumeLogs(ctx, logs.Logs()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = store.db.Exec("UPDATE records SET received_time=?", unknownSourceTime); err != nil {
@@ -75,7 +70,7 @@ func TestReplayUsesAuthenticatedFingerprintAcrossPolicyChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	var original Envelope
-	if err = json.Unmarshal(local.Bytes(), &original); err != nil || !bytes.Contains(original.Protobuf, []byte("session.id")) {
+	if err = json.Unmarshal(local.Bytes(), &original); err != nil || !hex64.MatchString(original.InputProof) || !bytes.Contains(original.Protobuf, []byte("session.id")) {
 		t.Fatalf("fixture did not retain the optional attribute (%v)", err)
 	}
 	if err = store.prune(); err != nil {
@@ -89,6 +84,7 @@ func TestReplayUsesAuthenticatedFingerprintAcrossPolicyChanges(t *testing.T) {
 	if err = store.Replay(ctx, &local); err != nil {
 		t.Fatal(err)
 	}
+	var raw []byte
 	if err = store.db.QueryRow("SELECT protobuf FROM records WHERE kind='otlp/logs'").Scan(&raw); err != nil ||
 		bytes.Contains(raw, []byte("session.id")) {
 		t.Fatalf("retry altered the restored payload (%v)", err)

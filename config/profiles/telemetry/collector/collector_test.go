@@ -327,6 +327,20 @@ func TestReceiverOutageOnlyAppliesToOverlappingLocalRuns(t *testing.T) {
 	if err := store.db.QueryRow("SELECT count(*) FROM gaps").Scan(&count); err != nil || count != 3 {
 		t.Fatalf("unexpected extra outage gaps: %d (%v)", count, err)
 	}
+	refused := func(state, at string) Record {
+		r := record("run", map[string]any{"agent_run_id": "refused", "state": state, "start_time": endedDuring})
+		r.SourceTime = at
+		return r
+	}
+	if err := store.Ingest(ctx, []Record{refused("starting", endedDuring),
+		refused("resources_observing", "2026-01-03T00:00:01Z"),
+		refused("not_started", "2026-01-03T00:00:02Z")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow("SELECT count(*) FROM gaps WHERE agent_run_id=?", store.key.id("refused")).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("refused launch acquired an outage gap: %d (%v)", count, err)
+	}
+
 	exported.Reset()
 	if _, err = Export(ctx, store.db, &exported, cursor, 10); err != nil ||
 		bytes.Count(exported.Bytes(), []byte("possible_native_loss")) != 2 {

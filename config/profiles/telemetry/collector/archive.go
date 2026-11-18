@@ -173,14 +173,14 @@ func legacyRuns(dir string) ([]legacyRun, error) {
 			}
 			data, err := readLegacyFile(filepath.Join(root, entry.Name()), 16384)
 			if err != nil {
-				// The filename still identifies the run in the old store.
-				runs = append(runs, legacyRun{ID: id, unreadable: true})
-				continue
+				return nil, fmt.Errorf("read legacy run manifest: %w", err)
 			}
 			var run legacyRun
-			if json.Unmarshal(data, &run) == nil && run.ID == id {
-				runs = append(runs, run)
+			if json.Unmarshal(data, &run) != nil || run.ID != id {
+				// The filename still identifies the run in the old store.
+				run = legacyRun{ID: id, unreadable: true}
 			}
+			runs = append(runs, run)
 		}
 	}
 	return runs, nil
@@ -277,7 +277,7 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 		}
 		e := store.localRecord("gap", "legacy-cutover", "unreadable:"+event, c.Started, body)
 		e.PolicyVersion, e.ReceivedTime = PolicyVersion, c.Started
-		return store.putRecord(tx, e, policy)
+		return store.putRecord(tx, e)
 	}
 	boot, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	for _, run := range runs {
@@ -291,13 +291,17 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 			e := store.localRecord("run", "legacy-cutover", "registration:"+id, c.Started,
 				map[string]any{"agent_run_id": id, "state": "running", "start_time": c.Started})
 			e.PolicyVersion, e.ReceivedTime = PolicyVersion, c.Started
-			if err = store.putRecord(tx, e, policy); err != nil {
+			if err = store.putRecord(tx, e); err != nil {
 				return err
 			}
 		}
 	}
 	producer := "legacy-producer"
-	if data, err := readLegacyFile(filepath.Join(dir, "producer.json"), frameBytes); err == nil {
+	data, err := readLegacyFile(filepath.Join(dir, "producer.json"), frameBytes)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read legacy producer identity: %w", err)
+	}
+	if err == nil {
 		var meta struct {
 			Source string `json:"source_id"`
 		}
@@ -324,7 +328,7 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 		}
 		if e.Kind != "" {
 			e.ReceivedTime = c.Started
-			if err = store.putRecord(tx, e, policy); errors.Is(err, errEventCollision) {
+			if err = store.putRecord(tx, e); errors.Is(err, errEventCollision) {
 				return nil
 			}
 		}
@@ -369,10 +373,7 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 			continue
 		}
 		if err != nil {
-			if err := unreadable(marker.path, ""); err != nil {
-				return err
-			}
-			continue
+			return fmt.Errorf("read legacy coverage marker: %w", err)
 		}
 		var health struct {
 			ID    string `json:"event_id"`
@@ -389,6 +390,8 @@ func (c cutover) importLegacy(tx *sql.Tx, dir string, key identityKey, policy Po
 				}}); err != nil {
 				return err
 			}
+		} else if err = unreadable(marker.path, ""); err != nil {
+			return err
 		}
 	}
 	return nil

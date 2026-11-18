@@ -55,6 +55,35 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual((receipt['device'], receipt['inode']), (original.st_dev, original.st_ino))
             self.assertNotEqual(database.stat().st_ino, receipt['inode'])
 
+    def test_existing_archive_inspection_reads_the_validated_inode(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            runtime = object.__new__(guest.Runtime)
+            runtime.data, runtime.uid, runtime.gid = Path(name), os.getuid(), os.getgid()
+            active = runtime.data/'telemetry.sqlite'
+            active.write_bytes(bytes(60)+(4).to_bytes(4, 'big'))
+            active.chmod(0o600)
+            archive = runtime.data/'archive'
+            archive.mkdir()
+            archive.chmod(0o700)
+            database = archive/'telemetry.sqlite'
+            with closing(sqlite3.connect(database)) as db:
+                db.execute('CREATE TABLE metadata(key TEXT, value TEXT)')
+                db.execute("INSERT INTO metadata VALUES('origin_id','fixture-origin')")
+                db.commit()
+            database.chmod(0o400)
+            copy = shutil.copyfileobj
+
+            def replace_path(source, target):
+                database.unlink()
+                database.write_bytes(b'not a database')
+                database.chmod(0o400)
+                copy(source, target)
+
+            with patch.object(guest.shutil, 'copyfileobj', side_effect=replace_path):
+                self.assertTrue(runtime.cutover_receipt())
+            receipt = json.loads((runtime.data/guest.CUTOVER).read_bytes())
+            self.assertEqual(receipt['archive'], 'archive-2')
+
     def test_installed_cutover_preserves_workloads_and_resumes(self):
         profile = Path(guest.__file__).parent
         with tempfile.TemporaryDirectory(dir='/tmp') as name, ExitStack() as children:
@@ -104,6 +133,7 @@ import contextlib, json, os, pathlib, sqlite3, sys
 root = pathlib.Path(sys.argv[1])
 (root/'spool-policy.json').unlink()
 (root/'runs').mkdir(mode=0o700)
+(root/'runs-v4').mkdir(mode=0o700)
 (root/'outbox').mkdir(mode=0o700)
 (root/'outbox/.lock').touch(mode=0o600)
 (root/'manager.lock').touch(mode=0o600)
@@ -114,6 +144,8 @@ with contextlib.closing(sqlite3.connect(root/'telemetry.sqlite')) as db:
     db.commit()
 for path, value in (
     ('runs/legacy-run.json', dict(agent_run_id='legacy-run', pid=2147483647,
+        boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip())),
+    ('runs-v4/recoverable-run.json', dict(agent_run_id='recoverable-run', pid=2147483646,
         boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip())),
     ('runs/health', dict(event_id='legacy-coverage', count=3,
          first_time='2026-01-01T01:00:00Z', last_time='2026-01-01T02:00:00Z')),
@@ -130,8 +162,10 @@ for path, value in (
 for path in ('runs/unreadable-run.json', 'runs-v4/observer-health'):
     target = root/path
     target.parent.mkdir(mode=0o700, exist_ok=True)
-    target.touch()
-    target.chmod(0)
+    target.write_text('{')
+    target.chmod(0o600)
+for path in ('runs-v4/recoverable-run.json', 'producer-health.json'):
+    (root/path).chmod(0)
 '''
             subprocess.run(dev(sys.executable, '-Bc', initialization, data), check=True, timeout=5)
             children.callback(lambda: runtime.as_developer(lambda: ((data/'runs').chmod(0o700), (data/'runs-v4').chmod(0o700), (data/'outbox').chmod(0o700))))
@@ -228,6 +262,12 @@ for _ in range(60):
                     self.assertEqual(invoked, [])
                     (collision/'foreign').unlink()
                     collision.rmdir()
+                for path in ('runs-v4/recoverable-run.json', 'producer-health.json'):
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        runtime.apply()
+                    self.assertTrue((data/guest.CUTOVER).exists())
+                    self.assertFalse((data/'spool-policy.json').exists())
+                    (data/path).chmod(0o600)
                 with patch.object(runtime, 'prepare_store', side_effect=interrupt_after_prepare):
                     with self.assertRaisesRegex(RuntimeError, 'after store preparation'):
                         runtime.apply()
@@ -281,7 +321,9 @@ assert launcher.launch(args) == 0
                     f"SELECT {reason},json_extract(body,'$.missing'),json_extract(body,'$.coverage_start'),"
                     "json_extract(body,'$.coverage_end') FROM gaps")}
                 self.assertEqual(health['run_manifest_capacity'], (3, '2026-01-01T01:00:00.000000000Z', '2026-01-01T02:00:00.000000000Z'))
-                self.assertEqual(health['producer_outbox_capacity'][0], 2)
+                self.assertEqual(health['producer_outbox_capacity'], (2, '2026-01-02T01:00:00.000000000Z', '2026-01-02T02:00:00.000000000Z'))
+                self.assertIsNotNone(db.execute("SELECT 1 FROM runs WHERE agent_run_id=?",
+                                                 (records.opaque_id(key, 'recoverable-run'),)).fetchone())
                 self.assertIn('source_offline', health)
                 unreadable = db.execute(f"SELECT agent_run_id FROM gaps WHERE {reason}='legacy_history_unreadable'").fetchall()
                 self.assertCountEqual(unreadable, [('',), (records.opaque_id(key, 'unreadable-run'),)])
@@ -294,15 +336,22 @@ assert launcher.launch(args) == 0
                                       [('legacy-run', 'interrupted_by_upgrade'), ('unreadable-run', 'interrupted_by_upgrade')])
             database = data/'telemetry.sqlite'
             active_inode = database.stat().st_ino
-            (data/'spool-policy.json').unlink()
+            snapshot = data/'spool-policy.json'
+            original = json.loads(snapshot.read_bytes())
             invoked.clear()
             with patch.object(guest, 'systemctl', side_effect=systemctl), patch.object(guest.native, 'reconcile', return_value=True):
-                observed = runtime.observe()
-                self.assertEqual(observed['state'], 'stale')
-                self.assertIn({'parameter': 'telemetry.spool-policy', 'installed': 'missing', 'desired': 'present'},
-                              observed['diagnostics'])
-                runtime.apply()
-                self.assertEqual(runtime.observe()['state'], 'current')
+                for status, value in (('missing', None), ('invalid', {}), ('invalid', {**original, 'signature': '0'*64})):
+                    if value is None:
+                        snapshot.unlink()
+                    else:
+                        runtime.as_developer(lambda: records.atomic_json(snapshot, value))
+                    observed = runtime.observe()
+                    self.assertEqual(observed['state'], 'stale')
+                    self.assertIn({'parameter': 'telemetry.spool-policy', 'installed': status, 'desired': 'present'},
+                                  observed['diagnostics'])
+                    runtime.apply()
+                    self.assertEqual(runtime.observe()['state'], 'current')
+                    runtime.as_developer(lambda: self.assertTrue(records.emit(data, 'gap', {})))
             self.assertEqual(database.stat().st_ino, active_inode)
             self.assertTrue((data/'spool-policy.json').is_file())
             self.assertFalse((data/guest.CUTOVER).exists())
@@ -567,7 +616,8 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                     for unit in args[1:]:states[unit]['ActiveState']='active' if args[0]=='start' else 'inactive'
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
-                 patch.object(guest.Runtime, 'prepare_store', side_effect=lambda: (root/'data/spool-policy.json').touch()), \
+                 patch.object(guest.Runtime, 'prepare_store'), \
+                 patch.object(guest.Runtime, 'policy_status', return_value='present'), \
                  patch.object(guest.Runtime, 'skill_delivery', side_effect=skill_delivery), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
                 runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')

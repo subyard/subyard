@@ -23,6 +23,11 @@ spec = importlib.util.spec_from_file_location('native_signals_fixture', Path(__f
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import launcher
+import records
+from spool_fixture import prepare
+
 
 class NativeSignalsTest(unittest.TestCase):
     def test_fixture_thread_requests_and_checks_effective_permissions(self):
@@ -39,6 +44,17 @@ class NativeSignalsTest(unittest.TestCase):
         sandbox = 'readOnly'
         with self.assertRaisesRegex(AssertionError, 'fixture tool permissions were not applied'):
             app.start_fixture_thread(Path('/tmp/fixture'))
+
+    def register_run(self, data, run_id):
+        prepare(data)
+        run = dict(agent_run_id=run_id, agent='codex', host_id='private-fixture', boot_id=launcher.boot_id())
+        self.assertTrue(launcher.admit_manifest(data, run, reserve=True))
+        launcher.finish_manifest(data, run)
+        self.assertNotIn('agent', records.read_private(data/'runs-v5'/(run_id+'.json')))
+        with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+            db.execute('CREATE TABLE runs(agent_run_id TEXT PRIMARY KEY, body TEXT)')
+            db.execute('INSERT INTO runs VALUES(?,?)', (fixture.stored_id(data, run_id), json.dumps(dict(agent='codex'))))
+            db.commit()
 
     def test_missing_bubblewrap_tool_error_fails_before_the_completion_deadline(self):
         provider = fixture.load(Path(__file__).parents[2]/'orca/tests/e2e/codex-permissions.py', 'codex_missing_sandbox_fixture')
@@ -95,8 +111,7 @@ class NativeSignalsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
-            (root/'runs-v5').mkdir(mode=0o700)
-            (root/'runs-v5/local.json').write_text(json.dumps(dict(agent='codex', agent_run_id='local')))
+            self.register_run(root, 'local')
             before = set(root.rglob('*'))
             command = fixture.native_context_command(root, root)
             completed = subprocess.run(shlex.split(command), capture_output=True, timeout=5,
@@ -262,8 +277,7 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
             data, state, home = root/'data', root/'state', root/'home'
-            (data/'runs-v5').mkdir(parents=True)
-            (data/'runs-v5/native-run.json').write_text(json.dumps(dict(agent='codex', agent_run_id='native-run')))
+            self.register_run(data, 'native-run')
             (state/'yards/test-yard').mkdir(parents=True)
             for path in (state/'id_ed25519', state/'id_ed25519.pub', state/'yards/test-yard/client-id'):
                 path.write_text('PRIVATE_CONTENT')
