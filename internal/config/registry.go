@@ -67,13 +67,12 @@ func discoverYardNames(configDir, configHome string, collect bool) ([]string, er
 	}
 	sort.Strings(discovered)
 	names := []string{"default"}
+	_, defaultErr := LocalYardSettingsFile(filepath.Join(configHome, "yards"), "default")
+	refusals = append(refusals, defaultErr)
 	for _, name := range discovered {
 		if _, err := FindYardRegistrationFile(configDir, configHome, name); err != nil {
 			if errors.Is(err, ErrUnknownYard) {
 				continue
-			}
-			if !collect {
-				return nil, err
 			}
 			refusals = append(refusals, err)
 			continue
@@ -91,6 +90,70 @@ func YardFileCandidates(configDir, configHome, name string) []string {
 	}
 }
 
+// SettingsFileConflict names the two files competing for a single local scope.
+type SettingsFileConflict struct {
+	First, Second           string
+	firstLabel, secondLabel string
+}
+
+func (err *SettingsFileConflict) Error() string {
+	return fmt.Sprintf("both %s and %s exist. Merge their settings into one file and remove the other", err.firstLabel, err.secondLabel)
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, sourceAccessError(path, "scalar settings", err)
+	}
+	return true, nil
+}
+
+func selectSettingsFile(first, second, firstLabel, secondLabel string, exists func(string) (bool, error)) (string, error) {
+	firstExists, firstErr := exists(first)
+	secondExists, secondErr := exists(second)
+	if err := domain.CollectRefusals(firstErr, secondErr); err != nil {
+		return "", err
+	}
+	if firstExists && secondExists {
+		return "", &SettingsFileConflict{first, second, firstLabel, secondLabel}
+	}
+	if secondExists {
+		return second, nil
+	}
+	return first, nil
+}
+
+// LocalHostSettingsFile returns the existing host source or the path to create.
+func LocalHostSettingsFile(configDir, configHome string) (string, error) {
+	return localHostSettingsFile(configDir, configHome, pathExists)
+}
+
+func localHostSettingsFile(configDir, configHome string, exists func(string) (bool, error)) (string, error) {
+	local := filepath.Join(configHome, "config.env")
+	if configDir == "" {
+		return local, nil
+	}
+	private := filepath.Join(configDir, "..", "private", "config.env")
+	if private == local {
+		return local, nil
+	}
+	return selectSettingsFile(local, private, "config.env", "private/config.env", exists)
+}
+
+// LocalYardSettingsFile returns the existing config-home source or the path to
+// create. A prospective caller can supply its view of file existence.
+func LocalYardSettingsFile(yardsDir, name string, readers ...func(string) (bool, error)) (string, error) {
+	exists := pathExists
+	if len(readers) > 0 {
+		exists = readers[0]
+	}
+	return selectSettingsFile(filepath.Join(yardsDir, name, "config.env"), filepath.Join(yardsDir, name+".env"),
+		"yards/"+name+"/config.env", "yards/"+name+".env", exists)
+}
+
 // FindYardRegistrationFile returns the highest-precedence regular,
 // non-symlink definition for a named yard.
 func FindYardRegistrationFile(configDir, configHome, name string) (string, error) {
@@ -101,11 +164,29 @@ func FindYardRegistrationFile(configDir, configHome, name string) (string, error
 	if err != nil {
 		return "", err
 	}
-	if reset {
-		return findFirstYardFile([]string{filepath.Join(configHome, "yards", name, "config.env"), filepath.Join(configHome, "yards", name+".env")}, name)
+	local, err := LocalYardSettingsFile(filepath.Join(configHome, "yards"), name)
+	if err != nil {
+		return "", err
 	}
-	candidates := append(YardFileCandidates(configDir, configHome, name), filepath.Join(configHome, GitSettingsRelativePath, "yards", name, "config.env"))
-	return findFirstYardFile(candidates, name)
+	return findFirstYardFile(yardRegistrationCandidates(configDir, configHome, name, local, reset), name)
+}
+
+func yardRegistrationCandidates(configDir, configHome, name, local string, reset bool) []string {
+	candidates := []string{local}
+	if !reset {
+		if configDir != "" {
+			private := filepath.Join(configDir, "..", "private", "yards", name+".env")
+			// Preserve the repository fallback's precedence between the
+			// supported config-home layouts.
+			if filepath.Base(local) == name+".env" {
+				candidates = []string{private, local}
+			} else {
+				candidates = append(candidates, private)
+			}
+		}
+		candidates = append(candidates, filepath.Join(configHome, GitSettingsRelativePath, "yards", name, "config.env"))
+	}
+	return candidates
 }
 
 func findFirstYardFile(candidates []string, name string) (string, error) {

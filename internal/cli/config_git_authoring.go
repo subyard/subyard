@@ -34,11 +34,7 @@ func (cli *CLI) exportSelectedConfig(loaded config.Loaded, candidate, hostID str
 		if err != nil {
 			return nil, err
 		}
-		if request.action == "set" {
-			content, err = cli.catalog.EditPersistentAssignmentsContent(path, snapshot.Content, configSetAssignments(requests))
-		} else {
-			content, err = cli.catalog.EditPersistentAssignmentContent(path, snapshot.Content, request.name, nil)
-		}
+		content, err = cli.editGitScalars(path, snapshot.Content, requests)
 		if err != nil || bytes.Equal(content, snapshot.Content) {
 			return nil, err
 		}
@@ -87,4 +83,11 @@ func (cli *CLI) exportSelectedConfig(loaded config.Loaded, candidate, hostID str
 		paths[index] = filepath.ToSlash(relative)
 	}
 	return paths, nil
+}
+
+func (cli *CLI) editGitScalars(path string, content []byte, requests []configAuthoringRequest) ([]byte, error) {
+	if requests[0].action == "unset" {
+		return cli.catalog.EditPersistentAssignmentContent(path, content, requests[0].name, nil)
+	}
+	return cli.catalog.EditPersistentAssignmentsContent(path, content, configSetAssignments(requests))
 }

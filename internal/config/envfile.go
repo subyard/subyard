@@ -96,7 +96,7 @@ func applyEnvReaderObserved(reader io.Reader, source string, values environment,
 func applyShippedEnv(reader io.Reader, source string, values environment, observer assignmentObserver, policy discardPolicy) error {
 	discardRetiredSettings(values)
 
-	return scanEnvRecords(reader, source, "scalar settings", func(record envRecord) error {
+	return scanEnvRecords(reader, source, "scalar settings", false, func(record envRecord) error {
 		if record.text == "" {
 			return nil
 		}
@@ -118,7 +118,7 @@ var errSettingExpansion = errors.New("settings files accept only literal values.
 
 func scanLiteralEnv(reader io.Reader, path, role string, visit func(record envRecord, name, value string)) error {
 	var refusals []error
-	err := scanEnvRecords(reader, path, role, func(record envRecord) error {
+	err := scanEnvRecords(reader, path, role, true, func(record envRecord) error {
 		if record.text == "" {
 			visit(record, "", "")
 			return nil
@@ -128,8 +128,11 @@ func scanLiteralEnv(reader io.Reader, path, role string, visit func(record envRe
 		var err error
 		if expand {
 			value, err = expandValue(value, nil, nil, discardPolicy{literal: true})
-		} else if strings.ContainsRune(strings.ReplaceAll(raw[1:len(raw)-1], escapedEnvApostrophe, ""), '\'') {
-			err = sourceError("", 0, "", role, "invalid single-quoted value. Replace it with one literal value", nil)
+		} else {
+			value = strings.ReplaceAll(value, escapedEnvApostrophe, "'")
+			if strings.ContainsRune(strings.ReplaceAll(raw[1:len(raw)-1], escapedEnvApostrophe, ""), '\'') {
+				err = sourceError("", 0, "", role, "invalid single-quoted value. Replace it with one literal value", nil)
+			}
 		}
 		if err == nil {
 			switch {
@@ -188,18 +191,12 @@ func applyLiteralAssignment(name, value string, line int, values environment, ob
 // scanEnvRecords preserves raw bytes for edits and supplies the same
 // evaluation text and line numbers to each consumer. Blank and comment lines
 // outside an assignment have empty evaluation text.
-func scanEnvRecords(reader io.Reader, source, purpose string, visit func(envRecord) error) error {
+func scanEnvRecords(reader io.Reader, source, purpose string, preserveEndings bool, visit func(envRecord) error) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	scanner.Split(func(data []byte, atEOF bool) (int, []byte, error) {
-		if end := bytes.IndexByte(data, '\n'); end >= 0 {
-			return end + 1, data[:end+1], nil
-		}
-		if atEOF && len(data) != 0 {
-			return len(data), data, nil
-		}
-		return 0, nil, nil
-	})
+	if preserveEndings {
+		scanner.Split(scanEnvLine)
+	}
 	var raw strings.Builder
 	var quote byte
 	lineNumber, recordLine := 0, 0
@@ -216,6 +213,8 @@ func scanEnvRecords(reader io.Reader, source, purpose string, visit func(envReco
 				continue
 			}
 			recordLine = lineNumber
+		} else if !preserveEndings {
+			raw.WriteByte('\n')
 		}
 		raw.WriteString(line)
 		quote = scanQuote(body, quote)
@@ -235,6 +234,16 @@ func scanEnvRecords(reader io.Reader, source, purpose string, visit func(envReco
 		return sourceError(source, recordLine, recordSettingKey(raw.String()), purpose, "unterminated quoted assignment", nil)
 	}
 	return nil
+}
+
+func scanEnvLine(data []byte, atEOF bool) (int, []byte, error) {
+	if end := bytes.IndexByte(data, '\n'); end >= 0 {
+		return end + 1, data[:end+1], nil
+	}
+	if atEOF && len(data) != 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 func scanQuote(line string, quote byte) byte {
@@ -319,7 +328,7 @@ func decodeValue(value string) (string, bool) {
 		return value, true
 	}
 	if value[0] == '\'' && value[len(value)-1] == '\'' {
-		return strings.ReplaceAll(value[1:len(value)-1], escapedEnvApostrophe, "'"), false
+		return value[1 : len(value)-1], false
 	}
 	if value[0] == '"' && value[len(value)-1] == '"' {
 		return value[1 : len(value)-1], true

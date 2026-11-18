@@ -271,6 +271,21 @@ func (cli *CLI) prepareConfigSyncPush(
 		prepared.cleanup(cli, ctx)
 		return nil, config.ErrLegacyGitSettingsMigration
 	}
+	if scalarEdit {
+		target := "config.env"
+		switch request.authoring[0].scope {
+		case config.ScopeShared:
+			target = "overrides/shared/config.env"
+		case config.ScopeYard:
+			target = filepath.ToSlash(filepath.Join("yards", loaded.Context.YardName, "config.env"))
+		}
+		if err := prepared.preview.CheckScalarPublication(target, func(path string, content []byte) ([]byte, error) {
+			return cli.editGitScalars(path, content, request.authoring)
+		}); err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, err
+		}
+	}
 	prepared.repairPermissions, err = clonedConfigSourcePermissions(record.Checkout, false)
 	if err != nil {
 		prepared.cleanup(cli, ctx)

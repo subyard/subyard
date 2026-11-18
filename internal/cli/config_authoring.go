@@ -406,37 +406,39 @@ func configScalarAuthoringPath(
 			loaded.Context.Paths.ConfigHome, "overrides", "shared", "config.env",
 		), nil
 	case config.ScopeHost:
-		return filepath.Join(loaded.Context.Paths.ConfigHome, "config.env"), nil
+		paths := loaded.Context.Paths
+		return config.LocalHostSettingsFile(paths.ConfigDir, paths.ConfigHome)
 	case config.ScopeYard:
 		name := loaded.Context.YardName
 		if name == "" {
 			name = "default"
 		}
 		paths := loaded.Context.Paths
-		nested := filepath.Join(paths.ConfigHome, "yards", name, "config.env")
-		if name == "default" {
-			return nested, nil
+		local, err := config.LocalYardSettingsFile(filepath.Join(paths.ConfigHome, "yards"), name)
+		if err != nil || name == "default" {
+			return local, err
 		}
-		flat := filepath.Join(paths.ConfigHome, "yards", name+".env")
 		registration, err := config.FindYardRegistrationFile(paths.ConfigDir, paths.ConfigHome, name)
 		if err != nil && !errors.Is(err, config.ErrUnknownYard) {
 			return "", err
 		}
 		switch registration {
-		case nested, flat:
-			return registration, nil
 		case "", filepath.Join(paths.ConfigHome, config.GitSettingsRelativePath, "yards", name, "config.env"):
-			// Preserve a flat file that lookup skipped because it is unsafe.
-			if _, err := os.Lstat(flat); !errors.Is(err, os.ErrNotExist) {
-				return flat, err
-			}
-			return nested, nil
+			return local, nil
 		default:
-			return "", configPublicRefusal("the yard uses a private registration outside the configuration root. Edit that registration directly")
+			return registration, nil
 		}
 	default:
 		return "", errors.New("unsupported persistent scope")
 	}
+}
+
+func configScalarAuthoringRoot(loaded config.Loaded, path string) string {
+	paths := loaded.Context.Paths
+	if relative, err := filepath.Rel(paths.ConfigHome, path); err == nil && filepath.IsLocal(relative) {
+		return paths.ConfigHome
+	}
+	return filepath.Join(paths.ConfigDir, "..", "private")
 }
 
 func (cli *CLI) configFileAuthoringPath(

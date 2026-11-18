@@ -97,6 +97,12 @@ Each yard has its own settings, including `default`:
 SSH_PORT=2222
 ```
 
+Each local scope has one settings file. An existing repository `private/config.env`
+can supply host settings, and an existing flat `yards/NAME.env` can supply yard
+settings. If both paths for either scope exist, merge their settings into one
+file and remove the other before loading configuration. Scalar edits use the
+existing file. Unsetting its final assignment leaves the file in place.
+
 Scalar precedence is:
 
 ```text
@@ -129,14 +135,14 @@ can now change its values.
 profile's own `profile.conf` declares them, and operator values never reach its evaluation:
 select the profile instead. `config set` refuses to assign them. The loader ignores a value
 already in a host, shared, yard or Git settings file, or in the command environment, as it
-ignores retired settings, and no operation refuses because of it. `config show`, `status`,
+ignores retired settings. The literal-value rule still applies to assignments in settings files.
+`config show`, `status`,
 `yard update --check` and the `init` plan report each non-empty one as configuration state, not
 as a warning, with its file and line and its removal:
 `yard -Y NAME config unset NAME --scope SCOPE --local` (or `--git`) when that command writes the
-file, otherwise the line to remove from that file, such as a flat `yards/NAME.env` registration.
-A default of the setting inside another assignment, such as
-`LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"`, has no effect and is not reported; a required check such
-as `${YARD_DEVICES:?}` is ignored as well. The JSON report of `update --check` carries
+file, otherwise the line to remove from that file.
+Expressions such as `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"` or `${YARD_DEVICES:?}` cause a read
+error under the literal-value rule. The JSON report of `update --check` carries
 them in its `configuration` array. If such a value supplied a device, the `init` plan names each
 device that the extras stage now detaches; while the yard's instance cannot be read, it states that
 any attached `yx-*` device no selected profile requests is detached. A VM yard does not apply a
@@ -1369,6 +1375,8 @@ or creates a commit. Its optional `-m`/`--message` argument remains accepted for
 Use typed writers with `--git` to create and push a setting change. Dirty, conflicted, detached,
 upstream-less or diverged checkouts fail closed; Subyard does not stash, merge, rebase, reset or
 resolve conflicts.
+Git scalar edits require the cache to match the source outside the selected edit.
+Run `yard config sync pull` to reconcile any other differences before retrying the edit.
 
 `sync pull`, `sync push` and typed writers with `--git` fetch the upstream once to plan. A change
 fetches it once more after confirmation, before its first write, and fails if the upstream moved;

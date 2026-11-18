@@ -118,21 +118,9 @@ func (transition *V2Transition) loadSSHPortYard(yard string, files *config.Prosp
 }
 
 func (transition *V2Transition) localSSHPortSnapshot(yard string, view V2SettingsSnapshotView, loaded config.Loaded) (config.PersistentFileSnapshot, string, Fingerprint, error) {
-	path := filepath.Join(transition.options.ConfigHome, "yards", yard, "config.env")
-	expected, err := view.ReadSnapshot(path)
+	expected, path, err := readLocalYardSettings(transition.options.ConfigHome, yard, view)
 	if err != nil {
 		return expected, path, "", err
-	}
-	// The loader has never read a flat file for the default yard.
-	if yard != "default" {
-		legacy := filepath.Join(transition.options.ConfigHome, "yards", yard+".env")
-		flat, err := view.ReadSnapshot(legacy)
-		if err != nil || expected.Exists && flat.Exists {
-			return expected, path, "", errors.New("SSH port migration requires unambiguous local yard settings")
-		}
-		if flat.Exists {
-			expected, path = flat, legacy
-		}
 	}
 	inputs := map[string]Fingerprint{}
 	for _, layer := range loaded.ConfigurationLayers {

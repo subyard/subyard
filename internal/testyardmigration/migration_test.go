@@ -200,13 +200,15 @@ func TestPrepareProspectiveRegistrationUsesPostSettingsContent(t *testing.T) {
 	write(t, filepath.Join(root, "incus-instance-state"), "STOPPED\n")
 	desired := []byte("YARD_TEMPLATE='test-vms'\n")
 
-	prepared, err := PrepareProspective(context.Background(), Options{
+	options := Options{
 		Executable: fakeExecutable(t, root), Incus: incus,
 		ConfigHome: configHome, DataHome: filepath.Join(root, "data"),
 		Environment: os.Environ(),
-	}, func(string) (config.PersistentFileSnapshot, error) {
+	}
+	readSnapshot := func(string) (config.PersistentFileSnapshot, error) {
 		return config.PersistentFileSnapshot{Exists: true, Content: desired}, nil
-	})
+	}
+	prepared, err := PrepareProspective(context.Background(), options, readSnapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,6 +219,13 @@ func TestPrepareProspectiveRegistrationUsesPostSettingsContent(t *testing.T) {
 	}
 	if actual := read(t, registrationPath); actual != original {
 		t.Fatalf("prospective inspection changed registration to %q", actual)
+	}
+	desired = []byte("YARD_TEMPLATE=test-vms\nGIT_USER_EMAIL=$GIT_USER_NAME\n")
+	_, err = PrepareProspective(context.Background(), options, readSnapshot)
+	var source *config.SourceError
+	if !errors.As(err, &source) || source.Path != registrationPath || source.Line != 2 || source.Key != "GIT_USER_EMAIL" ||
+		!strings.Contains(err.Error(), "only literal values") {
+		t.Fatalf("prospective expansion was not refused: %v", err)
 	}
 }
 

@@ -133,7 +133,7 @@ func Load(options LoadOptions) (Loaded, error) {
 		EnvironmentProfiles:   tracker.environmentProfiles,
 		assetValidationInputs: tracker.assetValidationInputs,
 		ProspectiveFiles:      options.ProspectiveFiles,
-		ignored:               tracker.ignoredAssignments(ctx.YardName, ctx.Paths.ConfigHome),
+		ignored:               tracker.ignoredAssignments(ctx.YardName, ctx.Paths.ConfigDir, ctx.Paths.ConfigHome),
 	}, nil
 }
 
@@ -291,41 +291,26 @@ func load(
 	gitYard := filepath.Join(gitRoot, "yards", yardName, "config.env")
 	localShared := filepath.Join(configHome, "overrides", "shared", "config.env")
 	localHost := filepath.Join(configHome, "config.env")
-	localYard := filepath.Join(configHome, "yards", yardName, "config.env")
+	host, hostErr := localHostSettingsFile(configDir, configHome, tracker.settingsPathExists)
+	if !options.DisablePrivate {
+		localHost = host
+	}
+	localYard, yardErr := LocalYardSettingsFile(filepath.Join(configHome, "yards"), yardName, tracker.settingsPathExists)
 	if options.LayerPaths != nil {
 		gitShared, gitHost, gitYard = options.LayerPaths.GitSharedSettings, options.LayerPaths.GitHostSettings, options.LayerPaths.GitYardSettings[yardName]
 		localShared, localHost, localYard = options.LayerPaths.SharedSettings, options.LayerPaths.HostSettings, options.LayerPaths.YardSettings[yardName]
-	} else {
-		hostExists, err := tracker.fileExists(localHost)
-		if err != nil {
-			return domain.Context{}, nil, err
+	} else if yardName != "default" && options.YardSettingsFile == "" && yardErr == nil {
+		if len(options.YardDirs) != 0 {
+			localYard, yardErr = findYardFileAt(root, yardName, configHome, options.YardDirs)
+		} else {
+			localYard, yardErr = tracker.findYardFile(yardRegistrationCandidates(configDir, configHome, yardName, localYard, resetFallback), yardName)
 		}
-		if !hostExists && !options.DisablePrivate {
-			privateConfig := filepath.Join(configDir, "..", "private", "config.env")
-			if pathPresent(privateConfig) {
-				localHost = privateConfig
-			}
+		if (errors.Is(yardErr, ErrUnknownYard) && options.AllowResetYard && resetFallback) || localYard == gitYard {
+			localYard, yardErr = "", nil
 		}
-		if yardName != "default" && options.YardSettingsFile == "" {
-			if (len(options.FileOverrides) != 0 || options.ProspectiveFiles != nil || tracker.batch != nil) && len(options.YardDirs) == 0 {
-				candidates := append(YardFileCandidates(configDir, configHome, yardName), gitYard)
-				if resetFallback {
-					candidates = []string{localYard, filepath.Join(configHome, "yards", yardName+".env")}
-				}
-				localYard, err = tracker.findYardFile(candidates, yardName)
-			} else {
-				localYard, err = findYardFile(root, yardName, values, options.YardDirs)
-			}
-			if errors.Is(err, ErrUnknownYard) && options.AllowResetYard && resetFallback {
-				localYard, err = "", nil
-			}
-			if err != nil {
-				return domain.Context{}, nil, err
-			}
-			if localYard == gitYard {
-				localYard = ""
-			}
-		}
+	}
+	if err := domain.CollectRefusals(hostErr, yardErr); err != nil {
+		return domain.Context{}, nil, err
 	}
 	if options.YardSettingsFile != "" && yardName != "default" {
 		localYard = options.YardSettingsFile
@@ -1381,25 +1366,17 @@ func FindYardSettingsFile(root, name, configHome string) (string, error) {
 	return FindYardRegistrationFile(filepath.Join(root, "config"), configHome, name)
 }
 
-func findYardFile(root, name string, values environment, explicit []string) (string, error) {
-	if len(explicit) == 0 {
-		return FindYardRegistrationFile(
-			values["SUBYARD_CONFIG_DIR"], values["SUBYARD_CONFIG_HOME"], name,
-		)
-	}
-	return findYardFileAt(root, name, values["SUBYARD_CONFIG_HOME"], explicit)
-}
-
 func findYardFileAt(root, name, configHome string, explicit []string) (string, error) {
 	if len(explicit) == 0 {
 		return FindYardRegistrationFile(filepath.Join(root, "config"), configHome, name)
 	}
 	var candidates []string
 	for _, directory := range explicit {
-		candidates = append(candidates,
-			filepath.Join(directory, name, "config.env"),
-			filepath.Join(directory, name+".env"),
-		)
+		path, err := LocalYardSettingsFile(directory, name)
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, path)
 	}
 	return findFirstYardFile(candidates, name)
 }

@@ -120,6 +120,34 @@ func TestConfigGitFileAuthoringKeepsLocalFileAndCachesFallback(t *testing.T) {
 	}
 }
 
+func TestConfigGitScalarAuthoringRefusesUnrelatedCacheChanges(t *testing.T) {
+	for _, scope := range []string{"shared", "host"} {
+		t.Run(scope, func(t *testing.T) {
+			f := newConfigGitAuthoringFixture(t)
+			checkout := filepath.Join(f.home, ".local", "share", "subyard-config")
+			writeConfigCommandFile(t, filepath.Join(checkout, "hosts/owner-a/config.env"), "# Preserve source records\nDEV_UID=2298\nDEV_SUDO=0\n")
+			commitConfigSource(t, checkout, "change host UID")
+			runConfigSyncGit(t, checkout, "push", "-q")
+			before := configSourceGitOutput(t, f.remote, "rev-parse", "HEAD")
+			arguments := []string{"config", "set", "GIT_USER_NAME", "Jane", "--scope", scope, "--git", "--yes"}
+			f.run(1, arguments...)
+			if !strings.Contains(f.stderr.String(), "outside this scalar edit") {
+				t.Fatalf("stale-cache diagnostic: %s", f.stderr.String())
+			}
+			f.assertSetting("DEV_UID", "2297")
+			f.assertSetting("GIT_USER_NAME", "")
+			if after := configSourceGitOutput(t, f.remote, "rev-parse", "HEAD"); after != before ||
+				configSourceGitOutput(t, checkout, "rev-parse", "HEAD") != before {
+				t.Fatal("refused edit advanced a Git ref")
+			}
+			f.run(0, "config", "sync", "pull", "--yes")
+			f.run(0, arguments...)
+			f.assertSetting("DEV_UID", "2298")
+			f.assertSetting("GIT_USER_NAME", "Jane")
+		})
+	}
+}
+
 func TestConfigGitAuthoringRetriesRejectedPushWithoutDuplicateCommit(t *testing.T) {
 	f := newConfigGitAuthoringFixture(t)
 	hook := filepath.Join(f.remote, "hooks", "pre-receive")

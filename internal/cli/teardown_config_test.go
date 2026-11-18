@@ -281,6 +281,14 @@ func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
 		testkit.WriteFile(t, path, []byte(content), 0600)
 	}
 	program.env = environmentMap(program.options.Environment)
+	_, err := program.loadContext("named")
+	var conflict *config.SettingsFileConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("ambiguous registration loaded: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "yards/named.env")); err != nil {
+		t.Fatal(err)
+	}
 	named, err := program.loadContext("named")
 	if err != nil {
 		t.Fatal(err)

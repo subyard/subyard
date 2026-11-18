@@ -112,6 +112,8 @@ func TestGitScalarEditPreservesLegacySSHSource(t *testing.T) {
 	}
 	writeConfigCommandFile(t, cache, string(cached), 0o600)
 	writeConfigCommandFile(t, filepath.Join(f.configHome, "config.env"), "SSH_PORT=2299\n", 0o640)
+	// Reconcile the unrelated source records explicitly before the scalar edit.
+	f.run(0, "config", "sync", "pull", "--yes")
 	f.stdout.Reset()
 	f.stderr.Reset()
 	prompt := &testkit.Prompt{Answers: []bool{true}}

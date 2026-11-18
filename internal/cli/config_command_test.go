@@ -746,7 +746,7 @@ func TestConfigSetChangedUsesOneDefaultYesPrompt(t *testing.T) {
 	}
 }
 
-func TestConfigUnsetExistingEmptyTargetRemovesIt(t *testing.T) {
+func TestConfigUnsetExistingEmptyTargetKeepsIt(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "")
@@ -764,10 +764,10 @@ func TestConfigUnsetExistingEmptyTargetRemovesIt(t *testing.T) {
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("empty unset failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("empty scalar target still exists: %v", err)
+	if content, err := os.ReadFile(target); err != nil || len(content) != 0 {
+		t.Fatalf("empty scalar target = %q, %v", content, err)
 	}
-	if len(prompt.Requests) != 1 {
+	if len(prompt.Requests) != 0 {
 		t.Fatalf("empty unset prompts = %#v", prompt.Requests)
 	}
 }
@@ -3300,7 +3300,7 @@ func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
 		t.Fatalf("single edit changed unrelated records: %q", got)
 	}
 	run("GIT_USER_NAME", "O'Connor", "GIT_USER_EMAIL", "new@example.invalid")
-	if got := string(mustReadConfigFixture(t, flat)); got != prefix+"GIT_USER_NAME='O'\\''Connor'\r\nGIT_USER_EMAIL='new@example.invalid'\n" {
+	if got := string(mustReadConfigFixture(t, flat)); got != prefix+"GIT_USER_NAME='O'\\''Connor'\r\nGIT_USER_EMAIL='new@example.invalid'\r\n" {
 		t.Fatalf("batch changed unrelated records: %q", got)
 	}
 	if _, err := os.Lstat(filepath.Join(home, "yards/neighbor/config.env")); !errors.Is(err, os.ErrNotExist) {
@@ -3429,7 +3429,11 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 		t.Fatalf("multi-pair set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	versioned = configSourceGitOutput(t, remote, "show", "HEAD:hosts/owner-a/config.env")
-	values, err := config.EvaluateAssignments(strings.NewReader(versioned), "config.env", nil)
+	assignments, err := config.ParsePersistentAssignments("config.env", []byte(versioned))
+	values := make(map[string]string, len(assignments))
+	for _, assignment := range assignments {
+		values[assignment.Name] = assignment.Value
+	}
 	if err != nil || values["GIT_USER_NAME"] != name || values["GIT_USER_EMAIL"] != email || values["DEV_UID"] != "2298" {
 		t.Fatalf("multi-pair set persisted %q, %v", values, err)
 	}

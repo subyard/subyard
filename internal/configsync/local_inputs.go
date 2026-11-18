@@ -120,25 +120,38 @@ func candidateYardNames(configHome string, source sourceSnapshot, previous Manif
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
+	var refusals []error
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() {
 			if strings.HasSuffix(name, ".env") {
-				return nil, fmt.Errorf("legacy yard input %s must be migrated before versioned sync", name)
+				yard := strings.TrimSuffix(name, ".env")
+				if domain.SafeName(yard) {
+					if _, err := config.LocalYardSettingsFile(filepath.Join(configHome, "yards"), yard); err != nil {
+						refusals = append(refusals, err)
+						continue
+					}
+				}
+				refusals = append(refusals, fmt.Errorf("legacy yard input %s must be migrated before versioned sync", name))
 			}
 			continue
 		}
 		if !domain.SafeName(name) {
-			return nil, fmt.Errorf("invalid live yard directory %q", name)
+			refusals = append(refusals, fmt.Errorf("invalid live yard directory %q", name))
+			continue
 		}
 		relative := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
 		observed, err := observeLocalInput(configHome, relative)
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
 		if name != "default" && observed.Exists && !excluded[filepath.Join(configHome, filepath.FromSlash(relative))] {
 			seen[name] = true
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
 	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {

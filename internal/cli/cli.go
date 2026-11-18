@@ -753,6 +753,14 @@ func (cli *CLI) Run(ctx context.Context) int {
 		if baseErr != nil {
 			err = baseErr
 		} else {
+			if admission.registrationRepair {
+				hostID, yardName, _ := strings.Cut(canonical, "/")
+				localHostID, _, hostErr := configsync.ResolveHostID(base.Context.Paths.ConfigHome, base.Environment)
+				if hostErr == nil && hostID != localHostID && domain.SafeName(hostID) && domain.SafeName(yardName) {
+					cli.errorf("config repair-registration must run on the registration owner")
+					return 2
+				}
+			}
 			readOnlyRoute := admission.readOnlyRoute
 			var results []ownerInventoryResult
 			if readOnlyInvocation && !commandHelpRequested(commandArguments) && !(core && definition.Handler == "@test-vms" && testVMLogsInvocation(commandArguments)) {

@@ -353,7 +353,7 @@ func TestConfigExactSharedScalarValidatesRegisteredNeighbor(t *testing.T) {
 	}
 }
 
-func TestConfigExactUnsetPreservesLegacyRegistrationFallback(t *testing.T) {
+func TestConfigExactUnsetKeepsEmptyRegistration(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	legacy := filepath.Join(filepath.Dir(loaded.Context.Paths.ConfigDir), "private/yards/named.env")
@@ -365,11 +365,86 @@ func TestConfigExactUnsetPreservesLegacyRegistrationFallback(t *testing.T) {
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unset target retained: %v", err)
+	if content, err := os.ReadFile(target); err != nil || len(content) != 0 {
+		t.Fatalf("unset registration = %q, %v", content, err)
 	}
-	if actual := loadConfigCommandContext(t, root, environment, "named").Context.SSHPort; actual != 2290 {
-		t.Fatalf("fallback port = %d", actual)
+	if actual := loadConfigCommandContext(t, root, environment, "named").Context.SSHPort; actual == 2290 || actual == 2390 {
+		t.Fatalf("unset kept the old port or selected the fallback registration: %d", actual)
+	}
+}
+
+func TestConfigExactHostScalarEditsPrivateSource(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	host := filepath.Join(home, "config.env")
+	if err := os.Remove(host); err != nil {
+		t.Fatal(err)
+	}
+	private := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_DIR"), "..", "private", "config.env")
+	const initial = "GIT_USER_EMAIL=private@example.invalid\n"
+	writeConfigCommandFile(t, private, initial, 0o640)
+	program := configExactProgram(t, root, environment, nil, nil)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	prepared := configExactPlan(t, program, loaded, []string{"set", "GIT_USER_NAME", "Jane", "--scope", "host"})
+	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(mustReadConfigFixture(t, private)); got != initial+"GIT_USER_NAME='Jane'\n" {
+		t.Fatalf("private host settings = %q", got)
+	}
+	if _, err := os.Stat(host); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("created a second settings file: %v", err)
+	}
+	loaded = loadConfigCommandContext(t, root, environment, "default")
+	prepared = configExactPlan(t, program, loaded, []string{"set", "GIT_USER_NAME", "Jane", "GIT_USER_EMAIL", "next@example.invalid", "--scope", "host"})
+	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	writeConfigCommandFile(t, host, "")
+	_, err := config.Load(config.LoadOptions{RepositoryRoot: root, Environment: program.baseEnv, YardName: "default"})
+	var conflict *config.SettingsFileConflict
+	if !errors.As(err, &conflict) || conflict.First != host || conflict.Second != private ||
+		!strings.Contains(config.Diagnose(home, err).Message("invalid configuration"), "Merge their settings into one file") {
+		t.Fatalf("host files were not refused: %v", err)
+	}
+}
+
+func TestConfigProspectiveRefusesFlatRegistrationArrivingAfterTargetSelection(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(home, config.GitSettingsRelativePath, "yards/named/config.env"), "")
+	loaded := loadConfigCommandContext(t, root, environment, "named")
+	path, err := configScalarAuthoringPath(loaded, config.ScopeYard)
+	if err != nil || path != filepath.Join(home, "yards/named/config.env") {
+		t.Fatalf("selected target = %s, %v", path, err)
+	}
+	flat := filepath.Join(home, "yards/named.env")
+	writeConfigCommandFile(t, flat, "GIT_USER_EMAIL=flat@example.invalid\n")
+	program := configExactProgram(t, root, environment, nil, nil)
+	plan, err := program.prepareConfigProspective(loaded, configAuthoringRequest{action: "set", scope: config.ScopeYard}, path,
+		config.PersistentFileSnapshot{Exists: true, Content: []byte("GIT_USER_NAME='Jane'\n")})
+	if plan != nil {
+		plan.close()
+	}
+	var conflict *config.SettingsFileConflict
+	if !errors.Is(err, domain.ErrPlanStale) || !errors.As(err, &conflict) || conflict.First != path || conflict.Second != flat {
+		t.Fatalf("conflicting draft accepted: %v", err)
+	}
+}
+
+func TestConfigProspectiveCollectsExpansionAndDependencyRefusals(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(home, "yards/alpha/config.env"), "GIT_USER_EMAIL=$GIT_USER_NAME\n")
+	writeConfigCommandFile(t, filepath.Join(home, "yards/beta/config.env"), "GIT_USER_NAME=Jane\n", 0o620)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	program := configExactProgram(t, root, environment, nil, nil)
+	plan, err := program.prepareConfigProspective(loaded, configAuthoringRequest{action: "set", scope: config.ScopeHost}, filepath.Join(home, "config.env"),
+		config.PersistentFileSnapshot{Exists: true, Content: []byte("GIT_USER_NAME='Jane'\n")})
+	if plan != nil {
+		plan.close()
+	}
+	message := config.Diagnose(home, err).Message("invalid configuration")
+	if !strings.Contains(message, "yards/alpha/config.env:1: GIT_USER_EMAIL") ||
+		!strings.Contains(message, "yards/beta/config.env") || !strings.Contains(message, "group/world writable") {
+		t.Fatalf("expected both configuration refusals: %s", message)
 	}
 }
 

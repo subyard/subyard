@@ -81,7 +81,7 @@ func (tracker *settingTracker) observeProfileOnly(layer settingLayerID, name, va
 	})
 }
 
-func (tracker *settingTracker) ignoredAssignments(yard, configHome string) []IgnoredAssignment {
+func (tracker *settingTracker) ignoredAssignments(yard, configDir, configHome string) []IgnoredAssignment {
 	if yard == "" {
 		yard = "default"
 	}
@@ -90,9 +90,17 @@ func (tracker *settingTracker) ignoredAssignments(yard, configHome string) []Ign
 		assignment := &ignored[index]
 		assignment.Yard = yard
 		authored := authoredSettingsPath(configHome, yard, assignment.Scope, assignment.Git)
-		flat := !assignment.Git && assignment.Scope == "yard" && yard != "default" &&
-			assignment.Path == filepath.Join(configHome, "yards", yard+".env")
-		assignment.authored = configHome != "" && (assignment.Path == authored || flat)
+		assignment.authored = configHome != "" && assignment.Path == authored
+		if !assignment.Git {
+			private := filepath.Join(configDir, "..", "private")
+			switch assignment.Scope {
+			case "host":
+				assignment.authored = assignment.authored || assignment.Path == filepath.Join(private, "config.env")
+			case "yard":
+				assignment.authored = assignment.authored || assignment.Path == filepath.Join(configHome, "yards", yard+".env") ||
+					yard != "default" && assignment.Path == filepath.Join(private, "yards", yard+".env")
+			}
+		}
 	}
 	slices.SortStableFunc(ignored, func(left, right IgnoredAssignment) int { return strings.Compare(left.String(), right.String()) })
 	return slices.CompactFunc(ignored, func(left, right IgnoredAssignment) bool { return left.String() == right.String() })

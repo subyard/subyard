@@ -89,6 +89,20 @@ func TestVersionedConfigSyncAppliesOnlyTypedSelectedHostSettings(t *testing.T) {
 	}
 }
 
+func TestVersionedConfigSyncRefusesCompetingLocalRegistrations(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.commit("manifest only")
+	nested := filepath.Join(fixture.configHome, "yards/default/config.env")
+	flat := filepath.Join(fixture.configHome, "yards/default.env")
+	writeSyncTestFile(t, nested, "GIT_USER_NAME=Jane\n", 0o600)
+	writeSyncTestFile(t, flat, "GIT_USER_EMAIL=jane@example.invalid\n", 0o600)
+	_, err := BuildPlan(fixture.options(false))
+	var conflict *config.SettingsFileConflict
+	if !errors.As(err, &conflict) || conflict.First != nested || conflict.Second != flat {
+		t.Fatalf("sync registration conflict = %v", err)
+	}
+}
+
 func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing.T) {
 	t.Run("manifest-only preserves unmanaged live settings", func(t *testing.T) {
 		fixture := newSyncFixture(t, "owner-a")

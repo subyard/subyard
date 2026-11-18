@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -140,6 +141,14 @@ func TestIgnoredProfileOnlyRepairTargetsTheSourceFile(t *testing.T) {
 
 	nested := filepath.Join(fixture.configHome, "yards", "box", "config.env")
 	fixture.write(t, nested, "SSH_PORT=2290\nYARD_DEVICES=gpu\n")
+	_, err = fixture.load("box", nil)
+	var conflict *SettingsFileConflict
+	if !errors.As(err, &conflict) || conflict.First != nested || conflict.Second != flat {
+		t.Fatalf("duplicate registrations = %v", err)
+	}
+	if err := os.Remove(flat); err != nil {
+		t.Fatal(err)
+	}
 	loaded, err = fixture.load("box", nil)
 	if err != nil {
 		t.Fatal(err)

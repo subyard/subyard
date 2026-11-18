@@ -170,8 +170,8 @@ func PrepareProspective(
 	if !snapshot.Exists {
 		return prepareObserved(ctx, options, actual, "")
 	}
-	if !selectsTestVMs(string(snapshot.Content)) {
-		return Prepared{}, reservedRegistrationDiagnostic(observed.oldRegistration, LegacyYard)
+	if err := checkReservedRegistrationContent(options, observed.oldRegistration, LegacyYard, snapshot.Content); err != nil {
+		return Prepared{}, err
 	}
 	digest := sha256.Sum256(snapshot.Content)
 	return prepareObserved(ctx, options, observed, fmt.Sprintf("%x", digest[:]))
@@ -1000,19 +1000,17 @@ func inspectRegistrationSet(options Options) (registrationSet, error) {
 			}
 		}
 	}
-	if len(foundLegacy) > 1 {
-		return registrationSet{}, ownerStateDiagnostic(options, errors.New("multiple e2e-yard registrations exist"),
-			"multiple config-home-relative registrations yards/e2e-yard/config.env and yards/e2e-yard.env; both preserved")
-	}
-	if len(foundCurrent) > 1 {
-		return registrationSet{}, ownerStateDiagnostic(options, errors.New("multiple test-yard registrations exist"),
-			"multiple config-home-relative registrations yards/test-yard/config.env and yards/test-yard.env; both preserved")
-	}
 	var registrationErrors []error
-	if len(foundLegacy) > 0 {
+	if len(foundLegacy) > 1 {
+		registrationErrors = append(registrationErrors, ownerStateDiagnostic(options, errors.New("multiple e2e-yard registrations exist"),
+			"multiple config-home-relative registrations yards/e2e-yard/config.env and yards/e2e-yard.env. Merge their settings into one file and remove the other"))
+	} else if len(foundLegacy) == 1 {
 		registrationErrors = append(registrationErrors, inspectReservedRegistration(options, foundLegacy[0].path, LegacyYard))
 	}
-	if len(foundCurrent) > 0 {
+	if len(foundCurrent) > 1 {
+		registrationErrors = append(registrationErrors, ownerStateDiagnostic(options, errors.New("multiple test-yard registrations exist"),
+			"multiple config-home-relative registrations yards/test-yard/config.env and yards/test-yard.env. Merge their settings into one file and remove the other"))
+	} else if len(foundCurrent) == 1 {
 		registrationErrors = append(registrationErrors, inspectReservedRegistration(options, foundCurrent[0].path, CurrentYard))
 	}
 	if err := registrationRefusals(registrationErrors...); err != nil {
@@ -2095,17 +2093,6 @@ func validateNoLegacyOwnerState(options Options) error {
 		}
 	}
 	return nil
-}
-
-func selectsTestVMs(payload string) bool {
-	for _, line := range strings.Split(payload, "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
-		if line == "YARD_TEMPLATE=test-vms" ||
-			line == `YARD_TEMPLATE="test-vms"` || line == "YARD_TEMPLATE='test-vms'" {
-			return true
-		}
-	}
-	return false
 }
 
 func prospectiveOwnedDirectory(options Options, path string) error {

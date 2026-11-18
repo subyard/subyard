@@ -151,13 +151,26 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		}
 	}()
 	paths := plan.loaded.Context.Paths
+	var refusals []error
+	checkTarget := func() error {
+		switch plan.request.action {
+		case "set", "unset", "selection-repair":
+			current, err := configScalarAuthoringPath(plan.loaded, plan.request.scope)
+			if err != nil {
+				return err
+			}
+			if current != plan.path {
+				return domain.ErrPlanStale
+			}
+		}
+		return nil
+	}
+	refusals = append(refusals, checkTarget())
 	names := []string{plan.loaded.Context.YardName}
 	if plan.request.scope != config.ScopeYard {
 		var err error
-		names, err = config.YardNames(paths.ConfigDir, paths.ConfigHome)
-		if err != nil {
-			return "", "", err
-		}
+		names, err = config.LocalBatchYardNames(paths.ConfigDir, paths.ConfigHome)
+		refusals = append(refusals, err)
 	}
 	environment := plan.cli.configProspectiveEnvironment(plan.loaded)
 	var overrides map[string]string
@@ -187,10 +200,8 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		}
 		return nil
 	}
-	if err := observeDirectories(plan.path); err != nil {
-		return "", "", err
-	}
-	observe := func(path string) error {
+	refusals = append(refusals, observeDirectories(plan.path))
+	readInput := func(path string) error {
 		if path == "" || !filepath.IsAbs(path) || path == plan.path {
 			return nil
 		}
@@ -224,8 +235,18 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		inputs[path] = snapshot
 		return nil
 	}
-	var refusals []error
+	observed := map[string]bool{}
+	observe := func(path string) {
+		if !observed[path] {
+			observed[path] = true
+			refusals = append(refusals, readInput(path))
+		}
+	}
 	for _, name := range names {
+		for _, candidate := range config.YardFileCandidates(paths.ConfigDir, paths.ConfigHome, name) {
+			observe(candidate)
+		}
+		observe(filepath.Join(paths.ConfigHome, ".yard-reset-"+name))
 		loaded, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
 			OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, FileOverrides: overrides, ConfigLocked: locked})
 		if err != nil {
@@ -235,75 +256,53 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 		if draft && plan.request.action == "selection-repair" {
 			before, err := config.Load(config.LoadOptions{Resources: plan.cli.operationResourceRegistry, RepositoryRoot: plan.cli.options.RepositoryRoot,
 				OperatorHome: paths.OperatorHome, YardName: name, Environment: environment, ConfigLocked: locked})
-			if err != nil {
-				return "", "", err
-			}
-			if err := plan.cli.checkSelectionReduction(before, loaded, plan.request.name); err != nil {
-				return "", "", err
+			refusals = append(refusals, err)
+			if err == nil {
+				refusals = append(refusals, plan.cli.checkSelectionReduction(before, loaded, plan.request.name))
 			}
 		}
 		contexts = append(contexts, loaded)
 		for _, path := range loaded.AssetValidationInputs() {
-			if err := observe(path); err != nil {
-				return "", "", err
-			}
+			observe(path)
 		}
 		for _, layer := range loaded.ConfigurationLayers {
 			if layer.Role == "scalar settings" || layer.Role == "Git scalar settings" || layer.Role == "shipped profile" {
-				if err := observe(layer.Path); err != nil {
-					return "", "", err
-				}
+				observe(layer.Path)
 			}
 			if layer.Role == "file settings" || layer.Role == "Git file settings" {
 				for _, mapping := range config.SyncableFileMappings(loaded) {
-					if err := observe(filepath.Join(layer.Path, filepath.FromSlash(mapping.Relative))); err != nil {
-						return "", "", err
-					}
+					observe(filepath.Join(layer.Path, filepath.FromSlash(mapping.Relative)))
 				}
 			}
 		}
 		for _, declaration := range loaded.Catalog.Profiles() {
 			for _, path := range declaration.ValidationInputs() {
-				if err := observe(path); err != nil {
-					return "", "", err
-				}
+				observe(path)
 			}
 		}
 		for _, declaration := range loaded.Catalog.Integrations() {
 			for _, path := range declaration.ValidationInputs() {
-				if err := observe(path); err != nil {
-					return "", "", err
-				}
+				observe(path)
 			}
 		}
 		for _, setting := range loaded.Settings {
 			for _, resolution := range setting.Resolutions {
-				if err := observe(resolution.Path); err != nil {
-					return "", "", err
-				}
+				observe(resolution.Path)
 			}
 		}
 		selectedProfiles := strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"])
 		if loaded.Context.AccessKind == domain.AccessLocal && len(selectedProfiles) != 0 {
 			packages, err := profile.Packages(plan.cli.options.RepositoryRoot)
-			if err != nil {
-				return "", "", err
-			}
+			refusals = append(refusals, err)
 			for _, pkg := range packages {
 				for _, source := range pkg.Resources {
-					if err := observe(source.Path); err != nil {
-						return "", "", err
-					}
+					observe(source.Path)
 				}
 			}
 			registry, err := resource.Load(plan.cli.options.RepositoryRoot)
-			if err != nil {
-				return "", "", err
-			}
+			refusals = append(refusals, err)
 			for _, definition := range registry.Definitions() {
-				if err := observe(definition.HandlerPath()); err != nil {
-					return "", "", err
-				}
+				observe(definition.HandlerPath())
 				if definition.Endpoint == nil || definition.Proxy == nil || !slices.Contains(selectedProfiles, definition.Profile) {
 					continue
 				}
@@ -311,9 +310,7 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 				if host != "" && port != "" {
 					continue
 				}
-				if err := observe(filepath.Join(paths.DataHome, "resource-endpoints", "state.json")); err != nil {
-					return "", "", err
-				}
+				observe(filepath.Join(paths.DataHome, "resource-endpoints", "state.json"))
 			}
 		}
 		for _, name := range strings.Fields(loaded.Environment["ENVIRONMENT_PROFILES"]) {
@@ -322,35 +319,23 @@ func (plan *configProspective) inspect(draft, locked bool) (binding, semantics s
 				continue
 			}
 			if err != nil {
-				return "", "", err
+				refusals = append(refusals, err)
+				continue
 			}
 			if pkg.Config != nil {
-				if err := observe(pkg.Config.Path); err != nil {
-					return "", "", err
-				}
+				observe(pkg.Config.Path)
 			}
 		}
-		for _, candidate := range config.YardFileCandidates(paths.ConfigDir, paths.ConfigHome, name) {
-			if err := observe(candidate); err != nil {
-				return "", "", err
-			}
-		}
-		if err := observe(filepath.Join(paths.ConfigHome, ".yard-reset-"+name)); err != nil {
-			return "", "", err
-		}
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return "", "", err
 	}
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
-		if err := observe(filepath.Join(paths.ConfigDir, name)); err != nil {
-			return "", "", err
-		}
+		observe(filepath.Join(paths.ConfigDir, name))
 	}
 	for _, path := range []string{filepath.Join(paths.ConfigHome, ".sync", "manifest.json"), filepath.Join(paths.ConfigHome, config.SourceRecordRelativePath)} {
-		if err := observe(path); err != nil {
-			return "", "", err
-		}
+		observe(path)
+	}
+	refusals = append(refusals, checkTarget())
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return "", "", err
 	}
 	if plan.directoryInputs == nil {
 		plan.directoryInputs = map[string]bool{}

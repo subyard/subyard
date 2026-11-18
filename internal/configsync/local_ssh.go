@@ -176,24 +176,15 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		if projectedPorts[yard] == port {
 			continue
 		}
-		path := filepath.Join(options.ConfigHome, "yards", yard, "config.env")
+		path, err := config.LocalYardSettingsFile(filepath.Join(options.ConfigHome, "yards"), yard)
+		if err != nil {
+			cleanup()
+			return nil, nil, func() {}, err
+		}
 		before, err := readLocalSSHFile(options.ConfigHome, path)
 		if err != nil {
 			cleanup()
 			return nil, nil, func() {}, err
-		}
-		flatPath := filepath.Join(options.ConfigHome, "yards", yard+".env")
-		flat, err := readLocalSSHFile(options.ConfigHome, flatPath)
-		if err != nil {
-			cleanup()
-			return nil, nil, func() {}, err
-		}
-		if flat.Exists && before.Exists {
-			cleanup()
-			return nil, nil, func() {}, errors.New("SSH port migration requires unambiguous local yard settings")
-		}
-		if flat.Exists {
-			path, before = flatPath, flat
 		}
 		value := strconv.Itoa(port)
 		content, err := config.EditPersistentAssignmentContent(path, before.Content, "SSH_PORT", &value)

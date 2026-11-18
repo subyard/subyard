@@ -272,6 +272,42 @@ func BuildPlan(options Options) (Plan, error) {
 	return plan, nil
 }
 
+// CheckScalarPublication proves that the full sync plan has exactly the file
+// changes the scalar editor would make to the live cache.
+func (plan Plan) CheckScalarPublication(target string, edit func(string, []byte) ([]byte, error)) error {
+	refusal := errors.New("the Git cache has differences outside this scalar edit. Run yard config sync pull before retrying")
+	target = gitSettingsPath(target)
+	for _, change := range plan.Changes {
+		if change.Path != target {
+			return refusal
+		}
+		candidate, exists := plan.desired[target]
+		if !exists {
+			return refusal
+		}
+		path := filepath.Join(plan.options.ConfigHome, filepath.FromSlash(target))
+		before, err := config.ReadPersistentFileSnapshot(plan.options.ConfigHome, path)
+		if err != nil {
+			return err
+		}
+		if (before.Exists && digestBytes(before.Content) != change.BeforeDigest) ||
+			(!before.Exists && change.BeforeDigest != "") {
+			return ErrPlanStale
+		}
+		if before.Exists && before.Identity.Mode&0o777 != candidate.Mode {
+			return refusal
+		}
+		expected, err := edit(path, before.Content)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(expected, candidate.Content) {
+			return refusal
+		}
+	}
+	return nil
+}
+
 func guardDeletedYardDefinition(options Options, path string) error {
 	yard, definition := deletedYardDefinition(path)
 	if !definition || options.YardInUse == nil {
@@ -297,6 +333,11 @@ func validateCandidate(
 	catalog config.Catalog,
 	capture ...*[]config.Loaded,
 ) error {
+	configDir := options.Environment["SUBYARD_CONFIG_DIR"]
+	if configDir == "" {
+		configDir = filepath.Join(options.RepositoryRoot, "config")
+	}
+	_, hostErr := config.LocalHostSettingsFile(configDir, options.ConfigHome)
 	excluded, err := legacyLocalExclusions(options.ConfigHome, previous)
 	if err != nil {
 		return err
@@ -333,7 +374,7 @@ func validateCandidate(
 		return err
 	}
 	yardNames, err := candidateYardNames(options.ConfigHome, source, previous)
-	if err != nil {
+	if err := domain.CollectRefusals(hostErr, err); err != nil {
 		return err
 	}
 	localYards := map[string]string{}

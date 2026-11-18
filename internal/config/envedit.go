@@ -277,31 +277,8 @@ func writePersistentAssignment(
 	if err != nil {
 		return err
 	}
-	if value == nil && len(updated) == 0 {
-		relative, err := filepath.Rel(configHome, path)
-		if err != nil || relative == "." || filepath.IsAbs(relative) ||
-			relative == ".." ||
-			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("persistent setting path escaped the configuration root")
-		}
-		info, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-			return sourceError(path, 0, "", "persistent settings", persistentOwnershipReason(info, stat), nil)
-		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-		return syncPersistentDirectory(filepath.Dir(path))
+	if !current.Exists && value == nil {
+		return nil
 	}
 	return writePersistentFile(configHome, path, updated)
 }
@@ -341,6 +318,17 @@ func WritePersistentFileIfUnchanged(
 	content []byte,
 	guards ...func() error,
 ) error {
+	return writePersistentFileIfUnchanged(configHome, configHome, path, expected, content, guards)
+}
+
+// WriteLocalScalarFileIfUnchanged keeps the configuration root lock while
+// editing a selected scalar source in config home or the private settings root.
+func WriteLocalScalarFileIfUnchanged(configHome, storageRoot, path string, expected PersistentFileSnapshot, content []byte, guard func() error) error {
+	return writePersistentFileIfUnchanged(configHome, storageRoot, path, expected, content,
+		[]func() error{func() error { return CheckLocalSettingsWritable(configHome) }, guard})
+}
+
+func writePersistentFileIfUnchanged(configHome, storageRoot, path string, expected PersistentFileSnapshot, content []byte, guards []func() error) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
 	}
@@ -349,10 +337,17 @@ func WritePersistentFileIfUnchanged(
 		return err
 	}
 	defer unlock()
+	if storageRoot != configHome {
+		unlockStorage, err := LockRoot(storageRoot, true)
+		if err != nil {
+			return err
+		}
+		defer unlockStorage()
+	}
 	if err := checkLocalSettingsTargetWritable(configHome, path); err != nil {
 		return err
 	}
-	current, err := persistentFileSnapshot(path)
+	current, err := ReadPersistentFileSnapshot(storageRoot, path)
 	if err != nil {
 		return err
 	}
@@ -364,7 +359,7 @@ func WritePersistentFileIfUnchanged(
 			return err
 		}
 	}
-	return writePersistentFile(configHome, path, content)
+	return writePersistentFile(storageRoot, path, content)
 }
 
 func persistentFileSnapshot(path string) (PersistentFileSnapshot, error) {
@@ -452,22 +447,30 @@ func editPersistentAssignments(path string, content []byte, assignments []Persis
 		return nil, err
 	}
 	var result bytes.Buffer
+	appendEnding := "\n"
+	if last := bytes.LastIndexByte(content, '\n'); last > 0 && content[last-1] == '\r' {
+		appendEnding = "\r\n"
+	}
 	for _, record := range records {
 		if record.replacement == nil {
 			result.WriteString(record.raw)
 			continue
 		}
 		if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
-			result.WriteByte('\n')
+			result.WriteString(appendEnding)
 		}
 		result.WriteString(record.name + "=" + quotePersistentValue(record.replacement.Value))
-		if strings.HasSuffix(record.raw, "\r\n") {
-			result.WriteByte('\r')
+		switch {
+		case strings.HasSuffix(record.raw, "\r\n"):
+			result.WriteString("\r\n")
+		case strings.HasSuffix(record.raw, "\n"):
+			result.WriteByte('\n')
+		default:
+			result.WriteString(appendEnding)
 		}
-		result.WriteByte('\n')
 	}
-	if result.Len() > 8<<20 {
-		return nil, sourceError(path, 0, "", "persistent settings", "edited content exceeds its size bound", nil)
+	if err := scanPersistentEnv(path, result.Bytes(), func(envRecord, string, string) {}); err != nil {
+		return nil, err
 	}
 	return result.Bytes(), nil
 }
@@ -483,6 +486,9 @@ func persistentEditRecords(path string, content []byte, assignments []Persistent
 	replacements := make(map[string]*PersistentAssignment, len(assignments))
 	for index := range assignments {
 		replacement := &assignments[index]
+		if !ValidVariable(replacement.Name) {
+			return nil, sourceError(path, 0, "", "persistent settings", "invalid variable name", nil)
+		}
 		replacements[CanonicalSettingName(replacement.Name)] = replacement
 	}
 	for index, record := range records {

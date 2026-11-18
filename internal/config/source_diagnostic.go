@@ -327,6 +327,8 @@ type ConfigDiagnostic struct {
 	Next         []string
 	Unclassified bool
 	known        []KnownCause
+	seenRefusals map[string]bool
+	seenNext     map[string]bool
 }
 
 // KnownCause is a boundary's own sentinel with fixed, value-free text.
@@ -342,6 +344,7 @@ func Diagnose(configHome string, err error, known ...KnownCause) ConfigDiagnosti
 	diagnostic := ConfigDiagnostic{known: known}
 	diagnostic.add(configHome, err)
 	diagnostic.known = nil
+	diagnostic.seenRefusals, diagnostic.seenNext = nil, nil
 	return diagnostic
 }
 
@@ -366,6 +369,10 @@ func (diagnostic *ConfigDiagnostic) add(configHome string, err error) {
 			return
 		}
 		switch typed := current.(type) {
+		case *SettingsFileConflict:
+			diagnostic.addRefusal(typed.Error())
+			diagnostic.addNext("merge the named files into one, then run config validate")
+			return
 		case *SourceError:
 			message, _ := SourceDiagnostic(configHome, typed)
 			diagnostic.addRefusal(message)
@@ -444,13 +451,24 @@ func operationSentinel(err error) (text, next string, ok bool) {
 // addRefusal keeps one copy of each rendered refusal; distinct values that
 // render alike would otherwise repeat the same fixed text.
 func (diagnostic *ConfigDiagnostic) addRefusal(refusal string) {
-	if !slices.Contains(diagnostic.Refusals, refusal) {
+	if diagnostic.seenRefusals == nil {
+		diagnostic.seenRefusals = make(map[string]bool)
+	}
+	if !diagnostic.seenRefusals[refusal] {
+		diagnostic.seenRefusals[refusal] = true
 		diagnostic.Refusals = append(diagnostic.Refusals, refusal)
 	}
 }
 
 func (diagnostic *ConfigDiagnostic) addNext(next string) {
-	if next != "" && !slices.Contains(diagnostic.Next, next) {
+	if next == "" {
+		return
+	}
+	if diagnostic.seenNext == nil {
+		diagnostic.seenNext = make(map[string]bool)
+	}
+	if !diagnostic.seenNext[next] {
+		diagnostic.seenNext[next] = true
 		diagnostic.Next = append(diagnostic.Next, next)
 	}
 }

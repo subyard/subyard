@@ -397,8 +397,9 @@ The validated context contract includes:
 
 Source-only domain modules do not load configuration themselves.
 
-Configuration refusals that may be shown are `config.SourceError`, the retired-template diagnostic
-and `domain.ConfigRefusal`: a closed code with a fixed template and next step, built only from
+Configuration refusals that may be shown are `config.SourceError`, `config.SettingsFileConflict`,
+the retired-template diagnostic and `domain.ConfigRefusal`. A domain refusal is a closed code
+with a fixed template and next step, built only from
 validated profile, setting, integration or yard-kind names. A producer that must keep an
 unvalidated value in its error text appends it after the wrapped refusal; the renderer prints only
 the refusal. Producers collect independent role and profile
@@ -421,7 +422,8 @@ named in the loader code:
 
 - D1: the bootstrap chain, including command alias conflicts, stops at its first failed step.
 - D2: yard identity (name, registration, template) resolves before sources are selected.
-- D3: source files apply in precedence order; the first refused file stops at its first refused line.
+- D3: source files apply in precedence order. The first refused file stops evaluation after its
+  independent findings have been collected.
 - D4: native target discovery covers source and command-override refusals only.
 - D5: unresolved integration roots select nothing for later checks.
 - D6: any earlier refusal (command override, asset source, integration, role or profile

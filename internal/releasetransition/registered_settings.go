@@ -19,21 +19,9 @@ func (t *V2Transition) registeredSettingsSnapshot(yard string, view V2SettingsSn
 	if view == nil {
 		view = posixV2SettingsSnapshotView{configHome: t.options.ConfigHome}
 	}
-	path := filepath.Join(t.options.ConfigHome, "yards", yard, "config.env")
-	snapshot, err := view.ReadSnapshot(path)
+	snapshot, path, err := readLocalYardSettings(t.options.ConfigHome, yard, view)
 	if err != nil {
 		return snapshot, path, "", err
-	}
-	// The loader has never read a flat file for the default yard.
-	if yard != "default" {
-		flatPath := filepath.Join(t.options.ConfigHome, "yards", yard+".env")
-		flat, err := view.ReadSnapshot(flatPath)
-		if err != nil || snapshot.Exists && flat.Exists {
-			return snapshot, path, "", invalid("ambiguous registered local settings")
-		}
-		if flat.Exists {
-			snapshot, path = flat, flatPath
-		}
 	}
 	inputs := map[string]Fingerprint{}
 	for _, relative := range []string{"host.env", "config.env", filepath.Join(config.GitSettingsRelativePath, "host.env"), filepath.Join(config.GitSettingsRelativePath, "config.env"), filepath.Join(config.GitSettingsRelativePath, "yards", yard, "config.env")} {
@@ -46,6 +34,16 @@ func (t *V2Transition) registeredSettingsSnapshot(yard string, view V2SettingsSn
 	}
 	payload, err := json.Marshal(inputs)
 	return snapshot, path, fingerprintPayload(payload), err
+}
+
+func readLocalYardSettings(home, yard string, view V2SettingsSnapshotView) (config.PersistentFileSnapshot, string, error) {
+	snapshots := make(map[string]config.PersistentFileSnapshot, 2)
+	path, err := config.LocalYardSettingsFile(filepath.Join(home, "yards"), yard, func(path string) (bool, error) {
+		snapshot, err := view.ReadSnapshot(path)
+		snapshots[path] = snapshot
+		return snapshot.Exists, err
+	})
+	return snapshots[path], path, err
 }
 
 func observeRegisteredOwner(ctx context.Context, owner V2ActivationReconciler, releases ReleasePair, links ReleaseLinks, view V2SettingsSnapshotView) (V2ActivationObservation, error) {

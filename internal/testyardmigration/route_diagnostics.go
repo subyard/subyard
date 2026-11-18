@@ -117,19 +117,9 @@ func reservedRegistrationDiagnostic(path, yard string) *routeActivationDiagnosti
 func inspectReservedRegistration(options Options, path, yard string) error {
 	payload, err := readRegistration(options, path)
 	if err == nil {
-		assignments, parseErr := config.ParsePersistentAssignments(path, payload)
-		if parseErr != nil {
-			return routeConfigDiagnostic(parseErr, "owner registration settings cannot be parsed", yard, options.ConfigHome)
-		}
-		for index := len(assignments) - 1; index >= 0; index-- {
-			assignment := assignments[index]
-			if assignment.Name != "YARD_TEMPLATE" {
-				continue
-			}
-			if assignment.Value == "test-vms" {
-				return nil
-			}
-			return reservedRegistrationDiagnostic(path, yard)
+		selected, parseErr := reservedRegistrationTemplate(options, path, yard, payload)
+		if selected || parseErr != nil {
+			return parseErr
 		}
 	}
 	if err == nil && yard == CurrentYard && filepath.IsAbs(options.RepositoryRoot) {
@@ -150,6 +140,31 @@ func inspectReservedRegistration(options Options, path, yard string) error {
 		diagnostic.retry = "inspect and repair the named registration settings, then run yard update --check"
 		diagnostic.refusal = false
 		return diagnostic
+	}
+	return reservedRegistrationDiagnostic(path, yard)
+}
+
+func reservedRegistrationTemplate(options Options, path, yard string, payload []byte) (bool, error) {
+	assignments, err := config.ParsePersistentAssignments(path, payload)
+	if err != nil {
+		return false, routeConfigDiagnostic(err, "owner registration settings cannot be parsed", yard, options.ConfigHome)
+	}
+	for index := len(assignments) - 1; index >= 0; index-- {
+		assignment := assignments[index]
+		if assignment.Name == "YARD_TEMPLATE" {
+			if assignment.Value != "test-vms" {
+				return false, reservedRegistrationDiagnostic(path, yard)
+			}
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func checkReservedRegistrationContent(options Options, path, yard string, payload []byte) error {
+	selected, err := reservedRegistrationTemplate(options, path, yard, payload)
+	if err != nil || selected {
+		return err
 	}
 	return reservedRegistrationDiagnostic(path, yard)
 }

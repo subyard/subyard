@@ -136,12 +136,38 @@ func TestPersistentAssignmentKeepsExistingMultilineCRLF(t *testing.T) {
 	const initial = "# keep\r\nGIT_USER_NAME='first\r\nsecond'\r\n"
 	value := "new@example.invalid"
 	content, err := EditPersistentAssignmentContent("config.env", []byte(initial), "GIT_USER_EMAIL", &value)
-	if err != nil || !bytes.HasPrefix(content, []byte(initial)) {
+	if err != nil || string(content) != initial+"GIT_USER_EMAIL='new@example.invalid'\r\n" {
 		t.Fatalf("edited content = %q, %v", content, err)
 	}
 	assignments, err := ParsePersistentAssignments("config.env", content)
 	if err != nil || len(assignments) != 2 || assignments[0].Value != "first\r\nsecond" {
 		t.Fatalf("read assignments = %#v, %v", assignments, err)
+	}
+	path := filepath.Join(testkit.TempDir(t), "shipped.env")
+	testkit.WriteFile(t, path, []byte(initial+"QUOTED='O'\\''Connor'\r\nEXPANDED=$GIT_USER_NAME\r\n"), 0o600)
+	shipped, err := ReadAssignments(path)
+	if err != nil || shipped["GIT_USER_NAME"] != "first\nsecond" || shipped["EXPANDED"] != "first\nsecond" || shipped["QUOTED"] != "O'\\''Connor" {
+		t.Fatalf("shipped assignments = %q, %v", shipped, err)
+	}
+}
+
+func TestPersistentAssignmentRefusesUnreadableOutput(t *testing.T) {
+	configHome := testkit.TempDir(t)
+	path := filepath.Join(configHome, "config.env")
+	const initial = "DEV_SUDO=0\n"
+	testkit.WriteFile(t, path, []byte(initial), 0o600)
+	for _, test := range []struct{ key, value, reason string }{
+		{"BAD KEY", "value", "invalid variable name"},
+		{"GIT_USER_NAME", strings.Repeat("'", 256<<10), "line size bound"},
+	} {
+		err := WritePersistentAssignment(configHome, path, test.key, &test.value)
+		var source *SourceError
+		if !errors.As(err, &source) || !strings.Contains(source.Reason, test.reason) {
+			t.Fatalf("write %s = %v", test.key, err)
+		}
+		if content, err := os.ReadFile(path); err != nil || string(content) != initial {
+			t.Fatalf("refused write changed file: %q, %v", content, err)
+		}
 	}
 }
 
