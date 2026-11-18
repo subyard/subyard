@@ -469,7 +469,8 @@ elif [ "\$(id -un)" != "\$dev_user" ] && ! command -v runuser >/dev/null 2>&1; t
 fi
 version=''
 if [ "\$can_run_as_dev" = 1 ]; then
-  run_as_dev bwrap --version >/dev/null 2>&1 || refuse "bubblewrap is unavailable; run yard init"
+  run_as_dev bwrap --unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/true >/dev/null 2>&1 \
+    || refuse "bubblewrap could not create the developer sandbox; check yard user namespace permissions"
   if [ "\$runtime_present" = 1 ]; then
     if output="\$(run_as_dev "\$runtime" --version 2>/dev/null)"; then
       if [[ "\$output" =~ ^codex-cli\ ([0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?)\$ ]]; then

@@ -164,6 +164,8 @@ cat > "$fake_bin/bwrap" <<'BWRAP'
 [ -f "$CODEX_TEST_BWRAP_READY" ] || exit 1
 case "$*" in
   --version) printf 'bubblewrap 0.11.0\n' ;;
+  '--unshare-user --unshare-net --ro-bind / / --chdir / -- /bin/true')
+    [ "${CODEX_TEST_BWRAP_PROBE_FAIL:-0}" = 0 ] ;;
   *) exit 2 ;;
 esac
 BWRAP
@@ -670,6 +672,10 @@ shadow="$dev_home/.local/bin/codex"
 standalone="$dev_home/.codex/packages/standalone"
 run_dev_hook() { run_hook amd64 "$root" CODEX_DEV_HOME="$dev_home" >/dev/null; }
 dev_check() { CODEX_CHECK_DEV_USER="$(id -un)" "$check"; }
+if CODEX_TEST_BWRAP_PROBE_FAIL=1 dev_check >"$tmp/bwrap.out" 2>"$tmp/bwrap.err"; then
+  fail "bubblewrap version passed readiness with a broken sandbox"
+fi
+grep -Fq 'bubblewrap could not create the developer sandbox' "$tmp/bwrap.err"
 mkdir -p "$dev_home/.local/bin" "$standalone/releases/0.100.0/bin"
 printf 'old\n' > "$standalone/releases/0.100.0/bin/codex"
 ln -s releases/0.100.0 "$standalone/current"

@@ -936,7 +936,12 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		case strings.Contains(serviceFingerprint, "bwrap=retire\n"):
 			plan.Steps = append(plan.Steps, "disable the yard's Bubblewrap boot loader and unload its two verified AppArmor profiles")
 		case strings.Contains(serviceFingerprint, "bwrap=enable\n"), strings.Contains(serviceFingerprint, "bwrap=repair\n"):
-			plan.Steps = append(plan.Steps, "reconcile the two Bubblewrap AppArmor profiles inside this yard")
+			plan.Steps = append(plan.Steps, "load the two verified Bubblewrap AppArmor profiles inside this yard and enable their boot loader as needed")
+		case strings.Contains(serviceFingerprint, "bwrap=conditional\n"):
+			plan.Steps = append(plan.Steps, "if Bubblewrap still fails after package installation, load the two distribution AppArmor profiles inside this yard and enable their boot loader")
+		}
+		if strings.Contains(serviceFingerprint, "bwrap=cleanup\n") {
+			plan.Steps = append(plan.Steps, "clear the interrupted Bubblewrap policy ownership record")
 		}
 		for _, step := range plan.PersistOperationSteps(runtime.Yard.IncusProject + "/" + runtime.Yard.YardInstanceName) {
 			plan.Steps = append(plan.Steps, step.Consequence)

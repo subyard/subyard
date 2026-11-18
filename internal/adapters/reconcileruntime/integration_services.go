@@ -18,15 +18,20 @@ var bubblewrapPolicy string
 // Integration services are reconciled even when the yard selects no coding tools.
 func (runtime Runtime) integrationServices(ctx context.Context, mode string) (string, bool, error) {
 	setting := runtime.environmentDefault("BWRAP_APPARMOR", "on")
-	claude := "0"
-	if slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), "claude") {
+	selected := strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))
+	claude, bubblewrap := "0", "0"
+	if slices.Contains(selected, "claude") {
 		claude = "1"
+	}
+	if claude == "1" || slices.Contains(selected, "codex") {
+		bubblewrap = "1"
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"sh", "-eu", "-c", `
 mode=$1
 allowed=$2
-changed=0
 conflict() { printf 'subyard-integration-conflict:%s\n' "$1" >&2; exit 1; }
+ccusage_status=0
+(
 if [ "$allowed" = false ] && { [ -e /usr/local/bin/ccusage ] || [ -L /usr/local/bin/ccusage ]; }; then
   receipt=/var/lib/subyard/ccusage-ownership
   if ! { [ -f "$receipt" ] && [ ! -L "$receipt" ] &&
@@ -38,21 +43,28 @@ if [ "$allowed" = false ] && { [ -e /usr/local/bin/ccusage ] || [ -L /usr/local/
     sha256sum --status -c "$receipt"; }; then
     conflict ccusage
   fi
-  sha256sum /usr/local/bin/ccusage
-  changed=1
   activation_receipt=/usr/local/bin/ccusage.subyard-runtime.json
   if [ -e "$activation_receipt" ] || [ -L "$activation_receipt" ]; then
     [ -f "$activation_receipt" ] && [ ! -L "$activation_receipt" ] &&
       [ "$(stat -c '%u:%g:%a' "$activation_receipt")" = 0:0:600 ] &&
       jq -e --arg binary "$(sha256sum /usr/local/bin/ccusage | cut -d' ' -f1)" \
         '.schema == 1 and .binary == $binary and (.version | type == "string") and (.archive | test("^[0-9a-f]{64}$"))' "$activation_receipt" >/dev/null || conflict ccusage
-    sha256sum "$activation_receipt"
+    sha256sum "$activation_receipt" || exit 1
   fi
-  if [ "$mode" = apply ]; then rm -- /usr/local/bin/ccusage "$receipt"; rm -f -- "$activation_receipt"; fi
+  sha256sum /usr/local/bin/ccusage || exit 1
+  if [ "$mode" = apply ]; then
+    rm -- /usr/local/bin/ccusage "$receipt" && rm -f -- "$activation_receipt" || exit 1
+  fi
+  printf 'changed=1\n'
+else
+  printf 'changed=0\n'
 fi
-printf 'changed=%s\n' "$changed"
-bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7"
-`, "subyard", mode, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), bubblewrapPolicy, setting, runtime.devUser(), claude, string(runtime.Yard.YardKind)}})
+) || ccusage_status=$?
+if [ "$ccusage_status" != 0 ]; then mode=observe; fi
+bubblewrap_status=0
+bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
+[ "$ccusage_status" = 0 ] && [ "$bubblewrap_status" = 0 ]
+`, "subyard", mode, runtime.environmentDefault("ALLOWS_CODING_TOOLS", "true"), bubblewrapPolicy, setting, runtime.devUser(), claude, string(runtime.Yard.YardKind), bubblewrap}})
 	if err != nil || result.ExitCode != 0 {
 		yard := runtime.Yard.YardName
 		if yard == "" {
@@ -76,7 +88,8 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7"
 	output := string(result.Stdout)
 	lines := strings.Split(output, "\n")
 	changed := slices.Contains(lines, "changed=1") || slices.Contains(lines, "bwrap=install") ||
-		slices.Contains(lines, "bwrap=retire") || slices.Contains(lines, "bwrap=repair") || slices.Contains(lines, "bwrap=enable")
+		slices.Contains(lines, "bwrap=retire") || slices.Contains(lines, "bwrap=repair") ||
+		slices.Contains(lines, "bwrap=enable") || slices.Contains(lines, "bwrap=cleanup")
 	return output, changed, nil
 }
 

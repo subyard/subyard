@@ -16,7 +16,7 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 	incus := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{
 		ExitCode: 1,
 		Stdout:   []byte("synthetic-private-stdout"),
-		Stderr:   []byte("synthetic-private-stderr\nsubyard-integration-conflict:ccusage\n"),
+		Stderr:   []byte("synthetic-private-stderr\nsubyard-integration-conflict:ccusage\nBubblewrap AppArmor: the owned policy directory is missing\n"),
 	}, Err: errors.New("guest command exited with status 1: synthetic-private-cause")}}}
 	runtime := Runtime{Executor: incus, Yard: domain.Context{YardName: "example"}}
 	fingerprint, changed, err := runtime.integrationServices(context.Background(), "observe")
@@ -41,6 +41,9 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 	}
 	if message = err.Error(); strings.Contains(message, "synthetic-private") || strings.Contains(message, "--yes") {
 		t.Fatalf("diagnostic exposed raw output or bypassed confirmation: %s", message)
+	}
+	if !strings.Contains(message, "Bubblewrap AppArmor: the owned policy directory is missing") {
+		t.Fatalf("independent Bubblewrap refusal was lost: %s", message)
 	}
 }
 
