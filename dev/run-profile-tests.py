@@ -1,34 +1,27 @@
 #!/usr/bin/env python3
 """Run the host-free profile inventory selected by test-profiles.sh."""
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from itertools import islice
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 
 
 def main():
-    count = int(sys.argv[1])
-    runners = [Path(arg) for arg in sys.argv[2:2 + count]]
-    args = sys.argv[2 + count:]
-    if not runners:
-        return 0
-
-    root = Path(__file__).resolve().parent.parent
-    logs = root / ".build/profile-test-runs"
-    logs.mkdir(parents=True, exist_ok=True)
-    log_dir = Path(tempfile.mkdtemp(prefix="run.", dir=logs))
-    print(f"PROFILE TESTS logs: {log_dir}", flush=True)
+    log_dir = Path(sys.argv[1])
+    count = int(sys.argv[2])
+    runners = [Path(arg) for arg in sys.argv[3:3 + count]]
+    args = sys.argv[3 + count:]
 
     def run(runner):
         name = runner.parent.parent.name
         log = log_dir / f"{name}.log"
         preflight = ["--after-permissions"] if runner.with_name("permissions.sh").is_file() else []
         print(f"PROFILE TESTS {name} starting", flush=True)
-        with log.open("wb") as output:
+        with log.open("ab") as output:
             code = subprocess.run(["bash", runner, *preflight, *args],
                                   stdout=output, stderr=subprocess.STDOUT, check=False).returncode
         return name, log, code if code >= 0 else 128 - code
@@ -51,10 +44,22 @@ def main():
         return 0
 
     status = 0
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        for result in as_completed([pool.submit(run, runner) for runner in runners]):
-            code = report(result.result())
-            status = status or code
+    workers = 3
+    remaining = iter(runners)
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        # Keep later profiles out of the executor queue so Ctrl-C stops dispatch.
+        pending = {pool.submit(run, runner) for runner in islice(remaining, workers)}
+        while pending:
+            done, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for result in done:
+                code = report(result.result())
+                status = status or code
+            pending.update(pool.submit(run, runner) for runner in islice(remaining, len(done)))
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        pool.shutdown(cancel_futures=True)
     return status
 
 

@@ -378,6 +378,7 @@ cat > "$fixture/config/profiles/example/tests/permissions.sh" <<'SH'
 #!/usr/bin/env bash
 [ "$(umask)" = 0022 ] || exit 30
 printf 'permission preflight\n'
+printf 'permission diagnostic\n' >&2
 exit "${RUNNER_PERMISSION_FAILURE:-0}"
 SH
 cat > "$fixture/config/profiles/example/tests/run.sh" <<'SH'
@@ -392,10 +393,21 @@ SH
 bash "$fixture/dev/test-profiles.sh" --permissions-only > "$tmp/profile-split.out"
 bash "$fixture/dev/test-profiles.sh" --after-permissions >> "$tmp/profile-split.out"
 [ "$(grep -c '^permission preflight$' "$tmp/profile-split.out")" -eq 1 ] || fail 'split preflight repeated'
-rc=0
-RUNNER_PERMISSION_FAILURE=33 bash "$fixture/dev/test-profiles.sh" > "$tmp/profile-permission-fail.out" 2>&1 || rc=$?
-[ "$rc" -eq 33 ] || fail 'profile preflight hid native exit'
-! grep -q '^PROFILE TESTS example starting$' "$tmp/profile-permission-fail.out" || fail 'failed preflight ran profile suite'
+for mode in normal --permissions-only; do
+  options=()
+  [ "$mode" = normal ] || options+=("$mode")
+  rc=0
+  RUNNER_PERMISSION_FAILURE=33 bash "$fixture/dev/test-profiles.sh" "${options[@]}" \
+    > "$tmp/profile-permission-fail.out" 2>&1 || rc=$?
+  [ "$rc" -eq 33 ] || fail 'profile preflight hid native exit'
+  ! grep -q '^PROFILE TESTS example starting$' "$tmp/profile-permission-fail.out" || fail 'failed preflight ran profile suite'
+  logs="$(sed -n 's/^PROFILE TESTS logs: //p' "$tmp/profile-permission-fail.out")"
+  grep -Fxq 'permission diagnostic' "$tmp/profile-permission-fail.out" \
+    && [ -n "$logs" ] \
+    && grep -Fxq 'permission preflight' "$logs/example.log" \
+    && grep -Fxq 'permission diagnostic' "$logs/example.log" \
+    || fail 'profile preflight output was not retained'
+done
 rc=0
 bash "$fixture/dev/test-profiles.sh" --e2e --permissions-only > /dev/null 2>&1 || rc=$?
 [ "$rc" -eq 2 ] || fail 'host-free preflight changed E2E execution'
@@ -424,7 +436,7 @@ cat > "$fixture/config/profiles/second/tests/run.sh" <<'SH'
 printf 'second profile output\n'
 SH
 rc=0
-SUBYARD_PROFILE_TESTS_SERIAL=0 PROFILE_MARKER="$tmp/parallel-started" \
+env -u SUBYARD_PROFILE_TESTS_SERIAL PROFILE_MARKER="$tmp/parallel-started" \
   bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' > "$tmp/parallel.out" 2>&1 || rc=$?
 [ "$rc" -eq 29 ] || fail 'parallel runner lost the failing profile exit'
 grep -Fxq 'failure stdout' "$tmp/parallel.out" && grep -Fxq 'failure stderr' "$tmp/parallel.out" \
@@ -437,6 +449,51 @@ rc=0
 SUBYARD_PROFILE_TESTS_SERIAL=1 PROFILE_MARKER="$tmp/serial-started" \
   bash "$fixture/dev/test-profiles.sh" -- 'forwarded argument' > "$tmp/serial.out" 2>&1 || rc=$?
 [ "$rc" -eq 29 ] && [ ! -e "$tmp/serial-started" ] || fail 'serial opt-out lost fail-fast execution'
+
+# Interrupt a full pool while two profiles are still waiting to start.
+env -u SUBYARD_PROFILE_TESTS_SERIAL python3 - "$tmp" "$fixture/dev/test-profiles.sh" <<'PYCASE'
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+tmp, wrapper = map(Path, sys.argv[1:])
+root = tmp / "interrupt"
+(root / "dev").mkdir(parents=True)
+for name in ("test-profiles.sh", "run-profile-tests.py"):
+    (root / "dev" / name).write_bytes(wrapper.with_name(name).read_bytes())
+marked = tmp / "interrupt-started"
+marked.mkdir()
+for index in range(5):
+    profile = root / "config" / "profiles" / str(index) / "tests"
+    profile.mkdir(parents=True)
+    script = 'import pathlib, sys, time\npathlib.Path(sys.argv[1]).touch()\n'
+    if index < 3:
+        script += 'time.sleep(30)\n'
+    (profile / "run.sh").write_text(f"""exec python3 - "$1/{index}" <<'PY'
+{script}PY
+""")
+
+with (tmp / "profile-interrupt.out").open("wb") as log:
+    with subprocess.Popen(["bash", root / "dev/test-profiles.sh", marked],
+                          stdout=log, stderr=log, start_new_session=True) as process:
+        try:
+            deadline = time.monotonic() + 10
+            while len(list(marked.iterdir())) < 3:
+                assert process.poll() is None and time.monotonic() < deadline, "pool did not fill"
+                time.sleep(0.01)
+            os.killpg(process.pid, signal.SIGINT)
+            code = process.wait(timeout=10)
+            assert sorted(p.name for p in marked.iterdir()) == ["0", "1", "2"], (
+                "interruption started a waiting profile"
+            )
+            assert code == 130, f"profile runner returned {code} after SIGINT"
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+PYCASE
 
 # The selected matrix uses real children/masks, rejects empty/missing checks,
 # and preserves the first operation failure before later masks.
