@@ -4733,8 +4733,8 @@ done
   CAPACITY_LOG_DIR='capacity-logs'
   [ "$(split_lane power-systemd power_systemd_lane)" = $'baseline\ncapacity-preflight run_vm 1 capacity-preflight\nmonitors\npower-systemd-platform run_vm 1 fixture-platform\npower-systemd power_systemd_lane 1\ncleanup cleanup_lane\nfinal-verify full_final_verify\nremove capacity-logs' ] \
     || fail 'split lane changed its baseline, monitor, cleanup or final verification order'
-  split_lane source-upgrade source_upgrade_lane fixture-platform-apparmor \
-    | grep -Fxq 'source-upgrade-platform run_vm 1 fixture-platform-apparmor' \
+  grep -Fxq 'source-upgrade-platform run_vm 1 fixture-platform-apparmor' \
+    <<<"$(split_lane source-upgrade source_upgrade_lane fixture-platform-apparmor)" \
     || fail 'split lane ignored its platform mode'
 ) || fail 'split lane final verification contract failed'
 # --split-covered is bound to the release collector's receipt for the same frozen bundle.
