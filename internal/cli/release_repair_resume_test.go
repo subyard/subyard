@@ -231,7 +231,12 @@ type installedConfigRepairExecutor struct {
 	ready             bool
 }
 
-func (fixture *installedConfigRepairExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+func (fixture *installedConfigRepairExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if result, ok, err := testkit.TokensFromSHA256(request.Command, func(command []string) (ports.InstanceExecResult, error) {
+		return fixture.Exec(ctx, project, instance, ports.InstanceExecRequest{Command: command})
+	}); ok {
+		return result, err
+	}
 	if len(request.Command) != 3 || request.Command[0] != "sha256sum" || request.Command[2] != fixture.destination {
 		return ports.InstanceExecResult{}, fmt.Errorf("unexpected materialization request: %v", request.Command)
 	}
@@ -414,6 +419,11 @@ type pendingRetirementExecutor struct {
 }
 
 func (fixture *pendingRetirementExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if result, ok, err := testkit.TokensFromSHA256(request.Command, func(command []string) (ports.InstanceExecResult, error) {
+		return fixture.Exec(ctx, project, instance, ports.InstanceExecRequest{Command: command})
+	}); ok {
+		return result, err
+	}
 	command := request.Command
 	if len(command) == 5 && command[0] == "python3" && strings.Contains(command[3], "Version 1 records observed ownership only") {
 		switch command[4] {
@@ -618,6 +628,11 @@ func (fixture *guestInventoryExecutor) inventory(ctx context.Context, mode strin
 }
 
 func (fixture *guestInventoryExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if result, ok, err := testkit.TokensFromSHA256(request.Command, func(command []string) (ports.InstanceExecResult, error) {
+		return fixture.Exec(ctx, project, instance, ports.InstanceExecRequest{Command: command})
+	}); ok {
+		return result, err
+	}
 	command := request.Command
 	if len(command) == 5 && command[0] == "python3" && command[3] == reconcileruntime.IntegrationInventoryReader() && command[4] != "settings" && command[4] != "selection" {
 		var input map[string]any

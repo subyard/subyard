@@ -48,7 +48,9 @@ type configTargetAssessment struct {
 	// guest files an earlier refused write preserved.
 	Consent    *ports.ConfigConsent `json:",omitempty"`
 	Unreadable []string             `json:",omitempty"`
-	Leftovers  []string             `json:",omitempty"`
+	// Preserved maps each destination to the guest files a refused write kept
+	// beside it; such a destination is not converged.
+	Preserved map[string][]string `json:",omitempty"`
 	// running marks an observed running yard; instance is its identity.
 	running  bool
 	instance string
@@ -1051,6 +1053,9 @@ func (cli *CLI) configStatus(
 		}
 		state, drift := assessment.State, assessment.Changed
 		fmt.Fprintf(cli.options.Stdout, "yard %s materialized-config: %s\n", target.Name, state)
+		for _, line := range configFileAttention(assessment) {
+			fmt.Fprintln(cli.options.Stdout, line)
+		}
 		if len(expectedDesired) == 0 {
 			diagnostic, err := cli.configInstalledDiagnostic(ctx, target, state)
 			for _, difference := range assessment.Differences {
@@ -1341,25 +1346,46 @@ func (cli *CLI) assessConfigTarget(
 		return finish("running")
 	}
 	failures := []error{prepareErr}
+	// One observation of every file a refresh of this yard writes gives the
+	// raw files' convergence and the consent tokens, unreadable files and
+	// preserved guest files that config apply, init, sync and status report.
+	destinations, err := configObservationDestinations(target, assets)
+	if err != nil {
+		return configTargetAssessment{NativeOwner: nativeOwner, State: "running"}, domain.CollectRefusals(prepareErr, err)
+	}
+	observed, err := configmaterial.ObserveTokens(ctx, executor, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, target.Loaded.Context.DevUser, destinations)
+	if err != nil {
+		return configTargetAssessment{NativeOwner: nativeOwner, State: "running"}, domain.CollectRefusals(prepareErr, err)
+	}
+	tokens := map[string]configmaterial.FileToken{}
+	consent := &ports.ConfigConsent{InstanceUUID: info.Config["volatile.uuid"], Files: []ports.ConfigFileConsent{}}
+	var unreadable []string
+	preserved := map[string][]string{}
+	for _, file := range observed {
+		tokens[file.Destination] = file
+		consent.Files = append(consent.Files, ports.ConfigFileConsent{Destination: file.Destination, Token: file.Token})
+		if file.Token == configmaterial.TokenUnreadable {
+			unreadable = append(unreadable, file.Destination)
+		}
+		if len(file.Leftovers) != 0 {
+			preserved[file.Destination] = file.Leftovers
+		}
+	}
 	for index, asset := range assets {
-		request := ports.InstanceExecRequest{
-			Command: []string{"sha256sum", "--", asset.Destination},
-			User:    uint32(target.Loaded.Context.DevUID), Group: uint32(target.Loaded.Context.DevUID),
+		token := tokens[asset.Destination]
+		// A raw file's token is its observation: an absent or unreadable file
+		// has no content, like a failed hash.
+		observed := config.MaterializationObservation{ExitCode: 1}
+		if digest, ok := strings.CutPrefix(token.Token, "sha256:"); ok {
+			observed = config.MaterializationObservation{Output: []byte(digest + "  " + asset.Destination + "\n")}
 		}
 		if asset.OwnedFormat != "" {
-			request, err = configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
+			request, err := configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
 			if err != nil {
 				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 				continue
 			}
-		}
-		result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, request)
-		if err != nil && result.ExitCode == 0 {
-			failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
-			continue
-		}
-		observed := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
-		if asset.OwnedFormat != "" {
+			result, err := executor.Exec(ctx, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, request)
 			if err != nil || result.ExitCode != 0 {
 				failures = append(failures, fmt.Errorf("%s: structured configuration observation failed", asset.Name))
 				continue
@@ -1369,12 +1395,15 @@ func (cli *CLI) assessConfigTarget(
 				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 				continue
 			}
-			observed.Fingerprint, observed.OwnedConverged = observation.Fingerprint, observation.Converged
+			observed = config.MaterializationObservation{Fingerprint: observation.Fingerprint, OwnedConverged: observation.Converged}
 		}
 		fact, err := config.AssessMaterializedArtifact(desired.Assets[index], observed)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 			continue
+		}
+		if len(token.Leftovers) != 0 {
+			fact.Converged = false
 		}
 		facts = append(facts, fact)
 		if !fact.Converged && asset.Setting != "" {
@@ -1390,43 +1419,52 @@ func (cli *CLI) assessConfigTarget(
 		return configTargetAssessment{NativeOwner: nativeOwner, State: "running", Differences: differences}, err
 	}
 	assessment, err := finish("running")
-	assessment.running, assessment.instance = true, info.Config["volatile.uuid"]
+	assessment.running, assessment.instance = true, consent.InstanceUUID
+	assessment.Consent, assessment.Unreadable = consent, unreadable
+	// A preserved guest file is drift until the operator resolves it, even
+	// for a file no config asset compares.
+	if len(preserved) != 0 {
+		assessment.Preserved, assessment.Changed = preserved, true
+	}
 	return assessment, err
 }
 
-// assessConfigConsent is a config apply plan's assessment of one target: a
-// changed running yard also records the tokens of every file its refresh
-// writes, from the runtime selection, which includes instruction files that
-// the config assets omit.
-func (cli *CLI) assessConfigConsent(ctx context.Context, target configTarget) (configTargetAssessment, error) {
-	assessment, err := cli.assessConfigTarget(ctx, target, true)
-	if err != nil || !assessment.Changed || !assessment.running {
-		return assessment, err
+// configFileAttention names the files a refresh of the assessed yard
+// refuses, each with the operator's step.
+func configFileAttention(assessment configTargetAssessment) []string {
+	yard := assessment.Target.Name
+	apply := domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: yard})
+	var lines []string
+	for _, destination := range assessment.Unreadable {
+		lines = append(lines, fmt.Sprintf("attention: yard %s: %s is not a readable regular file; replace it with a regular file or remove it, then run %s", yard, destination, apply))
 	}
-	_, executor := cli.statusPorts()
+	for _, destination := range slices.Sorted(maps.Keys(assessment.Preserved)) {
+		lines = append(lines, fmt.Sprintf("attention: yard %s: %s; then run %s", yard, configmaterial.LeftoverRecovery(destination, assessment.Preserved[destination]), apply))
+	}
+	return lines
+}
+
+// configObservationDestinations are every file a refresh of target writes:
+// its config assets and the runtime selection, which includes instruction
+// files the assets omit.
+func configObservationDestinations(target configTarget, assets []configAsset) ([]string, error) {
 	sources, err := config.SelectMaterializationSources(target.Loaded.Environment, target.Loaded.Context.DevUser, config.MaterializationRuntime, target.Loaded.Catalog.Integrations()...)
 	if err != nil {
-		return assessment, err
+		return nil, err
 	}
 	var destinations []string
+	add := func(destination string) {
+		if !slices.Contains(destinations, destination) {
+			destinations = append(destinations, destination)
+		}
+	}
+	for _, asset := range assets {
+		add(asset.Destination)
+	}
 	for _, source := range sources {
-		if !slices.Contains(destinations, source.Asset.Destination) {
-			destinations = append(destinations, source.Asset.Destination)
-		}
+		add(source.Asset.Destination)
 	}
-	observed, err := configmaterial.ObserveTokens(ctx, executor, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, target.Loaded.Context.DevUser, destinations)
-	if err != nil {
-		return assessment, err
-	}
-	assessment.Consent = &ports.ConfigConsent{InstanceUUID: assessment.instance, Files: []ports.ConfigFileConsent{}}
-	for _, file := range observed {
-		assessment.Consent.Files = append(assessment.Consent.Files, ports.ConfigFileConsent{Destination: file.Destination, Token: file.Token})
-		if file.Token == configmaterial.TokenUnreadable {
-			assessment.Unreadable = append(assessment.Unreadable, file.Destination)
-		}
-		assessment.Leftovers = append(assessment.Leftovers, file.Leftovers...)
-	}
-	return assessment, nil
+	return destinations, nil
 }
 
 func sameConfigTargetSet(

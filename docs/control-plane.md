@@ -55,9 +55,14 @@ other bytes leaves the guest's newest inode at the destination and reports `chan
 exec the writer walks the parent with `O_NOFOLLOW`, stages a temporary file and, for `absent`,
 publishes it with `renameat2(RENAME_NOREPLACE)`; otherwise it exchanges it with the destination,
 checks right after the exchange that the displaced inode is the one it hashed, rehashes it, and only
-then unlinks it. When the displaced inode differs, it exchanges back within a bound so the newest
-guest inode stays at the destination; an inode it did not hash is never unlinked or swept, but is
-preserved as `.<name>.subyard-cas.<hex>` and reported. When `renameat2` is unsupported (`ENOSYS`
+then unlinks it. When the displaced inode differs or cannot be rehashed, it exchanges back within a
+bound so the newest guest inode stays at the destination; an inode it did not hash is never unlinked
+or swept, but is preserved as `.<name>.subyard-cas.<hex>` and reported. A preserved file refuses
+every later write of its destination as `leftover` (exit status 5) until the operator resolves it,
+and the token observation reports it, so `config status` and release readiness never treat that
+destination as converged.
+Missing parent directories are created only after the write is decided, and a converged file only
+gets its owner and mode back. When `renameat2` is unsupported (`ENOSYS`
 or `EINVAL`, such as ZFS before 2.2), the same exec opens the destination with `O_NOFOLLOW`, checks
 its hash, writes the temporary file, re-checks the inode and hash and then renames over it; `absent`
 uses `link`, so an existing file refuses as changed. The window between that last re-check and the
@@ -72,7 +77,9 @@ because each write rechecks its own file. An `init --configs` child receives the
 `--config-consent-fd N`, an inherited file holding JSON; a release without that option rejects it
 before any write. Every other refresh plans for itself and observes the tokens immediately before
 writing: a direct `init` or `init --configs`, an init of a stopped or uninitialized yard, an
-integration apply, the follow-up after an update and a self-planned release transition.
+integration apply and the follow-up after an update. A release activation repair writes over the
+tokens its authorized plan read. `config status` uses the same observation, so it reports the
+unreadable and preserved files that a refresh refuses.
 
 Integration selection uses the shared prepared-command boundary, the protected per-yard config
 writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used
@@ -1565,9 +1572,15 @@ Recovery advice is typed until it is printed (`internal/domain/recovery.go`): th
 installed-source prerequisite are observed once, typed as findings, and one selector picks one
 action that the gate admits and that is not the command just attempted, unless its finding was
 observed after that attempt, such as a file changed since the plan. Status, refusals, sync and RPC
-use the same selection. A refused installed source ranks first and names its failed predicate, so no
-repair is advised behind it; an owner's retry ranks next and is printed verbatim when it is not one
-of the closed commands; invalid configuration advises `config validate` after it is corrected.
+use the same selection and one renderer, `domain.RenderNext`. A refused installed source ranks first
+and names its failed predicate, so no repair is advised behind it; its step is the command that makes
+the predicate hold: `yard migrate` finishes an unfinished transition or a pending protected
+publication with its sealed owner, `yard update` installs a fresh release whose journal, history and
+source proof verify, and `yard migrate --check` explains an unreadable store. A repair run with other
+tooling names the installed `yard` command instead. An owner's retry ranks next and is printed
+verbatim when it is not one of the closed commands and not the command just attempted; invalid
+configuration advises `config validate` after it is corrected; a preserved guest file names the
+operator's step and then `config apply`.
 
 A yard whose last init did not finish is left to that init, as described under [release
 migrations](#release-migrations); release repair of a yard holds the per-yard lock init holds, so

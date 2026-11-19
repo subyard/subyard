@@ -66,7 +66,7 @@ def ONCE(point):
 	if err != nil && !errors.As(err, &exit) {
 		world.t.Fatal(err)
 	}
-	if code := command.ProcessState.ExitCode(); code != 0 && code != 3 && code != 4 && code != 97 {
+	if code := command.ProcessState.ExitCode(); code != 0 && code != 3 && code != 4 && code != 5 && code != 97 {
 		world.t.Fatalf("writer failed: %d %s", code, stderr.String())
 	}
 	return command.ProcessState.ExitCode(), stdout.String()
@@ -178,8 +178,9 @@ func TestCompareAndWriteConvergedAndUnreadable(t *testing.T) {
 	if code, _ := world.run("", PayloadToken([]byte("other")), []byte("desired\n")); code != 0 {
 		t.Fatal("converged file refused", code)
 	}
-	if after, _ := os.Stat(world.destination); !os.SameFile(before, after) || after.Mode().Perm() != 0o600 {
-		t.Fatal("converged file was rewritten")
+	// Like a write, convergence leaves the developer's owner and mode.
+	if after, _ := os.Stat(world.destination); !os.SameFile(before, after) || after.Mode().Perm() != 0o644 {
+		t.Fatal("converged file was rewritten or kept its mode")
 	}
 	for _, kind := range []string{"symlink", "directory", "fifo", "symlinked parent"} {
 		t.Run(kind, func(t *testing.T) {
@@ -272,4 +273,51 @@ func mapsEqual(left, right map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// Guest bytes that a crash right after the exchange preserved block the next
+// write and its convergence until the operator resolves them.
+func TestCompareAndWriteLeftoverBlocksConvergence(t *testing.T) {
+	world := newCASWorld(t)
+	testkit.WriteFile(t, world.destination, []byte("old"), 0o644)
+	hook := `def CAS_HOOK(point):
+    if point == "staged": GUEST("guest")
+    if point == "exchanged": _t._exit(97)`
+	if code, _ := world.run(hook, PayloadToken([]byte("old")), []byte("desired\n")); code != 97 {
+		t.Fatalf("crash did not occur: %d", code)
+	}
+	if got := world.contents(); got["agent.md"] != "desired\n" || got["leftover"] != "guest" {
+		t.Fatalf("after crash: %v", got)
+	}
+	leftovers := world.observe().Leftovers
+	code, stdout := world.run("", PayloadToken([]byte("old")), []byte("desired\n"))
+	refusal := ParseWriteResult(world.destination, code, []byte(stdout))
+	var typed WriteRefusal
+	if code != 5 || !errors.As(refusal, &typed) || typed.Outcome != OutcomeLeftover || !slices.Equal(typed.Leftovers, leftovers) ||
+		!strings.Contains(refusal.Error(), leftovers[0]) {
+		t.Fatalf("rerun over preserved bytes: %d %v", code, refusal)
+	}
+	if got := world.contents(); got["agent.md"] != "desired\n" || got["leftover"] != "guest" {
+		t.Fatalf("rerun changed the directory: %v", got)
+	}
+}
+
+// A file that grows past the read bound after it was hashed is not verified:
+// the writer gives it back instead of unlinking or stranding it.
+func TestCompareAndWriteUnverifiableDisplacedFileIsGivenBack(t *testing.T) {
+	world := newCASWorld(t)
+	testkit.WriteFile(t, world.destination, []byte("old"), 0o644)
+	hook := fmt.Sprintf(`def CAS_HOOK(point):
+    if point == "staged":
+        with open(%q, "ab") as output: output.write(b"x" * (33 << 20))`, world.destination)
+	code, stdout := world.run(hook, PayloadToken([]byte("old")), []byte("desired\n"))
+	var typed WriteRefusal
+	if code != 4 || !errors.As(ParseWriteResult(world.destination, code, []byte(stdout)), &typed) || len(typed.Leftovers) != 0 {
+		t.Fatalf("grown file: %d %s", code, stdout)
+	}
+	entries, _ := os.ReadDir(filepath.Dir(world.destination))
+	info, err := os.Stat(world.destination)
+	if len(entries) != 1 || err != nil || info.Size() != 3+33<<20 {
+		t.Fatalf("grown guest file not at its destination: %d entries, %v", len(entries), err)
+	}
 }

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -146,8 +145,16 @@ func (finding Finding) Remedies(attempted Action) []Action {
 	yard := func(verb Verb) []Action { return []Action{{Verb: verb, Yard: finding.Yard}} }
 	switch finding.Kind {
 	case FindingSource:
-		if finding.Predicate == "journal-not-complete" {
-			return []Action{{Verb: VerbMigrate}}
+		// Each refused installed-source predicate names the command that can
+		// make it hold; only the running tooling itself has none.
+		switch finding.Predicate {
+		// After that command, the read-only check names why it still fails.
+		case "journal-not-complete", "pending-publication", "pending-archive":
+			return []Action{{Verb: VerbMigrate}, {Verb: VerbMigrateCheck}}
+		case "release-options", "journal-absent", "recovery-history", "source-proof", "proof-transaction", "proof-artifact":
+			return []Action{{Verb: VerbUpdate}, {Verb: VerbMigrateCheck}}
+		case "store":
+			return []Action{{Verb: VerbMigrateCheck}}
 		}
 	case FindingOwner, FindingPending:
 		if action, _, ok := ParseRetry(finding.Retry); ok {
@@ -192,7 +199,8 @@ func rank(finding Finding, action Action) int {
 		return 0
 	case finding.Kind == FindingOwner:
 		return 1
-	case action.Verb == VerbConfigValidate:
+	case action.Verb == VerbConfigValidate, finding.Kind == FindingFileLeftover:
+		// Both need the operator first: no command proceeds until they do.
 		return 2
 	case action.Verb == VerbNone:
 		return 3 + len(recoveryRank) // a terminal finding never hides a remedy
@@ -222,34 +230,26 @@ func NextStep(findings []Finding, attempted Action, admitted func(Action) bool) 
 	return best, chosen
 }
 
-// RenderRecovery prints every distinct cause and exactly one next step. An
-// owner retry that does not parse is printed verbatim as that step. A budget
-// above zero bounds the causes, naming how many it left out.
-func RenderRecovery(findings []Finding, action Action, chosen Finding, budget int) string {
-	var lines []string
-	for _, finding := range findings {
-		if finding.Public != "" && !slices.Contains(lines, finding.Public) {
-			lines = append(lines, finding.Public)
+// RenderNext is the one renderer of a selected next step. A source finding
+// keeps its named predicate beside the command that repairs it; an owner's
+// retry is printed in the owner's words, unless it repeats the attempted
+// command; a terminal finding prints what the operator must do.
+func RenderNext(action Action, chosen Finding, attempted Action) string {
+	rendered := RenderAction(action)
+	switch {
+	case chosen.Kind == FindingSource && action.Verb != VerbNone:
+		return rendered + " (" + chosen.Public + ")"
+	case chosen.Kind == FindingSource || chosen.Kind == FindingFileLeftover:
+		return chosen.Public
+	case chosen.Kind == FindingOwner || chosen.Kind == FindingPending:
+		if parsed, _, ok := ParseRetry(chosen.Retry); chosen.Retry != "" && (!ok || parsed == action || action.Verb == VerbNone && parsed != attempted) {
+			return chosen.Retry
 		}
+	case chosen.Kind == FindingConfigInvalid && action.Verb == VerbConfigValidate:
+		return "correct the yard's configuration, then " + rendered
 	}
-	next := RenderAction(action)
-	if action.Verb == VerbNone && (chosen.Kind == FindingOwner || chosen.Kind == FindingPending) {
-		next = chosen.Retry
+	if action.Verb == VerbNone {
+		return RenderAction(Action{Verb: VerbMigrateCheck})
 	}
-	if next != "" {
-		next = "next: " + next
-	}
-	if budget > 0 {
-		kept := 0
-		for size := len(next); kept < len(lines) && size+len(lines[kept])+1 <= budget-64; kept++ {
-			size += len(lines[kept]) + 1
-		}
-		if kept < len(lines) {
-			lines = append(lines[:kept], "(and "+strconv.Itoa(len(lines)-kept)+" more; yard migrate --check)")
-		}
-	}
-	if next != "" {
-		lines = append(lines, next)
-	}
-	return strings.Join(lines, "\n")
+	return rendered
 }

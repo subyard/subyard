@@ -530,7 +530,8 @@ func runningIncus(execCount int) *testkit.Incus {
 			InstanceFound: true,
 			Instance:      ports.InstanceInfo{Status: "Running"},
 		},
-		ExecSteps: steps,
+		ExecSteps:   steps,
+		GuestTokens: map[string]string{},
 	}
 }
 

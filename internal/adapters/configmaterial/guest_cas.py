@@ -17,7 +17,7 @@ import sys as _cas_sys
 CAS_NOREPLACE, CAS_EXCHANGE = 1, 2
 CAS_MAX_BYTES = 32 << 20
 CAS_EXCHANGE_BOUND = 8
-CAS_EXIT = {"unreadable": 3, "changed": 4}
+CAS_EXIT = {"unreadable": 3, "changed": 4, "leftover": 5}
 CAS_UNSUPPORTED = (_cas_errno.ENOSYS, _cas_errno.EINVAL, _cas_errno.ENOTSUP)
 _CAS_DIRECTORY = _cas_os.O_RDONLY | _cas_os.O_DIRECTORY | _cas_os.O_NOFOLLOW | _cas_os.O_CLOEXEC
 
@@ -166,11 +166,21 @@ def _cas_fallback(directory, temporary, name, expect, descriptor, hashed):
     _cas_os.rename(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
 
 
+def _cas_verified(directory, temporary, expect, descriptor, hashed):
+    # Identity first: only the hashed inode, still matching the token, may go.
+    # A file that can no longer be read is not verified either.
+    if _cas_identity(directory, temporary) != hashed:
+        return False
+    try:
+        return _cas_hash(descriptor) == expect
+    except CasRefusal:
+        return False
+
+
 def _cas_exchange(directory, temporary, name, ours, expect, descriptor, hashed):
     _cas_renameat2(directory, temporary, name, CAS_EXCHANGE)
     _cas_hook("exchanged")
-    # Identity first: only the hashed inode, still matching the token, may go.
-    if _cas_identity(directory, temporary) == hashed and _cas_hash(descriptor) == expect:
+    if _cas_verified(directory, temporary, expect, descriptor, hashed):
         _cas_hook("verified")
         _cas_os.unlink(temporary, dir_fd=directory)
         return
@@ -193,18 +203,39 @@ def _cas_exchange(directory, temporary, name, ours, expect, descriptor, hashed):
     raise CasRefusal("changed", [temporary])
 
 
+def _cas_leftovers(directory, destination):
+    prefix = "." + _cas_os.path.basename(destination) + ".subyard-cas."
+    return sorted(_cas_os.path.join(_cas_os.path.dirname(destination), entry)
+                  for entry in _cas_os.listdir(directory) if entry.startswith(prefix))
+
+
 def cas_replace(home, destination, expect, payload, uid, mode):
     """Replace destination with payload only if it still matches expect.
     Returns "written" or "converged"; raises CasRefusal otherwise."""
     if expect != "absent" and not (expect.startswith("sha256:") and len(expect) == 71):
         raise CasRefusal("changed")
-    directory = _cas_parent(home, destination, uid, expect == "absent")
+    # Missing parents are created only once the write is decided, so no
+    # refusal leaves new directories behind.
+    directory = _cas_parent(home, destination, uid, False)
     if directory is None:
-        raise CasRefusal("changed")
+        if expect != "absent":
+            raise CasRefusal("changed")
+        directory = _cas_parent(home, destination, uid, True)
     name, descriptor = _cas_os.path.basename(destination), None
     try:
+        # Guest bytes that a refused write preserved stay the operator's to
+        # resolve: no write, and no convergence, until they are gone.
+        leftovers = _cas_leftovers(directory, destination)
+        if leftovers:
+            raise CasRefusal("leftover", leftovers)
         current, descriptor, hashed = _cas_open(directory, name)
         if current == cas_token(payload):
+            # A converged file still gets the owner and mode a write gives it.
+            info = _cas_os.fstat(descriptor)
+            if (info.st_uid, info.st_gid) != (uid, uid):
+                _cas_os.fchown(descriptor, uid, uid)
+            if _cas_stat.S_IMODE(info.st_mode) != mode:
+                _cas_os.fchmod(descriptor, mode)
             return "converged"
         if current != expect:
             raise CasRefusal("changed")
@@ -257,10 +288,7 @@ def cas_observe(home, destination):
                 _cas_os.close(descriptor)
         except CasRefusal:
             token = "unreadable"
-        prefix = "." + name + ".subyard-cas."
-        leftovers = sorted(_cas_os.path.join(_cas_os.path.dirname(destination), entry)
-                           for entry in _cas_os.listdir(directory) if entry.startswith(prefix))
-        return {"destination": destination, "token": token, "leftovers": leftovers}
+        return {"destination": destination, "token": token, "leftovers": _cas_leftovers(directory, destination)}
     finally:
         _cas_os.close(directory)
 

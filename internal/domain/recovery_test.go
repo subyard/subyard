@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 )
@@ -46,8 +45,14 @@ func TestOwnerRetryKeepsUnparsedTextVerbatim(t *testing.T) {
 	if action.Verb != VerbNone || chosen != owner {
 		t.Fatalf("a lower remedy contradicted the owner: %#v %#v", action, chosen)
 	}
-	if text := RenderRecovery([]Finding{drift, owner}, action, chosen, 0); text != "next: run yard update for a fresh plan and confirmation" {
+	if text := RenderNext(action, chosen, Action{}); text != "run yard update for a fresh plan and confirmation" {
 		t.Fatalf("owner retry not rendered verbatim: %q", text)
+	}
+	// A retry that repeats the attempted command is never printed as its next step.
+	pending := Finding{Kind: FindingPending, Yard: "named", Retry: "run yard -Y named init"}
+	attempted := Action{Verb: VerbInit, Yard: "named"}
+	if action, chosen := NextStep([]Finding{pending}, attempted, nil); strings.Contains(RenderNext(action, chosen, attempted), "init") {
+		t.Fatalf("attempted retry repeated: %q", RenderNext(action, chosen, attempted))
 	}
 }
 
@@ -69,19 +74,5 @@ func TestNextStepNeverRepeatsTheAttemptedCommand(t *testing.T) {
 	}
 	if got := strings.Join(sequence, ", "); got != "yard migrate, yard -Y named stop --force, yard -Y named start" {
 		t.Fatalf("unreachable sequence: %s", got)
-	}
-}
-
-// The readiness RPC bounds message and next to 8192 characters.
-func TestRecoveryRenderingFitsTheReadinessBudget(t *testing.T) {
-	var findings []Finding
-	for index := range 162 {
-		findings = append(findings, Finding{Kind: FindingDrift, Yard: fmt.Sprintf("yard%03d", index),
-			Public: fmt.Sprintf("yard yard%03d: materialized-config drift in %s", index, strings.Repeat("x", 40))})
-	}
-	action, chosen := NextStep(findings, Action{}, nil)
-	text := RenderRecovery(findings, action, chosen, 8192)
-	if len(text) > 8192 || !strings.HasSuffix(text, "next: yard -Y yard000 init") || !strings.Contains(text, "more; yard migrate --check)") {
-		t.Fatalf("budget: %d bytes, tail %q", len(text), text[max(0, len(text)-120):])
 	}
 }

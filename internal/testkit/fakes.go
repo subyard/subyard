@@ -213,8 +213,8 @@ type Incus struct {
 	ExecSteps         []IncusExecStep
 	ExecCalls         []IncusExecCall
 	ProbeErr          error
-	// GuestTokens answer guest config token observations (absent by
-	// default) without consuming steps; TokenObservations records them.
+	// GuestTokens, when set, answer guest config token observations (absent
+	// by default) without consuming steps; TokenObservations records them.
 	GuestTokens       map[string]string
 	TokenObservations []IncusExecCall
 	ConfigUpdates     []InstanceConfigUpdate
@@ -357,19 +357,58 @@ func (fake *Incus) Events(context.Context, []string) (<-chan domain.OperationEve
 	return fake.EventsOut, fake.ErrorsOut
 }
 
-// GuestTokenObservation answers a guest config token observation from tokens,
-// absent by default, so fixtures need not script the read before each write.
-func GuestTokenObservation(command []string, tokens map[string]string) ([]byte, bool) {
-	if len(command) < 6 || command[0] != "python3" || command[4] != "observe" || !strings.HasSuffix(command[3], "\ncas_main()\n") {
+// GuestTokenObservation answers a guest config token observation: token
+// gives each destination's token, absent when it is nil or returns "".
+func GuestTokenObservation(command []string, token func(destination string) string) ([]byte, bool) {
+	if !IsGuestTokenObservation(command) {
 		return nil, false
 	}
 	files := []map[string]any{}
 	for _, destination := range command[6:] {
-		token := cmp.Or(tokens[destination], "absent")
-		files = append(files, map[string]any{"destination": destination, "token": token, "leftovers": []string{}})
+		value := ""
+		if token != nil {
+			value = token(destination)
+		}
+		files = append(files, map[string]any{"destination": destination, "token": cmp.Or(value, "absent"), "leftovers": []string{}})
 	}
 	payload, _ := json.Marshal(map[string]any{"files": files})
 	return payload, true
+}
+
+// IsGuestTokenObservation reports the guest config token observation command.
+func IsGuestTokenObservation(command []string) bool {
+	return len(command) >= 6 && command[0] == "python3" && command[4] == "observe" && strings.HasSuffix(command[3], "\ncas_main()\n")
+}
+
+// TokensFromSHA256 answers a guest config token observation from a fixture
+// that models each file by its sha256sum answer: a digest is the file's
+// token, a completed failed hash is an absent file, and a failed exec fails
+// the observation.
+func TokensFromSHA256(command []string, hash func(command []string) (ports.InstanceExecResult, error)) (ports.InstanceExecResult, bool, error) {
+	if !IsGuestTokenObservation(command) {
+		return ports.InstanceExecResult{}, false, nil
+	}
+	tokens := map[string]string{}
+	for _, destination := range command[6:] {
+		result, err := hash([]string{"sha256sum", "--", destination})
+		var completed *ports.GuestExitError
+		if err != nil && !errors.As(err, &completed) {
+			return ports.InstanceExecResult{}, true, err
+		}
+		if fields := strings.Fields(string(result.Stdout)); err == nil && result.ExitCode == 0 && len(fields) != 0 {
+			tokens[destination] = HashToken(fields[0])
+		}
+	}
+	payload, _ := GuestTokenObservation(command, func(destination string) string { return tokens[destination] })
+	return ports.InstanceExecResult{Stdout: payload}, true, nil
+}
+
+// HashToken is the observation token of a hex digest, or absent for "".
+func HashToken(digest string) string {
+	if digest == "" {
+		return "absent"
+	}
+	return "sha256:" + digest
 }
 
 func (fake *Incus) Exec(
@@ -383,7 +422,7 @@ func (fake *Incus) Exec(
 	if len(request.Command) == 1 && request.Command[0] == "true" {
 		return ports.InstanceExecResult{}, fake.ProbeErr
 	}
-	if payload, ok := GuestTokenObservation(request.Command, fake.GuestTokens); ok {
+	if payload, ok := GuestTokenObservation(request.Command, func(destination string) string { return fake.GuestTokens[destination] }); ok && fake.GuestTokens != nil {
 		fake.TokenObservations = append(fake.TokenObservations, IncusExecCall{Project: project, Name: name, Request: request})
 		return ports.InstanceExecResult{Stdout: payload}, nil
 	}

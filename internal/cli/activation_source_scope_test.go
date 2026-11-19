@@ -28,6 +28,9 @@ type sourceScopeConfigBoundary struct {
 func (boundary *sourceScopeConfigBoundary) Exec(
 	_ context.Context, project, instance string, request ports.InstanceExecRequest,
 ) (ports.InstanceExecResult, error) {
+	if payload, ok := testkit.GuestTokenObservation(request.Command, nil); ok {
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
 	digest, err := configmaterial.DesiredDigest(request.Stdin)
 	if err != nil {
 		return ports.InstanceExecResult{}, err

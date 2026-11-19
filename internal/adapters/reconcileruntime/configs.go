@@ -619,7 +619,7 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 		return err
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-	if result.ExitCode == 3 || result.ExitCode == 4 {
+	if result.ExitCode == 3 || result.ExitCode == 4 || result.ExitCode == 5 {
 		return configmaterial.WriteResult(file.destination, result, err)
 	}
 	if err != nil || result.ExitCode != 0 {

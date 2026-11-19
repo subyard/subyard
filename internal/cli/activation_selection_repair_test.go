@@ -964,7 +964,12 @@ type selectionOnlyIntegrationExecutor struct {
 	mutations, serviceObservations           int
 }
 
-func (executor *selectionOnlyIntegrationExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+func (executor *selectionOnlyIntegrationExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if result, ok, err := testkit.TokensFromSHA256(request.Command, func(command []string) (ports.InstanceExecResult, error) {
+		return executor.Exec(ctx, project, instance, ports.InstanceExecRequest{Command: command})
+	}); ok {
+		return result, err
+	}
 	command := strings.Join(request.Command, "\x00")
 	if len(request.Command) > 4 && request.Command[0] == "python3" && strings.Contains(request.Command[3], "Version 1 records observed ownership only") {
 		if request.Command[4] != "observe" {

@@ -546,8 +546,10 @@ type materializingExecutor struct {
 }
 
 func (executor materializingExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-	if payload, ok := testkit.GuestTokenObservation(request.Command, nil); ok {
-		return ports.InstanceExecResult{Stdout: payload}, nil
+	if result, ok, err := testkit.TokensFromSHA256(request.Command, func(command []string) (ports.InstanceExecResult, error) {
+		return executor.Exec(ctx, project, instance, ports.InstanceExecRequest{Command: command})
+	}); ok {
+		return result, err
 	}
 	if len(request.Command) == 3 && request.Command[0] == "sha256sum" {
 		digest, known := executor.desired[instance+"/"+request.Command[2]]

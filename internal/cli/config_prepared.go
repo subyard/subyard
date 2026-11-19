@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 
@@ -435,14 +436,9 @@ type configApplyExecution struct {
 	inProcess bool
 }
 
+// prepareConfigApply plans a refresh of targets that carries the guest tokens
+// it shows, so each write replaces only the bytes it was planned on.
 func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, selector configTargetSelector) (*configApplyExecution, error) {
-	return cli.prepareConfigRefresh(ctx, targets, selector, true)
-}
-
-// prepareConfigRefresh plans a refresh of targets. With consent, the plan
-// carries the guest tokens it shows; without, as for a release activation,
-// each yard's refresh observes them right before it writes.
-func (cli *CLI) prepareConfigRefresh(ctx context.Context, targets []configTarget, selector configTargetSelector, consent bool) (*configApplyExecution, error) {
 	if len(targets) == 0 {
 		return nil, errors.New("config apply: no local yards selected")
 	}
@@ -458,19 +454,17 @@ func (cli *CLI) prepareConfigRefresh(ctx context.Context, targets []configTarget
 		if target.Loaded.Context.AccessKind == domain.AccessRemote {
 			return nil, fmt.Errorf("config apply does not implicitly operate on remote yard %s", target.Name)
 		}
-		assess := cli.assessConfigConsent
-		if !consent {
-			assess = func(ctx context.Context, target configTarget) (configTargetAssessment, error) {
-				return cli.assessConfigTarget(ctx, target, true)
-			}
-		}
-		assessment, err := assess(ctx, target)
+		assessment, err := cli.assessConfigTarget(ctx, target, true)
 		if err != nil {
 			return nil, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome}
 		}
-		// A file without a token cannot be consented to: refuse before the prompt.
+		// A file without a token cannot be consented to, and preserved guest
+		// bytes are the operator's to resolve: refuse both before the prompt.
 		for _, destination := range assessment.Unreadable {
 			unreadable = append(unreadable, materializedConfigActivationError{configmaterial.WriteRefusal{Destination: destination, Outcome: configmaterial.OutcomeUnreadable}, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome})
+		}
+		for _, destination := range slices.Sorted(maps.Keys(assessment.Preserved)) {
+			unreadable = append(unreadable, materializedConfigActivationError{configmaterial.WriteRefusal{Destination: destination, Outcome: configmaterial.OutcomeLeftover, Leftovers: assessment.Preserved[destination]}, target.Name, "materialized config", "config apply", "resolve", target.Loaded.Context.Paths.ConfigHome})
 		}
 		execution.approved = append(execution.approved, assessment)
 	}
@@ -635,19 +629,45 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 // advice follows what the guest holds now: a file changed since the plan
 // needs a fresh one, and the rerun of config apply is then progress.
 func (cli *CLI) configApplyFailure(ctx context.Context, approved configTargetAssessment, cause error) error {
-	fresh, err := cli.assessConfigConsent(ctx, approved.Target)
-	action, _ := domain.NextStep(configApplyFindings(approved, fresh, err), domain.Action{Verb: domain.VerbConfigApply, Yard: approved.Target.Name}, nil)
-	command := "config status"
-	if action.Verb != domain.VerbNone && action.Yard == approved.Target.Name {
-		command = strings.TrimPrefix(domain.RenderAction(action), "yard -Y "+action.Yard+" ")
+	fresh, err := cli.assessConfigTarget(ctx, approved.Target, true)
+	return configApplyRefusal{
+		materializedConfigActivationError{cause, approved.Target.Name, "materialized config", "config status", "apply", approved.Target.Loaded.Context.Paths.ConfigHome},
+		configApplyNext(approved, fresh, err),
 	}
-	return materializedConfigActivationError{cause, approved.Target.Name, "materialized config", command, "apply", approved.Target.Loaded.Context.Paths.ConfigHome}
+}
+
+// configApplyNext is the one next step after a refused refresh of a yard.
+func configApplyNext(approved, fresh configTargetAssessment, observeErr error) string {
+	attempted := domain.Action{Verb: domain.VerbConfigApply, Yard: approved.Target.Name}
+	action, chosen := domain.NextStep(configApplyFindings(approved, fresh, observeErr), attempted, nil)
+	return domain.RenderNext(action, chosen, attempted)
+}
+
+// configApplyRefusal is a refused yard refresh and its one next step.
+type configApplyRefusal struct {
+	materializedConfigActivationError
+	next string
+}
+
+func (refusal configApplyRefusal) Error() string {
+	return refusal.materializedConfigActivationError.Error() + "; next: " + refusal.next
+}
+
+func (refusal configApplyRefusal) Unwrap() error { return refusal.materializedConfigActivationError }
+
+func (refusal configApplyRefusal) ActivationDiagnostic() (string, string) {
+	message, _ := refusal.materializedConfigActivationError.ActivationDiagnostic()
+	return message, refusal.next
 }
 
 // configApplyFindings are a yard's file findings after a refused refresh.
 func configApplyFindings(approved, fresh configTargetAssessment, observeErr error) []domain.Finding {
 	yard := approved.Target.Name
 	var findings []domain.Finding
+	for _, destination := range slices.Sorted(maps.Keys(fresh.Preserved)) {
+		findings = append(findings, domain.Finding{Kind: domain.FindingFileLeftover, Yard: yard,
+			Public: configmaterial.LeftoverRecovery(destination, fresh.Preserved[destination]) + "; then run " + domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: yard})})
+	}
 	for range fresh.Unreadable {
 		findings = append(findings, domain.Finding{Kind: domain.FindingFileUnreadable, Yard: yard})
 	}

@@ -1906,7 +1906,7 @@ func (reconciler *materializedConfigActivationReconciler) PrepareActivationRecov
 		return "", err
 	}
 	selector := func() ([]configTarget, error) { return reconciler.configTargets(ctx, operation, loaded, true) }
-	execution, err := operation.prepareConfigRefresh(ctx, targets, selector, false)
+	execution, err := operation.prepareConfigApply(ctx, targets, selector)
 	if err != nil {
 		return "", err
 	}
@@ -1964,7 +1964,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	}
 	execution := reconciler.recoveryApply
 	if execution == nil {
-		execution, err = operation.prepareConfigRefresh(ctx, targets, selector, false)
+		execution, err = operation.prepareConfigApply(ctx, targets, selector)
 		if err != nil {
 			return err
 		}

@@ -28,6 +28,10 @@ const (
 	OutcomeChanged        = "changed"
 	OutcomeUnreadable     = "unreadable"
 	OutcomeMissingConsent = "missing-consent"
+	// OutcomeLeftover is a destination beside guest bytes that an earlier
+	// refused write preserved: nothing is written until the operator
+	// resolves them.
+	OutcomeLeftover = "leftover"
 )
 
 var tokenPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -134,17 +138,25 @@ func (refusal WriteRefusal) Error() string {
 		OutcomeChanged:        "changed after its refresh was planned; the guest's file was kept",
 		OutcomeUnreadable:     "is not a readable regular file; it was kept",
 		OutcomeMissingConsent: "was not part of the confirmed refresh; it was kept",
+		OutcomeLeftover:       "was kept: a refused write preserved guest bytes beside it",
 	}[refusal.Outcome]
 	message := refusal.Destination + " " + text
 	if len(refusal.Leftovers) != 0 {
-		message += "; preserved guest files to inspect and remove: " + strings.Join(refusal.Leftovers, ", ")
+		message += "; " + LeftoverRecovery(refusal.Destination, refusal.Leftovers)
 	}
 	return message
 }
 
+// LeftoverRecovery is the operator's recovery for preserved guest files. Each
+// holds bytes a guest tool wrote while a refresh replaced the destination.
+func LeftoverRecovery(destination string, leftovers []string) string {
+	return "preserved guest bytes in " + strings.Join(leftovers, ", ") + ": keep them by moving one over " + destination +
+		", or delete them; the destination is not refreshed or reported converged until none remain"
+}
+
 // ParseWriteResult maps a compare-and-write exit to nil, a WriteRefusal or a failure.
 func ParseWriteResult(destination string, exitCode int, stdout []byte) error {
-	outcome := map[int]string{3: OutcomeUnreadable, 4: OutcomeChanged}[exitCode]
+	outcome := map[int]string{3: OutcomeUnreadable, 4: OutcomeChanged, 5: OutcomeLeftover}[exitCode]
 	if exitCode == 0 {
 		return nil
 	}
@@ -170,6 +182,11 @@ func ObserveTokens(ctx context.Context, executor ports.InstanceExecutor, project
 		return nil, err
 	}
 	result, err := executor.Exec(ctx, project, instance, request)
+	var completed *ports.GuestExitError
+	if err != nil && !errors.As(err, &completed) {
+		// A transport failure or cancellation stays itself.
+		return nil, fmt.Errorf("guest config files could not be observed: %w", err)
+	}
 	if err != nil || result.ExitCode != 0 {
 		return nil, errors.New("guest config files could not be observed")
 	}

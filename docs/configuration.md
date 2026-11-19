@@ -323,14 +323,18 @@ confirmed initial adoption with the usual file metadata checks, and is not persi
 
 Subyard serializes its own writes per asset and replaces a destination only when the guest still
 holds the bytes that the refresh was planned on, before updating the baseline. Replacements preserve
-the existing file mode. New documents use mode `0644`. Retrying an interrupted application
-converges. Invalid JSON or an invalid baseline fails without overwriting it; diagnostics omit
+the existing file mode. New documents use mode `0644`. An already converged file keeps its bytes and
+gets its owner and mode back. Retrying an interrupted application converges. Invalid JSON or an invalid baseline fails without overwriting it; diagnostics omit
 configuration contents. Running tools do not share Subyard's lock: a file that a tool changed after
 the plan is kept and reported as changed, the other files of the refresh are still written, and
 `yard -Y NAME config apply` plans again on the new bytes. A destination that is not a readable
-regular file is kept and reported; inspect it with `yard -Y NAME config status`. A refused write can
-leave the tool's newest file beside the destination as `.<name>.subyard-cas.<hex>`; the refusal
-names each such file, which is never removed automatically. Invalid TOML, like invalid JSON, fails
+regular file is kept; `yard -Y NAME config status` and the refused apply name it with the step to
+replace or remove it. A write interrupted at the wrong moment, or one that could not tell which
+bytes it displaced, keeps the guest's bytes beside the destination as `.<name>.subyard-cas.<hex>`.
+Such a file is never removed automatically: `config status`, `config apply`, `init` and `config sync`
+name it, and the destination is not refreshed, and `config status` and release readiness do not
+report it converged, until the operator keeps one of these files by moving it over the destination,
+or deletes them. Invalid TOML, like invalid JSON, fails
 without overwriting the current document or printing its contents.
 
 ## Per-yard coding tool selection

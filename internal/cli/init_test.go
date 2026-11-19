@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -94,6 +95,7 @@ type initPlatformFixture struct {
 	preflightErr              error
 	applyErr                  error
 	configs                   int
+	consents                  []*ports.ConfigConsent
 	configsConverged          bool
 	configChecks              []bool
 	teardowns                 int
@@ -468,6 +470,55 @@ func TestInitConfigsRechecksConvergenceAfterConsent(t *testing.T) {
 	}
 	if platform.configs != 0 {
 		t.Fatalf("converged configs were refreshed: %d checks=%v", platform.configs, platform.configChecks)
+	}
+}
+
+// A direct init plans its refresh itself: the runtime observes the guest
+// tokens right before it writes. Only a config apply parent's init --configs
+// child carries the parent's confirmed tokens, through its consent fd.
+func TestInitTokenSources(t *testing.T) {
+	consent := &ports.ConfigConsent{InstanceUUID: "uuid", Files: []ports.ConfigFileConsent{{Destination: "/home/dev/a", Token: "absent"}}}
+	for name, arguments := range map[string][]string{
+		"direct init --configs": {"init", "--configs", "--yes"},
+		"consented child":       {"init", "--configs", "--yes", "--config-consent-fd"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(root, "state", "host-id"), "5034c950-74d0-46c4-9428-b7835e602109\n", 0o600)
+			want := (*ports.ConfigConsent)(nil)
+			if arguments[len(arguments)-1] == "--config-consent-fd" {
+				payload, _ := json.Marshal(consent)
+				file := filepath.Join(testkit.TempDir(t), "consent")
+				testkit.WriteFile(t, file, payload, 0o600)
+				handle, err := os.Open(file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = handle.Close() })
+				arguments = append(slices.Clone(arguments), fmt.Sprint(handle.Fd()))
+				want = consent
+			}
+			platform := newInitPlatformFixture()
+			platform.configsConverged = false
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: arguments,
+				Environment: environment, WorkingDir: root, InitPlatform: platform, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := program.Run(context.Background()); code != 0 {
+				t.Fatalf("init: code=%d stderr=%q", code, stderr.String())
+			}
+			if len(platform.consents) != 1 || (want == nil) != (platform.consents[0] == nil) ||
+				want != nil && !reflect.DeepEqual(*platform.consents[0], *want) {
+				t.Fatalf("refresh consents %#v, want %#v", platform.consents, want)
+			}
+		})
 	}
 }
 
@@ -937,8 +988,9 @@ func (fixture *initPlatformFixture) Preflight(_ context.Context, fresh bool) err
 	return fixture.preflightErr
 }
 
-func (fixture *initPlatformFixture) RefreshConfigs(context.Context, *ports.ConfigConsent) error {
+func (fixture *initPlatformFixture) RefreshConfigs(_ context.Context, consent *ports.ConfigConsent) error {
 	fixture.configs++
+	fixture.consents = append(fixture.consents, consent)
 	return nil
 }
 

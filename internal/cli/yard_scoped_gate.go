@@ -495,10 +495,36 @@ type repairSourceBinding struct{ source, tooling string }
 // source failed. It stays a stale plan for callers that classify staleness.
 type repairSourceRefusal struct{ predicate, detail string }
 
-func (refusal repairSourceRefusal) Error() string {
-	text := domain.ErrPlanStale.Error() + ": a repair behind the release gate runs only with the installed release's own tooling; run it with the installed yard command; failed: " + refusal.predicate
+// sourceRefusalCauses is what each failed predicate means to the operator;
+// the finding's remedy is the command that makes it hold.
+var sourceRefusalCauses = map[string]string{
+	"release-options":      "no installed release can authorize a repair",
+	"store":                "the protected release store cannot be read",
+	"journal-absent":       "the installed release has no release journal",
+	"journal-not-complete": "the release transition is unfinished",
+	"tooling-dir":          "a repair behind the release gate runs only with the installed release's own tooling; run it with the installed yard command",
+	"pending-publication":  "finish the pending protected publication with its sealed owner before source repair",
+	"pending-archive":      "finish the pending protected archive publication with its sealed owner before source repair",
+	"recovery-history":     "the installed release history cannot authorize source repair",
+	"source-proof":         "the installed release source cannot be verified",
+	"proof-transaction":    "the installed release source belongs to another transaction",
+	"proof-artifact":       "the installed release source belongs to another artifact",
+}
+
+// public is the refusal's cause and its failed predicate, without a step.
+func (refusal repairSourceRefusal) public() string {
+	text := sourceRefusalCauses[refusal.predicate] + "; failed: " + refusal.predicate
 	if refusal.detail != "" {
 		text += " (" + refusal.detail + ")"
+	}
+	return text
+}
+
+func (refusal repairSourceRefusal) Error() string {
+	finding := refusal.finding()
+	text := domain.ErrPlanStale.Error() + ": " + refusal.public()
+	if action, _ := domain.NextStep([]domain.Finding{finding}, domain.Action{}, nil); action.Verb != domain.VerbNone {
+		text += "; next: " + domain.RenderAction(action)
 	}
 	return text
 }
@@ -506,26 +532,26 @@ func (refusal repairSourceRefusal) Error() string {
 func (repairSourceRefusal) Unwrap() error { return domain.ErrPlanStale }
 
 func (refusal repairSourceRefusal) finding() domain.Finding {
-	return domain.Finding{Kind: domain.FindingSource, Predicate: refusal.predicate, Public: strings.TrimPrefix(refusal.Error(), domain.ErrPlanStale.Error()+": ")}
+	return domain.Finding{Kind: domain.FindingSource, Predicate: refusal.predicate, Public: refusal.public()}
 }
 
-// sourceProofCause is the typed, printable cause of a refused source proof.
-func sourceProofCause(err error) string {
+// sourceProofRefusal names the typed predicate of a refused source proof.
+func sourceProofRefusal(err error) repairSourceRefusal {
 	switch {
 	case errors.Is(err, releasetransition.ErrSourcePendingPublication):
-		return "pending publication: " + err.Error()
+		return repairSourceRefusal{predicate: "pending-publication", detail: err.Error()}
 	case errors.Is(err, releasetransition.ErrSourcePendingArchive):
-		return "pending archive: " + err.Error()
+		return repairSourceRefusal{predicate: "pending-archive", detail: err.Error()}
 	case errors.Is(err, releasetransition.ErrSourceRecoveryHistory):
-		return releasetransition.ErrSourceRecoveryHistory.Error()
+		return repairSourceRefusal{predicate: "recovery-history", detail: releasetransition.ErrSourceRecoveryHistory.Error()}
 	}
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if errors.As(err, &diagnostic) {
 		if message, _ := diagnostic.ActivationDiagnostic(); message != "" {
-			return message
+			return repairSourceRefusal{predicate: "source-proof", detail: message}
 		}
 	}
-	return "installed release source proof failed verification"
+	return repairSourceRefusal{predicate: "source-proof", detail: "installed release source proof failed verification"}
 }
 
 func (cli *CLI) repairSources(ctx context.Context) (*repairSourceBinding, error) {
@@ -555,7 +581,7 @@ func (cli *CLI) repairSources(ctx context.Context) (*repairSourceBinding, error)
 		return nil, refusal
 	}
 	if err != nil {
-		return nil, repairSourceRefusal{predicate: "source-proof", detail: sourceProofCause(err)}
+		return nil, sourceProofRefusal(err)
 	}
 	return &repairSourceBinding{source: source, tooling: tooling}, nil
 }
@@ -579,7 +605,7 @@ func (cli *CLI) completedSourceBindings(ctx context.Context, journal releasetran
 	proof, err := cli.inspectConfigSourceAdmission(ctx, inspector)
 	switch {
 	case err != nil:
-		return "", "", repairSourceRefusal{predicate: "source-proof", detail: sourceProofCause(err)}
+		return "", "", sourceProofRefusal(err)
 	case proof.Metadata.Journal == nil || proof.Metadata.Journal.Checkpoint != releasetransition.JournalComplete:
 		return "", "", repairSourceRefusal{predicate: "source-proof", detail: "the proof names no completed journal"}
 	case proof.Metadata.Journal.Transaction != journal.Transaction:
@@ -704,16 +730,23 @@ func (cli *CLI) consumerRefreshAdmission(ctx context.Context, yard string, names
 	}
 	gate = cli.withSource(ctx, gate)
 	// Each consumer that config apply cannot refresh now is reported with the
-	// one step it needs; a refused installed source is that step for all.
+	// one step it needs. Another yard's refused installed source refuses only
+	// the consumers that need that repair.
 	attempted := func(name string) domain.Action { return domain.Action{Verb: domain.VerbConfigApply, Yard: name} }
 	var refusals []error
+	repair := false
 	for _, name := range names {
-		if gate.source != nil || !gate.admits(attempted(name)) {
+		if !gate.admits(attempted(name)) {
 			refusals = append(refusals, fmt.Errorf("%syard %s: next: %s", published, name, gate.step(name, attempted(name))))
 		}
+		repair = repair || gate.state(name).repairOnly()
 	}
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return false, nil, err
+	}
+	if !repair {
+		// Open consumers refresh through the ordinary child, admitted on its own.
+		return false, done, nil
 	}
 	history, err := cli.readReleaseHistory()
 	if err != nil || history == nil {

@@ -569,6 +569,11 @@ type materializedCurrentExecutor struct {
 }
 
 func (fixture materializedCurrentExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if result, ok, err := testkit.TokensFromSHA256(request.Command, func(command []string) (ports.InstanceExecResult, error) {
+		return fixture.Exec(ctx, project, instance, ports.InstanceExecRequest{Command: command})
+	}); ok {
+		return result, err
+	}
 	if len(request.Command) == 3 && request.Command[0] == "sha256sum" {
 		if hash, ok := fixture.hashes[request.Command[2]]; ok {
 			return ports.InstanceExecResult{Stdout: []byte(hash + "  " + request.Command[2] + "\n")}, nil

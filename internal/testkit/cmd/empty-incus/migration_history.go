@@ -96,23 +96,30 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 		if len(command) == 6 && command[0] == "sh" && command[1] == "-eu" && command[2] == "-c" && command[3] == `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents` && command[4] == "subyard" && command[5] == "dev" {
 			return testkit.IncusServerExecStep{}
 		}
-		if len(command) == 3 && command[0] == "sha256sum" && command[1] == "--" && command[2] == control.Destination {
-			if control.InitialDrift != "" {
-				historyMu.Lock()
-				if _, err := os.Stat(path + ".drift"); os.IsNotExist(err) && historyApplyBoundary(control) {
-					drift, err := os.ReadFile(control.InitialDrift)
-					if err == nil {
-						err = os.WriteFile(control.Guest, drift, 0o600)
-					}
-					if err == nil {
-						err = os.WriteFile(path+".drift", []byte("armed at verified activation boundary\n"), 0o600)
-					}
-					if err != nil {
-						historyMu.Unlock()
-						return reject()
-					}
+		// The first read at the verified activation boundary arms the drift.
+		armDrift := func() bool {
+			if control.InitialDrift == "" {
+				return true
+			}
+			historyMu.Lock()
+			defer historyMu.Unlock()
+			if _, err := os.Stat(path + ".drift"); os.IsNotExist(err) && historyApplyBoundary(control) {
+				drift, err := os.ReadFile(control.InitialDrift)
+				if err == nil {
+					err = os.WriteFile(control.Guest, drift, 0o600)
 				}
-				historyMu.Unlock()
+				if err == nil {
+					err = os.WriteFile(path+".drift", []byte("armed at verified activation boundary\n"), 0o600)
+				}
+				if err != nil {
+					return false
+				}
+			}
+			return true
+		}
+		if len(command) == 3 && command[0] == "sha256sum" && command[1] == "--" && command[2] == control.Destination {
+			if !armDrift() {
+				return reject()
 			}
 			payload, err := os.ReadFile(control.Guest)
 			if err != nil {
@@ -199,8 +206,19 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			return configmaterial.TokenAbsent
 		}
 		casCall := len(command) > 5 && command[0] == "python3" && command[1] == "-B" && command[2] == "-c" && command[3] == configmaterial.CompareWriteProgram() && command[5] == "/home/dev"
-		if casCall && command[4] == "observe" && len(command) == 7 && command[6] == control.Destination {
-			payload, _ := json.Marshal(map[string]any{"files": []configmaterial.FileToken{{Destination: control.Destination, Token: guestToken(), Leftovers: []string{}}}})
+		if casCall && command[4] == "observe" && slices.Contains(command[6:], control.Destination) {
+			if !armDrift() {
+				return reject()
+			}
+			files := []configmaterial.FileToken{}
+			for _, destination := range command[6:] {
+				token := configmaterial.TokenAbsent
+				if destination == control.Destination {
+					token = guestToken()
+				}
+				files = append(files, configmaterial.FileToken{Destination: destination, Token: token, Leftovers: []string{}})
+			}
+			payload, _ := json.Marshal(map[string]any{"files": files})
 			return testkit.IncusServerExecStep{Stdout: payload}
 		}
 		if casCall && command[4] == "write" && len(command) == 10 && command[6] == control.Destination && command[7] == "1000" {

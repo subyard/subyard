@@ -76,17 +76,7 @@ func (gate yardGate) admits(action domain.Action) bool {
 // step is the one next step of a yard behind this gate after attempted.
 func (gate yardGate) step(yard string, attempted domain.Action) string {
 	action, chosen := domain.NextStep(gate.yardFindings(yard), attempted, gate.admits)
-	switch {
-	case action.Verb == domain.VerbNone && chosen.Kind == domain.FindingSource:
-		return chosen.Public
-	case (chosen.Kind == domain.FindingPending || chosen.Kind == domain.FindingOwner) && chosen.Retry != "":
-		return chosen.Retry // the owner's own words, parsed or not
-	case chosen.Kind == domain.FindingConfigInvalid && action.Verb == domain.VerbConfigValidate:
-		return "correct the yard's configuration, then " + domain.RenderAction(action)
-	case action.Verb == domain.VerbNone:
-		return "yard migrate --check"
-	}
-	return domain.RenderAction(action)
+	return domain.RenderNext(action, chosen, attempted)
 }
 
 // withSource records the installed-source prerequisite of release repair on a
@@ -115,6 +105,11 @@ func (admission *gateAdmission) attempted() domain.Action {
 		if verbs := configArguments(arguments); len(verbs) != 0 && verbs[0] == "apply" {
 			return domain.Action{Verb: domain.VerbConfigApply, Yard: yard}
 		}
+	case "@current-migration":
+		if !slices.Contains(arguments, "--check") {
+			return domain.Action{Verb: domain.VerbMigrate}
+		}
+		return domain.Action{Verb: domain.VerbMigrateCheck}
 	case "@lifecycle":
 		if admission.request.name == "start" {
 			return domain.Action{Verb: domain.VerbStart, Yard: yard}

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -344,6 +346,70 @@ func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 	}
 	if strings.Contains(stdout.String()+stderr.String(), "permissions") {
 		t.Fatal("status printed agent config contents")
+	}
+}
+
+// fileFindingExecutor observes the first destination unreadable and the
+// second with bytes a refused write preserved; owned files drifted.
+type fileFindingExecutor struct{ ports.InstanceExecutor }
+
+func (fileFindingExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if !testkit.IsGuestTokenObservation(request.Command) {
+		return ports.InstanceExecResult{Stdout: []byte(`{"converged":false,"fingerprint":"` + strings.Repeat("0", 64) + `"}`)}, nil
+	}
+	files := []configmaterial.FileToken{}
+	for index, destination := range request.Command[6:] {
+		file := configmaterial.FileToken{Destination: destination, Token: configmaterial.TokenAbsent, Leftovers: []string{}}
+		switch index {
+		case 0:
+			file.Token = configmaterial.TokenUnreadable
+		case 1:
+			file.Leftovers = []string{path.Dir(destination) + "/." + path.Base(destination) + ".subyard-cas.0123456789abcdef"}
+		}
+		files = append(files, file)
+	}
+	payload, _ := json.Marshal(map[string]any{"files": files})
+	return ports.InstanceExecResult{Stdout: payload}, nil
+}
+
+// config status names the files a refresh refuses with the operator's step,
+// and config apply refuses them at plan time, before consent.
+func TestConfigStatusAndApplyNameUnreadableAndPreservedFiles(t *testing.T) {
+	root, _, _, environment := configCommandFixture(t)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
+		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
+		},
+	}}
+	assets, err := effectiveConfigAssets(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations, err := configObservationDestinations(configTarget{Loaded: loaded}, assets)
+	if err != nil || len(destinations) < 2 {
+		t.Fatalf("fixture needs two destinations: %v %v", destinations, err)
+	}
+	for _, arguments := range [][]string{{"config", "status"}, {"config", "apply", "--yes"}} {
+		applier := &recordingConfigApplier{}
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: arguments,
+			Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
+			Incus: fake, Executor: fileFindingExecutor{fake}, Config: applier, Stdout: &stdout, Stderr: &stderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := program.Run(context.Background())
+		output := stdout.String() + stderr.String()
+		if code == 0 || len(applier.yards) != 0 || !strings.Contains(output, "preserved guest bytes in "+path.Dir(destinations[1])) {
+			t.Fatalf("%v: code=%d applied=%v\n%s", arguments, code, applier.yards, output)
+		}
+		if arguments[1] == "status" && (!strings.Contains(output, "attention: yard default: "+destinations[0]+" is not a readable regular file") ||
+			!strings.Contains(output, "then run yard -Y default config apply")) {
+			t.Fatalf("status did not name the files: %s", output)
+		}
 	}
 }
 
@@ -1011,7 +1077,8 @@ func TestConfigApplyLeavesChangedDriftToTheGuestCompare(t *testing.T) {
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("changed drift: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !slices.Equal(applier.yards, []string{"default"}) || applier.consents[0] == nil || len(applier.consents[0].Files) == 0 || len(fake.TokenObservations) != 1 {
+	if !slices.Equal(applier.yards, []string{"default"}) || applier.consents[0] == nil || len(applier.consents[0].Files) == 0 ||
+		!slices.ContainsFunc(applier.consents[0].Files, func(file ports.ConfigFileConsent) bool { return file.Token == "sha256:"+strings.Repeat("0", 64) }) {
 		t.Fatalf("apply did not carry the confirmed tokens: %#v %#v", applier.yards, applier.consents)
 	}
 }
@@ -1212,29 +1279,16 @@ func TestConfigApplyRejectsDesiredChangeThatConvergedAfterConfirmation(t *testin
 		},
 	}}
 	appendMismatchedHashSteps(t, fake, loaded, "0")
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, asset := range assets {
-		var hash string
+	appendObservationSteps(t, fake, loaded, func(asset configAsset) string {
+		hash, err := config.HashRegularFile(asset.Source)
 		if asset.Source == source {
 			hash, err = configmaterial.DesiredDigestFor(asset.OwnedFormat, []byte(after))
-			if err != nil {
-				t.Fatal(err)
-			}
-		} else {
-			hash, err = config.HashRegularFile(asset.Source)
-			if err != nil {
-				t.Fatal(err)
-			}
 		}
-		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
-		if asset.OwnedFormat != "" {
-			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+		if err != nil {
+			t.Fatal(err)
 		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: output}})
-	}
+		return hash
+	}, true)
 	prompt := &callbackPrompt{callback: func() {
 		writeConfigCommandFile(t, source, after)
 	}}
@@ -3863,24 +3917,41 @@ func loadConfigCommandContext(t *testing.T, root string, environment []string, y
 
 func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 	t.Helper()
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, asset := range assets {
+	appendObservationSteps(t, fake, loaded, func(asset configAsset) string {
 		hash, err := config.HashRegularFile(asset.Source)
 		if err != nil {
 			t.Fatal(err)
 		}
-		output := []byte(fmt.Sprintf("%s  %s\n", hash, asset.Destination))
+		return hash
+	}, true)
+}
+
+// appendObservationSteps scripts one assessment of loaded: the guest token
+// observation of every destination, raw assets holding digest, then the
+// structured observation of each owned asset.
+func appendObservationSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded, digest func(configAsset) string, converged bool) {
+	t.Helper()
+	assets, err := effectiveConfigAssets(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations, err := configObservationDestinations(configTarget{Loaded: loaded}, assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens := map[string]string{}
+	for _, asset := range assets {
+		tokens[asset.Destination] = testkit.HashToken(digest(asset))
+	}
+	command := append([]string{"python3", "-B", "-c", configmaterial.CompareWriteProgram(), "observe", "/home/" + loaded.Context.DevUser}, destinations...)
+	observation, _ := testkit.GuestTokenObservation(command, func(destination string) string { return tokens[destination] })
+	fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: observation}})
+	for _, asset := range assets {
 		if asset.OwnedFormat != "" {
-			output = []byte(fmt.Sprintf(`{"converged":true,"fingerprint":%q}`, hash))
+			fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+				Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, digest(asset))),
+			}})
 		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{
-				Stdout: output, ExitCode: 0,
-			},
-		})
 	}
 }
 
@@ -3891,40 +3962,17 @@ func appendMismatchedHashSteps(
 	digit string,
 ) {
 	t.Helper()
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, asset := range assets {
-		output := []byte(strings.Repeat(digit, 64) + "  " + asset.Destination + "\n")
-		if asset.OwnedFormat != "" {
-			output = []byte(fmt.Sprintf(`{"converged":false,"fingerprint":%q}`, strings.Repeat(digit, 64)))
-		}
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{
-				Stdout:   output,
-				ExitCode: 0,
-			},
-		})
-	}
+	appendObservationSteps(t, fake, loaded, func(configAsset) string { return strings.Repeat(digit, 64) }, false)
 }
 
+// appendUnavailableHashSteps scripts an assessment that finds no guest file.
 func appendUnavailableHashSteps(
 	t *testing.T,
 	fake *testkit.Incus,
 	loaded config.Loaded,
 ) {
 	t.Helper()
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range assets {
-		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{
-			Result: ports.InstanceExecResult{ExitCode: 1},
-			Err:    errors.New("instance command exited with status 1"),
-		})
-	}
+	appendObservationSteps(t, fake, loaded, func(configAsset) string { return "" }, false)
 }
 
 func runConfigSyncGit(t *testing.T, directory string, arguments ...string) {
@@ -4173,7 +4221,7 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 			loaded.Environment["AGENT_"+test.agent+"_RULES"] = ""
 			fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 				loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"},
-			}}
+			}, GuestTokens: map[string]string{}}
 			program, err := New(Options{RepositoryRoot: root, Environment: environment, Incus: fake, Executor: fake})
 			if err != nil {
 				t.Fatal(err)
