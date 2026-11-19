@@ -42,7 +42,7 @@ class FailureEvidence(unittest.TestCase):
                 body = 'failure_evidence.run('+repr([sys.executable, '-c', child])+', evidence_root, secrets=secrets, check=True, timeout=.2)'
                 read_text = Path.read_text
                 def guest_text(path, *args, **kwargs):
-                    values = {'/var/lib/subyard/telemetry/auth.token': 'fixture-token',
+                    values = {'/var/lib/subyard/telemetry-private/auth.token': 'fixture-token',
                               '/proc/self/cgroup': '0::/fixture/caller', '/sys/fs/cgroup/fixture/memory.max': str(2*1024**3),
                               '/sys/fs/cgroup/fixture/pids.max': '128'}
                     return values[str(path)] if str(path) in values else read_text(path, *args, **kwargs)

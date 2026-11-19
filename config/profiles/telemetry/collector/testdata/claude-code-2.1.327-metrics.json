@@ -1,0 +1,4 @@
+{"resourceMetrics":[{"scopeMetrics":[{"metrics":[
+{"name":"claude_code.token.usage","sum":{"aggregationTemporality":1,"isMonotonic":true,"dataPoints":[{"startTimeUnixNano":"1792800000000000000","timeUnixNano":"1792800000000000000","asDouble":1200,"attributes":[{"key":"type","value":{"stringValue":"input"}},{"key":"model","value":{"stringValue":"claude-opus-5-5"}},{"key":"session.id","value":{"stringValue":"0b9f7d4e-1111-4222-8333-944455556666"}},{"key":"user.account_uuid","value":{"stringValue":"canary-account-uuid-e61f2221"}}]}]},"unit":"tokens"},
+{"name":"claude_code.cost.usage","sum":{"aggregationTemporality":1,"isMonotonic":true,"dataPoints":[{"startTimeUnixNano":"1792800000000000000","timeUnixNano":"1792800000000000000","asDouble":0.0421,"attributes":[{"key":"model","value":{"stringValue":"claude-opus-5-5"}}]}]},"unit":"USD"}
+]}]}]}

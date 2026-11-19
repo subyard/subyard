@@ -39,7 +39,7 @@ class ForwardTest(unittest.TestCase):
             thread.start()
             try:
                 with contextlib.closing(http.client.HTTPConnection(*server.server_address, timeout=2)) as connection:
-                    connection.request('POST', '/v1/records', b'{}')
+                    connection.request('POST', '/unexpected', b'{}')
                     response = connection.getresponse()
                     self.assertEqual(response.status, 400)
                     response.read()

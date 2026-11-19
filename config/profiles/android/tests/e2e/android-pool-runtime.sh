@@ -356,7 +356,8 @@ if [ "$lane" = skills ]; then
     printf preserved > /home/dev/.agents/skills/personal-probe/user-file
   '
   yard config set ENVIRONMENT_PROFILES '' --scope yard --local --yes
-  repair_skills
+  # Deselection is desired intent: release repair keeps the installed selection, so only init retires.
+  android_candidate_command "$YARD_BIN" migrate --check --json | jq -e '.outcome.status == "ready"' >/dev/null
   yard init --configs --yes
   incus --project "$project" exec "$instance" -- test ! -e /usr/local/share/subyard/skills/subyard-android
   for adapter in .agents/skills .claude/skills .config/opencode/skills; do

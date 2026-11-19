@@ -16,18 +16,24 @@ Measured conditions, binary identities and limits are recorded in the
 [owning guide](../telemetry.md#receiver-packaging-comparison); binary size and
 memory limits are not runtime overhead.
 
-Capture policy runs before any durable write. The default excludes log bodies,
-prompt/response/tool content, arbitrary status text, command lines, environment
-capture and authentication headers. Attribute policy applies to resource, scope,
-records, points, exemplars, events and links. Configurable safe metadata is kept
-within that policy; credentials and lease capabilities are never telemetry data.
-Sanitized complete OTLP ExportRequest protobuf retains supported structure and
-optional-field semantics, rather than flattening usage into model/token/cost rows.
+One collector-binary sanitizer applies closed field schemas before durable
+writes, including Python producer frames and observer state. Attribute
+policy applies to resources, scopes, records, points, exemplars, events and
+links. The filter drops log bodies, prompt/response/tool content, arbitrary
+status text, command lines, environment capture, headers, credentials and
+operator PII. Each retained string passes the same value filter. Private
+transport credentials and capabilities live outside the data directory.
+Sanitized OTLP ExportRequest protobuf retains supported structure and
+optional-field semantics, including raw identifiers, labels, and usage and
+cost fields.
 Source and receive times, policy and source versions remain distinct.
 Export/replay preserves the original capture-policy fingerprint separately from
 the trusted local import-policy fingerprint. Imported policy claims cannot relax
-sanitization. SQLite schema 2 transactionally migrates version 1 stores while
-read-only legacy export leaves them unchanged.
+sanitization. The first spool cutover archives schema 1–4 stores as
+`archive/telemetry.sqlite` or the next unoccupied numbered archive under the
+data directory. The active store starts empty with a fresh generation ID.
+The archive preserves the historical schema, identifiers and sequences.
+Readers select the schema using `PRAGMA user_version`.
 
 One bounded writer batches requests into SQLite WAL transactions with
 `synchronous=FULL`. OTLP acknowledges only a completed commit. Capacity or storage
@@ -36,8 +42,11 @@ the official receiver's consumer interface has no downstream partial-success
 counts, so the collector never commits part of a request and rejects the whole.
 Field redactions are counted as policy actions, not undisclosed record loss.
 
-Raw rows have stable origin/store and event identities. Export/replay uses those
-identities, never payload hashes. Identical legitimate events remain separate.
+Raw rows have stable `(origin_id, event_id)` pairs. Export and replay preserve
+them across stores. The first accepted row wins and only its insert changes
+projections. A duplicate spool frame still advances the committed offset.
+Identical payloads with distinct identities remain separate. Run and resource
+joins are scoped to the origin.
 Native OTLP has no universal delivery ID: an acknowledgement lost after commit
 can produce another delivery. Native source IDs are retained where available;
 ambiguous retry duplicates are not advertised as exactly-once usage totals.
@@ -45,8 +54,8 @@ ambiguous retry duplicates are not advertised as exactly-once usage totals.
 ## Internal record contract
 
 Profile-owned local producers write versioned sanitized records through the
-collector's private control endpoint or its bounded durable outbox. The collector
-owns only its outbox; it never acknowledges or deletes broker/owner journals.
+collector's bounded durable append-only spool. The collector retires its own
+committed segments. Broker and owner journals remain under their own lifecycle.
 Run snapshots reserve bounded count, total bytes and per-file space before a
 new execution scope is created. Capacity failure keeps default native execution
 with partial/unavailable coverage; explicit strict tracking refuses before exec.
@@ -56,6 +65,7 @@ interrupted reservations as gaps rather than permanently refusing the directory.
 ```json
 {
   "schema": "subyard.telemetry.record/v1",
+  "origin_id": "stable-origin-identity",
   "source_id": "stable-producer-identity",
   "event_id": "unique-source-event-id",
   "source_version": "producer-version",
@@ -70,6 +80,10 @@ identity, samples, allocation lifecycle, attribution and gaps. The owning code
 defines each body and rejects unsupported versions. Producer event IDs survive
 retry/replay. Receive time belongs to the collector. Monotonic values identify
 their host/boot clock domain and are never compared across owners.
+The collector stores `0001-01-01T00:00:00.000000000Z` for an invalid source
+timestamp; this denotes unknown source time. A local producer that has no
+source time stamps the current time, including when it reuses a stable event
+ID on retry; the first accepted row keeps its time.
 
 Run records distinguish `agent_run_id`, agent type/version, native session ID,
 parent run, task, project/worktree, yard and owner host. Samples belong to measured
@@ -115,7 +129,7 @@ Held-acquire registration is a bounded, private durable intent before observer
 lock acquisition. The observer installs generation-validated mappings and replays
 retained events for new mappings; canonical event identities prevent replay from
 adding another measurement. Transport credentials stay in private operational
-configuration, outside telemetry records and export.
+configuration outside the telemetry data directory.
 Owners expose separately advertised bounded read-only lifecycle/counter reads;
 they derive targets from validated allocation ownership, never caller paths or
 arbitrary Incus/Docker commands. VM identity includes owner, slot,

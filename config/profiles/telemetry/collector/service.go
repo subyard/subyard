@@ -1,19 +1,16 @@
 package collector
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"golang.org/x/sys/unix"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
+	"slices"
 	"sync/atomic"
 	"time"
 )
@@ -25,6 +22,10 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	if options.Policy.Schema == "" {
 		options.Policy = DefaultPolicy()
 	}
+	if options.Policy.Schema != PolicyVersion {
+		return errors.New("unsupported capture policy")
+	}
+	options.Policy.Attributes = slices.Clone(options.Policy.Attributes)
 	if err := validateListen(options.Listen); err != nil {
 		return err
 	}
@@ -32,11 +33,11 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	if err != nil {
 		return err
 	}
-	spool := filepath.Join(s.dir, "outbox")
+	spool := filepath.Join(s.dir, "spool")
 	if options.Spool != "" && filepath.Clean(options.Spool) != spool {
-		return errors.New("spool must be the data directory outbox")
+		return errors.New("spool must be the data directory spool")
 	}
-	if err = privateDir(spool); err != nil {
+	if err = s.publishCapturePolicy(ctx, options.Policy); err != nil {
 		return err
 	}
 	socket := filepath.Join(s.dir, "control.sock")
@@ -77,49 +78,7 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "origin_id": s.origin, "outbox_failures": failures.Load()})
-	})
-	mux.HandleFunc("POST /v1/records", func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case admission <- struct{}{}:
-			defer func() { <-admission }()
-		default:
-			w.Header().Set("Retry-After", "1")
-			http.Error(w, "telemetry capacity exceeded", http.StatusServiceUnavailable)
-			return
-		}
-		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.limits.RequestBytes))
-		if err != nil {
-			http.Error(w, "record request too large", 413)
-			return
-		}
-		data = bytes.TrimSpace(data)
-		var records []Record
-		if len(data) > 0 && data[0] == '[' {
-			dec := json.NewDecoder(bytes.NewReader(data))
-			dec.UseNumber()
-			err = dec.Decode(&records)
-		} else {
-			var record Record
-			dec := json.NewDecoder(bytes.NewReader(data))
-			dec.UseNumber()
-			err = dec.Decode(&record)
-			records = []Record{record}
-		}
-		if err != nil {
-			http.Error(w, "invalid record request", 400)
-			return
-		}
-		if err = s.Ingest(r.Context(), records); err != nil {
-			if errors.Is(err, ErrCapacity) || errors.Is(err, ErrStorage) {
-				http.Error(w, "telemetry unavailable", 503)
-			} else {
-				http.Error(w, "invalid record", 400)
-			}
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("{\"ok\":true}\n"))
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "origin_id": s.origin, "spool_failures": failures.Load()})
 	})
 	control := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
 	controlErrors := make(chan error, 1)
@@ -134,11 +93,17 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 		defer c()
 		control.Shutdown(shutdown)
 	}()
+	drained := make(chan struct{})
+	defer func() {
+		cancel()
+		<-drained
+	}()
 	go func() {
+		defer close(drained)
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for {
-			if err := s.IngestOutbox(ctx, spool); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.drainSpool(ctx, options.Policy); err != nil && !errors.Is(err, context.Canceled) {
 				failures.Add(1)
 			}
 			select {
@@ -165,67 +130,4 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 		cancel()
 		return <-finished
 	}
-}
-
-func (s *Store) IngestOutbox(ctx context.Context, path string) error {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return err
-	}
-	count := 0
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".json") || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		count++
-		if count > 256 {
-			break
-		}
-		target := filepath.Join(path, entry.Name())
-		info, err := os.Lstat(target)
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > s.limits.RequestBytes {
-			return errors.New("invalid outbox file")
-		}
-		f, err := os.OpenFile(target, os.O_RDONLY|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			return err
-		}
-		data, err := io.ReadAll(io.LimitReader(f, s.limits.RequestBytes+1))
-		f.Close()
-		if err != nil {
-			return err
-		}
-		var r Record
-		dec := json.NewDecoder(bytes.NewReader(data))
-		dec.UseNumber()
-		if err = dec.Decode(&r); err != nil {
-			return errors.New("invalid outbox record")
-		}
-		if err = s.Ingest(ctx, []Record{r}); err != nil {
-			return err
-		}
-		current, err := os.Lstat(target)
-		if err != nil {
-			return err
-		}
-		if !os.SameFile(info, current) {
-			return errors.New("outbox changed during commit")
-		}
-		if err = os.Remove(target); err != nil {
-			return err
-		}
-		dir, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		err = dir.Sync()
-		dir.Close()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }

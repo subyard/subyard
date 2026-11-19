@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import processes
+from spool_fixture import prepare
 spec = importlib.util.spec_from_file_location('process_scope', Path(__file__).parent/'e2e/process-scope.py')
 scope_fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(scope_fixture)
@@ -42,8 +43,11 @@ def cg(path, cpu, populated):
 class ProcessTest(unittest.TestCase):
     def test_short_run_waits_for_both_objects_baseline_and_final_samples(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            data = Path(name)
-            with closing(sqlite3.connect(data/'telemetry.sqlite')) as writer:
+            data = prepare(Path(name))
+            database = data/'telemetry.sqlite'
+            database.unlink()
+            with closing(sqlite3.connect(database)) as writer:
+                database.chmod(0o600)
                 writer.execute('CREATE TABLE samples(object_id TEXT,source_time INTEGER,body TEXT)')
                 def sample(suffix, at, final):
                     writer.execute('INSERT INTO samples VALUES(?,?,?)',
@@ -58,7 +62,7 @@ class ProcessTest(unittest.TestCase):
                      patch.object(scope_fixture.time, 'sleep', side_effect=commit_workload) as sleep:
                     scope_fixture.wait_for_short_run_samples(data, 'run')
                 self.assertEqual(sleep.call_count, 2, 'scope final must not admit a missing workload endpoint')
-                writer.execute("DELETE FROM samples WHERE object_id='run:workload' AND source_time=1")
+                writer.execute("DELETE FROM samples WHERE object_id=? AND source_time=1", ("run:workload",))
                 writer.commit()
                 with patch.object(scope_fixture.time, 'monotonic', side_effect=(0, 0, 40)), \
                      patch.object(scope_fixture.time, 'sleep') as sleep:
@@ -124,6 +128,7 @@ class ProcessTest(unittest.TestCase):
             with patch.object(processes.records, 'emit', side_effect=emit), patch.object(Path, 'rmdir') as remove:
                 sampler = processes.Sampler(root, run, root)
                 self.assertFalse(sampler.capture_baseline())
+                self.assertFalse(any(kind == 'run' for kind, _, _ in events))
                 self.assertEqual(len(run['scope_baselines']), 2)
                 self.assertFalse(sampler.poll())
                 remove.assert_not_called()

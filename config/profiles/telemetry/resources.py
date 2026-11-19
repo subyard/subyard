@@ -43,7 +43,7 @@ def allocation(config, resource, selector=None):
     body = base(config, resource, selector)
     owner = resource.get('owner', resource.get('context')) or {}
     body.update(state=resource.get('state', resource.get('to_state')), correlation_id=owner.get('run'),
-                yard_id=owner.get('yard'), project_id=owner.get('project'), purpose=owner.get('purpose'),
+                yard_id=owner.get('yard'), project_id=owner.get('project'),
                 acquired_at=nullable_time(resource.get('acquired_at')), ready_at=nullable_time(resource.get('ready_at')),
                 expires_at=nullable_time(resource.get('expires_at')))
     environment = resource.get('environment') or {}
@@ -76,6 +76,12 @@ def association(body, run, acquired_at, stopped_at, source):
                 quality='explicit', shared=False, source=source)
 
 
+def with_context(body, config, native):
+    # The collector can compare the projected fields with known sensitive
+    # values from the native page or the private route before keeping them.
+    return {**body, 'native_context': native, '_sensitive': config.get('_sensitive')}
+
+
 def emit_sample(data_dir, config, native, event_id=None):
     body = base(config, native)
     for name in COUNTERS:
@@ -91,13 +97,13 @@ def emit_sample(data_dir, config, native, event_id=None):
     if event_id is None:
         event_id = 'sample-' + hashlib.sha256(json.dumps([body['object_id'], native.get('source_time'),
                   native.get('monotonic_ns'), native.get('counter_generation')], separators=(',', ':')).encode()).hexdigest()
-    admitted = records.emit(data_dir, 'sample', body, source_id=config['source_id'],
+    admitted = records.emit(data_dir, 'sample', with_context(body, config, native), broker=True, source_id=config['source_id'],
                             source_time=native.get('source_time'), event_id=event_id)
     for binding in config.get('associations', {}).values():
         if (binding.get('slot_id') == body['slot_id'] and binding.get('resource_generation') == body['resource_generation']
                 and binding.get('lease_epoch') == body['lease_epoch']):
             edge = association(body, binding, native.get('acquired_at'), None, 'validated-grant')
-            admitted = records.emit(data_dir, 'association', edge, source_id=config['source_id'],
+            admitted = records.emit(data_dir, 'association', with_context(edge, config, native), broker=True, source_id=config['source_id'],
                                     source_time=native.get('source_time'), event_id=event_id + '-association') and admitted
     return admitted
 
@@ -122,22 +128,23 @@ def emit_event(data_dir, config, event):
         if terminal:
             body['stopped_at'] = source_time
         suffix = str(selector or 'allocation')
-        ok = records.emit(data_dir, 'allocation', body, source_id=config['source_id'],
+        ok = records.emit(data_dir, 'allocation', with_context(body, config, event), broker=True, source_id=config['source_id'],
                           source_time=source_time, event_id=identity + '-allocation-' + suffix) and ok
         correlation = body.get('correlation_id')
         run = config.get('associations', {}).get(correlation)
         if run and any(run.get(name) != body.get(name) for name in ('slot_id', 'resource_generation', 'lease_epoch')):
-            ok = records.emit(data_dir, 'gap', dict(object_id=body['object_id'], reason='correlation_generation_mismatch',
-                              quality='unknown'), source_id=config['source_id'], source_time=source_time,
+            gap = dict(object_id=body['object_id'], reason='correlation_generation_mismatch', quality='unknown')
+            ok = records.emit(data_dir, 'gap', with_context(gap, config, event),
+                              broker=True, source_id=config['source_id'], source_time=source_time,
                               event_id=identity+'-binding-mismatch-'+suffix) and ok
             run = None
         if run:
             edge = association(body, run, body.get('acquired_at'), body.get('stopped_at'), 'acquire-correlation')
-            ok = records.emit(data_dir, 'association', edge, source_id=config['source_id'],
+            ok = records.emit(data_dir, 'association', with_context(edge, config, event), broker=True, source_id=config['source_id'],
                               source_time=source_time, event_id=identity + '-association-' + suffix) and ok
         if terminal:
-            ok = records.emit(data_dir, 'gap', dict(object_id=body['object_id'], reason='final_tail_missing',
-                              end_time=source_time, quality='unknown'), source_id=config['source_id'],
+            gap = dict(object_id=body['object_id'], reason='final_tail_missing', end_time=source_time, quality='unknown')
+            ok = records.emit(data_dir, 'gap', with_context(gap, config, event), broker=True, source_id=config['source_id'],
                               source_time=source_time, event_id=identity + '-tail-' + suffix) and ok
     for index, sample in enumerate(samples):
         ok = emit_sample(data_dir, config, dict(sample, acquired_at=resource.get('acquired_at')),

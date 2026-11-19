@@ -4,6 +4,7 @@ import contextlib
 import datetime
 import fcntl
 import hashlib
+import itertools
 import json
 import os
 from pathlib import Path
@@ -22,6 +23,9 @@ import resources
 LIMIT = 1024 * 1024 + 65536
 MAX_INTENTS = 128
 MAX_INTENT_BYTES = 1024 * 1024
+MAX_READERS = 32
+ROUTE_ID = re.compile(r'[0-9a-f]{32}')
+REGISTRATION_ID = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
 
 
 def registration_gap(data_dir, reason):
@@ -29,10 +33,11 @@ def registration_gap(data_dir, reason):
         return True
     try:
         # One content-free recovery marker outside the intent quota. A full
-        # analytics outbox must not turn registration rejection into quiet loss.
+        # analytics spool must not turn registration rejection into quiet loss.
         root = records.private_directory(Path(data_dir)/'sources/intents')
         records.atomic_json(root/'registration-health', dict(reason=reason,
-            source_time=datetime.datetime.now(datetime.timezone.utc).isoformat(), event_id='registration-'+uuid.uuid4().hex))
+            source_time=datetime.datetime.now(datetime.timezone.utc).isoformat(), event_id='registration-'+uuid.uuid4().hex),
+            family='registration_loss')
     except (OSError, ValueError, TypeError):
         pass  # A failed filesystem cannot promise persistent coverage.
     return False
@@ -57,14 +62,11 @@ def registration_request(request):
         raise ValueError('invalid registration')
     value = dict(request)
     for name in ('owner_id', 'correlation_id'):
-        if not isinstance(value.get(name), str) or not records.IDENTITY.fullmatch(value[name]):
+        if not isinstance(value.get(name), str) or not REGISTRATION_ID.fullmatch(value[name]):
             raise ValueError('invalid registration identity')
-    for name in ('yard_id', 'project_id'):
-        if value.get(name) is not None and (not isinstance(value[name], str) or not records.IDENTITY.fullmatch(value[name])):
-            raise ValueError('invalid registration context')
     if value['phase'] == 'request':
         return value
-    if not isinstance(value.get('slot_id'), str) or not records.IDENTITY.fullmatch(value['slot_id']):
+    if not isinstance(value.get('slot_id'), str) or not REGISTRATION_ID.fullmatch(value['slot_id']):
         raise ValueError('invalid registration slot')
     for name in ('resource_generation', 'lease_epoch'):
         number = value.get(name)
@@ -76,11 +78,17 @@ def registration_request(request):
         if type(number) is not int or not 0 < number < 2**64:
             raise ValueError('invalid registration generation')
         value[name] = number
-    transport = value.get('transport')
-    keys = {'script', 'yard', 'state_dir', 'yard_state_dir', 'identity', 'route', 'route_config'} if value['kind'] == 'vm' else {'control', 'capability', 'instance', 'project'}
+    check_transport(value['kind'], value.get('transport'))
+    if len(json.dumps(value).encode()) > 16384:
+        raise ValueError('registration byte limit')
+    return value
+
+
+def check_transport(kind, transport):
+    keys = {'script', 'yard', 'state_dir', 'yard_state_dir', 'identity', 'route', 'route_config'} if kind == 'vm' else {'control', 'capability', 'instance', 'project'}
     if not isinstance(transport, dict) or set(transport)-keys or any(not isinstance(item, str) or len(item)>4096 or '\x00' in item or '\n' in item for item in transport.values()):
         raise ValueError('invalid registration transport')
-    if value['kind'] == 'vm':
+    if kind == 'vm':
         script = Path(transport.get('script', ''))
         if not script.is_absolute() or script.name != 'agent-e2e.sh' or script.parent.name != 'dev' or not re.fullmatch('[a-z0-9][a-z0-9_-]{0,31}', transport.get('yard', '')):
             raise ValueError('invalid registration route')
@@ -90,15 +98,64 @@ def registration_request(request):
             raise ValueError('invalid registration route')
         if ('instance' in transport or 'project' in transport) and not all(re.fullmatch('[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}', transport.get(name, '')) for name in ('instance', 'project')):
             raise ValueError('invalid registration route')
-    if len(json.dumps(value).encode()) > 16384:
-        raise ValueError('registration byte limit')
-    return value
 
 
-def registration_paths(root, request):
-    reader = hashlib.sha256(json.dumps(request['transport'], sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    identity = hashlib.sha256(json.dumps([request['kind'], request['owner_id'], request['correlation_id']], separators=(',', ':')).encode()).hexdigest()
-    return root/('observer-'+reader+'.json'), root/'intents'/('intent-'+identity+'.json')
+def registration_intent(root, request):
+    identity = hashlib.sha256(records.compact_json([request['kind'], request['owner_id'], request['correlation_id']])).hexdigest()
+    return root/'intents'/('intent-'+identity+'.json')
+
+
+def route_path(data_dir, route_id):
+    if not isinstance(route_id, str) or not ROUTE_ID.fullmatch(route_id):
+        raise ValueError('invalid observation route identifier')
+    return records.operational_directory(data_dir)/'routes'/(route_id+'.json')
+
+
+def read_transport(data_dir, route_id):
+    path = route_path(data_dir, route_id)
+    records.private_directory(path.parent)
+    return records.read_private(path)
+
+
+def write_transport(data_dir, route_id, transport):
+    check_transport('vm' if 'script' in transport else 'android', transport)
+    path = route_path(data_dir, route_id)
+    records.private_directory(path.parent)
+    records.atomic_json(path, transport)
+
+
+def sensitive_transport(transport):
+    return {name: transport[name] for name in ('capability', 'control', 'script', 'identity', 'route', 'route_config',
+            'state_dir', 'yard_state_dir') if isinstance(transport, dict) and transport.get(name)}
+
+
+def allocate_route(data_dir, root, transport):
+    # Read intents first: merge publishes the observer before deleting its
+    # intent. Under the admission lock there cannot be a new route reference.
+    used = set()
+    for paths, limit in ((root.joinpath('intents').glob('intent-*.json'), MAX_INTENTS),
+                         (root.glob('observer-*.json'), MAX_READERS)):
+        for path in itertools.islice(paths, limit+1):
+            try:
+                used.add(records.read_private(path).get('route_id'))
+            except FileNotFoundError:
+                continue
+    routes = records.private_directory(records.operational_directory(data_dir)/'routes')
+    match = None
+    for index, path in enumerate(routes.glob('*.json'), 1):
+        if index > MAX_INTENTS+MAX_READERS+1:
+            raise ValueError('observation route capacity')
+        if not ROUTE_ID.fullmatch(path.stem):
+            continue
+        if path.stem not in used:
+            path.unlink()
+        elif records.read_private(path) == transport:
+            match = path.stem
+    if match:
+        return match
+    route_id = uuid.uuid4().hex
+    write_transport(data_dir, route_id, transport)
+    return route_id
 
 
 def registration_binding(intent):
@@ -117,15 +174,13 @@ def binding_conflict(config, correlation, binding):
                for key, value in config.get('associations', {}).items())
 
 
-def reader_conflict(data_dir, root, request, binding):
-    producer_path = Path(data_dir)/'producer.json'
-    source = None
-    if producer_path.exists():
-        producer = records.read_private(producer_path)['source_id']
-        source = 'resource-'+hashlib.sha256((producer+':'+request['kind']+':'+request['owner_id']).encode()).hexdigest()
-    for path in list(root.glob('*.json'))[:32]:
-        config = records.read_private(path)
-        if config.get('kind') == request['kind'] and (config.get('registration_owner',config.get('owner_id')) == request['owner_id'] or config.get('source_id') == source):
+def reader_conflict(root, request, binding):
+    for path in itertools.islice(root.glob('observer-*.json'), MAX_READERS):
+        try:
+            config = records.read_private(path)
+        except FileNotFoundError:
+            continue
+        if config.get('kind') == request['kind'] and config.get('registration_owner') == request['owner_id']:
             if binding_conflict(config,request['correlation_id'],binding):
                 return True
     return False
@@ -158,24 +213,34 @@ def intent_lock(root):
 def store_intent(data_dir, agent_run, request):
     root = records.private_directory(Path(data_dir)/'sources')
     pending = records.private_directory(root/'intents')
-    path, intent_path = registration_paths(root, request)
-    intent = dict(schema_version=1, agent_run_id=agent_run, request=request,
-                  registered_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
+    transport = request['transport']
+    intent = records.sanitize_state('broker_intent', dict(schema_version=1, agent_run_id=agent_run,
+        request=request, route_id='0'*32, registered_at=records.now(), _sensitive=sensitive_transport(transport)))
+    request = intent['request']
+    intent_path = registration_intent(root, request)
     with intent_lock(pending):
         if intent_path.exists():
             previous = records.read_private(intent_path)
-            if previous['agent_run_id'] == agent_run and previous['request'] == request:
+            if (previous['agent_run_id'] == agent_run and previous['request'] == request
+                    and read_transport(data_dir, previous['route_id']) == transport):
                 return True
             registration_gap(data_dir, 'correlation_registration_conflict')
             return False
-        if reader_conflict(data_dir,root,request,registration_binding(intent)):
+        if reader_conflict(root, request, registration_binding(intent)):
             registration_gap(data_dir, 'correlation_registration_conflict')
             return False
-        entries = list(pending.glob('intent-*.json'))
-        if len(entries) >= MAX_INTENTS or sum(item.lstat().st_size for item in entries)+len(json.dumps(intent).encode()) > MAX_INTENT_BYTES:
+        entries = list(itertools.islice(pending.glob('intent-*.json'), MAX_INTENTS))
+        existing_bytes = 0
+        for item in entries:
+            try:
+                existing_bytes += item.lstat().st_size
+            except FileNotFoundError:
+                continue
+        if len(entries) >= MAX_INTENTS or existing_bytes+len(records.compact_json(intent))+1 > MAX_INTENT_BYTES:
             registration_gap(data_dir, 'correlation_registration_capacity')
             return False
-        records.atomic_json(intent_path, intent)
+        intent['route_id'] = allocate_route(data_dir, root, transport)
+        records.atomic_json(intent_path, intent, family='broker_intent')
     return True
 
 
@@ -186,38 +251,36 @@ def merge_intents(data_dir, root):
     for intent_path in sorted((root/'intents').glob('intent-*.json'))[:MAX_INTENTS]:
         try:
             intent = records.read_private(intent_path)
-            if set(intent) != {'schema_version','agent_run_id','request','registered_at'} or not isinstance(intent['registered_at'],str) or datetime.datetime.fromisoformat(intent['registered_at']).tzinfo is None:
+            if intent != records.sanitize_state('broker_intent', intent):
                 raise ValueError('invalid registration intent shape')
-            request = registration_request(intent['request'])
-            if intent.get('schema_version') != 1 or request['phase'] != 'held' or not records.IDENTITY.fullmatch(intent['agent_run_id']):
+            request = intent['request']
+            if intent['schema_version'] != 1:
                 raise ValueError('invalid registration intent')
-            path, expected = registration_paths(root, request)
-            if expected != intent_path:
+            if registration_intent(root, request) != intent_path:
                 raise ValueError('registration intent identity')
+            route_id = intent['route_id']
+            path = root/('observer-'+route_id+'.json')
             binding = registration_binding(intent)
-            if reader_conflict(data_dir,root,request,binding):
+            if reader_conflict(root, request, binding):
                 if registration_gap(data_dir,'correlation_registration_conflict'):
                     intent_path.unlink()
                 continue
             if path.exists():
                 config = records.read_private(path)
             else:
-                existing = list(root.glob('*.json'))
-                if len(existing) >= 32:
+                existing = list(itertools.islice(root.glob('observer-*.json'), MAX_READERS))
+                if len(existing) >= MAX_READERS:
                     completed = [(old, records.read_private(old)) for old in existing]
                     completed = [item for item in completed if item[1].get('completed')]
                     if not completed:
                         registration_gap(data_dir, 'observer_capacity')
                         continue
                     min(completed, key=lambda item: item[1].get('registered_at', ''))[0].unlink()
-                if not (Path(data_dir)/'producer.json').exists():
-                    public = {key: request.get(key) for key in ('owner_id', 'yard_id', 'project_id', 'correlation_id')}
-                    public.update(agent_run_id=intent['agent_run_id'], source='acquire-correlation', quality='explicit')
-                    records.emit(data_dir, 'relation', public, source_time=intent['registered_at'], event_id=intent_path.stem+'-relation')
-                producer = records.read_private(Path(data_dir)/'producer.json')['source_id']
+                producer = records.load_producer_state(Path(data_dir))['source_id']
                 source = 'resource-'+hashlib.sha256((producer+':'+request['kind']+':'+request['owner_id']).encode()).hexdigest()
                 config = dict(source_id=source, kind=request['kind'], owner_id=request['owner_id'], cursor='-',
-                              registration_owner=request['owner_id'],registered_at=intent['registered_at'], associations={}, transport=request['transport'])
+                              registration_owner=request['owner_id'], registered_at=intent['registered_at'],
+                              associations={}, route_id=route_id)
             correlation = request['correlation_id']
             if binding_conflict(config, correlation, binding):
                 if not registration_gap(data_dir, 'correlation_registration_conflict'):
@@ -228,7 +291,7 @@ def merge_intents(data_dir, root):
                     continue
                 config['associations'][correlation] = binding
                 config.update(completed=False, cursor='-')
-                records.atomic_json(path, config)
+                records.atomic_json(path, config, family='broker_observer')
                 changed.add(path)
             intent_path.unlink()
             directory = os.open(intent_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -349,7 +412,8 @@ def consume(data_dir, config, page):
     if page['gap']:
         marker = hashlib.sha256((config.get('cursor', '-') + ':' + cursor).encode()).hexdigest()
         if not records.emit(data_dir, 'gap', dict(owner_id=config['owner_id'], reason='cursor_retention_or_reset',
-                            quality='unknown'), source_id=config['source_id'], source_time=config['registered_at'], event_id='cursor-' + marker):
+                            quality='unknown', _sensitive=config.get('_sensitive')), source_id=config['source_id'],
+                            source_time=config['registered_at'], event_id='cursor-' + marker):
             return False
     for event in events:
         # Global events without allocation identity do not manufacture an object.
@@ -389,11 +453,16 @@ def poll(data_dir):
     """Advance each private cursor only after every record is durably admitted."""
     try:
         root = records.private_directory(Path(data_dir) / 'sources')
-        fd = os.open(root / '.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fd = os.open(root/'.lock', os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            os.fchmod(fd, 0o600)
+        except FileExistsError:
+            fd = os.open(root/'.lock', os.O_RDWR | os.O_NOFOLLOW)
         with os.fdopen(fd, 'rb') as lock:
+            records.checked_file(lock.fileno(), 0)
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             merge_intents(data_dir, root)
-            pending = [(path, records.read_private(path)) for path in sorted(root.glob('*.json'))[:32]]
+            pending = [(path, records.read_private(path)) for path in sorted(root.glob('observer-*.json'))[:MAX_READERS]]
             pending.sort(key=lambda item: item[1].get('polled_at', ''))
             deadline = time.monotonic() + 10
             for path, config in pending:
@@ -405,21 +474,24 @@ def poll(data_dir):
                     continue  # A completed reader may have been retired by a merge.
                 config['polled_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 try:
-                    page = fetch(config)
+                    transport = read_transport(data_dir, config['route_id'])
+                    page = fetch(dict(config, transport=transport))
                     if path in merge_intents(data_dir, root):
                         continue  # A new binding reset the durable cursor; fetch its retained history next.
-                    if consume(data_dir, config, page):
+                    observed = dict(config, _sensitive=sensitive_transport(transport))
+                    if consume(data_dir, observed, page):
                         if path not in merge_intents(data_dir, root):
-                            records.atomic_json(path, config)
+                            records.atomic_json(path, observed, family='broker_observer')
                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                     if not config.get('offline'):
                         admitted = records.emit(data_dir, 'gap', dict(owner_id=config['owner_id'], reason='source_offline',
-                                     start_time=config.get('last_seen'), quality='unknown', stale=True),
+                                     start_time=config.get('last_seen'), quality='unknown', stale=True,
+                                     _sensitive=config.get('_sensitive')),
                                      source_id=config['source_id'], source_time=config.get('last_seen', config['registered_at']),
                                      event_id='offline-' + hashlib.sha256(config.get('last_seen', config['registered_at']).encode()).hexdigest())
                         if admitted:
                             config['offline'] = True
-                    records.atomic_json(path, config)
+                    records.atomic_json(path, config, family='broker_observer')
         return True
     except (OSError, ValueError, KeyError, TypeError):
         return False

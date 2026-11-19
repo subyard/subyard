@@ -174,9 +174,12 @@ def trace(frame, event, value):
     if event != 'call' or frame.f_code.co_name not in ('atomic_json', 'emit', 'register'):
         return None
     filename = os.path.realpath(frame.f_code.co_filename)
-    if frame.f_code.co_name == 'atomic_json' and filename == RECORDS and frame.f_back.f_code.co_name == 'store_intent' and os.path.realpath(frame.f_back.f_code.co_filename) == SOURCES:
+    if frame.f_code.co_name == 'atomic_json' and filename == RECORDS and os.path.realpath(frame.f_back.f_code.co_filename) == SOURCES:
         path = os.fspath(frame.f_locals.get('path', ''))
-        if os.path.basename(os.path.dirname(path)) != 'intents' or not os.path.basename(path).startswith('intent-'):
+        directory = os.path.basename(os.path.dirname(path))
+        writer = frame.f_back.f_code.co_name
+        if not (writer == 'store_intent' and directory == 'intents' and os.path.basename(path).startswith('intent-')
+                or writer == 'write_transport' and directory == 'routes'):
             return None
         def observe_intent(frame, event, value):
             global held_enospc
@@ -283,15 +286,17 @@ def preflight():
         source = Path(__file__).resolve().parents[2]
         for name in ('broker-correlation.py', 'records.py', 'sources.py', 'resources.py'):
             private_file(hook/name, (source/name).read_bytes())
-        records_source = (hook/'records.py').read_bytes()
+        # The local preflight injects publication errors, independently of the
+        # installed privacy canary and the real filesystem fault below.
+        records_source = (hook/'records.py').read_bytes()+b'\ndef sanitize_state(_family, value):\n    return value\n'
         (hook/'records.py').unlink()
         private_file(hook/'records.py', records_source+b'''
 import errno
 original_atomic_json = atomic_json
-def atomic_json(path, value):
+def atomic_json(path, value, **options):
     if Path(path).name.startswith('intent-'):
         raise OSError(errno.ENOSPC, 'synthetic intent storage fault')
-    return original_atomic_json(path, value)
+    return original_atomic_json(path, value, **options)
 def emit(*args, **kwargs):
     try:
         raise OSError(errno.ENOSPC, 'synthetic storage fault')
@@ -334,10 +339,10 @@ def emit(*args, **kwargs):
         private_file(hook/'records.py', records_source+b'''
 import errno
 original_atomic_json = atomic_json
-def atomic_json(path, value):
+def atomic_json(path, value, **options):
     if Path(path).name.startswith('intent-'):
         raise OSError(errno.EACCES, 'synthetic non-storage fault')
-    return original_atomic_json(path, value)
+    return original_atomic_json(path, value, **options)
 def emit(*args, **kwargs):
     return False
 ''')
@@ -389,7 +394,9 @@ def run(args):
         data.mkdir(mode=0o700)
         os.chmod(data, 0o700)
         token = secrets.token_hex(32)
-        private_file(data/'auth.token', (token+'\n').encode())
+        operational = mount/'data-private'
+        operational.mkdir(mode=0o700)
+        private_file(operational/'auth.token', (token+'\n').encode())
         with socket.socket() as port_socket:
             port_socket.bind(('127.0.0.1', 0))
             port = port_socket.getsockname()[1]
@@ -400,7 +407,7 @@ def run(args):
             stream = os.fdopen(fd, 'wb')
             logs.append(stream)
             process = subprocess.Popen([str(binary), 'serve', '--data-dir', str(data), '--listen', f'127.0.0.1:{port}',
-                                      '--auth-file', str(data/'auth.token')], stdin=subprocess.DEVNULL,
+                                      '--auth-file', str(operational/'auth.token')], stdin=subprocess.DEVNULL,
                                      stdout=subprocess.DEVNULL, stderr=stream)
             healthy(data, process)
             return process
@@ -416,6 +423,9 @@ def run(args):
             os.chmod(pending.parent, 0o700)
             os.chmod(pending, 0o700)
             private_file(pending/'.lock', b'')
+            routes = operational/'routes'
+            routes.mkdir(mode=0o700)
+            routes.chmod(0o700)
         result['filled_bytes'] = fill(mount/'fill')
         result['fill_errno'] = errno.ENOSPC
         result['free_bytes_after_fill'] = os.statvfs(mount).f_bavail*os.statvfs(mount).f_frsize
@@ -440,7 +450,7 @@ def run(args):
         native = subprocess.run([sys.executable, '-B', str(Path(__file__).resolve().parents[2]/'launcher.py'), 'run',
             '--data-dir', str(data), '--agent', 'other', '--agent-version', 'storage-fixture', '--scope-mode', 'partial', '--',
             sys.executable, '-c', 'import os,sys; fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.fchmod(fd,0o600); os.write(fd,b"native-completed"); os.close(fd)', str(proof)],
-            capture_output=True, timeout=15)
+            env=dict(os.environ, SUBYARD_TELEMETRY_COLLECTOR=str(binary)), capture_output=True, timeout=15)
         private_file(args.evidence/'managed-command.stderr', native.stderr)
         assert native.returncode == 0 and proof.read_bytes() == b'native-completed', 'storage failure changed native command result'
         result.update(native_exit=native.returncode, native_proof_sha256=hashlib.sha256(proof.read_bytes()).hexdigest(),

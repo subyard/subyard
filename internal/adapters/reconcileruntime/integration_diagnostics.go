@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
 )
@@ -109,20 +110,15 @@ func (runtime Runtime) integrationDiagnostic(cause error, definition profile.Int
 	if phase != "inspect" && phase != "apply" && phase != "verify" {
 		phase = "inspect"
 	}
-	message, retry := "integration lifecycle "+phase, "yard integration status --json"
-	validComponent := len(definition.Name) <= 63 && domain.SafeName(definition.Name)
-	validYard := len(runtime.Yard.YardName) <= 63 && domain.SafeName(runtime.Yard.YardName)
-	if validComponent {
-		message = "integration " + definition.Name + " " + phase
-		retry = "yard integration status " + definition.Name + " --json"
+	component, yard := publicToken(definition.Name), publicToken(runtime.Yard.YardName)
+	message := "integration lifecycle " + phase
+	if component != "" {
+		message = "integration " + component + " " + phase
 	}
-	if validYard {
-		message += " in yard " + runtime.Yard.YardName
-		retry = "yard -Y " + runtime.Yard.YardName + " integration status --json"
-		if validComponent {
-			retry = "yard -Y " + runtime.Yard.YardName + " integration status " + definition.Name + " --json"
-		}
+	if yard != "" {
+		message += " in yard " + yard
 	}
+	retry := integrationStatusRetry(yard, component)
 	if reason == "observation-changed" && !errors.Is(cause, domain.ErrPlanStale) {
 		cause = fmt.Errorf("%w: %w", domain.ErrPlanStale, cause)
 	}
@@ -150,4 +146,163 @@ func (runtime Runtime) integrationPlanDiagnostic(cause error, approved, fresh In
 		}
 	}
 	return runtime.integrationDiagnostic(cause, profile.IntegrationDefinition{Name: component}, "apply", "observation-changed")
+}
+
+// publicToken returns a validated host name or ID, or nothing.
+func publicToken(value string) string {
+	if len(value) <= 63 && domain.SafeName(value) {
+		return value
+	}
+	return ""
+}
+
+func integrationStatusRetry(yard, component string) string {
+	retry := "yard"
+	if yard != "" {
+		retry += " -Y " + yard
+	}
+	retry += " integration status"
+	if component != "" {
+		retry += " " + component
+	}
+	return retry + " --json"
+}
+
+// integrationStep is the closed set of fail-fast integration apply steps.
+type integrationStep string
+
+const (
+	stepObserve         integrationStep = "observe"
+	stepHookScope       integrationStep = "hook scope"
+	stepSettings        integrationStep = "settings capture"
+	stepServices        integrationStep = "services"
+	stepArtifacts       integrationStep = "artifacts"
+	stepPersistApproval integrationStep = "persist approval"
+	stepPersist         integrationStep = "persist"
+	stepInventoryApply  integrationStep = "inventory update"
+	stepConfigs         integrationStep = "configs"
+	stepScript          integrationStep = "script"
+	stepHookCapture     integrationStep = "hook capture"
+	stepHooks           integrationStep = "hooks"
+	stepRetire          integrationStep = "retire"
+	stepInventoryCommit integrationStep = "inventory commit"
+	stepVerify          integrationStep = "verify"
+)
+
+// stepFailure names a failed apply step for the release boundary. Its public
+// diagnostic holds only host-owned tokens; the cause stays private.
+type stepFailure struct {
+	step        integrationStep
+	owner, yard string
+	cause       error
+}
+
+func (failure *stepFailure) message() string {
+	message := "integration"
+	if failure.owner != "" {
+		message += " " + failure.owner
+	}
+	message += " apply " + string(failure.step) + " failed"
+	if failure.yard != "" {
+		message += " in yard " + failure.yard
+	}
+	return message
+}
+
+func (failure *stepFailure) Error() string { return failure.message() + ": " + failure.cause.Error() }
+func (failure *stepFailure) Unwrap() error { return failure.cause }
+func (failure *stepFailure) ActivationDiagnostic() (string, string) {
+	return failure.message(), integrationStatusRetry(failure.yard, failure.owner)
+}
+
+// ownedError binds the declaring integration to a refusal at dispatch without
+// changing its text, so a later step failure can name that owner.
+type ownedError struct {
+	owner string
+	err   error
+}
+
+func (failure ownedError) Error() string { return failure.err.Error() }
+func (failure ownedError) Unwrap() error { return failure.err }
+
+func owned(owner string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return ownedError{owner, err}
+}
+
+// stepFailure wraps each refusal of one step once. Existing public diagnostics
+// pass through unchanged; an owner is shown only if the host declares it.
+func (runtime Runtime) stepFailure(step integrationStep, owner string, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	if refusals, ok := cause.(*domain.Refusals); ok {
+		causes := []error{}
+		for _, leaf := range refusals.Unwrap() {
+			wrapped := runtime.stepFailure(step, owner, leaf)
+			if nested, ok := wrapped.(*domain.Refusals); ok {
+				causes = append(causes, nested.Unwrap()...)
+			} else {
+				causes = append(causes, wrapped)
+			}
+		}
+		return domain.CollectRefusals(causes...)
+	}
+	// Source errors keep the boundary's own source rendering and repair retry.
+	var public interface{ ActivationDiagnostic() (string, string) }
+	var source *config.SourceError
+	if errors.As(cause, &public) || errors.As(cause, &source) {
+		return cause
+	}
+	var bound ownedError
+	if owner == "" && errors.As(cause, &bound) {
+		owner = bound.owner
+	}
+	return &stepFailure{step: step, owner: runtime.declaredOwner(owner), yard: publicToken(runtime.Yard.YardName), cause: cause}
+}
+
+// declaredOwner keeps an integration ID only if the host selection or catalog declares it.
+func (runtime Runtime) declaredOwner(owner string) string {
+	if publicToken(owner) == "" {
+		return ""
+	}
+	if slices.Contains(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), owner) {
+		return owner
+	}
+	definitions, err := runtime.integrationDefinitions()
+	if err == nil && slices.ContainsFunc(definitions, func(definition profile.IntegrationDefinition) bool { return definition.Name == owner }) {
+		return owner
+	}
+	return ""
+}
+
+// selectionOwner names the one selected integration whose AGENT_<id>_<setting> is value.
+func (runtime Runtime) selectionOwner(setting, value string) string {
+	owner := ""
+	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
+		if runtime.environmentValue("AGENT_"+agent+"_"+setting) == value {
+			if owner != "" {
+				return ""
+			}
+			owner = agent
+		}
+	}
+	return owner
+}
+
+// driftOwner names the declared owner when every outstanding fact has that one owner.
+func (runtime Runtime) driftOwner(plan IntegrationPlan) string {
+	owner := ""
+	for _, fact := range plan.facts {
+		if fact.AtDesired {
+			continue
+		}
+		if fact.owner == "" || owner != "" && fact.owner != owner {
+			return ""
+		}
+		owner = fact.owner
+	}
+	return runtime.declaredOwner(owner)
 }

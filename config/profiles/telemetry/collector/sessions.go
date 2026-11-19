@@ -1,71 +1,164 @@
 package collector
 
 import (
-	"context"
 	"encoding/json"
+	"maps"
+	"slices"
+	"strings"
 	"time"
-
-	"go.opentelemetry.io/collector/pdata/pcommon"
-	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
-func sessionAttributes(attributes pcommon.Map, sessions map[string]bool, p Policy) {
-	for _, key := range []string{"session.id", "session_id", "conversation.id", "conversation_id", "thread.id"} {
-		if value, ok := attributes.Get(key); ok && value.Type() == pcommon.ValueTypeStr && validID(value.Str()) {
-			for _, allowed := range p.Attributes {
-				if allowed == key {
-					sessions[value.Str()] = true
-					break
+var sessionAttributeNames = bodyRules["session_attributes"].choices
+
+// visitOTLPAttributes walks all retained attribute positions within a resource,
+// including metric points, exemplars, span events and span links.
+func visitOTLPAttributes(value any, visit func(map[string]any)) {
+	switch node := value.(type) {
+	case map[string]any:
+		for name, child := range node {
+			if name == "attributes" || name == "filteredAttributes" || name == "metadata" {
+				if attrs, ok := child.([]any); ok {
+					for _, attr := range attrs {
+						if field, ok := attr.(map[string]any); ok {
+							visit(field)
+						}
+					}
 				}
+				continue
 			}
+			visitOTLPAttributes(child, visit)
+		}
+	case []any:
+		for _, child := range node {
+			visitOTLPAttributes(child, visit)
 		}
 	}
 }
-func metricSessions(metric pmetric.Metric, sessions map[string]bool, policy Policy) {
-	switch metric.Type() {
-	case pmetric.MetricTypeGauge:
-		p := metric.Gauge().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
-		}
-	case pmetric.MetricTypeSum:
-		p := metric.Sum().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
-		}
-	case pmetric.MetricTypeHistogram:
-		p := metric.Histogram().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
-		}
-	case pmetric.MetricTypeExponentialHistogram:
-		p := metric.ExponentialHistogram().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
-		}
-	case pmetric.MetricTypeSummary:
-		p := metric.Summary().DataPoints()
-		for i := 0; i < p.Len(); i++ {
-			sessionAttributes(p.At(i).Attributes(), sessions, policy)
-		}
-	}
-}
-func sessionEnvelopes(ctx context.Context, sessions map[string]bool) []Envelope {
-	entries := []Envelope{}
-	run, _ := ctx.Value(runContextKey{}).(string)
-	for session := range sessions {
-		kind := "session"
-		body := map[string]any{"session_id": session, "quality": "explicit", "source": "native-otlp-attribute"}
-		if run != "" {
-			kind = "relation"
-			body["agent_run_id"] = run
-			body["relation"] = "native_session"
-			if evidence, ok := ctx.Value(runEvidenceKey{}).(string); ok {
-				body["source"] = "native-otlp-attribute/" + evidence
+
+func sessionEnvelopes(signal map[string]any) []Envelope {
+	var entries []Envelope
+	for _, group := range signal {
+		for _, resource := range group.([]any) {
+			sessions := map[string][]string{}
+			visitOTLPAttributes(resource, func(attr map[string]any) {
+				name := stringValue(attr, "key")
+				if slices.Contains(sessionAttributeNames, name) {
+					value, _ := attr["value"].(map[string]any)
+					session := stringValue(value, "stringValue")
+					if session != "" && !slices.Contains(sessions[session], name) {
+						sessions[session] = append(sessions[session], name)
+					}
+				}
+			})
+			var run, evidence string
+			if info, ok := resource.(map[string]any)["resource"]; ok {
+				visitOTLPAttributes(info, func(attr map[string]any) {
+					value, _ := attr["value"].(map[string]any)
+					switch attr["key"] {
+					case "subyard.agent_run.id":
+						run = stringValue(value, "stringValue")
+					case "subyard.agent_run.evidence":
+						evidence = stringValue(value, "stringValue")
+					}
+				})
+			}
+			for _, session := range slices.Sorted(maps.Keys(sessions)) {
+				names := sessions[session]
+				slices.Sort(names)
+				kind := "session"
+				body := map[string]any{"session_id": session, "session_attributes": names, "quality": "explicit", "source": "native-otlp-attribute"}
+				if run != "" {
+					kind = "relation"
+					body["agent_run_id"] = run
+					body["relation"] = "native_session"
+					if evidence != "" {
+						body["source"] = "native-otlp-attribute/" + evidence
+					}
+				}
+				raw, _ := json.Marshal(body)
+				entries = append(entries, Envelope{SourceID: "collector:otlp-correlation", SourceVersion: "1", SourceTime: time.Now().UTC().Format(timestampLayout), Kind: kind, Encoding: "json", PolicyVersion: PolicyVersion, Body: raw})
 			}
 		}
-		raw, _ := json.Marshal(body)
-		entries = append(entries, Envelope{SourceID: "collector:otlp-correlation", SourceVersion: "1", SourceTime: time.Now().UTC().Format(timestampLayout), Kind: kind, Encoding: "json", PolicyVersion: PolicyVersion, Body: raw})
 	}
 	return entries
+}
+
+var sessionFields = []string{"session_id", "native_session_id", "session_attributes"}
+
+const nativeSessionSource = "native-otlp-attribute"
+
+func (r Record) hasSessionMetadata() bool {
+	if r.Kind == "session" || r.Kind == "relation" || stringValue(r.Body, "relation") == "native_session" ||
+		strings.HasPrefix(stringValue(r.Body, "source"), nativeSessionSource) {
+		return true
+	}
+	for _, field := range sessionFields {
+		if _, exists := r.Body[field]; exists {
+			return true
+		}
+	}
+	return false
+}
+
+func filterSessionRelation(r *Record, policy Policy) (bool, int64) {
+	var removed int64
+	remove := func(fields ...string) {
+		for _, field := range fields {
+			if _, exists := r.Body[field]; exists {
+				delete(r.Body, field)
+				removed++
+			}
+		}
+	}
+	allowedName := func(name any) bool { s, _ := name.(string); return slices.Contains(policy.Attributes, s) }
+	_, hasNames := r.Body["session_attributes"]
+	list, hasList := r.Body["session_attributes"].([]any)
+	retained := slices.DeleteFunc(slices.Clone(list), func(name any) bool { return !allowedName(name) })
+	allowed := len(retained) != 0
+	if !hasList { // Legacy records do not identify the contributing attribute.
+		allowed = !slices.ContainsFunc(sessionAttributeNames, func(name string) bool { return !allowedName(name) })
+	}
+	primary, alias := stringValue(r.Body, "session_id"), stringValue(r.Body, "native_session_id")
+	session := firstNonempty(primary, alias)
+	allowed = allowed && (primary == "" || alias == "" || primary == alias)
+	nativeRelation := stringValue(r.Body, "relation") == "native_session"
+	nativeSource := strings.HasPrefix(stringValue(r.Body, "source"), nativeSessionSource)
+	keepRun := allowedName("subyard.agent_run.id")
+	relationKind := r.Kind == "session" || r.Kind == "relation"
+	switch {
+	case !relationKind && (!allowed || !keepRun || (session == "" && hasNames)):
+		remove(sessionFields...)
+		if nativeRelation {
+			remove("relation")
+		}
+		if nativeSource {
+			remove("source")
+		}
+		return true, removed
+	case relationKind && session == "":
+		return r.Kind != "session" && !nativeRelation && !nativeSource && !hasNames, 0
+	case !allowed:
+		return false, 0
+	}
+	if primary == "" && alias != "" {
+		r.Body["session_id"] = alias
+		delete(r.Body, "native_session_id")
+	} else {
+		remove("native_session_id")
+	}
+	if hasList {
+		r.Body["session_attributes"] = retained
+		removed += int64(len(list) - len(retained))
+	}
+	if !keepRun {
+		remove("agent_run_id", "parent_run_id", "relation")
+		r.Kind = "session"
+	}
+	if (relationKind || nativeSource) && (!keepRun || !allowedName("subyard.agent_run.evidence")) {
+		if old, exists := r.Body["source"]; exists && old != nativeSessionSource {
+			removed++
+		}
+		r.Body["source"] = nativeSessionSource
+	}
+	return true, removed
 }

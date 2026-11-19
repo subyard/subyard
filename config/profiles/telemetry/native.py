@@ -369,7 +369,8 @@ def refusal_messages(reasons):
             case ('legacy-token-unverified',):
                 messages.append('cannot identify the collector token in the legacy telemetry receipt; '
                                 'write the Bearer token from the legacy home agent configuration to '
-                                '/var/lib/subyard/telemetry/auth.token, then retry')
+                                '/var/lib/subyard/telemetry-private/auth.token, a developer-owned file with '
+                                'mode 0600 in a developer-owned directory with mode 0700, then retry')
             case ('legacy-token-remains', agent) if agent in AGENTS:
                 messages.append('collector token remains in legacy '+agent+' configuration')
             case ('legacy-config', agent) if agent in AGENTS:

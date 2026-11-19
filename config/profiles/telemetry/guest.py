@@ -1,22 +1,32 @@
 #!/usr/bin/env python3
 """Install only the marked local collector and native exporter ownership."""
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import pwd
 import re
+import records
+import select
+import shutil
+import signal
+import sqlite3
 import grp
 from types import SimpleNamespace
 import secrets
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 
 import native
 import tomli_w
 
 MARKER = b'subyard-telemetry-v1\n'
+CUTOVER = '.spool-cutover.json'
+PENDING = '.telemetry-archive.pending'
 COLLECTOR = 'subyard-telemetry.service'
 MANAGER = 'subyard-telemetry-runs.service'
 BINARY_LIMIT = 64*1024*1024
@@ -42,6 +52,8 @@ class Runtime:
         self.templates = {agent: content for agent in agents
                           if (content := native.snapshot(source/(agent+'.template'))) is not None}
         self.control, self.data, self.library, self.units, self.commands = control, data, library, units, commands
+        self.operational = data.with_name(data.name+'-private')
+        self.auth = self.operational/'auth.token'
         account = account or pwd.getpwnam(user)
         self.uid, self.gid, self.home = account.pw_uid, account.pw_gid, Path(account.pw_dir)
         if self.uid == 0 or not user.replace('_', '').replace('-', '').isalnum():
@@ -51,7 +63,8 @@ class Runtime:
         # Paths whose contents an unselected run neither needs nor installs. They
         # stay known so that leftovers are detected and kept unchanged.
         self.retained = {}
-        for name in ('native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
+        # Running launchers can import records during publication.
+        for name in ('records.py', 'native.py', 'launcher.py', 'processes.py', 'forward.py',
                      'resources.py', 'sources.py', 'broker-correlation.py', 'tomli_w.py', 'subyard-telemetry'):
             mode = 0o755 if name in ('subyard-telemetry', 'broker-correlation.py') else 0o644
             if name == 'subyard-telemetry' and not selected:
@@ -63,7 +76,7 @@ class Runtime:
             self.assets[library/name] = (content, mode)
         prefix = '# Managed by Subyard telemetry profile.\n'
         common = f'[Unit]\nDescription=Subyard local telemetry\n[Service]\nType=simple\nUser={user}\nGroup={self.gid}\nUMask=0077\nLimitCORE=0\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=10\n'
-        self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {data}/auth.token',
+        self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}',
                        MANAGER: f'/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B {library}/launcher.py manager --data-dir {data} --delegate'}
         collector = prefix+common+f'ExecStart={self.starts[COLLECTOR]}\nMemoryMax=256M\nCPUQuota=25%\nTasksMax=64\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n'
         # Workloads inherit their caller's ceilings. Do not put a low collector
@@ -152,6 +165,17 @@ class Runtime:
     def saved_inventory(self):
         return json.loads(native.snapshot(self.control/'assets.json') or b'{}')
 
+    def skill_delivery(self, mode):
+        result = subprocess.run([sys.executable, '-B', self.source/'agent-skills.py', mode,
+                                 '--provider', 'profile-telemetry', '--source', self.source/'skills',
+                                 '--home', self.home, '--uid', str(self.uid), '--gid', str(self.gid)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+        if mode == 'check-registered' and result.returncode == 10:
+            return False
+        if result.returncode:
+            raise ValueError('telemetry skill delivery failed')
+        return True
+
     def recorded_digests(self, saved, path):
         replaced = saved.get(REPLACED)
         if not isinstance(replaced, dict) or str(path) not in replaced:
@@ -190,8 +214,8 @@ class Runtime:
             raise ValueError('foreign control state')
         return True
 
-    def token(self):
-        path = self.data/'auth.token'
+    def token(self, path=None):
+        path = self.auth if path is None else path
         value = native.snapshot(path)
         if value is None or path.stat().st_uid != self.uid or stat.S_IMODE(path.stat().st_mode) != 0o600:
             raise ValueError('private collector token required')
@@ -199,6 +223,43 @@ class Runtime:
         if len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
             raise ValueError('invalid collector token')
         return token
+
+    def private_directory(self, path, refusal):
+        """Create a developer-owned 0700 directory, or finish creating our own.
+
+        mkdir, chmod and chown are separate steps. Only the deploying account can
+        create entries in the root-owned parent, so an empty directory it owns
+        without group or other access is one an interrupted run left behind."""
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            raise ValueError(refusal) from None
+        try:
+            info = os.fstat(fd)
+            if info.st_uid in (os.getuid(), self.uid) and not info.st_mode & 0o077 and not os.listdir(fd):
+                os.fchmod(fd, 0o700)
+                os.fchown(fd, self.uid, self.gid)
+                info = os.fstat(fd)
+            if stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != self.uid:
+                raise ValueError(refusal)
+            if info.st_gid != self.gid:
+                os.fchown(fd, self.uid, self.gid)
+        finally:
+            os.close(fd)
+
+    def prepare_auth(self):
+        self.private_directory(self.operational, 'foreign telemetry operational directory')
+        if not self.auth.exists():
+            # Keep the v0.30 bearer: the analytics copy, else the one its home-config receipt records.
+            old = self.data/'auth.token'
+            token = (self.token(old) if old.exists() or old.is_symlink()
+                     else native.legacy_token(self.control/'native.json') or secrets.token_hex(32))
+            native.publish(self.auth, (token+'\n').encode(), None, self.uid, self.gid)
+        return self.token()
 
     def manager(self, unit, startup=False):
         raw = systemctl('show', unit, '--property=ActiveState,SubState,MainPID,UnitFileState,LoadState,FragmentPath,DropInPaths,User,Group,Type,ExecStart,KillMode,UMask,LimitCORE,NoNewPrivileges,AmbientCapabilities,ExecStartPre,ExecStartPost,ExecStop,ExecStopPost,Environment,EnvironmentFiles,MemoryMax,TasksMax,CPUQuotaPerSecUSec,Delegate'+(',Job' if startup else ''))
@@ -222,15 +283,23 @@ class Runtime:
             else:
                 expected['Delegate'] = 'yes'
             command = self.starts[unit]
-            legacy = self.assets[self.units/unit][0].replace(b'/usr/bin/setpriv --no-new-privs ', b'', 1)
-            legacy_command = command.removeprefix('/usr/bin/setpriv --no-new-privs ')
+            path = self.units/unit
+            current = self.assets[path][0]
+            # Recognize only the prior managed service envelopes recorded in
+            # the inventory. Its bearer moves outside the analytics directory.
+            old_auth = str(self.data/'auth.token')
+            candidates = {command, command.removeprefix('/usr/bin/setpriv --no-new-privs ')}
+            if unit == COLLECTOR:
+                candidates.update(value.replace(str(self.auth), old_auth) for value in tuple(candidates))
             start = fields.get('ExecStart', '')
-            if start.startswith('{ path='+legacy_command.split()[0]+' ; argv[]='+legacy_command+' ; ignore_errors=no ; '):
-                path = self.units/unit
-                allowed = self.recorded_digests(self.saved_inventory(), path)
-                disk = self.asset_snapshot(path)
-                if disk in (legacy, self.assets[path][0]) and hashlib.sha256(legacy).hexdigest() in allowed:
-                    command = legacy_command  # Known pinned previous startup, stale until migrated.
+            for candidate in sorted(candidates):
+                if candidate == command or not start.startswith('{ path='+candidate.split()[0]+' ; argv[]='+candidate+' ; ignore_errors=no ; '):
+                    continue
+                prior = current.replace(command.encode(), candidate.encode(), 1)
+                if (self.asset_snapshot(path) in (prior, current)
+                        and hashlib.sha256(prior).hexdigest() in self.recorded_digests(self.saved_inventory(), path)):
+                    command = candidate  # Known previous startup, stale until migrated.
+                    break
             valid_start = start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
             nnp = fields.get('NoNewPrivileges')
             if (any(fields.get(key, '') != value for key, value in expected.items()) or not valid_start
@@ -270,8 +339,10 @@ class Runtime:
 
     def reconcile_native(self, check, token=None):
         receipt = self.control/'native.json'
-        if token is None and (self.selected or receipt.exists()) and native.snapshot(self.data/'auth.token') is not None:
-            token = self.token()
+        # Before the first apply after v0.30 the bearer is still in the analytics directory.
+        for path in (self.auth, self.data/'auth.token'):
+            if token is None and (self.selected or receipt.exists()) and native.snapshot(path) is not None:
+                token = self.token(path)
         return native.reconcile(self.etc, self.home, receipt, self.agents if self.selected else [],
                                 self.endpoint, token, tomli_w, self.uid, self.gid, self.templates, check)
 
@@ -288,9 +359,12 @@ class Runtime:
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
-        if ready:
-            saved = self.saved_inventory()
-            ready = self.retained_current(saved) and saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
+        saved = self.saved_inventory()
+        cutover_pending = self.selected and (self.data/CUTOVER).exists()
+        policy_status = self.policy_status() if self.selected else 'present'
+        policy_current = policy_status == 'present'
+        inventory_current = saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
+        ready = ready and not cutover_pending and not (self.data/'auth.token').exists() and inventory_current and all(files[str(path)][1] in (None, mode) for path, mode in self.retained.items())
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
         enabled = states[COLLECTOR].get('UnitFileState') == 'enabled'
@@ -298,13 +372,27 @@ class Runtime:
         converged = converged and all(self.running_no_new_privs(state) for state in states.values())
         if self.selected:
             converged = converged and states[MANAGER].get('ActiveState') == 'active' and states[MANAGER].get('UnitFileState') == 'enabled'
-            converged = converged and native.snapshot(self.data/'auth.token') is not None
+        try:
+            token = self.token()
+        except (OSError, ValueError):
+            token = None
+            converged = False
         converged = converged and native_current
-        actual = hashlib.sha256(json.dumps({'files': files, 'states': states, 'native_current': native_current}, sort_keys=True).encode()).hexdigest()
+        skill_current = not self.selected or self.skill_delivery('check-registered')
+        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': native_current, 'skill_current': skill_current, 'policy_current': policy_current}, sort_keys=True).encode()).hexdigest()
+        converged = converged and skill_current and policy_current
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
         if not converged:
             diagnostics = []
+            if cutover_pending:
+                diagnostics.append({'parameter': 'telemetry.cutover', 'installed': 'pending', 'desired': 'complete'})
+            if token is None:
+                diagnostics.append({'parameter': 'telemetry.receiver-auth', 'installed': 'missing or invalid', 'desired': 'present'})
+            if not policy_current:
+                diagnostics.append({'parameter': 'telemetry.spool-policy', 'installed': policy_status, 'desired': 'present'})
+            if not inventory_current:
+                diagnostics.append({'parameter': 'telemetry.inventory', 'installed': 'changed', 'desired': 'current'})
             for path, (content, mode) in self.assets.items():
                 snapshot = self.asset_snapshot(path)
                 if snapshot != content:
@@ -313,8 +401,8 @@ class Runtime:
                     diagnostics.append({'parameter': 'telemetry.mode.' + path.name, 'installed': 'mismatch', 'desired': 'matched'})
             if not native_current:
                 diagnostics.append({'parameter': 'telemetry.native', 'installed': 'changed', 'desired': 'current'})
-            if self.selected and native.snapshot(self.data/'auth.token') is None:
-                diagnostics.append({'parameter': 'telemetry.token', 'installed': 'missing', 'desired': 'present'})
+            if not skill_current:
+                diagnostics.append({'parameter': 'telemetry.skill', 'installed': 'absent', 'desired': 'registered'})
             for unit in (COLLECTOR, MANAGER):
                 expected = self.selected if unit == COLLECTOR else True if self.selected else None
                 if expected is None:
@@ -337,6 +425,256 @@ class Runtime:
             value['retained'] = {str(path): mode for path, mode in self.retained.items()}
         return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
+    def as_developer(self, operation):
+        # Create and change producer-owned paths with the producer's privileges.
+        if os.getuid() == self.uid:
+            operation()
+            return
+        child = os.fork()
+        if child == 0:
+            code = 1
+            try:
+                os.setgroups([])
+                os.setgid(self.gid)
+                os.setuid(self.uid)
+                os.umask(0o077)
+                operation()
+                code = 0
+            finally:
+                os._exit(code)
+        if os.waitpid(child, 0)[1] != 0:
+            raise ValueError('telemetry developer operation failed')
+
+    def retire_observer_lock(self, path):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0)
+        except FileExistsError:
+            fd = os.open(path, os.O_PATH | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) not in (0, 0o600)):
+                raise ValueError('foreign legacy observer lock')
+            if stat.S_IMODE(info.st_mode) != 0:
+                with open(f'/proc/self/fd/{fd}', 'rb') as handle:
+                    os.fchmod(handle.fileno(), 0)
+                    os.fsync(handle.fileno())
+            self.stop_lock_users(info)
+        finally:
+            os.close(fd)
+
+    def stop_lock_users(self, lock):
+        script = os.fsencode(self.library/'launcher.py')
+        for process in Path('/proc').iterdir():
+            if not process.name.isdecimal():
+                continue
+            try:
+                if process.stat().st_uid != self.uid or script not in (process/'cmdline').read_bytes().split(b'\0'):
+                    continue
+                pidfd = os.pidfd_open(int(process.name))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except OSError:
+                continue
+            try:
+                for entry in (process/'fd').iterdir():
+                    try:
+                        matches = os.path.samestat(entry.stat(), lock)
+                    except FileNotFoundError:
+                        continue
+                    if matches:
+                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                        exited = select.poll()
+                        exited.register(pidfd, select.POLLIN)
+                        if not exited.poll(5000):
+                            raise ValueError('legacy telemetry observer did not stop')
+                        break
+            except (FileNotFoundError, ProcessLookupError):
+                pass
+            except OSError:
+                # Ptrace access to /proc/PID/fd can require a matching GID.
+                # Leave an unidentified process alone. The fence still blocks
+                # its legacy writes, even when it holds the retired lock open.
+                pass
+            finally:
+                os.close(pidfd)
+
+    def prepare_store(self):
+        account = [] if self.uid == os.getuid() else ['--reuid', str(self.uid), '--regid', str(self.gid), '--clear-groups']
+        subprocess.run(['/usr/bin/setpriv', '--no-new-privs', *account, self.library/'subyard-telemetry',
+                        'prepare', '--data-dir', self.data], check=True, timeout=30,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.as_developer(lambda: records.load_producer_state(self.data, self.library/'subyard-telemetry'))
+
+    def policy_status(self):
+        try:
+            self.as_developer(lambda: records.load_producer_state(self.data, self.library/'subyard-telemetry'))
+        except (OSError, ValueError, KeyError, TypeError):
+            return 'invalid' if (self.data/'spool-policy.json').exists() else 'missing'
+        return 'present'
+
+    def inspect_archive(self, archive):
+        def inspect():
+            directory = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                info = os.fstat(directory)
+                if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise ValueError('foreign archive directory')
+                fd = os.open('telemetry.sqlite', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            finally:
+                os.close(directory)
+            with os.fdopen(fd, 'rb') as source:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                        or stat.S_IMODE(info.st_mode) != 0o400):
+                    raise ValueError('foreign archive database')
+                # SQLite resolves /proc/self/fd paths before opening them.
+                # Inspect a private copy read from the validated descriptor.
+                with tempfile.TemporaryDirectory(prefix='subyard-telemetry-archive-', dir='/tmp') as work:
+                    copy = Path(work)/'archive.sqlite'
+                    with copy.open('xb') as target:
+                        shutil.copyfileobj(source, target)
+                    db = sqlite3.connect(copy.as_uri()+'?mode=ro&immutable=1', uri=True)
+                    try:
+                        if not db.execute("SELECT value FROM metadata WHERE key='origin_id'").fetchone():
+                            raise ValueError('missing archive origin')
+                    finally:
+                        db.close()
+
+        try:
+            self.as_developer(inspect)
+        except (OSError, ValueError, sqlite3.Error):
+            raise ValueError('legacy archive collision') from None
+
+    def cutover_receipt(self):
+        receipt = self.data/CUTOVER
+        database = self.data/'telemetry.sqlite'
+        existing = native.snapshot(receipt, max_bytes=4096)
+        if existing is None:
+            legacy = any((self.data/name).exists() for name in ('outbox', 'runs', 'runs-v4', 'manager.lock', 'auth.token'))
+            try:
+                fd = os.open(database, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                info = None
+            else:
+                try:
+                    info = os.fstat(fd)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                            or stat.S_IMODE(info.st_mode) != 0o600):
+                        raise ValueError('foreign telemetry database')
+                    version = int.from_bytes(os.pread(fd, 4, 60), 'big')
+                finally:
+                    os.close(fd)
+                legacy = version in (1, 2, 3, 4) or (version == 0 and legacy)
+            if not legacy:
+                return False
+            if (self.data/PENDING).exists() or (self.data/PENDING).is_symlink():
+                raise ValueError('legacy archive staging collision')
+            name = 'archive'
+            for number in range(2, 4098):
+                archive = self.data/name
+                if not archive.exists() and not archive.is_symlink():
+                    break
+                self.inspect_archive(archive)
+                name = f'archive-{number}'
+            else:
+                raise ValueError('legacy archive capacity')
+            value = dict(device=info.st_dev if info else 0, inode=info.st_ino if info else 0,
+                         archive=name, nonce=secrets.token_hex(16), started=records.timestamp(records.now()))
+        else:
+            info = receipt.lstat()
+            if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError('foreign telemetry cutover receipt')
+            value = json.loads(existing)
+        # The collector validates the receipt, staging and archive when it publishes the archive.
+        return value
+
+    def retire_legacy_producers(self):
+        for name in ('runs', 'runs-v4'):
+            path = self.data/name
+            if path.is_symlink():
+                raise ValueError('foreign legacy run directory')
+            if not path.exists():
+                continue
+            with records.directory_lock(path, fcntl.LOCK_EX) as fd:
+                info = os.fstat(fd)
+                mode = stat.S_IMODE(info.st_mode)
+                if info.st_uid != self.uid or mode not in (0o700, 0o500):
+                    raise ValueError('foreign legacy run directory')
+                if mode == 0o700 or (path/'manager.lock').exists():
+                    self.retire_observer_lock(path/'manager.lock')
+                os.fchmod(fd, 0o500)
+                os.fsync(fd)
+        self.retire_observer_lock(self.data/'manager.lock')
+        path = self.data/'outbox'
+        path.mkdir(mode=0o700, exist_ok=True)
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(directory)
+            mode = stat.S_IMODE(info.st_mode)
+            if info.st_uid != self.uid or mode not in (0o700, 0o1700, 0o1500):
+                raise ValueError('foreign producer outbox')
+            lock = path/'.lock'
+            if lock.exists() and not lock.is_symlink() and stat.S_IMODE(lock.lstat().st_mode) == 0:
+                info = lock.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1:
+                    raise ValueError('foreign producer outbox lock')
+                # Resume retirement if interrupted after the lock mode changed.
+                os.fchmod(directory, 0o1500)
+                os.fsync(directory)
+                return
+            fd = os.open('.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=directory)
+            try:
+                records.checked_file(fd, 0)
+                deadline = time.monotonic()+2
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.01)
+                os.fchmod(fd, 0)
+                os.fsync(fd)
+                # An already-open descriptor can still acquire flock after chmod.
+                # Removing directory write permission also fences those waiters.
+                os.fchmod(directory, 0o1500)
+                os.fsync(directory)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
+
+    def remove_old_auth(self, path):
+        with records.open_private(path):
+            path.unlink()
+        records.sync_directory(self.data)
+
+    def retire_operational_state(self):
+        target = records.operational_directory(self.data)
+        for name in ('sources', 'delegation.json'):
+            old = self.data/name
+            if not old.exists() and not old.is_symlink():
+                continue
+            # Reserve a generated destination so an interrupted retry cannot
+            # overwrite the previous operational state.
+            archive = Path(tempfile.mkdtemp(prefix='legacy-', dir=target))
+            old.rename(archive/name)
+            records.sync_directory(archive)
+            records.sync_directory(target)
+        records.sync_directory(self.data)
+
+    def publish_asset(self, path, saved):
+        content, mode = self.assets[path]
+        before = self.asset_snapshot(path)
+        if before != content:
+            if before is not None and hashlib.sha256(before).hexdigest() not in self.recorded_digests(saved, path):
+                raise ValueError('managed asset changed')
+            native.publish(path, content, before, max_bytes=self.asset_limit(path), mode=mode)
+        elif stat.S_IMODE(path.stat().st_mode) != mode:
+            os.chmod(path, mode)
+
     def apply(self):
         installed = self.owned()
         if not self.selected and not installed:
@@ -349,59 +687,72 @@ class Runtime:
             self.control.mkdir(mode=0o700, parents=True)
             self.library.mkdir(mode=0o755, parents=True)
             native.publish(self.control/'marker', MARKER, None)
-            native.publish(self.control/'assets.json', self.inventory(), None)
         if self.data.is_symlink():
             raise ValueError('unsafe data directory')
-        if self.data.exists() and (self.data.stat().st_uid != self.uid or stat.S_IMODE(self.data.stat().st_mode) != 0o700):
-            raise ValueError('foreign data directory')
-        self.data.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.data, 0o700)
-        os.chown(self.data, self.uid, self.gid)
-        token = None
-        if self.selected:
-            if not (self.data/'auth.token').exists():
-                # v0.30 home documents still carry the token its receipt records.
-                value = native.legacy_token(self.control/'native.json') or secrets.token_hex(32)
-                native.publish(self.data/'auth.token', (value+'\n').encode(), None, self.uid, self.gid)
-            token = self.token()
+        self.data.parent.mkdir(parents=True, exist_ok=True)
+        self.private_directory(self.data, 'foreign data directory')
+        token = self.prepare_auth()
         inventory_path = self.control/'assets.json'
         inventory_before = native.snapshot(inventory_path)
-        saved = json.loads(inventory_before)
+        saved = json.loads(inventory_before or b'{}')
         pending = {key: value for key, value in saved.items() if key != REPLACED}
         replaced = dict(saved.get(REPLACED, {}))
-        restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
-                   and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
+        changed = False
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
             before_digest = hashlib.sha256(before).hexdigest() if before is not None else None
-            recorded = self.recorded_digests(saved, path)
-            if before_digest is not None and before_digest not in recorded:
+            wanted_digest = hashlib.sha256(self.assets[path][0]).hexdigest() if path in self.assets else None
+            # Content already equal to the delivery is never an unmanaged edit.
+            if before_digest not in (None, wanted_digest, *self.recorded_digests(saved, path)):
                 raise ValueError('managed asset changed')
             if path not in self.assets:
                 continue
-            wanted = self.assets[path][0]
-            wanted_digest = hashlib.sha256(wanted).hexdigest()
             if before is None:
                 pending[str(path)] = wanted_digest
                 replaced.pop(str(path), None)
-            elif before != wanted:
+            elif before_digest != wanted_digest:
                 pending[str(path)] = before_digest
                 replaced[str(path)] = wanted_digest
-            if path in (self.units/COLLECTOR, self.units/MANAGER) and (before != wanted or len(recorded) > 1) and before is not None:
-                unit = path.name
-                if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
-                    restart.append(unit)
-        # Record both versions before changing any asset. Keep the pair through
-        # daemon-reload so a retry can also accept the previously loaded unit.
+            changed |= before_digest != wanted_digest
+        # Record both versions before changing any asset, so a retry accepts either.
         inventory_pending = self.encode_inventory(pending, replaced)
         if inventory_pending != inventory_before:
             native.publish(inventory_path, inventory_pending, inventory_before)
+        saved = json.loads(inventory_pending)
+        prepared = self.policy_status() == 'present'
+        cutover = (installed and not prepared or (self.data/CUTOVER).exists()) and self.cutover_receipt()
+        retiring = cutover and not prepared
+        old_auth = self.data/'auth.token'
         self.reconcile_native(check=False, token=token)
-        for path, (content, mode) in self.assets.items():
-            before = self.asset_snapshot(path)
-            if before != content:
-                native.publish(path, content, before, max_bytes=self.asset_limit(path))
-            os.chmod(path, mode)
+        stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded'
+                and (retiring or changed or not self.running_no_new_privs(fields)
+                     or (unit == COLLECTOR and (old_auth.exists() or (self.selected and not prepared))))]
+        if retiring:
+            for path in (self.commands/'subyard-telemetry-run', self.library/'broker-correlation.py'):
+                if self.asset_snapshot(path) is not None:
+                    os.chmod(path, 0o700)
+            if stop:
+                systemctl('disable', *stop)
+        if stop:
+            systemctl('stop', *stop)
+        if retiring:
+            self.as_developer(self.retire_legacy_producers)
+            self.as_developer(self.retire_operational_state)
+        if old_auth.exists() or old_auth.is_symlink():
+            self.as_developer(lambda: self.remove_old_auth(old_auth))
+        if self.selected and not prepared:
+            binary = self.library/'subyard-telemetry'
+            self.publish_asset(binary, saved)
+            if cutover:
+                receipt = self.data/CUTOVER
+                clean = records.sanitize_state('cutover', cutover, binary)
+                if clean != cutover:
+                    raise ValueError('invalid telemetry cutover receipt')
+                if not receipt.exists():
+                    native.publish(receipt, records.compact_json(clean), None, self.uid, self.gid)
+            self.prepare_store()
+        for path in self.assets:
+            self.publish_asset(path, saved)
         for path, mode in self.retained.items():
             if self.asset_snapshot(path) is not None:
                 os.chmod(path, mode)
@@ -421,12 +772,20 @@ class Runtime:
         else:
             systemctl('disable', '--now', COLLECTOR)
             systemctl('disable', MANAGER)
-            native.publish(self.data/'drain.json', b'{"drain":true}\n', native.snapshot(self.data/'drain.json'), self.uid, self.gid)
-        if restart:
-            systemctl('restart', *restart)
-        inventory_after = self.inventory()
-        if inventory_after != inventory_published:
-            native.publish(inventory_path, inventory_after, inventory_published)
+            if not retiring:
+                drain = records.sanitize_state('drain', {'drain': True}, self.library/'subyard-telemetry')
+                native.publish(self.data/'drain.json', records.compact_json(drain)+b'\n',
+                               native.snapshot(self.data/'drain.json'), self.uid, self.gid)
+                systemctl('start', MANAGER)
+        # Keep the pair until the new units are loaded, so a retry also accepts the old ones.
+        inventory = self.inventory()
+        if inventory != inventory_published:
+            native.publish(inventory_path, inventory, inventory_published)
+        self.skill_delivery('apply' if self.selected else 'remove')
+        if cutover and self.selected:
+            (self.data/CUTOVER).unlink()
+            with records.directory_lock(self.data, fcntl.LOCK_SH) as directory:
+                os.fsync(directory)
 
 
 def main():
@@ -460,6 +819,8 @@ def main():
         return
     if mode == 'resume':
         if runtime.selected and runtime.owned():
+            if (runtime.data/CUTOVER).exists() and not (runtime.data/'spool-policy.json').exists():
+                raise ValueError('telemetry cutover pending')
             systemctl('start', COLLECTOR, MANAGER)
         return
     if mode == 'startup':

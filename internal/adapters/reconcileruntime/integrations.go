@@ -137,6 +137,8 @@ type integrationFact struct {
 	Desired   string `json:"desired"`
 	Observed  string `json:"observed"`
 	AtDesired bool   `json:"at_desired"`
+	// owner is the declaring integration, for diagnostics only.
+	owner string
 }
 
 type integrationArtifact struct {
@@ -446,24 +448,24 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 		return nil, err
 	}
 	entries := []integrationArtifact{}
+	var refusals []error
 	for _, file := range files {
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, owned(file.integration, err))
+			continue
 		}
 		entry := integrationArtifact{ID: file.integration, Kind: "file", Path: file.destination, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
 		entry.SourceDigest, err = file.legacySourceHash()
-		if err != nil {
-			return nil, err
-		}
-		if file.ownedFormat == "" && entry.SourceDigest == "" {
+		if err == nil && file.ownedFormat == "" && entry.SourceDigest == "" {
 			entry.SourceDigest, err = runtime.legacyIntegrationConfigDigest(file)
-			if err != nil {
-				return nil, err
-			}
+		}
+		if err != nil {
+			refusals = append(refusals, owned(file.integration, err))
+			continue
 		}
 		if file.ownedFormat != "" {
 			entry.Kind = "structured"
@@ -476,11 +478,13 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 	for _, link := range strings.Fields(runtime.environmentValue("INTEGRATION_HOST_LINKS")) {
 		parts := strings.Split(link, ":")
 		if len(parts) < 2 || len(parts) > 3 || !filepath.IsAbs(parts[1]) {
-			return nil, errors.New("invalid integration link")
+			refusals = append(refusals, errors.New("invalid integration link"))
+			continue
 		}
 		relative, err := safeGuestRelativePath(parts[0])
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
 		id := ""
 		for _, candidate := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
@@ -490,12 +494,14 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 			}
 		}
 		if id == "" {
-			return nil, errors.New("integration link has no selected owner")
+			refusals = append(refusals, errors.New("integration link has no selected owner"))
+			continue
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "link", Path: "/home/" + runtime.devUser() + "/" + relative, Target: parts[1], FileTarget: len(parts) == 3 && parts[2] == "file", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(parts[1])))})
 	}
+	// Package sources are read independently of the file sources.
 	packages, err := runtime.integrationPackageArtifacts(phase, reader)
-	if err != nil {
+	if err := domain.CollectRefusals(append(refusals, err)...); err != nil {
 		return nil, err
 	}
 	entries = append(entries, packages...)
@@ -534,13 +540,15 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 	if err != nil {
 		return nil, err
 	}
+	var refusals []error
 	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		inputs := []string{id, runtime.devUser(), runtime.environmentValue("CODING_TOOL_INTEGRATIONS")}
 		for _, definition := range definitions {
 			if definition.Name == id {
 				binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
 				if err != nil {
-					return nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
+					refusals = append(refusals, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable"))
+					continue
 				}
 				inputs = append(inputs, binding)
 			}
@@ -549,7 +557,8 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 		if provision != "" {
 			payload, err := (guestConfigFile{readAsset: reader}).readSourceAsset(config.MaterializedAsset{Source: provision})
 			if err != nil {
-				return nil, err
+				refusals = append(refusals, owned(id, err))
+				continue
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
 			// Preserve both installed mode identities across the default change.
@@ -561,6 +570,9 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
 	}
 
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
+	}
 	return entries, nil
 }
 
@@ -682,6 +694,12 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 	payload, _ := json.Marshal(request)
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, ports.InstanceExecRequest{Command: []string{"python3", "-B", "-c", IntegrationInventoryReader(), mode}, Stdin: payload})
 	if err != nil || result.ExitCode != 0 {
+		// Stderr reports conflicts only from a completed guest program; a
+		// cancelled or failed transport may carry partial output.
+		var completed *ports.GuestExitError
+		if err != nil && !errors.As(err, &completed) {
+			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
+		}
 		type conflictRecord struct{ Reason, Path, Detail string }
 		var report struct {
 			conflictRecord
@@ -700,6 +718,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		if len(conflicts) == 0 {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
+		unrecognized := 0
 		for _, conflict := range conflicts {
 			cause := func() error {
 				knownPath := slices.Contains(legacy, conflict.Path)
@@ -737,20 +756,29 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 								}
 							}
 						}
-						command := []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--no-clobber", "--", conflict.Path, conflict.Path + ".subyard-preserved"}
+						retry := runtime.preserveSiblingCommand(conflict.Path, "preserved")
 						if !strings.HasPrefix(conflict.Path, home+"/") {
-							command = []string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path}
+							retry = shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path})
 						}
 						return integrationOwnershipError{
 							pendingConfiguration: strings.HasPrefix(conflict.Path, home+"/"),
 							message:              fmt.Sprintf("integration ownership conflict in yard %s: %s at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Reason, conflict.Path),
-							retry:                shellquote.Command(command),
+							retry:                retry,
 						}
 					}
 				}
-				return ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
+				unrecognized++
+				return nil
 			}()
 			causes = append(causes, cause)
+		}
+		// Each unrecognized finding stays its own host-rendered refusal.
+		for index := range unrecognized {
+			message := "integration ownership conflict or unavailable evidence; managed artifacts were preserved"
+			if unrecognized > 1 {
+				message = fmt.Sprintf("integration ownership conflict or unavailable evidence (finding %d of %d); managed artifacts were preserved", index+1, unrecognized)
+			}
+			causes = append(causes, ownershipRefusal(message, result, err))
 		}
 		return integrationObservation{Initial: report.Initial, Retired: report.Retired}, domain.CollectRefusals(causes...)
 	}
@@ -791,21 +819,35 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	if err != nil {
 		return IntegrationPlan{}, integrationObservation{}, err
 	}
-	// Service ownership is independent of the structured documents and integration
-	// inventory. A refusal in any of those checks must still report service refusals.
-	servicesObserved := false
+	// Apply and verify name the declaring integration of each refusal.
+	step := map[string]integrationStep{"apply": stepObserve, "verify": stepVerify}[phase]
+	bind := func(owner string, err error) error {
+		if step == "" || err == nil {
+			return err
+		}
+		return runtime.stepFailure(step, owner, err)
+	}
+	// Service ownership and the package and hook probes are independent of the
+	// structured documents and integration inventory. A refusal in any of those
+	// checks must still report theirs; the probes need the integration substrate.
+	servicesObserved, probesObserved := false, true
 	defer func() {
+		if refusal != nil && !probesObserved {
+			_, probeErr := runtime.observeIntegrationProbes(ctx, bind)
+			refusal = domain.CollectRefusals(refusal, probeErr)
+		}
 		if refusal != nil && !servicesObserved {
 			_, _, serviceErr := runtime.integrationServices(ctx, "observe")
-			refusal = domain.CollectRefusals(refusal, serviceErr)
+			refusal = domain.CollectRefusals(refusal, bind("", serviceErr))
 		}
 	}()
 	if ok, err := runtime.guestCheck(ctx, []string{"sh", "-eu", "-c", `command -v python3 >/dev/null; id "$1" >/dev/null; test -d /srv/agents`, "subyard", runtime.devUser()}); err != nil || !ok {
 		return IntegrationPlan{}, integrationObservation{}, firstError(err, errIntegrationSubstrateUnavailable)
 	}
+	probesObserved = false
 	entries, err := runtime.integrationArtifactsWithSourceReader(phase, reader)
 	if err != nil {
-		return IntegrationPlan{}, integrationObservation{}, err
+		return IntegrationPlan{}, integrationObservation{}, bind("", err)
 	}
 	// Persist transfer state is independent of the inventory. Its projection
 	// tells the inventory which links the approved transfer will publish.
@@ -813,10 +855,10 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	runtime.persistProjection = persist.projection()
 	observed, err := runtime.integrationInventory(ctx, "observe", entries, "")
 	if err != nil {
-		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, err))
+		return IntegrationPlan{}, observed, bind("", domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, err)))
 	}
 	if persistErr != nil {
-		return IntegrationPlan{}, observed, domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, nil))
+		return IntegrationPlan{}, observed, bind("", domain.CollectRefusals(persistErr, runtime.collectIntegrationConfigRefusals(ctx, reader, observed, nil)))
 	}
 	persist = persist.retireUnrecordedLinks(observed.Retired)
 	// Passive installed admission may ignore redundant labels, but apply must
@@ -863,7 +905,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			continue
 		}
 		if err != nil {
-			causes = append(causes, err)
+			causes = append(causes, bind(file.integration, err))
 			continue
 		}
 		mode := configmaterial.ModeObserve
@@ -875,11 +917,11 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			err = runtime.releasedInstalledDocument(file.destination, observation)
 		}
 		if err != nil {
-			causes = append(causes, err)
+			causes = append(causes, bind(file.integration, err))
 			continue
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
-		plan.facts = append(plan.facts, integrationFact{Key: "structured:" + file.destination, Desired: fmt.Sprintf("%x", sha256.Sum256(payload)), Observed: observation.Fingerprint, AtDesired: observation.Converged})
+		plan.facts = append(plan.facts, integrationFact{Key: "structured:" + file.destination, Desired: fmt.Sprintf("%x", sha256.Sum256(payload)), Observed: observation.Fingerprint, AtDesired: observation.Converged, owner: file.integration})
 		plan.Changed = plan.Changed || !observation.Converged
 		if mode == configmaterial.ModeAssessAdopt && observation.Adoptable {
 			observed.Adopted = append(observed.Adopted, integrationArtifact{
@@ -901,11 +943,11 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		}
 		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
 		if err != nil {
-			causes = append(causes, err)
+			causes = append(causes, bind(entry.ID, err))
 			continue
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
-		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged})
+		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged, owner: entry.ID})
 		plan.Changed = plan.Changed || !observation.Converged
 		if observation.Release != "" {
 			notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
@@ -914,46 +956,19 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
 		}
 	}
+	probesObserved = true
+	probes, err := runtime.observeIntegrationProbes(ctx, bind)
+	causes = append(causes, err)
+	servicesObserved = true
+	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
+	causes = append(causes, bind("", err))
 	if err := domain.CollectRefusals(causes...); err != nil {
 		return plan, observed, err
 	}
-	commands, err := runtime.provisionAgentCommands()
-	if err != nil {
-		return plan, observed, err
-	}
-	for _, command := range commands {
-		ready, err := runtime.guestCheck(ctx, []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command})
-		if err != nil {
-			return plan, observed, err
-		}
-		plan.Changed = plan.Changed || !ready
-		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "command:" + command, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
-	}
-	checks, err := runtime.provisionAgentChecks()
-	if err != nil {
-		return plan, observed, err
-	}
-	for _, check := range checks {
-		ready, err := runtime.guestCheck(ctx, []string{check})
-		if err != nil {
-			return plan, observed, err
-		}
-		plan.Changed = plan.Changed || !ready
-		fingerprints = append(fingerprints, fmt.Sprint(ready))
-		plan.facts = append(plan.facts, integrationFact{Key: "check:" + check, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
-	}
-	ready, err := runtime.projectHooksConverged(ctx)
-	if err != nil {
-		return plan, observed, err
-	}
-	plan.Changed = plan.Changed || !ready
-	fingerprints = append(fingerprints, fmt.Sprint(ready))
-	plan.facts = append(plan.facts, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
-	servicesObserved = true
-	serviceFingerprint, servicesChanged, err := runtime.integrationServices(ctx, "observe")
-	if err != nil {
-		return plan, observed, err
+	for _, probe := range probes {
+		plan.Changed = plan.Changed || !probe.AtDesired
+		fingerprints = append(fingerprints, probe.Observed)
+		plan.facts = append(plan.facts, probe)
 	}
 	plan.Changed = plan.Changed || servicesChanged
 	fingerprints = append(fingerprints, serviceFingerprint)
@@ -993,6 +1008,38 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		}
 	}
 	return plan, observed, nil
+}
+
+// observeIntegrationProbes reads the package commands, package checks and
+// project hook wiring as plan facts, collecting every independent refusal.
+func (runtime Runtime) observeIntegrationProbes(ctx context.Context, bind func(string, error) error) ([]integrationFact, error) {
+	var probes []integrationFact
+	var causes []error
+	probe := func(key, owner string, command []string) {
+		ready, err := runtime.guestCheck(ctx, command)
+		if err != nil {
+			causes = append(causes, bind(owner, err))
+			return
+		}
+		probes = append(probes, integrationFact{Key: key, Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready, owner: owner})
+	}
+	commands, err := runtime.provisionAgentCommands()
+	causes = append(causes, bind("", err))
+	for _, command := range commands {
+		probe("command:"+command, runtime.selectionOwner("COMMAND", command), []string{"sh", "-c", `command -v "$1" >/dev/null`, "subyard", command})
+	}
+	checks, err := runtime.provisionAgentChecks()
+	causes = append(causes, bind("", err))
+	for _, check := range checks {
+		probe("check:"+check, runtime.selectionOwner("CHECK", check), []string{check})
+	}
+	ready, err := runtime.projectHooksConverged(ctx)
+	if err != nil {
+		causes = append(causes, bind("", err))
+	} else {
+		probes = append(probes, integrationFact{Key: "hooks", Desired: "ready", Observed: fmt.Sprint(ready), AtDesired: ready})
+	}
+	return probes, domain.CollectRefusals(causes...)
 }
 
 // reconcileIntegrationsStep names the selection. Release plans refuse text with
@@ -1106,7 +1153,7 @@ func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, rea
 			continue
 		}
 		if err != nil {
-			causes = append(causes, err)
+			causes = append(causes, owned(file.integration, err))
 			continue
 		}
 		mode := configmaterial.ModeObserve
@@ -1117,14 +1164,14 @@ func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, rea
 		if err == nil {
 			err = runtime.releasedInstalledDocument(file.destination, observation)
 		}
-		causes = append(causes, err)
+		causes = append(causes, owned(file.integration, err))
 	}
 	for _, entry := range observed.Retired {
 		if entry.Kind != "structured" {
 			continue
 		}
 		_, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
-		causes = append(causes, err)
+		causes = append(causes, owned(entry.ID, err))
 	}
 	return domain.CollectRefusals(causes...)
 }
@@ -1513,24 +1560,24 @@ func (runtime Runtime) PrepareSourceIntegrationPlan(ctx context.Context, reader 
 func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPlan) error {
 	fresh, observed, err := runtime.observeIntegrationsPhase(ctx, "apply")
 	if err != nil {
-		return err
+		return runtime.stepFailure(stepObserve, "", err)
 	}
 	if err := CheckIntegrationPlan(plan, fresh); err != nil {
 		return runtime.integrationPlanDiagnostic(err, plan, fresh)
 	}
 	if err := runtime.checkIntegrationHookScope(); err != nil {
-		return err
+		return runtime.stepFailure(stepHookScope, "", err)
 	}
 	if !fresh.Changed {
-		return runtime.storeAppliedIntegrationSettings(ctx)
+		return runtime.stepFailure(stepSettings, "", runtime.storeAppliedIntegrationSettings(ctx))
 	}
 	execution := runtime
 	if err := runtime.reconcileIntegrationServices(ctx); err != nil {
-		return err
+		return runtime.stepFailure(stepServices, "", err)
 	}
 	entries, err := runtime.integrationArtifactsPhase("apply")
 	if err != nil {
-		return err
+		return runtime.stepFailure(stepArtifacts, "", err)
 	}
 	expectedInventory := ""
 	if observed.Initial {
@@ -1539,53 +1586,51 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	// The approved transfer runs before inventory apply, which then records the
 	// exact link that transfer published (the projection bound in the plan).
 	runtime.persistProjection = fresh.persist.projection()
+	persistOwner := fresh.persist.changedOwner()
 	if err := runtime.checkApprovedPersist(fresh.persist); err != nil {
-		return err
+		return runtime.stepFailure(stepPersistApproval, persistOwner, err)
 	}
 	if err := runtime.applyPersist(ctx, entries, fresh.persist); err != nil {
-		return err
+		return runtime.stepFailure(stepPersist, persistOwner, err)
 	}
 	if _, err := runtime.integrationInventory(ctx, "apply", entries, expectedInventory); err != nil {
-		return err
+		return runtime.stepFailure(stepInventoryApply, "", err)
 	}
 	if err := runtime.RefreshConfigs(ctx, nil); err != nil {
-		return err
+		return runtime.stepFailure(stepConfigs, "", err)
 	}
 	if err := execution.runScript(ctx, runtime.Stderr, "reconcile-integrations.sh"); err != nil {
-		return err
+		return runtime.stepFailure(stepScript, "", err)
 	}
 	// Keep the inventory pending until hooks succeed so the same requested
 	// selection remains retryable after a transient hook failure.
 	if err := execution.captureProvisionedProjectHooks(ctx); err != nil {
-		return err
+		return runtime.stepFailure(stepHookCapture, "", err)
 	}
 	if err := execution.RunProjectHooks(ctx); err != nil {
-		return err
+		return runtime.stepFailure(stepHooks, "", err)
 	}
 	// Retirement effects follow the hooks: a failed init leaves the installed
 	// state, which the next successful init retires.
 	for _, entry := range observed.Retired {
 		if entry.Kind == "structured" {
 			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
-				return err
+				return runtime.stepFailure(stepRetire, entry.ID, err)
 			}
 		}
 	}
 	if _, err := runtime.integrationInventory(ctx, "commit", entries, ""); err != nil {
-		return err
+		return runtime.stepFailure(stepInventoryCommit, "", err)
 	}
 	verified, _, err := execution.observeIntegrationsPhase(ctx, "verify")
 	if err != nil {
-		return err
+		return runtime.stepFailure(stepVerify, "", err)
 	}
 	if verified.Changed {
 		return runtime.integrationDiagnostic(errors.New("integration reconcile verification failed; desired selection retained for retry"),
-			profile.IntegrationDefinition{}, "verify", "convergence-failed")
+			profile.IntegrationDefinition{Name: runtime.driftOwner(verified)}, "verify", "convergence-failed")
 	}
-	if err := runtime.storeAppliedIntegrationSettings(ctx); err != nil {
-		return err
-	}
-	return nil
+	return runtime.stepFailure(stepSettings, "", runtime.storeAppliedIntegrationSettings(ctx))
 }
 
 type appliedIntegrationSettingsCapture struct {

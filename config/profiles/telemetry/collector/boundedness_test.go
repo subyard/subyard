@@ -1,85 +1,41 @@
 package collector
 
 import (
-	"bufio"
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
-	"path/filepath"
-	"strings"
+	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/Subyard/Subyard/internal/testkit"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
-func TestPrivateRecordsAdmissionPrecedesBodyAndSharesReceiverBudget(t *testing.T) {
-	s := fixtureStore(t)
-	authFile := filepath.Join(s.dir, "auth")
-	testkit.WriteFile(t, authFile, []byte(strings.Repeat("a", 32)), 0600)
-	ctx, cancel := context.WithCancel(context.Background())
-	ready := make(chan *LocalAuth, 1)
-	done := make(chan error, 1)
-	go func() {
-		done <- Serve(ctx, s, Options{Listen: "127.0.0.1:0", AuthFile: authFile,
-			Receiver: func(ctx context.Context, _ *Store, _ Options, auth *LocalAuth) error {
-				ready <- auth
-				<-ctx.Done()
-				return nil
-			}})
-	}()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Error(err)
-		}
-	}()
-	var auth *LocalAuth
-	select {
-	case auth = <-ready:
-	case <-time.After(5 * time.Second):
-		t.Fatal("receiver readiness deadline")
-	}
-	for range cap(auth.slots) {
-		auth.slots <- struct{}{}
-	}
-	connection, err := net.Dial("unix", filepath.Join(s.dir, "control.sock"))
+func TestNativeAdmissionRefusesSaturationBeforeDecoding(t *testing.T) {
+	auth := localAuth{slots: make(chan struct{}, 1)}
+	middleware, err := auth.GetHTTPHandler(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
-	connection.SetDeadline(time.Now().Add(time.Second))
-	// No body is sent. A 100 Continue would prove decoding/read started before
-	// admission; saturation must instead reject immediately and retryably.
-	if _, err = connection.Write([]byte("POST /v1/records HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n")); err != nil {
-		t.Fatal(err)
-	}
-	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	handler, err := middleware(context.Background(), http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	if response.StatusCode != 503 || response.Header.Get("Retry-After") != "1" {
-		t.Fatalf("prebody saturation status=%d", response.StatusCode)
+	auth.slots <- struct{}{}
+	w := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/logs", nil)
+	handler.ServeHTTP(w, request)
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") != "1" {
+		t.Fatalf("pre-decode saturation status=%d", w.Code)
 	}
 	<-auth.slots
-	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(s.dir, "control.sock"))
-	}}}
-	defer client.CloseIdleConnections()
-	body, _ := json.Marshal(record("run", map[string]any{"agent_run_id": "admitted"}))
-	response, err = client.Post("http://localhost/v1/records", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != 200 || !s.RegisteredRun(context.Background(), "admitted") {
-		t.Fatal("record acknowledgement preceded durable commit")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, request)
+	if w.Code != http.StatusOK {
+		t.Fatalf("native admission status=%d", w.Code)
 	}
 }
 

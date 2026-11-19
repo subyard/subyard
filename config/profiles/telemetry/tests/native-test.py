@@ -213,7 +213,7 @@ class NativeTest(unittest.TestCase):
         }}}).encode()
         native.publish(self.receipt, receipt, None)
         with self.assertRaisesRegex(native.Refusal, 'cannot identify the collector token.*'
-                                    'write the Bearer token .* to /var/lib/subyard/telemetry/auth.token, then retry'):
+                                    'write the Bearer token .* to /var/lib/subyard/telemetry-private/auth.token, .* then retry'):
             self.reconcile([])
         self.assertEqual(path.read_bytes(), payload)
         self.assertEqual(self.receipt.read_bytes(), receipt)

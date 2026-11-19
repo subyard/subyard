@@ -92,7 +92,7 @@ func TestRunOwnerGapsAndSessionObservations(t *testing.T) {
 			}
 			for i, value := range refs {
 				ref := value.(map[string]any)
-				if ref["origin_id"] != "producer:fixture" || ref["event_id"] != sessionIDs[1-i] || ref["source_id"] != "fixture" || ref["source_version"] != "fixture/1" || ref["source"] != "native-otlp-attribute/authenticated-header" || ref["quality"] != "explicit" || ref["received_time"] == "" {
+				if ref["origin_id"] != s.OriginID() || ref["event_id"] != sessionIDs[1-i] || ref["source_id"] != fixtureSourceID || ref["source_version"] != "1" || ref["source"] != "native-otlp-attribute/authenticated-header" || ref["quality"] != "explicit" || ref["received_time"] == "" {
 					t.Fatalf("relation provenance lost: %+v", ref)
 				}
 			}

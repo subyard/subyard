@@ -1441,12 +1441,17 @@ func TestVersionedConfigSyncKeepsIgnoredProfileOnlyAssignments(t *testing.T) {
 // read; refused Git inputs never turn upstream values into spurious refusals.
 func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.T) {
 	const crossSetting = "require YARD_KIND=vm"
-	for _, test := range []struct{ stray, scope string }{
-		{"shared/notes.txt", "shared source: source entry"},
-		{"shared/overrides/notes.txt", "shared source: overrides: source entry"},
-		{"hosts/owner-a/notes.txt", `owner host "owner-a": source entry`},
-		{"hosts/owner-a/yards/demo/notes.txt", "yard demo: source entry"},
-		{"hosts/owner-a/yards/demo/overrides/notes.txt", "yard demo overrides: source entry"},
+	const unexpected = "source entry: unexpected source path"
+	const unknown = `unknown file setting "notes.txt"`
+	for _, test := range []struct{ stray, refusal string }{
+		{"shared/notes.txt", "shared source: " + unexpected},
+		{"shared/overrides/notes.txt", "shared source: overrides: " + unexpected},
+		{"shared/overrides/agents/notes.txt", "shared source: overrides: " + unknown},
+		{"hosts/owner-a/notes.txt", `owner host "owner-a": ` + unexpected},
+		{"hosts/owner-a/overrides/agents/notes.txt", `owner host "owner-a" overrides: ` + unknown},
+		{"hosts/owner-a/yards/demo/notes.txt", "yard demo: " + unexpected},
+		{"hosts/owner-a/yards/demo/overrides/notes.txt", "yard demo overrides: " + unexpected},
+		{"hosts/owner-a/yards/demo/overrides/agents/notes.txt", "yard demo overrides: " + unknown},
 	} {
 		t.Run(test.stray, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
@@ -1468,12 +1473,34 @@ func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.
 			if err == nil {
 				t.Fatal("unexpected source path was accepted")
 			}
-			for _, text := range []string{test.scope + ": unexpected source path", crossSetting} {
+			for _, text := range []string{test.refusal, crossSetting} {
 				if !strings.Contains(err.Error(), text) {
 					t.Fatalf("missing %q in %v", text, err)
 				}
 			}
 		})
+	}
+}
+
+// One override tree reports every independent asset refusal.
+func TestVersionedConfigSyncReportsEveryOverrideAssetRefusal(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.writeSource("hosts/owner-a/config.env", "")
+	fixture.writeSource("hosts/owner-a/overrides/agents/notes.txt", "note\n")
+	fixture.writeSource("hosts/owner-a/overrides/agents/codex/config.toml", "api_key=\"must-not-be-versioned\"\n")
+	fixture.commit("two asset refusals")
+	_, err := BuildPlan(fixture.options(false))
+	if err == nil {
+		t.Fatal("refused override assets were accepted")
+	}
+	for _, text := range []string{
+		`owner host "owner-a" overrides: unknown file setting "notes.txt"`,
+		`owner host "owner-a" overrides: codex/config.toml`,
+		"secret material",
+	} {
+		if !strings.Contains(err.Error(), text) {
+			t.Fatalf("missing %q in %v", text, err)
+		}
 	}
 }
 
@@ -1495,6 +1522,10 @@ func TestVersionedConfigSyncSkipsEffectiveChecksForUnreadGitInputs(t *testing.T)
 			f.writeSource("shared/config.env", "E2E_VM_CPU=invalid\n")
 			f.commit("invalid shared")
 		}, []string{"shared/config.env:1: E2E_VM_CPU"}, true},
+		{"refused yard asset", "", vmYard, func(f *syncFixture) {
+			f.writeSource("hosts/owner-a/yards/demo/overrides/agents/codex/config.toml", "api_key=\"must-not-be-versioned\"\n")
+			f.commit("secret yard asset")
+		}, []string{"yard demo overrides: codex/config.toml", "secret material"}, false},
 		{"dirty checkout", "", vmYard, func(f *syncFixture) {
 			f.writeSource("hosts/owner-a/yards/demo/config.env", vmYard+"GIT_USER_NAME=Jane\n")
 		}, []string{"changes in managed paths"}, true},

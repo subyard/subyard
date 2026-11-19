@@ -164,8 +164,9 @@ class Sampler:
         self.known, self.last, self.direct_last, self.ended = {}, {}, {}, set()
         self.group = Path(run['cgroup']) if run.get('cgroup') else None
         self.workload = self.group/'workload' if self.group else None
-        self.run_body = {**run, 'state': 'resources_observing', 'scope_quality': 'managed' if self.group else 'partial'}
-        self.run_announced = records.emit(self.data_dir, 'run', self.run_body)
+        self.run_body = {'agent_run_id': run['agent_run_id'], 'state': 'resources_observing',
+                         'scope_quality': 'managed' if self.group else 'partial'}
+        self.run_announced = False
         self.object_id = run['agent_run_id']+':scope'
         self.base = {name: run[name] for name in ('host_id', 'boot_id', 'agent_run_id')}
         self.base.update(object_id=self.object_id, generation=run['agent_run_id'],
@@ -305,7 +306,7 @@ class Sampler:
                              'observed_process_count': len(chosen), 'populated': populated,
                              'quality': 'complete' if self.group else 'partial', 'final': final})
         if final and saved and direct_saved:
-            if not records.emit(self.data_dir, 'run', {'agent_run_id': self.run['agent_run_id'], 'state': 'resources_complete', 'resource_completed': True,
+            if not records.emit(self.data_dir, 'run', {'agent_run_id': self.run['agent_run_id'], 'state': 'resources_complete', 'resource_completed': True, 'end_time': records.now(),
                          'quality': 'complete' if self.group else 'partial'}):
                 return False
             if self.group:

@@ -14,10 +14,20 @@ import (
 )
 
 func Stats(ctx context.Context, db *sql.DB) (map[string]any, error) {
-	var origin, version string
+	var origin, version, generation string
+	schema, err := readVersion(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	var count, last int64
 	if err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='origin_id'").Scan(&origin); err != nil {
 		return nil, err
+	}
+	generation = origin
+	if schema == storeVersion {
+		if err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='store_generation_id'").Scan(&generation); err != nil {
+			return nil, err
+		}
 	}
 	if err := db.QueryRowContext(ctx, "SELECT sqlite_version()").Scan(&version); err != nil {
 		return nil, err
@@ -39,24 +49,44 @@ func Stats(ctx context.Context, db *sql.DB) (map[string]any, error) {
 		}
 		counts[kind] = n
 	}
-	return map[string]any{"origin_id": origin, "sqlite_version": version, "records": count, "last_sequence": last, "kinds": counts}, rows.Err()
+	return map[string]any{"origin_id": origin, "store_generation_id": generation, "schema_version": schema, "sqlite_version": version, "records": count, "last_sequence": last, "kinds": counts}, rows.Err()
 }
 
 // ShowRun selects each measured object once and keeps its explicit temporal
 // edges. Detail covered by inclusive ancestors is never charged a second time.
 func ShowRun(ctx context.Context, db *sql.DB, run string) (map[string]any, error) {
-	return showRun(ctx, db, run, false)
+	return showRunOrigin(ctx, db, run, "", false)
 }
 
 // ShowRunIncludingChildren follows only explicitly recorded parent_run_id edges.
 // Object selection is performed once across the tree, before totals are formed.
 func ShowRunIncludingChildren(ctx context.Context, db *sql.DB, run string) (map[string]any, error) {
-	return showRun(ctx, db, run, true)
+	return showRunOrigin(ctx, db, run, "", true)
 }
 
-func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) (map[string]any, error) {
+func showRunOrigin(ctx context.Context, db *sql.DB, run, origin string, includeChildren bool) (map[string]any, error) {
+	version, err := readVersion(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	var scope string
+	if version == storeVersion {
+		if origin == "" {
+			// Prefer the local run. If only imports have this ID, require it
+			// to be unambiguous or explicitly selected by the caller.
+			err := db.QueryRowContext(ctx, `SELECT origin_id FROM runs WHERE agent_run_id=? AND (
+				origin_id=(SELECT value FROM metadata WHERE key='origin_id') OR
+				(SELECT count(*) FROM runs WHERE agent_run_id=?)=1)`, run, run).Scan(&origin)
+			if err != nil {
+				return nil, err
+			}
+		}
+		scope = scopedRunTables(origin)
+	} else if origin != "" {
+		return nil, errors.New("historical telemetry does not support selecting a run origin")
+	}
 	var raw string
-	if err := db.QueryRowContext(ctx, "SELECT body FROM runs WHERE agent_run_id=?", run).Scan(&raw); err != nil {
+	if err := db.QueryRowContext(ctx, scope+"SELECT body FROM runs WHERE agent_run_id=?", run).Scan(&raw); err != nil {
 		return nil, err
 	}
 	body, err := decodeBody([]byte(raw))
@@ -67,7 +97,7 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 	mode := "direct_run"
 	if includeChildren {
 		mode = "including_child_runs"
-		runIDs, err = descendantRuns(ctx, db, run)
+		runIDs, err = descendantRuns(ctx, db, scope, run)
 		if err != nil {
 			return nil, err
 		}
@@ -77,7 +107,7 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 		literals[i] = sqlLiteral(id)
 	}
 	runSet := "(" + strings.Join(literals, ",") + ")"
-	rows, err := db.QueryContext(ctx, `SELECT o.object_id,o.parent_object_id,o.accounting,o.body,a.body,a.start_time,a.end_time,a.shared,a.quality,a.agent_run_id FROM associations a JOIN objects o ON o.object_id=a.object_id WHERE a.agent_run_id IN `+runSet+` ORDER BY o.object_id,a.start_time,a.agent_run_id LIMIT 10001`)
+	rows, err := db.QueryContext(ctx, scope+`SELECT o.object_id,o.parent_object_id,o.accounting,o.body,a.body,a.start_time,a.end_time,a.shared,a.quality,a.agent_run_id FROM associations a JOIN objects o ON o.object_id=a.object_id WHERE a.agent_run_id IN `+runSet+` ORDER BY o.object_id,a.start_time,a.agent_run_id LIMIT 10001`)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +178,7 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 				}
 			}
 		}
-		other, err := db.QueryContext(ctx, `SELECT start_time,end_time,agent_run_id FROM associations WHERE object_id=? AND agent_run_id NOT IN `+runSet+` LIMIT 10001`, id)
+		other, err := db.QueryContext(ctx, scope+`SELECT start_time,end_time,agent_run_id FROM associations WHERE object_id=? AND agent_run_id NOT IN `+runSet+` LIMIT 10001`, id)
 		if err != nil {
 			return nil, err
 		}
@@ -226,7 +256,7 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 				disposition = "unknown"
 			}
 		}
-		samples, err := db.QueryContext(ctx, `SELECT s.body,s.source_time,s.origin_id,s.event_id,r.source_id,r.received_time,r.sequence
+		samples, err := db.QueryContext(ctx, scope+`SELECT s.body,s.source_time,s.origin_id,s.event_id,r.source_id,r.received_time,r.sequence
 			FROM samples s JOIN records r ON r.origin_id=s.origin_id AND r.event_id=s.event_id
 			WHERE s.object_id=? ORDER BY s.source_time,s.origin_id,s.event_id LIMIT 10001`, id)
 		if err != nil {
@@ -309,20 +339,20 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 		}
 
 	}
-	sessionRows, err := sessionObservations(ctx, db, runSet)
+	sessionRows, err := sessionObservations(ctx, db, scope, runSet)
 	if err != nil {
 		return nil, err
 	}
-	childRows, err := Query(ctx, db, "SELECT agent_run_id,body FROM runs WHERE json_extract(body,'$.parent_run_id')="+sqlLiteral(run)+" ORDER BY agent_run_id")
+	childRows, err := Query(ctx, db, scope+"SELECT agent_run_id,body FROM runs WHERE json_extract(body,'$.parent_run_id')="+sqlLiteral(run)+" ORDER BY agent_run_id")
 	if err != nil {
 		return nil, err
 	}
-	processRows, err := Query(ctx, db, "SELECT DISTINCT o.object_id,o.body FROM objects o JOIN associations a ON a.object_id=o.object_id WHERE o.kind='process' AND a.agent_run_id IN "+runSet+" ORDER BY o.object_id")
+	processRows, err := Query(ctx, db, scope+"SELECT DISTINCT o.object_id,o.body FROM objects o JOIN associations a ON a.object_id=o.object_id WHERE o.kind='process' AND a.agent_run_id IN "+runSet+" ORDER BY o.object_id")
 	if err != nil {
 		return nil, err
 	}
 	gaps := []any{}
-	gapRows, err := db.QueryContext(ctx, `SELECT body FROM gaps WHERE agent_run_id IN `+runSet+`
+	gapRows, err := db.QueryContext(ctx, scope+`SELECT body FROM gaps WHERE agent_run_id IN `+runSet+`
 		OR object_id IN(SELECT object_id FROM associations WHERE agent_run_id IN `+runSet+`)
 		OR nullif(json_extract(body,'$.owner_id'),'') IN(
 			SELECT nullif(json_extract(o.body,'$.owner_id'),'') FROM objects o JOIN associations a ON a.object_id=o.object_id WHERE a.agent_run_id IN `+runSet+`)
@@ -348,8 +378,18 @@ func showRun(ctx context.Context, db *sql.DB, run string, includeChildren bool) 
 	return map[string]any{"run": body, "attribution_mode": mode, "included_runs": runIDs, "hierarchy_source": "run.parent_run_id", "selected_nonoverlapping": selected, "shared": shared, "unknown": unknown, "excluded_overlapping_detail": overlap, "gaps": gaps, "totals": runTotals(selected, overlap, shared, unknown), "sessions": sessionRows, "child_runs": childRows, "processes": processRows, "accounting_note": "Samples belong once to objects and explicit time intervals. CPU deltas require compatible monotonic/counter domains. Missing values remain null; native retry duplicates are not usage totals."}, gapRows.Err()
 }
 
-func sessionObservations(ctx context.Context, db *sql.DB, runSet string) ([]map[string]any, error) {
-	observations, err := Query(ctx, db, `SELECT r.agent_run_id,r.session_id,r.origin_id,r.event_id,r.body,e.source_id,e.source_version,e.source_time,e.received_time
+// Current projections are keyed by origin. The historical report can use the
+// same SQL directly against versions that only have a single identity scope.
+func scopedRunTables(origin string) string {
+	tables := []string{"runs", "objects", "associations", "samples", "relations", "gaps"}
+	for i, table := range tables {
+		tables[i] = table + " AS (SELECT * FROM main." + table + " WHERE origin_id=" + sqlLiteral(origin) + ")"
+	}
+	return "WITH RECURSIVE " + strings.Join(tables, ", ") + " "
+}
+
+func sessionObservations(ctx context.Context, db *sql.DB, scope, runSet string) ([]map[string]any, error) {
+	observations, err := Query(ctx, db, scope+`SELECT r.agent_run_id,r.session_id,r.origin_id,r.event_id,r.body,e.source_id,e.source_version,e.source_time,e.received_time
 		FROM relations r JOIN records e ON e.origin_id=r.origin_id AND e.event_id=r.event_id
 		WHERE r.session_id<>'' AND r.agent_run_id IN `+runSet+` ORDER BY r.agent_run_id,r.session_id,e.source_time,r.origin_id,r.event_id LIMIT 10001`)
 	if err != nil {
@@ -415,10 +455,14 @@ func offlineAfterSample(ctx context.Context, db *sql.DB, object, sample map[stri
 	return false, rows.Err()
 }
 
-func descendantRuns(ctx context.Context, db *sql.DB, run string) ([]string, error) {
+func descendantRuns(ctx context.Context, db *sql.DB, scope, run string) ([]string, error) {
 	// UNION visits an identity once, including malformed cyclic producer graphs.
 	// The finite CTE limit detects oversized trees without materializing all runs.
-	rows, err := db.QueryContext(ctx, `WITH RECURSIVE selected_runs(agent_run_id) AS (
+	prefix := "WITH RECURSIVE "
+	if scope != "" {
+		prefix = strings.TrimSpace(scope) + ", "
+	}
+	rows, err := db.QueryContext(ctx, prefix+`selected_runs(agent_run_id) AS (
 		SELECT ? UNION SELECT r.agent_run_id FROM runs r JOIN selected_runs s ON json_extract(r.body,'$.parent_run_id')=s.agent_run_id LIMIT 1001
 	) SELECT r.agent_run_id,coalesce(json_extract(r.body,'$.parent_run_id'),'') FROM runs r JOIN selected_runs s USING(agent_run_id) ORDER BY r.agent_run_id`, run)
 	if err != nil {
@@ -479,6 +523,9 @@ func integerValue(value any) (*big.Int, bool) {
 const queryByteLimit = 16 << 20
 
 func Query(ctx context.Context, db *sql.DB, query string) ([]map[string]any, error) {
+	if _, err := readVersion(ctx, db); err != nil {
+		return nil, err
+	}
 	connection, err := db.Conn(ctx)
 	if err != nil {
 		return nil, err

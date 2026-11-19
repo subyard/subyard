@@ -40,7 +40,7 @@ for unit in ('subyard-telemetry.service','subyard-telemetry-runs.service'):
     for path in dropins:
         parent=pathlib.Path(path).parent.name
         classes['type-wide' if parent=='service.d' else 'unit-specific' if parent==unit+'.d' else 'other']+=1
-    command='/usr/bin/setpriv --no-new-privs '+('/usr/bin/python3 -B /usr/local/lib/subyard-telemetry/launcher.py manager --data-dir /var/lib/subyard/telemetry --delegate' if manager else '/usr/local/lib/subyard-telemetry/subyard-telemetry serve --data-dir /var/lib/subyard/telemetry --listen 127.0.0.1:14318 --auth-file /var/lib/subyard/telemetry/auth.token')
+    command='/usr/bin/setpriv --no-new-privs '+('/usr/bin/python3 -B /usr/local/lib/subyard-telemetry/launcher.py manager --data-dir /var/lib/subyard/telemetry --delegate' if manager else '/usr/local/lib/subyard-telemetry/subyard-telemetry serve --data-dir /var/lib/subyard/telemetry --listen 127.0.0.1:14318 --auth-file /var/lib/subyard/telemetry-private/auth.token')
     start=fields.get('ExecStart','')
     path=command.split()[0]
     expected={'User':user,'Group':gid,'Type':'simple','KillMode':'process' if manager else 'control-group',
@@ -86,7 +86,7 @@ os.chmod(state,0o700)
 (state/'marker').write_bytes(b'subyard-telemetry-incus-v1')
 os.chmod(state/'marker',0o600)
 sys.argv=['process-scope.py','--state',str(state),'--data-dir',str(data)]
-exec(compile(FIXTURE_SOURCE,'process-scope.py','exec'),{'__name__':'__main__'})
+exec(compile(FIXTURE_SOURCE,'process-scope.py','exec'),{'__name__':'__main__','__file__':'/usr/local/lib/subyard-telemetry/tests/e2e/process-scope.py'})
 if NATIVE_STAGE:
     prepared=pathlib.Path(NATIVE_STAGE)/'native'
     os.environ['SUBYARD_TELEMETRY_NATIVE_STATE']=str(prepared)
@@ -184,16 +184,15 @@ with closing(sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro',uri
 assert retained>=run['records_before']>0,'disable lost history'
 (state/'release').touch(mode=0o600)
 deadline=time.monotonic()+40
-sys.path.insert(0,'/usr/local/lib/subyard-telemetry')
-import records
 while time.monotonic()<deadline:
     final=[]
-    for path in (data/'outbox').glob('*.json'):
-        record=records.read_private(path)
-        body=record.get('body',{})
-        if record.get('kind')=='sample' and body.get('object_id')==run['agent_run_id']+':scope' and body.get('final'):
-            final.append(body)
-    if (state/'done').is_file() and not (data/'runs'/(run['agent_run_id']+'.json')).exists() and final:
+    for path in (data/'spool').glob('*'):
+        for frame in path.read_bytes().split(b'\\n')[1:-1]:
+            record=json.loads(frame)
+            body=record.get('body',{})
+            if record.get('kind')=='sample' and body.get('object_id')==run['agent_run_id']+':scope' and body.get('final'):
+                final.append(body)
+    if (state/'done').is_file() and not (data/'runs-v5'/(run['agent_run_id']+'.json')).exists() and final:
         assert final[-1]['populated'] is False
         print(json.dumps({'retained_records':retained,'descendant_completed':True,'final_counter_durable':True}),flush=True)
         break
@@ -362,6 +361,7 @@ def main():
     stage = Path(fixture['root'])
     files = {'source/config/profiles/telemetry/tests/e2e/native-signals.py': args.source/'config/profiles/telemetry/tests/e2e/native-signals.py',
              'source/config/profiles/telemetry/tests/e2e/failure-evidence.py': args.source/'config/profiles/telemetry/tests/e2e/failure-evidence.py',
+             'source/config/profiles/telemetry/records.py': args.source/'config/profiles/telemetry/records.py',
              'source/config/profiles/telemetry/native.py': args.source/'config/profiles/telemetry/native.py',
              'source/internal/adapters/configmaterial/tomli_w.py': args.source/'internal/adapters/configmaterial/tomli_w.py',
              'source/config/profiles/orca/tests/e2e/codex-permissions.py': args.source/'config/profiles/orca/tests/e2e/codex-permissions.py',
@@ -383,7 +383,7 @@ spec.loader.exec_module(failure_evidence)
 output=io.StringIO()
 secrets=('local-fixture-only',)
 try:
-    secrets+=(pathlib.Path('/var/lib/subyard/telemetry/auth.token').read_text().strip(),)
+    secrets+=(pathlib.Path('/var/lib/subyard/telemetry-private/auth.token').read_text().strip(),)
     membership=pathlib.Path('/proc/self/cgroup').read_text().strip().split('::',1)[1]
     delegated=pathlib.Path('/sys/fs/cgroup')/membership.lstrip('/')
     assert delegated.name=='caller'
@@ -398,7 +398,7 @@ try:
     os.chmod(root/'result.tmp',0o600)
     os.replace(root/'result.tmp',root/'result')
     deadline=time.monotonic()+150
-    while list(pathlib.Path('/var/lib/subyard/telemetry/runs').glob('*.json')):
+    while list(pathlib.Path('/var/lib/subyard/telemetry/runs-v5').glob('*.json')):
         assert time.monotonic()<deadline,'fixture scopes did not drain'
         time.sleep(.2)
 except BaseException as error:

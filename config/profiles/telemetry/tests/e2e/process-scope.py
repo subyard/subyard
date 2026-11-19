@@ -12,7 +12,6 @@ import subprocess
 import sys
 import time
 
-
 def nested_run(args):
     context = args.state/'nested-context.json'
     code = r'''import json,os,subprocess,sys
@@ -36,7 +35,7 @@ assert '/run-'+parent+'/run-'+document['child']+'/workload' in document['cgroup'
             for name in ('parent', 'child'):
                 samples = [json.loads(row[0]) for row in db.execute('SELECT body FROM samples WHERE object_id=?', (run[name]+':scope',))]
                 finals[name] = any(sample.get('final') and sample.get('populated') is False for sample in samples)
-            if all(finals.values()) and not any((args.data_dir/'runs'/(run[name]+'.json')).exists() for name in ('parent', 'child')):
+            if all(finals.values()) and not any((args.data_dir/'runs-v5'/(run[name]+'.json')).exists() for name in ('parent', 'child')):
                 parent = db.execute('SELECT parent_object_id FROM objects WHERE object_id=?', (run['child']+':scope',)).fetchone()
                 child_run = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (run['child'],)).fetchone()
                 if not parent or not child_run:
@@ -55,7 +54,7 @@ def wait_for_short_run_samples(data_dir, run):
     deadline = time.monotonic()+40
     with closing(sqlite3.connect('file:'+str(data_dir/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=1)) as db:
         while time.monotonic() < deadline:
-            # The outbox commits each object's endpoints independently.
+            # The spool commits each object's endpoints independently.
             for suffix in (':scope', ':workload'):
                 rows = db.execute('SELECT body FROM samples WHERE object_id=? ORDER BY source_time', (run+suffix,)).fetchall()
                 samples = [json.loads(row[0]) for row in rows]
@@ -160,7 +159,7 @@ Path(sys.argv[1]).write_text(json.dumps({'agent_run_id':run,'child_pid':child.pi
                 assert finals[-1]['cpu_ns'] > 0
                 assert finals[-1]['populated'] is False
                 assert finals[-1]['memory_peak_bytes'] >= 8*1024*1024
-                assert not list((args.data_dir/'runs').glob(run['agent_run_id']+'.json'))
+                assert not list((args.data_dir/'runs-v5').glob(run['agent_run_id']+'.json'))
                 print('ok: pre-exec managed placement; child survived main; final cumulative counters durable')
                 return
             time.sleep(0.2)

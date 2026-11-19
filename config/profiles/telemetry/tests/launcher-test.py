@@ -3,6 +3,7 @@ import concurrent.futures
 import contextlib
 import fcntl
 import json
+import os
 import sqlite3
 from pathlib import Path
 import subprocess
@@ -11,9 +12,16 @@ import tempfile
 import time
 import types
 import unittest
+import uuid
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import launcher
+import records
+from spool_fixture import prepare, spooled
+
+
+def fixture_run(**changes):
+    return dict(agent_run_id=str(uuid.uuid4()), boot_id=launcher.boot_id(), pid=42, start_ticks=123) | changes
 
 
 class LauncherTest(unittest.TestCase):
@@ -54,11 +62,12 @@ class LauncherTest(unittest.TestCase):
         code = owner.split("<<'PY_FINALS_DIAGNOSTIC'",1)[1].split('\n',1)[1].split('\nPY_FINALS_DIAGNOSTIC',1)[0]
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            data = launcher.records.private_directory(root/'data')
-            runs = launcher.records.private_directory(data/'runs')
-            outbox = launcher.records.private_directory(data/'outbox')
+            data = prepare(root/'data')
+            runs = launcher.records.private_directory(data/'runs-v5')
+            spool = launcher.records.private_directory(data/'spool')
             cgroups, proc = root/'cgroups', root/'proc'
-            group = cgroups/'run-active'
+            active_id, reserved_id = str(uuid.uuid4()), str(uuid.uuid4())
+            group = cgroups/('run-'+active_id)
             (group/'workload').mkdir(parents=True)
             (group/'cgroup.events').write_text('populated 1\n')
             (group/'cgroup.procs').write_text('')
@@ -72,15 +81,20 @@ class LauncherTest(unittest.TestCase):
             process(42,'ssh')
             process(44,'PRIVATE_SECRET_PROCESS')
             info=group.stat()
-            launcher.records.atomic_json(runs/'active.json',dict(agent_run_id='active',pid=43,start_ticks=123,
+            active_path = launcher.manifest_path(runs, active_id)
+            launcher.records.atomic_json(active_path,dict(agent_run_id=active_id,pid=43,start_ticks=123,
                 cgroup=str(group),cgroup_identity=[info.st_dev,info.st_ino], private='PRIVATE_SECRET_MANIFEST'))
-            launcher.records.atomic_json(runs/'reserved.json',dict(agent_run_id='reserved',manifest_state='reserved',launcher_pid=44,launcher_start_ticks=123))
+            launcher.records.atomic_json(launcher.manifest_path(runs, reserved_id),
+                dict(agent_run_id=reserved_id,manifest_state='reserved',launcher_pid=44,launcher_start_ticks=123))
             launcher.records.atomic_json(runs/'invalid.json',dict(private='PRIVATE_SECRET_INVALID'))
             (runs/'invalid.json').chmod(0o644)
-            launcher.records.atomic_json(outbox/'event.json',dict(private='PRIVATE_SECRET_OUTBOX'))
-            with contextlib.closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+            launcher.records.atomic_json(spool/'broker.open',dict(private='PRIVATE_SECRET_SPOOL'))
+            database = data/'telemetry.sqlite'
+            database.unlink()
+            with contextlib.closing(sqlite3.connect(database)) as db:
+                database.chmod(0o600)
                 db.execute('CREATE TABLE runs (agent_run_id TEXT, body TEXT)')
-                db.execute('INSERT INTO runs VALUES (?,?)',('active',json.dumps(dict(state='main_exited',main_exited=True,agent_exited=True,resource_completed=False,private='PRIVATE_SECRET_DB'))))
+                db.execute('INSERT INTO runs VALUES (?,?)',(active_id,json.dumps(dict(state='main_exited',main_exited=True,agent_exited=True,resource_completed=False,private='PRIVATE_SECRET_DB'))))
                 db.commit()
             namespace={'__name__':'fixture'}
             with patch.object(sys,'argv',['probe',str(Path(launcher.__file__).parent),str(data)]):
@@ -90,7 +104,7 @@ class LauncherTest(unittest.TestCase):
             self.assertNotIn('PRIVATE_SECRET',encoded)
             self.assertNotIn(str(root),encoded)
             self.assertLess(len(encoded),8192)
-            self.assertEqual(document['outbox_count'],1)
+            self.assertEqual(document['spool_count'],1)
             active=next(item for item in document['runs'] if item.get('scope')=='identified')
             self.assertTrue(active['populated'])
             self.assertFalse(active['main_identity_present'])
@@ -100,58 +114,52 @@ class LauncherTest(unittest.TestCase):
             reserved=next(item for item in document['runs'] if item['manifest']=='reserved')
             self.assertEqual(reserved['main_process']['comm_class'],'other')
             self.assertTrue(any(item['manifest']=='invalid' for item in document['runs']))
-            self.assertTrue((runs/'active.json').exists())
-            self.assertTrue((outbox/'event.json').exists())
+            self.assertTrue(active_path.exists())
+            self.assertTrue((spool/'broker.open').exists())
 
     def test_manifest_admission_is_bounded_private_and_recovers(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            first = {'agent_run_id': 'first', 'boot_id': launcher.boot_id()}
+            first, second, third = fixture_run(), fixture_run(), fixture_run()
             with patch.object(launcher, 'MAX_RUNS', 1):
                 self.assertTrue(launcher.admit_manifest(root, first))
-                self.assertFalse(launcher.admit_manifest(root, {**first, 'agent_run_id': 'second'}))
-                marker = root/'runs/health'
-                self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
-                self.assertLess(marker.stat().st_size, 1024)
-                (root/'runs/first.json').unlink()
-                self.assertTrue(launcher.admit_manifest(root, {**first, 'agent_run_id': 'second'}))
-                self.assertFalse(marker.exists())
-                events = [json.loads(path.read_text()) for path in (root/'outbox').glob('*.json')]
-                self.assertTrue(any(event['kind']=='gap' and event['body']['reason']=='run_manifest_capacity' for event in events))
-            payload = {'agent_run_id': 'third', 'metadata': 'x'*100}
+                self.assertFalse(launcher.admit_manifest(root, second))
+                launcher.manifest_path(root/'runs-v5', first['agent_run_id']).unlink()
+                self.assertTrue(launcher.admit_manifest(root, second))
+            payload = dict(third, cgroup='x'*100)
             with patch.object(launcher, 'MAX_RUN_BYTES', 1):
                 self.assertFalse(launcher.admit_manifest(root, payload))
             with patch.object(launcher, 'MAX_RUN_PAYLOAD', 10):
                 self.assertFalse(launcher.admit_manifest(root, payload))
-            self.assertEqual(len(list((root/'runs').glob('*.json'))), 1)
+            self.assertEqual(len(list((root/'runs-v5').glob('*.json'))), 1)
 
     def test_concurrent_manifest_admission_never_exceeds_count(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             with patch.object(launcher, 'MAX_RUNS', 1), concurrent.futures.ThreadPoolExecutor(2) as pool:
-                results = list(pool.map(lambda run: launcher.admit_manifest(root, {'agent_run_id': run}), ('one', 'two')))
+                results = list(pool.map(lambda run: launcher.admit_manifest(root, run), (fixture_run(), fixture_run())))
             self.assertEqual(sorted(results), [False, True])
-            self.assertEqual(len(list((root/'runs').glob('*.json'))), 1)
+            self.assertEqual(len(list((root/'runs-v5').glob('*.json'))), 1)
 
     def test_manifest_admission_preserves_foreign_and_permission_guards(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            runs = launcher.records.private_directory(root/'runs')
+            runs = launcher.records.private_directory(root/'runs-v5')
             foreign = root/'foreign'
             foreign.write_text('do not overwrite')
             (runs/'foreign.json').symlink_to(foreign)
-            self.assertFalse(launcher.admit_manifest(root, {'agent_run_id':'new'}))
+            self.assertFalse(launcher.admit_manifest(root, fixture_run()))
             self.assertEqual(foreign.read_text(), 'do not overwrite')
             (runs/'foreign.json').unlink()
             launcher.records.atomic_json(runs/'foreign.json', {'agent_run_id':'foreign'})
             (runs/'foreign.json').chmod(0o644)
-            self.assertFalse(launcher.admit_manifest(root, {'agent_run_id':'new'}))
+            self.assertFalse(launcher.admit_manifest(root, fixture_run()))
             self.assertTrue((runs/'foreign.json').exists())
 
     def test_observer_recovers_preexisting_overflow_in_bounded_batches(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            runs = launcher.records.private_directory(root/'runs')
+            runs = launcher.records.private_directory(root/'runs-v5')
             for number in range(3):
                 launcher.records.atomic_json(runs/(str(number)+'.json'), {'agent_run_id':str(number), 'boot_id':launcher.boot_id()})
             sampler = types.SimpleNamespace(poll=lambda: True)
@@ -165,7 +173,7 @@ class LauncherTest(unittest.TestCase):
     def test_observer_byte_budget_retains_later_manifest_while_first_stays_active(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            directory = launcher.records.private_directory(root/'runs')
+            directory = launcher.records.private_directory(root/'runs-v5')
             for run in ('one', 'two'):
                 launcher.records.atomic_json(directory/(run+'.json'), {'agent_run_id':run, 'boot_id':launcher.boot_id()})
             first, second = list(directory.glob('*.json'))
@@ -190,55 +198,125 @@ class LauncherTest(unittest.TestCase):
             self.assertIn(second.stem, sampled)
             self.assertLessEqual(len(ticks), 2)
 
-    def test_manifest_capacity_keeps_default_native_success_and_strict_refusal(self):
+    def test_manifest_contention_keeps_default_native_success_and_strict_refusal(self):
         for mode in ('auto', 'partial', 'require'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir='/tmp') as name:
                 root = Path(name)
+                prepare(root/'data')
                 target = root/'executed'
                 args = types.SimpleNamespace(command=[sys.executable, '-c', 'from pathlib import Path; Path('+repr(str(target))+').touch(); raise SystemExit(19)'],
                     data_dir=str(root/'data'), agent='other', agent_version='fixture', scope_mode=mode,
                     task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
-                with patch.object(launcher, 'MAX_RUN_BYTES', 0), patch.object(launcher, 'create_scope') as create, patch.object(launcher, 'detached_observer') as observer:
+                manifest = records.private_directory(root/'data'/launcher.RUNS)
+                with (manifest/'.lock').open('wb') as lock, patch.object(launcher, 'create_scope') as create:
+                    (manifest/'.lock').chmod(0o600)
+                    fcntl.flock(lock, fcntl.LOCK_EX)
                     self.assertEqual(launcher.launch(args), 2 if mode == 'require' else 19)
                 create.assert_not_called()
-                observer.assert_not_called()
                 self.assertEqual(target.exists(), mode != 'require')
-                self.assertFalse(list((root/'data/runs').glob('*.json')))
-                self.assertTrue((root/'data/runs/health').exists())
+                self.assertFalse(list((root/'data/runs-v5').glob('*.json')))
+                events = list(spooled(root/'data'))
+                self.assertEqual(events[0]['kind'], 'run')
+                self.assertEqual(events[0]['body']['state'], 'starting')
+                self.assertTrue(any(row['body'].get('reason') == 'run_manifest_unavailable' for row in events))
+
+    def test_spool_lock_contention_is_bounded(self):
+        producer = '''
+import sys
+sys.path.insert(0, sys.argv[1])
+import records
+if sys.argv[3] == 'spool-loss':
+    records.MAX_RECORDS = 0
+assert not records.emit(sys.argv[2], 'gap', {})
+'''
+        for name in ('.', 'spool', 'spool/broker.open', 'spool-loss'):
+            with self.subTest(lock=name), tempfile.TemporaryDirectory(dir='/tmp') as directory:
+                root = prepare(Path(directory)/'data')
+                records.private_directory(root/'spool')
+                if name.endswith('.open'):
+                    self.assertTrue(records.emit(root, 'gap', {}))
+                lock = os.open(root/name, os.O_RDONLY)
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    subprocess.run([sys.executable, '-Bc', producer, str(Path(records.__file__).parent), root, name],
+                                   check=True, capture_output=True, timeout=3)
+                finally:
+                    os.close(lock)
 
     def test_reserved_capacity_is_charged_and_failed_placement_releases_it(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            run = {'agent_run_id':'one', 'boot_id':launcher.boot_id()}
+            run = {**fixture_run(),
+                   'project_id':'private-project', 'task_id':'private-task', 'agent_version':'private-version',
+                   'worktree_id':'private-worktree', 'start_time':'2026-01-01T00:00:00Z'}
+            sample = dict(event_id='fixture-baseline', source_time='2026-01-01T00:00:00.000000000Z',
+                          body=dict(object_id='fixture-scope', host_id='private-host', cpu_ns=42))
+            run['scope_baselines'] = [sample]
+            other = {**run, 'agent_run_id': str(uuid.uuid4())}
+            path = launcher.manifest_path(root/'runs-v5', run['agent_run_id'])
             with patch.object(launcher, 'MAX_RUN_BYTES', launcher.MAX_RUN_PAYLOAD):
                 self.assertTrue(launcher.admit_manifest(root, run, reserve=True))
-                self.assertFalse(launcher.admit_manifest(root, {**run,'agent_run_id':'two'}, reserve=True))
+                self.assertEqual(set(records.read_private(path)), {
+                    'agent_run_id', 'boot_id', 'manifest_state', 'launcher_pid', 'launcher_start_ticks'})
+                self.assertFalse(launcher.admit_manifest(root, other, reserve=True))
                 launcher.finish_manifest(root, run)
-                self.assertTrue(launcher.admit_manifest(root, {**run,'agent_run_id':'two'}))
+                expected = {field: run[field] for field in ('agent_run_id', 'boot_id', 'pid', 'start_ticks')}
+                expected.update(host_id=launcher.host_id(),
+                                scope_baselines=[{**sample, 'body': {**sample['body'], 'host_id': launcher.host_id()}}])
+                self.assertEqual(records.read_private(path), expected)
+                self.assertNotIn(b'private-', path.read_bytes())
+                self.assertEqual(launcher.environment(root, {**run, 'agent':'other'}, {})['SUBYARD_TASK_ID'], 'private-task')
+                self.assertTrue(launcher.admit_manifest(root, other))
             args = types.SimpleNamespace(command=['/bin/true'], data_dir=str(root), agent='other', agent_version='fixture', scope_mode='require',
                 task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
-            before = set((root/'runs').glob('*.json'))
+            before = set((root/'runs-v5').glob('*.json'))
             with patch.object(launcher, 'create_scope', side_effect=ValueError('safe caller delegation unavailable')):
                 self.assertEqual(launcher.launch(args), 2)
-            self.assertEqual(set((root/'runs').glob('*.json')), before)
+            self.assertEqual(set((root/'runs-v5').glob('*.json')), before)
 
     def test_observer_recovers_stale_reservation_only_after_durable_gap(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            self.assertTrue(launcher.admit_manifest(root, {'agent_run_id':'stale','boot_id':'old-boot'}, reserve=True))
-            path = root/'runs/stale.json'
+            prepare(root)
+            run = fixture_run(boot_id='old-boot')
+            self.assertTrue(launcher.admit_manifest(root, run, reserve=True))
+            path = launcher.manifest_path(root/'runs-v5', run['agent_run_id'])
             with patch.object(launcher.records, 'emit', return_value=False):
                 self.assertEqual(launcher.observe(root, once=True), 0)
             self.assertTrue(path.exists())
             self.assertEqual(launcher.observe(root, once=True), 0)
             self.assertFalse(path.exists())
-            gap = next(json.loads(item.read_text()) for item in (root/'outbox').glob('*.json'))
+            gap = next(spooled(root))
             self.assertEqual(gap['body']['reason'], 'run_reservation_interrupted')
+
+    def test_observer_retry_after_failed_unlink_reuses_the_gap_event(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            prepare(root)
+            run = fixture_run(boot_id='old-boot')
+            self.assertTrue(launcher.admit_manifest(root, run, reserve=True))
+            path = launcher.manifest_path(root/'runs-v5', run['agent_run_id'])
+            unlink = Path.unlink
+            failed = []
+            def fail_once(self, *args, **kwargs):
+                if self == path and not failed:
+                    failed.append(self)
+                    raise PermissionError('fixture unlink failure')
+                return unlink(self, *args, **kwargs)
+            with patch.object(Path, 'unlink', fail_once):
+                self.assertEqual(launcher.observe(root, once=True), 0)
+            self.assertTrue(failed and path.exists())
+            self.assertEqual(launcher.observe(root, once=True), 0)
+            self.assertFalse(path.exists())
+            gaps = [record for record in spooled(root) if record['body']['reason'] == 'run_reservation_interrupted']
+            self.assertEqual(len(gaps), 2)
+            self.assertEqual(len({record['event_id'] for record in gaps}), 1)
+            self.assertTrue(all(records.TIMESTAMP.fullmatch(record['source_time']) for record in gaps))
 
     def test_observer_overflow_foreign_prefix_does_not_starve_valid_run(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            directory = launcher.records.private_directory(root/'runs')
+            directory = launcher.records.private_directory(root/'runs-v5')
             # scandir's actual order supplies the retained unsafe prefix and then
             # the valid snapshot; no filesystem ordering assumption is needed.
             for number in range(3):
@@ -264,16 +342,17 @@ class LauncherTest(unittest.TestCase):
                 root = Path(name)
                 workload = root/'scope/workload'
                 workload.mkdir(parents=True)
+                prepare(root/'data')
                 target = root/'executed'
                 code = 'from pathlib import Path; p=Path('+repr(str(target))+'); p.write_text((p.read_text() if p.exists() else "")+"once"); raise SystemExit(19)'
                 args = types.SimpleNamespace(command=[sys.executable,'-c',code], data_dir=str(root/'data'),
                     agent='other', agent_version='fixture', scope_mode=mode, task_id=None,
                     project_id=None, worktree_id=None, yard_id=None, host_id=None)
                 original_write, original_remove = launcher.records.atomic_json, Path.rmdir
-                def write(path, value):
-                    if path.parent.name == 'runs' and path.suffix == '.json' and 'manifest_state' not in value:
+                def write(path, value, **options):
+                    if path.parent.name == 'runs-v5' and path.suffix == '.json' and 'manifest_state' not in value:
                         raise OSError(28, 'simulated snapshot fsync failure')
-                    return original_write(path, value)
+                    return original_write(path, value, **options)
                 def remove(path):
                     # Kernel cgroup pseudo-files do not prevent rmdir; the host-
                     # free cgroup fixture uses one ordinary file instead.
@@ -284,18 +363,18 @@ class LauncherTest(unittest.TestCase):
                     self.assertEqual(launcher.launch(args), 2 if mode == 'require' else 19)
                 self.assertEqual(target.read_text() if target.exists() else '', '' if mode == 'require' else 'once')
                 self.assertFalse(workload.parent.exists())
-                self.assertFalse(list((root/'data/runs').glob('*.json')))
+                self.assertFalse(list((root/'data/runs-v5').glob('*.json')))
 
     def test_manifest_busy_lock_is_finite_and_preserves_owner_snapshot(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
-            self.assertTrue(launcher.admit_manifest(root, {'agent_run_id':'old'}))
-            with (root/'runs/.lock').open('rb') as lock:
+            self.assertTrue(launcher.admit_manifest(root, fixture_run()))
+            with (root/'runs-v5/.lock').open('rb') as lock:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 started = time.monotonic()
-                self.assertFalse(launcher.admit_manifest(root, {'agent_run_id':'new'}))
+                self.assertFalse(launcher.admit_manifest(root, fixture_run()))
                 self.assertLess(time.monotonic()-started, .5)
-            self.assertEqual(len(list((root/'runs').glob('*.json'))), 1)
+            self.assertEqual(len(list((root/'runs-v5').glob('*.json'))), 1)
 
     def test_manager_identity_does_not_require_namespace_permission(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -348,11 +427,12 @@ class LauncherTest(unittest.TestCase):
             root = Path(name)
             cgroups, proc = root/'cgroups', root/'proc'
             delegated = cgroups/'fixture'
-            parent = delegated/'run-parent'
+            parent_id = str(uuid.uuid4())
+            parent = delegated/('run-'+parent_id)
             workload = parent/'workload'
             workload.mkdir(parents=True)
             (proc/'self').mkdir(parents=True)
-            (proc/'self/cgroup').write_text('0::/fixture/run-parent/workload')
+            (proc/'self/cgroup').write_text('0::/fixture/'+parent.name+'/workload')
             for directory in (delegated, parent):
                 for filename, value in {'cgroup.controllers':'cpu memory io pids',
                                         'cgroup.subtree_control':'cpu memory io pids', 'cgroup.procs':''}.items():
@@ -360,13 +440,13 @@ class LauncherTest(unittest.TestCase):
             (workload/'cgroup.procs').write_text('123')
             (delegated/'memory.max').write_text('4096')
             (delegated/'pids.max').write_text('32')
-            launcher.records.private_directory(root/'runs')
+            launcher.records.private_directory(root/'runs-v5')
             info = parent.stat()
-            launcher.records.atomic_json(root/'runs/parent.json', {'cgroup':str(parent), 'boot_id':'boot',
+            launcher.records.atomic_json(launcher.manifest_path(root/'runs-v5', parent_id), {'cgroup':str(parent), 'boot_id':'boot',
                 'cgroup_identity':[info.st_dev,info.st_ino]})
-            run = {'agent_run_id':'child','parent_run_id':'parent','boot_id':'boot'}
+            run = {'agent_run_id':'child','parent_run_id':parent_id,'boot_id':'boot'}
             self.assertEqual(launcher.scope_parent(root,run,cgroups/'manager',proc,cgroups),parent)
-            self.assertEqual(run['parent_scope_id'],'parent:scope')
+            self.assertEqual(run['parent_scope_id'],parent_id+':scope')
             (workload/'pids.max').write_text('8')
             with self.assertRaisesRegex(ValueError, 'safe caller delegation'):
                 launcher.scope_parent(root,run,cgroups/'manager',proc,cgroups)
@@ -382,8 +462,8 @@ class LauncherTest(unittest.TestCase):
                 group.mkdir(parents=True)
                 parent_info, group_info = delegated.stat(), group.stat()
                 data = root/'data'
-                launcher.records.private_directory(data/'runs')
-                manifest = data/'runs/run.json'
+                launcher.records.private_directory(data/'runs-v5')
+                manifest = data/'runs-v5/run.json'
                 run = {'agent_run_id': 'run', 'boot_id': launcher.boot_id(), 'scope_root': str(delegated),
                        'scope_root_identity': [parent_info.st_dev, parent_info.st_ino], 'cgroup': str(group),
                        'cgroup_identity': [group_info.st_dev, group_info.st_ino]}
@@ -444,13 +524,14 @@ class LauncherTest(unittest.TestCase):
             (delegated/'cgroup.subtree_control').write_text('cpu memory io')
             (delegated/'workload').mkdir()
             (proc/'self/cgroup').write_text('0::/fixture/workload')
-            launcher.records.private_directory(root/'runs')
+            launcher.records.private_directory(root/'runs-v5')
             info = delegated.stat()
-            launcher.records.atomic_json(root/'runs/parent.json', {'cgroup': str(delegated), 'boot_id': 'boot',
+            parent_id = str(uuid.uuid4())
+            launcher.records.atomic_json(launcher.manifest_path(root/'runs-v5', parent_id), {'cgroup': str(delegated), 'boot_id': 'boot',
                 'cgroup_identity': [info.st_dev, info.st_ino]})
-            run['parent_run_id'] = 'parent'
+            run['parent_run_id'] = parent_id
             self.assertEqual(launcher.scope_parent(root, run, manager, proc, cgroups), delegated)
-            self.assertEqual(run['parent_scope_id'], 'parent:scope')
+            self.assertEqual(run['parent_scope_id'], parent_id+':scope')
             # A narrower caller leaf budget may never be escaped to a sibling.
             (delegated/'workload/pids.max').write_text('8')
             with self.assertRaisesRegex(ValueError, 'safe caller delegation'):
@@ -459,12 +540,13 @@ class LauncherTest(unittest.TestCase):
     def test_auto_scope_refusal_preserves_native_success_and_reports_partial(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
+            prepare(root/'data')
             args = types.SimpleNamespace(command=[sys.executable, '-c', 'raise SystemExit(19)'], data_dir=str(root/'data'),
                 agent='other', agent_version='fixture', scope_mode='auto', task_id=None,
                 project_id=None, worktree_id=None, yard_id=None, host_id=None)
-            with patch.object(launcher, 'create_scope', side_effect=ValueError('safe refusal')), patch.object(launcher, 'detached_observer'):
+            with patch.object(launcher, 'create_scope', side_effect=ValueError('safe refusal')):
                 self.assertEqual(launcher.launch(args), 19)
-            events = [json.loads(path.read_text()) for path in (root/'data/outbox').glob('*.json')]
+            events = list(spooled(root/'data'))
             self.assertTrue(any(event['kind']=='run' and event['body'].get('scope_quality')=='partial' for event in events))
 
     def test_native_exec_waits_for_baseline_publication(self):
@@ -475,6 +557,7 @@ class LauncherTest(unittest.TestCase):
             baseline = root/'baseline-durable'
             target = root/'executed'
             code = 'from pathlib import Path; assert Path('+repr(str(baseline))+').read_bytes()==b"durable"; Path('+repr(str(target))+').touch()'
+            prepare(root/'data')
             args = types.SimpleNamespace(command=[sys.executable, '-c', code], data_dir=str(root/'data'),
                 agent='other', agent_version='fixture', scope_mode='require', task_id=None,
                 project_id=None, worktree_id=None, yard_id=None, host_id=None)
@@ -489,6 +572,7 @@ class LauncherTest(unittest.TestCase):
             workload = root/'scope/workload'
             workload.mkdir(parents=True)
             target = root/'executed'
+            prepare(root/'data')
             args = types.SimpleNamespace(command=[sys.executable, '-c', 'from pathlib import Path; Path('+repr(str(target))+').touch()'],
                 data_dir=str(root/'data'), agent='other', agent_version='fixture', scope_mode='require',
                 task_id=None, project_id=None, worktree_id=None, yard_id=None, host_id=None)
@@ -506,20 +590,34 @@ class LauncherTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
             target = root/'context.json'
+            code = '''
+import json, os, sys, time
+from pathlib import Path
+spool = Path(os.environ['SUBYARD_TELEMETRY_DATA_DIR'])/'spool'
+deadline = time.monotonic()+5
+while not any(json.loads(frame)['kind'] == 'process' for path in spool.glob('*.open') for frame in path.read_bytes().split(b'\\n')[1:-1]):
+    if time.monotonic() >= deadline:
+        raise RuntimeError('standalone observer did not sample the workload')
+    time.sleep(.05)
+Path(sys.argv[1]).write_text(json.dumps({k:os.environ[k] for k in ("SUBYARD_AGENT_RUN_ID","SUBYARD_TASK_ID")}))
+raise SystemExit(23)
+'''
             command = [sys.executable, '-B', str(Path(launcher.__file__)), 'run', '--data-dir', str(root/'data'),
                        '--agent', 'other', '--scope-mode', 'partial', '--task-id', 'task', '--', sys.executable, '-c',
-                       'import json,os,sys; json.dump({k:os.environ.get(k) for k in ("SUBYARD_AGENT_RUN_ID","SUBYARD_TASK_ID")},open(sys.argv[1],"w")); raise SystemExit(23)', str(target)]
+                       code, str(target)]
+            prepare(root/'data')
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             self.assertEqual(result.returncode, 23, result.stderr)
             value = json.loads(target.read_text())
             self.assertEqual(value['SUBYARD_TASK_ID'], 'task')
             self.assertTrue(value['SUBYARD_AGENT_RUN_ID'])
-            events = [json.loads(path.read_text()) for path in (root/'data/outbox').glob('*.json')]
+            events = list(spooled(root/'data'))
             self.assertTrue(any(event['kind'] == 'run' and event['body'].get('state') == 'starting' for event in events))
-            deadline = time.monotonic()+12
-            while list((root/'data/runs').glob('*.json')) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            self.assertFalse(list((root/'data/runs').glob('*.json')))
+            manifest = root/'data/runs-v5'/(value['SUBYARD_AGENT_RUN_ID']+'.json')
+            deadline = time.monotonic()+5
+            while manifest.exists() and time.monotonic() < deadline:
+                time.sleep(.05)
+            self.assertFalse(manifest.exists())
 
     def test_native_binding_does_not_persist_argv_or_claim_shared_backend(self):
         arguments = launcher.native_arguments('codex', ['codex', 'exec', 'PRIVATE_PROMPT'], 'run')
