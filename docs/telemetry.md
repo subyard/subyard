@@ -30,8 +30,39 @@ checks the running processes as well as unit files. Foreign unit overrides are
 refused; interrupted startup changes can be retried without terminating agent
 workloads.
 
-The telemetry owner records existing native exporter leaves before acquiring its own
-settings and restores them on disable. Existing ownership conflicts remain errors.
+Telemetry writes whole policy files for selected coding-tool integrations. Both are
+`0640`, owned by root and readable by the developer's primary group.
+
+- Claude reads an `env` block from `/etc/claude-code/managed-settings.d/60-subyard-telemetry.json`.
+- Codex reads the HTTP endpoint, protocol, Authorization header and an empty TLS table for
+  each of logs, metrics and traces from `/etc/codex/managed_config.toml`. Codex merges this
+  layer recursively. Lower layers can still supply extra headers and TLS fields. A competing
+  gRPC exporter can make the merged definition invalid, and `otel.headers_helper` can replace
+  static Authorization. Codex system requirements can replace the entire exporter definition.
+  The Codex provisioner owns and verifies the requirements file, while telemetry has its
+  own enable and disable lifecycle.
+
+The policy overrides user values in the fields it defines while telemetry is enabled.
+Telemetry refuses a foreign file at either managed path on enable and reports fields where a
+configured Subyard template disagrees with the policy. It compares the two inputs
+without reading the home document.
+
+The one-time upgrade from v0.30 restores recorded prior values where telemetry settings
+are unchanged, preserves later edits and removes leaves containing the exact collector token.
+Rewritten home documents retain at most owner read and write permissions. A home file the
+receipt never covered is only scanned for the token bytes. The upgrade keeps the receipt if
+any resulting home file still contains them. The collector token stays the same; a missing
+token file is restored from the token every recorded header names. Subsequent telemetry
+updates and disable operations leave home documents alone.
+
+Rolling back to v0.28–v0.30 leaves both system policy files behind if they were installed.
+Those releases can also reintroduce the collector token into home documents, where an
+older template writer can publish it with mode `0644`. If an upgrade stopped while it was
+replacing collector assets, finish it before rolling back: those releases refuse a collector
+asset that the inventory does not record. Process environment settings such
+as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
+local drop-ins when server-managed settings apply.
+
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection
 should begin. No running agent is killed to reload exporter settings.
@@ -42,7 +73,7 @@ Disable collection through the same profile family:
 yard -Y default profile disable telemetry --yes
 ```
 
-Disabling restores only unchanged owned native settings and retains the database.
+Disabling removes the owned policy files and retains the database.
 The run manager drains existing observations without terminating agent workloads.
 
 ## Managed runs

@@ -343,13 +343,13 @@ func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 	}
 }
 
-func TestConfigStatusRendersPendingProfileInputDiagnostics(t *testing.T) {
+func TestConfigStatusRendersProfileRuntimeDiagnostics(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {Status: "Running"}}}
 	appendMismatchedHashSteps(t, fake, loaded, "0")
 	diagnostics := ports.RuntimeDiagnostics{{Parameter: "sample.input.invalid", Installed: "changed", Desired: "current"}}
-	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &ports.RuntimeObservation{State: ports.RuntimeStatePending, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Diagnostics: &diagnostics}}
+	platform := &sampleRepairPlatformFixture{initPlatformFixture: newInitPlatformFixture(), observation: &ports.RuntimeObservation{State: ports.RuntimeStateStale, Actual: strings.Repeat("a", 64), Desired: strings.Repeat("b", 64), Diagnostics: &diagnostics}}
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "status"}, Environment: environment,
 		WorkingDir: root, Incus: fake, Executor: fake, InitPlatform: platform, Stdout: &stdout, Stderr: &stderr})
@@ -357,7 +357,7 @@ func TestConfigStatusRendersPendingProfileInputDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	if code := program.Run(context.Background()); code != 1 || !strings.Contains(stdout.String(), "sample.input.invalid") || strings.Contains(stdout.String()+stderr.String(), "yard is stopped") {
-		t.Fatalf("pending diagnostic hidden: exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("profile diagnostic hidden: exit=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 }
 

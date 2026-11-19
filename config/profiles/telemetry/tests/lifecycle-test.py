@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -22,53 +23,6 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
-    def test_missing_managed_document_waits_before_first_telemetry_install(self):
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            root = Path(name)
-            runtime = object.__new__(guest.Runtime)
-            runtime.selected, runtime.agents, runtime.managed_agents = True, ['claude', 'codex'], {'claude', 'codex'}
-            runtime.home, runtime.control, runtime.library, runtime.data = root, root/'control', root/'library', root/'data'
-            runtime.assets, runtime.retained = {}, {}
-            runtime.owned = lambda: False
-            runtime.desired = lambda: 'a'*64
-            runtime.manager = lambda unit: {}
-            observed = runtime.observe()
-            self.assertEqual(observed['state'], 'pending')
-            self.assertEqual([item['parameter'] for item in observed['diagnostics']],
-                             ['telemetry.agent.claude.config.missing', 'telemetry.agent.codex.config.missing'])
-            with self.assertRaisesRegex(ValueError, 'config apply'):
-                runtime.apply()
-            self.assertEqual(list(root.iterdir()), [], 'pending managed inputs allowed partial installation')
-
-    def test_invalid_agent_document_is_pending_until_config_repair(self):
-        with tempfile.TemporaryDirectory(dir='/tmp') as name:
-            root = Path(name)
-            runtime = object.__new__(guest.Runtime)
-            asset = root/'collector'
-            asset.write_bytes(b'stale collector')
-            runtime.assets, runtime.retained = {asset: (b'current collector', 0o755)}, {}
-            runtime.selected, runtime.agents = True, ['claude']
-            runtime.managed_agents = {'claude'}
-            runtime.home, runtime.control = root, root/'control'
-            runtime.library = root/'library'
-            runtime.endpoint, runtime.uid, runtime.gid = 'http://127.0.0.1:14318', os.getuid(), os.getgid()
-            runtime.owned = lambda: True
-            runtime.saved_inventory = lambda: {}
-            runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
-            runtime.running_no_new_privs = lambda state: True
-            runtime.desired = lambda: 'a'*64
-            runtime.token = lambda: 'x'*64
-            (root/'.claude').mkdir()
-            (root/'.claude/settings.json').write_bytes(b'private invalid content')
-            observation = runtime.observe()
-            self.assertEqual(observation['state'], 'pending')
-            self.assertEqual(len(observation['actual']), 64)
-            self.assertEqual(observation['desired'], 'a'*64)
-            self.assertIn('telemetry.agent.claude.config.invalid', str(observation['diagnostics']))
-            self.assertNotIn('private invalid content', str(observation))
-            (root/'.claude/settings.json').write_text('{}')
-            self.assertEqual(runtime.observe()['state'], 'stale', 'repairing the document must reveal pending collector refresh')
-
     def test_runtime_diagnostics_name_changed_asset_without_contents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             path = Path(name)/'collector.py'
@@ -78,6 +32,8 @@ class LifecycleTest(unittest.TestCase):
             runtime.retained = {}
             runtime.selected = True
             runtime.home, runtime.agents = Path(name), []
+            runtime.data = Path(name)
+            runtime.reconcile_native = lambda check: True
             runtime.owned = lambda: True
             runtime.asset_snapshot = lambda path: path.read_bytes()
             runtime.manager = lambda unit: {'ActiveState': 'active', 'UnitFileState': 'enabled'}
@@ -221,6 +177,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
     def test_apply_repeat_pause_disable_preserves_data_and_never_stops_workloads(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
+            root.chmod(0o755)  # Permit policy traversal for the fixture developer when run as root.
             source = root/'source'
             source.mkdir()
             for path in Path(guest.__file__).parent.glob('*.py'):
@@ -228,7 +185,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
             # Match the compiled collector's observed 25 MiB size, not a tiny stub.
             (source/'subyard-telemetry').write_bytes(b'\x7fELF'+b'\0'*(25_333_922-4))
-            for directory in ('home', 'units', 'bin'):
+            for directory in ('home', 'units', 'bin', 'etc'):
                 (root/directory).mkdir()
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             states, calls = {}, []
@@ -264,7 +221,17 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 return ''
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
-                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
+                runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
+                off = guest.Runtime(source, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
+                foreign = root/'etc/codex/managed_config.toml'
+                foreign.parent.mkdir()
+                foreign.write_text('# Administrator policy\n')
+                self.assertEqual(off.observe()['state'], 'absent')
+                off.apply()
+                self.assertEqual(foreign.read_text(), '# Administrator policy\n')
+                with self.assertRaisesRegex(guest.native.Refusal, 'unsafe or foreign telemetry policy'):
+                    runtime.observe()
+                foreign.unlink()
                 for command in runtime.starts.values():
                     self.assertEqual(command.split()[:2],['/usr/bin/setpriv','--no-new-privs'])
                     actual=subprocess.check_output(command.split()[:2]+[sys.executable,'-c',
@@ -275,6 +242,69 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'],'current runtime must satisfy the generic activation digest contract')
+                installed_native = root/'library/native.py'
+                receipt_path = root/'control/assets.json'
+                legacy_fixture = Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz'
+                with tarfile.open(legacy_fixture) as archive:
+                    legacy_native = archive.extractfile('config/profiles/telemetry/native.py').read()
+                # A v0.30 receipt names the token its home documents carry; a
+                # missing token file is restored from it rather than rotated.
+                legacy = {}
+                exec(compile(legacy_native, 'v0.30.0/native.py', 'exec'), legacy)
+                legacy_token = 'c'*64
+                (root/'data/auth.token').unlink()
+                legacy['reconcile'](root/'home', root/'control/native.json', ['codex'], runtime.endpoint, legacy_token,
+                                    guest.tomli_w, runtime.uid, runtime.gid)
+                self.assertIn(legacy_token.encode(), (root/'home/.codex/config.toml').read_bytes())
+                self.assertEqual(runtime.observe()['state'], 'stale')
+                runtime.apply()
+                self.assertEqual(runtime.observe()['state'], 'current')
+                self.assertEqual((root/'data/auth.token').read_text(), legacy_token+'\n')
+                self.assertFalse((root/'control/native.json').exists())
+                self.assertNotIn(legacy_token.encode(), (root/'home/.codex/config.toml').read_bytes())
+                self.assertIn(legacy_token.encode(), (root/'etc/codex/managed_config.toml').read_bytes())
+                shutil.rmtree(root/'home/.codex')
+                publish = guest.native.publish
+
+                def v030_accepts():
+                    # v0.30 apply requires each path entry to be the digest on disk.
+                    inventory = json.loads(receipt_path.read_bytes())
+                    return all(inventory.get(str(path)) == hashlib.sha256(path.read_bytes()).hexdigest()
+                               for path in [*runtime.assets, *runtime.retained] if path.exists())
+
+                for stop in ('before-rename', 'after-rename', 'daemon-reload'):
+                    after_rename = stop != 'before-rename'
+                    with self.subTest(stop=stop):
+                        installed_native.write_bytes(legacy_native)
+                        inventory = json.loads(receipt_path.read_bytes())
+                        inventory[str(installed_native)] = hashlib.sha256(legacy_native).hexdigest()
+                        receipt_path.write_text(json.dumps(inventory))
+
+                        def interrupt(path, *args, **kwargs):
+                            if path == installed_native and stop != 'daemon-reload':
+                                if after_rename:
+                                    publish(path, *args, **kwargs)
+                                raise InterruptedError('fixture stopped at native asset replacement')
+                            publish(path, *args, **kwargs)
+
+                        def reload(*args):
+                            if args == ('daemon-reload',) and stop == 'daemon-reload':
+                                raise InterruptedError('fixture stopped at daemon reload')
+                            return manager(*args)
+
+                        with patch.object(guest.native, 'publish', side_effect=interrupt), \
+                             patch.object(guest, 'systemctl', side_effect=reload), self.assertRaises(InterruptedError):
+                            runtime.apply()
+                        # Only a stop between asset replacements is the accepted rollback residual.
+                        self.assertEqual(v030_accepts(), stop != 'after-rename')
+                        self.assertEqual(runtime.observe()['state'], 'stale')
+                        retry = off if after_rename else runtime
+                        retry.apply()
+                        self.assertEqual(retry.observe()['state'], 'current')
+                        self.assertEqual(installed_native.read_bytes(), runtime.assets[installed_native][0])
+                        self.assertEqual(json.loads(receipt_path.read_bytes())[str(installed_native)],
+                                         hashlib.sha256(installed_native.read_bytes()).hexdigest())
+                        runtime.apply()
                 self.assertEqual(runtime.startup(), {'state': 'ready'})
                 for unit in (guest.COLLECTOR, guest.MANAGER):
                     states[unit].update(ActiveState='inactive', Job='17')
@@ -345,7 +375,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 (bare/'subyard-telemetry').unlink()
                 installed_binary = root/'library/subyard-telemetry'
                 kept = installed_binary.read_bytes()
-                runs = {name: guest.Runtime(path, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
+                runs = {name: guest.Runtime(path, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
                         for name, path in (('source', bare), ('packaged', source))}
                 for unselected in runs.values():
                     self.assertNotIn(installed_binary, unselected.assets)
@@ -361,9 +391,9 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(states[guest.MANAGER]['ActiveState'], 'active')
                 self.assertFalse(any(call[0] == 'stop' and guest.MANAGER in call for call in calls))
                 self.assertTrue((root/'bin/subyard-telemetry-run').read_text().startswith('#!/bin/sh\n'))
-                self.assertNotIn('analytics', (root/'home/.codex/config.toml').read_text())
+                self.assertFalse((root/'home/.codex').exists())
+                self.assertFalse((root/'etc/codex/managed_config.toml').exists())
                 token=(root/'data/auth.token').read_bytes()
-                native_receipt=(root/'control/native.json').read_bytes()
                 target=dict(user='next',uid=runtime.uid,gid=runtime.gid,home=str(runtime.home),group='next')
                 recipe=runtime.identity_observe(target,'a'*64)
                 runtime.identity_apply(recipe,'quiesce')
@@ -381,7 +411,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(states[guest.COLLECTOR]['ActiveState'],'inactive')
                 self.assertEqual(states[guest.MANAGER]['ActiveState'],'active')
                 self.assertEqual((root/'data/auth.token').read_bytes(),token)
-                self.assertEqual((root/'control/native.json').read_bytes(),native_receipt)
+                self.assertFalse((root/'control/native.json').exists())
                 self.assertEqual(marker.read_bytes(),b'history')
                 runtime=runtime.identity_runtime(target)
                 # The binary exception must not relax configuration admission.
@@ -396,7 +426,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 with (source/'subyard-telemetry').open('wb') as output:
                     output.truncate(guest.BINARY_LIMIT+1)
                 with self.assertRaisesRegex(ValueError, 'unsafe native file'):
-                    guest.Runtime(source, 'dev', True, [], root/'control', root/'data', root/'library', root/'units', root/'bin')
+                    guest.Runtime(source, 'dev', True, [], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
 
     def test_unselected_guest_needs_only_the_collector_path(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -409,7 +439,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             def runtime(selected, origin=source):
                 return guest.Runtime(origin, 'dev', selected, [], root/'control', root/'data', root/'library',
-                                     root/'units', root/'bin')
+                                     root/'units', root/'bin', etc=root/'etc')
             with patch.object(guest.pwd, 'getpwnam', return_value=account):
                 with self.assertRaisesRegex(ValueError, 'missing profile asset'):
                     runtime(True)

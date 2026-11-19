@@ -32,8 +32,8 @@ func TestTOMLMaterializationPreservesRuntimeFields(t *testing.T) {
 		t.Fatalf("adoption changed otherwise converged TOML: err=%v", err)
 	}
 	info, err := os.Stat(h.destination)
-	if err != nil || info.Mode().Perm() != 0o644 {
-		t.Fatalf("TOML adoption did not enforce materialized file mode: err=%v", err)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("TOML adoption changed the existing file mode: err=%v", err)
 	}
 	h.writeDestination(t, strings.Replace(original, "notifications = true", "notifications = false", 1))
 	second := h.observe(t, desired)
@@ -71,13 +71,17 @@ func TestManagedInvalidDestinationIsDriftAndRepairable(t *testing.T) {
 					desired = []byte("managed = true\n")
 				}
 				h.apply(t, desired)
-				h.writeDestination(t, broken)
+				testkit.WriteFile(t, h.destination, []byte(broken), 0o600)
 				if h.observe(t, desired).Converged {
 					t.Fatal("invalid managed destination reported current")
 				}
 				h.apply(t, desired)
 				if !h.observe(t, desired).Converged {
 					t.Fatal("repair did not converge")
+				}
+				info, err := os.Stat(h.destination)
+				if err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("repair changed the existing file mode: err=%v", err)
 				}
 			})
 		}

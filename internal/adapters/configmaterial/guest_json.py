@@ -829,8 +829,9 @@ def main():
             for entry in sorted(retired, key=lambda item: item["path"].count("/"), reverse=True):
                 remove_owned(current, entry)
         overlay(current, desired)
+        file_mode = stat.S_IMODE(os.lstat(destination).st_mode) if original is not None else 0o644
         replace_destination(destination, allowed_home, uid, original,
-                            document_payload(current, original), True)
+                            document_payload(current, original), True, file_mode)
         evidence = {"schema": 2, "developer": developer,
                     "destination": destination, "desired_digest": desired_digest,
                     "format": FORMAT, "phase": "applied",

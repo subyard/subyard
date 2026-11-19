@@ -298,7 +298,8 @@ historical digest in `legacy-config/<destination-basename>.sha256`; it is accept
 confirmed initial adoption with the usual file metadata checks, and is not persisted as ownership.
 
 Subyard serializes its own writes per asset and atomically replaces the destination before updating
-the baseline. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
+the baseline. Replacements preserve the existing file mode. New documents use mode
+`0644`. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
 fails without overwriting it; diagnostics omit configuration contents. Running tools do not share
 Subyard's lock: application reads the current file and verifies its result, but cannot serialize
 arbitrary concurrent third-party writes. Invalid TOML, like invalid JSON, fails without overwriting

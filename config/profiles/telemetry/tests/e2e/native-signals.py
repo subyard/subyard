@@ -558,8 +558,8 @@ def exercise(args):
                       'otel': native.desired('codex', 'http://127.0.0.1:14318', token), 'analytics': {'enabled': True},
                       'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                           'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
-            (state/'codex/config.toml').write_text(tomli_w.dumps(config))
-            (state/'codex/config.toml').chmod(0o600)
+            path = state/'codex/config.toml'
+            native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
             app = codex_app_class(fixture.App)(['subyard-telemetry-run', '--agent', agent, '--scope-mode', 'require', '--project-id', 'telemetry-fixture', '--', str(binaries/agent), 'app-server'], env, project)
             try:
                 session = app.start_fixture_thread(project)
@@ -609,7 +609,7 @@ def exercise(args):
     print('ok: native Codex and Claude tools acquired distinct '+args.kind+' allocations with explicit exported session bindings')
 
 
-def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, data):
+def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, data, system_policy):
     """A running shared daemon must not take a managed run's tools or their identity."""
     import fcntl, pty, struct, termios
     root = state/'attribution'
@@ -621,12 +621,14 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
     provider.command, provider.failure, provider.workspace = None, None, project
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'sandbox_mode': 'danger-full-access', 'approval_policy': 'on-request',
-              'features': {'plugins': False, 'unified_exec': False}, 'otel': native.desired('codex', endpoint, token),
+              'features': {'plugins': False, 'unified_exec': False},
               'projects': {str(project): {'trust_level': 'trusted'}},
               'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                   'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
-    (codex_home/'config.toml').write_text(tomli_w.dumps(config))
-    (codex_home/'config.toml').chmod(0o600)
+    if not system_policy:
+        config['otel'] = native.desired('codex', endpoint, token)
+    path = codex_home/'config.toml'
+    native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
     environment = dict(env, HOME=str(home), CODEX_HOME=str(codex_home), TERM='xterm-256color')
 
     class Client(fixture.Terminal):
@@ -689,6 +691,7 @@ def main():
     parser.add_argument('--data-dir', type=Path, required=True)
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--exercise', action='store_true')
+    parser.add_argument('--system-policy', action='store_true')
     parser.add_argument('--kind', choices=['vm', 'android'])
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -715,12 +718,18 @@ def main():
     provider = http.server.ThreadingHTTPServer(('127.0.0.1', 0), codex_provider_class(fixture.Provider))
     provider.command, provider.failure, provider.workspace = None, None, state/'project'
     threading.Thread(target=provider.serve_forever, daemon=True).start()
-    config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'features': {'plugins': False, 'unified_exec': False}, 'otel': native.desired('codex', endpoint, token),
+    config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'features': {'plugins': False, 'unified_exec': False},
               'analytics': {'enabled': True}, # Explicit isolated fixture opt-in; production intent remains untouched.
               'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                   'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
-    (state/'codex/config.toml').write_text(tomli_w.dumps(config))
-    (state/'codex/config.toml').chmod(0o600)
+    # A competing user exporter exercises the managed configuration's recursive merge.
+    config['otel'] = (native.desired('codex', 'http://127.0.0.1:1', 'fixture-user-header')
+                      if args.system_policy else native.desired('codex', endpoint, token))
+    if args.system_policy:
+        for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
+            config['otel'][key]['otlp-http']['protocol'] = 'json'
+    path = state/'codex/config.toml'
+    native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
     app = codex_app_class(fixture.App)(['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--shared-backend', '--', str(binaries/'codex'), 'app-server'], env, state/'project')
     threads = set()
     try:
@@ -748,9 +757,14 @@ def main():
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ClaudeProvider)
     server.requests = 0
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    local = dict(env, **native.desired('claude', endpoint, token), ANTHROPIC_BASE_URL=f'http://127.0.0.1:{server.server_port}',
+    local = dict(env, ANTHROPIC_BASE_URL=f'http://127.0.0.1:{server.server_port}',
                  ANTHROPIC_API_KEY='local-fixture-only', DISABLE_AUTOUPDATER='1', CLAUDE_CODE_PROPAGATE_TRACEPARENT='1')
-    native.publish(state/'claude/settings.json', (json.dumps({'env': native.desired('claude', endpoint, token)})+'\n').encode(), None)
+    if args.system_policy:
+        claude_env = {'OTEL_LOGS_EXPORTER': 'none'}
+    else:
+        claude_env = native.desired('claude', endpoint, token)
+        local.update(claude_env)
+    native.publish(state/'claude/settings.json', (json.dumps({'env': claude_env})+'\n').encode(), None)
     try:
         result = claude_command(['subyard-telemetry-run', '--agent', 'claude', '--scope-mode', 'require', '--', str(binaries/'claude'),
                                  '-p', 'Return probe.', '--output-format', 'stream-json', '--verbose', '--max-turns', '1'],
@@ -764,7 +778,7 @@ def main():
     wait_claude_sessions(args.data_dir, {session}, result, token)
     kinds = {row[0] for row in query(args.data_dir, "SELECT DISTINCT kind FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces')")}
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
-    assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir)
+    assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir, args.system_policy)
     print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence')
 
 
