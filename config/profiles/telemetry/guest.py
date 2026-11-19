@@ -149,6 +149,10 @@ class Runtime:
     def saved_inventory(self):
         return json.loads(native.snapshot(self.control/'assets.json') or b'{}')
 
+    def recorded_digests(self, saved, path):
+        record = saved.get(str(path))
+        return record if isinstance(record, list) else [record]
+
     def retained_current(self, saved):
         """A retained path is absent, or exactly what the inventory recorded with its mode."""
         for path, mode in self.retained.items():
@@ -214,8 +218,10 @@ class Runtime:
             legacy_command = command.removeprefix('/usr/bin/setpriv --no-new-privs ')
             start = fields.get('ExecStart', '')
             if start.startswith('{ path='+legacy_command.split()[0]+' ; argv[]='+legacy_command+' ; ignore_errors=no ; '):
-                saved = json.loads(native.snapshot(self.control/'assets.json') or b'{}')
-                if self.asset_snapshot(self.units/unit) == legacy and saved.get(str(self.units/unit)) == hashlib.sha256(legacy).hexdigest():
+                path = self.units/unit
+                allowed = self.recorded_digests(self.saved_inventory(), path)
+                disk = self.asset_snapshot(path)
+                if disk in (legacy, self.assets[path][0]) and hashlib.sha256(legacy).hexdigest() in allowed:
                     command = legacy_command  # Known pinned previous startup, stale until migrated.
             valid_start = start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
             nnp = fields.get('NoNewPrivileges')
@@ -265,10 +271,8 @@ class Runtime:
         installed = self.owned()
         if not installed and any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
             raise ValueError('unmanaged collector assets')
-        native_current = self.reconcile_native(check=True)
+        native_current = self.reconcile_native(check=True) if installed or self.selected else True
         if not installed:
-            if not self.selected and not native_current:
-                raise ValueError('telemetry policy remains without collector ownership')
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
                 result['diagnostics'] = [{'parameter': 'telemetry.runtime', 'installed': 'absent', 'desired': 'present'}]
@@ -276,7 +280,9 @@ class Runtime:
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
-        ready = ready and self.retained_current(self.saved_inventory())
+        if ready:
+            saved = self.saved_inventory()
+            ready = self.retained_current(saved) and saved == {path: digest for path, (digest, mode) in files.items() if mode is not None}
         states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         active = states[COLLECTOR].get('ActiveState') == 'active'
         enabled = states[COLLECTOR].get('UnitFileState') == 'enabled'
@@ -325,9 +331,9 @@ class Runtime:
 
     def apply(self):
         installed = self.owned()
-        self.reconcile_native(check=True)
         if not self.selected and not installed:
             return
+        self.reconcile_native(check=True)
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         if not installed:
             if self.library.exists():
@@ -348,17 +354,35 @@ class Runtime:
             if not (self.data/'auth.token').exists():
                 native.publish(self.data/'auth.token', (secrets.token_hex(32)+'\n').encode(), None, self.uid, self.gid)
             token = self.token()
-        saved = json.loads((self.control/'assets.json').read_text())
+        inventory_path = self.control/'assets.json'
+        inventory_before = native.snapshot(inventory_path)
+        saved = json.loads(inventory_before)
+        pending = saved.copy()
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
                    and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
-            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
+            before_digest = hashlib.sha256(before).hexdigest() if before is not None else None
+            recorded = self.recorded_digests(saved, path)
+            if before_digest is not None and before_digest not in recorded:
                 raise ValueError('managed asset changed')
-            if path in (self.units/COLLECTOR, self.units/MANAGER) and before != self.assets[path][0] and before is not None:
+            if path not in self.assets:
+                continue
+            wanted = self.assets[path][0]
+            wanted_digest = hashlib.sha256(wanted).hexdigest()
+            if before is None:
+                pending[str(path)] = wanted_digest
+            elif before != wanted:
+                pending[str(path)] = [before_digest, wanted_digest]
+            if path in (self.units/COLLECTOR, self.units/MANAGER) and (before != wanted or len(recorded) > 1) and before is not None:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
+        # Record both versions before changing any asset. Keep the pair through
+        # daemon-reload so a retry can also accept the previously loaded unit.
+        inventory_pending = (json.dumps(pending)+'\n').encode()
+        if inventory_pending != inventory_before:
+            native.publish(inventory_path, inventory_pending, inventory_before)
         self.reconcile_native(check=False, token=token)
         for path, (content, mode) in self.assets.items():
             before = self.asset_snapshot(path)
@@ -368,7 +392,6 @@ class Runtime:
         for path, mode in self.retained.items():
             if self.asset_snapshot(path) is not None:
                 os.chmod(path, mode)
-        native.publish(self.control/'assets.json', self.inventory(), native.snapshot(self.control/'assets.json'))
         systemctl('daemon-reload')
         if self.selected:
             drain = self.data/'drain.json'
@@ -381,6 +404,9 @@ class Runtime:
             native.publish(self.data/'drain.json', b'{"drain":true}\n', native.snapshot(self.data/'drain.json'), self.uid, self.gid)
         if restart:
             systemctl('restart', *restart)
+        inventory_after = self.inventory()
+        if inventory_after != inventory_pending:
+            native.publish(inventory_path, inventory_after, inventory_pending)
 
 
 def main():
@@ -456,7 +482,7 @@ if __name__ == '__main__':
         main()
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         if isinstance(error, native.Refusal):
-            print('telemetry-native-refusal-v1 '+str(error), file=sys.stderr)
+            print('telemetry-native-refusal-v2 '+json.dumps(error.reasons), file=sys.stderr)
         if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):
             import authority
             print(authority.refusal('Telemetry', error), file=sys.stderr)

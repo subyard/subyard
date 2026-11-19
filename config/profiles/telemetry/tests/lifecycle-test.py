@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import unittest
@@ -176,6 +177,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
     def test_apply_repeat_pause_disable_preserves_data_and_never_stops_workloads(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)
+            root.chmod(0o755)  # Permit policy traversal for the fixture developer when run as root.
             source = root/'source'
             source.mkdir()
             for path in Path(guest.__file__).parent.glob('*.py'):
@@ -220,6 +222,16 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
                 runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
+                off = guest.Runtime(source, 'dev', False, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin', etc=root/'etc')
+                foreign = root/'etc/codex/managed_config.toml'
+                foreign.parent.mkdir()
+                foreign.write_text('# Administrator policy\n')
+                self.assertEqual(off.observe()['state'], 'absent')
+                off.apply()
+                self.assertEqual(foreign.read_text(), '# Administrator policy\n')
+                with self.assertRaisesRegex(guest.native.Refusal, 'unsafe or foreign telemetry policy'):
+                    runtime.observe()
+                foreign.unlink()
                 for command in runtime.starts.values():
                     self.assertEqual(command.split()[:2],['/usr/bin/setpriv','--no-new-privs'])
                     actual=subprocess.check_output(command.split()[:2]+[sys.executable,'-c',
@@ -230,6 +242,36 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 observed=runtime.observe()
                 self.assertEqual(observed['state'], 'current')
                 self.assertEqual(observed['actual'],observed['desired'],'current runtime must satisfy the generic activation digest contract')
+                installed_native = root/'library/native.py'
+                receipt_path = root/'control/assets.json'
+                legacy_fixture = Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz'
+                with tarfile.open(legacy_fixture) as archive:
+                    legacy_native = archive.extractfile('config/profiles/telemetry/native.py').read()
+                publish = guest.native.publish
+                for after_rename in (False, True):
+                    with self.subTest(after_asset_rename=after_rename):
+                        installed_native.write_bytes(legacy_native)
+                        inventory = json.loads(receipt_path.read_bytes())
+                        inventory[str(installed_native)] = hashlib.sha256(legacy_native).hexdigest()
+                        receipt_path.write_text(json.dumps(inventory))
+
+                        def interrupt(path, *args, **kwargs):
+                            if path == installed_native:
+                                if after_rename:
+                                    publish(path, *args, **kwargs)
+                                raise InterruptedError('fixture stopped at native asset replacement')
+                            publish(path, *args, **kwargs)
+
+                        with patch.object(guest.native, 'publish', side_effect=interrupt), self.assertRaises(InterruptedError):
+                            runtime.apply()
+                        self.assertEqual(runtime.observe()['state'], 'stale')
+                        retry = off if after_rename else runtime
+                        retry.apply()
+                        self.assertEqual(retry.observe()['state'], 'current')
+                        self.assertEqual(installed_native.read_bytes(), runtime.assets[installed_native][0])
+                        self.assertEqual(json.loads(receipt_path.read_bytes())[str(installed_native)],
+                                         hashlib.sha256(installed_native.read_bytes()).hexdigest())
+                        runtime.apply()
                 self.assertEqual(runtime.startup(), {'state': 'ready'})
                 for unit in (guest.COLLECTOR, guest.MANAGER):
                     states[unit].update(ActiveState='inactive', Job='17')

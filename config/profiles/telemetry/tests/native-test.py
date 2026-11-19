@@ -2,7 +2,6 @@
 import json
 import os
 from pathlib import Path
-import re
 import stat
 import sys
 import tarfile
@@ -43,7 +42,7 @@ class NativeTest(unittest.TestCase):
         otel = native.parse('codex', codex.read_bytes())['otel']
         for key, signal in (('exporter', 'logs'), ('metrics_exporter', 'metrics'), ('trace_exporter', 'traces')):
             self.assertEqual(otel[key]['otlp-http'], {'endpoint': self.endpoint+'/v1/'+signal, 'protocol': 'binary',
-                                                     'headers': {'Authorization': 'Bearer '+self.token}})
+                                                     'headers': {'Authorization': 'Bearer '+self.token}, 'tls': {}})
         env = native.parse('claude', claude.read_bytes())['env']
         self.assertEqual(env['OTEL_EXPORTER_OTLP_LOGS_HEADERS'], 'Authorization=Bearer '+self.token)
         self.assertFalse(otel['log_user_prompt'])
@@ -77,10 +76,40 @@ class NativeTest(unittest.TestCase):
         codex.parent.mkdir()
         codex.symlink_to(claude)
         for check in (False, True):
-            with self.assertRaisesRegex(native.Refusal, re.escape(str(claude))+'.*'+re.escape(str(codex))):
-                self.reconcile([], check=check)
+            self.assertTrue(self.reconcile([], check=check))
+            with self.assertRaisesRegex(native.Refusal, '/etc/claude-code/.*; unsafe.* /etc/codex/'):
+                self.reconcile(list(self.paths), check=check)
             self.assertEqual(claude.read_bytes(), b'{"env":{}}')
             self.assertTrue(codex.is_symlink())
+
+    def test_policy_observation_requires_traversal_as_developer(self):
+        self.reconcile(['codex'])
+        path = self.paths['codex']
+        access = os.access
+
+        def restricted(entry, mode, **kwargs):
+            return entry != path.parent and access(entry, mode, **kwargs)
+
+        with patch.object(native.os, 'access', side_effect=restricted), \
+                self.assertRaisesRegex(native.Refusal, 'developer cannot read telemetry policy'):
+            self.reconcile(['codex'], check=True)
+
+    def test_policy_stage_is_private_until_rename_and_permissions_retry(self):
+        path = self.paths['codex']
+        replace = os.replace
+        def verify_stage(source, target):
+            self.assertEqual(target, path)
+            self.assertEqual(stat.S_IMODE(Path(source).stat().st_mode), 0o600)
+            replace(source, target)
+
+        with patch.object(native.os, 'replace', side_effect=verify_stage), \
+                patch.object(native.os, 'fchown', side_effect=InterruptedError('after rename')), \
+                self.assertRaises(InterruptedError):
+            self.reconcile(['codex'])
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertFalse(self.reconcile(['codex'], check=True))
+        self.reconcile(['codex'])
+        self.assertTrue(self.reconcile(['codex'], check=True))
 
     def test_template_conflicts_compare_desired_fields_without_home_or_secret_output(self):
         agents = list(self.paths)
@@ -89,9 +118,11 @@ class NativeTest(unittest.TestCase):
         self.reconcile(agents, templates=templates)
         self.assertTrue(self.reconcile(agents, check=True, templates=templates))
         templates = {'claude': b'{"env":{"OTEL_LOGS_EXPORTER":"private-template-value"}}',
-                     'codex': b'[otel.exporter.otlp-http.headers]\nAuthorization = "private-template-value"\n'}
+                     'codex': b'[otel.exporter.otlp-http.headers]\nAuthorization = "private-template-value"\n'
+                              b'[otel.exporter.otlp-http.tls]\nca-certificate = "/private.pem"\n'}
         with self.assertRaisesRegex(native.Refusal, r'/env/OTEL_LOGS_EXPORTER.*?/otel/exporter/otlp-http/headers/Authorization') as error:
             self.reconcile(agents, templates=templates)
+        self.assertIn('and 1 more field(s)', str(error.exception))
         self.assertNotIn('private-template-value', str(error.exception))
         self.assertNotIn(self.token, str(error.exception))
 
@@ -103,9 +134,12 @@ class NativeTest(unittest.TestCase):
         exec(compile(legacy_source, 'v0.30.0/native.py', 'exec'), legacy)
         claude, codex = (self.documents[agent] for agent in native.AGENTS)
         native.publish(claude, b'{"env":{"OTEL_LOGS_EXPORTER":"console","UNRELATED":"keep"}}\n', None)
-        prior = {'analytics': {'enabled': False},
+        user_header = 'Bearer '+'b'*64
+        prior = {'analytics': {'enabled': False}, 'unrelated': user_header,
                  'otel': {'log_user_prompt': True, 'exporter': {'otlp-http': {'endpoint': 'https://original.invalid',
-                           'protocol': 'json', 'headers': {'Authorization': 'original', 'Other': 'original'}}}}}
+                           'protocol': 'json', 'headers': {'Authorization': user_header, 'Other': 'original'}}},
+                          'metrics_exporter': {'otlp-http': {'endpoint': 'https://original.invalid',
+                           'protocol': 'json', 'headers': {'Authorization': 'Basic dXNlcjpwYXNz'}}}}}
         native.publish(codex, tomli_w.dumps(prior).encode(), None)
         agents = list(self.paths)
         legacy['reconcile'](self.home, self.receipt, agents, self.endpoint, self.token, tomli_w, self.uid, self.gid)
@@ -117,7 +151,8 @@ class NativeTest(unittest.TestCase):
         before['copy'] = {'nested': ['secret '+self.token, 'keep']}
         before['otel']['trace_exporter'] = {}
         codex.write_text(tomli_w.dumps(before))
-        codex.chmod(0o640)
+        codex.chmod(0o644)
+        claude.chmod(0o400)
         self.assertFalse(self.reconcile(agents, check=True))
         publish = native.publish
 
@@ -135,15 +170,52 @@ class NativeTest(unittest.TestCase):
         self.assertTrue(self.reconcile(agents, check=True))
         self.assertFalse(self.receipt.exists())
         self.assertEqual(json.loads(claude.read_bytes()), {'env': {'OTEL_LOGS_EXPORTER': 'console', 'UNRELATED': 'keep'}})
-        expected = {'analytics': {'enabled': False}, 'copy': {'nested': ['keep']},
+        expected = {'analytics': {'enabled': False}, 'copy': {'nested': ['keep']}, 'unrelated': user_header,
                     'otel': {'log_user_prompt': True, 'trace_exporter': {}, 'exporter': {'otlp-http': {'endpoint': 'https://edited.invalid',
-                              'protocol': 'json', 'headers': {'Authorization': 'original', 'Other': 'original', 'Added': 'keep'}}}}}
+                              'protocol': 'json', 'headers': {'Authorization': user_header, 'Other': 'original', 'Added': 'keep'}}},
+                             'metrics_exporter': prior['otel']['metrics_exporter']}}
         self.assertTrue(native.semantic_equal(native.parse('codex', codex.read_bytes()), expected))
-        self.assertEqual(stat.S_IMODE(codex.stat().st_mode), 0o640)
+        self.assertEqual(stat.S_IMODE(codex.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(claude.stat().st_mode), 0o400)
         for path in self.paths.values():
             self.assertTrue(self.token.encode() in path.read_bytes())
         for path in self.documents.values():
             self.assertFalse(self.token.encode() in path.read_bytes())
+
+    def test_legacy_cleanup_refuses_token_left_in_comments_or_shadowed_members(self):
+        claude, codex = (self.documents[agent] for agent in native.AGENTS)
+        for path, payload in (
+            (claude, b'{"env":{"OTEL_EXPORTER_OTLP_LOGS_HEADERS":"Authorization=Bearer '+self.token.encode()+b'"},"env":{}}\n'),
+            (codex, b'# Authorization = "Bearer '+self.token.encode()+b'"\n[otel]\nlog_user_prompt = true\n'),
+        ):
+            native.publish(path, payload, None, mode=0o644)
+        entries = {agent: {key: {'managed': value, 'present': False}
+                           for key, value in native.desired(agent, self.endpoint, self.token).items()}
+                   for agent in native.AGENTS}
+        receipt = json.dumps({'schema': 1, 'agents': entries}).encode()
+        native.publish(self.receipt, receipt, None)
+        for check in (True, False):
+            with self.assertRaisesRegex(native.Refusal, 'collector token remains in legacy claude configuration; '
+                                        'collector token remains in legacy codex configuration'):
+                self.reconcile([], check=check)
+        self.assertEqual(self.receipt.read_bytes(), receipt)
+        self.assertIn(self.token.encode(), claude.read_bytes())
+        self.assertIn(self.token.encode(), codex.read_bytes())
+
+    def test_legacy_cleanup_does_not_infer_a_token_from_the_receipt(self):
+        path = self.documents['claude']
+        key = 'OTEL_EXPORTER_OTLP_LOGS_HEADERS'
+        different_header = 'Authorization=Bearer '+'b'*64
+        payload = json.dumps({'env': {key: different_header}}).encode()
+        native.publish(path, payload, None)
+        receipt = json.dumps({'schema': 1, 'agents': {'claude': {
+            key: {'managed': different_header, 'present': False},
+        }}}).encode()
+        native.publish(self.receipt, receipt, None)
+        with self.assertRaisesRegex(native.Refusal, 'cannot identify the collector token'):
+            self.reconcile([])
+        self.assertEqual(path.read_bytes(), payload)
+        self.assertEqual(self.receipt.read_bytes(), receipt)
 
 
 if __name__ == '__main__':

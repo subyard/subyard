@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tarfile
 
+from native import refusal_messages
+
 FILES = ('guest.py', 'native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
          'resources.py', 'sources.py', 'broker-correlation.py')
 GUEST_SCRIPT = 'stage="$(mktemp -d /tmp/subyard-telemetry.XXXXXX)"; trap \'rm -rf -- "$stage"\' EXIT; tar -xf - -C "$stage"; python3 -B "$stage/guest.py" "$@"'
@@ -22,13 +24,15 @@ def run(arguments, **kwargs):
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90, **kwargs)
     if result.returncode:
         for line in result.stderr[-65536:].decode(errors='replace').splitlines()[-32:]:
-            if line.startswith('telemetry-native-refusal-v1 '):
-                detail = line.removeprefix('telemetry-native-refusal-v1 ')
-                if detail and len(detail.encode()) <= 480 and detail.isprintable():
-                    raise Refusal([detail])
+            if line.startswith('telemetry-native-refusal-v2 '):
+                try:
+                    messages = refusal_messages(json.loads(line.removeprefix('telemetry-native-refusal-v2 ')))
+                except (ValueError, TypeError, RecursionError):
+                    continue
+                raise Refusal(messages)
             match = SAFE_GUEST_FAILURE.fullmatch(line)
             if match:
-                print(line, file=sys.stderr)
+                print(f'telemetry: local reconciliation failed ({match["kind"]} at {match["location"]})', file=sys.stderr)
                 print('subyard-profile-observation-diagnostic-v1 '+match['kind']+' '+match['location'], file=sys.stderr)
                 break
         raise ValueError('telemetry owner transport failed')

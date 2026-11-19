@@ -12,6 +12,8 @@ import sys
 import tempfile
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 class OwnerTest(unittest.TestCase):
     def test_exact_owner_check_distinguishes_fresh_drift_from_failure_and_applies(self):
@@ -245,6 +247,9 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
                 (safe+' PRIVATE_CREDENTIAL', ''),
                 (safe.replace('native.py', '/private/native.py'), ''),
                 (safe.replace(':28', ':0'), ''),
+                ('telemetry-native-refusal-v1 PRIVATE_CREDENTIAL', ''),
+                ('telemetry-native-refusal-v2 [["template-conflict","codex","PRIVATE_CREDENTIAL"]]', ''),
+                ('telemetry-native-refusal-v2 [["unsafe-policy","PRIVATE_CREDENTIAL"]]', ''),
                 (safe.replace('PermissionError','PRIVATE_CREDENTIAL'), '')]:
             with self.subTest(message_class=bool(expected)):
                 stderr = io.StringIO()
@@ -259,7 +264,7 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
         with self.assertRaisesRegex(owner['Refusal'], path):
             owner['run']([sys.executable, '-c',
                           "import sys; print(sys.argv[1], file=sys.stderr); sys.exit(2)",
-                          'telemetry-native-refusal-v1 unsafe or foreign telemetry policy '+path])
+                          'telemetry-native-refusal-v2 [["unsafe-policy","codex"]]'])
 
     def test_all_exact_absent_release_observations_are_declared(self):
         from unittest.mock import patch

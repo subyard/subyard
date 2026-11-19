@@ -46,7 +46,8 @@ def main():
                 assert fields['OTEL_LOGS_EXPORTER'] == 'otlp'
             else:
                 assert fields['log_user_prompt'] is False
-                assert {'exporter', 'metrics_exporter', 'trace_exporter'} <= fields.keys()
+                for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
+                    assert fields[key]['otlp-http']['tls'] == {}
     if phase == 'disabled':
         print('ok: managed policies removed and Claude and Codex home documents preserved')
 
