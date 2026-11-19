@@ -190,7 +190,7 @@ compatibility manifest and provenance. Runtime releases use the
 [prepare → accept → publish flow](reference/release-publication.md): CI builds exact assets,
 acceptance defaults to host-free/local checks, and publication verifies the immutable release.
 Long core/profile VM checks run only on explicit request (`accept --with-vms` or a collector
-`--only` selection). Unrequested checks stay `not-run`. Select slots explicitly for local VM checks.
+`--only` selection). Unrequested checks stay `not-run`. Local VM checks use slots 1–4 by default.
 Use `--slots slot-2,slot-4` for an exact set or `--slot-count 2` for the first two slots.
 [Live external checks](reference/release-publication.md#external-checks) are optional. `yard update`
 verifies all release inputs, applies the candidate's migration registry, publishes an immutable

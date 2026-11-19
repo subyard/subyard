@@ -1631,7 +1631,7 @@ def release_level(requested, reason, scope, recorded=None):
     if requested == "ordinary":
         if changed:
             refusals.append(f"full release required: migration or update-contract changes since {baseline}: {listed}; "
-                            "rerun accept with --level full and a slot selection (--slots slot-N[,slot-N...] or --slot-count N)")
+                            "rerun accept with --level full")
         elif changed is None and reason is None:
             refusals.append("cannot determine migration changes since the previous release from local tags; "
                             "use --level full, or --level-reason to record why an ordinary release is safe")

@@ -61,11 +61,11 @@ def add_slot_arguments(parser):
     group.add_argument("--slots", type=slot_list, action=SlotSelection, metavar="slot-N[,slot-N...]",
                        help="use exactly these slots")
     group.add_argument("--slot-count", type=int, choices=SLOT_COUNTS, action=SlotSelection,
-                       help="use slots 1 through N")
+                       help="use slots 1 through N (default: slots 1 through 4)")
 
 
 def selected_slots(args):
-    return tuple(range(1, args.slot_count + 1)) if args.slot_count else args.slots or ()
+    return SLOT_COUNTS[:args.slot_count] if args.slots is None else args.slots
 
 
 @contextmanager
@@ -1137,19 +1137,7 @@ def is_live(name):
     return name == "p0-release-smoke" or name.startswith(("profile:", "vm:"))
 
 
-def slot_continues_after(result):
-    """A check that failed inside a recorded lease, with its cleanup and lease release witnessed as
-    passing, leaves the slot to the next check. Refusals, interruptions, timeouts, cleanup failures
-    (exit 3), missing cleanup evidence and attempts without a lease stop that slot, so an unusable
-    slot cannot turn later checks into failures. A typed capacity block keeps the slot separately."""
-    cleanup = result.get("cleanup") or {}
-    return (result.get("status") == "failed" and result.get("termination") == "exit"
-            and result.get("exit_code") not in (3, 4) and result.get("environment_evidence") == "recorded"
-            and result.get("cleanup_status") == "recorded" and "lease-release" in cleanup
-            and all(item.get("exit_code") == 0 for item in cleanup.values()))
-
-
-def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=(), with_vms=False):
+def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=SLOT_COUNTS, types=(), with_vms=False):
     if len(set(slots)) != len(slots) or any(type(slot) is not int or slot < 1 or slot > 999 for slot in slots):
         raise ValueError("slots must be unique integers from 1 to 999")
     if any(not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", kind) for kind in types):
@@ -1198,7 +1186,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                                                "arm64": "GitHub CI native build and runtime smoke; separate from local physical acceptance"},
               "local_tools": {tool: shutil.which(tool) is not None for tool in
                               ("bash", "python3", "go", "make", "rg", "shellcheck", "git", "jq", "tar", "gzip", "sha256sum", "systemd-analyze", "script")},
-              "physical_prerequisites": ["explicitly approved slots", "available managed test environment; fresh leases per attempt"],
+              "physical_prerequisites": ["available managed test environment; fresh leases per attempt"],
               "broker": public_broker_status(broker_status)}
     broker = report["broker"]
     observed_slots = {int(slot["id"].split("-")[1]): slot for slot in broker.get("slots", [])}
@@ -1372,13 +1360,10 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
     if not live:
         return
     pending = deque(live)
-    idle = set(slots)
     active = {}
     retries = deque()
     retrying = False
-    retired = set()
     error = None
-    next_probe = 0
     deadline = None
     if recovery_wait_seconds is None:
         duration = re.fullmatch(r"([0-9]{1,6})([sm])", env["SUBYARD_E2E_CAPACITY_WAIT"])
@@ -1389,13 +1374,11 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
             for future in tuple(active):
                 if not future.done():
                     continue
-                name, slot = active.pop(future)
+                name, _ = active.pop(future)
                 try:
                     result = future.result()
                 except Exception as exc:
-                    # Keep the other workers draining this pass. Only this
-                    # slot's worker stops when attempt recording fails.
-                    retired.add(slot)
+                    # Finish the first pass before surfacing the recording error.
                     if error is None:
                         error = exc
                     continue
@@ -1406,8 +1389,6 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
                                     and result.get("reason") in ("capacity_memory", "capacity_disk"))
                 if capacity_blocked and not retrying:
                     retries.append(name)
-                if capacity_blocked or result["status"] == "passed" or slot_continues_after(result):
-                    idle.add(slot)
 
             if STOP.is_set():
                 if not active:
@@ -1421,45 +1402,42 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
                     break
                 retrying = True
             ready = retries if retrying else pending
-            for slot in slots:
-                if slot not in idle or STOP.is_set():
-                    continue
-                if not ready:
-                    break
-                name = ready.popleft()
-                idle.remove(slot)
-                active[pool.submit(attempt, name, slot)] = (name, slot)
-
-            outstanding = ready or (error is None and retries)
-            if not active and not outstanding:
+            if not active and not ready:
                 break
-            parked = set(slots) - idle - retired - {slot for _, slot in active.values()}
-            if not active and not parked:
-                break
-            now = time.monotonic()
             if active:
                 deadline = None
-            elif deadline is None:
-                deadline = now + recovery_wait_seconds
-            if deadline is not None and now >= deadline:
-                print("INCOMPLETE: no selected slot returned within the capacity wait", flush=True)
-                break
-            if outstanding and parked and now >= next_probe:
+            busy = {slot for _, slot in active.values()}
+            free = [slot for slot in slots if slot not in busy]
+            if ready and free and (deadline is None or time.monotonic() < deadline):
+                # Select at most one slot from each snapshot. Broker admission
+                # still decides whether the controller can acquire the lease.
                 observed = broker_slots(env)
-                next_probe = time.monotonic() + SLOT_POLL_SECONDS
+                if STOP.is_set():
+                    continue
                 if deadline is None or time.monotonic() < deadline:
-                    idle.update(slot for slot in parked if observed.get(slot) == "available")
-                continue
+                    slot = next((slot for slot in free if observed.get(slot) == "available"), None)
+                    if slot is not None:
+                        name = ready.popleft()
+                        active[pool.submit(attempt, name, slot)] = (name, slot)
+                        deadline = None
+                        continue
             if active:
-                timeout = next_probe - now if outstanding and parked else SLOT_POLL_SECONDS
+                timeout = SLOT_POLL_SECONDS if ready and free else None
                 wait(active, timeout=timeout, return_when=FIRST_COMPLETED)
             else:
-                STOP.wait(min(deadline - now, next_probe - now))
+                now = time.monotonic()
+                if deadline is None:
+                    deadline = now + recovery_wait_seconds
+                if now >= deadline:
+                    print("INCOMPLETE: no selected slot returned within the capacity wait", flush=True)
+                    break
+                STOP.wait(min(deadline - now, SLOT_POLL_SECONDS))
     if error is not None:
         raise error
 
 
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=()):
+    slots = slots or SLOT_COUNTS
     root, receipt = load_bound(output)
     if receipt.get("superseded"):
         raise ValueError("candidate was explicitly superseded; prepare a new candidate")
@@ -1496,8 +1474,6 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     live = [name for name in pending if is_live(name)]
     durations = duration_estimates(receipt, previous)
     live.sort(key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
-    if live and not slots:
-        raise ValueError("live checks require --slots slot-N[,slot-N...] or --slot-count N")
     try:
         invocation = Invocation(output, receipt, selected, pending, excluded, requested)
     except OSError:

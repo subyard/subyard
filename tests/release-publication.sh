@@ -805,14 +805,20 @@ class Contracts(unittest.TestCase):
         legacy["checks"]["p0-release-smoke"] = m.a.OPTIONAL_VM_NOT_RUN.copy()
         with self.assertRaises(ValueError):
             m.validate_attestation(legacy, self.identity, self.output / "source")
-        for option in (["--with-vms"], ["--only", "profile:sample"]):
-            with patch.object(m, "GitHub", return_value=github), \
-                 patch.object(m.a, "execution_environment", return_value=document["environment"]), \
-                 patch.object(m.signal, "signal"), \
-                 patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
-                                           "accept", "--candidate", identity["candidate_id"], *option]):
-                with self.assertRaisesRegex(ValueError, "require --slots"):
-                    m.main()
+        native_execute = m.a.execute
+        def execute_profile(*args):
+            return native_execute(*args) | {"environment_evidence": "recorded",
+                                            "environments": document["checks"]["p0-release-smoke"]["environments"]}
+        with patch.object(m, "GitHub", return_value=github), \
+             patch.object(m.a, "execution_environment", return_value=document["environment"]), \
+             patch.object(m.a, "broker_slots", return_value={4: "available"}), \
+             patch.object(m.a, "execute", side_effect=execute_profile) as execute, \
+             patch.object(m.signal, "signal"), \
+             patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
+                                       "accept", "--candidate", identity["candidate_id"], "--with-vms"]):
+            self.assertEqual(m.main(), 0)
+        execute.assert_called_once()
+        self.assertEqual((execute.call_args.args[0], execute.call_args.args[-1]), ("profile:sample", 4))
 
     def test_release_scope_uses_previous_merged_tag_and_product_migration_paths(self):
         repository = self.directory / "scope-repository"

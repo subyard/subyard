@@ -145,6 +145,9 @@ def prepare_fixture(checkout, output):
 
 
 class TestAcceptance(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(m, "broker_slots", return_value={1: "available", 2: "available"}))
+
     def test_shellcheck_command_preserves_historical_receipts(self):
         self.assertEqual(m.commands(root, "test", {})["shellcheck"], ["bash", "dev/shellcheck.sh"])
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
@@ -2370,7 +2373,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             result = m.execute("profile:sample/four", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"], result["reason"]), ("blocked", 4, "capacity_memory"))
 
-    def test_client_handle_release_evidence_keeps_the_slot_after_a_lane_failure(self):
+    def test_client_handle_release_evidence_records_cleanup_after_a_lane_failure(self):
         # The standalone client's acquire line and handle-release markers, then a lane failure.
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
@@ -2384,10 +2387,9 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
             self.assertEqual((result["status"], result["exit_code"]), ("failed", 1))
             self.assertEqual(result["cleanup"]["lease-release"], {"exit_code": 0, "duration_seconds": 2})
-            self.assertTrue(m.slot_continues_after(result))
             script.write_text(script.read_text().replace("duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=0", "duration_seconds=2 budget_seconds=180 grace_seconds=5 exit_code=1"))
             result = m.execute("profile:test-vms-client", ["bash", str(script)], output, output, m.clean_environment(), 1)
-            self.assertFalse(m.slot_continues_after(result))
+            self.assertEqual(result["cleanup"]["lease-release"], {"exit_code": 1, "duration_seconds": 2})
 
     def test_explicit_import_identity_closure_and_tamper_guards(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2816,7 +2818,7 @@ while True: time.sleep(1)
                      patch.object(m, "source_fingerprint", return_value="a" * 64), \
                      patch.object(m, "broker_slots", return_value={1: "available"}) as broker:
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                broker.assert_called_once()
+                self.assertEqual(broker.call_count, 2)
                 persisted = json.loads((output / "receipt.json").read_text())
                 attempt = persisted["checks"][blocked]
                 self.assertEqual(attempt["status"], "failed")
@@ -2853,7 +2855,8 @@ while True: time.sleep(1)
                  patch.object(m, "commands", return_value=checks), \
                  patch.object(m, "source_fingerprint", return_value="a" * 64), \
                  patch.object(m, "execute", side_effect=execute):
-                with patch.object(m, "dispatch_live", partial(m.dispatch_live, recovery_wait_seconds=0)):
+                with patch.object(m, "dispatch_live", partial(m.dispatch_live, recovery_wait_seconds=0)), \
+                     patch.object(m, "broker_slots", side_effect=[{1: "available"}, {1: "draining"}]):
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
                 self.assertEqual(calls, ["profile:sample/one"])
                 persisted = json.loads((output / "receipt.json").read_text())
@@ -3258,20 +3261,20 @@ while True: time.sleep(1)
                 self.assertEqual((code, argv), (2, []), arguments)
                 self.assertIn("release-vm-check:", error)
 
-    def test_live_failure_reuses_slot_after_clean_release_or_broker_confirmation(self):
+    def test_live_failure_reuses_slot_after_broker_confirmation(self):
         # This scheduler fixture supplies synthetic receipts; immutable evidence has separate real fixtures.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
         lease = {"status": "failed", "termination": "exit", "exit_code": 1, "duration_seconds": 1,
                  "environment_evidence": "recorded", "environments": [], "cleanup_status": "recorded",
                  "cleanup": {"guest-cleanup": {"exit_code": 0}, "lease-release": {"exit_code": 0}}}
-        for name, failure, clean_release in (("lease", lease, True),
-                                         ("cleanup", {**lease, "exit_code": 3}, False),
-                                         ("cleanup-phase", {**lease, "cleanup": {**lease["cleanup"], "guest-cleanup": {"exit_code": 1}}}, False),
-                                         ("no-cleanup-witness", {**lease, "cleanup": {}, "cleanup_status": "unknown"}, False),
-                                         ("no-lease-release", {**lease, "cleanup": {"guest-cleanup": {"exit_code": 0}}}, False),
-                                         ("failed-lease-release", {**lease, "cleanup": {**lease["cleanup"], "lease-release": {"exit_code": 1}}}, False),
-                                         ("unallocated", {**lease, "environment_evidence": "unknown"}, False),
-                                         ("timeout", {**lease, "termination": "timeout", "exit_code": 124}, False)):
+        for name, failure in (("lease", lease),
+                              ("cleanup", {**lease, "exit_code": 3}),
+                              ("cleanup-phase", {**lease, "cleanup": {**lease["cleanup"], "guest-cleanup": {"exit_code": 1}}}),
+                              ("no-cleanup-witness", {**lease, "cleanup": {}, "cleanup_status": "unknown"}),
+                              ("no-lease-release", {**lease, "cleanup": {"guest-cleanup": {"exit_code": 0}}}),
+                              ("failed-lease-release", {**lease, "cleanup": {**lease["cleanup"], "lease-release": {"exit_code": 1}}}),
+                              ("unallocated", {**lease, "environment_evidence": "unknown"}),
+                              ("timeout", {**lease, "termination": "timeout", "exit_code": 124})):
             with self.subTest(name=name), tempfile.TemporaryDirectory(dir="/tmp") as temporary:
                 output = Path(temporary)
                 names = ["verify", "vm:one", "vm:two"]
@@ -3289,7 +3292,7 @@ while True: time.sleep(1)
                      patch.object(m, "execute", side_effect=execute), \
                      patch.object(m, "broker_slots", return_value={1: "available"}) as broker:
                     self.assertEqual(m.run_checks(output, [1], [], False, with_vms=True), 1)
-                self.assertEqual(broker.call_count, 0 if clean_release else 1)
+                self.assertEqual(broker.call_count, 2)
                 self.assertEqual(calls, ["vm:one", "vm:two"])
                 persisted = json.loads((output / "receipt.json").read_text())
                 self.assertEqual(persisted["checks"]["vm:one"]["status"], "failed")
@@ -3436,6 +3439,7 @@ class FullSplitRequirement(unittest.TestCase):
     def test_run_only_full_runs_its_split_checks(self):
         # Synthetic receipt: an otherwise passing candidate with optional VM checks not run.
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        self.enterContext(patch.object(m, "broker_slots", return_value={1: "available"}))
         checks = {name: ["true"] for name in ("verify", "p0-release-smoke", "vm:p0-full", "vm:p0-split")}
         for case, split, rerun, exclude, calls_expected, code, result in (
                 ("fresh", m.OPTIONAL_VM_NOT_RUN.copy(), False, [], ["vm:p0-full", "vm:p0-split"], 0, "passed"),

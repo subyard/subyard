@@ -114,7 +114,7 @@ python3 dev/release-acceptance.py run --output .build/release-local \
   --only p0-release-smoke --slots slot-1
 ```
 
-Select slots explicitly for local VM execution. Use `--slots slot-2,slot-4` for an exact set,
+Local VM execution uses slots 1–4 by default. Use `--slots slot-2,slot-4` for an exact set,
 or `--slot-count 2` for slots 1 and 2. Slot flags alone do not request local VM execution.
 Checks without counted hosted evidence or an explicit local request remain `not-run` in acceptance
 and publication. Once requested, incomplete or failed checks block the candidate, including after
@@ -417,7 +417,7 @@ Agents preparing a release apply the
 - Runtime releases default to the existing host-free/CI checks, local adapters and full
   released-caller compatibility check in [Development](../development.md).
   Request long VM smoke and shipped-profile VM checks using `accept --with-vms` or collector
-  `run --only CHECK` and select slots with `--slots` or `--slot-count`.
+  `run --only CHECK`. Use `--slots` or `--slot-count` to narrow the default set of slots 1–4.
   Core `p0-release-smoke` is mandatory and cannot be excluded or waived as optional. Local-only
   acceptance remains incomplete until it passes. Unrequested shipped-profile VM checks remain `not-run`,
   never passed; requested incomplete or failed checks block acceptance/publication.
@@ -463,8 +463,9 @@ python3 dev/release-acceptance.py run --output .build/release-acceptance
 ```
 
 Add `--with-vms` to `preflight`/`run` to request all VM smoke, core and profile checks,
-or use `run --only p0-release-smoke --slots slot-1` for one check. For local VM execution, select an exact set
-with `--slots slot-2,slot-4` or the first N slots with `--slot-count N` (1–4).
+or use `run --only p0-release-smoke --slots slot-1` for one check. Local VM execution uses slots 1–4
+by default. Select an exact set with `--slots slot-2,slot-4` or the first N slots with
+`--slot-count N` (1–4).
 Core VM checks are the lanes in `dev/e2e/release-vm-checks.json`
 (full P0 and its split lanes, uninstall, published-baseline upgrades and other release lanes), recorded as `vm:<id>`
 and run by `dev/e2e/release-vm-check.sh ID --slot N` with the frozen candidate; `--only vm:published-upgrade`
@@ -473,11 +474,11 @@ whenever that check is requested or recorded; preparation records them in the re
 candidate's catalog must still match. Selecting a check also runs its required checks that have not
 passed for the candidate, so `run --only vm:p0-full --slot-count 3` runs the full P0 outside a release:
 `vm:p0-full --split-covered` plus its split checks; `--exclude` keeps a required check not run and the
-result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. One worker
-runs per selected slot. After a check fails inside a recorded lease whose cleanup passed, that slot takes
-the next check. Other failures pause that slot until the broker reports it available. One collector
-owns a candidate's receipt at a time. Run every check through it to record the result. Once explicitly
-requested, a pending VM check remains required on continuation.
+result incomplete. A candidate whose pinned source has no catalog has no `vm:` checks. Each selected slot
+runs at most one check at a time. Before assigning each check or capacity retry, the collector queries
+the broker and uses a slot it reports as available. One collector owns a candidate's receipt at a time.
+Run every check through it to record the result. Once explicitly requested, a pending VM check
+remains required on continuation.
 
 Preflight reads the worktree or `--output` frozen candidate. It never authenticates or allocates;
 `--broker-status FILE` accepts an already-collected public status, and `--external-readiness FILE`
