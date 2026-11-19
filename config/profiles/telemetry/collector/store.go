@@ -672,24 +672,14 @@ func project(tx *sql.Tx, e Envelope) error {
 		if id == "" {
 			id = projectionID(e.OriginID, object, run, stringValue(b, "source"))
 		}
-		var oldObject string
-		var oldRun, oldStart, oldEnd sql.NullString
+		// Later updates keep the first identity, start and sharing, and may only close the edge.
 		shared, _ := b["shared"].(bool)
-		err := tx.QueryRow("SELECT object_id,agent_run_id,start_time,end_time,shared FROM associations WHERE association_id=? AND origin_id=?", id, e.OriginID).
-			Scan(&oldObject, &oldRun, &oldStart, &oldEnd, &shared)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if err == nil {
-			object = firstNonempty(oldObject, object)
-			run = firstNonempty(oldRun.String, run)
-		}
-		start := firstNonempty(canonicalTimestamp(oldStart.String), stringValue(b, "start_time"))
-		end := firstNonempty(stringValue(b, "end_time"), canonicalTimestamp(oldEnd.String))
-		_, err = tx.Exec(`INSERT INTO associations VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,association_id) DO UPDATE SET
-			object_id=excluded.object_id,agent_run_id=excluded.agent_run_id,shared=excluded.shared,
-			start_time=excluded.start_time,end_time=excluded.end_time,quality=excluded.quality,body=json_patch(associations.body,excluded.body)`,
-			id, object, run, stringValue(b, "quality"), start, end, shared, body, e.OriginID)
+		_, err := tx.Exec(`INSERT INTO associations VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(origin_id,association_id) DO UPDATE SET
+			agent_run_id=coalesce(nullif(associations.agent_run_id,''),excluded.agent_run_id),
+			start_time=coalesce(nullif(associations.start_time,''),excluded.start_time),
+			end_time=coalesce(nullif(excluded.end_time,''),associations.end_time),
+			quality=excluded.quality,body=json_patch(associations.body,excluded.body)`,
+			id, object, run, stringValue(b, "quality"), stringValue(b, "start_time"), stringValue(b, "end_time"), shared, body, e.OriginID)
 		return err
 	case "gap":
 		_, err := tx.Exec("INSERT INTO gaps VALUES(?,?,?,?,?,?)", e.OriginID, e.EventID, object, run, e.SourceTime, body)

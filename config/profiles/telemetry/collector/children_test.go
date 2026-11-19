@@ -123,3 +123,21 @@ func TestRunHierarchyCycleAndWindow(t *testing.T) {
 		})
 	}
 }
+
+func TestAssociationUpdateKeepsIdentityAndClosesTheEdge(t *testing.T) {
+	s := fixtureStore(t)
+	edge := func(run, start, end string, shared bool) Record {
+		return record("association", map[string]any{"association_id": "edge", "object_id": "object", "agent_run_id": run,
+			"quality": "explicit", "source": "validated-grant", "start_time": start, "end_time": end, "shared": shared})
+	}
+	if err := s.Ingest(context.Background(), []Record{edge("", "2026-01-01T00:00:00Z", "", true),
+		edge("run", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z", false), edge("other", "", "", false)}); err != nil {
+		t.Fatal(err)
+	}
+	var run, start, end string
+	var shared bool
+	if err := s.db.QueryRow("SELECT agent_run_id,start_time,end_time,shared FROM associations").Scan(&run, &start, &end, &shared); err != nil ||
+		run != "run" || !strings.HasPrefix(start, "2026-01-01") || !strings.HasPrefix(end, "2026-01-03") || !shared {
+		t.Fatalf("merged association: %s %s %s %v (%v)", run, start, end, shared, err)
+	}
+}
