@@ -658,13 +658,16 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
         client = Client([*argv, str(binaries/'codex'), '--no-alt-screen', 'Run the fixture command.'])
         try:
             client.wait('Fixture complete.', provider)
+            tool_run = (project/(name+'.run')).read_text().strip()
+            # The response can appear before the SDK exports the completed
+            # span. The terminal fixture's close() sends SIGTERM, so keep
+            # servicing the PTY until the collector observes the span.
+            deadline = time.monotonic()+30
+            while tool_run and traces(tool_run) <= counts.get(tool_run, 0) and time.monotonic() < deadline:
+                client.read(0.5)
         finally:
             client.close()
         time.sleep(4)
-        tool_run = (project/(name+'.run')).read_text().strip()
-        deadline = time.monotonic()+30
-        while tool_run and not traces(tool_run) > counts.get(tool_run, 0) and time.monotonic() < deadline:
-            time.sleep(0.5)
         new = runs()-known
         grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
         result = dict(new=sorted(new), tool_run=tool_run, tool_exe=(project/(name+'.exe')).read_text().strip(), traces_grew_for=sorted(grown))
