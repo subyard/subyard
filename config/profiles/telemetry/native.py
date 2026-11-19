@@ -102,7 +102,8 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
 def desired(agent, endpoint, helper=HELPER):
     """The managed document. Exporters get Authorization only from the helper."""
     if agent == 'codex':
-        result = {'log_user_prompt': False, 'headers_helper': helper, 'headers_helper_refresh_interval_ms': HELPER_REFRESH_MS}
+        result = {'log_user_prompt': False}
+        result |= {'headers_helper': helper, 'headers_helper_refresh_interval_ms': HELPER_REFRESH_MS}
         for key, path in [('exporter', 'logs'), ('metrics_exporter', 'metrics'), ('trace_exporter', 'traces')]:
             result[key] = {'otlp-http': {'endpoint': endpoint+'/v1/'+path, 'protocol': 'binary', 'tls': {}}}
         return {'otel': result}
