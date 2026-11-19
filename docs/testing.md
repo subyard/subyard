@@ -727,13 +727,19 @@ acceptance. A passing default release does not claim full physical acceptance.
 #### Periodic E2E on hosted runners
 
 The Periodic E2E workflow (`.github/workflows/periodic-e2e.yml`) runs the long VM checks of release
-acceptance on GitHub-hosted runners, so their failures surface between releases. Every six hours it
-tests the latest `master` commit unless a finished push or scheduled run already covered it. Only a
-run whose `pool` job succeeded covers its commit: a cancelled run, a run skipped as covered and a run
-that failed while preparing the pool cover nothing. A new run that tests a branch replaces the run still in progress
-on that branch together with its nested retries; runs on other branches continue. A red check is a finding
-to fix early. It does not replace [release acceptance](reference/release-publication.md#one-release-candidate) and imports no evidence
-into it.
+acceptance on GitHub-hosted runners, so their failures surface between releases. It checks the latest
+`master` commit at 00:23 and 12:23 UTC on `debian-13` and at 06:23 and 18:23 UTC on
+`ubuntu-24.04`. The triggering cron entry determines the image even when GitHub starts the run
+late. Each slot checks coverage for its own commit and image. A completed push or scheduled run
+counts when its `pool` job succeeded and the run finished without cancellation. The workflow reads
+the scheduled run title for its image and treats older unlabelled schedules and `ci-probe/**`
+pushes as Debian runs. A failed check after pool success can be repeated with Re-run or a manual
+dispatch.
+
+On `master`, a new main run replaces an earlier run for the same image and, when it proceeds to
+testing, stops its Intel retries. Main runs and retries on `master` show the image in their titles.
+Other branches retain branch-wide replacement. A red check is a finding to fix early. Periodic E2E
+is separate from [release acceptance](reference/release-publication.md#one-release-candidate).
 
 `dev/ci/plan-periodic-checks.py` takes the checks from their existing owners: the release collector's
 profile lanes, smoke check and core VM catalog (`dev/e2e/release-vm-checks.json`). Published upgrades
@@ -745,9 +751,10 @@ except `boundary` and `cleanup`; a lane that the catalog also declares as its ow
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
 becomes an ordinary owner with the packaged candidate. A dispatch can select
-`image=debian-13`, `image=ubuntu-24.04` or `image=ubuntu-26.04`. The default and scheduled
-runs use Debian 13. The planner passes `--image` to the hosted wrapper for every lane, and the
-pool boundary check uses the same image. The wrapper gives lane controllers a lease image default,
+`image=debian-13`, `image=ubuntu-24.04` or `image=ubuntu-26.04`. Manual dispatches default
+to Debian 13, which is also the image used by `ci-probe/**` pushes. The planner passes
+`--image` to the hosted wrapper for every lane, and the pool boundary check uses the same image.
+The wrapper gives lane controllers a lease image default,
 which the shared client sends to the hosted broker. The broker creates leases from the matching
 Incus VM base. Intel retries retain the original image. Lane IDs and fixture images inside the
 leased VMs are shared across the dispatch choices.
@@ -772,9 +779,10 @@ optional physical coverage; host-free checks and other required physical lanes k
 Checks that boot a VM inside the leased VM run only on Intel runners. Hosted runners are Azure
 Hyper-V VMs on Intel or AMD CPUs, and the runner label cannot choose one. On AMD, virtualization
 nested this deep is so slow that these checks cannot finish. On an AMD runner the job explains the
-skip, and a `reschedule` job dispatches runs named `Nested VM checks on Intel, attempt N, for run X`
-at the branch's latest commit. A retry runs each check on three runners at once and is repeated up to
-30 times; checks that never reached Intel fail that last run as not run. Only the `reschedule` job may
+skip, and a `reschedule` job dispatches runs at the branch's latest commit with titles starting
+with `Nested VM checks on Intel, attempt N, for run X`. A retry runs each check on three runners
+at once and is repeated up to 30 times; checks that never reached Intel fail that last run as not run.
+Only the `reschedule` job may
 start runs, and the `supersede` job cancels replaced ones; neither checks out code.
 
 Periodic-only `vm:incus-apparmor-probe` installs the packaged candidate on one standard VM and
