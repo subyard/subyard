@@ -977,7 +977,8 @@ func TestPersistProjectionKeepsInitialInventoryPlanBound(t *testing.T) {
 }
 
 func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
-	runtime := Runtime{Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"}}
+	runtime := Runtime{Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude"}}
 	stderr, _ := json.Marshal(map[string]any{"conflicts": []map[string]string{
 		{"reason": "persist transfer identity unavailable", "path": "/home/dev/.claude/projects.subyard-transfer.json", "integration": "claude"},
 		{"reason": "atomic exchange unsupported", "path": "", "detail": "Invalid argument", "integration": "claude"},
@@ -991,7 +992,7 @@ func TestPersistRefusalsArePendingConfigurationWithNextSteps(t *testing.T) {
 	err := runtime.persistRefusal(stderr)
 	text := err.Error()
 	for _, want := range []string{"projects.subyard-transfer.json", "not a complete Subyard record", "'disable' 'claude'", "release activation does not start", "init", "Permission denied",
-		"'namei' '-l' '--' '/home/dev/.claude/projects/p'", "'findmnt'", "AGENT_claude_PERSIST", "a future reason", "'integration' 'status'",
+		"'namei' '-l' '--' '/home/dev/.claude/projects/p'", "'findmnt'", "AGENT_claude_PERSIST", "refused (unrecognized reason)", "'integration' 'status'",
 		"the target refused \"/mnt/host/agent-sessions/claude/projects/p1/x\"", "'namei' '-l' '--' '/mnt/host/agent-sessions/claude/projects/p1/'"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("refusal omitted %q: %s", want, text)

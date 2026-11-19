@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
+	"syscall"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -71,6 +75,21 @@ func (observation persistObservation) changed() bool {
 	return slices.ContainsFunc(observation.Entries, func(entry persistEntry) bool { return len(entry.Ops) != 0 })
 }
 
+// changedOwner names the integration only if all planned work belongs to it.
+func (observation persistObservation) changedOwner() string {
+	owner := ""
+	for _, entry := range observation.Entries {
+		if len(entry.Ops) == 0 {
+			continue
+		}
+		if entry.Integration == "" || owner != "" && owner != entry.Integration {
+			return ""
+		}
+		owner = entry.Integration
+	}
+	return owner
+}
+
 // retireUnrecordedLinks plans removing the exact link of a deselected mapping
 // that the artifact inventory does not record: an adoption cut after its
 // exchange but before the inventory apply. A recorded link is retired by the
@@ -123,7 +142,7 @@ func (observation persistObservation) facts() []integrationFact {
 		desired, _ := json.Marshal(persistStep{entry.Ops, entry.Source, entry.Target, entry.Selected, entry.Existing, entry.ExistingCount})
 		observed, _ := json.Marshal(entry)
 		facts = append(facts, integrationFact{Key: "persist:" + strings.Join(entry.Ops, "+") + ":" + entry.Source,
-			Desired: string(desired), Observed: string(observed)})
+			Desired: string(desired), Observed: string(observed), owner: entry.Integration})
 	}
 	return facts
 }
@@ -394,6 +413,11 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 	causes := []error{}
 	for _, conflict := range report.Conflicts {
 		message, retry := "", shellquote.Command([]string{"yard", "-Y", yard, "init"})
+		// An overlap names the other mapped path, which is shown quoted.
+		if conflict.Reason != "persist paths overlap" || !filepath.IsAbs(conflict.Detail) || !utf8.ValidString(conflict.Detail) {
+			conflict.Detail = persistDetail(conflict.Detail)
+		}
+		conflict.Integration = runtime.declaredOwner(conflict.Integration)
 		switch conflict.Reason {
 		case "persist adoption pending":
 			message = fmt.Sprintf("persist adoption of %q in yard %s is pending: release activation does not start data transfers; data was preserved", conflict.Path, yard)
@@ -418,12 +442,19 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 		case "persist paths overlap", "persist target filesystem":
 			message = fmt.Sprintf("persist mapping in yard %s: %s for %q and %q; data was preserved. Correct the persist mapping, then repeat yard init", yard, conflict.Reason, conflict.Path, conflict.Detail)
 			retry = shellquote.Command([]string{"yard", "-Y", yard, "config", "show", "AGENT_" + conflict.Integration + "_PERSIST"})
+			if conflict.Integration == "" {
+				retry = status
+			}
 		case "persist space unavailable":
 			message = fmt.Sprintf("persist transfer in yard %s: not enough space for %q (%s); data was preserved. Free space on the sessions volume, then repeat yard init", yard, conflict.Path, conflict.Detail)
 			retry = shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "df", "-h", "--", conflict.Path[:strings.LastIndex(conflict.Path, "/")+1]})
 		case "atomic exchange unsupported", "no-replace rename unsupported":
 			message = fmt.Sprintf("persist transfer for %s in yard %s: %s (%s); nothing was copied. Deselect the integration to keep its data in place", conflict.Integration, yard, conflict.Reason, conflict.Detail)
 			retry = shellquote.Command([]string{"yard", "-Y", yard, "integration", "disable", conflict.Integration})
+			if conflict.Integration == "" {
+				message = fmt.Sprintf("persist transfer in yard %s: %s (%s); nothing was copied. Deselect the integration to keep its data in place", yard, conflict.Reason, conflict.Detail)
+				retry = status
+			}
 		case "persist transfer identity unavailable":
 			message = fmt.Sprintf("persist transfer in yard %s: the transfer descriptor %q is not a complete Subyard record; data was preserved. Inspect it and move it aside, then repeat yard init", yard, conflict.Path)
 			retry = inspect(conflict.Path)
@@ -431,7 +462,8 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 			causes = append(causes, fmt.Errorf("%w: persist transfer state changed after planning", domain.ErrPlanStale))
 			continue
 		default:
-			message = fmt.Sprintf("persist transfer in yard %s refused (%s) at %q; data was preserved. Inspect the pending transfers, then repeat", yard, conflict.Reason, conflict.Path)
+			// The guest's reason is not in this release's vocabulary.
+			message = fmt.Sprintf("persist transfer in yard %s refused (unrecognized reason) at %q; data was preserved. Inspect the pending transfers, then repeat", yard, conflict.Path)
 			retry = status
 		}
 		causes = append(causes, integrationOwnershipError{pendingConfiguration: true, message: message, retry: retry})
@@ -440,6 +472,28 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 		return persistRefused{domain.CollectRefusals(causes...), report.Entries}
 	}
 	return domain.CollectRefusals(causes...)
+}
+
+var persistSpaceDetail = regexp.MustCompile(`^needs [0-9]{1,20} bytes plus a 1 GiB reserve; [0-9]{1,20} available$`)
+
+// persistDetail keeps only the persist program's fixed details, operating
+// system error texts and exception class names; other guest text is replaced.
+func persistDetail(detail string) string {
+	switch detail {
+	case "", "not readable by the developer", "not writable by the developer", "a mount inside the persist target",
+		"the persist source is a mount point", "the target is a mount point; its stage would be on another filesystem",
+		"must be owned by the developer and not writable by group or others":
+		return detail
+	}
+	if persistSpaceDetail.MatchString(detail) || len(detail) <= 63 && domain.SafeID(detail) {
+		return detail
+	}
+	for code := syscall.Errno(1); code < 256; code++ {
+		if strings.EqualFold(detail, code.Error()) {
+			return detail
+		}
+	}
+	return "unrecognized detail"
 }
 
 // InspectPersistTransfers discloses pending transfers for an already running

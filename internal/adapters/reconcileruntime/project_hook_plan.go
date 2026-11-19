@@ -428,13 +428,13 @@ func (runtime Runtime) captureProvisionedProjectHooks(ctx context.Context) error
 	if err := runtime.checkIntegrationHookScope(); err != nil {
 		return err
 	}
-	hooks := []string{}
+	hooks := map[string]string{}
 	for _, agent := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		if runtime.environmentValue("AGENT_"+agent+"_PROVISION") == "" {
 			continue
 		}
 		if hook := runtime.environmentValue("AGENT_" + agent + "_PROJECTS_CHANGED"); hook != "" {
-			hooks = append(hooks, hook)
+			hooks[agent] = hook
 		}
 	}
 	if len(hooks) == 0 {
@@ -445,12 +445,17 @@ func (runtime Runtime) captureProvisionedProjectHooks(ctx context.Context) error
 		return err
 	}
 	sources := hookObservation{Facts: map[string]string{}, Resolved: map[string]string{}}
-	for _, hook := range hooks {
+	var refusals []error
+	for agent, hook := range hooks {
 		if !slices.Contains(observation.Hooks, hook) || !profileRuntimeDigest.MatchString(observation.Facts[hook]) || !filepath.IsAbs(observation.Resolved[hook]) {
-			return fmt.Errorf("%w: provisioned integration hook source unavailable", domain.ErrPlanStale)
+			refusals = append(refusals, owned(agent, fmt.Errorf("%w: provisioned integration hook source of %s unavailable", domain.ErrPlanStale, agent)))
+			continue
 		}
 		sources.Facts[hook] = observation.Facts[hook]
 		sources.Resolved[hook] = observation.Resolved[hook]
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	runtime.HookPlan.provisionedHooks = sources
 	return nil

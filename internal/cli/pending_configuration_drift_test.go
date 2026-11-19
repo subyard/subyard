@@ -369,7 +369,7 @@ if grep -qx "$SUBYARD_YARD" %[1]q 2>/dev/null; then printf '%%s\n' '%[3]s'; else
 			// integration apply.
 			refreshed := "yard named: cannot apply materialized config"
 			if scenario == "pending-before-resume" {
-				refreshed = "yard default: cannot reconcile integrations"
+				refreshed = "integration apply inventory apply failed in yard default"
 			}
 			first := fixture.execute(t, &releasetransition.Execution{Plan: inspection.Plan, Authorization: "fixture-grant"}, nil)
 			if first.Outcome == nil || first.Outcome.Status != releasetransition.StatusRecovering || !strings.HasPrefix(first.Outcome.Message, refreshed) {

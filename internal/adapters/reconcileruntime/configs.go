@@ -177,7 +177,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 			continue
 		}
 		if err != nil {
-			refusals = append(refusals, fmt.Errorf("%s: %w", file.label, err))
+			refusals = append(refusals, owned(file.integration, fmt.Errorf("%s: %w", file.label, err)))
 			continue
 		}
 		bytes += len(payload)
@@ -260,7 +260,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			continue
 		}
 		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
-			return fmt.Errorf("apply %s: %w", file.label, err)
+			return owned(file.integration, fmt.Errorf("apply %s: %w", file.label, err))
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
@@ -549,6 +549,24 @@ func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
 	return shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
 }
 
+// preserveSiblingCommand renames path within its directory to a fixed-length
+// digest sibling: the rename keeps owner, mode and parent access, the name
+// stays within the limit, and a repeat keeps the earlier copy as a numbered backup.
+func (runtime Runtime) preserveSiblingCommand(path, prefix string) string {
+	digest := sha256.Sum256([]byte(filepath.Base(path)))
+	sibling := filepath.Join(filepath.Dir(path), fmt.Sprintf("%s%x", prefix, digest[:8]))
+	return shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "-T", "--backup=numbered", "--", path, sibling})
+}
+
+// unownedInvalidConfig keeps its local text and gives activation the single
+// preservation action; its message names the follow-up apply.
+type unownedInvalidConfig struct{ text, message, retry string }
+
+func (err unownedInvalidConfig) Error() string { return err.text }
+func (err unownedInvalidConfig) ActivationDiagnostic() (string, string) {
+	return err.message, err.retry
+}
+
 func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
 	if file.ownedFormat == "" {
 		return runtime.writeGuestFile(ctx, file.destination, payload)
@@ -571,7 +589,11 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 			if domain.SafeName(runtime.Yard.YardName) {
 				repair = "yard -Y " + runtime.Yard.YardName + " config apply"
 			}
-			return fmt.Errorf("unowned invalid configuration preserved; next: run %s; then run %s", preserve, repair)
+			return unownedInvalidConfig{
+				text:    fmt.Sprintf("unowned invalid configuration preserved; next: run %s; then run %s", preserve, repair),
+				message: fmt.Sprintf("unowned invalid configuration at %q preserved; after the next command, run %s", file.destination, repair),
+				retry:   preserve,
+			}
 		}
 		return errors.New("structured configuration apply failed")
 	}
