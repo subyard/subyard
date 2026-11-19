@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
@@ -413,40 +414,48 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 	causes := []error{}
 	for _, conflict := range report.Conflicts {
 		message, retry := "", shellquote.Command([]string{"yard", "-Y", yard, "init"})
-		// An overlap names the other mapped path, which is shown quoted.
-		if conflict.Reason != "persist paths overlap" || !filepath.IsAbs(conflict.Detail) || !utf8.ValidString(conflict.Detail) {
-			conflict.Detail = persistDetail(conflict.Detail)
+		// Guest paths are shown quoted only once they pass the path check.
+		at := "an unrecognized path"
+		if persistPath(conflict.Path) {
+			at = fmt.Sprintf("%q", conflict.Path)
 		}
+		other := "an unrecognized path"
+		if conflict.Reason == "persist paths overlap" && persistPath(conflict.Detail) && conflict.Detail != "" {
+			other = fmt.Sprintf("%q", conflict.Detail)
+		} else if detail := persistDetail(conflict.Detail); conflict.Reason == "persist target filesystem" && detail == conflict.Detail && detail != "" {
+			other = fmt.Sprintf("%q", detail)
+		}
+		conflict.Detail = persistDetail(conflict.Detail)
 		conflict.Integration = runtime.declaredOwner(conflict.Integration)
 		switch conflict.Reason {
 		case "persist adoption pending":
-			message = fmt.Sprintf("persist adoption of %q in yard %s is pending: release activation does not start data transfers; data was preserved", conflict.Path, yard)
+			message = fmt.Sprintf("persist adoption of %s in yard %s is pending: release activation does not start data transfers; data was preserved", at, yard)
 		case "unsafe persist data", "unsupported persist entry", "unsafe persist target", "session mount is unavailable":
-			message = fmt.Sprintf("persist transfer in yard %s: %s at %q; data was preserved. Inspect it, then repeat yard init", yard, conflict.Reason, conflict.Path)
+			message = fmt.Sprintf("persist transfer in yard %s: %s at %s; data was preserved. Inspect it, then repeat yard init", yard, conflict.Reason, at)
 			if conflict.Detail != "" {
-				message = fmt.Sprintf("persist transfer in yard %s: %s at %q (%s); data was preserved. Inspect it, then repeat yard init", yard, conflict.Reason, conflict.Path, conflict.Detail)
+				message = fmt.Sprintf("persist transfer in yard %s: %s at %s (%s); data was preserved. Inspect it, then repeat yard init", yard, conflict.Reason, at, conflict.Detail)
 			}
 			retry = inspect(conflict.Path)
 		case "persist target entry refused":
-			message = fmt.Sprintf("persist transfer in yard %s: the target refused %q (%s); nothing was exchanged and the source directory is unchanged. Fix the target permissions or free space, then repeat yard init", yard, conflict.Path, conflict.Detail)
+			message = fmt.Sprintf("persist transfer in yard %s: the target refused %s (%s); nothing was exchanged and the source directory is unchanged. Fix the target permissions or free space, then repeat yard init", yard, at, conflict.Detail)
 			retry = inspect(conflict.Path[:strings.LastIndex(conflict.Path, "/")+1])
 		case "persist mount boundary":
-			message = fmt.Sprintf("persist transfer in yard %s: %q is a mount point inside persist data; nothing below it was copied or removed. Unmount or move it, then repeat", yard, conflict.Path)
+			message = fmt.Sprintf("persist transfer in yard %s: %s is a mount point inside persist data; nothing below it was copied or removed. Unmount or move it, then repeat", yard, at)
 			retry = shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "findmnt", "--target", conflict.Path})
 		case "persist filesystem error":
-			message = fmt.Sprintf("persist transfer in yard %s: filesystem error at %q (%s); data was preserved. Inspect it, then repeat yard init", yard, conflict.Path, conflict.Detail)
+			message = fmt.Sprintf("persist transfer in yard %s: filesystem error at %s (%s); data was preserved. Inspect it, then repeat yard init", yard, at, conflict.Detail)
 			retry = inspect(conflict.Path)
 			if conflict.Path == "" {
 				retry = status
 			}
 		case "persist paths overlap", "persist target filesystem":
-			message = fmt.Sprintf("persist mapping in yard %s: %s for %q and %q; data was preserved. Correct the persist mapping, then repeat yard init", yard, conflict.Reason, conflict.Path, conflict.Detail)
+			message = fmt.Sprintf("persist mapping in yard %s: %s for %s and %s; data was preserved. Correct the persist mapping, then repeat yard init", yard, conflict.Reason, at, other)
 			retry = shellquote.Command([]string{"yard", "-Y", yard, "config", "show", "AGENT_" + conflict.Integration + "_PERSIST"})
 			if conflict.Integration == "" {
 				retry = status
 			}
 		case "persist space unavailable":
-			message = fmt.Sprintf("persist transfer in yard %s: not enough space for %q (%s); data was preserved. Free space on the sessions volume, then repeat yard init", yard, conflict.Path, conflict.Detail)
+			message = fmt.Sprintf("persist transfer in yard %s: not enough space for %s (%s); data was preserved. Free space on the sessions volume, then repeat yard init", yard, at, conflict.Detail)
 			retry = shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "df", "-h", "--", conflict.Path[:strings.LastIndex(conflict.Path, "/")+1]})
 		case "atomic exchange unsupported", "no-replace rename unsupported":
 			message = fmt.Sprintf("persist transfer for %s in yard %s: %s (%s); nothing was copied. Deselect the integration to keep its data in place", conflict.Integration, yard, conflict.Reason, conflict.Detail)
@@ -456,14 +465,17 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 				retry = status
 			}
 		case "persist transfer identity unavailable":
-			message = fmt.Sprintf("persist transfer in yard %s: the transfer descriptor %q is not a complete Subyard record; data was preserved. Inspect it and move it aside, then repeat yard init", yard, conflict.Path)
+			message = fmt.Sprintf("persist transfer in yard %s: the transfer descriptor %s is not a complete Subyard record; data was preserved. Inspect it and move it aside, then repeat yard init", yard, at)
 			retry = inspect(conflict.Path)
 		case "integration plan is stale":
 			causes = append(causes, fmt.Errorf("%w: persist transfer state changed after planning", domain.ErrPlanStale))
 			continue
 		default:
 			// The guest's reason is not in this release's vocabulary.
-			message = fmt.Sprintf("persist transfer in yard %s refused (unrecognized reason) at %q; data was preserved. Inspect the pending transfers, then repeat", yard, conflict.Path)
+			message = fmt.Sprintf("persist transfer in yard %s refused (unrecognized reason) at %s; data was preserved. Inspect the pending transfers, then repeat", yard, at)
+			retry = status
+		}
+		if !persistPath(conflict.Path) {
 			retry = status
 		}
 		causes = append(causes, integrationOwnershipError{pendingConfiguration: true, message: message, retry: retry})
@@ -474,7 +486,15 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 	return domain.CollectRefusals(causes...)
 }
 
-var persistSpaceDetail = regexp.MustCompile(`^needs [0-9]{1,20} bytes plus a 1 GiB reserve; [0-9]{1,20} available$`)
+var (
+	persistSpaceDetail  = regexp.MustCompile(`^needs [0-9]{1,20} bytes plus a 1 GiB reserve; [0-9]{1,20} available$`)
+	persistUnknownErrno = regexp.MustCompile(`^Unknown error -?[0-9]{1,10}$`)
+)
+
+// persistPath accepts an empty or absolute, printable guest path.
+func persistPath(path string) bool {
+	return path == "" || len(path) <= 4096 && filepath.IsAbs(path) && utf8.ValidString(path) && !strings.ContainsFunc(path, unicode.IsControl)
+}
 
 // persistDetail keeps only the persist program's fixed details, operating
 // system error texts and exception class names; other guest text is replaced.
@@ -485,7 +505,7 @@ func persistDetail(detail string) string {
 		"must be owned by the developer and not writable by group or others":
 		return detail
 	}
-	if persistSpaceDetail.MatchString(detail) || len(detail) <= 63 && domain.SafeID(detail) {
+	if persistSpaceDetail.MatchString(detail) || persistUnknownErrno.MatchString(detail) || len(detail) <= 63 && domain.SafeID(detail) {
 		return detail
 	}
 	for code := syscall.Errno(1); code < 256; code++ {

@@ -128,7 +128,7 @@ func TestIntegrationApplyStepDiagnostics(t *testing.T) {
 		"yard -Y sample integration status second --json", "yard -Y sample integration status codex --json"
 	for _, test := range []struct{ cut, message, retry string }{
 		{"persist", "integration sample apply persist failed", sampleRetry},
-		{"inventory apply", "integration apply inventory apply failed", yardRetry},
+		{"inventory apply", "integration apply inventory update failed", yardRetry},
 		{"inventory commit", "integration apply inventory commit failed", yardRetry},
 		{"inventory capture-settings", "integration apply settings capture failed", yardRetry},
 		{"configs", "integration codex apply configs failed", codexRetry},
@@ -143,7 +143,7 @@ func TestIntegrationApplyStepDiagnostics(t *testing.T) {
 		{"verify check exit", "integration second verify in yard sample: native lifecycle did not converge", secondRetry},
 		{"capture check exit", "integration apply settings capture failed", yardRetry},
 		{"structured observe", "integration codex apply observe failed", codexRetry},
-		{"structured apply", `unowned invalid configuration at "/home/dev/.codex/settings.json" preserved; after the next command, run yard -Y sample config apply`, ""},
+		{"structured apply", `integration codex apply configs in yard sample: unowned invalid configuration at "/home/dev/.codex/settings.json" preserved; after the next command, rerun the pending release activation`, ""},
 		{"persist approval", "integration sample apply persist approval failed", sampleRetry},
 		{"persist verify drift", "integration sample verify in yard sample: native lifecycle did not converge", sampleRetry},
 		{"persist capture drift", "integration apply settings capture failed", yardRetry},
@@ -291,14 +291,17 @@ func TestOwnershipRecoveryPreservesEveryConflictBesideIt(t *testing.T) {
 	root := testkit.TempDir(t)
 	testkit.WriteFile(t, filepath.Join(root, "incus"), []byte("#!/bin/sh\nshift 5\nexec \"$@\"\n"), 0700)
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-	directory := filepath.Join(root, "home")
-	if err := os.Mkdir(directory, 0o755); err != nil {
-		t.Fatal(err)
+	// A short name keeps its basename; a name at the limit falls back to the digest.
+	for name, pattern := range map[string]string{"settings.json": "settings.json.subyard-preserved-*", strings.Repeat("x", 249) + "&copy": ".subyard-preserved-*"} {
+		t.Run(pattern, func(t *testing.T) { preserveSiblingFixture(t, name, pattern) })
 	}
-	// A name at the limit cannot take a suffix; the digest sibling still fits.
-	path := filepath.Join(directory, strings.Repeat("x", 249)+"&copy")
+}
+
+func preserveSiblingFixture(t *testing.T, name, pattern string) {
+	directory := testkit.TempDir(t)
+	path := filepath.Join(directory, name)
 	runtime := Runtime{Yard: domain.Context{YardInstanceName: "yard", IncusProject: "subyard"}}
-	command := runtime.preserveSiblingCommand(path, ".subyard-preserved-")
+	command := runtime.preserveSiblingCommand(path, "preserved")
 	for _, content := range []string{"first conflict", "second conflict", "third conflict"} {
 		testkit.WriteFile(t, path, []byte(content), 0o640)
 		if output, err := exec.Command("sh", "-c", command).CombinedOutput(); err != nil {
@@ -308,7 +311,7 @@ func TestOwnershipRecoveryPreservesEveryConflictBesideIt(t *testing.T) {
 			t.Fatalf("conflicting artifact was left in place: %v", err)
 		}
 	}
-	preserved, err := filepath.Glob(filepath.Join(directory, ".subyard-preserved-*"))
+	preserved, err := filepath.Glob(filepath.Join(directory, pattern))
 	if err != nil || len(preserved) != 3 {
 		t.Fatalf("preserved siblings: %v / %v", preserved, err)
 	}
@@ -371,17 +374,81 @@ func TestPersistRefusalRendersUnknownGuestTextAsHostText(t *testing.T) {
 		{"reason": "atomic exchange unsupported", "path": "", "detail": "Invalid argument", "integration": "private-undeclared"},
 		{"reason": "persist paths overlap", "path": "/home/dev/.claude/projects", "detail": "/home/dev/.claude/other", "integration": "private-undeclared"},
 		{"reason": "persist space unavailable", "path": "/mnt/host/agent-sessions/claude/x", "detail": "needs 10 bytes plus a 1 GiB reserve; 5 available", "integration": "claude"},
+		{"reason": "persist target entry refused", "path": "/mnt/host/agent-sessions/claude/y", "detail": "Unknown error 999", "integration": "claude"},
+		{"reason": "persist paths overlap", "path": "/home/dev/.claude/a", "detail": "private relative detail", "integration": "claude"},
+		{"reason": "unsafe persist data", "path": "private relative path", "integration": "claude"},
 	}})
 	text := runtime.persistRefusal(stderr).Error()
 	for _, want := range []string{"refused (unrecognized reason) at \"/home/dev/.claude/projects/x\"", "(unrecognized detail)", "(Permission denied)",
 		"atomic exchange unsupported (Invalid argument)", "for \"/home/dev/.claude/projects\" and \"/home/dev/.claude/other\"",
-		"(needs 10 bytes plus a 1 GiB reserve; 5 available)"} {
+		"(needs 10 bytes plus a 1 GiB reserve; 5 available)", "(Unknown error 999)",
+		"for \"/home/dev/.claude/a\" and an unrecognized path;", "unsafe persist data at an unrecognized path; data was preserved"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("refusal omitted %q: %s", want, text)
 		}
 	}
-	if strings.Contains(text, "private") || strings.Contains(text, "'disable'") || strings.Contains(text, "AGENT_") {
+	if strings.Contains(text, "private") || strings.Contains(text, "'disable'") || strings.Contains(text, "AGENT_private") || strings.Contains(text, `"unrecognized detail"`) {
 		t.Fatalf("refusal rendered undeclared guest text: %s", text)
+	}
+}
+
+func TestIntegrationPackageSourcesReportEveryUnreadableProvision(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex first second", "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex.md"),
+			"AGENT_first_PROVISION=" + filepath.Join(root, "first.sh"), "AGENT_second_PROVISION=" + filepath.Join(root, "second.sh")}}
+	bindInstructionTestPackage(t, &runtime, root, "codex")
+	reads := 0
+	_, err := runtime.integrationArtifactsWithSourceReader("apply", func(asset config.MaterializedAsset) ([]byte, error) {
+		if base := filepath.Base(asset.Source); base == "first.sh" || base == "second.sh" || base == "codex.md" {
+			reads++
+			return nil, errors.New("private unreadable " + base)
+		}
+		return asset.ReadSource()
+	})
+	var findings *domain.Refusals
+	failure := runtime.stepFailure(stepArtifacts, "", err)
+	if reads != 3 || !errors.As(failure, &findings) || len(findings.Unwrap()) != 3 {
+		t.Fatalf("reads=%d, refusals: %v", reads, failure)
+	}
+	var messages []string
+	for _, finding := range findings.Unwrap() {
+		message, _ := finding.(*stepFailure).ActivationDiagnostic()
+		messages = append(messages, message)
+	}
+	slices.Sort(messages)
+	if !slices.Equal(messages, []string{"integration codex apply artifacts failed in yard sample", "integration first apply artifacts failed in yard sample",
+		"integration second apply artifacts failed in yard sample"}) {
+		t.Fatalf("package refusals = %q", messages)
+	}
+}
+
+func TestProvisionDeclarationRefusalNamesItsIntegration(t *testing.T) {
+	runtime := Runtime{Yard: domain.Context{YardName: "sample"}, Integrations: []profile.IntegrationDefinition{},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_CHECK=bad check"}}
+	_, err := runtime.provisionAgentChecks()
+	failure := runtime.stepFailure(stepVerify, "", err)
+	message, retry := failure.(*stepFailure).ActivationDiagnostic()
+	if message != "integration sample apply verify failed in yard sample" || retry != "yard -Y sample integration status sample --json" {
+		t.Fatalf("diagnostic = %q / %q", message, retry)
+	}
+}
+
+func TestInventoryKeepsEachUnrecognizedConflict(t *testing.T) {
+	incus := runningIncus(1)
+	incus.ExecSteps[0].Result = ports.InstanceExecResult{ExitCode: 1,
+		Stderr: []byte(`{"conflicts":[{"reason":"private first","path":"/x"},{"reason":"private second","path":"/y"}]}`)}
+	incus.ExecSteps[0].Err = &ports.GuestExitError{Code: 1}
+	runtime := Runtime{RepositoryRoot: testkit.TempDir(t), Integrations: []profile.IntegrationDefinition{}, Executor: incus,
+		Yard: domain.Context{YardName: "sample", YardInstanceName: "yard", IncusProject: "subyard", DevUser: "dev", DevUID: 1000}}
+	_, err := runtime.integrationInventory(context.Background(), "apply", nil, "")
+	var findings *domain.Refusals
+	if !errors.As(err, &findings) || len(findings.Unwrap()) != 2 || strings.Contains(err.Error(), "private") || !IntegrationOwnershipConflict(err) {
+		t.Fatalf("unrecognized conflicts: %v", err)
 	}
 }
 
@@ -459,5 +526,18 @@ func TestProvisionedHookCaptureNamesEveryMissingHook(t *testing.T) {
 		if message != "integration "+owner+" apply hook capture failed in yard sample" || retry != "yard -Y sample integration status "+owner+" --json" {
 			t.Fatalf("hook capture diagnostic = %q / %q", message, retry)
 		}
+	}
+}
+
+func TestStepFailureKeepsSourceErrorsForTheBoundary(t *testing.T) {
+	source := config.Catalog{}.ValidateIntegrationInitSettings(map[string]string{"UNSUPPORTED_FIELD": "x"})
+	var typed *config.SourceError
+	if !errors.As(source, &typed) {
+		t.Fatalf("fixture is not a source error: %v", source)
+	}
+	runtime := Runtime{Yard: domain.Context{YardName: "default"}, Integrations: []profile.IntegrationDefinition{}}
+	// Unchanged, the boundary renders it with its own source diagnostic and repair retry.
+	if failure := runtime.stepFailure(stepSettings, "", source); failure != source {
+		t.Fatalf("settings capture source error was wrapped: %v", failure)
 	}
 }

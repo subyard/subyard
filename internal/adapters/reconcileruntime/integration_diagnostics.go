@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/profile"
 )
@@ -178,7 +179,7 @@ const (
 	stepArtifacts       integrationStep = "artifacts"
 	stepPersistApproval integrationStep = "persist approval"
 	stepPersist         integrationStep = "persist"
-	stepInventoryApply  integrationStep = "inventory apply"
+	stepInventoryApply  integrationStep = "inventory update"
 	stepConfigs         integrationStep = "configs"
 	stepScript          integrationStep = "script"
 	stepHookCapture     integrationStep = "hook capture"
@@ -249,8 +250,10 @@ func (runtime Runtime) stepFailure(step integrationStep, owner string, cause err
 		}
 		return domain.CollectRefusals(causes...)
 	}
+	// Source errors keep the boundary's own source rendering and repair retry.
 	var public interface{ ActivationDiagnostic() (string, string) }
-	if errors.As(cause, &public) {
+	var source *config.SourceError
+	if errors.As(cause, &public) || errors.As(cause, &source) {
 		return cause
 	}
 	var bound ownedError

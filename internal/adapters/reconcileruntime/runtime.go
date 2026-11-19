@@ -2217,7 +2217,7 @@ func (runtime Runtime) provisionAgentCommands() ([]string, error) {
 			continue
 		}
 		if !regularFile(provision) {
-			return nil, fmt.Errorf("agent %s provision hook is missing", agent)
+			return nil, owned(agent, fmt.Errorf("agent %s provision hook is missing", agent))
 		}
 		command := runtime.environmentValue("AGENT_" + agent + "_COMMAND")
 		if command == "" && safeCommand(runtime.environmentValue("AGENT_"+agent+"_CHECK")) {
@@ -2226,7 +2226,7 @@ func (runtime Runtime) provisionAgentCommands() ([]string, error) {
 			continue
 		}
 		if !safeCommand(command) {
-			return nil, fmt.Errorf("agent %s command is invalid", agent)
+			return nil, owned(agent, fmt.Errorf("agent %s command is invalid", agent))
 		}
 		commands = append(commands, command)
 	}
@@ -2241,7 +2241,7 @@ func (runtime Runtime) provisionAgentChecks() ([]string, error) {
 			continue
 		}
 		if !safeCommand(check) {
-			return nil, fmt.Errorf("agent %s check command is invalid", agent)
+			return nil, owned(agent, fmt.Errorf("agent %s check command is invalid", agent))
 		}
 		checks = append(checks, check)
 	}

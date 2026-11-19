@@ -475,9 +475,6 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 		}
 		entries = append(entries, entry)
 	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return nil, err
-	}
 	for _, link := range strings.Fields(runtime.environmentValue("INTEGRATION_HOST_LINKS")) {
 		parts := strings.Split(link, ":")
 		if len(parts) < 2 || len(parts) > 3 || !filepath.IsAbs(parts[1]) {
@@ -499,8 +496,9 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "link", Path: "/home/" + runtime.devUser() + "/" + relative, Target: parts[1], FileTarget: len(parts) == 3 && parts[2] == "file", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(parts[1])))})
 	}
+	// Package sources are read independently of the file sources.
 	packages, err := runtime.integrationPackageArtifacts(phase, reader)
-	if err != nil {
+	if err := domain.CollectRefusals(append(refusals, err)...); err != nil {
 		return nil, err
 	}
 	entries = append(entries, packages...)
@@ -539,13 +537,15 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 	if err != nil {
 		return nil, err
 	}
+	var refusals []error
 	for _, id := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
 		inputs := []string{id, runtime.devUser(), runtime.environmentValue("CODING_TOOL_INTEGRATIONS")}
 		for _, definition := range definitions {
 			if definition.Name == id {
 				binding, err := runtime.integrationPackageBindingWithSourceReader(definition, reader)
 				if err != nil {
-					return nil, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable")
+					refusals = append(refusals, runtime.integrationDiagnostic(err, definition, phase, "native-unavailable"))
+					continue
 				}
 				inputs = append(inputs, binding)
 			}
@@ -554,7 +554,8 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 		if provision != "" {
 			payload, err := (guestConfigFile{readAsset: reader}).readSourceAsset(config.MaterializedAsset{Source: provision})
 			if err != nil {
-				return nil, owned(id, err)
+				refusals = append(refusals, owned(id, err))
+				continue
 			}
 			inputs = append(inputs, fmt.Sprintf("%x", sha256.Sum256(payload)))
 			// Preserve both installed mode identities across the default change.
@@ -566,6 +567,9 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
 	}
 
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return nil, err
+	}
 	return entries, nil
 }
 
@@ -711,7 +715,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		if len(conflicts) == 0 {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
-		for _, conflict := range conflicts {
+		for index, conflict := range conflicts {
 			cause := func() error {
 				knownPath := slices.Contains(legacy, conflict.Path)
 				for _, entry := range entries {
@@ -748,7 +752,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 								}
 							}
 						}
-						retry := runtime.preserveSiblingCommand(conflict.Path, ".subyard-preserved-")
+						retry := runtime.preserveSiblingCommand(conflict.Path, "preserved")
 						if !strings.HasPrefix(conflict.Path, home+"/") {
 							retry = shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path})
 						}
@@ -759,7 +763,12 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 						}
 					}
 				}
-				return ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
+				// Each unrecognized finding stays its own host-rendered refusal.
+				message := "integration ownership conflict or unavailable evidence; managed artifacts were preserved"
+				if len(conflicts) > 1 {
+					message = fmt.Sprintf("integration ownership conflict or unavailable evidence (finding %d of %d); managed artifacts were preserved", index+1, len(conflicts))
+				}
+				return ownershipRefusal(message, result, err)
 			}()
 			causes = append(causes, cause)
 		}

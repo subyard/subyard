@@ -116,7 +116,7 @@ func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testin
 				message, retry := diagnostic.ActivationDiagnostic()
 				if !strings.Contains(message, wantDetail) || !strings.Contains(message, path) ||
 					!strings.Contains(retry, "'"+path+"'") ||
-					(strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'mv' '--backup=numbered'")) ||
+					(strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'mv' '-T' '--backup=numbered'")) ||
 					(!strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'sha256sum'")) {
 					t.Fatalf("unactionable ownership diagnostic: %s; %s", message, retry)
 				}

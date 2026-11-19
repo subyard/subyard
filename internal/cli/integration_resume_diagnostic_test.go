@@ -148,7 +148,7 @@ func TestIntegrationApplyStepRendersAtActivationBoundary(t *testing.T) {
 		yard:  "sample", phase: "integrations", action: "reconcile", command: "integration status",
 	}
 	message, retry := boundary.ActivationDiagnostic()
-	if message != "integration apply inventory apply failed in yard sample" || retry != "run yard migrate" {
+	if message != "integration apply inventory update failed in yard sample" || retry != "run yard migrate" {
 		t.Fatalf("activation diagnostic = %q / %q", message, retry)
 	}
 }
