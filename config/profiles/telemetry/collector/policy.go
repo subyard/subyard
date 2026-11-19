@@ -2,10 +2,11 @@ package collector
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"os"
 	"regexp"
 	"slices"
@@ -24,7 +25,7 @@ var capturePolicyVersion = regexp.MustCompile(`^subyard\.telemetry\.capture/v1(?
 func policyFingerprint(p Policy) string {
 	data, _ := json.Marshal(p)
 	// Bind the closed schema as well as the configurable subset.
-	return fmt.Sprintf("%s:%x", PolicyVersion, sha256.Sum256(append([]byte("otlp/closed-fields/v2\x00"), data...)))
+	return fmt.Sprintf("%s:%x", PolicyVersion, sha256.Sum256(append([]byte("otlp/closed-fields/v3\x00"), data...)))
 }
 
 type Policy struct {
@@ -42,12 +43,12 @@ var wireVocabulary = map[string][]string{
 	"provider":   strings.Fields("openai anthropic azure"),
 	"operation":  strings.Fields("chat text_completion generate_content embeddings execute_tool invoke_agent"),
 	"evidence":   strings.Fields("authenticated-header registered-resource-attribute"),
-	"tokenType":  strings.Fields("input output cacheRead cacheCreation cached_input reasoning_output total"),
+	"tokenType":  strings.Fields("input output cacheRead cacheCreation cached_input reasoning_output total cache_read cache_creation cache_creation_5m cache_creation_1h reasoning tool"),
 	"unit":       strings.Fields("1 % s ms us ns By KiBy MiBy GiBy By/s 1/s USD tokens {token} {request} {session} {line} {commit}"),
 	"scopeName":  strings.Fields("codex codex_otel codex-otel claude-code claude_code"),
 	"spanName":   strings.Fields("agent.interaction llm_request tool_execution claude_code.interaction claude_code.llm_request claude_code.tool codex.turn codex.api_request"),
-	"eventName":  strings.Fields("claude_code.user_prompt claude_code.api_request claude_code.api_error claude_code.tool_result claude_code.tool_decision codex.api_request codex.sse_event codex.user_prompt codex.tool_result codex.conversation_starts"),
-	"metricName": strings.Fields("claude_code.session.count claude_code.lines_of_code.count claude_code.pull_request.count claude_code.commit.count claude_code.cost.usage claude_code.token.usage claude_code.code_edit_tool.decision claude_code.active_time.total codex.api_request codex.api_request.duration_ms codex.turn.e2e_duration_ms codex.turn.ttft.duration_ms codex.turn.ttfm.duration_ms codex.turn.token_usage codex.turn.tool.call codex.turn.memory codex.turn.network_proxy codex.thread.started codex.conversation.turn.count codex.websocket.event codex.websocket.event.duration_ms gen_ai.client.token.usage gen_ai.client.operation.duration"),
+	"eventName":  strings.Fields("claude_code.user_prompt claude_code.api_request claude_code.api_error claude_code.tool_result claude_code.tool_decision codex.api_request codex.sse_event codex.user_prompt codex.tool_result codex.conversation_starts codex.conversation_start codex.websocket_request codex.websocket_event claude_code.session_start"),
+	"metricName": strings.Fields("claude_code.session.count claude_code.lines_of_code.count claude_code.pull_request.count claude_code.commit.count claude_code.cost.usage claude_code.token.usage claude_code.code_edit_tool.decision claude_code.active_time.total codex.api_request codex.api_request.duration_ms codex.turn.e2e_duration_ms codex.turn.ttft.duration_ms codex.turn.ttfm.duration_ms codex.turn.token_usage codex.turn.tool.call codex.turn.memory codex.turn.network_proxy codex.thread.started codex.conversation.turn.count codex.websocket.event codex.websocket.event.duration_ms gen_ai.client.token.usage gen_ai.client.operation.duration codex.turn.duration_ms codex.api_request.duration codex.turn.token.usage"),
 }
 
 var attributeRules = func() map[string]string {
@@ -58,15 +59,32 @@ var attributeRules = func() map[string]string {
 		"subyard.agent_run.id": "id", "subyard.agent_run.evidence": "evidence",
 		"gen_ai.system": "provider", "gen_ai.provider.name": "provider", "gen_ai.operation.name": "operation",
 		"event.name": "eventName", "type": "tokenType", "token_type": "tokenType",
+		"model": "label", "gen_ai.request.model": "label", "gen_ai.response.model": "label",
+		"tool_name": "label", "tool_namespace": "label", "gen_ai.tool.name": "label", "slug": "label", "app.version": "label",
+		"duration_ms": "decimal", "ttft_ms": "decimal", "cost_usd": "decimal", "success": "bool",
+		"host.id": "label", "subyard.host.id": "label", "subyard.yard.id": "label", "subyard.project.id": "label",
+		"subyard.worktree.id": "label", "subyard.task.id": "label",
 	}
 	for _, name := range sessionAttributeNames {
 		rules[name] = "id"
 	}
-	for _, name := range strings.Fields("gen_ai.usage.input_tokens gen_ai.usage.output_tokens gen_ai.usage.cache_read.input_tokens gen_ai.usage.reasoning.output_tokens prompt_tokens completion_tokens input_tokens output_tokens cached_input_tokens reasoning_output_tokens") {
+	for _, name := range strings.Fields("gen_ai.usage.input_tokens gen_ai.usage.output_tokens gen_ai.usage.cache_read.input_tokens gen_ai.usage.reasoning.output_tokens prompt_tokens completion_tokens input_tokens output_tokens cached_input_tokens reasoning_output_tokens prompt_length cache_read_tokens cache_creation_tokens cache_creation_5m_tokens cache_creation_1h_tokens cost_usd_micros input_token_count output_token_count cached_token_count cache_write_token_count reasoning_token_count tool_token_count") {
 		rules[name] = "counter"
 	}
 	return rules
 }()
+
+var ownerCursor = regexp.MustCompile(`^[0-9]{20}-[0-9a-f]{16}$`)
+
+func selectedStrings(supplied, allowed []string) []string {
+	out := make([]string, 0, len(allowed))
+	for _, value := range allowed {
+		if slices.Contains(supplied, value) {
+			out = append(out, value)
+		}
+	}
+	return out
+}
 
 func DefaultPolicy() Policy {
 	attributes := make([]string, 0, len(attributeRules))
@@ -130,9 +148,11 @@ var wireMessages = map[string]string{
 	"quantile":             "quantile:number value:number",
 }
 
-var wireFields = func() map[string]map[string]string {
-	out := make(map[string]map[string]string, len(wireMessages))
-	for kind, fields := range wireMessages {
+var wireFields = messageFields(wireMessages)
+
+func messageFields(messages map[string]string) map[string]map[string]string {
+	out := make(map[string]map[string]string, len(messages))
+	for kind, fields := range messages {
 		out[kind] = map[string]string{}
 		for _, field := range strings.Fields(fields) {
 			name, rule, _ := strings.Cut(field, ":")
@@ -140,17 +160,53 @@ var wireFields = func() map[string]map[string]string {
 		}
 	}
 	return out
+}
+
+var stateFields = func() map[string]map[string]string {
+	fields := messageFields(stateMessages)
+	maps.Copy(fields, messageFields(coreStateMessages))
+	return fields
 }()
 
+func firstRequired(rule string) []string {
+	if fields := coreStateRequired[rule]; fields != nil {
+		return fields
+	}
+	return stateRequired[rule]
+}
+
 type wirePolicy struct {
-	key         identityKey
-	id          identity
-	rekeyBinary bool
-	policy      Policy
-	removed     int64
+	filter  valueFilter
+	policy  Policy
+	removed int64
 }
 
 func (p *wirePolicy) clean(rule string, value any) (any, bool) {
+	if optional, ok := strings.CutPrefix(rule, "?"); ok {
+		if value == nil {
+			return nil, true
+		}
+		rule = optional
+	}
+	if value == nil {
+		return nil, false
+	}
+	if field, ok := strings.CutPrefix(rule, "body:"); ok {
+		return p.filter.field(bodyRules[field], value)
+	}
+	if element, ok := strings.CutPrefix(rule, "@"); ok {
+		input, ok := value.(map[string]any)
+		if !ok || len(input) > 128 {
+			return nil, false
+		}
+		out := make(map[string]any, len(input))
+		for key, child := range input {
+			if clean, valid := p.clean(element, child); valid && p.filter.id(key) {
+				out[key] = clean
+			}
+		}
+		return out, true
+	}
 	if element, repeated := strings.CutPrefix(rule, "*"); repeated {
 		input, ok := value.([]any)
 		if !ok {
@@ -166,17 +222,26 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 		}
 		return out, true
 	}
-	if fields, known := wireFields[rule]; known {
+	fields, known := wireFields[rule]
+	if !known {
+		fields, known = stateFields[rule]
+	}
+	if known {
 		input, ok := value.(map[string]any)
 		if !ok {
 			return nil, false
 		}
 		out := make(map[string]any, len(fields))
 		for name, child := range input {
-			if clean, keep := p.clean(fields[name], child); keep {
+			if clean, keep := p.clean(fields[name], child); keep && p.filter.safe(name) {
 				out[name] = clean
 			} else {
 				p.removed++
+			}
+		}
+		for _, required := range firstRequired(rule) {
+			if item, exists := out[required]; !exists || item == "" {
+				return nil, false
 			}
 		}
 		return out, true
@@ -186,29 +251,45 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 		return p.attribute(value)
 	case "number":
 		// Numeric wire fields came from the typed pdata encoder.
+		if text, ok := value.(string); ok && !p.filter.safe(text) {
+			return nil, false
+		}
 		return value, true
-	case "counter":
-		text, _ := value.(string)
-		n, err := strconv.ParseInt(text, 10, 64)
-		return value, err == nil && n >= 0
+	case "counter", "uint", "int", "time", "id", "label", "decimal":
+		if rule == "counter" {
+			rule = "uint"
+		}
+		return p.filter.field(bodyRule{kind: rule}, value)
+
 	case "bool":
 		_, ok := value.(bool)
 		return value, ok
 	}
 	s, ok := value.(string)
-	if !ok {
+	if !ok || !p.filter.safe(s) {
 		return nil, false
 	}
 	switch rule {
 	case "version":
 		return s, versionPattern.MatchString(s)
-	case "id":
-		s = p.id(s)
-		return s, s != ""
-	case "traceID":
-		return p.binaryID(s, 16)
-	case "spanID":
-		return p.binaryID(s, 8)
+	case "hex32":
+		return s, hex32.MatchString(s)
+	case "capture_version":
+		return s, s == PolicyVersion
+	case "attribute_name":
+		return s, attributeRules[s] != ""
+	case "cutover_archive":
+		return s, archiveName.MatchString(s)
+	case "reserved":
+		return s, s == "reserved"
+	case "cursor":
+		return s, s == "-" || ownerCursor.MatchString(s)
+	case "known_span_name":
+		return s, slices.Contains(wireVocabulary["spanName"], s)
+	case "known_event_name":
+		return s, slices.Contains(wireVocabulary["eventName"], s)
+	case "traceID", "spanID":
+		return s, true
 	case "spanName":
 		return s, slices.Contains(wireVocabulary[rule], s) && slices.Contains(p.policy.SpanNames, s)
 	case "eventName":
@@ -216,14 +297,6 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 	default:
 		return s, slices.Contains(wireVocabulary[rule], s)
 	}
-}
-
-func (p *wirePolicy) binaryID(value string, size int) (string, bool) {
-	if value == "" || value == strings.Repeat("0", size*2) || !p.rekeyBinary {
-		return value, true
-	}
-	sum := p.key.digest("otlp-binary-id\x00" + value)
-	return hex.EncodeToString(sum[:size]), true
 }
 
 func (p *wirePolicy) attributeRule(name string) string {
@@ -241,18 +314,42 @@ func (p *wirePolicy) attribute(value any) (any, bool) {
 		return nil, false
 	}
 	wireValue, _ := attr["value"].(map[string]any)
-	valueType := "stringValue"
+	if len(wireValue) != 1 || !p.filter.safe(name) {
+		return nil, false
+	}
+	var valueType string
+	var raw any
+	for valueType, raw = range wireValue {
+	}
+	switch rule {
+	case "counter", "decimal":
+		if valueType != "intValue" && valueType != "doubleValue" && valueType != "stringValue" {
+			return nil, false
+		}
+	case "bool":
+		if valueType != "boolValue" {
+			return nil, false
+		}
+	default:
+		if valueType != "stringValue" {
+			return nil, false
+		}
+	}
+	clean, keep := p.clean(rule, raw)
+	if !keep || clean == nil {
+		return nil, false
+	}
 	if rule == "counter" {
-		valueType = "intValue"
-	}
-	if len(wireValue) != 1 {
-		return nil, false
-	}
-	clean, keep := p.clean(rule, wireValue[valueType])
-	if !keep {
-		return nil, false
+		n := clean.(uint64)
+		if n > math.MaxInt64 {
+			return nil, false
+		}
+		clean, valueType = strconv.FormatUint(n, 10), "intValue"
+	} else if rule == "decimal" {
+		valueType = "doubleValue"
 	}
 	return map[string]any{"key": name, "value": map[string]any{valueType: clean}}, true
+
 }
 
 type otlpRequest interface {
@@ -301,10 +398,11 @@ func transformOTLP(encoding string, protobuf []byte, transform func(map[string]a
 	return output.MarshalProto()
 }
 
-func (key identityKey) sanitizeOTLP(e *Envelope, p Policy, id identity, rekeyBinary bool) ([]Envelope, error) {
-	policy := wirePolicy{key: key, id: id, policy: p, rekeyBinary: rekeyBinary}
+func sanitizeOTLP(e *Envelope, p Policy, f valueFilter) ([]Envelope, error) {
+	policy := wirePolicy{filter: f, policy: p}
 	var relations []Envelope
 	protobuf, err := transformOTLP(e.Encoding, e.Protobuf, func(body map[string]any) any {
+		f.discover(body, false)
 		clean, _ := policy.clean(e.Encoding, body)
 		if e.native {
 			relations = sessionEnvelopes(clean.(map[string]any))
@@ -314,6 +412,9 @@ func (key identityKey) sanitizeOTLP(e *Envelope, p Policy, id identity, rekeyBin
 	e.Protobuf = protobuf
 	e.PolicyVersion = policyFingerprint(p)
 	for i := range relations {
+		relations[i].OriginID = e.OriginID
+		relations[i].EventID = e.EventID + ":" + strconv.Itoa(i)
+		relations[i].ReceivedTime = e.ReceivedTime
 		relations[i].PolicyVersion = e.PolicyVersion
 	}
 	e.Redactions += policy.removed

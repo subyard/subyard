@@ -40,7 +40,7 @@ for unit in ('subyard-telemetry.service','subyard-telemetry-runs.service'):
     for path in dropins:
         parent=pathlib.Path(path).parent.name
         classes['type-wide' if parent=='service.d' else 'unit-specific' if parent==unit+'.d' else 'other']+=1
-    command='/usr/bin/setpriv --no-new-privs '+('/usr/bin/python3 -B /usr/local/lib/subyard-telemetry/launcher.py manager --data-dir /var/lib/subyard/telemetry --delegate' if manager else '/usr/local/lib/subyard-telemetry/subyard-telemetry serve --data-dir /var/lib/subyard/telemetry --listen 127.0.0.1:14318 --auth-file /var/lib/subyard/telemetry/auth.token')
+    command='/usr/bin/setpriv --no-new-privs '+('/usr/bin/python3 -B /usr/local/lib/subyard-telemetry/launcher.py manager --data-dir /var/lib/subyard/telemetry --delegate' if manager else '/usr/local/lib/subyard-telemetry/subyard-telemetry serve --data-dir /var/lib/subyard/telemetry --listen 127.0.0.1:14318 --auth-file /var/lib/subyard/telemetry-private/auth.token')
     start=fields.get('ExecStart','')
     path=command.split()[0]
     expected={'User':user,'Group':gid,'Type':'simple','KillMode':'process' if manager else 'control-group',
@@ -184,15 +184,13 @@ with closing(sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro',uri
 assert retained>=run['records_before']>0,'disable lost history'
 (state/'release').touch(mode=0o600)
 deadline=time.monotonic()+40
-sys.path.insert(0,'/usr/local/lib/subyard-telemetry')
-import records
 while time.monotonic()<deadline:
     final=[]
     for path in (data/'spool').glob('*'):
         for frame in path.read_bytes().split(b'\\n')[1:-1]:
-            record=json.loads(frame)['record']
+            record=json.loads(frame)
             body=record.get('body',{})
-            if record.get('kind')=='sample' and body.get('object_id')==records.opaque_id(records.identity_key(data),run['agent_run_id']+':scope') and body.get('final'):
+            if record.get('kind')=='sample' and body.get('object_id')==run['agent_run_id']+':scope' and body.get('final'):
                 final.append(body)
     if (state/'done').is_file() and not (data/'runs-v5'/(run['agent_run_id']+'.json')).exists() and final:
         assert final[-1]['populated'] is False
@@ -386,7 +384,7 @@ spec.loader.exec_module(failure_evidence)
 output=io.StringIO()
 secrets=('local-fixture-only',)
 try:
-    secrets+=(pathlib.Path('/var/lib/subyard/telemetry/auth.token').read_text().strip(),)
+    secrets+=(pathlib.Path('/var/lib/subyard/telemetry-private/auth.token').read_text().strip(),)
     membership=pathlib.Path('/proc/self/cgroup').read_text().strip().split('::',1)[1]
     delegated=pathlib.Path('/sys/fs/cgroup')/membership.lstrip('/')
     assert delegated.name=='caller'

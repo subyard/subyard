@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +23,29 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric/pmetricotlp"
 	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("SUBYARD_TELEMETRY_TEST_CLI") == "1" {
+		if err := RunCLI(os.Args[1:], nil); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func pythonCollectorCommand(t *testing.T, code string, args ...string) *exec.Cmd {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", append([]string{"-B", "-c", code}, args...)...)
+	cmd.Env = append(os.Environ(), "SUBYARD_TELEMETRY_COLLECTOR="+binary,
+		"SUBYARD_TELEMETRY_TEST_CLI=1", "GORACE=atexit_sleep_ms=0")
+	return cmd
+}
 
 func fixtureStore(t *testing.T) *Store {
 	t.Helper()
@@ -79,6 +103,18 @@ func TestStoreAtomicReplayAndIdenticalEvents(t *testing.T) {
 	}
 	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("replay identity: %d %v", count, err)
+	}
+	if destination.RegisteredRun(ctx, "run-one") {
+		t.Fatal("foreign replay registered a local run")
+	}
+	if err := destination.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": "run-one", "project_id": "local"})}); err != nil {
+		t.Fatal(err)
+	}
+	if !destination.RegisteredRun(ctx, "run-one") {
+		t.Fatal("local run registration was refused after foreign replay")
+	}
+	if err := destination.db.QueryRow("SELECT count(*) FROM runs WHERE agent_run_id='run-one'").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("identical run IDs across origins merged: %d (%v)", count, err)
 	}
 }
 func TestStorageFailureAndRestart(t *testing.T) {
@@ -154,7 +190,7 @@ func TestOTLPSanitizationPreservesMetricKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: proto}
-	if _, err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
+	if _, err = sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(e.Protobuf, []byte("fixture-private")) {
@@ -190,7 +226,7 @@ func TestTraceLinksAndPolicy(t *testing.T) {
 	}
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/traces", Protobuf: raw}
-	if _, err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
+	if _, err = sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(e.Protobuf, []byte("fixture-private")) {
@@ -221,7 +257,7 @@ func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	attrs.PutBool("gen_ai.usage.output_tokens", true)
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: raw}
-	if _, err = (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
+	if _, err = sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	clean := pmetricotlp.NewExportRequest()
@@ -254,7 +290,7 @@ func TestNonoverlappingAttribution(t *testing.T) {
 	if err := s.Ingest(ctx, rs); err != nil {
 		t.Fatal(err)
 	}
-	result, err := ShowRun(ctx, s.db, s.key.id("r"))
+	result, err := ShowRun(ctx, s.db, "r")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +356,7 @@ func TestReceiverOutageOnlyAppliesToOverlappingLocalRuns(t *testing.T) {
 		"finishes-late": 0, "overlap-confirmed-late": 1,
 	} {
 		var count int
-		if err := store.db.QueryRow("SELECT count(*) FROM gaps WHERE agent_run_id=? AND json_extract(body,'$.reason')='possible_native_loss'", store.key.id(id)).Scan(&count); err != nil || count != want {
+		if err := store.db.QueryRow("SELECT count(*) FROM gaps WHERE agent_run_id=? AND json_extract(body,'$.reason')='possible_native_loss'", id).Scan(&count); err != nil || count != want {
 			t.Errorf("run %s: outage gaps=%d, want %d (%v)", id, count, want, err)
 		}
 	}
@@ -337,7 +373,7 @@ func TestReceiverOutageOnlyAppliesToOverlappingLocalRuns(t *testing.T) {
 		refused("not_started", "2026-01-03T00:00:02Z")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow("SELECT count(*) FROM gaps WHERE agent_run_id=?", store.key.id("refused")).Scan(&count); err != nil || count != 0 {
+	if err := store.db.QueryRow("SELECT count(*) FROM gaps WHERE agent_run_id=?", "refused").Scan(&count); err != nil || count != 0 {
 		t.Fatalf("refused launch acquired an outage gap: %d (%v)", count, err)
 	}
 
@@ -422,11 +458,11 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	clean := plogotlp.NewExportRequest()
 	clean.UnmarshalProto(stored)
 	id, ok := clean.Logs().ResourceLogs().At(0).Resource().Attributes().Get("subyard.agent_run.id")
-	if !ok || id.Str() != s.key.id("pending") {
+	if !ok || id.Str() != "pending" {
 		t.Fatal("explicit run context missing")
 	}
 	var session string
-	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id=?", s.key.id("pending")).Scan(&session); err != nil || session != s.key.id("native-session") {
+	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id=?", "pending").Scan(&session); err != nil || session != "native-session" {
 		t.Fatalf("native session relation missing: %q %v", session, err)
 	}
 	resourceRequest := plogotlp.NewExportRequest()
@@ -437,7 +473,7 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	if code = post("logs", resourceBytes, token, ""); code != 200 {
 		t.Fatalf("resource-based run context HTTP %d", code)
 	}
-	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id=? AND session_id=?", s.key.id("pending"), s.key.id("resource-native-session")).Scan(&session); err != nil {
+	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id=? AND session_id=?", "pending", "resource-native-session").Scan(&session); err != nil {
 		t.Fatal("resource native session missing", err)
 	}
 	resource.Resource().Attributes().PutStr("subyard.agent_run.id", "not-yet-registered")

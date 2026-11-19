@@ -3,11 +3,12 @@ package collector
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,11 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 	"golang.org/x/sys/unix"
 )
+
+func fixtureSpoolStream(run string) string {
+	digest := sha256.Sum256([]byte(run))
+	return hex.EncodeToString(digest[:16])
+}
 
 func TestUnorderedLifecycleProjection(t *testing.T) {
 	ctx := context.Background()
@@ -76,7 +82,7 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 				check := func(query, id string, expected map[string]string) {
 					t.Helper()
 					var raw, at string
-					if err := s.db.QueryRow(query, s.key.id(id)).Scan(&raw, &at); err != nil {
+					if err := s.db.QueryRow(query, id).Scan(&raw, &at); err != nil {
 						t.Fatal(err)
 					}
 					body, err := decodeBody([]byte(raw))
@@ -92,14 +98,14 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 						t.Errorf("source time rolled back: %s", at)
 					}
 				}
-				check("SELECT body,source_time FROM runs WHERE agent_run_id=?", "unordered", map[string]string{"state": "resources_complete", "agent": "other", "agent_version": "1.2.3", "project_id": s.key.id("project"), "session_id": s.key.id("session"), "parent_run_id": s.key.id("parent"), "exit_code": "7"})
+				check("SELECT body,source_time FROM runs WHERE agent_run_id=?", "unordered", map[string]string{"state": "resources_complete", "agent": "other", "agent_version": "1.2.3", "project_id": "project", "session_id": "session", "parent_run_id": "parent", "exit_code": "7"})
 				allocation := map[string]string{"state": "ended", "allocated_cpu": "4", "allocated_memory_bytes": "4096", "allocated_disk_bytes": "8192", "acquired_at": "2026-10-01T01:00:00.000000000Z", "stopped_at": "2026-10-01T02:00:00.000000000Z"}
 				check("SELECT body,source_time FROM allocations WHERE object_id=?", "vm", allocation)
 				check("SELECT body,source_time FROM objects WHERE object_id=?", "vm", allocation)
-				check("SELECT body,source_time FROM objects WHERE object_id=?", "process", map[string]string{"state": "ended", "pid": "123", "parent_object_id": s.key.id("new-parent"), "accounting": "direct"})
+				check("SELECT body,source_time FROM objects WHERE object_id=?", "process", map[string]string{"state": "ended", "pid": "123", "parent_object_id": "new-parent", "accounting": "direct"})
 				for object, want := range map[string][2]string{"vm": {"owner", "qemu-process-and-threads"}, "process": {"new-parent", "direct"}} {
 					var parent, accounting string
-					if err := s.db.QueryRow("SELECT parent_object_id,accounting FROM objects WHERE object_id=?", s.key.id(object)).Scan(&parent, &accounting); err != nil || parent != s.key.id(want[0]) || accounting != want[1] {
+					if err := s.db.QueryRow("SELECT parent_object_id,accounting FROM objects WHERE object_id=?", object).Scan(&parent, &accounting); err != nil || parent != want[0] || accounting != want[1] {
 						t.Errorf("typed %s: parent=%q accounting=%q err=%v", object, parent, accounting, err)
 					}
 				}
@@ -112,7 +118,7 @@ func TestUnorderedLifecycleProjection(t *testing.T) {
 	}
 }
 
-func TestLegacyTimestampRetry(t *testing.T) {
+func TestProducerRetryKeepsFirstTimestampAndBody(t *testing.T) {
 	for _, original := range []string{"malformed legacy timestamp", "2026-01-01T00:00:00Z"} {
 		t.Run(original, func(t *testing.T) {
 			ctx := context.Background()
@@ -131,11 +137,15 @@ func TestLegacyTimestampRetry(t *testing.T) {
 				want = unknownSourceTime
 			}
 			if err := store.db.QueryRow("SELECT count(*), min(source_time) FROM records").Scan(&count, &at); err != nil || count != 1 || at != want {
-				t.Fatalf("outbox retry count=%d, time=%s, err=%v", count, at, err)
+				t.Fatalf("retry count=%d, time=%s, err=%v", count, at, err)
 			}
 			r.Body["reason"] = "final_tail_missing"
-			if err := store.Ingest(ctx, []Record{r}); !errors.Is(err, errEventCollision) {
-				t.Fatalf("retry with changed body should collide: %v", err)
+			if err := store.Ingest(ctx, []Record{r}); err != nil {
+				t.Fatal(err)
+			}
+			var reason string
+			if err := store.db.QueryRow("SELECT json_extract(body,'$.reason') FROM records WHERE event_id=?", r.EventID).Scan(&reason); err != nil || reason != "source_offline" {
+				t.Fatalf("changed retry modified the first row: %q (%v)", reason, err)
 			}
 		})
 	}
@@ -154,7 +164,7 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			first := record("gap", map[string]any{"reason": "source_offline", "agent_run_id": runID})
 			appendPython(t, s, []Record{first})
 			dir := filepath.Join(s.dir, "spool")
-			path := filepath.Join(dir, s.key.id(runID)+".open")
+			path := filepath.Join(dir, fixtureSpoolStream(runID)+".open")
 			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -199,7 +209,7 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			var recoveryGaps, attributed int
 			if err := s.db.QueryRow(`SELECT count(*),sum(agent_run_id<>'') FROM gaps
 				WHERE json_extract(body,'$.reason') IN ('spool_invalid_frame','spool_torn_tail')`).
-				Scan(&recoveryGaps, &attributed); err != nil || recoveryGaps != 2 || attributed != 0 {
+				Scan(&recoveryGaps, &attributed); err != nil || recoveryGaps != 2 || attributed != 2 {
 				t.Fatalf("recovery gaps=%d attributed=%d (%v)", recoveryGaps, attributed, err)
 			}
 			conflict := first
@@ -210,7 +220,7 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			foreign := filepath.Join(dir, s.key.id("foreign")+".open")
+			foreign := filepath.Join(dir, fixtureSpoolStream("foreign")+".open")
 			testkit.WriteFile(t, foreign, []byte("subyard-spool/99 fixture\n"), 0600)
 			if err := s.Close(); err != nil {
 				t.Fatal(err)
@@ -223,7 +233,7 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			if err = restarted.drainSpool(ctx, p); !errors.Is(err, errInvalidRecord) {
 				t.Fatalf("unknown version was not reported: %v", err)
 			}
-			assertCount(restarted, 5)
+			assertCount(restarted, 4)
 			entries, err := os.ReadDir(dir)
 			if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(foreign) {
 				t.Fatalf("only foreign spool evidence should remain: %v (%v)", entries, err)
@@ -234,41 +244,26 @@ func TestSpoolRecoveryAcrossCommitAndUnlink(t *testing.T) {
 			}
 			if unlinked {
 				const producer = `
-import hashlib, os, pathlib, sys
+import sys
 sys.path.insert(0, '..')
 import records
-root = pathlib.Path(sys.argv[1])
-if sys.argv[2] == 'legacy':
-    at = records.timestamp(records.now())
-    stream = records.opaque_id(records.identity_key(root), 'forged-run')
-    data = records.compact_json(dict(revision=1, count=1, id='a'*32, stream=stream, first=at, last=at))
-    slot = (hashlib.sha256(data).hexdigest().encode()+b' '+data).ljust(records.MARKER_SLOT, b'\0')
-    with (root/'spool-loss').open('r+b') as marker:
-        os.pwrite(marker.fileno(), slot, records.MARKER_SLOT)
-    sys.exit()
 records.MAX_RECORDS = 0
 for _ in range(2):
-    assert not records.emit(root, 'run', {'agent_run_id':'quota-lost'})
+    assert not records.emit(sys.argv[1], 'run', {'agent_run_id':'quota-lost'})
 `
-				for _, mode := range []string{"legacy", "signed"} {
-					if output, err := exec.Command("python3", "-B", "-c", producer, restarted.dir, mode).CombinedOutput(); err != nil {
-						t.Fatalf("write reserved loss marker: %v\n%s", err, output)
-					}
-					for range 2 {
-						if err := restarted.drainSpool(ctx, p); !errors.Is(err, errInvalidRecord) {
-							t.Fatalf("marker drain next to foreign stream: %v", err)
-						}
+				if output, err := pythonCollectorCommand(t, producer, restarted.dir).CombinedOutput(); err != nil {
+					t.Fatalf("write reserved loss marker: %v\n%s", err, output)
+				}
+				for range 2 {
+					if err := restarted.drainSpool(ctx, p); !errors.Is(err, errInvalidRecord) {
+						t.Fatalf("marker drain next to foreign stream: %v", err)
 					}
 				}
 				var count, missing int
 				if err := restarted.db.QueryRow(`SELECT count(*),sum(json_extract(body,'$.missing')) FROM gaps
-					WHERE agent_run_id=? AND json_extract(body,'$.reason')='producer_spool_capacity'`, restarted.key.id("quota-lost")).
+					WHERE agent_run_id='quota-lost' AND json_extract(body,'$.reason')='producer_spool_capacity'`).
 					Scan(&count, &missing); err != nil || count != 1 || missing != 2 {
 					t.Fatalf("marker-only recovery: gaps=%d losses=%d (%v)", count, missing, err)
-				}
-				if err := restarted.db.QueryRow(`SELECT count(*) FROM gaps WHERE agent_run_id=''
-					AND json_extract(body,'$.reason')='producer_spool_capacity'`).Scan(&count); err != nil || count != 1 {
-					t.Fatalf("unsigned marker did not recover without attribution: %d (%v)", count, err)
 				}
 			}
 		})
@@ -292,7 +287,7 @@ func TestServeDrainsSealedSpoolAndStopsWithDirectoryLocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer lock.Close()
-	authFile := filepath.Join(s.dir, "auth.token")
+	authFile := filepath.Join(testkit.TempDir(t), "auth.token")
 	testkit.WriteFile(t, authFile, []byte(strings.Repeat("a", 32)), 0600)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -326,7 +321,7 @@ func TestServeDrainsSealedSpoolAndStopsWithDirectoryLocked(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stalled producer blocked collector shutdown")
 	}
-	if _, err := os.Stat(filepath.Join(spool, s.key.id("busy")+".open")); err != nil {
+	if _, err := os.Stat(filepath.Join(spool, fixtureSpoolStream("busy")+".open")); err != nil {
 		t.Fatalf("busy segment was not retained: %v", err)
 	}
 }

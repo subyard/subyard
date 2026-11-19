@@ -44,11 +44,8 @@ for index in range(6):
                      (marker[:records.MARKER_SLOT], marker[records.MARKER_SLOT:])]
             loss = max(slots, key=lambda slot: slot['revision'])
             self.assertEqual(loss['count'], 2)
-            self.assertEqual(loss['stream'], records.opaque_id(records.identity_key(root), 'overflow'))
+            self.assertEqual(loss['run'], 'overflow')
             self.assertTrue(loss['first'] <= loss['last'])
-            with patch.object(records, 'identity_key', return_value=b'x'*32):
-                self.assertFalse(records.emit(root, 'run', {'agent_run_id':'overflow'}))
-            self.assertEqual((root/'spool-loss').read_bytes(), marker)
 
     def test_existing_segment_append_under_directory_contention(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
@@ -68,7 +65,7 @@ for index in range(6):
             self.assertFalse((root/'spool').exists())
             prepare(root)
             value = records.read_private(root/'spool-policy.json')
-            records.atomic_json(root/'spool-policy.json', dict(value, signature='invalid'))
+            records.atomic_json(root/'spool-policy.json', dict(value, policy_version='unsupported'))
             self.assertFalse(records.emit(root, 'gap', {}))
             records.atomic_json(root/'spool-policy.json', value)
             self.assertTrue(records.emit(root, 'gap', {'reason':'private reason', 'text': 'private'}))

@@ -26,16 +26,22 @@ DEFAULT_DATA_DIR = '/var/lib/subyard/telemetry'
 MAX_RUNS = 4096
 MAX_RUN_BYTES = 16*1024*1024
 MAX_RUN_PAYLOAD = 16384
-OBSERVER_FIELDS = (
-    'agent_run_id', 'boot_id', 'pid', 'start_ticks', 'shared',
-    'cgroup', 'cgroup_identity', 'scope_root', 'scope_root_identity',
-    'parent_scope_id', 'scope_start_time', 'scope_baselines',
-)
+RUN_ID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}')
+
+
+def manifest_path(root, identity):
+    if not isinstance(identity, str) or not RUN_ID.fullmatch(identity):
+        raise ValueError('invalid run identity')
+    return root/(identity+'.json')
 
 
 @contextlib.contextmanager
 def manifest_lock(root):
-    fd = os.open(root/'.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fd = os.open(root/'.lock', os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+    except FileExistsError:
+        fd = os.open(root/'.lock', os.O_RDWR | os.O_NOFOLLOW)
     with os.fdopen(fd, 'rb') as lock:
         info = os.fstat(lock.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
@@ -57,18 +63,16 @@ def admit_manifest(data_dir, run, reserve=False):
     try:
         directory = records.private_directory(data_dir)
         root = records.private_directory(directory/RUNS)
-        identity = run['agent_run_id']
-        if not records.IDENTITY.fullmatch(identity):
-            raise ValueError('invalid run identity')
         if reserve:
-            value = {field: run[field] for field in ('agent_run_id', 'boot_id') if field in run}
-            value.update(manifest_state='reserved', launcher_pid=os.getpid(),
-                         launcher_start_ticks=processes.start_ticks(os.getpid()))
+            value = records.sanitize_state('reservation', {
+                **run, 'manifest_state': 'reserved', 'launcher_pid': os.getpid(),
+                'launcher_start_ticks': processes.start_ticks(os.getpid()),
+            })
         else:
             value = observer_manifest(run)
+        path = manifest_path(root, value['agent_run_id'])
         size = len(records.compact_json(value))+1
         with manifest_lock(root):
-            path = root/(identity+'.json')
             if size > MAX_RUN_PAYLOAD or path.exists() or path.is_symlink():
                 return False
             count = total = 0
@@ -101,14 +105,14 @@ def admit_manifest(data_dir, run, reserve=False):
 
 def finish_manifest(data_dir, run):
     root = records.private_directory(Path(data_dir)/RUNS)
+    value = observer_manifest(run)
+    if len(records.compact_json(value))+1 > MAX_RUN_PAYLOAD:
+        raise ValueError('run payload limit')
     with manifest_lock(root):
-        path = root/(run['agent_run_id']+'.json')
+        path = manifest_path(root, value['agent_run_id'])
         previous = records.read_private(path)
         if not isinstance(previous, dict) or previous.get('manifest_state') != 'reserved' or previous.get('launcher_pid') != os.getpid() or previous.get('launcher_start_ticks') != processes.start_ticks(os.getpid()):
             raise ValueError('run reservation identity')
-        value = observer_manifest(run)
-        if len(records.compact_json(value))+1 > MAX_RUN_PAYLOAD:
-            raise ValueError('run payload limit')
         records.atomic_json(path, value)
 
 
@@ -116,7 +120,7 @@ def discard_reservation(data_dir, run):
     try:
         root = records.private_directory(Path(data_dir)/RUNS)
         with manifest_lock(root):
-            path = root/(run['agent_run_id']+'.json')
+            path = manifest_path(root, run['agent_run_id'])
             previous = records.read_private(path)
             if isinstance(previous, dict) and previous.get('manifest_state') == 'reserved' and previous.get('launcher_pid') == os.getpid() and previous.get('launcher_start_ticks') == processes.start_ticks(os.getpid()):
                 path.unlink()
@@ -136,11 +140,16 @@ def host_id():
 
 
 def observer_manifest(run):
-    value = {field: run[field] for field in OBSERVER_FIELDS if field in run}
-    value['host_id'] = host_id()
+    value = {**run, 'host_id': host_id()}
     if 'scope_baselines' in value:
-        value['scope_baselines'] = [{**entry, 'body': {**entry['body'], 'host_id': value['host_id']}}
-                                    for entry in value['scope_baselines']]
+        value['scope_baselines'] = [
+            {**entry, 'body': {**entry['body'], 'host_id': value['host_id']}}
+            for entry in value['scope_baselines']
+        ]
+    value = records.sanitize_state('run_manifest', value)
+    if any(run.get(field) and value.get(field) != run[field] for field in
+           ('cgroup', 'cgroup_identity', 'scope_root', 'scope_root_identity')):
+        raise ValueError('invalid scope state')
     return value
 
 
@@ -152,9 +161,6 @@ def context(args, environ):
               'worktree_id': args.worktree_id or environ.get('SUBYARD_WORKTREE_ID'),
               'yard_id': args.yard_id or environ.get('SUBYARD_YARD_NAME'),
               'host_id': args.host_id or environ.get('SUBYARD_HOST_ID') or host_id(), 'boot_id': boot_id()}
-    for name, value in result.items():
-        if value is not None and (len(value) > 128 or not records.IDENTITY.fullmatch(value)):
-            raise ValueError('invalid '+name)
     return result
 
 
@@ -190,8 +196,8 @@ def environment(data_dir, run, environ):
 
 def scope_parent(data_dir, run, root, proc=Path('/proc'), cgroups=Path('/sys/fs/cgroup')):
     candidates = processes.delegated_parents(proc, cgroups)
-    if run.get('parent_run_id'):
-        path = Path(data_dir)/RUNS/(run['parent_run_id']+'.json')
+    if RUN_ID.fullmatch(run.get('parent_run_id') or ''):
+        path = manifest_path(Path(data_dir)/RUNS, run['parent_run_id'])
         try:
             previous = records.read_private(path)
             if previous.get('cgroup') and previous['boot_id'] == run['boot_id']:
@@ -302,7 +308,7 @@ def enable_delegation(data_dir):
     identity = processes.process(os.getpid())
     info = root.stat()
     records.atomic_json(Path(data_dir)/'delegation.json', {'path': str(root), 'identity': [info.st_dev, info.st_ino],
-                        'pid': os.getpid(), 'start_ticks': identity['start_ticks'], 'boot_id': boot_id()})
+                        'pid': os.getpid(), 'start_ticks': identity['start_ticks'], 'boot_id': boot_id()}, family='delegation')
 
 
 def removed_scope(run):
@@ -500,7 +506,9 @@ def launch(args):
         except (OSError, subprocess.SubprocessError):
             pass
     run['start_time'] = records.now()
-    registered = records.emit(data_dir, 'run', {**run, 'state': 'starting'})
+    registered = records.emit(data_dir, 'run', {**run, 'state': 'starting',
+        'environment': {name: value for name, value in os.environ.items() if len(value) <= 4096},
+        'command_line': command})
     if not registered and args.scope_mode == 'require':
         return 2
     tracked = registered and admit_manifest(data_dir, run, reserve=True)

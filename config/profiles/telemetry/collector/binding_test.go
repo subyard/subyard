@@ -51,7 +51,7 @@ func TestVerifiedResourceContextsAcrossSignals(t *testing.T) {
 	wanted := map[string]string{}
 	for _, label := range []string{"a", "b"} {
 		for _, signal := range []string{"logs", "metrics", "traces"} {
-			wanted[s.key.id("session-"+label+"-"+signal)] = s.key.id("run-" + label)
+			wanted["session-"+label+"-"+signal] = "run-" + label
 		}
 	}
 	count := 0
@@ -139,7 +139,7 @@ func TestRetentionKeepsHeldOfflineResponsibility(t *testing.T) {
 	if samples != 0 {
 		t.Fatal("old high-volume samples not pruned")
 	}
-	result, err := ShowRun(ctx, s.db, s.key.id("old-run"))
+	result, err := ShowRun(ctx, s.db, "old-run")
 	if err != nil {
 		t.Fatal(err)
 	}

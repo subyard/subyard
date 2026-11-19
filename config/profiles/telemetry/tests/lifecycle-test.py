@@ -50,8 +50,8 @@ class LifecycleTest(unittest.TestCase):
                 return pread(fd, size, offset)
 
             with patch.object(guest.os, 'pread', side_effect=replace_path):
-                self.assertTrue(runtime.cutover_receipt())
-            receipt = json.loads((runtime.data/guest.CUTOVER).read_bytes())
+                receipt = runtime.cutover_receipt()
+            self.assertTrue(receipt)
             self.assertEqual((receipt['device'], receipt['inode']), (original.st_dev, original.st_ino))
             self.assertNotEqual(database.stat().st_ino, receipt['inode'])
 
@@ -80,8 +80,8 @@ class LifecycleTest(unittest.TestCase):
                 copy(source, target)
 
             with patch.object(guest.shutil, 'copyfileobj', side_effect=replace_path):
-                self.assertTrue(runtime.cutover_receipt())
-            receipt = json.loads((runtime.data/guest.CUTOVER).read_bytes())
+                receipt = runtime.cutover_receipt()
+            self.assertTrue(receipt)
             self.assertEqual(receipt['archive'], 'archive-2')
 
     def test_installed_cutover_preserves_workloads_and_resumes(self):
@@ -93,8 +93,8 @@ class LifecycleTest(unittest.TestCase):
             shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
             binary = source/'subyard-telemetry'
-            subprocess.run(['go', 'build', '-o', binary, './config/profiles/telemetry/cmd/telemetry'],
-                           cwd=profile.parents[2], check=True, timeout=90)
+            shutil.copyfile(records.collector_binary(), binary)
+            binary.chmod(0o755)
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             runtime = guest.Runtime(source, 'dev', True, [], root/'control', root/'data',
                                     root/'library', root/'units', root/'bin', account)
@@ -139,18 +139,13 @@ root = pathlib.Path(sys.argv[1])
 (root/'manager.lock').touch(mode=0o600)
 with contextlib.closing(sqlite3.connect(root/'telemetry.sqlite')) as db:
     db.execute("PRAGMA user_version=4")
-    db.execute("INSERT INTO runs VALUES('legacy-run','{}','')")
-    db.execute("INSERT INTO runs VALUES('unreadable-run','{}','')")
+    db.execute('DROP TABLE runs')
+    db.execute('CREATE TABLE runs(agent_run_id TEXT PRIMARY KEY, body TEXT, source_time TEXT)')
+    db.execute("INSERT INTO runs VALUES(?,?,'')", ('legacy-run', json.dumps({'state': 'running'})))
     db.commit()
 for path, value in (
     ('runs/legacy-run.json', dict(agent_run_id='legacy-run', pid=2147483647,
         boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip())),
-    ('runs-v4/recoverable-run.json', dict(agent_run_id='recoverable-run', pid=2147483646,
-        boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip())),
-    ('runs/health', dict(event_id='legacy-coverage', count=3,
-         first_time='2026-01-01T01:00:00Z', last_time='2026-01-01T02:00:00Z')),
-    ('producer-health.json', dict(event_id='producer-coverage', count=2,
-         first_time='2026-01-02T01:00:00Z', last_time='2026-01-02T02:00:00Z')),
     ('outbox/.valid.json', dict(schema_version=1, event_id='.valid', source_id='old-producer',
          source_version='1', kind='gap', body=dict(reason='source_offline'))),
     ('outbox/.foreign.json', dict(schema_version=1, event_id='wrong-name', source_id='old-producer',
@@ -159,13 +154,11 @@ for path, value in (
     target = root/path
     target.write_text(json.dumps(value))
     target.chmod(0o600)
-for path in ('runs/unreadable-run.json', 'runs-v4/observer-health'):
-    target = root/path
-    target.parent.mkdir(mode=0o700, exist_ok=True)
-    target.write_text('{')
-    target.chmod(0o600)
-for path in ('runs-v4/recoverable-run.json', 'producer-health.json'):
-    (root/path).chmod(0)
+(root/'producer-health.json').touch(mode=0)
+(root/'sources').mkdir(mode=0o700)
+(root/'sources/observer-old.json').write_text('historical operational state')
+(root/'auth.token').write_text('a'*64+chr(10))
+(root/'auth.token').chmod(0o600)
 '''
             subprocess.run(dev(sys.executable, '-Bc', initialization, data), check=True, timeout=5)
             children.callback(lambda: runtime.as_developer(lambda: ((data/'runs').chmod(0o700), (data/'runs-v4').chmod(0o700), (data/'outbox').chmod(0o700))))
@@ -205,7 +198,7 @@ print('descendant', flush=True)
 sys.stdin.read()
 token = open(sys.argv[1]).read().strip()
 req = urllib.request.Request('http://'+sys.argv[2]+'/v1/logs', b'{}',
-    headers={'Content-Type':'application/json','Authorization':'Bearer '+token, 'x-subyard-agent-run-id':'legacy-run'})
+    headers={'Content-Type':'application/json','Authorization':'Bearer '+token})
 for _ in range(60):
     try:
         with urllib.request.urlopen(req, timeout=.5) as response:
@@ -214,7 +207,7 @@ for _ in range(60):
     except OSError:
         time.sleep(.1)
 '''
-            workload = child(sys.executable, '-Bc', descendant, data/'auth.token', address)
+            workload = child(sys.executable, '-Bc', descendant, runtime.auth, address)
             self.assertTrue(select.select([workload.stdout], [], [], 5)[0])
             self.assertEqual(workload.stdout.readline(), b'descendant\n')
             self.assertEqual(workload.wait(timeout=5), 0)
@@ -238,7 +231,7 @@ for _ in range(60):
                         collector = None
                     if action == 'enable' and unit == guest.COLLECTOR and collector is None:
                         collector = child(runtime.library/'subyard-telemetry', 'serve', '--data-dir', data,
-                                          '--listen', address, '--auth-file', data/'auth.token')
+                                          '--listen', address, '--auth-file', runtime.auth)
                 return ''
 
             runtime.manager = lambda unit: dict(LoadState='loaded', ActiveState='active' if active[unit] else 'inactive',
@@ -262,12 +255,6 @@ for _ in range(60):
                     self.assertEqual(invoked, [])
                     (collision/'foreign').unlink()
                     collision.rmdir()
-                for path in ('runs-v4/recoverable-run.json', 'producer-health.json'):
-                    with self.assertRaises(subprocess.CalledProcessError):
-                        runtime.apply()
-                    self.assertTrue((data/guest.CUTOVER).exists())
-                    self.assertFalse((data/'spool-policy.json').exists())
-                    (data/path).chmod(0o600)
                 with patch.object(runtime, 'prepare_store', side_effect=interrupt_after_prepare):
                     with self.assertRaisesRegex(RuntimeError, 'after store preparation'):
                         runtime.apply()
@@ -301,13 +288,15 @@ assert launcher.launch(args) == 0
             self.assertTrue(select.select([workload.stdout], [], [], 10)[0])
             self.assertEqual(workload.stdout.readline(), b'200\n')
             deadline = time.monotonic()+10
-            key = records.identity_key(data)
-            before_id = records.opaque_id(key, 'before-outage')
+            before_id = 'before-outage'
+            self.assertFalse((data/'auth.token').exists())
+            self.assertFalse((data/'sources/observer-old.json').exists())
+            self.assertEqual(runtime.auth.read_bytes(), b'a'*64+b'\n')
             with closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
                 while True:
                     reason = "json_extract(body,'$.reason')"
                     count, = db.execute(f"SELECT count(*) FROM gaps WHERE {reason}='possible_native_loss' AND agent_run_id=?",
-                                        (records.opaque_id(key, offline_id),)).fetchone()
+                                        (offline_id,)).fetchone()
                     done = db.execute("SELECT 1 FROM runs WHERE agent_run_id=? AND json_extract(body,'$.end_time') IS NOT NULL",
                                       (before_id,)).fetchone()
                     if count and done:
@@ -317,41 +306,53 @@ assert launcher.launch(args) == 0
                 self.assertEqual(count, 1)
                 self.assertIsNone(db.execute(f"SELECT 1 FROM gaps WHERE {reason}='possible_native_loss' AND agent_run_id=?",
                                              (before_id,)).fetchone())
-                health = {row[0]: (row[1], row[2], row[3]) for row in db.execute(
-                    f"SELECT {reason},json_extract(body,'$.missing'),json_extract(body,'$.coverage_start'),"
-                    "json_extract(body,'$.coverage_end') FROM gaps")}
-                self.assertEqual(health['run_manifest_capacity'], (3, '2026-01-01T01:00:00.000000000Z', '2026-01-01T02:00:00.000000000Z'))
-                self.assertEqual(health['producer_outbox_capacity'], (2, '2026-01-02T01:00:00.000000000Z', '2026-01-02T02:00:00.000000000Z'))
-                self.assertIsNotNone(db.execute("SELECT 1 FROM runs WHERE agent_run_id=?",
-                                                 (records.opaque_id(key, 'recoverable-run'),)).fetchone())
-                self.assertIn('source_offline', health)
-                unreadable = db.execute(f"SELECT agent_run_id FROM gaps WHERE {reason}='legacy_history_unreadable'").fetchall()
-                self.assertCountEqual(unreadable, [('',), (records.opaque_id(key, 'unreadable-run'),)])
-                self.assertIsNone(db.execute("SELECT 1 FROM runs WHERE agent_run_id=?",
-                                              (records.opaque_id(key, 'unreadable-run'),)).fetchone())
+                self.assertEqual(db.execute("SELECT count(*) FROM runs WHERE agent_run_id='legacy-run'").fetchone(), (0,))
+                self.assertEqual(db.execute(f"SELECT count(*) FROM gaps WHERE {reason}='source_offline'").fetchone(), (0,))
             archive = data/'archive/telemetry.sqlite'
             self.assertEqual(stat.S_IMODE(archive.stat().st_mode), 0o400)
             with closing(sqlite3.connect(archive.as_uri()+'?mode=ro', uri=True)) as db:
                 self.assertCountEqual(db.execute("SELECT agent_run_id,json_extract(body,'$.reason') FROM gaps").fetchall(),
-                                      [('legacy-run', 'interrupted_by_upgrade'), ('unreadable-run', 'interrupted_by_upgrade')])
+                                      [('legacy-run', 'interrupted_by_upgrade')])
             database = data/'telemetry.sqlite'
             active_inode = database.stat().st_ino
-            snapshot = data/'spool-policy.json'
-            original = json.loads(snapshot.read_bytes())
+            producer = data/'producer.json'
+            policy = data/'spool-policy.json'
+            original_producer = json.loads(producer.read_bytes())
+            original_policy = json.loads(policy.read_bytes())
             invoked.clear()
-            with patch.object(guest, 'systemctl', side_effect=systemctl), patch.object(guest.native, 'reconcile', return_value=True):
-                for status, value in (('missing', None), ('invalid', {}), ('invalid', {**original, 'signature': '0'*64})):
-                    if value is None:
-                        snapshot.unlink()
-                    else:
-                        runtime.as_developer(lambda: records.atomic_json(snapshot, value))
-                    observed = runtime.observe()
-                    self.assertEqual(observed['state'], 'stale')
-                    self.assertIn({'parameter': 'telemetry.spool-policy', 'installed': status, 'desired': 'present'},
-                                  observed['diagnostics'])
-                    runtime.apply()
-                    self.assertEqual(runtime.observe()['state'], 'current')
-                    runtime.as_developer(lambda: self.assertTrue(records.emit(data, 'gap', {})))
+            cases = (
+                (policy, 'missing', None, None),
+                (policy, 'invalid', {}, None),
+                (policy, 'invalid', {**original_policy, 'unknown': 'excess'}, None),
+                (policy, 'invalid', {**original_policy, 'policy_version': 'unexpected'}, None),
+                (policy, 'invalid', {**original_policy, 'attributes': ['user.email']}, None),
+                (producer, 'invalid', {}, None),
+                (producer, 'invalid', {**original_producer, 'source_id': 'not-a-producer'}, None),
+                (producer, 'invalid', {**original_producer, 'origin_id': '1'*32}, None),
+                (producer, 'invalid', original_producer, 0o644),
+                (producer, 'invalid', {}, 0o600),
+            )
+            with patch.object(guest, 'systemctl', side_effect=systemctl), patch.object(guest.native, 'reconcile', return_value=True), \
+                 patch.dict(os.environ, SUBYARD_TELEMETRY_COLLECTOR=str(runtime.library/'subyard-telemetry')):
+                self.assertEqual(runtime.observe()['state'], 'current')
+                runtime.as_developer(lambda: self.assertTrue(records.emit(data, 'gap', {}, event_id='ready-before-repair')))
+                for snapshot, status, value, mode in cases:
+                    with self.subTest(file=snapshot.name, value=value, mode=mode):
+                        if value is None:
+                            snapshot.unlink()
+                        else:
+                            runtime.as_developer(lambda: records.atomic_json(snapshot, value))
+                        if mode is not None:
+                            snapshot.chmod(mode)
+                        observed = runtime.observe()
+                        self.assertEqual(observed['state'], 'stale')
+                        self.assertIn({'parameter': 'telemetry.spool-policy', 'installed': status, 'desired': 'present'},
+                                      observed['diagnostics'])
+                        runtime.as_developer(lambda: self.assertFalse(records.emit(data, 'gap', {})))
+                        runtime.apply()
+                        self.assertEqual(runtime.observe()['state'], 'current')
+                        runtime.as_developer(lambda: self.assertTrue(records.emit(data, 'gap', {})))
+                        self.assertEqual(json.loads(producer.read_bytes()), original_producer)
             self.assertEqual(database.stat().st_ino, active_inode)
             self.assertTrue((data/'spool-policy.json').is_file())
             self.assertFalse((data/guest.CUTOVER).exists())
@@ -423,6 +424,8 @@ assert launcher.launch(args) == 0
             runtime.running_no_new_privs = lambda state: True
             runtime.skill_delivery = lambda mode: True
             runtime.desired = lambda: 'a'*64
+            runtime.policy_status = lambda: 'missing'
+            runtime.token = lambda: 'a'*64
             observation = runtime.observe()
             self.assertIn({'parameter': 'telemetry.asset.collector.py', 'installed': 'changed', 'desired': 'current'}, observation['diagnostics'])
             self.assertNotIn('private observed content', str(observation))
@@ -446,6 +449,7 @@ assert launcher.launch(args) == 0
             units=Path(name)
             command='/usr/bin/setpriv --no-new-privs /usr/local/lib/subyard-telemetry/subyard-telemetry serve'
             runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},
+                data=units/'data',auth=units/'data-private/auth.token',
                 assets={units/guest.COLLECTOR:(b'known unit',0o644)})
             fields=dict(LoadState='loaded',FragmentPath=str(units/guest.COLLECTOR),User='dev',Group='1000',
                 Type='simple',KillMode='control-group',UMask='0077',LimitCORE='0',NoNewPrivileges='no',
@@ -618,6 +622,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             with patch.object(guest.pwd, 'getpwnam', return_value=account), patch.object(guest, 'systemctl', side_effect=manager), \
                  patch.object(guest.Runtime, 'prepare_store'), \
                  patch.object(guest.Runtime, 'policy_status', return_value='present'), \
+                 patch.object(guest.records, 'sanitize_state', side_effect=lambda _family, value, _binary: value), \
                  patch.object(guest.Runtime, 'skill_delivery', side_effect=skill_delivery), \
                  patch.object(guest.Runtime,'running_no_new_privs',side_effect=lambda fields: fields.get('ProcessNNP','yes')=='yes'):
                 runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', root/'units', root/'bin')
@@ -767,7 +772,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertFalse(any(call[0] == 'stop' and guest.MANAGER in call for call in calls[start:]))
                 self.assertTrue((root/'bin/subyard-telemetry-run').read_text().startswith('#!/bin/sh\n'))
                 self.assertNotIn('analytics', (root/'home/.codex/config.toml').read_text())
-                token=(root/'data/auth.token').read_bytes()
+                token=(root/'data-private/auth.token').read_bytes()
                 native_receipt=(root/'control/native.json').read_bytes()
                 target=dict(user='next',uid=runtime.uid,gid=runtime.gid,home=str(runtime.home),group='next')
                 recipe=runtime.identity_observe(target,'a'*64)
@@ -785,7 +790,7 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 for _ in range(2):runtime.identity_apply(recipe,'rebind')
                 self.assertEqual(states[guest.COLLECTOR]['ActiveState'],'inactive')
                 self.assertEqual(states[guest.MANAGER]['ActiveState'],'active')
-                self.assertEqual((root/'data/auth.token').read_bytes(),token)
+                self.assertEqual((root/'data-private/auth.token').read_bytes(),token)
                 self.assertEqual((root/'control/native.json').read_bytes(),native_receipt)
                 self.assertEqual(marker.read_bytes(),b'history')
                 runtime=runtime.identity_runtime(target)

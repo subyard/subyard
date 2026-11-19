@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,7 +35,7 @@ func TestCustomCapturePolicyAndFingerprint(t *testing.T) {
 	}
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/traces", Protobuf: raw}
-	if _, err := (identityKey{}).sanitizeOTLP(&e, p, (identityKey{}).id, true); err != nil {
+	if _, err := sanitizeOTLP(&e, p, valueFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	clean := ptraceotlp.NewExportRequest()
@@ -68,7 +67,7 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 			// A historical custom policy could authorize arbitrary text.
 			e.PolicyVersion = policyFingerprint(p)
 			if !custom {
-				if _, err := s.key.sanitizeOTLP(&e, p, s.key.id, true); err != nil {
+				if _, err := sanitizeOTLP(&e, p, valueFilter{}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -107,7 +106,7 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 			if err := json.Unmarshal(imported.Bytes(), &roundTrip); err != nil {
 				t.Fatal(err)
 			}
-			if roundTrip.OriginID != destination.key.id(original.OriginID) || roundTrip.EventID != destination.key.id(original.EventID) || roundTrip.PolicyVersion != original.PolicyVersion || roundTrip.ImportPolicyVersion != applied || bytes.Contains(imported.Bytes(), []byte("PRIVATE")) {
+			if roundTrip.OriginID != original.OriginID || roundTrip.EventID != original.EventID || roundTrip.PolicyVersion != original.PolicyVersion || roundTrip.ImportPolicyVersion != applied || bytes.Contains(imported.Bytes(), []byte("PRIVATE")) {
 				t.Fatal("export lost provenance/identity or trusted imported policy text")
 			}
 			if err := destination.Replay(ctx, bytes.NewReader(imported.Bytes())); err != nil {
@@ -117,12 +116,15 @@ func TestReplayPreservesCapturePolicyAndAppliesTrustedImportPolicy(t *testing.T)
 				t.Fatal("local export replay not idempotent", err)
 			}
 			for _, captureClaim := range []string{"PRIVATE-invalid-capture", PolicyVersion + ":" + strings.Repeat("a", 64)} {
-				collision := roundTrip
-				collision.PolicyVersion = captureClaim
-				data, _ := json.Marshal(collision)
-				if err := destination.Replay(ctx, bytes.NewReader(data)); err == nil {
-					t.Fatalf("invalid/conflicting capture claim accepted: %s", captureClaim)
+				duplicate := roundTrip
+				duplicate.PolicyVersion = captureClaim
+				data, _ := json.Marshal(duplicate)
+				if err := destination.Replay(ctx, bytes.NewReader(data)); err != nil {
+					t.Fatal("duplicate with a changed capture claim stopped replay", err)
 				}
+			}
+			if err := destination.db.QueryRow("SELECT policy_version FROM records").Scan(&capture); err != nil || capture != original.PolicyVersion {
+				t.Fatalf("duplicate changed capture provenance: %q (%v)", capture, err)
 			}
 		})
 	}
@@ -180,7 +182,7 @@ func TestReplaySanitizesSourceMetadataWithoutBlockingDelivery(t *testing.T) {
 	producer.Schema = ExportSchema
 	producer.EventID = r.EventID
 	producer.SourceID = r.SourceID
-	producer.OriginID = "producer:" + r.SourceID
+	producer.OriginID = store.OriginID()
 	producer.SourceVersion = r.SourceVersion
 	producer.Body, err = json.Marshal(r.Body)
 	if err != nil {
@@ -234,7 +236,7 @@ func TestReplayLegacyOutOfRangeTimestamps(t *testing.T) {
 	var count int
 	var sourceTime, receivedTime string
 	var redactions int
-	if err := destination.db.QueryRow("SELECT source_time, received_time, redactions FROM records WHERE event_id=?", destination.key.id(legacy.EventID)).Scan(&sourceTime, &receivedTime, &redactions); err != nil || sourceTime != unknownSourceTime || receivedTime != unknownSourceTime || redactions != 2 {
+	if err := destination.db.QueryRow("SELECT source_time, received_time, redactions FROM records WHERE event_id=?", legacy.EventID).Scan(&sourceTime, &receivedTime, &redactions); err != nil || sourceTime != unknownSourceTime || receivedTime != unknownSourceTime || redactions != 2 {
 		t.Fatalf("source time=%s, receive time=%s, redactions=%d, err=%v", sourceTime, receivedTime, redactions, err)
 	}
 	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 2 {
@@ -242,7 +244,7 @@ func TestReplayLegacyOutOfRangeTimestamps(t *testing.T) {
 	}
 }
 
-func TestReplayConflictingProducerTimestamp(t *testing.T) {
+func TestReplayKeepsOriginalProducerTimestamp(t *testing.T) {
 	ctx := context.Background()
 	store := fixtureStore(t)
 	r := record("gap", map[string]any{})
@@ -259,9 +261,13 @@ func TestReplayConflictingProducerTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.SourceTime = unknownSourceTime
-	collision, _ := json.Marshal(e)
-	if err := store.Replay(ctx, bytes.NewReader(collision)); !errors.Is(err, errEventCollision) {
-		t.Fatalf("replay accepted a changed timestamp: %v", err)
+	duplicate, _ := json.Marshal(e)
+	if err := store.Replay(ctx, bytes.NewReader(duplicate)); err != nil {
+		t.Fatal(err)
+	}
+	var sourceTime string
+	if err := store.db.QueryRow("SELECT source_time FROM records WHERE event_id=?", e.EventID).Scan(&sourceTime); err != nil || sourceTime != canonicalTimestamp(r.SourceTime) {
+		t.Fatalf("duplicate changed original timestamp: %q (%v)", sourceTime, err)
 	}
 }
 

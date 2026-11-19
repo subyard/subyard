@@ -2,7 +2,6 @@ package collector
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -15,10 +14,12 @@ import (
 
 func RunCLI(args []string, receiver ReceiverFunc) error {
 	if len(args) == 0 {
-		return errors.New("usage: subyard-telemetry prepare|serve|export|replay|show-run|stats|query [options]")
+		return errors.New("usage: subyard-telemetry prepare|serve|export|replay|show-run|stats|query|sanitize [options]")
 	}
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
+	family := f.String("family", "record", "record or state family to sanitize from stdin")
+	origin := f.String("origin", "", "store origin for show-run (defaults to local, then a unique imported run)")
 	dir := f.String("data-dir", "", "private telemetry directory")
 	listen := f.String("listen", "127.0.0.1:4318", "loopback OTLP HTTP listener")
 	auth := f.String("auth-file", "", "private bearer token file")
@@ -38,6 +39,9 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
+	if command == "sanitize" {
+		return runSanitizer(*family, os.Stdin, os.Stdout)
+	}
 	if *dir == "" {
 		return errors.New("--data-dir is required")
 	}
@@ -53,7 +57,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		limits.QueueBytes = *queue
 		limits.QueueRequests = *requests
 		limits.Retention = *retention
-		store, err := openStore(*dir, limits, policy)
+		store, err := openStore(*dir, limits)
 		if err != nil {
 			return err
 		}
@@ -91,18 +95,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		if *runID == "" {
 			return errors.New("--run is required")
 		}
-		show := ShowRun
-		if *includeChildren {
-			show = ShowRunIncludingChildren
-		}
-		result, err = show(ctx, db, *runID)
-		if errors.Is(err, sql.ErrNoRows) {
-			if key, keyErr := readIdentityKey(*dir); keyErr == nil {
-				if id := key.id(*runID); id != "" {
-					result, err = show(ctx, db, id)
-				}
-			}
-		}
+		result, err = showRunOrigin(ctx, db, *runID, *origin, *includeChildren)
 	case "stats":
 		result, err = Stats(ctx, db)
 	case "query":
@@ -114,4 +107,36 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func runSanitizer(family string, reader io.Reader, writer io.Writer) error {
+	const limit = 2 << 20
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil || len(data) > limit {
+		return errInvalidRecord
+	}
+	input, err := decodeBody(data)
+	if err != nil || !json.Valid(data) {
+		return errInvalidRecord
+	}
+	encoder := json.NewEncoder(writer)
+	if family != "record" {
+		clean, err := sanitizeState(family, input)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(clean)
+	}
+	var command struct {
+		Record Record `json:"record"`
+		Policy Policy `json:"policy"`
+	}
+	if err := json.Unmarshal(data, &command); err != nil || command.Policy.Schema != PolicyVersion {
+		return errInvalidRecord
+	}
+	clean, err := sanitizeRecord(command.Record, command.Policy, command.Record.filter)
+	if err != nil {
+		return errInvalidRecord
+	}
+	return encoder.Encode(clean)
 }

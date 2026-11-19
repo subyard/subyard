@@ -66,35 +66,106 @@ fi
 # Native signal homes are separate below; no real authorization is read.
 sudo -n python3 -B "$state/source/guest.py" apply 1 dev ''
 timeout 30 bash -c 'until test -S /var/lib/subyard/telemetry/control.sock && test -f /var/lib/subyard/telemetry/delegation.json; do sleep 0.2; done'
-python3 -B - /var/lib/subyard/telemetry http://127.0.0.1:14318 <<'PY_UNITS'
-import json, pathlib, sqlite3, sys, time, urllib.error, urllib.request
+python3 -B - /var/lib/subyard/telemetry http://127.0.0.1:14318 "$ROOT/config/profiles/telemetry" <<'PY_UNITS'
+import json, os, pathlib, sqlite3, struct, subprocess, sys, threading, time, urllib.error, urllib.request
+sys.path.insert(0, sys.argv[3])
+import forward
+
 data = pathlib.Path(sys.argv[1])
+token = (data.with_name(data.name+'-private')/'auth.token').read_text().strip()
+bearer = 'telemetry-canary-bearer'
+password = 'telemetry-canary-password'
+api_key = 'sk-proj-telemetry-canary-secret-0123456789'
+email = 'telemetry-canary@example.invalid'
+account = '6c28464d-369f-4b50-98ac-6e3b3b9a1c13'
+prompt, output = 'telemetry-canary-prompt-content', 'telemetry-canary-tool-content'
+canaries = (bearer, password, api_key, email, account, prompt, output, token)
+
+def attribute(key, value, encoding='stringValue'):
+    return dict(key=key, value={encoding: value})
+
+def send(endpoint, signal, payload, authorization):
+    request = urllib.request.Request(f'{endpoint}/v1/{signal}', data=json.dumps(payload).encode(),
+        headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+authorization, 'X-Probe-Email': email})
+    deadline = time.monotonic()+10
+    while True:
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert response.status == 200
+                response.read()
+                return
+        except urllib.error.URLError as error:
+            if isinstance(error, urllib.error.HTTPError) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+attributes = [attribute('user.email', email), attribute('user.account_id', account),
+              attribute('authorization', 'Bearer '+bearer), attribute('slug', account),
+              attribute('prompt', prompt), attribute('output', output), attribute(api_key, email)]
+session = 'e9afa75b-6243-404c-a18f-5ad572f01c54'
+logs = dict(resourceLogs=[dict(resource=dict(attributes=attributes), scopeLogs=[dict(logRecords=[
+    dict(eventName='codex.tool_result', timeUnixNano=str(time.time_ns()), severityNumber=9,
+         body=dict(stringValue=prompt), attributes=[
+             attribute('conversation.id', session), attribute('model', 'subyard-fixture-model'),
+             attribute('tool_name', 'exec_command'), attribute('tool_namespace', 'password='+password),
+             attribute('arguments', output), attribute('input_token_count', '17', 'intValue'),
+             attribute('cost_usd', 0.125, 'doubleValue')])])])])
+with forward.Server(('127.0.0.1', 0), data/'control.sock') as bridge:
+    thread = threading.Thread(target=bridge.serve_forever, daemon=True)
+    thread.start()
+    try:
+        send(f'http://127.0.0.1:{bridge.server_port}', 'logs', logs, bearer)
+    finally:
+        bridge.shutdown()
+        thread.join(timeout=5)
 metrics = [dict(name=name, unit=unit, gauge=dict(dataPoints=[dict(asInt='1')]))
            for name, unit in (('claude_code.session.count', '%'), ('codex.turn.token_usage', '{token}'))]
-request = urllib.request.Request(sys.argv[2]+'/v1/metrics',
-    data=json.dumps(dict(resourceMetrics=[dict(scopeMetrics=[dict(metrics=metrics)])])).encode(),
-    headers={'Content-Type': 'application/json', 'Authorization': 'Bearer '+(data/'auth.token').read_text().strip()})
-deadline = time.monotonic()+10
-while True:
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            assert response.status == 200
-            response.read()
-        break
-    except urllib.error.URLError as error:
-        if isinstance(error, urllib.error.HTTPError) or time.monotonic() >= deadline:
-            raise
-        time.sleep(0.1)
+metrics[0].update(description=output)
+metrics[0]['gauge']['dataPoints'][0]['attributes'] = attributes
+send(sys.argv[2], 'metrics', dict(resourceMetrics=[dict(scopeMetrics=[dict(metrics=metrics)])]), token)
+trace_id = '38e963202beb4b94b7958e79638a0e41'
+send(sys.argv[2], 'traces', dict(resourceSpans=[dict(scopeSpans=[dict(spans=[
+    dict(traceId=trace_id, spanId='52e87bd6bb2a758d', name='codex.turn', attributes=attributes,
+         startTimeUnixNano=str(time.time_ns()), endTimeUnixNano=str(time.time_ns()),
+         status=dict(code=2, message=output))])])]), token)
+environment = dict(os.environ, SUBYARD_WORKTREE_ID='password='+password, SUBYARD_HOST_ID=api_key)
+launched = subprocess.run(['subyard-telemetry-run', '--agent', 'other', '--scope-mode', 'partial',
+    '--project-id', 'telemetry-canary-project', '--yard-id', 'telemetry-canary-yard', '--task-id', email,
+    '--', '/bin/true', prompt, output], capture_output=True, env=environment, check=True, timeout=15)
+run = next(line.partition(b'=')[2].decode() for line in launched.stderr.splitlines() if line.startswith(b'agent_run_id='))
 with sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2) as db:
     db.execute('PRAGMA query_only=ON')
-    row = db.execute("SELECT protobuf FROM records WHERE encoding='otlp/metrics' ORDER BY sequence DESC LIMIT 1").fetchone()
-assert row and all(value in row[0] for value in (b'claude_code.session.count', b'codex.turn.token_usage', b'%', b'{token}'))
+    signals = {}
+    for kind in ('logs', 'metrics', 'traces'):
+        row = db.execute('SELECT protobuf FROM records WHERE encoding=? ORDER BY sequence DESC LIMIT 1', ('otlp/'+kind,)).fetchone()
+        assert row, 'installed collector did not commit a canary signal'
+        signals[kind] = row[0]
+    deadline = time.monotonic()+15
+    while True:
+        row = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (run,)).fetchone()
+        if row:
+            break
+        assert time.monotonic() < deadline, 'launcher canary did not commit'
+        time.sleep(.1)
+    run_body = json.loads(row[0])
+assert all(value in signals['metrics'] for value in (b'claude_code.session.count', b'codex.turn.token_usage', b'%', b'{token}'))
+assert all(value in signals['logs'] for value in (session.encode(), b'subyard-fixture-model', b'exec_command',
+    b'input_token_count', b'cost_usd', struct.pack('<d', .125))), 'allowed native log fields missing'
+assert bytes.fromhex(trace_id) in signals['traces'], 'raw trace ID missing'
+assert run_body['project_id'] == 'telemetry-canary-project' and run_body['yard_id'] == 'telemetry-canary-yard'
+markers = tuple(marker.encode() for marker in canaries)
+for path in data.rglob('*'):
+    try:
+        content = path.read_bytes() if path.is_file() else b''
+    except FileNotFoundError:
+        continue  # A spool segment can retire after its SQLite transaction.
+    assert not any(marker in content or marker in os.fsencode(path.name) for marker in markers), 'privacy canary persisted'
 print(json.dumps(dict(schema='subyard.telemetry.unit-acceptance/v1', percent_retained=True,
-                      token_retained=True, sqlite_commit=True)), flush=True)
+                      token_retained=True, sqlite_commit=True, installed_privacy_canary=True)), flush=True)
 PY_UNITS
 finals_diagnostic() {
   timeout --signal=TERM --kill-after=1 5 python3 -B - "$ROOT/config/profiles/telemetry" /var/lib/subyard/telemetry <<'PY_FINALS_DIAGNOSTIC' || true
-import contextlib, hashlib, json, os, pathlib, sqlite3, stat, sys
+import contextlib, hashlib, json, os, pathlib, re, sqlite3, stat, sys
 sys.path.insert(0, sys.argv[1])
 import records
 
@@ -134,7 +205,7 @@ def diagnose(data, cgroups=pathlib.Path('/sys/fs/cgroup'), proc=pathlib.Path('/p
         result['runs'].append(item)
         try:
             run = records.read_private(path)
-            if not isinstance(run, dict) or run.get('agent_run_id') != path.stem or not records.IDENTITY.fullmatch(path.stem):
+            if not isinstance(run, dict) or run.get('agent_run_id') != path.stem or not re.fullmatch(r'[0-9a-f-]{36}', path.stem):
                 continue
             item['manifest'] = 'reserved' if run.get('manifest_state') == 'reserved' else 'ready'
             try:
@@ -146,7 +217,7 @@ def diagnose(data, cgroups=pathlib.Path('/sys/fs/cgroup'), proc=pathlib.Path('/p
                 item['main_identity_present'] = False
             try:
                 with contextlib.closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=.2)) as db:
-                    row = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (records.opaque_id(records.identity_key(data), path.stem),)).fetchone()
+                    row = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (path.stem,)).fetchone()
                 body = json.loads(row[0]) if row else {}
                 state = body.get('state')
                 item['run_state'] = state if state in ('starting', 'resources_observing', 'main_exited', 'resources_complete', 'resources_unknown', 'not_started') else 'other'
@@ -258,12 +329,10 @@ fi
 subyard-telemetry-run --agent other --agent-version fixture --scope-mode require --project-id telemetry-fixture -- \
   bash config/profiles/android/tests/e2e/android-pool-runtime.sh --lane memory-budget
 wait_for_finals
-python3 -B - "$asset" "$mode" "$ROOT/config/profiles/telemetry" <<'PY'
+python3 -B - "$asset" "$mode" <<'PY'
 import hashlib, json, os, pathlib, sqlite3, subprocess, sys, time
-sys.path.insert(0, sys.argv[3])
-import records
 data = pathlib.Path('/var/lib/subyard/telemetry')
-project = records.opaque_id(records.identity_key(data), 'telemetry-fixture')
+project = 'telemetry-fixture'
 kinds = {'android'} if sys.argv[2] in ('--android', '--android-resources') else {'vm', 'android'}
 expected = {(agent, kind) for agent in ('codex', 'claude') for kind in kinds}
 output = pathlib.Path('.build/agent-telemetry/physical-examples')
@@ -274,8 +343,8 @@ with sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True) 
     while True:
         rows = db.execute('''SELECT DISTINCT runs.agent_run_id, json_extract(runs.body,'$.agent'),
               json_extract(allocations.body,'$.object_kind') FROM runs
-            JOIN relations USING(agent_run_id) JOIN associations USING(agent_run_id)
-            JOIN allocations USING(object_id)
+            JOIN relations USING(origin_id,agent_run_id) JOIN associations USING(origin_id,agent_run_id)
+            JOIN allocations USING(origin_id,object_id)
             WHERE json_extract(runs.body,'$.project_id')=?
               AND json_extract(runs.body,'$.agent') IN ('codex','claude')''', (project,)).fetchall()
         rows = [row for row in rows if row[2] in kinds]
@@ -286,7 +355,7 @@ with sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True) 
     assert len({row[0] for row in rows}) >= len(expected), 'native examples must come from distinct managed runs'
     hashes = []
     for index, (run, _agent, _kind) in enumerate(rows, 1):
-        assert db.execute("SELECT count(*) FROM objects JOIN associations USING(object_id) WHERE associations.agent_run_id=? AND objects.kind='scope' AND objects.accounting='inclusive'", (run,)).fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM objects JOIN associations USING(origin_id,object_id) WHERE associations.agent_run_id=? AND objects.kind='scope' AND objects.accounting='inclusive'", (run,)).fetchone()[0] == 1
         result = subprocess.run([sys.argv[1], 'show-run', '--data-dir', str(data), '--run', run],
                                 capture_output=True, check=True, timeout=8)
         document = json.loads(result.stdout)

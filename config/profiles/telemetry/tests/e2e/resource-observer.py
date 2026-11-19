@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -58,7 +59,7 @@ def failure_details(error):
 
 def configs(data_dir, kind):
     selected = []
-    for path in (Path(data_dir) / 'sources').glob('*.json'):
+    for path in (Path(data_dir) / 'sources').glob('observer-*.json'):
         config = records.read_private(path)
         if config['kind'] == kind:
             selected.append(config)
@@ -71,35 +72,41 @@ def wait_for_records(data, identities, timeout=15):
     with contextlib.closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
         db.execute('PRAGMA query_only=ON')
         while identities:
-            identities = {(source, event) for source, event in identities if not db.execute(
-                "SELECT 1 FROM records WHERE origin_id='producer:'||? AND source_id=? AND event_id=? AND encoding='json'",
-                (source, source, event)).fetchone()}
+            identities = {(origin, event) for origin, event in identities if not db.execute(
+                "SELECT 1 FROM records WHERE origin_id=? AND event_id=? AND encoding='json'",
+                (origin, event)).fetchone()}
             if identities:
                 require(time.monotonic()<deadline, 'collector did not commit spooled evidence')
                 time.sleep(.05)
 
 
 def spool_frames(data):
-    for path in (data/'spool').glob('*'):
-        if path.suffix not in ('.open', '.sealed'):
-            continue
-        try:
-            with path.open('rb') as segment:
-                frames = segment.read(records.SEGMENT_BYTES).split(b'\n')[1:-1]
-        except FileNotFoundError:
-            continue  # Segment may already have been retired by the collector.
-        yield from (json.loads(frame) for frame in frames)
+    spool = data/'spool'
+    if not spool.exists():
+        return
+    # The spool directory lock prevents renames between listing and opening.
+    # A sealed segment may disappear after its final transaction commits.
+    with records.directory_lock(spool, fcntl.LOCK_SH, time.monotonic()+5):
+        for path in spool.glob('*'):
+            if path.suffix not in ('.open', '.sealed'):
+                continue
+            try:
+                with path.open('rb') as segment:
+                    frames = segment.read(records.SEGMENT_BYTES).split(b'\n')[1:-1]
+            except FileNotFoundError:
+                if path.suffix != '.sealed':
+                    raise
+                continue
+            yield from (json.loads(frame) for frame in frames)
 
 
 def drain_spool(data_dir):
     data = Path(data_dir)
-    source_ids = {records.read_private(path)['source_id'] for path in (data/'sources').glob('*.json')}
+    source_ids = {records.read_private(path)['source_id'] for path in (data/'sources').glob('observer-*.json')}
     if (data/'producer.json').exists():
         source_ids.add(records.read_private(data/'producer.json')['source_id'])
-    key = records.identity_key(data)
-    source_ids = {records.opaque_id(key, source) for source in source_ids}
-    wait_for_records(data, {(row['source_id'], row['event_id']) for frame in spool_frames(data)
-                            if (row := frame['record'])['source_id'] in source_ids and not row.get('filtered')})
+    wait_for_records(data, {(row['origin_id'], row['event_id']) for row in spool_frames(data)
+                            if row['source_id'] in source_ids and not row.get('filtered')})
 
 
 def capture(data_dir, kind):
@@ -120,8 +127,10 @@ def capture(data_dir, kind):
     count = 0
     for config in selected:
         config['cursor'] = '-'
+        route = sources.read_transport(data_dir, config['route_id'])
+        config['_sensitive'] = sources.sensitive_transport(route)
         for _ in range(32):
-            page = sources.fetch(config)
+            page = sources.fetch(dict(config, transport=route))
             # As in the production reader, retry if the spool refuses admission.
             admit_deadline = time.monotonic()+30
             while not sources.consume(data_dir, config, page):
@@ -148,7 +157,7 @@ def assert_records(data_dir, kind, stage):
     allocation = [row for row in read_rows(data_dir, 'allocations') if row.get('object_kind') == kind]
     require(allocation, 'SQLite has no native allocation')
     objects = {row['object_id'] for row in allocation}
-    agent_run = records.opaque_id(records.identity_key(Path(data_dir)), os.environ.get('SUBYARD_AGENT_RUN_ID'))
+    agent_run = os.environ.get('SUBYARD_AGENT_RUN_ID')
     edges = [row for row in read_rows(data_dir, 'associations') if row.get('object_id') in objects
              and agent_run and row.get('agent_run_id') == agent_run and row.get('quality') == 'explicit']
     require(edges,'native allocation lacks explicit managed-run association')
@@ -178,53 +187,54 @@ def offline_reader(data_dir, kind):
     # Fault a private reader copy, never its native owner or the service's cursor.
     original = configs(data_dir, kind)[-1]
     before = json.dumps(original, sort_keys=True)
-    sources.fetch(original)
+    transport = sources.read_transport(data_dir, original['route_id'])
+    sources.fetch(dict(original, transport=transport))
     with tempfile.TemporaryDirectory(prefix='telemetry-offline-reader-', dir='/tmp') as name:
-        root = Path(name)
-        root.chmod(0o700)
+        root = records.private_directory(Path(name)/'data')
         probe = json.loads(json.dumps(original))
         probe['source_id'] = 'offline-probe-' + hashlib.sha256(name.encode()).hexdigest()
-        probe['last_seen'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        probe['last_seen'] = records.timestamp(records.now())
         probe['offline'] = False
         probe['associations'] = {}
         seen, cursor = probe['last_seen'], probe['cursor']
+        broken_route = dict(transport)
         if kind == 'android':
-            probe['transport'] = dict(control=str(root/'control.sock'), capability=original['transport']['capability'])
+            broken_route = dict(control=str(root/'control.sock'), capability=transport['capability'])
         else:
             # A missing public half makes the real --observe helper fail locally,
             # even when its yard has a higher-priority route registry entry.
             key = root/'unavailable-key'
             key.write_bytes(b'unavailable fixture identity\n')
             key.chmod(0o600)
-            probe['transport']['identity'] = str(key)
-        path = records.private_directory(root/'sources')/'probe.json'
-        records.atomic_json(path, probe)
-        for name in ('.identity-key', 'spool-policy.json', 'producer.json', 'spool-loss'):
+            broken_route['identity'] = str(key)
+        sources.write_transport(root, probe['route_id'], broken_route)
+        path = records.private_directory(root/'sources')/('observer-'+probe['route_id']+'.json')
+        records.atomic_json(path, probe, family='broker_observer')
+        for name in ('spool-policy.json', 'producer.json', 'spool-loss'):
             shutil.copyfile(Path(data_dir)/name, root/name)
             (root/name).chmod(0o600)
+        records.private_directory(root/'spool')
         require(sources.poll(root), 'isolated offline reader failed to retain state')
         failed = records.read_private(path)
         require(failed['offline'] and failed['cursor'] == cursor and failed['last_seen'] == seen,
                 'offline observer changed its cursor or last successful observation')
         rows = list(spool_frames(root))
         require(len(rows) == 1, 'offline observer did not emit exactly one gap')
-        signed = rows[0]
-        gap = signed['record']
+        gap = rows[0]
         require(gap['kind'] == 'gap' and gap['body'].get('reason') == 'source_offline'
                 and gap['body'].get('stale') is True and gap['body'].get('start_time') == records.timestamp(seen),
                 'offline gap lost its last-seen boundary')
-        require(records.append_frame(Path(data_dir)/'spool', 'broker', records.compact_json(signed)+b'\n'),
+        require(records.append_frame(Path(data_dir)/'spool', 'broker', records.compact_json(gap)+b'\n'),
                 'offline observer gap failed spool admission')
-        wait_for_records(Path(data_dir), {(gap['source_id'], gap['event_id'])})
+        wait_for_records(Path(data_dir), {(gap['origin_id'], gap['event_id'])})
         with contextlib.closing(sqlite3.connect((Path(data_dir)/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2)) as db:
-            row = db.execute('SELECT body FROM records WHERE source_id=? AND event_id=?',
-                             (gap['source_id'], gap['event_id'])).fetchone()
+            row = db.execute('SELECT body FROM records WHERE origin_id=? AND event_id=?',
+                             (gap['origin_id'], gap['event_id'])).fetchone()
             stored = json.loads(row[0]) if row else {}
             require(stored.get('reason') == 'source_offline' and stored.get('stale') is True
                     and datetime.datetime.fromisoformat(stored['start_time']) == datetime.datetime.fromisoformat(seen),
                     'offline gap or last-seen boundary missing in SQLite')
-        failed['transport'] = original['transport']
-        records.atomic_json(path, failed)
+        sources.write_transport(root, failed['route_id'], transport)
         require(sources.poll(root), 'restored isolated reader could not poll its real owner')
         recovered = records.read_private(path)
         require(not recovered['offline'] and recovered['last_seen'] != seen, 'real reader did not recover')

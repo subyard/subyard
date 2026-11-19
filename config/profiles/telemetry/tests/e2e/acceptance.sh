@@ -8,7 +8,7 @@ if [ "${1:-}" = --preflight ] && [ "$#" = 1 ]; then
   done
   shellcheck -x -S warning "$ROOT/config/profiles/telemetry/tests/e2e/"*.sh "$ROOT/config/profiles/test-vms/tests/e2e/broker-memory-boundary.sh"
   python3 -B - "$ROOT/config/profiles/telemetry/tests/e2e" <<'PY'
-import ast, json, os, pathlib, sqlite3, subprocess, sys, tempfile, time
+import ast, fcntl, json, os, pathlib, runpy, sqlite3, subprocess, sys, tempfile, time
 from unittest import mock
 owner = (pathlib.Path(sys.argv[1])/'owner.sh').read_text()
 compile(owner.split("<<'PY_UNITS'\n", 1)[1].split('\nPY_UNITS', 1)[0], 'owner.sh:OTLP-unit-probe', 'exec')
@@ -133,14 +133,7 @@ for mode in ('all','--resources','--android','--android-resources'):
         assert result.stdout.strip() == '/fixture/config/profiles/telemetry/tests/e2e/profile-lifecycle.py'
 print('ok: both Android-only modes skip local measurements and VM broker; only resources continuation omits profile callback; default keeps full dispatch')
 # Run the actual example selection and assertions against tiny SQLite fixtures.
-profile_dir = pathlib.Path(sys.argv[1]).resolve().parents[1]
-sys.path.insert(0, str(profile_dir))
-import records
-sys.path.insert(0, str(profile_dir/'tests'))
-from spool_fixture import prepare
-with tempfile.TemporaryDirectory(dir='/tmp') as directory:
-    fixture_key = records.identity_key(prepare(pathlib.Path(directory)))
-examples = owner.split('python3 -B - "$asset" "$mode" "$ROOT/config/profiles/telemetry" <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
+examples = owner.split('python3 -B - "$asset" "$mode" <<\'PY\'\n', 1)[1].split('\nPY', 1)[0]
 selection = examples.split('    hashes = []', 1)[0]
 for mode, pairs, accepted in (
     ('--android', [('codex','android'),('claude','android')], True),
@@ -154,25 +147,29 @@ for mode, pairs, accepted in (
     ('all', [('codex','android'),('claude','android')], False),
     ('all', [(agent, kind) for agent in ('codex','claude') for kind in ('vm','android')], True)):
     db = sqlite3.connect(':memory:')
-    db.executescript('CREATE TABLE runs(agent_run_id TEXT,body TEXT); CREATE TABLE relations(agent_run_id TEXT); CREATE TABLE associations(agent_run_id TEXT,object_id TEXT); CREATE TABLE allocations(object_id TEXT,body TEXT);')
+    db.executescript('''
+        CREATE TABLE runs(agent_run_id TEXT,body TEXT,origin_id TEXT);
+        CREATE TABLE relations(agent_run_id TEXT,origin_id TEXT);
+        CREATE TABLE associations(agent_run_id TEXT,object_id TEXT,origin_id TEXT);
+        CREATE TABLE allocations(object_id TEXT,body TEXT,origin_id TEXT);
+    ''')
     for index, (agent, kind) in enumerate(pairs):
         run, allocation = 'run-'+str(index), 'allocation-'+str(index)
-        db.execute('INSERT INTO runs VALUES(?,?)', (run, json.dumps(dict(agent=agent,project_id=records.opaque_id(fixture_key, 'telemetry-fixture')))))
-        db.execute('INSERT INTO relations VALUES(?)', (run,))
-        db.execute('INSERT INTO associations VALUES(?,?)', (run,allocation))
-        db.execute('INSERT INTO allocations VALUES(?,?)', (allocation,json.dumps(dict(object_kind=kind))))
+        db.execute("INSERT INTO runs VALUES(?,?,'local')", (run, json.dumps(dict(agent=agent,project_id='telemetry-fixture'))))
+        db.execute("INSERT INTO relations VALUES(?,'local')", (run,))
+        db.execute("INSERT INTO associations VALUES(?,?,'local')", (run,allocation))
+        db.execute("INSERT INTO allocations VALUES(?,?,'local')", (allocation,json.dumps(dict(object_kind=kind))))
     for agent, kind in ((agent, kind) for agent in ('codex','claude') for kind in ('vm','android')):
-        run, allocation = 'raw-'+agent+'-'+kind, 'raw-allocation-'+agent+'-'+kind
-        db.execute('INSERT INTO runs VALUES(?,?)', (run, json.dumps(dict(agent=agent,project_id='telemetry-fixture'))))
-        db.execute('INSERT INTO relations VALUES(?)', (run,))
-        db.execute('INSERT INTO associations VALUES(?,?)', (run,allocation))
-        db.execute('INSERT INTO allocations VALUES(?,?)', (allocation,json.dumps(dict(object_kind=kind))))
+        run, allocation = 'other-'+agent+'-'+kind, 'other-allocation-'+agent+'-'+kind
+        db.execute("INSERT INTO runs VALUES(?,?,'local')", (run, json.dumps(dict(agent=agent,project_id='other-project'))))
+        db.execute("INSERT INTO relations VALUES(?,'local')", (run,))
+        db.execute("INSERT INTO associations VALUES(?,?,'local')", (run,allocation))
+        db.execute("INSERT INTO allocations VALUES(?,?,'local')", (allocation,json.dumps(dict(object_kind=kind))))
     db.commit()
     previous = os.getcwd()
     try:
         with tempfile.TemporaryDirectory(dir='/tmp') as directory, mock.patch.object(sqlite3, 'connect', return_value=db), \
-             mock.patch.object(sys, 'argv', ['examples', 'fixture', mode, str(profile_dir)]), mock.patch.object(time, 'monotonic', side_effect=[0,100]), \
-             mock.patch.object(records, 'identity_key', return_value=fixture_key):
+             mock.patch.object(sys, 'argv', ['examples', 'fixture', mode]), mock.patch.object(time, 'monotonic', side_effect=[0,100]):
             os.chdir(directory)
             try:
                 exec(compile(selection, 'owner.sh:example-selection', 'exec'), {})
@@ -184,6 +181,30 @@ for mode, pairs, accepted in (
         os.chdir(previous)
         db.close()
 print('ok: both Android-only modes require actual Codex and Claude Android rows; full examples require both resource kinds')
+# Simulate a seal attempt between the fixture's listing and its frame read.
+observer = runpy.run_path(str(pathlib.Path(sys.argv[1])/'resource-observer.py'))
+with tempfile.TemporaryDirectory(dir='/tmp') as directory:
+    data = pathlib.Path(directory)
+    spool = data/'spool'
+    spool.mkdir(mode=0o700)
+    segment = spool/'broker.open'
+    row = dict(origin_id='fixture-origin', source_id='fixture-source', event_id='fixture-event')
+    segment.write_bytes(b'fixture-header\n'+json.dumps(row).encode()+b'\n')
+    original_open = pathlib.Path.open
+    def try_seal(path, *args, **kwargs):
+        if path == segment:
+            fd = os.open(spool, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                segment.rename(spool/'broker.sealed')
+            except BlockingIOError:
+                pass
+            finally:
+                os.close(fd)
+        return original_open(path, *args, **kwargs)
+    with mock.patch.object(pathlib.Path, 'open', try_seal):
+        assert list(observer['spool_frames'](data)) == [row], 'resource evidence disappeared during seal'
+print('ok: fixture frame snapshot prevents seal during open')
 for path in pathlib.Path(sys.argv[1]).glob('*.py'):
     tree = ast.parse(path.read_text(), filename=str(path))
     if path.name == 'process-scope.py':

@@ -10,7 +10,7 @@ import sources
 
 def register(data_dir, agent_run, request):
     try:
-        if not isinstance(agent_run, str) or not records.IDENTITY.fullmatch(agent_run):
+        if not isinstance(agent_run, str) or not sources.REGISTRATION_ID.fullmatch(agent_run):
             raise ValueError('invalid agent run')
         request = sources.registration_request(request)
         # The intent is durable before any reader lock or analytics delivery.
@@ -18,6 +18,7 @@ def register(data_dir, agent_run, request):
             return sources.store_intent(data_dir, agent_run, request)
         public = {key: request.get(key) for key in ('owner_id', 'yard_id', 'project_id', 'correlation_id')}
         public.update(agent_run_id=agent_run, source='acquire-correlation', quality='explicit')
+        public['_sensitive'] = sources.sensitive_transport(request.get('transport'))
         admitted = records.emit(data_dir, 'relation', public, broker=True)
         return admitted
     except (ValueError, TypeError):

@@ -28,6 +28,15 @@ install -d -m 0700 "$SUBYARD_TELEMETRY_DATA_DIR"
 # Consumed by the native correlation function sourced above.
 # shellcheck disable=SC2034
 LEASE_YARD=yard LEASE_PROJECT=project LEASE_RUN=12345678 LEASE_SLOT=slot-001 LEASE_GENERATION=2 LEASE_EPOCH=3
+# Exercise the candidate hook even on a host with a released helper installed.
+timeout() {
+  if [ "$#" -eq 4 ] && [ "${4##*/}" = broker-correlation.py ]; then
+    command timeout "$1" "$2" "$3" "$ROOT/config/profiles/telemetry/broker-correlation.py"
+  else
+    command timeout "$@"
+  fi
+}
+"$SUBYARD_TELEMETRY_COLLECTOR" prepare --data-dir "$SUBYARD_TELEMETRY_DATA_DIR"
 telemetry_correlation held
 python3 -B - "$tmp/data" "$ROOT/config/profiles/telemetry" <<'PY'
 import json
@@ -35,10 +44,7 @@ from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 sys.path.insert(0, sys.argv[2])
-sys.path.insert(0, str(Path(sys.argv[2])/'tests'))
 import sources
-from spool_fixture import prepare
-prepare(root)
 sources.merge_intents(root, root/'sources')
 config = json.loads(next((root / 'sources').glob('*.json')).read_text())
 binding = config['associations']['12345678']

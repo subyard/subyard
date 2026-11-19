@@ -27,14 +27,6 @@ def safe(path):
             raise ValueError('non-directory managed parent: ' + str(parent))
 
 
-def sync_directory(path):
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def mkdir(path, mode, uid, gid):
     safe(path)
     if path.exists():
@@ -50,32 +42,22 @@ def mkdir(path, mode, uid, gid):
         current.mkdir(mode=mode)
         current.chmod(mode)
         os.chown(current, uid, gid)
-        sync_directory(current)
-        sync_directory(current.parent)
 
 
-def write(path, data, mode, uid, gid, staging_root=None):
+def write(path, data, mode, uid, gid):
     safe(path)
-    if staging_root is None:
-        # Keep preview staging private inside the developer's home.
-        with tempfile.TemporaryDirectory(prefix='.staging-', dir=path.parent) as directory:
-            write(path, data, mode, uid, gid, Path(directory))
-        return
-    # mkstemp creates a fresh inode with O_EXCL, even after interruption.
-    fd, name = tempfile.mkstemp(prefix='.subyard-skill-staging-', dir=staging_root)
-    temporary = Path(name)
+    fd, temporary = tempfile.mkstemp(prefix='.skill-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
-            os.fchmod(fd, mode)
-            os.fchown(fd, uid, gid)
+            os.fchmod(stream.fileno(), mode)
+            os.fchown(stream.fileno(), uid, gid)
             stream.write(data)
             stream.flush()
-            os.fsync(fd)
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-    sync_directory(path.parent)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def metadata(path, mode, uid, gid):
@@ -186,22 +168,19 @@ def delivery(args):
             if (st.st_uid,st.st_gid) != (owner,os.getegid()) or st.st_mode & 0o022:
                 raise ValueError('unsafe canonical skill directory')
             changed |= stat.S_IMODE(st.st_mode) != 0o755 or (st.st_uid,st.st_gid) != (owner,os.getegid())
-            actual = set()
-            for p in directory.rglob('*'):
-                relative = str(p.relative_to(directory))
-                if p.is_symlink():
-                    raise ValueError('symlinked skill content')
-                if p.is_dir():
-                    st = p.stat()
-                    if (st.st_uid,st.st_gid) != (owner,os.getegid()) or st.st_mode & 0o022:
-                        raise ValueError('unsafe canonical skill directory')
-                    changed |= stat.S_IMODE(st.st_mode) != 0o755
-                else:
-                    actual.add(relative)
+            actual = {str(p.relative_to(directory)) for p in directory.rglob('*') if not p.is_dir() or p.is_symlink()}
             # Legacy package installers used this explicit managed-content marker.
             legacy = name not in old['skills'] and actual == {'SKILL.md'} and b'<!-- subyard-managed-v1 -->' in (directory / 'SKILL.md').read_bytes()
             if (name not in old['skills'] or actual - known) and not legacy:
                 raise ValueError('unmanaged skill content: ' + str(directory))
+            for p in directory.rglob('*'):
+                if p.is_dir() and not p.is_symlink():
+                    st = p.stat()
+                    if (st.st_uid,st.st_gid) != (owner,os.getegid()) or st.st_mode & 0o022:
+                        raise ValueError('unsafe canonical skill directory')
+                    changed |= stat.S_IMODE(st.st_mode) != 0o755 or (st.st_uid,st.st_gid) != (owner,os.getegid())
+                if p.is_symlink():
+                    raise ValueError('symlinked skill content')
         for adapter in adapters + ('.codex/skills',):
             link = args.home / adapter / name
             safe(link.parent)
@@ -224,20 +203,18 @@ def delivery(args):
     # before an interruption without claiming any unrecognized path.
     pending = dict(desired, skills={name: dict(old['skills'].get(name, {}), **desired['skills'].get(name, {})) for name in names})
     if names:
-        write(receipt_path, (json.dumps(pending, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), state)
+        write(receipt_path, (json.dumps(pending, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid())
     for name in sorted(names):
         directory = canonical / name
         for adapter in adapters + ('.codex/skills',):
             link = args.home / adapter / name
             if os.path.lexists(link) and (name not in wanted or adapter not in adapters):
                 link.unlink()
-                sync_directory(link.parent)
         for relative in old['skills'].get(name, {}):
             path = directory / relative
             if relative not in wanted.get(name, {}) and path.exists():
                 safe(path)
                 path.unlink()
-                sync_directory(path.parent)
         if name in wanted:
             mkdir(directory, 0o755, owner, os.getegid())
             directory.chmod(0o755)
@@ -251,26 +228,22 @@ def delivery(args):
                     parent.chmod(0o755)
                     os.chown(parent,owner,os.getegid())
                 if not path.exists() or not metadata(path, 0o644, owner, os.getegid()) or path.read_bytes() != data:
-                    write(path, data, 0o644, owner, os.getegid(), canonical)
+                    write(path, data, 0o644, owner, os.getegid())
             for adapter in adapters:
                 link = args.home / adapter / name
                 mkdir(link.parent, 0o755, args.uid, args.gid)
                 if not os.path.lexists(link):
                     link.symlink_to(directory)
                 os.chown(link, args.uid, args.gid, follow_symlinks=False)
-                sync_directory(link.parent)
         elif directory.exists():
             for child in sorted(directory.rglob('*'), reverse=True):
                 if child.is_dir():
                     child.rmdir()
-                    sync_directory(child.parent)
             directory.rmdir()
-            sync_directory(canonical)
     if wanted:
-        write(receipt_path, (json.dumps(desired, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid(), state)
+        write(receipt_path, (json.dumps(desired, sort_keys=True) + '\n').encode(), 0o600, owner, os.getegid())
     elif receipt_path.exists():
         receipt_path.unlink()
-        sync_directory(receipt_path.parent)
     return 0
 
 

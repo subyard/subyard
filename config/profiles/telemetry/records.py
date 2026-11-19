@@ -5,7 +5,6 @@ import ctypes
 import datetime
 import fcntl
 import hashlib
-import hmac
 import http.client
 import itertools
 import json
@@ -13,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import subprocess
 import sys
 import stat
 import tempfile
@@ -21,22 +21,7 @@ import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
 POLICY_VERSION = 'subyard.telemetry.capture/v1'
-KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
-BODY_ID = {'run': 'agent_run_id', **dict.fromkeys(('scope', 'process', 'sample', 'allocation', 'association'), 'object_id')}
-BODY_RULES = {}
-PATTERNS = {}
-policy_path = Path(__file__).with_name('record-policy.txt')
-for line in policy_path.read_text().splitlines():
-    rule, *fields = line.split()
-    if rule == 'pattern':
-        PATTERNS[fields[0]] = re.compile(fields[1])
-    elif rule in ('enum', 'names'):
-        BODY_RULES[fields[0]] = (rule, fields[1:])
-    else:
-        BODY_RULES.update((field, (rule, ())) for field in fields)
-
-IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
-UNKNOWN_SOURCE_TIME = '0001-01-01T00:00:00.000000000Z'
+TIMESTAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.,][0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])')
 USE_CURRENT_TIME = object()
 MAX_RECORDS = 4096
 MAX_BYTES = 64*1024*1024
@@ -48,7 +33,7 @@ LOCK_WAIT = 0.05
 
 
 def timestamp(value):
-    if not isinstance(value, str) or not PATTERNS['timestamp'].fullmatch(value):
+    if not isinstance(value, str) or not TIMESTAMP.fullmatch(value):
         return None
     try:
         utc = datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(datetime.timezone.utc)
@@ -63,155 +48,31 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
-def legacy_identity(key, value):
-    if PATTERNS['legacy_opaque'].fullmatch(value):
-        return value
-    return 'id:' + hmac.digest(key, value.encode(), 'sha256').hex()
-
-
-def opaque_id(key, value):
-    if not isinstance(value, str) or not PATTERNS['legacy_id'].fullmatch(value):
-        return None
-    # Accept the old spelling as an input alias, but digest every input.
-    return 'h1:' + hmac.digest(key, legacy_identity(key, value).encode(), 'sha256').hex()
-
-
-def clean_field(key, field, value):
-    rule, choices = BODY_RULES[field]
-    if value is None:
-        # Explicit nulls preserve unavailable gauges and clear old projections.
-        return True, None
-    if rule == 'names':
-        return (True, [item for item in value if item in choices]) if type(value) is list and len(value) <= 128 else (False, None)
-    if rule == 'missing':
-        if type(value) is list and len(value) <= 128:
-            return True, [item for item in value if isinstance(item, str) and item in BODY_RULES]
-        if value in ('broker_attribution', 'final_tail'):
-            return True, value
-        rule = 'uint'
-    if rule == 'bool':
-        return type(value) is bool, value
-    if rule in ('uint', 'int'):
-        if isinstance(value, str) and PATTERNS['decimal'].fullmatch(value) and (rule == 'int' or not value.startswith('-')):
-            digits = value.lstrip('+-').lstrip('0')
-            if len(digits) > 20:
-                return False, None
-            value = int(('-' if value.startswith('-') else '') + (digits or '0'), 10)
-        if rule == 'uint':
-            return type(value) is int and 0 <= value < 2**64, value
-        return type(value) is int and -(2**63) <= value < 2**63, value
-    if not isinstance(value, str):
-        return False, None
-    if rule == 'enum':
-        return value in choices, value
-    if rule == 'time':
-        value = timestamp(value)
-        return value is not None, value
-    if rule == 'id':
-        value = opaque_id(key, value)
-        return value is not None, value
-    return bool(PATTERNS[rule].fullmatch(value)), value
-
-
-def clean(body, key):
-    if not isinstance(body, dict):
-        raise ValueError('unsupported metadata')
-    result, removed = {}, 0
-    for field, original in body.items():
-        if field not in BODY_RULES:
-            removed += 1
-            continue
-        accepted, value = clean_field(key, field, original)
-        if accepted:
-            result[field] = value
-            if type(original) is list:
-                removed += len(original) - len(value)
-        else:
-            removed += 1
-    return result, removed
-
-
 def compact_json(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
 
 
-def signed_record(key, record):
-    signature = hmac.digest(key, b'producer-record/v1\0' + compact_json(record), 'sha256').hex()
-    return {'record': record, 'signature': signature}
+def collector_binary():
+    installed = Path(__file__).with_name('subyard-telemetry')
+    if installed.is_file():
+        return installed
+    return Path(os.environ.get('SUBYARD_TELEMETRY_COLLECTOR', installed))
 
 
-def prepared_record(key, kind, body, source_id, event_id, source_time):
-    source_id, event_id = opaque_id(key, source_id), opaque_id(key, event_id)
-    if kind not in KINDS or not source_id or not event_id:
-        raise ValueError('invalid record identity or kind')
-    body, removed = clean(body, key)
-    required = BODY_ID.get(kind)
-    if required and not body.get(required):
-        raise ValueError('missing record identity')
-    source_time = timestamp(source_time)
-    if source_time is None:
-        source_time = UNKNOWN_SOURCE_TIME
-        removed += 1
-    return {'schema': SCHEMA, 'source_id': source_id, 'event_id': event_id, 'source_version': '1',
-            'source_time': source_time, 'kind': kind, 'body': body, 'redactions': removed}
+def sanitize_state(family, value, binary=None):
+    try:
+        result = subprocess.run([binary or collector_binary(), 'sanitize', '--family', family],
+                                input=compact_json(value), capture_output=True, timeout=2, check=False)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        pass
+    raise ValueError('invalid or unavailable telemetry sanitizer')
 
 
-SESSION_FIELDS = ('session_id', 'native_session_id', 'session_attributes')
-NATIVE_SOURCE = 'native-otlp-attribute'
-
-
-def session_metadata(record):
-    body = record['body']
-    return (record['kind'] in ('session', 'relation') or any(field in body for field in SESSION_FIELDS)
-            or body.get('relation') == 'native_session' or (body.get('source') or '').startswith(NATIVE_SOURCE))
-
-
-def filter_session(record, attributes):
-    body = record['body']
-    native_relation = body.get('relation') == 'native_session'
-    native_source = (body.get('source') or '').startswith(NATIVE_SOURCE)
-    relation_kind = record['kind'] in ('session', 'relation')
-    names = body.get('session_attributes')
-    retained = [name for name in names if name in attributes] if isinstance(names, list) else None
-    allowed = bool(retained) if retained is not None else set(BODY_RULES['session_attributes'][1]).issubset(attributes)
-    keep_run = 'subyard.agent_run.id' in attributes
-    keep_evidence = 'subyard.agent_run.evidence' in attributes
-
-    def remove(*fields):
-        for field in fields:
-            if field in body:
-                del body[field]
-                record['redactions'] += 1
-
-    session = body.get('session_id') or body.get('native_session_id')
-    ambiguous = body.get('session_id') and body.get('native_session_id') and body['session_id'] != body['native_session_id']
-    if not relation_kind and (not allowed or not keep_run or ambiguous or (not session and 'session_attributes' in body)):
-        remove(*SESSION_FIELDS)
-        if native_relation:
-            remove('relation')
-        if native_source:
-            remove('source')
-        return True
-    if relation_kind and not session:
-        return record['kind'] != 'session' and not native_relation and not native_source and 'session_attributes' not in body
-    if not allowed or ambiguous:
-        return False
-
-    if 'native_session_id' in body:
-        if not body.get('session_id') and session:
-            body['session_id'] = body.pop('native_session_id')
-        else:
-            remove('native_session_id')
-    if retained is not None:
-        body['session_attributes'] = retained
-        record['redactions'] += len(names) - len(retained)
-    if not keep_run:
-        remove('agent_run_id', 'parent_run_id', 'relation')
-        record['kind'] = 'session'
-    if (relation_kind or native_source) and (not keep_run or not keep_evidence):
-        record['redactions'] += 'source' in body and body['source'] != NATIVE_SOURCE
-        body['source'] = NATIVE_SOURCE
-    return True
+def operational_directory(data_dir):
+    path = Path(data_dir)
+    return private_directory(path.with_name(path.name+'-private'))
 
 
 def private_directory(path):
@@ -232,7 +93,9 @@ def private_directory(path):
     return path
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, *, family=None):
+    if family is not None:
+        value = sanitize_state(family, value)
     path = Path(path)
     private_directory(path.parent)
     if path.is_symlink():
@@ -281,14 +144,6 @@ def read_private(path):
         return json.load(source)
 
 
-def identity_key(directory):
-    with open_private(directory/'.identity-key') as source:
-        key = source.read(33)
-    if len(key) != 32:
-        raise ValueError('invalid telemetry identity key')
-    return key
-
-
 def lock_until(fd, mode, deadline):
     while True:
         try:
@@ -321,19 +176,23 @@ def directory_lock(path, mode, deadline=None):
         os.close(fd)
 
 
-def capture_policy(directory, key):
-    value = read_private(directory/'spool-policy.json')
-    settings = value['settings']
-    proof = hmac.digest(key, b'spool-policy/v1\0'+compact_json(settings), 'sha256').hex()
-    verifier = hmac.digest(key, b'subyard.telemetry/identity-key/v1', 'sha256').hex()
-    attributes, policy = settings['attributes'], settings['policy_version']
-    allowed = {*BODY_RULES['session_attributes'][1], 'subyard.agent_run.id', 'subyard.agent_run.evidence'}
-    if (not hmac.compare_digest(value['signature'], proof)
-            or not hmac.compare_digest(settings['key_verifier'], verifier)
-            or type(attributes) is not list or not set(attributes) <= allowed
-            or not re.fullmatch(re.escape(POLICY_VERSION)+r':[0-9a-f]{64}', policy)):
-        raise ValueError('invalid telemetry capture policy')
-    return attributes, policy
+def load_producer_state(directory, binary=None):
+    """Read and validate the same state used by emit, readiness and repair."""
+    directory = Path(directory)
+    for path in (directory, directory/'spool'):
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid():
+            raise ValueError('invalid telemetry producer directory')
+    with open_private(directory/'spool-loss') as slot:
+        if os.fstat(slot.fileno()).st_size != 2*MARKER_SLOT:
+            raise ValueError('invalid telemetry loss slot')
+    producer = read_private(directory/'producer.json')
+    policy = read_private(directory/'spool-policy.json')
+    state = {'producer': producer, 'policy': policy}
+    if (sanitize_state('producer_state', state, binary) != state
+            or producer['origin_id'] != policy['origin_id']):
+        raise ValueError('invalid telemetry producer state')
+    return {**producer, **policy}
 
 
 class LocalConnection(http.client.HTTPConnection):
@@ -353,7 +212,7 @@ class LocalConnection(http.client.HTTPConnection):
         self.sock.connect(str(self.path))
 
 
-def append_frame(spool, stream, frame, deadline=None):
+def append_frame(spool, stream, frame, deadline=None, *, run=None):
     if deadline is None:
         deadline = time.monotonic()+LOCK_WAIT
     target = spool/(stream+'.open')
@@ -383,8 +242,10 @@ def append_frame(spool, stream, frame, deadline=None):
                     fallocate = ctypes.CDLL(None, use_errno=True).fallocate
                     if fallocate(fd, 1, ctypes.c_longlong(0), ctypes.c_longlong(SEGMENT_BYTES)):
                         raise OSError(ctypes.get_errno(), 'spool segment allocation failed')
-                    header = b' '.join((SPOOL_VERSION, stream.encode(), generation.encode(),
-                                        f'{int(number)+1:016d}'.encode()))+b'\n'
+                    fields = [SPOOL_VERSION, stream.encode(), generation.encode(), f'{int(number)+1:016d}'.encode()]
+                    if run:
+                        fields.append(run.encode())
+                    header = b' '.join(fields)+b'\n'
                     write_frame(fd, header+frame)
                     os.link(f'/proc/self/fd/{fd}', target.name, dst_dir_fd=directory)
                     os.fsync(directory)
@@ -400,8 +261,8 @@ def append_frame(spool, stream, frame, deadline=None):
                 continue
             if not os.path.samestat(info, current):
                 continue
-            fields = os.pread(fd, 160, 0).split(b'\n', 1)[0].split(b' ')
-            if (len(fields) != 4 or fields[:2] != [SPOOL_VERSION, stream.encode()]
+            fields = os.pread(fd, 1024, 0).split(b'\n', 1)[0].split(b' ')
+            if (len(fields) != (5 if run else 4) or fields[4:] != ([run.encode()] if run else []) or fields[:2] != [SPOOL_VERSION, stream.encode()]
                     or not re.fullmatch(rb'[0-9a-f]{32}', fields[2]) or not re.fullmatch(rb'[0-9]{16}', fields[3])):
                 raise ValueError('unsupported spool segment')
             if os.pread(fd, 1, info.st_size-1) == b'\n' and info.st_size+len(frame) <= SEGMENT_BYTES:
@@ -411,7 +272,7 @@ def append_frame(spool, stream, frame, deadline=None):
                 return True
             # The sealed reader treats any bytes after the last newline as a gap.
             with directory_lock(spool, fcntl.LOCK_EX, deadline) as directory:
-                sealed = spool/('.'.join(part.decode() for part in fields[1:])+'.sealed')
+                sealed = spool/('.'.join(part.decode() for part in fields[1:4])+'.sealed')
                 if sealed.exists() or sealed.is_symlink():
                     raise ValueError('spool segment collision')
                 os.rename(target, sealed)
@@ -426,33 +287,29 @@ def write_frame(fd, data):
     os.fsync(fd)
 
 
-def note_loss(directory, key, stream):
+def note_loss(directory, run):
     path = directory/'spool-loss'
     fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         checked_file(fd, 2*MARKER_SLOT)
-        def proof(data):
-            return hmac.digest(key, b'spool-loss/v1\0'+data, 'sha256').hex().encode()
-
         lock_until(fd, fcntl.LOCK_EX, time.monotonic()+LOCK_WAIT)
         slots = []
         for offset in (0, MARKER_SLOT):
             digest, _, data = os.pread(fd, MARKER_SLOT, offset).partition(b' ')
             data = data.rstrip(b'\0')
-            if hmac.compare_digest(digest, proof(data)):
+            if digest == hashlib.sha256(data).hexdigest().encode():
                 slots.append(json.loads(data))
-            elif digest == hashlib.sha256(data).hexdigest().encode():
-                slots.append(dict(json.loads(data), stream='broker'))
         previous = max(slots, key=lambda item: item['revision'], default={'revision': 0, 'count': 0})
         now_at = timestamp(now())
-        if previous['count']:
-            previous['stream'] = previous['stream'] if previous['stream'] == stream else 'broker'
-        else:
-            previous.update(id=uuid.uuid4().hex, first=now_at, stream=stream)
-        previous.update(revision=previous['revision']+1, last=now_at, count=previous['count']+1)
-        data = compact_json(previous)
-        slot = (proof(data)+b' '+data).ljust(MARKER_SLOT, b'\0')
-        if os.pwrite(fd, slot, (previous['revision']%2)*MARKER_SLOT) != MARKER_SLOT:
+        count = previous.get('count', 0)
+        value = dict(revision=previous['revision']+1, count=count+1, last=now_at,
+                     first=previous.get('first', now_at) if count else now_at,
+                     id=previous.get('id') if count else uuid.uuid4().hex)
+        if run and (not count or previous.get('run') == run):
+            value['run'] = run
+        data = compact_json(sanitize_state('loss_slot', value))
+        slot = (hashlib.sha256(data).hexdigest().encode()+b' '+data).ljust(MARKER_SLOT, b'\0')
+        if os.pwrite(fd, slot, (value['revision']%2)*MARKER_SLOT) != MARKER_SLOT:
             raise OSError('short loss marker write')
         os.fsync(fd)
     finally:
@@ -460,31 +317,29 @@ def note_loss(directory, key, stream):
 
 
 def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, event_id=None, *, broker=False):
-    deadline = time.monotonic()+LOCK_WAIT
+    directory = Path(data_dir)
+    run = None
     try:
-        directory = private_directory(data_dir)
-        with directory_lock(directory, fcntl.LOCK_SH, deadline):
-            key = identity_key(directory)
-            attributes, policy = capture_policy(directory, key)
-            stream = 'broker'
-            try:
-                source_id = source_id or read_private(directory/'producer.json')['source_id']
-                if source_time is USE_CURRENT_TIME:
-                    source_time = now() if not event_id else None
-                record = prepared_record(key, kind, body, source_id, event_id or str(uuid.uuid4()), source_time)
-                identity = [record[field] for field in ('kind', 'source_version', 'source_time', 'body')]
-                record['input_id'] = hmac.digest(key, b'producer-input/v1\0'+compact_json(identity), 'sha256').hex()
-                record['policy_version'] = policy
-                if session_metadata(record) and not filter_session(record, attributes):
-                    record.update(filtered=True, body={})
-                if not broker:
-                    stream = record['body'].get('agent_run_id') or 'broker'
-                frame = compact_json(signed_record(key, record))+b'\n'
-                if len(frame) <= FRAME_BYTES and append_frame(private_directory(directory/'spool'), stream, frame, deadline):
-                    return True
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
-            note_loss(directory, key, stream)
+        with directory_lock(directory, fcntl.LOCK_SH, time.monotonic()+LOCK_WAIT):
+            settings = load_producer_state(directory)
+            if source_time is USE_CURRENT_TIME:
+                source_time = now() if not event_id else ''
+            record = dict(schema=SCHEMA, origin_id=settings['origin_id'], source_id=source_id or settings['source_id'],
+                          event_id=event_id or str(uuid.uuid4()), source_version='1', source_time=source_time,
+                          kind=kind, body=body)
+            policy = {field: settings[field] for field in ('attributes', 'span_names', 'event_names')}
+            policy['schema'] = settings['policy_version']
+            record = sanitize_state('record', {'record': record, 'policy': policy})
+            if not broker:
+                run = record['body'].get('agent_run_id')
+            stream = hashlib.sha256(run.encode()).hexdigest()[:32] if run else 'broker'
+            frame = compact_json(record)+b'\n'
+            if len(frame) <= FRAME_BYTES and append_frame(directory/'spool', stream, frame, run=run):
+                return True
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        note_loss(directory, run)
     except (OSError, ValueError, KeyError, TypeError):
         print('Telemetry coverage gap could not be saved', file=sys.stderr, flush=True)
     return False

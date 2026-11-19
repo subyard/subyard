@@ -20,9 +20,11 @@ These are operator actions; building and testing the profile does not enable it
 on an existing deployment. The profile installs separate collector and delegated
 run-manager services. Data lives in `/var/lib/subyard/telemetry`, owned by the
 yard's developer account with directory mode `0700`, active files `0600` and
-archive files `0400`. The service
-listens on `127.0.0.1:14318`, authenticates native exporters and provides a private
-Unix control socket. SQLite and the endpoint are not published on the owner host.
+archive files `0400`. The service listens on `127.0.0.1:14318`, authenticates
+native exporters and provides a private Unix control socket. The receiver's
+bearer file lives at `/var/lib/subyard/telemetry-private/auth.token`, outside
+the telemetry data directory. SQLite and the endpoint are not published on
+the owner host.
 
 Incus images can apply a systemd policy to every service. The profile validates
 the effective command, identity, stop policy and resource limits, and uses
@@ -150,9 +152,11 @@ data=/var/lib/subyard/telemetry
   'SELECT object_id,source_time,cpu_ns,memory_bytes,rss_bytes,io_read_bytes,io_write_bytes FROM sample_values ORDER BY source_time LIMIT 100'
 ```
 
-Readers open SQLite with read-only/query-only restrictions; they neither create a
-missing database nor run migrations. Queries have finite row, response-size and
-time limits. The installed `subyard-telemetry` skill provides these commands
+The `stats`, `query`, `show-run` and `export` readers open SQLite with
+read-only/query-only restrictions and select the reader for the stored
+`PRAGMA user_version`. `stats` reports `schema_version` and
+`store_generation_id`. Queries have finite row, response-size and time
+limits. The installed `subyard-telemetry` skill provides these commands
 for agents. A native SQLite limit rejects scalar values and encoded rows above
 16 MiB before result materialization; this is not a total SQLite working-memory
 budget for arbitrary SQL. Large histories must be inspected in bounded windows rather than
@@ -166,24 +170,19 @@ run manager and identified detached legacy observers. Agent workloads keep
 running. A released launcher already in memory may miss a launch or final
 sample as it crosses this cutover.
 
-A private receipt lets the installer resume after interruption. It retires
-the old producer path in place, checkpoints the schema 1–4 database and
-publishes it read-only at `/var/lib/subyard/telemetry/archive/telemetry.sqlite`
-(or the next numbered archive if the path is already occupied by a sealed
-store). The new active schema 5 store imports verified pending records and
-legacy health markers. Read failures leave the cutover pending so a retry can
-import the original evidence. Invalid manifest or marker contents produce a
-`legacy_history_unreadable` gap in the active store. A retired manifest's
-filename can still identify an interrupted run in the archive. A disabled
+A private receipt lets the installer resume after interruption. The profile
+fences the old outbox, checkpoints the schema 1–4 database and publishes it
+read-only at `/var/lib/subyard/telemetry/archive/telemetry.sqlite`. An occupied
+archive is preserved and the next archive uses `archive-2`, `archive-3` and so
+on. The active schema 5 store starts empty with its own generation ID. Pending
+legacy outbox records and health markers stay in retired storage. A disabled
 collector finishes the store transition when enabled. Fresh installs and
 compatible spool upgrades skip legacy quiesce.
 
-Unfinished historical runs get an ordinary `interrupted_by_upgrade` gap with
-`missing=final_tail` in the archive. The gap appears in `show-run`, export and
-replay. The new store carries minimal registrations for unfinished current-boot
-legacy scopes, including those whose main process has exited, so descendants
-can continue exporting native OTLP. The archive retains historical rows and
-sequence numbers and each store has its own export cursor.
+Each identifiable unfinished historical run gets an ordinary
+`interrupted_by_upgrade` gap with `missing=final_tail` in the archive. The gap
+appears in `show-run`, export and replay. The archive retains historical rows,
+their identifiers and their sequences. Each store has its own export cursor.
 
 ```sh
 "$collector" stats --data-dir "$data/archive"
@@ -194,7 +193,14 @@ sequence numbers and each store has its own export cursor.
 ```
 
 Use the store's own identifiers and export cursor for each database. Keep
-archive exports private under the previous release's capture rules.
+archive exports private under the previous release's capture rules. Schema 5
+stores the schema version and generation ID in the initialization transaction.
+The first spool cutover is the implemented archive transition. General rotation
+and compression are deferred. A future transition must checkpoint WAL and drain
+or transfer committed spool offsets and loss revisions before a new store
+consumes surviving segments. The logical JSON/protobuf export stays independent
+of the physical storage codec, with bounded decoded sizes and SQL access to
+fields used for projections and retention.
 
 `show-run` returns sessions, child runs, processes, temporal object links, gaps and
 separate `local_direct`, `local_inclusive`, `broker_actual`, `shared` and `unknown`
@@ -211,6 +217,8 @@ across that tree, including descendants' broker allocations. `included_runs` and
 their nested scopes; those child measurements remain explanatory detail. Shared
 objects stay shared. Compare these two views rather than adding their totals.
 Cycles or a hierarchy exceeding 1000 runs are reported as errors.
+In the active store, `show-run` prefers the local run or a unique imported run.
+Use `--origin ORIGIN_ID` to select an imported run explicitly.
 
 The canonical source is `records`. Its provenance columns include
 `origin_id`, `event_id`, `sequence`, `source_id`, `source_version`, `source_time`,
@@ -237,12 +245,13 @@ recorded observation times. Those evidence points are not a claim about the
 session's full lifetime. Owner-level offline gaps accompany linked allocations
 even when no new object sample could be obtained.
 
-For example, inspect an allocation's original events through its source records:
+Use the record origin when querying a run in the active store.
 
 ```sql
 SELECT sequence, origin_id, event_id, source_id, source_time, received_time, body
 FROM records
 WHERE encoding = 'json'
+  AND origin_id = 'ORIGIN_ID'
   AND json_extract(body, '$.agent_run_id') = 'RUN_ID'
 ORDER BY sequence
 LIMIT 1000;
@@ -252,10 +261,11 @@ Unlinked resource records remain visible at yard level. They are not inferred to
 belong to the run being inspected:
 
 ```sql
-SELECT r.object_id, r.source_time, r.body
+SELECT r.origin_id, r.object_id, r.source_time, r.body
 FROM allocations AS r
 WHERE NOT EXISTS (
-  SELECT 1 FROM associations AS a WHERE a.object_id = r.object_id
+  SELECT 1 FROM associations AS a
+  WHERE a.origin_id = r.origin_id AND a.object_id = r.object_id
 )
 ORDER BY r.source_time
 LIMIT 1000;
@@ -271,8 +281,8 @@ SELECT a.object_id, a.start_time, a.end_time, a.quality,
        json_extract(r.body, '$.allocated_memory_bytes') AS allocated_memory_bytes,
        json_extract(r.body, '$.stopped_at') AS stopped_at
 FROM associations AS a
-JOIN allocations AS r USING (object_id)
-WHERE a.agent_run_id = 'RUN_ID'
+JOIN allocations AS r USING (origin_id, object_id)
+WHERE a.origin_id = 'ORIGIN_ID' AND a.agent_run_id = 'RUN_ID'
 ORDER BY a.start_time;
 
 SELECT s.origin_id, s.event_id, r.sequence, s.object_id, s.source_time, s.body
@@ -280,7 +290,8 @@ FROM samples AS s
 JOIN records AS r USING (origin_id, event_id)
 WHERE EXISTS (
   SELECT 1 FROM associations AS a
-  WHERE a.object_id = s.object_id AND a.agent_run_id = 'RUN_ID'
+  WHERE a.origin_id = 'ORIGIN_ID' AND a.origin_id = s.origin_id
+    AND a.object_id = s.object_id AND a.agent_run_id = 'RUN_ID'
     AND s.source_time >= a.start_time
     AND (a.end_time = '' OR s.source_time <= a.end_time)
 )
@@ -301,7 +312,8 @@ for the observer's remote read lock. The observer merges it and replays retained
 owner events when adding a new mapping. That also links a short allocation which
 ended before the mapping was applied. Stable event identities prevent duplicate
 measurements during replay; generation checks prevent stale ownership changes.
-Private transport credentials are not included in SQLite records or export.
+Private operational storage outside the data directory holds transport
+credentials, Android observe capabilities and sensitive route paths.
 
 A returned VM allocation is identified by owner, slot, resource generation and
 lease epoch; Android uses its native owner/slot/generation contract. Observe-only
@@ -364,33 +376,49 @@ Likewise direct workload and inclusive parent scopes must not be added together.
 
 ## Capture policy and delivery
 
-Durable telemetry is rebuilt from closed field schemas at the producer spool,
-collector ingest and replay. SQLite projections merge inputs that have already
-been sanitized. Allocation
-purpose, log bodies, severity text, arbitrary attributes and free-form names are
-excluded. The OTLP schema retains severity numbers, timestamps, binary trace
-and span IDs, links and numeric metric data. Known metric names, units and other
-labels use fixed vocabularies. Token counter attributes require a nonnegative
-OTLP integer value, including the decimal representation used by OTLP JSON.
+The collector binary owns the allowlist sanitizer used by native OTLP, ingest
+and replay. Local producers and state writers call it over stdin, including
+while the service is stopped. Sanitization happens before a frame, manifest or
+temporary file is written. Producer configuration, observer snapshots,
+reservations, delegation, broker intents, cursors, loss markers and cutover
+receipts use closed schemas. The producer, readiness check and repair
+verification share a read-only loader for producer identity and capture policy.
+
+New telemetry preserves raw session, conversation, run, trace and span IDs,
+host, yard, project, worktree and task labels, model and tool names, token
+counts, cost and durations. OTLP retains supported resource and scope fields,
+timestamps, trace links, severity and status numbers, known signal names,
+metric points, exemplars, histogram bounds and counts, and units. Bounded
+decimal strings are accepted for documented numeric fields. Zero is
+distinguished from a missing value.
+
+- Claude retains `session.id`, `ccr.session.id`, `model`, `tool_name`,
+  `prompt_length`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
+  `cache_creation_tokens`, `cache_creation_5m_tokens`,
+  `cache_creation_1h_tokens`, `cost_usd`, `cost_usd_micros`, `duration_ms`
+  and `success`, plus supported token, cost and time metric points with
+  their type and unit. Prompt, tool-detail and tool-content logging stay off.
+- Codex retains `conversation.id` and supported session aliases, `app.version`,
+  `model`, `slug`, `tool_name`, `tool_namespace`, `prompt_length`,
+  `duration_ms`, `ttft_ms`, `success`, `input_token_count`,
+  `output_token_count`, `cached_token_count`, `cache_write_token_count`,
+  `reasoning_token_count` and `tool_token_count`, plus supported usage and
+  duration metric points. The Codex emitter uses `tool_token_count` for
+  total tokens. `log_user_prompt` stays false.
+
+The sanitizer drops log bodies, prompts, tool inputs, arguments, parameters
+and output previews, response text, error messages, severity text, headers,
+allocation purpose and arbitrary nested fields. It drops operator PII fields
+including email, user and account IDs, account UUIDs and organization IDs.
+Every retained string is checked for recognizable email addresses, bearer and
+basic credentials, password assignments, API and private keys, token formats
+and exact sensitive values identified in the input. Unsafe optional strings
+are omitted. An unsafe required identity is refused with a fixed diagnostic.
 
 An optional `--policy-file` supplies `subyard.telemetry.capture/v1` with
 `attributes`, `span_names` and `event_names` allowlists that narrow the built-in
-vocabularies. On startup, `serve` publishes its selected session allowlist,
-policy fingerprint and key verifier together in a private snapshot. Producers
-verify the snapshot and apply the selected allowlist before they append, including
-while the collector is stopped. Missing or invalid settings refuse capture.
-Each producer frame signs its capture policy claim and redaction count.
-The collector keeps that claim if its policy changes before drain.
-Older signed records without a fingerprint retain the capture schema version.
-
-Identifiers from callers are keyed digests, including IDs with the same shape as
-generated IDs, session attributes and trace or span IDs. The local spool
-authenticates prepared records to avoid mapping those digests twice. Retain
-the private `.identity-key` with the database when backing up or restoring a store.
-The writer refuses to open an established store with a missing or mismatched
-key. Local producers also refuse capture with a missing or mismatched key.
-Read-only SQL and export work without the key. `show-run` accepts the stored run reference and can resolve
-a launcher run ID in the active store when its key is available.
+schema. The selected producer policy is published as a private snapshot.
+Missing or invalid producer state makes profile readiness stale.
 
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, allow 16 concurrent OTLP requests before decode,
@@ -400,10 +428,11 @@ retention to seven days. Each legacy archive uses additional disk space outside
 that ceiling. Lifecycle, session and attribution records remain under the hard
 disk bound so an old run's outstanding resource responsibility does not disappear during owner downtime.
 The producer spool is bounded to 4096 files and 64 MiB using fixed allocations
-and 64 KiB frames. It keeps records ordered within each keyed run stream and
+and 64 KiB frames. It keeps records ordered within each generated run stream and
 within the broker stream. SQLite commits the records, projections and byte
-position together. The collector retires sealed segments after the committed
-end. A malformed frame or a sealed torn tail produces a content-free gap.
+position together. Producers acknowledge after frame and directory durability.
+The collector retires sealed segments after the committed end. A malformed
+frame or a sealed torn tail produces a content-free gap.
 Run snapshots have separate limits of 4096 files, 16 MiB total and 16 KiB per snapshot, including reserved space, with a
 100 ms admission deadline. Older overflowing directories are consumed in bounded
 batches; capacity and interrupted reservations produce content-free coverage gaps.
@@ -442,32 +471,25 @@ provenance are retained.
 "$collector" replay --data-dir /path/to/private/replay-store --input telemetry-0001.jsonl
 ```
 
-Continue export with `--after` equal to the last exported `sequence`; each command
-is a bounded snapshot, not an endless transaction. Continue a pre-upgrade export
-against the archive and start a new cursor at zero for the active store. Replay
-uses the source pair `(origin_id,event_id)` as input to the receiving
-store's keyed mapping. An active-store export made with the source key available
-carries a proof the originating store can verify. Verified same-store replay
-reuses stored identifiers and the recorded input fingerprint. A restored sample
-can rejoin its retained object and run, and retrying its original delivery
-deduplicates against it. The destination preserves relationships within the
-imported history.
-Replaying the same input adds no projections. A matching identity with
-different data is an error. Two records with different identities remain separate
-even when their payloads match. Replay applies the destination's `--policy-file`
-or the default policy. Each replay row is subject to the queue and disk limits,
-which allow legacy data whose identifiers grow past the live request limit. `policy_version` preserves the original validated
-capture-policy claim; `import_policy_version` records the trusted local policy
-applied by replay. Imported policy metadata never authorizes additional content.
-Legacy exports without that optional import field remain supported. Provenance
-already lost by an older importer cannot be reconstructed.
+Continue export with `--after` equal to the last exported `sequence`. Each
+command reads a bounded snapshot. Continue a pre-upgrade export against the
+archive and start a new cursor at zero for the active store.
 
-The database capacity limit also covers deduplication entries for fully
-filtered inputs and receiver outage intervals. Both survive sample retention.
-The collector uses the former to recognize retries after policy changes and
-the latter to attribute gaps when local run records arrive from the spool
-after readiness. At readiness it evaluates the new interval for known local
-runs.
+The producer assigns `(origin_id, event_id)` once and reuses it on retry. Export
+and replay preserve that pair across stores, including exports from a
+database-only backup. The first accepted row wins even if a later delivery
+changes the payload or capture policy. A duplicate advances the spool offset
+without changing the row or its projections. Identical payloads with distinct
+identities remain distinct. Run and resource joins use the origin to keep raw
+IDs from different stores separate.
+
+Replay sanitizes new imports with the destination's `--policy-file` or default
+policy and applies queue and disk limits. `policy_version` preserves the original
+validated capture-policy claim and `import_policy_version` records the local
+policy applied by replay. Legacy exports without that optional field remain
+readable. Expiring a sample or OTLP row also expires its projections and
+deduplication claim. An expired sample can be restored once and rejoin its
+retained object and run. Run lifecycle and coverage records remain available.
 
 OTLP has no universal delivery identity. If a sender retries after a successful
 commit whose acknowledgement was lost, the native delivery can appear twice.
@@ -480,11 +502,11 @@ Build the same native collector from the repository:
 
 ```sh
 go build -o subyard-telemetry ./config/profiles/telemetry/cmd/telemetry
-install -d -m 0700 /path/to/private/telemetry
-umask 077
-openssl rand -hex 32 > /path/to/private/telemetry/auth.token
+install -d -m 0700 /path/to/private/telemetry /path/to/private/telemetry-credentials
+install -m 0600 /dev/null /path/to/private/telemetry-credentials/auth.token
+openssl rand -hex 32 > /path/to/private/telemetry-credentials/auth.token
 ./subyard-telemetry serve --data-dir /path/to/private/telemetry \
-  --listen 127.0.0.1:14318 --auth-file /path/to/private/telemetry/auth.token
+  --listen 127.0.0.1:14318 --auth-file /path/to/private/telemetry-credentials/auth.token
 ```
 
 Configure trusted senders for HTTP/protobuf `/v1/logs`, `/v1/metrics` and

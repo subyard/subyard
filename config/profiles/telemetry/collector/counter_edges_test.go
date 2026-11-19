@@ -67,10 +67,7 @@ func TestLateOldGenerationDoesNotContaminateReplacement(t *testing.T) {
 		}
 	}
 	for _, store := range []*Store{s, destination} {
-		run, successor := s.key.id("run"), s.key.id("owner:slot:g2")
-		if store == destination {
-			run, successor = store.key.id(run), store.key.id(successor)
-		}
+		run, successor := "run", "owner:slot:g2"
 		result, err := ShowRun(ctx, store.db, run)
 		if err != nil {
 			t.Fatal(err)

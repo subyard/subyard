@@ -47,14 +47,9 @@ def claude_command(command, token, **kwargs):
         raise
 
 
-def stored_id(data, value):
-    import records
-    return records.opaque_id(records.identity_key(data), value)
-
-
 def wait_claude_sessions(data, expected, result, token):
     try:
-        return wait_sessions(data, 'claude', {stored_id(data, value) for value in expected}, stderr=result.stderr)
+        return wait_sessions(data, 'claude', expected, stderr=result.stderr)
     except AssertionError:
         claude_failure('claude-session-binding', result, token)
         raise
@@ -129,11 +124,11 @@ def session_failure_metadata(data, agent, expected, stderr):
         with closing(sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=.1)) as db:
             db.set_progress_handler(lambda: int(time.perf_counter() >= deadline), 1000)
             classification = "CASE coalesce(json_extract(runs.body,'$.agent'),'missing') WHEN 'codex' THEN 'codex' WHEN 'claude' THEN 'claude' WHEN 'other' THEN 'other' WHEN 'missing' THEN 'missing' ELSE 'unknown' END"
-            for label, source in (('managed_runs', 'runs'), ('relations', 'relations LEFT JOIN runs USING(agent_run_id)')):
+            for label, source in (('managed_runs', 'runs'), ('relations', 'relations LEFT JOIN runs USING(origin_id,agent_run_id)')):
                 result[label] = dict(db.execute('SELECT '+classification+',count(*) FROM '+source+' GROUP BY 1').fetchall())
             result['otlp_signals'] = dict(db.execute("SELECT kind,count(*) FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces') GROUP BY kind").fetchall())
             placeholders = ','.join('?' for _ in selected)
-            matched = db.execute("SELECT DISTINCT relations.session_id FROM relations JOIN runs USING(agent_run_id) WHERE json_extract(runs.body,'$.agent')=? AND relations.session_id IN ("+placeholders+') LIMIT 8', (agent, *selected)).fetchall()
+            matched = db.execute("SELECT DISTINCT relations.session_id FROM relations JOIN runs USING(origin_id,agent_run_id) WHERE json_extract(runs.body,'$.agent')=? AND relations.session_id IN ("+placeholders+') LIMIT 8', (agent, *selected)).fetchall()
             result['matched_count'] = len(matched)
             result['matched_digests'] = sorted(digest(row[0]) for row in matched)
     except sqlite3.Error:
@@ -144,7 +139,7 @@ def session_failure_metadata(data, agent, expected, stderr):
 def wait_sessions(data, agent, expected, stderr=b''):
     deadline = time.monotonic()+40
     while time.monotonic() < deadline:
-        rows = query(data, 'SELECT relations.agent_run_id,relations.session_id FROM relations JOIN runs USING(agent_run_id) WHERE json_extract(runs.body,\'$.agent\')=?', (agent,))
+        rows = query(data, 'SELECT relations.agent_run_id,relations.session_id FROM relations JOIN runs USING(origin_id,agent_run_id) WHERE json_extract(runs.body,\'$.agent\')=?', (agent,))
         found = {row[1] for row in rows}
         if expected <= found:
             return {row[0] for row in rows if row[1] in expected}
@@ -159,7 +154,7 @@ def wait_sessions(data, agent, expected, stderr=b''):
 def wait_shared_scope(data, run_id, timeout=40):
     deadline = time.monotonic()+timeout
     while time.monotonic() < deadline:
-        rows = query(data, """SELECT json_extract(objects.body,'$.shared') FROM objects JOIN associations USING(object_id)
+        rows = query(data, """SELECT json_extract(objects.body,'$.shared') FROM objects JOIN associations USING(origin_id,object_id)
                              WHERE associations.agent_run_id=? AND objects.kind='scope' AND objects.accounting='inclusive'""", (run_id,))
         if rows:
             shared = 'true' if rows[0][0] == 1 else 'false' if rows[0][0] == 0 else 'missing_or_invalid'
@@ -216,11 +211,10 @@ def managed_agent_matches(data, run, agent):
         manifest = records.read_private(data/'runs-v5'/(run+'.json'))
         if manifest.get('agent_run_id') != run or manifest.get('manifest_state') == 'reserved':
             return False
-        stored = records.opaque_id(records.identity_key(data), run)
         deadline = time.monotonic()+2
         with closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=.2)) as db:
             while time.monotonic() < deadline:
-                row = db.execute("SELECT json_extract(body,'$.agent') FROM runs WHERE agent_run_id=?", (stored,)).fetchone()
+                row = db.execute("SELECT json_extract(body,'$.agent') FROM runs WHERE agent_run_id=?", (run,)).fetchone()
                 if row and row[0]:
                     return row[0] == agent
                 time.sleep(.05)
@@ -542,7 +536,7 @@ def exercise(args):
     fixture.TIMEOUT = 1830
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     assert command and args.kind in ('vm', 'android')
-    token = (args.data_dir/'auth.token').read_text().strip()
+    token = (args.data_dir.with_name(args.data_dir.name+'-private')/'auth.token').read_text().strip()
     identities = []
     project = prepared/'project'
     for agent in ('codex', 'claude'):
@@ -601,17 +595,17 @@ def exercise(args):
         if agent != 'codex':
             require_command_success(receipt, agent)
         runs = (wait_claude_sessions(args.data_dir, {session}, result, token) if agent == 'claude'
-                else wait_sessions(args.data_dir, agent, {stored_id(args.data_dir, session)}))
+                else wait_sessions(args.data_dir, agent, {session}))
         assert len(runs) == 1
         run = next(iter(runs))
         deadline = time.monotonic()+45
         while time.monotonic() < deadline:
-            allocations = query(args.data_dir, 'SELECT DISTINCT allocations.object_id FROM allocations JOIN associations USING(object_id) WHERE associations.agent_run_id=?', (run,))
+            allocations = query(args.data_dir, 'SELECT DISTINCT allocations.object_id FROM allocations JOIN associations USING(origin_id,object_id) WHERE associations.agent_run_id=?', (run,))
             if allocations:
                 break
             time.sleep(0.2)
         assert allocations, agent+': actual native tool acquire did not bind its allocation'
-        assert json.loads(query(args.data_dir, 'SELECT body FROM runs WHERE agent_run_id=?', (run,))[0][0])['project_id'] == stored_id(args.data_dir, 'telemetry-fixture')
+        assert json.loads(query(args.data_dir, 'SELECT body FROM runs WHERE agent_run_id=?', (run,))[0][0])['project_id'] == 'telemetry-fixture'
         identities.append(dict(agent=agent, agent_run_id=run, session_id=session, object_ids=[row[0] for row in allocations]))
     assert identities[0]['agent_run_id'] != identities[1]['agent_run_id']
     assert set(identities[0]['object_ids']).isdisjoint(identities[1]['object_ids']), 'independent acquisitions reused one resource generation'
@@ -668,8 +662,6 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
             client.close()
         time.sleep(4)
         tool_run = (project/(name+'.run')).read_text().strip()
-        if tool_run:
-            tool_run = stored_id(data, tool_run)
         deadline = time.monotonic()+30
         while tool_run and not traces(tool_run) > counts.get(tool_run, 0) and time.monotonic() < deadline:
             time.sleep(0.5)
@@ -715,7 +707,7 @@ def main():
     sys.path.insert(0, str(args.source/'internal/adapters/configmaterial'))
     import native
     import tomli_w
-    token = (args.data_dir/'auth.token').read_text().strip()
+    token = (args.data_dir.with_name(args.data_dir.name+'-private')/'auth.token').read_text().strip()
     endpoint = 'http://127.0.0.1:14318'
     env = {'PATH': str(binaries)+':/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8',
            'HOME': str(state/'home'), 'CODEX_HOME': str(state/'codex'), 'CLAUDE_CONFIG_DIR': str(state/'claude'),
@@ -755,7 +747,7 @@ def main():
         app.close()
         provider.shutdown()
         provider.server_close()
-    runs = wait_sessions(args.data_dir, 'codex', {stored_id(args.data_dir, thread) for thread in threads})
+    runs = wait_sessions(args.data_dir, 'codex', set(threads))
     assert len(runs) == 1, 'two backend sessions must retain the one real shared backend run'
     run_id = next(iter(runs))
     wait_shared_scope(args.data_dir, run_id)

@@ -49,6 +49,7 @@ type Options struct {
 type LocalAuth = localAuth
 type ReceiverFunc func(context.Context, *Store, Options, *LocalAuth) error
 type runContextKey struct{}
+type sensitiveContextKey struct{}
 type localAuth struct {
 	store *Store
 	token string
@@ -70,12 +71,24 @@ func (a *localAuth) Authenticate(ctx context.Context, sources map[string][]strin
 	if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte("Bearer "+a.token)) != 1 {
 		return ctx, errors.New("telemetry authentication required")
 	}
+	secrets := []string{a.token}
+	for name, values := range sources {
+		if isSensitiveField(name) || strings.EqualFold(name, "x-api-key") {
+			for _, value := range values {
+				secrets = append(secrets, value)
+				if scheme, token, ok := strings.Cut(value, " "); ok && (strings.EqualFold(scheme, "bearer") || strings.EqualFold(scheme, "basic")) {
+					secrets = append(secrets, token)
+				}
+			}
+		}
+	}
+	ctx = context.WithValue(ctx, sensitiveContextKey{}, secrets)
 	runs := header(sources, "x-subyard-agent-run-id")
 	if len(runs) > 1 {
 		return ctx, errors.New("invalid run context")
 	}
 	if len(runs) == 1 {
-		if !legacyID.MatchString(runs[0]) {
+		if !(valueFilter{}).id(runs[0]) {
 			return ctx, errors.New("invalid run context")
 		}
 		ctx = context.WithValue(ctx, runContextKey{}, runs[0])
@@ -186,12 +199,12 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) err
 	headerRun, _ := ctx.Value(runContextKey{}).(string)
 	resourceRun := ""
 	if value, ok := attributes.Get("subyard.agent_run.id"); ok {
-		if value.Type() != pcommon.ValueTypeStr || !legacyID.MatchString(value.Str()) {
+		if value.Type() != pcommon.ValueTypeStr || !(valueFilter{}).id(value.Str()) {
 			return status.Error(codes.InvalidArgument, "invalid resource run context")
 		}
 		resourceRun = value.Str()
 	}
-	if headerRun != "" && resourceRun != "" && s.key.id(headerRun) != s.key.id(resourceRun) {
+	if headerRun != "" && resourceRun != "" && headerRun != resourceRun {
 		return status.Error(codes.InvalidArgument, "conflicting resource and header run context")
 	}
 	run := headerRun
@@ -367,24 +380,24 @@ func (s *Store) nativeLoss(tx *sql.Tx, run, readyAt string) error {
 		json_extract(r.body,'$.end_time') IS NOT NULL OR json_extract(r.body,'$.start_time') >= o.start
 		FROM receiver_outages o JOIN runs r ON json_extract(r.body,'$.start_time') < o.end
 		AND coalesce(json_extract(r.body,'$.end_time'),o.end) > o.start
-		WHERE coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')
+		WHERE r.origin_id=? AND coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')
 		AND (json_extract(r.body,'$.state') IS NOT 'resources_observing' OR EXISTS(
-			SELECT 1 FROM records WHERE kind='run' AND import_policy_version=''
+			SELECT 1 FROM records WHERE origin_id=r.origin_id AND kind='run' AND import_policy_version=''
 			AND json_extract(body,'$.agent_run_id')=r.agent_run_id AND json_extract(body,'$.state')='running'))`
-	var args []any
+	args := []any{s.origin}
 	if run == "" {
-		query += ` AND o.end=? AND r.agent_run_id IN (
-			SELECT json_extract(body,'$.agent_run_id') FROM records WHERE kind='run' AND import_policy_version='')`
-		args = []any{readyAt}
+		query += ` AND o.end=? AND r.agent_run_id IN (SELECT agent_run_id FROM local_runs)`
+		args = append(args, readyAt)
 	} else {
 		// Rebuild provisional gaps when a local run update arrives.
 		if _, err := tx.Exec(`DELETE FROM gaps WHERE agent_run_id=? AND origin_id=?
+			AND json_extract(body,'$.reason')='possible_native_loss'
 			AND NOT EXISTS(SELECT 1 FROM records r WHERE r.origin_id=gaps.origin_id AND r.event_id=gaps.event_id)`,
-			run, "producer:"+s.key.id(source)); err != nil {
+			run, s.origin); err != nil {
 			return err
 		}
 		query += " AND r.agent_run_id=?"
-		args = []any{run}
+		args = append(args, run)
 	}
 	rows, err := tx.Query(query, args...)
 	if err != nil {
@@ -400,11 +413,14 @@ func (s *Store) nativeLoss(tx *sql.Tx, run, readyAt string) error {
 		e := s.localRecord("gap", source, id+":"+first, first,
 			map[string]any{"agent_run_id": id, "reason": "possible_native_loss", "quality": "partial",
 				"coverage_start": first, "coverage_end": last})
-		e.ReceivedTime, e.PolicyVersion = last, PolicyVersion
+		e.ReceivedTime, e.filter = last, valueFilter{}
+		if _, err = sanitizeEnvelope(&e, DefaultPolicy()); err != nil {
+			return err
+		}
 		if confirmed {
 			err = s.putRecord(tx, e)
 		} else {
-			err = s.key.project(tx, e)
+			err = project(tx, e)
 		}
 		if err != nil {
 			return err

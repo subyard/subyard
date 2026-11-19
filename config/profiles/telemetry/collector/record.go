@@ -3,11 +3,11 @@ package collector
 
 import (
 	"bytes"
-	"crypto/hmac"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -23,20 +23,18 @@ const timestampLayout = "2006-01-02T15:04:05.000000000Z"
 const unknownSourceTime = "0001-01-01T00:00:00.000000000Z"
 
 type Record struct {
-	Schema        string         `json:"schema,omitempty"`
-	SchemaVersion int            `json:"schema_version,omitempty"`
-	SourceID      string         `json:"source_id"`
-	EventID       string         `json:"event_id"`
-	SourceVersion string         `json:"source_version"`
-	SourceTime    string         `json:"source_time"`
-	Kind          string         `json:"kind"`
+	Schema        string `json:"schema,omitempty"`
+	SchemaVersion int    `json:"schema_version,omitempty"`
+	OriginID      string `json:"origin_id,omitempty"`
+	SourceID      string `json:"source_id"`
+	EventID       string `json:"event_id"`
+	SourceVersion string `json:"source_version"`
+	SourceTime    string `json:"source_time"`
+	Kind          string `json:"kind"`
+	filter        valueFilter
+	Filtered      bool           `json:"filtered,omitempty"`
+	Redactions    int64          `json:"redactions,omitempty"`
 	Body          map[string]any `json:"body"`
-
-	authenticated bool
-	redactions    int64
-	capturePolicy string
-	inputID       string
-	filtered      bool
 }
 
 func (r *Record) UnmarshalJSON(data []byte) error {
@@ -49,11 +47,20 @@ func (r *Record) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*r = Record{
-		Schema: jsonString(input["schema"]), SourceID: jsonString(input["source_id"]), EventID: jsonString(input["event_id"]),
+		OriginID: jsonString(input["origin_id"]),
+		Schema:   jsonString(input["schema"]), SourceID: jsonString(input["source_id"]), EventID: jsonString(input["event_id"]),
 		SourceVersion: jsonString(input["source_version"]), SourceTime: jsonString(input["source_time"]),
 		Kind: jsonString(input["kind"]), Body: body,
 	}
 	_ = json.Unmarshal(input["schema_version"], &r.SchemaVersion)
+	_ = json.Unmarshal(input["filtered"], &r.Filtered)
+	_ = json.Unmarshal(input["redactions"], &r.Redactions)
+	fields, err := decodeBody(data)
+	if err != nil {
+		return err
+	}
+	r.filter = valueFilter{}
+	r.filter.discover(fields, false)
 	return nil
 }
 
@@ -78,19 +85,15 @@ type Envelope struct {
 	// PolicyVersion is the source capture claim; imports independently record
 	// the trusted local policy applied before the imported bytes are stored.
 	ImportPolicyVersion string          `json:"import_policy_version,omitempty"`
-	InputProof          string          `json:"input_proof,omitempty"`
-	StoreProof          string          `json:"store_proof,omitempty"`
 	Redactions          int64           `json:"redactions"`
 	Body                json.RawMessage `json:"body,omitempty"`
 	Protobuf            []byte          `json:"protobuf,omitempty"`
 
-	// Only internal capture and an authenticated producer can set local.
-	local                       bool
-	replay                      bool
-	native                      bool
-	inputID                     string
-	claimedOrigin, claimedEvent string
-	untimedProducer             *Envelope
+	replay   bool
+	native   bool
+	filtered bool
+	invalid  bool
+	filter   valueFilter
 }
 
 func newID() string {
@@ -155,7 +158,7 @@ func loadRecordPolicy() (map[string]*regexp.Regexp, map[string]bodyRule) {
 	return patterns, rules
 }
 
-func (id identity) field(rule bodyRule, value any) (any, bool) {
+func (f valueFilter) field(rule bodyRule, value any) (any, bool) {
 	if rule.kind == "" {
 		return nil, false
 	}
@@ -170,7 +173,7 @@ func (id identity) field(rule bodyRule, value any) (any, bool) {
 		}
 		fields := []any{}
 		for _, item := range list {
-			if name, ok := item.(string); ok && slices.Contains(rule.choices, name) {
+			if name, ok := item.(string); ok && f.safe(name) && slices.Contains(rule.choices, name) {
 				fields = append(fields, name)
 			}
 		}
@@ -183,7 +186,7 @@ func (id identity) field(rule bodyRule, value any) (any, bool) {
 			}
 			fields := []any{}
 			for _, field := range v {
-				if name, ok := field.(string); ok {
+				if name, ok := field.(string); ok && f.safe(name) {
 					if _, known := bodyRules[name]; known {
 						fields = append(fields, name)
 					}
@@ -191,33 +194,23 @@ func (id identity) field(rule bodyRule, value any) (any, bool) {
 			}
 			return fields, true
 		case string:
-			if v == "broker_attribution" || v == "final_tail" {
+			if f.safe(v) && (v == "broker_attribution" || v == "final_tail") {
 				return v, true
 			}
-			return id.field(bodyRule{kind: "uint"}, v)
+			return f.field(bodyRule{kind: "uint"}, v)
 		default:
-			return id.field(bodyRule{kind: "uint"}, v)
+			return f.field(bodyRule{kind: "uint"}, v)
 		}
 	case "bool":
 		_, ok := value.(bool)
 		return value, ok
+	case "decimal":
+		text := numberText(value)
+		n, err := strconv.ParseFloat(text, 64)
+		return json.Number(strconv.FormatFloat(n, 'g', -1, 64)), f.safe(text) && err == nil && n >= 0 && !math.IsInf(n, 0) && !math.IsNaN(n)
 	case "uint", "int":
-		var number string
-		switch v := value.(type) {
-		case string:
-			number = v // Historical producer counters were sometimes decimal strings.
-		case json.Number:
-			number = string(v)
-		case int:
-			number = strconv.Itoa(v)
-		case int64:
-			number = strconv.FormatInt(v, 10)
-		case uint64:
-			number = strconv.FormatUint(v, 10)
-		default:
-			return nil, false
-		}
-		if !recordPatterns["decimal"].MatchString(number) {
+		number := numberText(value)
+		if !f.safe(number) || !recordPatterns["decimal"].MatchString(number) {
 			return nil, false
 		}
 		if rule.kind == "uint" {
@@ -228,7 +221,7 @@ func (id identity) field(rule bodyRule, value any) (any, bool) {
 		return n, err == nil
 	}
 	s, ok := value.(string)
-	if !ok {
+	if !ok || !f.safe(s) {
 		return nil, false
 	}
 	switch rule.kind {
@@ -238,7 +231,8 @@ func (id identity) field(rule bodyRule, value any) (any, bool) {
 		s = canonicalTimestamp(s)
 		return s, s != ""
 	case "id":
-		s = id(s)
+		return s, legacyID.MatchString(s)
+	case "label":
 		return s, s != ""
 	case "version":
 		return s, versionPattern.MatchString(s)
@@ -249,12 +243,12 @@ func (id identity) field(rule bodyRule, value any) (any, bool) {
 
 var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true}
 
-func (id identity) body(input map[string]any) (map[string]any, int64) {
+func (f valueFilter) body(input map[string]any) (map[string]any, int64) {
 	out := make(map[string]any, len(bodyRules))
 	var removed int64
 	for name, value := range input {
-		clean, ok := id.field(bodyRules[name], value)
-		if ok {
+		clean, ok := f.field(bodyRules[name], value)
+		if ok && f.safe(name) {
 			out[name] = clean
 		}
 		if list, isList := value.([]any); isList {
@@ -270,19 +264,25 @@ func (id identity) body(input map[string]any) (map[string]any, int64) {
 	return out, removed
 }
 
-func (id identity) cleanRecord(r Record) (Record, int64, error) {
+func (f valueFilter) cleanRecord(r Record) (Record, int64, error) {
 	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
 		return Record{}, 0, errors.New("unsupported record schema")
 	}
 	clean := Record{
 		Schema: RecordSchema, SourceID: r.SourceID, EventID: r.EventID,
 		SourceVersion: sanitizeSourceVersion(r.SourceVersion), SourceTime: canonicalTimestamp(r.SourceTime),
-		Kind: r.Kind,
+		Kind: r.Kind, OriginID: r.OriginID,
 	}
-	if clean.SourceID == "" || clean.EventID == "" || !kinds[clean.Kind] || r.Body == nil {
+	if !f.id(clean.SourceID) || !f.id(clean.EventID) || (r.OriginID != "" && !f.id(r.OriginID)) || !f.safe(clean.Kind) || !kinds[clean.Kind] || r.Body == nil {
 		return Record{}, 0, errors.New("invalid record identity or kind")
 	}
-	body, removed := id.body(r.Body)
+	body, removed := f.body(r.Body)
+	if !f.safe(r.SourceVersion) {
+		clean.SourceVersion = ""
+	}
+	if !f.safe(r.SourceTime) {
+		clean.SourceTime = ""
+	}
 	if clean.SourceTime == "" {
 		clean.SourceTime = unknownSourceTime
 		removed++
@@ -303,47 +303,20 @@ func (id identity) cleanRecord(r Record) (Record, int64, error) {
 	return clean, removed, nil
 }
 
-// decodeRecord authenticates the exact inner JSON sent by a producer. Passing
-// through already digested identifiers requires this proof, not an ID prefix.
-func (key identityKey) decodeRecord(data []byte) (Record, error) {
-	var signed struct {
-		Record    json.RawMessage `json:"record"`
-		Signature string          `json:"signature"`
+func numberText(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case json.Number:
+		return string(v)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
 	}
-	if err := json.Unmarshal(data, &signed); err != nil {
-		return Record{}, err
-	}
-	if signed.Record == nil {
-		var r Record
-		err := json.Unmarshal(data, &r)
-		return r, err
-	}
-	signature, err := hex.DecodeString(signed.Signature)
-	if err != nil || !hmac.Equal(signature, key.digest("producer-record/v1\x00"+string(signed.Record))) {
-		return Record{}, errInvalidRecord
-	}
-	var r Record
-	if err = json.Unmarshal(signed.Record, &r); err != nil {
-		return Record{}, err
-	}
-	var count struct {
-		Redactions    int64  `json:"redactions"`
-		PolicyVersion string `json:"policy_version"`
-		InputID       string `json:"input_id"`
-		Filtered      bool   `json:"filtered"`
-	}
-	if err = json.Unmarshal(signed.Record, &count); err != nil {
-		return Record{}, err
-	}
-	r.authenticated = true
-	r.inputID, r.filtered = count.InputID, count.Filtered
-	r.redactions = max(0, min(count.Redactions, 1<<31))
-	// Older signed outbox entries did not identify the producer's allowlist.
-	r.capturePolicy = PolicyVersion
-	if capturePolicyVersion.MatchString(count.PolicyVersion) {
-		r.capturePolicy = count.PolicyVersion
-	}
-	return r, nil
+	return ""
 }
 
 func decodeBody(data []byte) (map[string]any, error) {

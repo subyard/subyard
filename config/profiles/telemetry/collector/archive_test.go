@@ -15,33 +15,6 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func legacyOutboxFixture(t *testing.T, s *Store) string {
-	t.Helper()
-	path := filepath.Join(s.dir, "outbox")
-	if err := privateDir(path); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0700) })
-	return path
-}
-
-func importLegacyFixture(t *testing.T, s *Store, p Policy) error {
-	t.Helper()
-	if err := os.Chmod(filepath.Join(s.dir, "outbox"), os.ModeSticky|0500); err != nil {
-		return err
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	c := cutover{Started: spoolTime()}
-	if err := c.importLegacy(tx, s.dir, s.key, p); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 func TestArchiveUpgrade(t *testing.T) {
 	ctx := context.Background()
 	for _, version := range []int{1, 2, 3, 4} {
@@ -50,11 +23,22 @@ func TestArchiveUpgrade(t *testing.T) {
 			const runID = "42424242-4242-4242-8242-424242424242"
 			legacy := runID
 			if version == 4 {
-				legacy = s.key.id(legacy)
+				legacy = "h1:" + strings.Repeat("ab", 32)
 			}
-			body, _ := json.Marshal(map[string]any{"agent_run_id": legacy, "historical_note": "retained"})
+			body, _ := json.Marshal(map[string]any{"agent_run_id": legacy, "historical_note": "retained", "state": "resources_observing"})
 			seedRetained(t, s, Envelope{OriginID: "producer:old-source", EventID: "old-run", SourceID: "old-source",
 				SourceVersion: "1", Kind: "run", Encoding: "json", PolicyVersion: PolicyVersion, Body: body})
+			if _, err := s.db.Exec(`DROP TABLE runs;
+				CREATE TABLE runs(agent_run_id TEXT PRIMARY KEY,body TEXT NOT NULL,source_time TEXT NOT NULL);
+				DROP TABLE objects;
+				CREATE TABLE objects(object_id TEXT PRIMARY KEY,kind TEXT NOT NULL,parent_object_id TEXT,accounting TEXT,body TEXT NOT NULL,source_time TEXT NOT NULL);
+				DROP TABLE associations;
+				CREATE TABLE associations(association_id TEXT PRIMARY KEY,object_id TEXT NOT NULL,agent_run_id TEXT,quality TEXT,start_time TEXT,end_time TEXT,shared INTEGER NOT NULL,body TEXT NOT NULL);
+				DROP TABLE allocations;
+				CREATE TABLE allocations(object_id TEXT PRIMARY KEY,body TEXT NOT NULL,source_time TEXT NOT NULL);
+				DELETE FROM metadata WHERE key='store_generation_id'`); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := s.db.Exec("INSERT INTO runs VALUES(?,?,?)", legacy, string(body), unknownSourceTime); err != nil {
 				t.Fatal(err)
 			}
@@ -102,12 +86,14 @@ os._exit(0)
 			if err := os.Chmod(runs, 0500); err != nil {
 				t.Fatal(err)
 			}
-			outbox := legacyOutboxFixture(t, s)
+			outbox := filepath.Join(s.dir, "outbox")
+			if err := privateDir(outbox); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(outbox, 0700) })
 			gap := []byte(`{"schema_version":1,"source_id":"old-source","event_id":".legacy","source_version":"1","kind":"gap","body":{"reason":"source_offline"}}`)
-			testkit.WriteFile(t, filepath.Join(outbox, ".legacy.json"), gap, 0600)
-			testkit.WriteFile(t, filepath.Join(outbox, ".foreign.json"), gap, 0600)
-			unsupported := strings.NewReplacer(`"schema_version":1`, `"schema_version":2`, `".legacy"`, `".unsupported"`).Replace(string(gap))
-			testkit.WriteFile(t, filepath.Join(outbox, ".unsupported.json"), []byte(unsupported), 0600)
+			gapPath := filepath.Join(outbox, ".legacy.json")
+			testkit.WriteFile(t, gapPath, gap, 0600)
 			if err := os.Chmod(outbox, os.ModeSticky|0500); err != nil {
 				t.Fatal(err)
 			}
@@ -118,7 +104,7 @@ os._exit(0)
 			if version <= 2 {
 				// Interrupt after committing historical evidence, with the old inode
 				// still at the active path in v1 and already staged in v2.
-				if err := c.checkpointArchive(s.dir, path); err != nil {
+				if err := c.checkpointArchive(path); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -140,16 +126,19 @@ os._exit(0)
 					t.Fatal(err)
 				}
 				stats, err := Stats(ctx, active.db)
-				if err != nil || stats["records"] != int64(2) || !active.RegisteredRun(ctx, runID) || active.origin == s.origin {
+				if err != nil || stats["records"] != int64(0) || active.RegisteredRun(ctx, runID) || active.origin == s.origin {
 					t.Fatalf("active cutover rows: %v (%v)", stats, err)
 				}
 				var offsets int
 				if err := active.db.QueryRow("SELECT count(*) FROM spool_offsets").Scan(&offsets); err != nil || offsets != 0 {
-					t.Fatalf("legacy import left checkpoints: %d (%v)", offsets, err)
+					t.Fatalf("fresh store has spool checkpoints: %d (%v)", offsets, err)
 				}
 				if err := active.Close(); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if pending, err := os.ReadFile(gapPath); err != nil || !bytes.Equal(pending, gap) {
+				t.Fatalf("retired outbox payload changed: %v", err)
 			}
 			archive := filepath.Join(s.dir, "archive")
 			if sealed, err := os.Stat(filepath.Join(archive, databaseName)); err != nil ||
@@ -165,6 +154,10 @@ os._exit(0)
 				t.Fatal(err)
 			}
 			defer db.Close()
+			stats, err := Stats(ctx, db)
+			if err != nil || stats["schema_version"] != version || stats["store_generation_id"] != s.OriginID() {
+				t.Fatalf("historical store metadata: %v (%v)", stats, err)
+			}
 			report, err := ShowRun(ctx, db, legacy)
 			if err != nil {
 				t.Fatal(err)
@@ -185,74 +178,13 @@ os._exit(0)
 					t.Fatal(err)
 				}
 			}
-			var count int
-			if err := replay.db.QueryRow(`SELECT count(*) FROM gaps WHERE json_extract(body,'$.reason')='interrupted_by_upgrade'`).Scan(&count); err != nil || count != 1 {
-				t.Fatalf("historical gap after repeated replay: %d (%v)", count, err)
-			}
-		})
-	}
-}
-
-func TestEstablishedStoreRefusesMissingAndMismatchedKeys(t *testing.T) {
-	for _, missing := range []bool{true, false} {
-		t.Run(fmt.Sprint(missing), func(t *testing.T) {
-			dir := testkit.TempDir(t)
-			s, err := Open(dir, DefaultLimits())
+			replayed, err := ShowRun(ctx, replay.db, legacy)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := s.Ingest(context.Background(), []Record{record("gap", map[string]any{})}); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.publishCapturePolicy(context.Background(), DefaultPolicy()); err != nil {
-				t.Fatal(err)
-			}
-			if err := s.Close(); err != nil {
-				t.Fatal(err)
-			}
-			path := filepath.Join(dir, identityKeyFile)
-			want := "does not match"
-			if missing {
-				want = "is missing"
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				replacement := bytes.Clone(s.key)
-				replacement[0] ^= 1
-				testkit.WriteFile(t, path, replacement, 0600)
-			}
-			if opened, err := Open(dir, DefaultLimits()); err == nil {
-				opened.Close()
-				t.Fatal("store accepted an incorrect key")
-			} else if !strings.Contains(err.Error(), want) {
-				t.Fatal(err)
-			}
-			const producer = `
-import sys
-sys.path.insert(0, '..')
-import records
-from pathlib import Path
-root = Path(sys.argv[1])
-assert not records.emit(root, 'gap', {}, source_id='fixture', event_id='wrong-key')
-assert not list((root/'spool').iterdir())
-`
-			if output, err := exec.Command("python3", "-B", "-c", producer, dir, want).CombinedOutput(); err != nil {
-				t.Fatalf("producer check: %v\n%s", err, output)
-			}
-			if missing {
-				if _, err := os.Lstat(path); !os.IsNotExist(err) {
-					t.Fatalf("missing key was recreated: %v", err)
-				}
-			}
-			testkit.WriteFile(t, path, s.key, 0600)
-			restored, err := Open(dir, DefaultLimits())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer restored.Close()
-			if stats, err := Stats(context.Background(), restored.db); err != nil || stats["records"] != int64(1) || restored.OriginID() != s.OriginID() {
-				t.Fatalf("restored store changed: %v (%v)", stats, err)
+			replayedGaps := replayed["gaps"].([]any)
+			if len(replayedGaps) != 1 || replayedGaps[0].(map[string]any)["reason"] != "interrupted_by_upgrade" {
+				t.Fatalf("historical final gap after repeated replay: %v", replayedGaps)
 			}
 		})
 	}

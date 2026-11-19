@@ -21,7 +21,7 @@ func TestOTLPMetricUnitsSurviveCapturePolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				e := Envelope{Encoding: "otlp/metrics", Protobuf: raw}
-				if _, err := (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
+				if _, err := sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 					t.Fatal(err)
 				}
 				clean := pmetricotlp.NewExportRequest()
@@ -48,7 +48,7 @@ func TestOTLPMetricUnitBoundsAndOtherStringPolicies(t *testing.T) {
 			t.Fatal(err)
 		}
 		e := Envelope{Encoding: "otlp/metrics", Protobuf: raw}
-		if _, err := (identityKey{}).sanitizeOTLP(&e, DefaultPolicy(), (identityKey{}).id, true); err != nil {
+		if _, err := sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 			t.Fatal(err)
 		}
 		clean := pmetricotlp.NewExportRequest()

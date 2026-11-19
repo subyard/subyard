@@ -5,12 +5,16 @@ export TMPDIR=/tmp
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$(cd "$ROOT/../../.." && pwd)"
 cd "$SOURCE"
+# All producer tests use the same real sanitizer binary as the installed profile.
+mkdir -p .build/telemetry-tests
+export SUBYARD_TELEMETRY_COLLECTOR="$SOURCE/.build/telemetry-tests/subyard-telemetry"
+go build -o "$SUBYARD_TELEMETRY_COLLECTOR" ./config/profiles/telemetry/cmd/telemetry
 case "$#:${1:-}" in
   0:) bash "$ROOT/tests/permissions.sh" ;;
   1:--after-permissions) ;;
   *) printf 'Usage: tests/run.sh [--after-permissions]\n' >&2; exit 2 ;;
 esac
-for check in assets process native native-signals failure-evidence launcher lifecycle forward owner sqlite-fixture; do
+for check in assets process native native-signals failure-evidence launcher lifecycle forward owner sqlite-fixture records resources privacy-canary; do
   python3 -B "$ROOT/tests/$check-test.py"
 done
 bash "$ROOT/tests/broker-controller-test.sh"

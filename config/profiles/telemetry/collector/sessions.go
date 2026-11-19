@@ -2,6 +2,7 @@ package collector
 
 import (
 	"encoding/json"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -61,7 +62,8 @@ func sessionEnvelopes(signal map[string]any) []Envelope {
 					}
 				})
 			}
-			for session, names := range sessions {
+			for _, session := range slices.Sorted(maps.Keys(sessions)) {
+				names := sessions[session]
 				slices.Sort(names)
 				kind := "session"
 				body := map[string]any{"session_id": session, "session_attributes": names, "quality": "explicit", "source": "native-otlp-attribute"}
