@@ -352,6 +352,239 @@ assert launcher.launch(args) == 0
             self.assertEqual(list(data.glob('archive*')), [archive.parent])
             self.assertNotIn('disable', invoked)
 
+    def test_interrupted_private_directory_creation_is_finished_on_retry(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            runtime = object.__new__(guest.Runtime)
+            runtime.uid, runtime.gid = os.getuid() or 1000, os.getgid()
+            runtime.data, runtime.control = Path(name)/'data', Path(name)/'control'
+            runtime.operational = Path(name)/'data-private'
+            runtime.auth = runtime.operational/'auth.token'
+            refusal = 'foreign telemetry operational directory'
+            # mkdir under a restrictive umask before chmod, and as guest root before chown.
+            runtime.operational.mkdir(mode=0o500)
+            leftovers = [0o500]
+            if os.getuid() == 0:
+                leftovers.append(0o700)
+            for mode in leftovers:
+                with self.subTest(mode=oct(mode)):
+                    runtime.operational.chmod(mode)
+                    runtime.prepare_auth()
+                    info = runtime.operational.stat()
+                    self.assertEqual((stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid), (0o700, runtime.uid, runtime.gid))
+                    runtime.auth.unlink()
+                    os.chown(runtime.operational, os.getuid(), os.getgid())
+            # Anything else is not our half-made directory.
+            (runtime.operational/'foreign').touch()
+            runtime.operational.chmod(0o500)
+            with self.assertRaisesRegex(ValueError, refusal):
+                runtime.prepare_auth()
+            runtime.operational.chmod(0o700)
+            (runtime.operational/'foreign').unlink()
+            runtime.operational.chmod(0o750)
+            with self.assertRaisesRegex(ValueError, refusal):
+                runtime.prepare_auth()
+            runtime.operational.rmdir()
+            runtime.operational.symlink_to(runtime.data)
+            runtime.data.mkdir(mode=0o700)
+            with self.assertRaisesRegex(ValueError, refusal):
+                runtime.prepare_auth()
+
+    def test_v030_policy_and_store_migrations_resume_after_every_interruption(self):
+        profile = Path(guest.__file__).parent
+        token = 'c'*64
+        with tarfile.open(Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz') as archive:
+            legacy_native = archive.extractfile('config/profiles/telemetry/native.py').read()
+        v030 = {}
+        exec(compile(legacy_native, 'v0.30.0/native.py', 'exec'), v030)
+
+        class Interrupted(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            base = Path(name)
+            base.chmod(0o711)
+            source = base/'source'
+            shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
+            shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            binary = source/'subyard-telemetry'
+            shutil.copyfile(records.collector_binary(), binary)
+            binary.chmod(0o755)
+            root, pristine = base/'yard', base/'pristine'
+            account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
+            states = {}
+
+            def systemctl(action, *args):
+                for unit in (unit for unit in args if unit in states):
+                    if action in ('enable', 'disable'):
+                        states[unit]['UnitFileState'] = action+'d'
+                    if action in ('stop', 'start') or '--now' in args:
+                        states[unit]['ActiveState'] = 'active' if action in ('start', 'enable') else 'inactive'
+                return ''
+
+            def runtime():
+                value = guest.Runtime(source, 'dev', True, ['claude', 'codex'], root/'control', root/'data', root/'library',
+                                      root/'units', root/'bin', account, etc=root/'etc')
+                value.manager = lambda unit: dict(LoadState='loaded', **states[unit])
+                value.running_no_new_privs = lambda _state: True
+                value.skill_delivery = lambda _action: True
+                return value
+
+            def dev(*command):
+                if os.getuid() != account.pw_uid:
+                    return ['/usr/bin/setpriv', '--reuid', str(account.pw_uid), '--regid', str(account.pw_gid), '--clear-groups', *command]
+                return command
+
+            def remove(path):
+                if path.exists():
+                    subprocess.run(['chmod', '-R', 'u+rwX', path], check=True)
+                    shutil.rmtree(path)
+
+            # One v0.30 yard: home agent configurations, their receipt and a schema 4 store.
+            installed = runtime()
+            for directory in (installed.control, installed.library, installed.units, installed.commands, installed.etc):
+                directory.mkdir(mode=0o755, parents=True)
+            for directory in (installed.home, installed.data):
+                directory.mkdir(mode=0o700)
+                os.chown(directory, installed.uid, installed.gid)
+            (installed.control/'marker').write_bytes(guest.MARKER)
+            for path, (_, mode) in installed.assets.items():
+                path.write_bytes(b'v0.30 '+path.name.encode())
+                path.chmod(mode)
+            (installed.control/'assets.json').write_text(json.dumps({
+                str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in installed.assets}))
+            claude, codex = (installed.home/parts[1] for parts in guest.native.AGENTS.values())
+            prior = {claude: b'{"env": {"UNRELATED": "keep"}, "theme": "dark"}\n', codex: b'[analytics]\nenabled = false\n'}
+            for path, content in prior.items():
+                path.parent.mkdir(mode=0o700)
+                path.write_bytes(content)
+                path.chmod(0o600)
+                for owned in (path.parent, path):
+                    os.chown(owned, installed.uid, installed.gid)
+            v030['reconcile'](installed.home, installed.control/'native.json', ['claude', 'codex'], installed.endpoint, token,
+                              guest.tomli_w, installed.uid, installed.gid)
+            for path in prior:
+                self.assertIn(token.encode(), path.read_bytes())
+            subprocess.run(dev(binary, 'prepare', '--data-dir', installed.data), check=True, timeout=10)
+            initialization = '''
+import contextlib, json, pathlib, sqlite3, sys
+root = pathlib.Path(sys.argv[1])
+(root/'spool-policy.json').unlink()
+for name in ('runs', 'runs-v4', 'outbox', 'sources'):
+    (root/name).mkdir(mode=0o700)
+(root/'outbox/.lock').touch(mode=0o600)
+(root/'manager.lock').touch(mode=0o600)
+with contextlib.closing(sqlite3.connect(root/'telemetry.sqlite')) as db:
+    db.execute("PRAGMA user_version=4")
+    db.execute('DROP TABLE runs')
+    db.execute('CREATE TABLE runs(agent_run_id TEXT PRIMARY KEY, body TEXT, source_time TEXT)')
+    db.execute("INSERT INTO runs VALUES(?,?,'')", ('legacy-run', json.dumps({'state': 'running'})))
+    db.commit()
+for path, value in (
+    ('runs/legacy-run.json', json.dumps(dict(agent_run_id='legacy-run', pid=2147483647,
+        boot_id=pathlib.Path('/proc/sys/kernel/random/boot_id').read_text().strip()))),
+    ('outbox/.valid.json', json.dumps(dict(schema_version=1, event_id='.valid', source_id='old-producer',
+         source_version='1', kind='gap', body=dict(reason='source_offline')))),
+    ('sources/observer-old.json', 'historical operational state'),
+    ('auth.token', sys.argv[2]+chr(10)),
+):
+    (root/path).write_text(value)
+    (root/path).chmod(0o600)
+'''
+            subprocess.run(dev(sys.executable, '-Bc', initialization, installed.data, token), check=True, timeout=5)
+            subprocess.run(['cp', '-a', root, pristine], check=True)
+            private = [root/'home', root/'etc', root/'control', root/'data', root/'data-private']
+            effects = [(guest.native, 'publish'), (guest, 'systemctl'), (subprocess, 'run'), *((os, name) for name in (
+                'replace', 'rename', 'unlink', 'rmdir', 'mkdir', 'chmod', 'fchmod', 'chown', 'fchown'))]
+
+            def check():
+                for top in private:
+                    for path in (top.rglob('*') if top.exists() else ()):
+                        info = path.lstat()
+                        if stat.S_ISREG(info.st_mode) and info.st_mode & 0o004:
+                            self.assertFalse(token.encode() in path.read_bytes(), path)
+                for path in (root/'data/auth.token', root/'data-private/auth.token'):
+                    if path.exists():
+                        self.assertEqual(path.read_bytes(), token.encode()+b'\n')
+                for parts in guest.native.AGENTS.values():
+                    if (root/'etc'/parts[0]).exists():
+                        self.assertIn(token.encode(), (root/'etc'/parts[0]).read_bytes())
+
+            def apply(stop):
+                calls, publishing = 0, None
+
+                def wrap(name, original):
+                    def call(*args, **kwargs):
+                        nonlocal calls, publishing
+                        # Inside a publish, a stop before the rename equals a stop before the publish.
+                        if publishing is not False or name == 'replace':
+                            calls += 1
+                            check()
+                            if calls == stop:
+                                raise Interrupted
+                        if name != 'publish':
+                            result = original(*args, **kwargs)
+                            if name == 'replace' and publishing is False:
+                                publishing = True
+                            return result
+                        publishing = False
+                        try:
+                            return original(*args, **kwargs)
+                        finally:
+                            publishing = None
+                    return call
+
+                with ExitStack() as patches:
+                    patches.enter_context(patch.object(guest, 'systemctl', side_effect=systemctl))
+                    for owner, name in effects:
+                        patches.enter_context(patch.object(owner, name, wrap(name, getattr(owner, name))))
+                    runtime().apply()
+                return calls
+
+            def upgrade(stop):
+                remove(root)
+                subprocess.run(['cp', '-a', pristine, root], check=True)
+                states.update({unit: dict(ActiveState='active', UnitFileState='enabled') for unit in (guest.COLLECTOR, guest.MANAGER)})
+                if stop:
+                    # A child failure as guest root surfaces as a failed developer operation.
+                    with self.assertRaises(Interrupted if os.getuid() else (Interrupted, ValueError)):
+                        apply(stop)
+                completed = apply(0)
+                check()
+                current = runtime()
+                self.assertEqual(current.observe()['state'], 'current')
+                self.assertEqual(current.auth.read_bytes(), token.encode()+b'\n')
+                self.assertFalse((root/'data/auth.token').exists())
+                self.assertFalse((root/'control/native.json').exists())
+                self.assertFalse((root/'data'/guest.CUTOVER).exists())
+                for parts in guest.native.AGENTS.values():
+                    policy = current.etc/parts[0]
+                    self.assertIn(token.encode(), policy.read_bytes())
+                    self.assertEqual(stat.S_IMODE(policy.stat().st_mode), 0o640)
+                self.assertEqual(json.loads(claude.read_bytes()), json.loads(prior[claude]))
+                self.assertEqual(guest.native.parse('codex', codex.read_bytes()), {'analytics': {'enabled': False}})
+                # The legacy store, run, outbox and operational state are kept, once.
+                self.assertEqual(list((root/'data').glob('archive*')), [root/'data/archive'])
+                with closing(sqlite3.connect((root/'data/archive/telemetry.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
+                    self.assertEqual(db.execute('SELECT agent_run_id FROM runs').fetchall(), [('legacy-run',)])
+                    self.assertEqual(db.execute("SELECT agent_run_id,json_extract(body,'$.reason') FROM gaps").fetchall(),
+                                     [('legacy-run', 'interrupted_by_upgrade')])
+                self.assertTrue((root/'data/outbox/.valid.json').exists())
+                self.assertTrue((root/'data/runs/legacy-run.json').exists())
+                kept = list((root/'data-private').glob('legacy-*/sources/observer-old.json'))
+                self.assertEqual([path.read_text() for path in kept], ['historical operational state'])
+                return completed
+
+            try:
+                # The run without an interruption counts the steps; every retry completes.
+                steps = upgrade(0)
+                self.assertGreater(steps, 40)
+                for stop in range(1, steps+1):
+                    with self.subTest(stop=stop):
+                        upgrade(stop)
+            finally:
+                remove(root)
+                remove(pristine)
+
     def test_runtime_diagnostics_name_changed_asset_without_contents(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             path = Path(name)/'collector.py'
