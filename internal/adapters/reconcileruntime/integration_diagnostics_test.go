@@ -25,12 +25,13 @@ func TestIntegrationPlanReportsStructuredConfigAndBubblewrapRefusals(t *testing.
 	runtime.Integrations = []profile.IntegrationDefinition{definition}
 	runtime.Environment = []string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_CONFIG=" + path}
 	runtime.Yard = domain.Context{YardName: "sample", IncusProject: "test", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}
-	incus := runningIncus(4)
+	// Substrate, inventory, structured config, project hook probe, services.
+	incus := runningIncus(5)
 	incus.ExecSteps[1].Result.Stdout = []byte(`{"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
 	incus.ExecSteps[2].Result = ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: invalid current TOML\n")}
 	incus.ExecSteps[2].Err = &ports.GuestExitError{Code: 2}
 	const policyRefusal = "Bubblewrap AppArmor: the owned policy directory is missing or changed"
-	incus.ExecSteps[3].Result = ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(policyRefusal + "\n")}
+	incus.ExecSteps[4].Result = ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(policyRefusal + "\n")}
 	runtime.Incus, runtime.Executor = incus, incus
 	_, err := runtime.IntegrationPlan(context.Background())
 	var refusals *domain.Refusals
@@ -115,7 +116,7 @@ func TestUnrecordedStructuredConfigDiagnosticPreservesOwnershipRefusal(t *testin
 				message, retry := diagnostic.ActivationDiagnostic()
 				if !strings.Contains(message, wantDetail) || !strings.Contains(message, path) ||
 					!strings.Contains(retry, "'"+path+"'") ||
-					(strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'mv' '--backup=numbered'")) ||
+					(strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'mv' '-T' '--backup=numbered'")) ||
 					(!strings.HasPrefix(kind, "invalid-") && !strings.Contains(retry, "'sha256sum'")) {
 					t.Fatalf("unactionable ownership diagnostic: %s; %s", message, retry)
 				}

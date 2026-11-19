@@ -387,9 +387,14 @@ func TestIntegrationActivationFailureBoundaries(t *testing.T) {
 				t.Fatal("injected failure was accepted")
 			}
 			boundary := materializedConfigActivationError{cause: err, yard: "default", phase: "integrations", action: "reconcile", command: "integration status"}
-			message, _ := boundary.ActivationDiagnostic()
-			if !strings.Contains(message, "stage="+stage+" projected=") || strings.Contains(message, "private-sentinel") || len(message) > 512 {
-				t.Fatalf("unsafe or unattributed failure: %s", message)
+			message, retry := boundary.ActivationDiagnostic()
+			attributed := strings.Contains(message, "stage="+stage+" projected=")
+			if stage == "apply" {
+				// The apply step names itself and keeps the release retry.
+				attributed = message == "integration apply observe failed in yard default" && retry == "run yard migrate"
+			}
+			if !attributed || strings.Contains(message, "private-sentinel") || len(message) > 512 {
+				t.Fatalf("unsafe or unattributed failure: %s / %s", message, retry)
 			}
 			comparison := strings.HasPrefix(stage, "compare-")
 			if strings.Contains(message, "fingerprint_equal=false scope_equal=true approved_changed=false fresh_changed=false plan_stale=true") != comparison || errors.Is(err, domain.ErrPlanStale) != comparison {

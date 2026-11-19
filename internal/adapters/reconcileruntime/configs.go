@@ -177,7 +177,7 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 			continue
 		}
 		if err != nil {
-			refusals = append(refusals, fmt.Errorf("%s: %w", file.label, err))
+			refusals = append(refusals, owned(file.integration, fmt.Errorf("%s: %w", file.label, err)))
 			continue
 		}
 		bytes += len(payload)
@@ -260,7 +260,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			continue
 		}
 		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
-			return fmt.Errorf("apply %s: %w", file.label, err)
+			return owned(file.integration, fmt.Errorf("apply %s: %w", file.label, err))
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
@@ -546,7 +546,31 @@ func (file guestConfigFile) legacySourceHash() (string, error) {
 }
 
 func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
-	return shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
+	return runtime.preserveSiblingCommand(path, "invalid")
+}
+
+// preserveSiblingCommand renames path within its directory to a sibling named
+// <name>.subyard-<label>-<digest>, or only .subyard-<label>-<digest> when the
+// name leaves no room. The rename keeps owner, mode and parent access, and a
+// repeat keeps the earlier copy as a numbered backup within the name limit.
+func (runtime Runtime) preserveSiblingCommand(path, label string) string {
+	name := filepath.Base(path)
+	digest := sha256.Sum256([]byte(name))
+	sibling := fmt.Sprintf("%s.subyard-%s-%x", name, label, digest[:4])
+	// Leave room for the numbered backup suffix .~NNN~.
+	if len(sibling) > 248 {
+		sibling = fmt.Sprintf(".subyard-%s-%x", label, digest[:8])
+	}
+	return shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "-T", "--backup=numbered", "--", path, filepath.Join(filepath.Dir(path), sibling)})
+}
+
+// unownedInvalidConfig keeps its local text and gives activation the single
+// preservation action; its message names the step, owner and the follow-up.
+type unownedInvalidConfig struct{ text, message, retry string }
+
+func (err unownedInvalidConfig) Error() string { return err.text }
+func (err unownedInvalidConfig) ActivationDiagnostic() (string, string) {
+	return err.message, err.retry
 }
 
 func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
@@ -571,7 +595,19 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 			if domain.SafeName(runtime.Yard.YardName) {
 				repair = "yard -Y " + runtime.Yard.YardName + " config apply"
 			}
-			return fmt.Errorf("unowned invalid configuration preserved; next: run %s; then run %s", preserve, repair)
+			scope := "integration"
+			if owner := runtime.declaredOwner(file.integration); owner != "" {
+				scope += " " + owner
+			}
+			scope += " apply " + string(stepConfigs)
+			if yard := publicToken(runtime.Yard.YardName); yard != "" {
+				scope += " in yard " + yard
+			}
+			return unownedInvalidConfig{
+				text:    fmt.Sprintf("unowned invalid configuration preserved; next: run %s; then run %s", preserve, repair),
+				message: fmt.Sprintf("%s: unowned invalid configuration at %q preserved; after the next command, rerun the pending release activation", scope, file.destination),
+				retry:   preserve,
+			}
 		}
 		return errors.New("structured configuration apply failed")
 	}

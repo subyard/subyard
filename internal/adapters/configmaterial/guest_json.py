@@ -5,7 +5,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import stat
 import sys
 from decimal import Decimal
@@ -309,10 +308,10 @@ def read_current(destination, allow_invalid=False):
 
 
 def unowned_invalid_destination(destination):
+    # The host renders the preservation command; this record names no file.
     return MaterializationError("unowned-invalid-destination-v1 " + FORMAT.upper() +
-        "; unowned destination preserved; in the yard run mv --backup=numbered -- " +
-        shlex.quote(destination) + " " + shlex.quote(destination + ".subyard-invalid") +
-        "; then on the owner run yard config apply")
+        "; unowned destination preserved; move it aside with the preservation command the owner host prints" +
+        ", then on the owner run yard config apply")
 
 
 def validate_destination_parent(destination, allowed_home, uid, create):
