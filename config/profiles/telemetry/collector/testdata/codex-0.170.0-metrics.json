@@ -1,0 +1,107 @@
+{
+ "resourceMetrics": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "codex_cli_rs"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "0.170.0"
+      }
+     }
+    ]
+   },
+   "scopeMetrics": [
+    {
+     "scope": {
+      "name": "codex_otel"
+     },
+     "metrics": [
+      {
+       "name": "codex.turn.token_usage",
+       "unit": "tokens",
+       "sum": {
+        "aggregationTemporality": 1,
+        "isMonotonic": true,
+        "dataPoints": [
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asInt": "1500",
+          "attributes": [
+           {
+            "key": "token_type",
+            "value": {
+             "stringValue": "input"
+            }
+           },
+           {
+            "key": "model",
+            "value": {
+             "stringValue": "gpt-5.5"
+            }
+           }
+          ]
+         },
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asInt": "220",
+          "attributes": [
+           {
+            "key": "token_type",
+            "value": {
+             "stringValue": "output"
+            }
+           },
+           {
+            "key": "model",
+            "value": {
+             "stringValue": "gpt-5.5"
+            }
+           }
+          ]
+         }
+        ]
+       }
+      },
+      {
+       "name": "codex.tool.call",
+       "sum": {
+        "aggregationTemporality": 1,
+        "isMonotonic": true,
+        "dataPoints": [
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asInt": "1",
+          "attributes": [
+           {
+            "key": "tool",
+            "value": {
+             "stringValue": "exec_command"
+            }
+           },
+           {
+            "key": "success",
+            "value": {
+             "stringValue": "true"
+            }
+           }
+          ]
+         }
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

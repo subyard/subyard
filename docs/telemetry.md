@@ -392,19 +392,31 @@ metric points, exemplars, histogram bounds and counts, and units. Bounded
 decimal strings are accepted for documented numeric fields. Zero is
 distinguished from a missing value.
 
-- Claude retains `session.id`, `ccr.session.id`, `model`, `tool_name`,
-  `prompt_length`, `input_tokens`, `output_tokens`, `cache_read_tokens`,
-  `cache_creation_tokens`, `cache_creation_5m_tokens`,
-  `cache_creation_1h_tokens`, `cost_usd`, `cost_usd_micros`, `duration_ms`
-  and `success`, plus supported token, cost and time metric points with
-  their type and unit. Prompt, tool-detail and tool-content logging stay off.
-- Codex retains `conversation.id` and supported session aliases, `app.version`,
-  `model`, `slug`, `tool_name`, `tool_namespace`, `prompt_length`,
-  `duration_ms`, `ttft_ms`, `success`, `input_token_count`,
+- Claude retains `event.name`, `session.id`, `ccr.session.id`, `app.version`,
+  `model`, `tool_name`, `prompt_length`, `input_tokens`, `output_tokens`,
+  `cache_read_tokens`, `cache_creation_tokens`, `cache_creation_5m_tokens`,
+  `cache_creation_1h_tokens`, `cost_usd`, `cost_usd_micros`, `duration_ms`,
+  `ttft_ms` and `success`, plus supported token, cost and time metric points
+  with their type and unit. Claude sends `event.name` without the
+  `claude_code.` prefix, which appears only in the dropped log body; the
+  stored value keeps the client's form and is checked as
+  `claude_code.<name>`. Prompt, tool-detail and tool-content logging stay off.
+- Codex retains `event.name`, `conversation.id` and supported session aliases,
+  `app.version`, `model`, `slug`, `tool_name`, `tool_namespace`,
+  `prompt_length`, `duration_ms`, `ttft_ms`, `success`, `input_token_count`,
   `output_token_count`, `cached_token_count`, `cache_write_token_count`,
   `reasoning_token_count` and `tool_token_count`, plus supported usage and
-  duration metric points. The Codex emitter uses `tool_token_count` for
-  total tokens. `log_user_prompt` stays false.
+  duration metric points. Codex sends prefixed event names such as
+  `codex.tool_result`, `codex.tool_decision` and `codex.sse_event`. The Codex
+  emitter uses `tool_token_count` for total tokens. `log_user_prompt` stays
+  false.
+
+Both clients send `success` and several counts and durations as strings.
+`success` is accepted as a boolean or the string `true` or `false` and is
+stored as a boolean; counters are stored as integers and durations and cost
+as doubles. Sensitive values found in a log record, span or metric are
+removed only from that record; values found in a resource or scope apply to
+every record below it.
 
 The sanitizer drops log bodies, prompts, tool inputs, arguments, parameters
 and output previews, response text, error messages, severity text, headers,

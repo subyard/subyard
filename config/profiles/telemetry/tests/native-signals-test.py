@@ -426,6 +426,36 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
             db.execute("INSERT INTO associations(object_id,agent_run_id) VALUES('scope-digest','run')")
             db.commit()
 
+    def test_native_log_fields_are_read_from_stored_protobuf(self):
+        def varint(value):
+            out = bytearray()
+            while True:
+                out.append((value & 0x7f) | (0x80 if value > 0x7f else 0))
+                value >>= 7
+                if not value:
+                    return bytes(out)
+        def field(number, payload):
+            return varint(number << 3 | 2)+varint(len(payload))+payload
+        def attribute(key, value):
+            return field(1, key.encode())+field(2, field(1, value.encode()))
+        def logs(*records_):
+            # Resource attributes and a fixed64 timestamp precede the attributes.
+            resource = field(1, field(1, attribute('service.name', 'subyard-fixture')))
+            body = b''.join(field(2, b'\x09'+bytes(8)+b''.join(field(6, attribute(*pair)) for pair in pairs)) for pairs in records_)
+            return field(1, resource+field(2, body))
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            data = Path(name)
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+                db.execute('CREATE TABLE records(kind TEXT, protobuf BLOB)')
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs([('event.name', 'codex.sse_event'), ('model', 'subyard-fixture')])))
+                db.commit()
+                with self.assertRaisesRegex(AssertionError, 'claude: stored native logs lost event.name or model'):
+                    fixture.assert_native_log_fields(data, timeout=0)
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs([('event.name', 'api_request'), ('model', 'claude-fixture')], [('event.name', 'tool_result')])))
+                db.commit()
+            fixture.assert_native_log_fields(data, timeout=0)
+            self.assertIn({'event.name': 'tool_result'}, fixture.stored_log_attributes(data))
+
     def test_session_can_precede_scope_projection(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             data = self.database(directory)

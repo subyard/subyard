@@ -1,0 +1,351 @@
+{
+ "resourceMetrics": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "claude-code"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "2.1.327"
+      }
+     }
+    ]
+   },
+   "scopeMetrics": [
+    {
+     "scope": {
+      "name": "com.anthropic.claude_code",
+      "version": "2.1.327"
+     },
+     "metrics": [
+      {
+       "name": "claude_code.token.usage",
+       "unit": "tokens",
+       "sum": {
+        "aggregationTemporality": 1,
+        "isMonotonic": true,
+        "dataPoints": [
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asDouble": 1200,
+          "attributes": [
+           {
+            "key": "user.id",
+            "value": {
+             "stringValue": "canary-claude-user-id-0123456789abcdef"
+            }
+           },
+           {
+            "key": "session.id",
+            "value": {
+             "stringValue": "0b9f7d4e-1111-4222-8333-944455556666"
+            }
+           },
+           {
+            "key": "app.version",
+            "value": {
+             "stringValue": "2.1.327"
+            }
+           },
+           {
+            "key": "organization.id",
+            "value": {
+             "stringValue": "canary-org-5d0c7a52-7a1d-4b1f-9e43-1c2d3e4f5a6b"
+            }
+           },
+           {
+            "key": "user.email",
+            "value": {
+             "stringValue": "canary-claude@example.com"
+            }
+           },
+           {
+            "key": "user.account_uuid",
+            "value": {
+             "stringValue": "canary-account-uuid-e61f2221-71ba"
+            }
+           },
+           {
+            "key": "user.account_id",
+            "value": {
+             "stringValue": "canary-account-id-user_01ABC"
+            }
+           },
+           {
+            "key": "model",
+            "value": {
+             "stringValue": "claude-opus-5-5"
+            }
+           },
+           {
+            "key": "type",
+            "value": {
+             "stringValue": "input"
+            }
+           }
+          ]
+         },
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asDouble": 345,
+          "attributes": [
+           {
+            "key": "user.id",
+            "value": {
+             "stringValue": "canary-claude-user-id-0123456789abcdef"
+            }
+           },
+           {
+            "key": "session.id",
+            "value": {
+             "stringValue": "0b9f7d4e-1111-4222-8333-944455556666"
+            }
+           },
+           {
+            "key": "app.version",
+            "value": {
+             "stringValue": "2.1.327"
+            }
+           },
+           {
+            "key": "organization.id",
+            "value": {
+             "stringValue": "canary-org-5d0c7a52-7a1d-4b1f-9e43-1c2d3e4f5a6b"
+            }
+           },
+           {
+            "key": "user.email",
+            "value": {
+             "stringValue": "canary-claude@example.com"
+            }
+           },
+           {
+            "key": "user.account_uuid",
+            "value": {
+             "stringValue": "canary-account-uuid-e61f2221-71ba"
+            }
+           },
+           {
+            "key": "user.account_id",
+            "value": {
+             "stringValue": "canary-account-id-user_01ABC"
+            }
+           },
+           {
+            "key": "model",
+            "value": {
+             "stringValue": "claude-opus-5-5"
+            }
+           },
+           {
+            "key": "type",
+            "value": {
+             "stringValue": "output"
+            }
+           }
+          ]
+         },
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asDouble": 800,
+          "attributes": [
+           {
+            "key": "user.id",
+            "value": {
+             "stringValue": "canary-claude-user-id-0123456789abcdef"
+            }
+           },
+           {
+            "key": "session.id",
+            "value": {
+             "stringValue": "0b9f7d4e-1111-4222-8333-944455556666"
+            }
+           },
+           {
+            "key": "app.version",
+            "value": {
+             "stringValue": "2.1.327"
+            }
+           },
+           {
+            "key": "organization.id",
+            "value": {
+             "stringValue": "canary-org-5d0c7a52-7a1d-4b1f-9e43-1c2d3e4f5a6b"
+            }
+           },
+           {
+            "key": "user.email",
+            "value": {
+             "stringValue": "canary-claude@example.com"
+            }
+           },
+           {
+            "key": "user.account_uuid",
+            "value": {
+             "stringValue": "canary-account-uuid-e61f2221-71ba"
+            }
+           },
+           {
+            "key": "user.account_id",
+            "value": {
+             "stringValue": "canary-account-id-user_01ABC"
+            }
+           },
+           {
+            "key": "model",
+            "value": {
+             "stringValue": "claude-opus-5-5"
+            }
+           },
+           {
+            "key": "type",
+            "value": {
+             "stringValue": "cacheRead"
+            }
+           }
+          ]
+         },
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asDouble": 64,
+          "attributes": [
+           {
+            "key": "user.id",
+            "value": {
+             "stringValue": "canary-claude-user-id-0123456789abcdef"
+            }
+           },
+           {
+            "key": "session.id",
+            "value": {
+             "stringValue": "0b9f7d4e-1111-4222-8333-944455556666"
+            }
+           },
+           {
+            "key": "app.version",
+            "value": {
+             "stringValue": "2.1.327"
+            }
+           },
+           {
+            "key": "organization.id",
+            "value": {
+             "stringValue": "canary-org-5d0c7a52-7a1d-4b1f-9e43-1c2d3e4f5a6b"
+            }
+           },
+           {
+            "key": "user.email",
+            "value": {
+             "stringValue": "canary-claude@example.com"
+            }
+           },
+           {
+            "key": "user.account_uuid",
+            "value": {
+             "stringValue": "canary-account-uuid-e61f2221-71ba"
+            }
+           },
+           {
+            "key": "user.account_id",
+            "value": {
+             "stringValue": "canary-account-id-user_01ABC"
+            }
+           },
+           {
+            "key": "model",
+            "value": {
+             "stringValue": "claude-opus-5-5"
+            }
+           },
+           {
+            "key": "type",
+            "value": {
+             "stringValue": "cacheCreation"
+            }
+           }
+          ]
+         }
+        ]
+       }
+      },
+      {
+       "name": "claude_code.cost.usage",
+       "unit": "USD",
+       "sum": {
+        "aggregationTemporality": 1,
+        "isMonotonic": true,
+        "dataPoints": [
+         {
+          "startTimeUnixNano": "1792800000000000000",
+          "timeUnixNano": "1792800000000000000",
+          "asDouble": 0.0421,
+          "attributes": [
+           {
+            "key": "user.id",
+            "value": {
+             "stringValue": "canary-claude-user-id-0123456789abcdef"
+            }
+           },
+           {
+            "key": "session.id",
+            "value": {
+             "stringValue": "0b9f7d4e-1111-4222-8333-944455556666"
+            }
+           },
+           {
+            "key": "app.version",
+            "value": {
+             "stringValue": "2.1.327"
+            }
+           },
+           {
+            "key": "organization.id",
+            "value": {
+             "stringValue": "canary-org-5d0c7a52-7a1d-4b1f-9e43-1c2d3e4f5a6b"
+            }
+           },
+           {
+            "key": "user.email",
+            "value": {
+             "stringValue": "canary-claude@example.com"
+            }
+           },
+           {
+            "key": "user.account_uuid",
+            "value": {
+             "stringValue": "canary-account-uuid-e61f2221-71ba"
+            }
+           },
+           {
+            "key": "user.account_id",
+            "value": {
+             "stringValue": "canary-account-id-user_01ABC"
+            }
+           },
+           {
+            "key": "model",
+            "value": {
+             "stringValue": "claude-opus-5-5"
+            }
+           }
+          ]
+         }
+        ]
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

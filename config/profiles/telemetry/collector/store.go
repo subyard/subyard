@@ -333,6 +333,7 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 				e.filter[value] = struct{}{}
 			}
 		}
+		filter := maps.Clone(e.filter)
 		projected, err := sanitizeEnvelope(&e, p)
 		if err != nil {
 			if !e.replay || !e.filter.id(e.OriginID) || !e.filter.id(e.EventID) {
@@ -343,7 +344,13 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 			e = Envelope{OriginID: e.OriginID, EventID: e.EventID, invalid: true}
 		}
 		entries = append(entries, e)
-		entries = append(entries, projected...)
+		// Derived session relations pass the same sanitizer as every record.
+		for _, relation := range projected {
+			relation.filter = maps.Clone(filter)
+			if _, err := sanitizeEnvelope(&relation, p); err == nil {
+				entries = append(entries, relation)
+			}
+		}
 	}
 	return s.submit(ctx, entries, replay, advance)
 }

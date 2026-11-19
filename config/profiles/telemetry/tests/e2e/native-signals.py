@@ -104,6 +104,77 @@ def query(data, sql, args=()):
         return db.execute(sql, args).fetchall()
 
 
+def protobuf_fields(data):
+    """Yield (field, value) pairs of one protobuf message; nested messages stay bytes."""
+    offset = 0
+    def varint():
+        nonlocal offset
+        value = shift = 0
+        while True:
+            byte = data[offset]
+            offset += 1
+            value |= (byte & 0x7f) << shift
+            shift += 7
+            if byte < 0x80:
+                return value
+    while offset < len(data):
+        key = varint()
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            yield field, varint()
+        elif wire == 1:
+            yield field, data[offset:offset+8]
+            offset += 8
+        elif wire == 2:
+            size = varint()
+            yield field, data[offset:offset+size]
+            offset += size
+        elif wire == 5:
+            yield field, data[offset:offset+4]
+            offset += 4
+        else:
+            raise ValueError('unsupported protobuf wire type')
+
+
+def otlp_attributes(message, field):
+    # KeyValue.key = 1, KeyValue.value = 2 and AnyValue.string_value = 1.
+    attributes = {}
+    for number, value in protobuf_fields(message):
+        if number == field:
+            pair = dict(protobuf_fields(value))
+            text = dict(protobuf_fields(pair.get(2, b''))).get(1)
+            attributes[pair[1].decode()] = text.decode() if isinstance(text, bytes) else text
+    return attributes
+
+
+def stored_log_attributes(data):
+    """Return the attributes of every stored native log record."""
+    found = []
+    for (protobuf,) in query(data, "SELECT protobuf FROM records WHERE kind='otlp/logs'"):
+        for resource_logs in (value for number, value in protobuf_fields(protobuf) if number == 1):
+            for scope_logs in (value for number, value in protobuf_fields(resource_logs) if number == 2):
+                for record in (value for number, value in protobuf_fields(scope_logs) if number == 2):
+                    found.append(otlp_attributes(record, 6))
+    return found
+
+
+def assert_native_log_fields(data, timeout=20):
+    """Installed clients keep their event name and model through the sanitizer.
+
+    Codex sends prefixed event names; Claude sends them without a prefix."""
+    agents = {'codex': lambda name: name.startswith('codex.'), 'claude': lambda name: '.' not in name}
+    deadline = time.monotonic()+timeout
+    while True:
+        logs = stored_log_attributes(data)
+        missing = [agent for agent, matches in agents.items()
+                   if not any(fields.get('model') and matches(fields.get('event.name') or '.') for fields in logs)]
+        if not missing or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    assert not missing, (', '.join(missing)+': stored native logs lost event.name or model; kept keys '+
+                         json.dumps(sorted({key for fields in logs for key in fields})))
+
+
 def session_failure_metadata(data, agent, expected, stderr):
     selected = sorted(expected)[:8]
     digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
@@ -773,6 +844,7 @@ def main():
     wait_claude_sessions(args.data_dir, {session}, result, token)
     kinds = {row[0] for row in query(args.data_dir, "SELECT DISTINCT kind FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces')")}
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
+    assert_native_log_fields(args.data_dir)
     assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir)
     print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence')
 

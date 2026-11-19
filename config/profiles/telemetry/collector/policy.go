@@ -47,8 +47,8 @@ var wireVocabulary = map[string][]string{
 	"unit":       strings.Fields("1 % s ms us ns By KiBy MiBy GiBy By/s 1/s USD tokens {token} {request} {session} {line} {commit}"),
 	"scopeName":  strings.Fields("codex codex_otel codex-otel claude-code claude_code"),
 	"spanName":   strings.Fields("agent.interaction llm_request tool_execution claude_code.interaction claude_code.llm_request claude_code.tool codex.turn codex.api_request"),
-	"eventName":  strings.Fields("claude_code.user_prompt claude_code.api_request claude_code.api_error claude_code.tool_result claude_code.tool_decision codex.api_request codex.sse_event codex.user_prompt codex.tool_result codex.conversation_starts codex.conversation_start codex.websocket_request codex.websocket_event claude_code.session_start"),
-	"metricName": strings.Fields("claude_code.session.count claude_code.lines_of_code.count claude_code.pull_request.count claude_code.commit.count claude_code.cost.usage claude_code.token.usage claude_code.code_edit_tool.decision claude_code.active_time.total codex.api_request codex.api_request.duration_ms codex.turn.e2e_duration_ms codex.turn.ttft.duration_ms codex.turn.ttfm.duration_ms codex.turn.token_usage codex.turn.tool.call codex.turn.memory codex.turn.network_proxy codex.thread.started codex.conversation.turn.count codex.websocket.event codex.websocket.event.duration_ms gen_ai.client.token.usage gen_ai.client.operation.duration codex.turn.duration_ms codex.api_request.duration codex.turn.token.usage"),
+	"eventName":  strings.Fields("claude_code.user_prompt claude_code.api_request claude_code.api_error claude_code.tool_result claude_code.tool_decision codex.api_request codex.sse_event codex.user_prompt codex.tool_result codex.tool_decision codex.conversation_starts codex.conversation_start codex.websocket_connect codex.websocket_request codex.websocket_event codex.turn_ttft codex.turn_cost codex.startup_phase codex.sandbox_outcome claude_code.session_start"),
+	"metricName": strings.Fields("claude_code.session.count claude_code.lines_of_code.count claude_code.pull_request.count claude_code.commit.count claude_code.cost.usage claude_code.token.usage claude_code.code_edit_tool.decision claude_code.active_time.total codex.api_request codex.api_request.duration_ms codex.sse_event codex.sse_event.duration_ms codex.tool.call codex.tool.call.duration_ms codex.turn.cost_microusd codex.websocket.request codex.websocket.request.duration_ms codex.turn.e2e_duration_ms codex.turn.ttft.duration_ms codex.turn.ttfm.duration_ms codex.turn.token_usage codex.turn.tool.call codex.turn.memory codex.turn.network_proxy codex.thread.started codex.conversation.turn.count codex.websocket.event codex.websocket.event.duration_ms gen_ai.client.token.usage gen_ai.client.operation.duration codex.turn.duration_ms codex.api_request.duration codex.turn.token.usage"),
 }
 
 var attributeRules = func() map[string]string {
@@ -231,20 +231,18 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 		if !ok {
 			return nil, false
 		}
-		out := make(map[string]any, len(fields))
-		for name, child := range input {
-			if clean, keep := p.clean(fields[name], child); keep && p.filter.safe(name) {
-				out[name] = clean
+		if part, scoped := recordScopes[rule]; scoped {
+			child := wirePolicy{filter: maps.Clone(p.filter), policy: p.policy}
+			if part == "" {
+				child.filter.discover(input, false)
 			} else {
-				p.removed++
+				child.filter.discover(input[part], false)
 			}
+			out, keep := child.message(rule, fields, input)
+			p.removed += child.removed
+			return out, keep
 		}
-		for _, required := range firstRequired(rule) {
-			if item, exists := out[required]; !exists || item == "" {
-				return nil, false
-			}
-		}
-		return out, true
+		return p.message(rule, fields, input)
 	}
 	switch rule {
 	case "attribute":
@@ -293,10 +291,45 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 	case "spanName":
 		return s, slices.Contains(wireVocabulary[rule], s) && slices.Contains(p.policy.SpanNames, s)
 	case "eventName":
-		return s, slices.Contains(wireVocabulary[rule], s) && slices.Contains(p.policy.EventNames, s)
+		name := qualifiedEventName(s)
+		return s, slices.Contains(wireVocabulary[rule], name) && slices.Contains(p.policy.EventNames, name)
 	default:
 		return s, slices.Contains(wireVocabulary[rule], s)
 	}
+}
+
+// Claude sends the unprefixed event name in event.name; the prefixed name is
+// only in the log body, which is dropped. Codex always sends the prefixed name.
+func qualifiedEventName(name string) string {
+	if name == "" || strings.Contains(name, ".") {
+		return name
+	}
+	return "claude_code." + name
+}
+
+// Sensitive values found in a resource or scope apply to everything below it;
+// values found in one log record, span or metric apply only to that record.
+var recordScopes = map[string]string{
+	"resourceLogs": "resource", "resourceMetrics": "resource", "resourceSpans": "resource",
+	"scopeLogs": "scope", "scopeMetrics": "scope", "scopeSpans": "scope",
+	"logRecord": "", "span": "", "metric": "",
+}
+
+func (p *wirePolicy) message(rule string, fields map[string]string, input map[string]any) (any, bool) {
+	out := make(map[string]any, len(fields))
+	for name, child := range input {
+		if clean, keep := p.clean(fields[name], child); keep && p.filter.safe(name) {
+			out[name] = clean
+		} else {
+			p.removed++
+		}
+	}
+	for _, required := range firstRequired(rule) {
+		if item, exists := out[required]; !exists || item == "" {
+			return nil, false
+		}
+	}
+	return out, true
 }
 
 func (p *wirePolicy) attributeRule(name string) string {
@@ -327,6 +360,10 @@ func (p *wirePolicy) attribute(value any) (any, bool) {
 			return nil, false
 		}
 	case "bool":
+		// Claude and Codex send success as the string "true" or "false".
+		if text, ok := raw.(string); ok && valueType == "stringValue" && (text == "true" || text == "false") {
+			raw, valueType = text == "true", "boolValue"
+		}
 		if valueType != "boolValue" {
 			return nil, false
 		}
@@ -402,7 +439,6 @@ func sanitizeOTLP(e *Envelope, p Policy, f valueFilter) ([]Envelope, error) {
 	policy := wirePolicy{filter: f, policy: p}
 	var relations []Envelope
 	protobuf, err := transformOTLP(e.Encoding, e.Protobuf, func(body map[string]any) any {
-		f.discover(body, false)
 		clean, _ := policy.clean(e.Encoding, body)
 		if e.native {
 			relations = sessionEnvelopes(clean.(map[string]any))
