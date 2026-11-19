@@ -9,7 +9,6 @@ import io
 import json
 import os
 from pathlib import Path
-import pwd
 import queue
 import re
 import shutil
@@ -165,22 +164,40 @@ def wait_shared_scope(data, run_id, timeout=40):
         'reason': 'shared_scope_projection_missing', 'scope_present': False, 'shared': 'not_observed'}))
 
 
-def install_agents(args, state):
+CODEX_FIXTURE_VERSION = '0.170.0'
+CODEX_FIXTURE_DIGESTS = {
+    'x86_64': 'a77ff87be7ba809d715728270a78f5ce3527dc07529416d1ef8929b90b8475eb',
+    'aarch64': '3f7e1ae38c4fe27322e082b855e8eec936d08fa538d62b71c07e2a53f34e8847',
+}
+CLAUDE_FIXTURE_PACKAGES = {
+    'x86_64': ('linux-x64', '3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0'),
+    'aarch64': ('linux-arm64', 'e4daf793d1e74fb0d9874dd09e98690bbfd7be515f78a87fd05b9e2b4bb33b03'),
+}
+
+
+def install_agents(state):
     binaries = state/'bin'
     binaries.mkdir()
-    provision = dict(DEV_USER=pwd.getpwuid(os.getuid()).pw_name, CODEX_INSTALL_ROOT=str(state/'codex-native'),
-                     CODEX_BIN_LINK=str(binaries/'codex'), CODEX_CHECK_PATH=str(binaries/'codex-check'),
-                     CODEX_REQUIREMENTS_PATH=str(state/'codex-requirements/requirements.toml'))
-    subprocess.run(['sudo', '-n', 'env', *[key+'='+value for key, value in provision.items()],
-                    'bash', str(args.source/'config/agents/codex/provision.sh')], check=True, timeout=180)
     arch = os.uname().machine
-    platforms = {'x86_64': ('linux-x64', '3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0'),
-                 'aarch64': ('linux-arm64', 'e4daf793d1e74fb0d9874dd09e98690bbfd7be515f78a87fd05b9e2b4bb33b03')}
-    platform, digest = platforms[arch]
+    download = ['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https', '--proto-redir', '=https',
+                '--connect-timeout', '20', '--max-time', '120', '--output']
+    # These clients run on the lease VM with fixture permissions. Keep the full
+    # Codex package for app-server, without invoking yard sandbox provisioning.
+    archive = state/'codex-native.tgz'
+    url = (f'https://github.com/openai/codex/releases/download/rust-v{CODEX_FIXTURE_VERSION}/'
+           f'codex-package-{arch}-unknown-linux-musl.tar.gz')
+    subprocess.run([*download, str(archive), url], check=True, timeout=125)
+    with archive.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != CODEX_FIXTURE_DIGESTS[arch]:
+            raise ValueError('Codex fixture archive checksum mismatch')
+    with tarfile.open(archive, 'r:gz') as package:
+        package.extractall(state/'codex-native', filter='data')
+    (binaries/'codex').symlink_to('../codex-native/bin/codex')
+
+    platform, digest = CLAUDE_FIXTURE_PACKAGES[arch]
     archive = state/'claude-native.tgz'
     url = f'https://registry.npmjs.org/@anthropic-ai/claude-code-{platform}/-/claude-code-{platform}-2.1.287.tgz'
-    subprocess.run(['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https', '--proto-redir', '=https',
-                    '--connect-timeout', '20', '--max-time', '120', '--output', str(archive), url], check=True, timeout=125)
+    subprocess.run([*download, str(archive), url], check=True, timeout=125)
     with tarfile.open(archive, 'r:gz') as package, (binaries/'claude').open('wb') as output:
         member = package.getmember('package/claude')
         assert member.isfile() and member.size < 512*1024*1024
@@ -679,7 +696,7 @@ def main():
         return exercise(args)
     state = args.state/'native'
     state.mkdir(mode=0o700)
-    binaries = install_agents(args, state)
+    binaries = install_agents(state)
     sys.path.insert(0, str(args.source/'config/profiles/telemetry'))
     sys.path.insert(0, str(args.source/'internal/adapters/configmaterial'))
     import native
