@@ -34,15 +34,17 @@ type sourceSnapshot struct {
 	id           string
 	commit       string
 	digest       string
-	hostID       string
 	catalog      config.Catalog
 	manifest     SourceManifest
 	files        map[string]candidateFile
 	yardNames    []string
 	scalarPath   map[string]string
+	assetRoots   map[string]string
 	fileSettings []config.FileSettingMapping
 }
 
+// When source entries are refused, the snapshot retains validated inputs for
+// effective configuration inspection. A caller must have a nil error to use it for writes.
 func readSource(options Options, hostID string, catalog config.Catalog) (sourceSnapshot, error) {
 	root, err := filepath.Abs(options.SourceRoot)
 	if err != nil {
@@ -96,14 +98,11 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		allowedFiles[filepath.ToSlash(filepath.Clean(mapping.Relative))] = mapping
 	}
 	snapshot := sourceSnapshot{
-		root: root, id: digestBytes([]byte(identityRoot)), commit: commit, hostID: hostID,
+		root: root, id: digestBytes([]byte(identityRoot)), commit: commit,
 		catalog: catalog, manifest: manifest, files: map[string]candidateFile{},
-		scalarPath: map[string]string{}, fileSettings: options.FileSettings,
+		scalarPath: map[string]string{}, assetRoots: map[string]string{}, fileSettings: options.FileSettings,
 	}
-	if err := validateTopLevelRoles(root); err != nil {
-		return sourceSnapshot{}, err
-	}
-	var refusals []error
+	refusals := []error{validateTopLevelRoles(root)}
 	if err := snapshot.readScope(
 		filepath.Join(root, "shared"), "overrides/shared/config.env",
 		"overrides/shared/agents", config.ScopeShared, allowedFiles, false,
@@ -113,7 +112,7 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	hostsRoot := filepath.Join(root, "hosts")
 	hostEntries, err := readOptionalDirectory(root, hostsRoot)
 	if err != nil {
-		return sourceSnapshot{}, domain.CollectRefusals(append(refusals, fmt.Errorf("owner hosts: %w", err))...)
+		return snapshot, domain.CollectRefusals(append(refusals, fmt.Errorf("owner hosts: %w", err))...)
 	}
 	hostRoot := filepath.Join(root, "hosts", hostID)
 	hostPresent := false
@@ -125,7 +124,7 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	}
 	if hostPresent {
 		if _, err := readOptionalDirectory(root, hostRoot); err != nil {
-			return sourceSnapshot{}, domain.CollectRefusals(append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))...)
+			return snapshot, domain.CollectRefusals(append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))...)
 		}
 		if err := validateChildren(hostRoot, map[string]bool{
 			"config.env": false, "overrides": true, "yards": true,
@@ -167,6 +166,8 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		targetConfig := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
 		if err := snapshot.readConfig(sourceConfig, targetConfig, config.ScopeYard, name != "default"); err != nil {
 			refusals = append(refusals, err)
+		} else if name != "default" {
+			snapshot.yardNames = append(snapshot.yardNames, name)
 		}
 		targetAssets := filepath.ToSlash(filepath.Join("yards", name, "overrides", "agents"))
 		if err := snapshot.readOverrides(
@@ -174,16 +175,10 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		); err != nil {
 			refusals = append(refusals, fmt.Errorf("yard %s overrides: %w", name, err))
 		}
-		if name != "default" {
-			snapshot.yardNames = append(snapshot.yardNames, name)
-		}
-	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
-		return sourceSnapshot{}, err
 	}
 	sort.Strings(snapshot.yardNames)
-	if err := snapshot.ensureTracked(); err != nil {
-		return sourceSnapshot{}, err
+	if err := domain.CollectRefusals(append(refusals, snapshot.ensureTracked())...); err != nil {
+		return snapshot, err
 	}
 	snapshot.digest = snapshotDigest(snapshot.files, manifestContent)
 	return snapshot, nil
@@ -273,7 +268,7 @@ func (snapshot *sourceSnapshot) readOverrides(
 	} else if err != nil {
 		return err
 	}
-	return filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -311,6 +306,10 @@ func (snapshot *sourceSnapshot) readOverrides(
 		}
 		return nil
 	})
+	if err == nil {
+		snapshot.assetRoots[targetRoot] = agentsRoot
+	}
+	return err
 }
 
 func validateSourceDirectory(root string) error {

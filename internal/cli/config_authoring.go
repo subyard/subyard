@@ -343,16 +343,16 @@ func parseConfigAuthoringRequests(
 		switch arguments[index] {
 		case "--scope":
 			if index+1 >= len(arguments) {
-				return nil, errors.New("--scope needs a value")
+				return nil, configPublicRefusal("--scope needs a value")
 			}
 			index++
 			if request.scope != "" {
-				return nil, errors.New("--scope may be specified only once")
+				return nil, configPublicRefusal("--scope may be specified only once")
 			}
 			request.scope = config.SettingScope(arguments[index])
 		case "--local", "--git":
 			if request.storage != "" {
-				return nil, errors.New("choose --local or --git only once")
+				return nil, configPublicRefusal("choose --local or --git only once")
 			}
 			request.storage = arguments[index]
 			request.git = request.storage == "--git"
@@ -365,15 +365,15 @@ func parseConfigAuthoringRequests(
 	switch request.scope {
 	case config.ScopeShared, config.ScopeHost, config.ScopeYard:
 	case "":
-		return nil, errors.New(
+		return nil, configPublicRefusal(
 			"--scope shared, --scope host or --scope yard is required",
 		)
 	default:
-		return nil, fmt.Errorf("unsupported scope %q", request.scope)
+		return nil, configPublicRefusal("unsupported scope; use shared, host or yard")
 	}
 	if action == "set" {
 		if len(positional) == 0 || len(positional)%2 != 0 {
-			return nil, errors.New("expects SETTING VALUE pairs")
+			return nil, configPublicRefusal("expects SETTING VALUE pairs")
 		}
 		requests := make([]configAuthoringRequest, 0, len(positional)/2)
 		for index := 0; index < len(positional); index += 2 {
@@ -388,7 +388,7 @@ func parseConfigAuthoringRequests(
 		expected = 2
 	}
 	if len(positional) != expected {
-		return nil, fmt.Errorf("expects %d positional argument(s)", expected)
+		return nil, configPublicRefusal(fmt.Sprintf("expects %d positional argument(s)", expected))
 	}
 	request.name = positional[0]
 	if action == "import" {
@@ -406,7 +406,7 @@ func (cli *CLI) collectConfigAuthoringRefusals(home, yard string, arguments []st
 	}
 	requests, err := parseConfigAuthoringRequests(args[0], args[1:], false)
 	if err != nil {
-		return loadErr
+		return domain.CollectRefusals(loadErr, err)
 	}
 	refusals := []error{loadErr}
 	if args[0] == "set" || args[0] == "unset" {

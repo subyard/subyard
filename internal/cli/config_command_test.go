@@ -2700,6 +2700,38 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 	if head != upstream {
 		t.Fatalf("pull did not fast-forward: head=%s upstream=%s", head, upstream)
 	}
+
+	publishedYard := filepath.Join(publisher, "hosts", "owner-a", "yards", "demo", "config.env")
+	localYard := filepath.Join(configHome, "yards", "demo", "config.env")
+	const localInvalid = "SSH_PORT=invalid\n"
+	writeConfigCommandFile(t, publishedYard, "DEV_SUDO=invalid\n")
+	writeConfigCommandFile(t, localYard, localInvalid)
+	commitConfigSource(t, publisher, "Publish invalid yard settings")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	checkoutBefore := snapshotConfigCheckout(t, checkout)
+	manifestBefore := mustReadConfigFixture(t, configsync.ManifestPath(configHome))
+	stdout.Reset()
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", "pull", "--yes"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "hosts/owner-a/yards/demo/config.env:1: DEV_SUDO") ||
+		!strings.Contains(stderr.String(), "yards/demo/config.env:1: SSH_PORT") {
+		t.Fatalf("invalid pull: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if !reflect.DeepEqual(snapshotConfigCheckout(t, checkout), checkoutBefore) ||
+		!bytes.Equal(mustReadConfigFixture(t, configsync.ManifestPath(configHome)), manifestBefore) ||
+		!bytes.Equal(mustReadConfigFixture(t, filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")), content) ||
+		string(mustReadConfigFixture(t, localYard)) != localInvalid {
+		t.Fatal("refused pull changed the checkout, cache or local settings")
+	}
 }
 
 func TestConfigSyncPullPromptsForManifestOnlyApplyWithoutFastForward(t *testing.T) {
@@ -3295,6 +3327,8 @@ func TestConfigHostAuthoringCollectsIndependentSourceRefusals(t *testing.T) {
 	}{
 		{[]string{"config", "validate"}, 1, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO"}},
 		{[]string{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "yards/neighbor/config.env:1: GIT_USER_NAME"}},
+		{[]string{"config", "set", "SSH_PORT", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "expects SETTING VALUE pairs"}},
+		{[]string{"config", "set", "SSH_PORT", "2298", "--scope", "host", "--scope", "yard", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "--scope may be specified only once"}},
 	} {
 		var output bytes.Buffer
 		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: invocation.args, Stdout: &output, Stderr: &output})
@@ -3534,7 +3568,9 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	runConfigSyncGit(t, publisher, "push", "-q")
 	upstreamBefore = configSourceGitOutput(t, remote, "rev-parse", "HEAD")
 	if code := run("config", "set", "GIT_USER_NAME", "Jane", "--scope", "shared", "--git", "--yes"); code != 1 ||
-		!strings.Contains(stderr.String(), "upstream is diverged") {
+		!strings.Contains(stderr.String(), "upstream is diverged") ||
+		!strings.Contains(stderr.String(), "reconcile the branch with git") ||
+		strings.Contains(stderr.String(), "config sync pull") {
 		t.Fatalf("diverged checkout: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
 	}
 	if configSourceGitOutput(t, remote, "rev-parse", "HEAD") != upstreamBefore ||

@@ -60,20 +60,28 @@ func BuildPlan(options Options) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	source, err := readSource(options, hostID, catalog)
-	if err != nil {
-		return Plan{}, err
-	}
+	source, sourceErr := readSource(options, hostID, catalog)
 	previous, err := readManifest(options.ConfigHome)
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, domain.CollectRefusals(sourceErr, err)
 	}
 	if previous.SchemaVersion != 0 && previous.HostID != hostID {
-		return Plan{}, fmt.Errorf(
+		return Plan{}, domain.CollectRefusals(sourceErr, fmt.Errorf(
 			"managed configuration belongs to owner host %q, not %q", previous.HostID, hostID,
-		)
+		))
 	}
-	if err := guardHostSourceIdentity(source.root, hostID, previous); err != nil {
+	var identityErr error
+	if sourceErr == nil {
+		identityErr = guardHostSourceIdentity(source.root, hostID, previous)
+	}
+	var legacyContexts []config.Loaded
+	inspection := options
+	inspection.inspectionOnly = true
+	candidateErr := validateCandidate(inspection, source, previous, catalog, &legacyContexts)
+	if candidateErr != nil {
+		candidateErr = fmt.Errorf("candidate configuration: %w", candidateErr)
+	}
+	if err := domain.CollectRefusals(sourceErr, identityErr, candidateErr); err != nil {
 		return Plan{}, err
 	}
 	allowedAssets := map[string]bool{}
@@ -84,12 +92,6 @@ func BuildPlan(options Options) (Plan, error) {
 		if asset, _ := managedSettingRole(localSettingsPath(file.Path)); asset != "" && !allowedAssets[asset] {
 			return Plan{}, errors.New("config sync manifest contains an unknown file setting")
 		}
-	}
-	var legacyContexts []config.Loaded
-	inspection := options
-	inspection.inspectionOnly = true
-	if err := validateCandidate(inspection, source, previous, catalog, &legacyContexts); err != nil {
-		return Plan{}, fmt.Errorf("candidate configuration: %w", err)
 	}
 	localDesired, overrides, cleanup, err := prepareLocalSSHPorts(options, &source, previous, legacyContexts)
 	if err != nil {
@@ -365,8 +367,9 @@ func validateCandidate(
 	shared, sharedErr := selectLocal("overrides/shared/config.env")
 	host, hostErr := selectLocal("config.env")
 	localYards, yardErr := candidateLocalYards(options.ConfigHome, source, excluded)
-	if err := domain.CollectRefusals(sharedErr, hostErr, yardErr); err != nil {
-		return err
+	refusals := []error{sharedErr, hostErr, yardErr}
+	if localYards == nil {
+		localYards = map[string]string{}
 	}
 	gitYards := map[string]string{}
 	yardNames := slices.DeleteFunc(slices.Sorted(maps.Keys(localYards)), func(name string) bool { return name == "default" })
@@ -389,62 +392,52 @@ func validateCandidate(
 		GitHostSettings:   selectGit("config.env"), GitYardSettings: gitYards,
 		SharedAssets:    filepath.Join(options.ConfigHome, "overrides", "shared", "agents"),
 		HostAssets:      filepath.Join(options.ConfigHome, "overrides", "host", "agents"),
-		GitSharedAssets: filepath.Join(source.root, "shared", "overrides", "agents"),
-		GitHostAssets:   filepath.Join(source.root, "hosts", source.hostID, "overrides", "agents"),
+		GitSharedAssets: source.assetRoots["overrides/shared/agents"],
+		GitHostAssets:   source.assetRoots["overrides/host/agents"],
 		YardAssets:      map[string]string{}, GitYardAssets: map[string]string{},
 		ExcludedLocalPaths: excluded,
 	}
 	for _, name := range assetYards {
 		layerPaths.YardAssets[name] = filepath.Join(options.ConfigHome, "yards", name, "overrides", "agents")
-		layerPaths.GitYardAssets[name] = filepath.Join(source.root, "hosts", source.hostID, "yards", name, "overrides", "agents")
+		layerPaths.GitYardAssets[name] = source.assetRoots[filepath.ToSlash(filepath.Join("yards", name, "overrides", "agents"))]
 	}
-	// Reset yards are absent from effective inventory, but their retained authored
-	// source must still satisfy the same schema and runtime configuration checks.
+	sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
+	contexts := make([]config.Loaded, 0, len(yardNames)+1)
 	for _, name := range assetYards {
 		reset, err := config.YardFallbackReset(options.ConfigHome, name)
 		if err != nil {
-			return err
-		}
-		if !reset || gitYards[name] == "" {
+			refusals = append(refusals, err)
 			continue
 		}
-		sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
-		if _, err := config.Load(config.LoadOptions{Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome, YardName: name, Environment: environment, ConfigLocked: options.ConfigLocked, LayerPaths: sourceLayers, FileOverrides: options.validationOverrides, SyncSource: true}); err != nil {
-			return fmt.Errorf("yard %s retained source: %w", name, err)
-		}
-	}
-	contexts := make([]config.Loaded, 0, len(yardNames)+1)
-	load := func(name string) error {
-		loaded, err := config.Load(config.LoadOptions{
+		loadOptions := config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
 			YardName: name, Environment: environment,
 			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides,
-		})
-		if err != nil {
-			return fmt.Errorf("yard %s: %w", name, err)
 		}
-		contexts = append(contexts, loaded)
-		return nil
-	}
-	if err := load("default"); err != nil {
-		return err
-	}
-	for _, name := range yardNames {
-		reset, err := config.YardFallbackReset(options.ConfigHome, name)
-		if err != nil {
-			return err
+		// Reset yards are absent from effective inventory, but their retained authored
+		// source must still satisfy the same schema and runtime configuration checks.
+		if reset && gitYards[name] != "" {
+			retained := loadOptions
+			retained.LayerPaths, retained.SyncSource = sourceLayers, true
+			if _, err := config.Load(retained); err != nil {
+				refusals = append(refusals, fmt.Errorf("yard %s retained source: %w", name, err))
+			}
 		}
-		if reset && localYards[name] == "" {
+		if name != "default" && reset && localYards[name] == "" {
 			continue
 		}
-		if err := load(name); err != nil {
-			return err
+		loaded, err := config.Load(loadOptions)
+		if err != nil {
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+			continue
 		}
+		contexts = append(contexts, loaded)
 	}
 	if !options.inspectionOnly {
-		if err := validateInventory(contexts); err != nil {
-			return err
-		}
+		refusals = append(refusals, validateInventory(contexts))
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	if len(capture) != 0 {
 		*capture[0] = contexts

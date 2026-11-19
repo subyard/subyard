@@ -166,11 +166,13 @@ func (cli *CLI) prepareConfigSyncPush(
 		return nil, err
 	}
 	if repository.behind != 0 {
-		relation := configGitRelation(repository.ahead, repository.behind)
 		repository.cleanup()
+		if repository.ahead != 0 {
+			return nil, errors.New("upstream is diverged; reconcile the branch with git before pushing")
+		}
 		return nil, fmt.Errorf(
-			"upstream is %s; run %s config sync pull before pushing",
-			relation, cli.options.Program,
+			"upstream is behind; run %s config sync pull before pushing",
+			cli.options.Program,
 		)
 	}
 	scalarEdit := len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset")

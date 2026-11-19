@@ -395,6 +395,8 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 	invalid.writeSource("shared/config.env", "E2E_VM_CPU=invalid\n")
 	invalid.writeSource("hosts/owner-a/config.env", "GIT_USER_EMAIL=$PRIVATE_INPUT_MARKER\nDEV_SUDO=invalid\nAGENT_codex_RULES=/tmp/rules\n")
 	invalid.commit("independent source refusals")
+	writeSyncTestFile(t, filepath.Join(invalid.configHome, "yards/default/config.env"), "SSH_PORT=invalid\n", 0o600)
+	writeSyncTestFile(t, filepath.Join(invalid.configHome, "yards/neighbor.env"), "GIT_USER_NAME=$PRIVATE_INPUT_MARKER\n", 0o600)
 	_, err := BuildPlan(invalid.options(false))
 	if err == nil || strings.Contains(err.Error(), "PRIVATE_INPUT_MARKER") {
 		t.Fatalf("invalid inputs accepted or exposed: %v", err)
@@ -402,6 +404,7 @@ func TestVersionedConfigSyncRejectsDirtyUnknownSecretAndLocalOnlySource(t *testi
 	for _, want := range []string{
 		"shared/config.env:1: E2E_VM_CPU", "hosts/owner-a/config.env:1: GIT_USER_EMAIL",
 		"hosts/owner-a/config.env:2: DEV_SUDO", "hosts/owner-a/config.env:3: AGENT_codex_RULES",
+		"yards/default/config.env:1: SSH_PORT", "yards/neighbor.env:1: GIT_USER_NAME",
 		"invalid boolean value", "store file settings under overrides/agents",
 	} {
 		if !strings.Contains(err.Error(), want) {
