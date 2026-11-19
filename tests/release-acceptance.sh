@@ -3528,3 +3528,4 @@ class HostedInventory(unittest.TestCase):
 unittest.main()
 PY
 node "$ROOT/dev/observer-poll-test.mjs"
+python3 -B "$ROOT/tests/helpers/release-scheduler-test.py"

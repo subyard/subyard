@@ -1374,9 +1374,10 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
     pending = deque(live)
     idle = set(slots)
     active = {}
-    blocked = {}
-    finished_at = {}
-    completion = 0
+    retries = deque()
+    retrying = False
+    retired = set()
+    error = None
     next_probe = 0
     deadline = None
     if recovery_wait_seconds is None:
@@ -1384,52 +1385,57 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
         recovery_wait_seconds = int(duration[1]) * (60 if duration[2] == "m" else 1) if duration else 0
 
     with ThreadPoolExecutor(max_workers=len(slots)) as pool:
-        while pending or active or blocked:
-            if STOP.is_set():
-                for future in active:
-                    future.result()
-                break
-            completion += 1
+        while pending or active or retries:
             for future in tuple(active):
                 if not future.done():
                     continue
-                name, slot, retrying = active.pop(future)
-                result = future.result()
-                finished_at[slot] = completion
+                name, slot = active.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    # Keep the other workers draining this pass. Only this
+                    # slot's worker stops when attempt recording fails.
+                    retired.add(slot)
+                    if error is None:
+                        error = exc
+                    continue
                 if result is None:
                     continue
                 capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
                                     and result.get("termination") == "exit"
                                     and result.get("reason") in ("capacity_memory", "capacity_disk"))
                 if capacity_blocked and not retrying:
-                    blocked[name] = (slot, completion)
+                    retries.append(name)
                 if capacity_blocked or result["status"] == "passed" or slot_continues_after(result):
                     idle.add(slot)
 
-            # A sibling completion can free capacity before the remaining controllers finish.
-            ready = deque(name for name, (slot, refused_at) in blocked.items()
-                          if any(peer != slot and finished >= refused_at for peer, finished in finished_at.items()))
-            if not active and not pending:
-                ready = deque(blocked)
+            if STOP.is_set():
+                if not active:
+                    break
+                wait(active, return_when=FIRST_COMPLETED)
+                continue
+            # Match the first-pass drain on master. Once retries are eligible,
+            # they can use any available slot while other retries run.
+            if not retrying and not pending and not active:
+                if error is not None:
+                    break
+                retrying = True
+            ready = retries if retrying else pending
             for slot in slots:
                 if slot not in idle or STOP.is_set():
                     continue
-                if ready:
-                    name = ready.popleft()
-                    del blocked[name]
-                    retrying = True
-                elif pending:
-                    name = pending.popleft()
-                    retrying = False
-                else:
+                if not ready:
                     break
+                name = ready.popleft()
                 idle.remove(slot)
-                active[pool.submit(attempt, name, slot)] = (name, slot, retrying)
+                active[pool.submit(attempt, name, slot)] = (name, slot)
 
-            outstanding = pending or blocked
+            outstanding = ready or (error is None and retries)
             if not active and not outstanding:
                 break
-            parked = set(slots) - idle - {slot for _, slot, _ in active.values()}
+            parked = set(slots) - idle - retired - {slot for _, slot in active.values()}
+            if not active and not parked:
+                break
             now = time.monotonic()
             if active:
                 deadline = None
@@ -1449,6 +1455,8 @@ def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
                 wait(active, timeout=timeout, return_when=FIRST_COMPLETED)
             else:
                 STOP.wait(min(deadline - now, next_probe - now))
+    if error is not None:
+        raise error
 
 
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=()):

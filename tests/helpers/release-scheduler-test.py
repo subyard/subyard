@@ -2,8 +2,12 @@
 """Host-free tests for local release acceptance dispatch."""
 import argparse
 from concurrent.futures import Future
+from contextlib import contextmanager, redirect_stdout
 import importlib.util
+import io
+import json
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -19,7 +23,7 @@ BLOCKED = {"status": "blocked", "exit_code": 4, "termination": "exit", "reason":
 
 
 class FakeControllers:
-    def __init__(self, attempts, broker):
+    def __init__(self, attempts, broker=lambda _: {}):
         self.attempts = {name: iter(results) for name, results in attempts.items()}
         self.broker = broker
         self.now = 0
@@ -36,21 +40,27 @@ class FakeControllers:
     def submit(self, attempt, name, slot):
         assert slot not in self.active
         self.started.append((self.now, name, slot))
-        duration, result = attempt(name, slot)
+        duration, result = next(self.attempts[name])
         future = Future()
-        self.active[slot] = (self.now + duration, future, result)
+        if callable(result):
+            result = result(self.now)
+        self.active[slot] = (self.now + duration, future, attempt, name, result)
         return future
 
     def advance(self, seconds):
         deadline = self.now + seconds
-        self.now = min([deadline, *(end for end, _, _ in self.active.values())])
-        for slot, (end, future, result) in list(self.active.items()):
+        self.now = min([deadline, *(end for end, *_ in self.active.values())])
+        for slot, (end, future, attempt, name, result) in list(self.active.items()):
             if end <= self.now:
                 del self.active[slot]
-                future.set_result(result)
+                try:
+                    self.result = result
+                    future.set_result(attempt(name, slot))
+                except Exception as error:
+                    future.set_exception(error)
 
-    def wait(self, futures, *, timeout, return_when):
-        self.advance(timeout)
+    def wait(self, futures, *, timeout=None, return_when):
+        self.advance(float("inf") if timeout is None else timeout)
 
     def status(self, env):
         self.probes.append(self.now)
@@ -58,18 +68,42 @@ class FakeControllers:
 
 
 class SchedulerTests(unittest.TestCase):
-    def dispatch(self, slots, attempts, broker=None, recovery_wait_seconds=None):
-        controllers = FakeControllers(attempts, broker)
-        env = {"SUBYARD_E2E_CAPACITY_WAIT": acceptance.LIVE_CAPACITY_WAIT}
+    @contextmanager
+    def controller_patches(self, controllers):
         with (
             patch.multiple(acceptance, ThreadPoolExecutor=lambda **_: controllers,
                            wait=controllers.wait, time=SimpleNamespace(monotonic=lambda: controllers.now),
                            broker_slots=controllers.status),
             patch.object(acceptance.STOP, "wait", side_effect=controllers.advance),
         ):
-            acceptance.dispatch_live(attempts, slots, env, lambda name, slot: next(controllers.attempts[name]),
+            yield
+
+    def dispatch(self, slots, attempts, broker=lambda _: {}, recovery_wait_seconds=None):
+        controllers = FakeControllers(attempts, broker)
+        env = {"SUBYARD_E2E_CAPACITY_WAIT": acceptance.LIVE_CAPACITY_WAIT}
+        with self.controller_patches(controllers):
+            acceptance.dispatch_live(attempts, slots, env, lambda name, slot: controllers.result,
                                      recovery_wait_seconds=recovery_wait_seconds)
         return controllers
+
+    @contextmanager
+    def run_fixture(self, controllers, output, *, completed_attempt=None):
+        checks = {"verify": ["true"]} | {name: ["true"] for name in controllers.attempts}
+        receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64,
+                   "candidate_bundle_sha256": "b" * 64, "external_obligations": {},
+                   "checks": {name: {"status": "passed" if name == "verify" else "pending"} for name in checks}}
+        with (
+            self.controller_patches(controllers),
+            patch.object(acceptance, "load_bound", return_value=(output, receipt)),
+            patch.object(acceptance, "commands", return_value=checks),
+            patch.object(acceptance, "execution_environment", return_value={}),
+            patch.object(acceptance, "source_fingerprint", return_value=receipt["source_fingerprint"]),
+            patch.object(acceptance, "execute", side_effect=lambda *_: controllers.result.copy()),
+            patch.object(acceptance, "completed_attempt", side_effect=completed_attempt,
+                         return_value={"id": "a" * 32, "sha256": "b" * 64}),
+            redirect_stdout(io.StringIO()),
+        ):
+            yield
 
     def test_all_selected_slots_start_and_free_slots_keep_working(self):
         controllers = self.dispatch((2, 4, 7), {
@@ -102,15 +136,45 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(controllers.probes, [3, 8, 13])
         self.assertEqual(controllers.now, 15)
 
-    def test_capacity_block_relaunches_after_sibling_without_waiting_for_all(self):
-        controllers = self.dispatch((1, 2, 3), {
-            "blocked": [(2, BLOCKED), (1, BLOCKED)],
-            "short": [(9, PASSED)],
-            "long": [(30, PASSED)],
+    def test_capacity_retry_waits_for_the_sibling_holding_resources(self):
+        blocked = "vm:blocked"
+        controllers = FakeControllers({
+            blocked: [(2, BLOCKED), (1, lambda now: PASSED if now >= 30 else BLOCKED)],
+            "vm:short": [(9, PASSED)],
+            "vm:long": [(30, PASSED)],
         })
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            with self.run_fixture(controllers, output):
+                self.assertEqual(acceptance.run_checks(output, (1, 2, 3), (), False, with_vms=True), 0)
+            receipt = json.loads((output / "receipt.json").read_text())
+        self.assertEqual(receipt["result"], "passed")
+        self.assertEqual(receipt["checks"][blocked]["status"], "passed")
         self.assertEqual(controllers.started, [
-            (0, "blocked", 1), (0, "short", 2), (0, "long", 3), (9, "blocked", 1),
+            (0, blocked, 1), (0, "vm:short", 2), (0, "vm:long", 3), (30, blocked, 1),
         ])
+
+    def test_attempt_recording_error_drains_the_queue_on_the_healthy_slot(self):
+        broken, sibling, queued = "vm:broken", "vm:sibling", "vm:queued"
+        controllers = FakeControllers({broken: [(1, PASSED)], sibling: [(2, PASSED)], queued: [(1, PASSED)]})
+
+        def record(_output, _root, _receipt, name, _result):
+            if name == broken:
+                raise OSError("injected attempt recording error")
+            return {"id": "a" * 32, "sha256": "b" * 64}
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            with self.run_fixture(controllers, output, completed_attempt=record):
+                with self.assertRaisesRegex(OSError, "injected attempt recording error"):
+                    acceptance.run_checks(output, (1, 2), (), False, with_vms=True)
+            receipt = json.loads((output / "receipt.json").read_text())
+            invocation = json.loads(next((output / "runs").glob("*.json")).read_text())
+        self.assertEqual(controllers.started, [(0, broken, 1), (0, sibling, 2), (2, queued, 2)])
+        self.assertEqual(receipt["checks"][queued]["status"], "passed")
+        self.assertEqual(invocation["checks"][broken]["status"], "incomplete")
+        self.assertEqual(invocation["checks"][queued]["status"], "passed")
+        self.assertEqual((invocation["state"], invocation["capture_status"]), ("error", "failed"))
 
     def test_capacity_block_relaunches_once_when_idle(self):
         controllers = self.dispatch((1,), {
@@ -118,15 +182,28 @@ class SchedulerTests(unittest.TestCase):
         })
         self.assertEqual(controllers.started, [(0, "blocked", 1), (2, "next", 1), (3, "blocked", 1)])
 
-    def test_capacity_block_relaunches_after_work_on_a_returned_slot(self):
-        controllers = self.dispatch((1, 2), {
-            "blocked": [(2, BLOCKED), (1, PASSED)], "unclean": [(1, FAILED)],
-            "long": [(30, PASSED)], "short": [(1, PASSED)],
-        }, lambda now: {2: "available"} if now >= 6 else {})
+    def test_recovered_slot_does_not_bypass_first_pass_capacity_barrier(self):
+        controllers = self.dispatch((1, 2, 3), {
+            "blocked": [(2, BLOCKED), (1, lambda now: PASSED if now >= 30 else BLOCKED)],
+            "unclean": [(1, FAILED)], "long": [(30, PASSED)],
+        }, lambda now: {2: "available"} if now >= 7 else {})
+        self.assertEqual(controllers.probes, [2, 7])
         self.assertEqual(controllers.started, [
-            (0, "blocked", 1), (0, "unclean", 2), (2, "long", 1),
-            (6, "short", 2), (7, "blocked", 2),
+            (0, "blocked", 1), (0, "unclean", 2), (0, "long", 3), (30, "blocked", 1),
         ])
+
+    def test_queued_retry_uses_first_available_slot_during_retry_pass(self):
+        for recovery, duration, expected in ((True, 30, (6, 2)), (False, 4, (8, 3))):
+            with self.subTest(recovery=recovery):
+                controllers = self.dispatch((1, 2, 3), {
+                    "a": [(2, BLOCKED), (30, PASSED)], "unclean": [(1, FAILED)],
+                    "b": [(3, BLOCKED), (duration, PASSED)], "c": [(2, BLOCKED), (1, PASSED)],
+                }, lambda now: {2: "available"} if recovery and now >= 6 else {})
+                when, slot = expected
+                self.assertEqual(controllers.started, [
+                    (0, "a", 1), (0, "unclean", 2), (0, "b", 3), (2, "c", 1),
+                    (4, "a", 1), (4, "b", 3), (when, "c", slot),
+                ])
 
     def test_slot_arguments(self):
         parser = argparse.ArgumentParser(exit_on_error=False)

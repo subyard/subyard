@@ -536,9 +536,9 @@ and assigns queued checks as slots finish. Controllers use their own `SUBYARD_E2
 once the broker reports it available. When all slots are idle and unavailable, the collector waits
 up to the same configured duration for a slot to return, then leaves undispatched checks pending.
 
-A typed `blocked/capacity_memory` or `blocked/capacity_disk` result permits one relaunch after a
-sibling controller finishes, or once other work has drained. Both attempts retain their logs and
-immutable records. A second capacity block leaves the candidate incomplete.
+A typed `blocked/capacity_memory` or `blocked/capacity_disk` result permits one relaunch once
+first-pass work has drained. Queued retries use slots as they become available. Both attempts
+retain their logs and immutable records. A second capacity block leaves the candidate incomplete.
 A physical retry always allocates fresh VMs. It never resumes a fixture across leases. Source or
 artifact changes reject reuse; prepare a new candidate in a new directory. Logs are retained per
 attempt and include the controllers' source and environment evidence. The run checks its platform
