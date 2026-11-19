@@ -23,9 +23,9 @@ _CAS_DIRECTORY = _cas_os.O_RDONLY | _cas_os.O_DIRECTORY | _cas_os.O_NOFOLLOW | _
 
 
 class CasRefusal(Exception):
-    def __init__(self, outcome, leftovers=()):
+    def __init__(self, outcome, leftovers=(), staged=()):
         Exception.__init__(self, outcome)
-        self.outcome, self.leftovers = outcome, list(leftovers)
+        self.outcome, self.leftovers, self.staged = outcome, list(leftovers), list(staged)
 
 
 def _cas_hook(point):
@@ -209,6 +209,21 @@ def _cas_leftovers(directory, destination):
                   for entry in _cas_os.listdir(directory) if entry.startswith(prefix))
 
 
+def _cas_leftover_tokens(directory, leftovers):
+    """Tokens of the first listed leftovers, so a staged copy of the
+    refreshed payload is told apart from preserved guest bytes."""
+    tokens = []
+    for leftover in leftovers[:64]:
+        try:
+            token, descriptor, _ = _cas_open(directory, _cas_os.path.basename(leftover))
+            if descriptor is not None:
+                _cas_os.close(descriptor)
+        except CasRefusal:
+            token = "unreadable"
+        tokens.append(token)
+    return tokens
+
+
 def cas_replace(home, destination, expect, payload, uid, mode):
     """Replace destination with payload only if it still matches expect.
     Returns "written" or "converged"; raises CasRefusal otherwise."""
@@ -227,11 +242,16 @@ def cas_replace(home, destination, expect, payload, uid, mode):
         # resolve: no write, and no convergence, until they are gone.
         leftovers = _cas_leftovers(directory, destination)
         if leftovers:
-            raise CasRefusal("leftover", leftovers)
+            desired = cas_token(payload)
+            staged = [leftover for leftover, token in zip(leftovers, _cas_leftover_tokens(directory, leftovers)) if token == desired]
+            raise CasRefusal("leftover", leftovers, staged)
         current, descriptor, hashed = _cas_open(directory, name)
         if current == cas_token(payload):
             # A converged file still gets the owner and mode a write gives it.
             info = _cas_os.fstat(descriptor)
+            if info.st_nlink != 1:
+                # Another name shares this inode; its owner and mode stay.
+                return "converged"
             if (info.st_uid, info.st_gid) != (uid, uid):
                 _cas_os.fchown(descriptor, uid, uid)
             if _cas_stat.S_IMODE(info.st_mode) != mode:
@@ -288,13 +308,15 @@ def cas_observe(home, destination):
                 _cas_os.close(descriptor)
         except CasRefusal:
             token = "unreadable"
-        return {"destination": destination, "token": token, "leftovers": _cas_leftovers(directory, destination)}
+        leftovers = _cas_leftovers(directory, destination)
+        return {"destination": destination, "token": token, "leftovers": leftovers,
+                "leftover_tokens": _cas_leftover_tokens(directory, leftovers)}
     finally:
         _cas_os.close(directory)
 
 
 def cas_refuse(refusal):
-    print(_cas_json.dumps({"outcome": refusal.outcome, "leftovers": refusal.leftovers}, separators=(",", ":"), sort_keys=True))
+    print(_cas_json.dumps({"outcome": refusal.outcome, "leftovers": refusal.leftovers, "staged": refusal.staged}, separators=(",", ":"), sort_keys=True))
     _cas_sys.stdout.flush()
     raise SystemExit(CAS_EXIT[refusal.outcome])
 

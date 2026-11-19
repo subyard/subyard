@@ -187,7 +187,7 @@ func TestStructuredWriterRefusesStaleConsentToken(t *testing.T) {
 				t.Fatalf("stale token accepted: %v", err)
 			}
 			refusal, ok := ParseWriteResult(h.destination, exit.ExitCode(), stdout).(WriteRefusal)
-			if !ok || refusal.Outcome != OutcomeChanged || len(refusal.Leftovers) != 0 {
+			if !ok || refusal.Outcome != OutcomeChanged || refusal.Leftovers.Any() {
 				t.Fatalf("refusal: %v", ParseWriteResult(h.destination, exit.ExitCode(), stdout))
 			}
 			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {

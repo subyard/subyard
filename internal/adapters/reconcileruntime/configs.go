@@ -409,9 +409,14 @@ func (runtime Runtime) ConfigsConverged(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// guestConfigsConverged is the token observation that config status and
+// release readiness use too: an unreadable file or a leftover beside one is
+// not converged, so init refreshes it and its refusal names the files.
 func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestConfigFile) (bool, error) {
-	converged := true
 	var refusals []error
+	var observed []guestConfigFile
+	var payloads [][]byte
+	var destinations []string
 	for _, file := range files {
 		payload, err := file.readSource()
 		if os.IsNotExist(err) {
@@ -421,50 +426,46 @@ func (runtime Runtime) guestConfigsConverged(ctx context.Context, files []guestC
 			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 			continue
 		}
-		request := ports.InstanceExecRequest{Command: []string{"sha256sum", "--", file.destination}}
+		observed, payloads, destinations = append(observed, file), append(payloads, payload), append(destinations, file.destination)
+	}
+	tokens, err := configmaterial.ObserveTokens(ctx, runtime.Executor, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, runtime.devUser(), destinations)
+	if err != nil {
+		return false, domain.CollectRefusals(append(refusals, err)...)
+	}
+	converged := true
+	for index, file := range observed {
+		desired := config.DesiredMaterializedArtifact{Name: file.label, Destination: file.destination, OwnedFormat: file.ownedFormat, DesiredHash: fmt.Sprintf("%x", sha256.Sum256(payloads[index]))}
+		var owned *configmaterial.Observation
 		if file.ownedFormat != "" {
-			request, err = configmaterial.Request(file.ownedFormat, configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+			if desired.DesiredHash, err = configmaterial.DesiredDigestFor(file.ownedFormat, payloads[index]); err != nil {
+				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
+				continue
+			}
+			request, err := configmaterial.Request(file.ownedFormat, configmaterial.ModeObserve, runtime.devUser(), file.destination, runtime.Yard.DevUID, payloads[index])
 			if err != nil {
 				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 				continue
 			}
-		}
-		result, execErr := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
-		if execErr != nil && result.ExitCode == 0 {
-			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, execErr))
-			continue
-		}
-		desiredHash := fmt.Sprintf("%x", sha256.Sum256(payload))
-		if file.ownedFormat != "" {
-			desiredHash, err = configmaterial.DesiredDigestFor(file.ownedFormat, payload)
-			if err != nil {
-				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
-				continue
-			}
-		}
-		desired := config.DesiredMaterializedArtifact{Name: file.label, Destination: file.destination, OwnedFormat: file.ownedFormat, DesiredHash: desiredHash}
-		observation := config.MaterializationObservation{ExitCode: result.ExitCode, Output: result.Stdout}
-		if file.ownedFormat != "" {
+			result, execErr := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
 			if execErr != nil || result.ExitCode != 0 {
 				refusals = append(refusals, fmt.Errorf("observe %s: structured configuration unavailable", file.label))
 				continue
 			}
-			observed, err := configmaterial.ParseObservation(result.Stdout)
+			observation, err := configmaterial.ParseObservation(result.Stdout)
 			if err != nil {
 				refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 				continue
 			}
-			observation.Fingerprint, observation.OwnedConverged = observed.Fingerprint, observed.Converged
+			owned = &observation
 		}
-		assessed, err := config.AssessMaterializedArtifact(desired, observation)
+		assessed, err := configmaterial.AssessFile(desired, tokens[index], owned)
 		if err != nil {
 			refusals = append(refusals, fmt.Errorf("observe %s: %w", file.label, err))
 			continue
 		}
 		converged = converged && assessed.Converged
 	}
-
-	err := domain.CollectRefusals(refusals...)
+	err = domain.CollectRefusals(refusals...)
 	return converged && err == nil, err
 }
 

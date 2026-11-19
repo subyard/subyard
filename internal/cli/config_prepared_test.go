@@ -5,13 +5,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/configsync"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -1353,5 +1357,90 @@ func TestDeveloperIdentityGateRendersLoadRefusalsWithoutValues(t *testing.T) {
 	if code := program.Run(context.Background()); code == 0 || strings.Contains(stderr.String(), "s3cr3tvalue") || strings.Contains(stderr.String(), configHome) ||
 		!strings.Contains(stderr.String(), `developer identity: load yard "idy": unknown YARD_TEMPLATE`) {
 		t.Fatalf("identity gate load refusal: code=%d %s", code, stderr.String())
+	}
+}
+
+// syncLeftoverExecutor answers each consumer yard's guest files: drifted
+// until the applier refreshed that yard, and hermes with a file a refused
+// write left beside its first destination.
+type syncLeftoverExecutor struct {
+	applier *recordingConfigApplier
+	yards   map[string]string // instance -> yard
+	desired map[string]string // instance/destination -> desired sha256
+}
+
+func (executor syncLeftoverExecutor) Exec(_ context.Context, _, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	applied := slices.Contains(executor.applier.yards, executor.yards[instance])
+	if !testkit.IsGuestTokenObservation(request.Command) {
+		return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, applied, strings.Repeat("0", 64)))}, nil
+	}
+	files := []configmaterial.FileToken{}
+	for index, destination := range request.Command[6:] {
+		file := configmaterial.FileToken{Destination: destination, Token: "sha256:" + strings.Repeat("0", 64), Leftovers: []string{}}
+		if digest, ok := executor.desired[instance+"/"+destination]; ok && applied {
+			file.Token = "sha256:" + digest
+		}
+		if executor.yards[instance] == "hermes" && index == 0 {
+			file.Leftovers = []string{path.Dir(destination) + "/." + path.Base(destination) + ".subyard-cas.0123456789abcdef"}
+		}
+		files = append(files, file)
+	}
+	payload, _ := json.Marshal(map[string]any{"files": files})
+	return ports.InstanceExecResult{Stdout: payload}, nil
+}
+
+// One consumer's leftover refuses that yard alone: the sync publishes its
+// candidate and refreshes the other consumer, then reports the refused yard
+// with its files and next step.
+func TestConfigSyncApplyRefusesOnlyTheConsumerWithLeftovers(t *testing.T) {
+	root, home, configHome, environment := configCommandFixture(t)
+	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
+	source := filepath.Join(testkit.TempDir(t), "source")
+	writeConfigCommandFile(t, filepath.Join(source, "subyard-config.json"), "{\"schemaVersion\":1}\n")
+	writeConfigCommandFile(t, filepath.Join(source, "hosts", "owner-a", "yards", "hermes", "config.env"), "SSH_PORT=2391\n")
+	writeConfigCommandFile(t, filepath.Join(source, "hosts", "owner-a", "overrides", "agents", "codex", "config.toml"), "model = \"approved-candidate\"\n")
+	runConfigSyncGit(t, source, "init", "-q")
+	commitConfigSource(t, source, "candidate")
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	native, err := configsync.BuildPlan(configsync.Options{SourceRoot: source, ConfigHome: configHome, RepositoryRoot: root, OperatorHome: home, Environment: environmentMap(environment), FileSettings: config.SyncableFileMappings(loaded), Adopt: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts, err := native.CandidateConfigs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	applier := &recordingConfigApplier{}
+	executor := syncLeftoverExecutor{applier: applier, yards: map[string]string{}, desired: map[string]string{}}
+	for _, candidate := range contexts {
+		instance := candidate.Context.YardInstanceName
+		fake.Instances[candidate.Context.IncusProject+"/"+instance] = ports.InstanceInfo{Name: instance, Project: candidate.Context.IncusProject, Status: "Running"}
+		executor.yards[instance] = candidate.Context.YardName
+		materialization, _, _, err := materializationDesired(configTarget{Name: candidate.Context.YardName, Loaded: candidate}, true, candidate.ProspectiveFiles.ReadAsset)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, asset := range materialization.Assets {
+			executor.desired[instance+"/"+asset.Destination] = asset.DesiredHash
+		}
+	}
+	if !slices.Contains(slices.Collect(maps.Values(executor.yards)), "hermes") {
+		t.Fatalf("hermes is not a candidate consumer: %v", executor.yards)
+	}
+	program := configExactProgram(t, root, environment, fake, applier)
+	program.options.Executor = executor
+	prepared := configExactPlan(t, program, loaded, []string{"sync", source, "--adopt", "--apply"})
+	var output bytes.Buffer
+	_, err = prepared.Execute(context.Background(), nil, &output)
+	if err == nil || !strings.Contains(err.Error(), "yard hermes") || !strings.Contains(err.Error(), ".subyard-cas.0123456789abcdef") ||
+		!strings.Contains(err.Error(), "then run yard -Y hermes config apply") {
+		t.Fatalf("hermes refusal: %v\n%s", err, &output)
+	}
+	if !slices.Equal(applier.yards, []string{"default"}) {
+		t.Fatalf("refreshed yards %v, want only default", applier.yards)
+	}
+	if _, err := os.Stat(configsync.HostIDPath(configHome)); err != nil {
+		t.Fatalf("the candidate was not published: %v", err)
 	}
 }

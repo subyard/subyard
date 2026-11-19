@@ -58,7 +58,8 @@ func TestOwnerRetryKeepsUnparsedTextVerbatim(t *testing.T) {
 
 func TestNextStepNeverRepeatsTheAttemptedCommand(t *testing.T) {
 	drift := Finding{Kind: FindingDrift, Yard: "named"}
-	if action, _ := NextStep([]Finding{drift}, Action{Verb: VerbInit, Yard: "named"}, nil); action.Verb != VerbNone {
+	// Drift that init left is named by config status, not by init again.
+	if action, _ := NextStep([]Finding{drift}, Action{Verb: VerbInit, Yard: "named"}, nil); action != (Action{Verb: VerbConfigStatus, Yard: "named"}) {
 		t.Fatalf("attempted init repeated: %#v", action)
 	}
 	// A file that changed after the plan is a new observation: rerun the apply.

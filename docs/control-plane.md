@@ -59,8 +59,10 @@ then unlinks it. When the displaced inode differs or cannot be rehashed, it exch
 bound so the newest guest inode stays at the destination; an inode it did not hash is never unlinked
 or swept, but is preserved as `.<name>.subyard-cas.<hex>` and reported. A preserved file refuses
 every later write of its destination as `leftover` (exit status 5) until the operator resolves it,
-and the token observation reports it, so `config status` and release readiness never treat that
-destination as converged.
+and the token observation reports it with the token of each such file, so a write's own unpublished
+copy is told apart from guest bytes. That observation is the only convergence check of guest config
+files: `init`, `config status` and release readiness all use it, and none treats the destination as
+converged while a leftover remains; past 64 names, leftovers are counted rather than listed.
 Missing parent directories are created only after the write is decided, and a converged file only
 gets its owner and mode back. When `renameat2` is unsupported (`ENOSYS`
 or `EINVAL`, such as ZFS before 2.2), the same exec opens the destination with `O_NOFOLLOW`, checks
@@ -79,7 +81,8 @@ before any write. Every other refresh plans for itself and observes the tokens i
 writing: a direct `init` or `init --configs`, an init of a stopped or uninitialized yard, an
 integration apply and the follow-up after an update. A release activation repair writes over the
 tokens its authorized plan read. `config status` uses the same observation, so it reports the
-unreadable and preserved files that a refresh refuses.
+unreadable and preserved files that a refresh refuses. Those files refuse their own yard at plan
+time; every other yard of the plan is still refreshed.
 
 Integration selection uses the shared prepared-command boundary, the protected per-yard config
 writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used
@@ -1576,7 +1579,9 @@ use the same selection and one renderer, `domain.RenderNext`. A refused installe
 and names its failed predicate, so no repair is advised behind it; its step is the command that makes
 the predicate hold: `yard migrate` finishes an unfinished transition or a pending protected
 publication with its sealed owner, `yard update` installs a fresh release whose journal, history and
-source proof verify, and `yard migrate --check` explains an unreadable store. A repair run with other
+source proof verify, and `yard migrate --check` explains an unreadable store. These remedies run past
+the gate, so their step also names `yard migrate --check` for when the predicate still fails. Drift
+that `init` left is named by `config status`. A repair run with other
 tooling names the installed `yard` command instead. An owner's retry ranks next and is printed
 verbatim when it is not one of the closed commands and not the command just attempted; invalid
 configuration advises `config validate` after it is corrected; a preserved guest file names the

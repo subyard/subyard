@@ -1270,7 +1270,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		}
 		return []testkit.IncusExecStep{
 			{}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}}, usage,
-			{Result: ports.InstanceExecResult{Stdout: []byte(configHash + "  config\n")}},
+			{Result: ports.InstanceExecResult{Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"sha256:` + configHash + `","leftovers":[]}]}`)}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("skills-current\n")}},
 			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {}, {},
 		}
@@ -1311,8 +1311,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	if call := incus.ExecCalls[10].Request; len(call.Command) != 5 || call.Command[0] != "python3" || call.Command[4] != "check" || string(call.Stdin) != string(runtime.guestRuntimeFacts()) {
 		t.Fatalf("provision did not check its exact guest facts: %#v", call)
 	}
-	if command := incus.ExecCalls[4].Request.Command; len(command) != 3 ||
-		command[0] != "sha256sum" || command[2] != "/home/dev/.config/opencode/AGENTS.md" {
+	if command := incus.ExecCalls[4].Request.Command; !testkit.IsGuestTokenObservation(command) || !slices.Equal(command[6:], []string{"/home/dev/.config/opencode/AGENTS.md"}) {
 		t.Fatalf("OpenCode instructions were not checked natively: %#v", command)
 	}
 	transport := errors.New("native transport unavailable")
@@ -1354,9 +1353,9 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		"HOST_OPENCODE_AGENTS_MD=" + instructions,
 	}
 	missing := steps("regular file|755|0:0", digest)
-	missing[4] = testkit.IncusExecStep{
-		Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("missing config"),
-	}
+	missing[4] = testkit.IncusExecStep{Result: ports.InstanceExecResult{
+		Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"absent","leftovers":[]}]}`),
+	}}
 	incus.ExecSteps = missing
 	assertStage(t, runtime, "provision", false, "missing materialized agent config")
 	forwardDrop := steps("regular file|755|0:0", digest)

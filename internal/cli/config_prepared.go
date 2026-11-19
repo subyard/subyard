@@ -449,7 +449,6 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 		return nil, err
 	}
 	execution := &configApplyExecution{selector: selector}
-	var unreadable []error
 	for _, target := range targets {
 		if target.Loaded.Context.AccessKind == domain.AccessRemote {
 			return nil, fmt.Errorf("config apply does not implicitly operate on remote yard %s", target.Name)
@@ -458,37 +457,51 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 		if err != nil {
 			return nil, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome}
 		}
-		// A file without a token cannot be consented to, and preserved guest
-		// bytes are the operator's to resolve: refuse both before the prompt.
+		// A file without a token cannot be consented to, and leftovers are the
+		// operator's to resolve: the plan refuses that yard alone, with its
+		// files and next step, and refreshes the others.
+		var refused []error
 		for _, destination := range assessment.Unreadable {
-			unreadable = append(unreadable, materializedConfigActivationError{configmaterial.WriteRefusal{Destination: destination, Outcome: configmaterial.OutcomeUnreadable}, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome})
+			refused = append(refused, configmaterial.WriteRefusal{Destination: destination, Outcome: configmaterial.OutcomeUnreadable})
 		}
 		for _, destination := range slices.Sorted(maps.Keys(assessment.Preserved)) {
-			unreadable = append(unreadable, materializedConfigActivationError{configmaterial.WriteRefusal{Destination: destination, Outcome: configmaterial.OutcomeLeftover, Leftovers: assessment.Preserved[destination]}, target.Name, "materialized config", "config apply", "resolve", target.Loaded.Context.Paths.ConfigHome})
+			refused = append(refused, configmaterial.WriteRefusal{Destination: destination, Outcome: configmaterial.OutcomeLeftover})
+		}
+		if len(refused) != 0 {
+			assessment.refusal = configApplyRefusal{
+				materializedConfigActivationError{domain.CollectRefusals(refused...), target.Name, "materialized config", "config status", "apply", target.Loaded.Context.Paths.ConfigHome},
+				configApplyNext(assessment, assessment, nil),
+			}
 		}
 		execution.approved = append(execution.approved, assessment)
-	}
-	if err := domain.CollectRefusals(unreadable...); err != nil {
-		return nil, err
 	}
 	execution.current = slices.Clone(execution.approved)
 	return execution, nil
 }
 
 func (execution *configApplyExecution) changed() bool {
-	return slices.ContainsFunc(execution.current, func(item configTargetAssessment) bool { return item.Changed })
+	// A yard the plan refuses is reported, not refreshed.
+	for index, item := range execution.current {
+		if item.Changed && execution.approved[index].refusal == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // steps are the approved plan's: the refresh writes with the approved consent.
 func (execution *configApplyExecution) steps() []domain.OperationStep {
 	var steps []domain.OperationStep
 	for _, assessment := range execution.approved {
-		decision := domain.StepSkip
+		decision, observed := domain.StepSkip, assessment.State+"; fingerprint:"+assessment.MaterializedFingerprint
 		if assessment.Changed {
 			decision = domain.StepApply
 		}
+		if assessment.refusal != nil {
+			decision, observed = domain.StepSkip, "refused: "+assessment.refusal.Error()
+		}
 		steps = append(steps, domain.OperationStep{ID: "config.apply." + assessment.Target.Name, Target: "local yard " + assessment.Target.Name,
-			Observed: assessment.State + "; fingerprint:" + assessment.MaterializedFingerprint, Desired: "fingerprint:" + assessment.DesiredFingerprint,
+			Observed: observed, Desired: "fingerprint:" + assessment.DesiredFingerprint,
 			Decision: decision, Preconditions: []string{"the selected local target set, desired configuration and yard instance are unchanged", "each guest config file still holds the bytes observed here, or has converged"},
 			Verify: "check native materialized file settings against the approved desired fingerprint", Consequence: "refresh materialized agent configs in local running yard " + assessment.Target.Name})
 	}
@@ -573,8 +586,13 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		return err
 	}
 	var targets []configTargetAssessment
+	// Yards refresh in order, each with its own consent; one yard's refusal,
+	// at plan time or by its writes, does not stop the next.
+	var refusals []error
 	for index, assessment := range execution.current {
 		switch approved := execution.approved[index]; {
+		case approved.refusal != nil:
+			refusals = append(refusals, approved.refusal)
 		case approved.Changed && assessment.Changed:
 			targets = append(targets, approved)
 		case approved.Changed:
@@ -591,9 +609,6 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 	if applier == nil {
 		applier = dispatcherConfigApplier{path: cli.options.DispatcherPath, environment: cli.baseEnv, stdout: output, stderr: output}
 	}
-	// Yards refresh in order, each with its own consent; one yard's refusal
-	// does not stop the next.
-	var refusals []error
 	var refreshed []configTarget
 	for _, approved := range targets {
 		target := approved.Target
@@ -615,7 +630,7 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return err
 	}
-	if len(targets) == 0 {
+	if len(targets) == 0 && len(refusals) == 0 {
 		if slices.ContainsFunc(execution.approved, func(item configTargetAssessment) bool { return item.Changed }) {
 			fmt.Fprintln(output, "config apply: drift converged after confirmation; nothing to refresh")
 		} else {
@@ -666,7 +681,7 @@ func configApplyFindings(approved, fresh configTargetAssessment, observeErr erro
 	var findings []domain.Finding
 	for _, destination := range slices.Sorted(maps.Keys(fresh.Preserved)) {
 		findings = append(findings, domain.Finding{Kind: domain.FindingFileLeftover, Yard: yard,
-			Public: configmaterial.LeftoverRecovery(destination, fresh.Preserved[destination]) + "; then run " + domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: yard})})
+			Public: fresh.Preserved[destination].Recovery(destination) + "; then run " + domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: yard})})
 	}
 	for range fresh.Unreadable {
 		findings = append(findings, domain.Finding{Kind: domain.FindingFileUnreadable, Yard: yard})

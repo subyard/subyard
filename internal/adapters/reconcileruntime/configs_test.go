@@ -278,7 +278,9 @@ func TestPrepareConfigsReportsEveryInvalidSourceBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
+// The runtime's convergence is the token observation that config status and
+// release readiness use: a leftover beside a matching file is not converged.
+func TestConfigsConvergedComparesSourceAndGuestTokensReadOnly(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "AGENTS.md")
 	payload := []byte("current instructions\n")
@@ -289,17 +291,23 @@ func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash := fmt.Sprintf("%x", sha256.Sum256(effective))
+	observation := func(token string, leftovers ...string) string {
+		payload, _ := json.Marshal(map[string]any{"files": []configmaterial.FileToken{{Destination: "/home/dev/.codex/AGENTS.md", Token: token, Leftovers: append([]string{}, leftovers...)}}})
+		return string(payload)
+	}
 	for _, test := range []struct {
 		name   string
 		stdout string
 		want   bool
 	}{
-		{name: "converged", stdout: hash + "  /home/dev/.codex/AGENTS.md\n", want: true},
-		{name: "drifted", stdout: strings.Repeat("0", 64) + "  /home/dev/.codex/AGENTS.md\n"},
+		{name: "converged", stdout: observation(configmaterial.PayloadToken(effective)), want: true},
+		{name: "drifted", stdout: observation("sha256:" + strings.Repeat("0", 64))},
+		{name: "unreadable", stdout: observation(configmaterial.TokenUnreadable)},
+		{name: "leftover beside a matching file", stdout: observation(configmaterial.PayloadToken(effective), "/home/dev/.codex/.AGENTS.md.subyard-cas.0123456789abcdef")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			incus := runningIncus(1)
+			incus.GuestTokens = nil
 			incus.ExecSteps[0].Result.Stdout = []byte(test.stdout)
 			runtime := Runtime{
 				Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "HOST_CODEX_AGENTS_MD=" + source},
@@ -311,11 +319,8 @@ func TestConfigsConvergedComparesSourceAndGuestHashesReadOnly(t *testing.T) {
 			if err != nil || got != test.want {
 				t.Fatalf("converged=%t err=%v", got, err)
 			}
-			if len(incus.ExecCalls) != 1 || !slices.Equal(
-				incus.ExecCalls[0].Request.Command,
-				[]string{"sha256sum", "--", "/home/dev/.codex/AGENTS.md"},
-			) {
-				t.Fatalf("hash probe=%#v", incus.ExecCalls)
+			if command := incus.ExecCalls[0].Request.Command; len(incus.ExecCalls) != 1 || !testkit.IsGuestTokenObservation(command) || !slices.Equal(command[6:], []string{"/home/dev/.codex/AGENTS.md"}) {
+				t.Fatalf("token probe=%#v", incus.ExecCalls)
 			}
 		})
 	}

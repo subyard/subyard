@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -158,7 +159,7 @@ func TestCompareAndWriteReplacesOnlyConsentedBytes(t *testing.T) {
 			refusal := ParseWriteResult(world.destination, code, []byte(stdout))
 			var typed WriteRefusal
 			if (refusal != nil) != (code != 0) || code != 0 && (!errors.As(refusal, &typed) || typed.Outcome != OutcomeChanged ||
-				len(typed.Leftovers) != len(test.want)-1) {
+				len(typed.Leftovers.Kept) != len(test.want)-1) {
 				t.Fatalf("write result %v from %q", refusal, stdout)
 			}
 			if code == 0 {
@@ -255,8 +256,22 @@ func TestCompareAndWriteRequests(t *testing.T) {
 	if _, err := Request("json", ModeApply, "dev", "/home/dev/a.json", 1000, []byte(`{}`)); err == nil {
 		t.Fatal("structured apply through the read-only request accepted")
 	}
-	if _, err := ParseTokens([]byte(`{"files":[{"destination":"/home/dev/a","token":"absent","leftovers":["/etc/x"]}]}`), []string{"/home/dev/a"}); err == nil {
-		t.Fatal("unsafe leftover accepted")
+	// A leftover that cannot be named, or one past the bound, is counted, and
+	// the destination still does not converge.
+	names := []string{`"/etc/x"`}
+	for index := range 65 {
+		names = append(names, fmt.Sprintf(`"/home/dev/.a.subyard-cas.%016x"`, index))
+	}
+	tokens, err := ParseTokens([]byte(`{"files":[{"destination":"/home/dev/a","token":"absent","leftovers":[`+strings.Join(names, ",")+`]}]}`), []string{"/home/dev/a"})
+	if err != nil || len(tokens) != 1 {
+		t.Fatalf("overflowing leftovers failed the observation: %v", err)
+	}
+	if leftovers := tokens[0].LeftoversFor(""); len(leftovers.Kept) != 64 || leftovers.Unlisted != 2 || slices.Contains(leftovers.Kept, "/etc/x") ||
+		!strings.Contains(leftovers.Recovery("/home/dev/a"), "2 more files named /home/dev/.a.subyard-cas.* beside it") {
+		t.Fatalf("leftovers %#v", leftovers)
+	}
+	if assessed, err := AssessFile(config.DesiredMaterializedArtifact{Name: "a", Destination: "/home/dev/a", DesiredHash: strings.Repeat("0", 64)}, FileToken{Destination: "/home/dev/a", Token: "sha256:" + strings.Repeat("0", 64), unlisted: 1}, nil); err != nil || assessed.Converged {
+		t.Fatalf("unlisted leftover converged: %#v %v", assessed, err)
 	}
 	if err := ParseWriteResult("/home/dev/a", 4, []byte(`{"outcome":"unreadable","leftovers":[]}`)); err == nil || errors.As(err, new(WriteRefusal)) {
 		t.Fatal("mismatched outcome accepted")
@@ -293,7 +308,7 @@ func TestCompareAndWriteLeftoverBlocksConvergence(t *testing.T) {
 	code, stdout := world.run("", PayloadToken([]byte("old")), []byte("desired\n"))
 	refusal := ParseWriteResult(world.destination, code, []byte(stdout))
 	var typed WriteRefusal
-	if code != 5 || !errors.As(refusal, &typed) || typed.Outcome != OutcomeLeftover || !slices.Equal(typed.Leftovers, leftovers) ||
+	if code != 5 || !errors.As(refusal, &typed) || typed.Outcome != OutcomeLeftover || !slices.Equal(typed.Leftovers.Kept, leftovers) || len(typed.Leftovers.Staged) != 0 ||
 		!strings.Contains(refusal.Error(), leftovers[0]) {
 		t.Fatalf("rerun over preserved bytes: %d %v", code, refusal)
 	}
@@ -312,12 +327,32 @@ func TestCompareAndWriteUnverifiableDisplacedFileIsGivenBack(t *testing.T) {
         with open(%q, "ab") as output: output.write(b"x" * (33 << 20))`, world.destination)
 	code, stdout := world.run(hook, PayloadToken([]byte("old")), []byte("desired\n"))
 	var typed WriteRefusal
-	if code != 4 || !errors.As(ParseWriteResult(world.destination, code, []byte(stdout)), &typed) || len(typed.Leftovers) != 0 {
+	if code != 4 || !errors.As(ParseWriteResult(world.destination, code, []byte(stdout)), &typed) || typed.Leftovers.Any() {
 		t.Fatalf("grown file: %d %s", code, stdout)
 	}
 	entries, _ := os.ReadDir(filepath.Dir(world.destination))
 	info, err := os.Stat(world.destination)
 	if len(entries) != 1 || err != nil || info.Size() != 3+33<<20 {
 		t.Fatalf("grown guest file not at its destination: %d entries, %v", len(entries), err)
+	}
+}
+
+// A write stopped between staging and the exchange leaves its own copy of the
+// refreshed file, which is told apart from guest bytes.
+func TestCompareAndWriteNamesItsOwnStagedCopy(t *testing.T) {
+	world := newCASWorld(t)
+	testkit.WriteFile(t, world.destination, []byte("old"), 0o644)
+	if code, _ := world.run(`def CAS_HOOK(point):
+    if point == "staged": _t._exit(97)`, PayloadToken([]byte("old")), []byte("desired\n")); code != 97 {
+		t.Fatalf("crash did not occur: %d", code)
+	}
+	if leftovers := world.observe().LeftoversFor(PayloadToken([]byte("desired\n"))); len(leftovers.Staged) != 1 || len(leftovers.Kept) != 0 ||
+		!strings.Contains(leftovers.Recovery(world.destination), "unpublished copy of the refreshed file") {
+		t.Fatalf("staged copy: %#v", leftovers)
+	}
+	code, stdout := world.run("", PayloadToken([]byte("old")), []byte("desired\n"))
+	var typed WriteRefusal
+	if code != 5 || !errors.As(ParseWriteResult(world.destination, code, []byte(stdout)), &typed) || len(typed.Leftovers.Staged) != 1 || len(typed.Leftovers.Kept) != 0 {
+		t.Fatalf("rerun over a staged copy: %d %s", code, stdout)
 	}
 }

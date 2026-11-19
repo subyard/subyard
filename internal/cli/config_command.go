@@ -50,10 +50,13 @@ type configTargetAssessment struct {
 	Unreadable []string             `json:",omitempty"`
 	// Preserved maps each destination to the guest files a refused write kept
 	// beside it; such a destination is not converged.
-	Preserved map[string][]string `json:",omitempty"`
+	Preserved map[string]configmaterial.Leftovers `json:",omitempty"`
 	// running marks an observed running yard; instance is its identity.
 	running  bool
 	instance string
+	// refusal is the plan's refusal of this yard alone: a file it cannot
+	// replace. The other yards of the plan are still refreshed.
+	refusal error
 }
 
 type configTargetSelector func() ([]configTarget, error)
@@ -1360,25 +1363,27 @@ func (cli *CLI) assessConfigTarget(
 	tokens := map[string]configmaterial.FileToken{}
 	consent := &ports.ConfigConsent{InstanceUUID: info.Config["volatile.uuid"], Files: []ports.ConfigFileConsent{}}
 	var unreadable []string
-	preserved := map[string][]string{}
+	preserved := map[string]configmaterial.Leftovers{}
+	// A raw asset's staged copy holds its desired bytes; other leftovers are
+	// the guest's.
+	desiredTokens := map[string]string{}
+	for index, asset := range assets {
+		if asset.OwnedFormat == "" {
+			desiredTokens[asset.Destination] = "sha256:" + desired.Assets[index].DesiredHash
+		}
+	}
 	for _, file := range observed {
 		tokens[file.Destination] = file
 		consent.Files = append(consent.Files, ports.ConfigFileConsent{Destination: file.Destination, Token: file.Token})
 		if file.Token == configmaterial.TokenUnreadable {
 			unreadable = append(unreadable, file.Destination)
 		}
-		if len(file.Leftovers) != 0 {
-			preserved[file.Destination] = file.Leftovers
+		if leftovers := file.LeftoversFor(desiredTokens[file.Destination]); leftovers.Any() {
+			preserved[file.Destination] = leftovers
 		}
 	}
 	for index, asset := range assets {
-		token := tokens[asset.Destination]
-		// A raw file's token is its observation: an absent or unreadable file
-		// has no content, like a failed hash.
-		observed := config.MaterializationObservation{ExitCode: 1}
-		if digest, ok := strings.CutPrefix(token.Token, "sha256:"); ok {
-			observed = config.MaterializationObservation{Output: []byte(digest + "  " + asset.Destination + "\n")}
-		}
+		var owned *configmaterial.Observation
 		if asset.OwnedFormat != "" {
 			request, err := configmaterial.Request(asset.OwnedFormat, configmaterial.ModeObserve, target.Loaded.Context.DevUser, asset.Destination, target.Loaded.Context.DevUID, desiredPayloads[index])
 			if err != nil {
@@ -1395,15 +1400,12 @@ func (cli *CLI) assessConfigTarget(
 				failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 				continue
 			}
-			observed = config.MaterializationObservation{Fingerprint: observation.Fingerprint, OwnedConverged: observation.Converged}
+			owned = &observation
 		}
-		fact, err := config.AssessMaterializedArtifact(desired.Assets[index], observed)
+		fact, err := configmaterial.AssessFile(desired.Assets[index], tokens[asset.Destination], owned)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", asset.Name, err))
 			continue
-		}
-		if len(token.Leftovers) != 0 {
-			fact.Converged = false
 		}
 		facts = append(facts, fact)
 		if !fact.Converged && asset.Setting != "" {
@@ -1439,7 +1441,7 @@ func configFileAttention(assessment configTargetAssessment) []string {
 		lines = append(lines, fmt.Sprintf("attention: yard %s: %s is not a readable regular file; replace it with a regular file or remove it, then run %s", yard, destination, apply))
 	}
 	for _, destination := range slices.Sorted(maps.Keys(assessment.Preserved)) {
-		lines = append(lines, fmt.Sprintf("attention: yard %s: %s; then run %s", yard, configmaterial.LeftoverRecovery(destination, assessment.Preserved[destination]), apply))
+		lines = append(lines, fmt.Sprintf("attention: yard %s: %s; then run %s", yard, assessment.Preserved[destination].Recovery(destination), apply))
 	}
 	return lines
 }

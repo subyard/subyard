@@ -142,7 +142,13 @@ type Finding struct {
 // Remedies is a finding's candidate actions in order, given the attempted one.
 // A finding with none is terminal: it names what the operator must do.
 func (finding Finding) Remedies(attempted Action) []Action {
-	yard := func(verb Verb) []Action { return []Action{{Verb: verb, Yard: finding.Yard}} }
+	yard := func(verbs ...Verb) []Action {
+		actions := make([]Action, 0, len(verbs))
+		for _, verb := range verbs {
+			actions = append(actions, Action{Verb: verb, Yard: finding.Yard})
+		}
+		return actions
+	}
 	switch finding.Kind {
 	case FindingSource:
 		// Each refused installed-source predicate names the command that can
@@ -174,8 +180,12 @@ func (finding Finding) Remedies(attempted Action) []Action {
 			return yard(VerbStart)
 		}
 		return []Action{{Verb: VerbMigrate}}
-	case FindingFailed, FindingDrift:
+	case FindingFailed:
 		return yard(VerbInit)
+	case FindingDrift:
+		// Drift that init left names its files in config status: one it
+		// cannot read, or leftovers that are the operator's to resolve.
+		return yard(VerbInit, VerbConfigStatus)
 	case FindingFileChanged:
 		return yard(VerbConfigApply)
 	case FindingFileUnreadable, FindingFileUnknown:
@@ -237,6 +247,10 @@ func NextStep(findings []Finding, attempted Action, admitted func(Action) bool) 
 func RenderNext(action Action, chosen Finding, attempted Action) string {
 	rendered := RenderAction(action)
 	switch {
+	case chosen.Kind == FindingSource && (action.Verb == VerbMigrate || action.Verb == VerbUpdate):
+		// The remedy runs past the gate, so no later advice knows it was
+		// attempted: the step names the read-only check for when it did not help.
+		return rendered + " (" + chosen.Public + "); if it still fails, " + RenderAction(Action{Verb: VerbMigrateCheck})
 	case chosen.Kind == FindingSource && action.Verb != VerbNone:
 		return rendered + " (" + chosen.Public + ")"
 	case chosen.Kind == FindingSource || chosen.Kind == FindingFileLeftover:

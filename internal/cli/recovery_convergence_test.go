@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"maps"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 )
@@ -40,10 +42,52 @@ func (world recoveryWorld) gate() yardGate {
 			gate.order = append(gate.order, name)
 		}
 	}
+	// Readiness sees the files yard through the one convergence check.
+	if !world.filesConverged() {
+		if _, found := gate.yards[world.filesYard]; !found {
+			gate.yards[world.filesYard] = &yardGateState{}
+			gate.order = append(gate.order, world.filesYard)
+			slices.Sort(gate.order)
+		}
+		gate.yards[world.filesYard].drift = true
+	}
 	if world.source != "" && slices.ContainsFunc(gate.order, func(name string) bool { return gate.state(name).repairOnly() }) {
 		gate.source = &repairSourceRefusal{predicate: world.source}
 	}
 	return gate
+}
+
+var recoveryDesired = config.DesiredMaterializedArtifact{Name: "agent", Destination: "/home/dev/.config/agent.md", DesiredHash: fmt.Sprintf("%x", sha256.Sum256([]byte("desired\n")))}
+
+// fileToken is what the guest observation reports for the files yard; a
+// preserved file sits beside a destination that already holds the desired bytes.
+func (world recoveryWorld) fileToken() configmaterial.FileToken {
+	token := configmaterial.FileToken{Destination: recoveryDesired.Destination, Token: "sha256:" + recoveryDesired.DesiredHash}
+	switch world.files {
+	case "changed":
+		token.Token = "sha256:" + strings.Repeat("a", 64)
+	case "unreadable":
+		token.Token = configmaterial.TokenUnreadable
+	case "leftover":
+		token.Leftovers = []string{"/home/dev/.config/.agent.md.subyard-cas.0123456789abcdef"}
+	}
+	return token
+}
+
+// filesConverged is the production check that init, config status and
+// release readiness share.
+func (world recoveryWorld) filesConverged() bool {
+	assessed, err := configmaterial.AssessFile(recoveryDesired, world.fileToken(), nil)
+	return err == nil && assessed.Converged
+}
+
+// refresh is the real effect of init or config apply on the files yard: a
+// converged file is left alone, and a write refuses an unreadable file or
+// one with leftovers beside it.
+func (world *recoveryWorld) refresh() {
+	if !world.filesConverged() && world.files == "changed" {
+		world.files = ""
+	}
 }
 
 // fileAssessments are the plan and the fresh observation of the files yard.
@@ -57,13 +101,13 @@ func (world recoveryWorld) fileAssessments() (configTargetAssessment, configTarg
 	case "unreadable":
 		fresh.Consent, fresh.Unreadable = approved.Consent, []string{destination}
 	case "leftover":
-		fresh.Consent, fresh.Preserved = approved.Consent, map[string][]string{destination: {"/home/dev/.config/.agent.md.subyard-cas.0123456789abcdef"}}
+		fresh.Consent, fresh.Preserved = approved.Consent, map[string]configmaterial.Leftovers{destination: world.fileToken().LeftoversFor("")}
 	}
 	return approved, fresh
 }
 
 func (world recoveryWorld) ready() bool {
-	return len(world.gate().order) == 0 && world.files == ""
+	return len(world.gate().order) == 0
 }
 
 // entry renders the one next step an entry point prints, through its
@@ -76,21 +120,21 @@ type recoveryEntry struct {
 func gateEntry(render func(gate yardGate, yard string, attempted domain.Action) string) func(recoveryWorld, domain.Action) (string, string) {
 	return func(world recoveryWorld, attempted domain.Action) (string, string) {
 		gate := world.gate()
-		if len(gate.order) != 0 {
-			yard := gate.order[0]
-			return yard, render(gate, yard, attempted)
-		}
-		// Only file findings are left: config status and config apply name them.
-		approved, fresh := world.fileAssessments()
-		if attempted.Verb == domain.VerbConfigApply {
+		// A refused refresh of the files yard names its files and next step.
+		if attempted.Verb == domain.VerbConfigApply && attempted.Yard == world.filesYard && !world.filesConverged() {
+			approved, fresh := world.fileAssessments()
 			return world.filesYard, configApplyNext(approved, fresh, nil)
 		}
-		fresh.Target.Name = world.filesYard
-		lines := configFileAttention(fresh)
-		if len(lines) == 0 {
-			return world.filesYard, configApplyNext(approved, fresh, nil)
+		// config status names the files a refresh refuses, with their step.
+		if attempted.Verb == domain.VerbConfigStatus && attempted.Yard == world.filesYard {
+			_, fresh := world.fileAssessments()
+			fresh.Target.Name = world.filesYard
+			if lines := configFileAttention(fresh); len(lines) != 0 {
+				return world.filesYard, strings.TrimPrefix(lines[0], "attention: yard "+world.filesYard+": ")
+			}
 		}
-		return world.filesYard, strings.TrimPrefix(lines[0], "attention: yard "+world.filesYard+": ")
+		yard := gate.order[0]
+		return yard, render(gate, yard, attempted)
 	}
 }
 
@@ -186,13 +230,13 @@ func (world *recoveryWorld) apply(action domain.Action) {
 	case domain.VerbInit:
 		// Init plans for itself on a running, stopped or uninitialized yard.
 		state.failed, state.drift, state.pending = false, false, false
-		if action.Yard == world.filesYard && world.files == "changed" {
-			world.files = ""
+		if action.Yard == world.filesYard {
+			world.refresh()
 		}
 	case domain.VerbConfigApply:
 		state.drift = false
-		if action.Yard == world.filesYard && world.files == "changed" {
-			world.files = ""
+		if action.Yard == world.filesYard {
+			world.refresh()
 		}
 	case domain.VerbIntegrationStatus:
 		state.pending, state.retry = false, "" // the owner's resume finished
