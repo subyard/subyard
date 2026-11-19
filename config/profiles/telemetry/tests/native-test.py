@@ -236,6 +236,22 @@ class NativeTest(unittest.TestCase):
                 self.reconcile(['claude', 'codex'], check=check)
         self.assertTrue(self.receipt.exists())
         self.assertEqual(claude.read_bytes(), copied)
+        # The private token is scanned too, in covered and uncovered files alike.
+        private = b'{"copied":"'+self.token.encode()+b'"}'
+        for covered in (['claude', 'codex'], ['codex']):
+            with self.subTest(covered=covered):
+                native.publish(claude, b'{}', native.snapshot(claude))
+                legacy(self.home, self.receipt, covered, self.endpoint, minted, tomli_w, self.uid, self.gid)
+                document = json.loads(claude.read_bytes())
+                document['copied'] = self.token
+                native.publish(claude, json.dumps(document).encode() if 'claude' in covered else private,
+                               native.snapshot(claude))
+                before = claude.read_bytes()
+                for check in (True, False):
+                    with self.assertRaisesRegex(native.Refusal, r'\Acollector token remains in legacy claude configuration\Z'):
+                        self.reconcile(['claude', 'codex'], check=check)
+                self.assertTrue(self.receipt.exists())
+                self.assertEqual(claude.read_bytes(), before)
 
     def test_legacy_cleanup_refuses_headers_that_name_no_single_token(self):
         path = self.documents['claude']
@@ -251,9 +267,9 @@ class NativeTest(unittest.TestCase):
         self.assertIsNone(native.legacy_token(self.receipt))
         for token in (self.token, None):
             with self.subTest(token=bool(token)), self.assertRaisesRegex(
-                    native.Refusal, r'\Athe legacy telemetry receipt names no single collector token; remove the collector Bearer '
-                                    r'tokens from the legacy home agent configurations, then remove the receipt '
-                                    r'/var/lib/subyard/telemetry-control/native.json and retry\Z'):
+                    native.Refusal, r'\Athe legacy telemetry receipt names no single collector token; inside the yard, remove the '
+                                    r"collector Bearer tokens from the developer's ~/\.claude/settings\.json and ~/\.codex/config\.toml, "
+                                    r'then remove the receipt /var/lib/subyard/telemetry-control/native\.json and retry\Z'):
                 native.reconcile(self.etc, self.home, self.receipt, [], self.endpoint, token, tomli_w,
                                  self.uid, self.gid, {})
             self.assertEqual(path.read_bytes(), payload)
