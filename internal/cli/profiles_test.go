@@ -105,6 +105,33 @@ func TestScopedProfileStatusDiagnosticIsHumanOnly(t *testing.T) {
 	}
 }
 
+func TestScopedProfileStatusShowsDeclaredAdvisoryOfConvergedProfile(t *testing.T) {
+	cli, _, fixture, _, output := scopedProfileFixture(t, "ENVIRONMENT_PROFILES=fixture\n")
+	runtime := &profileDiagnosticRuntime{profileRuntimeSelection: profileRuntimeSelection{fixture, true}, observation: ports.ReconcileStageObservation{Converged: true,
+		Advisories: []ports.ProfileAdvisory{{Owner: "fixture", Code: "storage-capacity"}, {Owner: "other", Code: "storage-capacity"}, {Owner: "fixture", Code: "private-canary"}}}}
+	cli.options.ProfileRuntime = func(config.Loaded) ProfileServiceRuntime { return runtime }
+	for _, asJSON := range []bool{false, true} {
+		output.Reset()
+		arguments := []string{"status", "fixture"}
+		if asJSON {
+			arguments = append(arguments, "--json")
+		}
+		prepared, err := prepareScopedProfile(t, cli, arguments...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code := cli.runPreparedCommand(context.Background(), prepared, true)
+		prepared.Close()
+		want := "runtime: ready\nready: true\nwarning: storage-capacity: inside the yard run cleanup --older-than 60d\n"
+		if asJSON {
+			want = `"runtime":"ready","ready":true,"warnings":["storage-capacity: inside the yard run cleanup --older-than 60d"]}` + "\n"
+		}
+		if code != 0 || !strings.HasSuffix(output.String(), want) || strings.Contains(output.String(), "private-canary") {
+			t.Fatalf("status exit=%d: %s", code, output)
+		}
+	}
+}
+
 func scopedProfileFixture(t *testing.T, selection string) (*CLI, *testkit.Incus, *profileRuntimeFixture, string, *bytes.Buffer) {
 	t.Helper()
 	root, environment, _ := nativeFixture(t)
@@ -114,7 +141,7 @@ func scopedProfileFixture(t *testing.T, selection string) (*CLI, *testkit.Incus,
 		t.Fatal(err)
 	}
 	writeCLIFile(t, manifest, string(data)+"profile||@profile||deny|mutate|dynamic|public|lifecycle|profile|profile <command> <id>|profiles|--json --yes --help|enable disable setup status\n", 0600)
-	writeProfileTestFile(t, filepath.Join(root, "config", "profiles", "fixture", "profile.json"), []byte(`{"schema_version":1,"default_yards":["default"],"owner_service":"owner.sh","managed_paths":[{"root":"data","path":"profile-fixture/{yard}"}]}`), 0600)
+	writeProfileTestFile(t, filepath.Join(root, "config", "profiles", "fixture", "profile.json"), []byte(`{"schema_version":1,"default_yards":["default"],"owner_service":"owner.sh","advisories":{"storage-capacity":"inside the yard run cleanup --older-than 60d"},"managed_paths":[{"root":"data","path":"profile-fixture/{yard}"}]}`), 0600)
 	writeProfileTestFile(t, filepath.Join(root, "config", "profiles", "fixture", "owner.sh"), []byte("#!/bin/sh\nexit 0\n"), 0700)
 	path := filepath.Join(root, "state", "yards", "default", "config.env")
 	writeProfileTestFile(t, path, []byte(selection), 0600)

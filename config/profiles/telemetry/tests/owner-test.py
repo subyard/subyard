@@ -83,6 +83,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
                 observation['diagnostics']=[dict(parameter='telemetry.asset.collector.py',installed='changed',desired='current')]
             return observation
         def startup(self): return {'state':'ready' if marker.exists() else 'drift'}
+        def raw_refused(self): return os.environ.get('TELEMETRY_FIXTURE_ADVISORY')=='1'
         def apply(self): marker.write_text(str(int(self.selected)))
     guest.Runtime=Runtime
     guest.os.getuid=lambda:0
@@ -129,6 +130,8 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(invoke('--yes').returncode,0)
             self.assertEqual((root/'applied').read_text(),'1')
             self.assertEqual(invoke('--check').returncode,0)
+            advisory = invoke('--check',TELEMETRY_FIXTURE_ADVISORY='1')
+            self.assertEqual((advisory.returncode,advisory.stderr),(0,b'subyard-profile-advisory-v1 storage-capacity\n'))
             managed_source = root/'settings.json'
             managed_source.write_text('{}')
             result = invoke('--check', CODING_TOOL_INTEGRATIONS='claude codex',

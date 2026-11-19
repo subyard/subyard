@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net"
 	"net/url"
@@ -65,6 +66,7 @@ func (runtime Runtime) ReadStatusFacts(
 	result.Agents = runtime.agentStatus(ctx, yard, running)
 	result.Shared = runtime.resourceStatus(ctx, running)
 	result.Shared = append(result.Shared, runtime.profileDashboardStatus(ctx, yard, running)...)
+	result.Shared = append(result.Shared, runtime.profileAdvisoryStatus(ctx, yard, running)...)
 	return result, nil
 }
 
@@ -621,17 +623,7 @@ func (runtime Runtime) profileDashboardStatus(ctx context.Context, yard domain.C
 			started := time.Now()
 			err := phaseCtx.Err()
 			if err == nil {
-				probe := exec.CommandContext(phaseCtx, filepath.Join(definition.Root, definition.OwnerService), "--check")
-				probe.Env = append(environment(runtime.Environment), "SUBYARD_PROFILE_SELECTED=1")
-				probe.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-				probe.Cancel = func() error {
-					if probe.Process == nil {
-						return nil
-					}
-					return syscall.Kill(-probe.Process.Pid, syscall.SIGKILL)
-				}
-				probe.WaitDelay = 2 * time.Second
-				err = probe.Run()
+				err = runtime.profileCheck(phaseCtx, definition, nil)
 			}
 			if err == nil && phaseCtx.Err() == nil {
 				status.State = "up"
@@ -652,6 +644,52 @@ func (runtime Runtime) profileDashboardStatus(ctx context.Context, yard domain.C
 		result = append(result, status)
 	}
 	return result
+}
+
+func (runtime Runtime) profileCheck(ctx context.Context, definition profile.Definition, stderr io.Writer) error {
+	probe := exec.CommandContext(ctx, filepath.Join(definition.Root, definition.OwnerService), "--check")
+	probe.Env = append(environment(runtime.Environment), "SUBYARD_PROFILE_SELECTED=1")
+	if stderr != nil {
+		probe.Env, probe.Stderr = append(probe.Env, "SUBYARD_PROFILE_DIAGNOSTICS=1"), stderr
+	}
+	probe.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	probe.Cancel = func() error {
+		if probe.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-probe.Process.Pid, syscall.SIGKILL)
+	}
+	probe.WaitDelay = 2 * time.Second
+	return probe.Run()
+}
+
+// profileAdvisoryStatus shows a converged profile's advisory as a warning with
+// its declared remediation; an unconverged or unavailable check shows nothing.
+func (runtime Runtime) profileAdvisoryStatus(ctx context.Context, yard domain.Context, running bool) []domain.SharedResourceStatus {
+	phaseCtx, cancel := context.WithTimeout(ctx, profile.ReadinessTimeout)
+	defer cancel()
+	var result []domain.SharedResourceStatus
+	for _, definition := range runtime.Profiles {
+		if len(definition.Advisories) == 0 || !running || !definition.Selected(yard.YardName, runtime.Environment) {
+			continue
+		}
+		var stderr boundedOutput
+		if runtime.profileCheck(phaseCtx, definition, &stderr) != nil || phaseCtx.Err() != nil {
+			continue
+		}
+		code := profile.ServiceAdvisory(stderr)
+		if hint, declared := definition.Advisories[code]; declared {
+			result = append(result, domain.SharedResourceStatus{Profile: definition.Name, Name: code, State: "warning", Hint: hint})
+		}
+	}
+	return result
+}
+
+type boundedOutput []byte
+
+func (output *boundedOutput) Write(data []byte) (int, error) {
+	*output = append(*output, data[:min(len(data), 129-len(*output))]...)
+	return len(data), nil
 }
 
 func profileCheckDiagnostic(err, contextErr error, elapsed time.Duration) string {

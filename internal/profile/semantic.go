@@ -23,6 +23,11 @@ func (definition *Definition) validateSemantic() error {
 	if definition.SchemaVersion != 1 || !domain.SafeName(definition.Name) {
 		return errors.New("unsupported profile schema or name")
 	}
+	for code, hint := range definition.Advisories {
+		if !ValidServiceAdvisory(code) || definition.OwnerService == "" || !startupDiagnostic.MatchString(hint) {
+			return errors.New("invalid profile advisory")
+		}
+	}
 	seenUnmanaged := map[string]bool{}
 	for _, observation := range definition.UnmanagedIntegrations {
 		if !domain.SafeName(observation.ID) || seenUnmanaged[observation.ID] || len(observation.Command) == 0 || len(observation.Command) > 8 || observation.Detail == "" || !textSafe(observation.Detail) {

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Install only the marked local collector and native exporter ownership."""
+from contextlib import closing
 import fcntl
 import hashlib
 import json
@@ -418,6 +419,14 @@ class Runtime:
                 diagnostics.append({'parameter': 'telemetry.runtime', 'installed': 'unknown', 'desired': 'current'})
             result['diagnostics'] = diagnostics
         return result
+
+    def raw_refused(self):
+        """Whether the collector refuses raw OTLP for space; unreadable means no advisory."""
+        try:
+            with closing(sqlite3.connect((self.data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=1)) as db:
+                return db.execute("SELECT 1 FROM metadata WHERE key='raw_otlp_refused_since'").fetchone() is not None
+        except sqlite3.Error:
+            return False
 
     def desired(self):
         value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
@@ -838,6 +847,8 @@ def main():
             print('telemetry-drift')
         elif observation['state'] not in ('current', 'absent'):
             raise ValueError('telemetry drift')
+        elif observation['state'] == 'current' and runtime.selected and runtime.raw_refused():
+            print('telemetry-advisory storage-capacity')
         return
     if mode not in ('apply', 'refresh') or (mode == 'refresh' and bindings != [observation['actual'], observation['desired']]):
         raise ValueError('telemetry observation changed')

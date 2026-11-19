@@ -175,6 +175,9 @@ def main():
     if operation == 'check':
         if output == 'telemetry-drift':
             return 1
+        if output == 'telemetry-advisory storage-capacity':
+            print('subyard-profile-advisory-v1 storage-capacity', file=sys.stderr)
+            return 0
         if output:
             raise ValueError('unexpected telemetry check output')
         return 0

@@ -42,6 +42,22 @@ class LifecycleTest(unittest.TestCase):
                     unit = guest.Runtime(source, 'dev', False, [], account=account).assets[Path('/etc/systemd/system')/guest.COLLECTOR][0].decode()
                 self.assertIn('--auth-file /var/lib/subyard/telemetry-private/auth.token'+flag+'\n', unit)
 
+    def test_raw_refusal_is_read_from_the_store(self):
+        profile = Path(guest.__file__).parent
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            source, data = Path(name), Path(name)/'store'
+            shutil.copytree(profile, source, dirs_exist_ok=True, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
+            shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            data.mkdir()
+            runtime = guest.Runtime(source, 'dev', False, [], data=data, account=types.SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir=name))
+            self.assertFalse(runtime.raw_refused())
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as db, db:
+                db.execute('CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)')
+            self.assertFalse(runtime.raw_refused())
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as db, db:
+                db.execute("INSERT INTO metadata VALUES('raw_otlp_refused_since','2026-11-19T00:00:00Z')")
+            self.assertTrue(runtime.raw_refused())
+
     def test_cutover_receipt_reads_the_validated_inode(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             runtime = object.__new__(guest.Runtime)

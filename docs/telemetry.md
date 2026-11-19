@@ -544,7 +544,9 @@ the WAL stay a tenth below it and the data partition keeps 1 GiB free, or a
 twentieth of a smaller partition. Beyond that the collector refuses raw OTLP and
 its per-request session correlations with a retryable status, still stores the
 request's usage records and bindings and all lifecycle, resource and sample
-records, and `stats` warns with the cleanup command for that store. Those records
+records. `stats` warns with the cleanup command for that store, and `yard status`
+and `yard profile status telemetry` show the `storage-capacity` warning with the
+command to run inside the yard while the profile stays ready. Those records
 are small and are not bounded by the budget, so a store above a lowered budget
 still opens. Each legacy archive uses additional disk space outside it.
 Nothing is pruned automatically. Remove old raw OTLP, per-request session

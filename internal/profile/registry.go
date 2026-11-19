@@ -65,10 +65,12 @@ type Definition struct {
 	Setup                      *Setup                         `json:"setup,omitempty"`
 	Dashboard                  *IntegrationDashboard          `json:"dashboard,omitempty"`
 	UnmanagedIntegrations      []UnmanagedIntegration         `json:"unmanaged_integrations,omitempty"`
-	Settings                   []Setting                      `json:"settings,omitempty"`
-	Runtime                    *RuntimeHook                   `json:"runtime,omitempty"`
-	GuestEnvironment           *GuestEnvironmentHook          `json:"guest_environment,omitempty"`
-	validationInputs           []string
+	// Advisories map each advisory code the owner service may report to its remediation.
+	Advisories       map[string]string     `json:"advisories,omitempty"`
+	Settings         []Setting             `json:"settings,omitempty"`
+	Runtime          *RuntimeHook          `json:"runtime,omitempty"`
+	GuestEnvironment *GuestEnvironmentHook `json:"guest_environment,omitempty"`
+	validationInputs []string
 }
 
 func (definition Definition) Selected(yard string, environment map[string]string) bool {
