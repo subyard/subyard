@@ -16,6 +16,7 @@ import re
 import shutil
 import shlex
 import sqlite3
+import struct
 import subprocess
 import sys
 import tarfile
@@ -137,13 +138,23 @@ def protobuf_fields(data):
 
 
 def otlp_attributes(message, field):
-    # KeyValue.key = 1, KeyValue.value = 2 and AnyValue.string_value = 1.
+    # KeyValue: key = 1, value = 2. AnyValue: string = 1, bool = 2, int = 3, double = 4.
     attributes = {}
     for number, value in protobuf_fields(message):
         if number == field:
             pair = dict(protobuf_fields(value))
-            text = dict(protobuf_fields(pair.get(2, b''))).get(1)
-            attributes[pair[1].decode()] = text.decode() if isinstance(text, bytes) else text
+            for kind, raw in protobuf_fields(pair.get(2, b'')):
+                if kind == 1:
+                    raw = raw.decode()
+                elif kind == 2:
+                    raw = bool(raw)
+                elif kind == 3:
+                    raw = raw-(1 << 64) if raw >= 1 << 63 else raw
+                elif kind == 4:
+                    raw = struct.unpack('<d', raw)[0]
+                else:
+                    continue
+                attributes[pair[1].decode()] = raw
     return attributes
 
 
@@ -158,20 +169,39 @@ def stored_log_attributes(data):
     return found
 
 
-def assert_native_log_fields(data, timeout=20):
-    """Installed clients keep their event name and model through the sanitizer.
+NATIVE_TOKEN_COUNTERS = {
+    'codex': ('input_token_count', 'output_token_count', 'cached_token_count', 'reasoning_token_count', 'tool_token_count'),
+    'claude': ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens'),
+}
+
+
+def native_log_shortfalls(logs, success):
+    """Name each client field the installed clients' stored logs lack.
 
     Codex sends prefixed event names; Claude sends them without a prefix."""
     agents = {'codex': lambda name: name.startswith('codex.'), 'claude': lambda name: '.' not in name}
+    missing = []
+    for agent, matches in agents.items():
+        own = [fields for fields in logs if matches(fields.get('event.name') or '.')]
+        checks = {'event.name and model': lambda fields: isinstance(fields.get('model'), str) and fields['model'] != '',
+                  'token counter': lambda fields: any(type(fields.get(name)) is int and fields[name] >= 0
+                                                       for name in NATIVE_TOKEN_COUNTERS[agent])}
+        if agent in success:
+            checks['boolean success'] = lambda fields: type(fields.get('success')) is bool
+        missing += [agent+' '+label for label, check in checks.items() if not any(check(fields) for fields in own)]
+    return missing
+
+
+def assert_native_log_fields(data, success=('codex', 'claude'), timeout=20):
+    """Installed clients keep their event name, model, tokens and success through the sanitizer."""
     deadline = time.monotonic()+timeout
     while True:
         logs = stored_log_attributes(data)
-        missing = [agent for agent, matches in agents.items()
-                   if not any(fields.get('model') and matches(fields.get('event.name') or '.') for fields in logs)]
+        missing = native_log_shortfalls(logs, success)
         if not missing or time.monotonic() >= deadline:
             break
         time.sleep(0.5)
-    assert not missing, (', '.join(missing)+': stored native logs lost event.name or model; kept keys '+
+    assert not missing, (', '.join(missing)+': lost from stored native logs; kept keys '+
                          json.dumps(sorted({key for fields in logs for key in fields})))
 
 
@@ -680,6 +710,7 @@ def exercise(args):
         identities.append(dict(agent=agent, agent_run_id=run, session_id=session, object_ids=[row[0] for row in allocations]))
     assert identities[0]['agent_run_id'] != identities[1]['agent_run_id']
     assert set(identities[0]['object_ids']).isdisjoint(identities[1]['object_ids']), 'independent acquisitions reused one resource generation'
+    assert_native_log_fields(args.data_dir)
     output = args.state/'native-resource-bindings.json'
     output.write_text(json.dumps(dict(kind=args.kind, project_id='telemetry-fixture', runs=identities), indent=2)+'\n')
     output.chmod(0o600)
@@ -844,7 +875,8 @@ def main():
     wait_claude_sessions(args.data_dir, {session}, result, token)
     kinds = {row[0] for row in query(args.data_dir, "SELECT DISTINCT kind FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces')")}
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
-    assert_native_log_fields(args.data_dir)
+    # The Claude probe here runs no tool; the resources exercise covers its success field.
+    assert_native_log_fields(args.data_dir, success=('codex',))
     assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir)
     print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence')
 

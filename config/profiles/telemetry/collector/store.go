@@ -343,14 +343,19 @@ func (s *Store) captureAt(ctx context.Context, input []Envelope, p Policy, advan
 			// validation. Queue only the pair, never the rejected payload.
 			e = Envelope{OriginID: e.OriginID, EventID: e.EventID, invalid: true}
 		}
-		entries = append(entries, e)
-		// Derived session relations pass the same sanitizer as every record.
+		// Derived session relations pass the same sanitizer as every record;
+		// a rejected relation counts as a redaction of its source record.
+		relations := make([]Envelope, 0, len(projected))
 		for _, relation := range projected {
 			relation.filter = maps.Clone(filter)
 			if _, err := sanitizeEnvelope(&relation, p); err == nil {
-				entries = append(entries, relation)
+				relations = append(relations, relation)
+			} else {
+				e.Redactions++
 			}
 		}
+		entries = append(entries, e)
+		entries = append(entries, relations...)
 	}
 	return s.submit(ctx, entries, replay, advance)
 }

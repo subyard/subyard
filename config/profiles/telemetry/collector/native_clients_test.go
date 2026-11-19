@@ -18,27 +18,7 @@ import (
 // contains "canary"; every retained value is free of it.
 func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 	s := fixtureStore(t)
-	ctx := context.Background()
-	consumers, err := makeConsumers(s, DefaultPolicy())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range []string{"claude-code-2.1.327", "codex-0.170.0"} {
-		logs := plogotlp.NewExportRequest()
-		if err = logs.UnmarshalJSON(readFixture(t, name+"-logs.json")); err != nil {
-			t.Fatal(err)
-		}
-		if err = consumers.logs.ConsumeLogs(ctx, logs.Logs()); err != nil {
-			t.Fatal(err)
-		}
-		metrics := pmetricotlp.NewExportRequest()
-		if err = metrics.UnmarshalJSON(readFixture(t, name+"-metrics.json")); err != nil {
-			t.Fatal(err)
-		}
-		if err = consumers.metrics.ConsumeMetrics(ctx, metrics.Metrics()); err != nil {
-			t.Fatal(err)
-		}
-	}
+	captureNativeFixtures(t, s)
 	rows, err := s.db.Query("SELECT encoding,coalesce(body,''),coalesce(protobuf,'') FROM records")
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +134,79 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 	}
 	if len(points) != 8 {
 		t.Errorf("metric points dropped: %d", len(points))
+	}
+}
+
+func captureNativeFixtures(t *testing.T, s *Store) {
+	t.Helper()
+	ctx := context.Background()
+	consumers, err := makeConsumers(s, DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"claude-code-2.1.327", "codex-0.170.0"} {
+		logs := plogotlp.NewExportRequest()
+		if err = logs.UnmarshalJSON(readFixture(t, name+"-logs.json")); err != nil {
+			t.Fatal(err)
+		}
+		if err = consumers.logs.ConsumeLogs(ctx, logs.Logs()); err != nil {
+			t.Fatal(err)
+		}
+		metrics := pmetricotlp.NewExportRequest()
+		if err = metrics.UnmarshalJSON(readFixture(t, name+"-metrics.json")); err != nil {
+			t.Fatal(err)
+		}
+		if err = consumers.metrics.ConsumeMetrics(ctx, metrics.Metrics()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// Export and replay keep every record's redaction count, so a copied store
+// reports the same filtering as the original.
+func TestReplayKeepsNativeRedactionCounts(t *testing.T) {
+	ctx := context.Background()
+	source := fixtureStore(t)
+	captureNativeFixtures(t, source)
+	counts := func(s *Store) (map[string]int64, bytes.Buffer) {
+		var out bytes.Buffer
+		if _, err := Export(ctx, s.db, &out, 0, 10000); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := s.db.Query("SELECT origin_id||'/'||event_id,redactions FROM records")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		result := map[string]int64{}
+		for rows.Next() {
+			var id string
+			var redactions int64
+			if err = rows.Scan(&id, &redactions); err != nil {
+				t.Fatal(err)
+			}
+			result[id] = redactions
+		}
+		return result, out
+	}
+	want, export := counts(source)
+	var total int64
+	for _, n := range want {
+		total += n
+	}
+	if total == 0 {
+		t.Fatal("fixtures recorded no redactions")
+	}
+	for round := range 2 {
+		copy := fixtureStore(t)
+		if err := copy.Replay(ctx, bytes.NewReader(export.Bytes())); err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]int64
+		got, export = counts(copy)
+		if !maps.Equal(got, want) {
+			t.Fatalf("replay %d changed redaction counts: got %v, want %v", round+1, got, want)
+		}
 	}
 }
 

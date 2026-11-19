@@ -11,6 +11,7 @@ import queue
 import shlex
 import signal
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -437,24 +438,42 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
         def field(number, payload):
             return varint(number << 3 | 2)+varint(len(payload))+payload
         def attribute(key, value):
-            return field(1, key.encode())+field(2, field(1, value.encode()))
+            if isinstance(value, bool):
+                typed = varint(2 << 3)+varint(int(value))
+            elif isinstance(value, int):
+                typed = varint(3 << 3)+varint(value)
+            elif isinstance(value, float):
+                typed = varint(4 << 3 | 1)+struct.pack('<d', value)
+            else:
+                typed = field(1, value.encode())
+            return field(1, key.encode())+field(2, typed)
         def logs(*records_):
             # Resource attributes and a fixed64 timestamp precede the attributes.
             resource = field(1, field(1, attribute('service.name', 'subyard-fixture')))
             body = b''.join(field(2, b'\x09'+bytes(8)+b''.join(field(6, attribute(*pair)) for pair in pairs)) for pairs in records_)
             return field(1, resource+field(2, body))
+        codex = logs([('event.name', 'codex.sse_event'), ('model', 'subyard-fixture'), ('input_token_count', 1)],
+                     [('event.name', 'codex.tool_result'), ('success', True), ('duration_ms', 12.0)])
+        claude = [('event.name', 'api_request'), ('model', 'claude-fixture'), ('input_tokens', 0), ('cost_usd', 0.5)]
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             data = Path(name)
             with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
                 db.execute('CREATE TABLE records(kind TEXT, protobuf BLOB)')
-                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs([('event.name', 'codex.sse_event'), ('model', 'subyard-fixture')])))
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', codex))
                 db.commit()
-                with self.assertRaisesRegex(AssertionError, 'claude: stored native logs lost event.name or model'):
+                with self.assertRaisesRegex(AssertionError, 'claude event.name and model, claude token counter: lost'):
+                    fixture.assert_native_log_fields(data, success=('codex',), timeout=0)
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs(claude, [('event.name', 'tool_result'), ('success', 'true')])))
+                db.commit()
+                fixture.assert_native_log_fields(data, success=('codex',), timeout=0)
+                with self.assertRaisesRegex(AssertionError, '^claude boolean success: lost'):
                     fixture.assert_native_log_fields(data, timeout=0)
-                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs([('event.name', 'api_request'), ('model', 'claude-fixture')], [('event.name', 'tool_result')])))
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs([('event.name', 'tool_result'), ('success', False)])))
                 db.commit()
             fixture.assert_native_log_fields(data, timeout=0)
-            self.assertIn({'event.name': 'tool_result'}, fixture.stored_log_attributes(data))
+            stored = fixture.stored_log_attributes(data)
+            self.assertIn({'event.name': 'codex.tool_result', 'success': True, 'duration_ms': 12.0}, stored)
+            self.assertIn({'event.name': 'api_request', 'model': 'claude-fixture', 'input_tokens': 0, 'cost_usd': 0.5}, stored)
 
     def test_session_can_precede_scope_projection(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:

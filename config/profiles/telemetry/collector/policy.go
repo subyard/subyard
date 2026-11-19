@@ -317,6 +317,11 @@ var recordScopes = map[string]string{
 func (p *wirePolicy) message(rule string, fields map[string]string, input map[string]any) (any, bool) {
 	out := make(map[string]any, len(fields))
 	for name, child := range input {
+		if empty, ok := child.(map[string]any); ok && len(empty) == 0 && fields[name] == "" {
+			// The pdata round trip writes an empty log body; it carries no data,
+			// so replaying an export must not count it as another redaction.
+			continue
+		}
 		if clean, keep := p.clean(fields[name], child); keep && p.filter.safe(name) {
 			out[name] = clean
 		} else {
