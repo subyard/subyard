@@ -17,7 +17,6 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/adapters/releaseruntime"
-	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
@@ -37,8 +36,6 @@ type configApplyRepairPermit struct {
 	driftedTargetNames  []string
 	requestedTargets    map[string]string
 	selectedTargetNames []string
-	selectedRuntimes    map[string]ports.RuntimeObservation
-	pendingInputs       bool
 }
 
 type configApplyRepairFacts struct {
@@ -158,7 +155,6 @@ func (cli *CLI) prepareActivationRepair(
 	}
 	var driftedNames []string
 	requestedDesired := make(map[string]string, len(requested))
-	selectedRuntimes := make(map[string]ports.RuntimeObservation, len(requested))
 	for _, target := range allTargets {
 		assessment, assessErr := operation.assessConfigTarget(ctx, target, true)
 		if assessErr != nil {
@@ -199,39 +195,10 @@ func (cli *CLI) prepareActivationRepair(
 		!sameConfigApplyReleaseID(observedLinks.Previous, pair.Previous) {
 		return nil, nil
 	}
-	pendingInputs := false
 	for _, reconciler := range cli.nonConfigActivationReconcilers(request) {
 		observation, observeErr := reconciler.Observe(ctx, pair, observedLinks)
 		if observeErr != nil || !validConfigApplyActivationObservation(observation) {
 			return nil, nil
-		}
-		if owner, ok := reconciler.(*profileRuntimeActivationReconciler); ok && !observation.Converged {
-			pending := false
-			for _, target := range allTargets {
-				state, err := owner.observeTarget(ctx, &operation, target)
-				if err != nil {
-					return nil, nil
-				}
-				switch state.State {
-				case ports.RuntimeStatePending:
-					if _, selected := requested[target.Name]; !selected {
-						return nil, nil
-					}
-					pending = true
-				case ports.RuntimeStateCurrent, ports.RuntimeStateAbsent, ports.RuntimeStateDeferred:
-				default:
-					return nil, nil
-				}
-				binding, err := activationStageFingerprint(state)
-				if err != nil {
-					return nil, err
-				}
-				facts.OtherActivations = append(facts.OtherActivations, configApplyActivationFact{ID: owner.ID() + "/" + target.Name, Actual: binding, Desired: binding, Converged: state.State != ports.RuntimeStatePending})
-			}
-			if pending {
-				pendingInputs = true
-				continue
-			}
 		}
 		if !observation.Converged || observation.Actual != observation.Desired {
 			return nil, nil
@@ -263,8 +230,6 @@ func (cli *CLI) prepareActivationRepair(
 		driftedTargetNames:  driftedNames,
 		requestedTargets:    requestedDesired,
 		selectedTargetNames: slices.Clone(selectedNames),
-		selectedRuntimes:    selectedRuntimes,
-		pendingInputs:       pendingInputs,
 	}, nil
 }
 
@@ -309,8 +274,7 @@ func (cli *CLI) lockConfigApplyRepair(
 		refreshed.factsFingerprint != permit.factsFingerprint ||
 		refreshed.journal.Fingerprint != permit.journal.Fingerprint ||
 		!bytes.Equal(refreshed.journal.Payload, permit.journal.Payload) ||
-		!configApplyDriftSubset(refreshed.driftedTargetNames, permit.driftedTargetNames) ||
-		!validRuntimeRepairTransition(permit.selectedRuntimes, refreshed.selectedRuntimes) {
+		!configApplyDriftSubset(refreshed.driftedTargetNames, permit.driftedTargetNames) {
 		unlock()
 		if err != nil {
 			return nil, err
@@ -318,28 +282,6 @@ func (cli *CLI) lockConfigApplyRepair(
 		return nil, errors.New("config apply release repair changed after confirmation")
 	}
 	return unlock, nil
-}
-
-func validRuntimeRepairTransition(
-	confirmed, current map[string]ports.RuntimeObservation,
-) bool {
-	if len(confirmed) != len(current) {
-		return false
-	}
-	for name, before := range confirmed {
-		after, exists := current[name]
-		if !exists {
-			return false
-		}
-		if before == after {
-			continue
-		}
-		if before.State != "stale" || after.State != "current" ||
-			before.Desired != after.Desired || after.Actual != after.Desired {
-			return false
-		}
-	}
-	return true
 }
 
 func configApplyDriftSubset(current, admitted []string) bool {
@@ -375,11 +317,6 @@ func (cli *CLI) finishConfigApplyRepair(
 		}
 	}
 	if outcome != nil {
-		if permit.pendingInputs && outcome.Status == releasetransition.StatusMigrationRequired &&
-			outcome.Code == releasetransition.CodeTransitionRequired && outcome.Active == permit.gate.Active && outcome.Target == permit.gate.Target {
-			fmt.Fprintln(cli.options.Stdout, "Materialized configuration repaired; next: run yard migrate")
-			return nil, nil
-		}
 		return nil, fmt.Errorf("materialized configuration did not restore release readiness: %s (%s); next: %s", outcome.Code, outcome.Message, releaseruntime.CurrentReleaseRetry(*outcome))
 	}
 	return nil, nil

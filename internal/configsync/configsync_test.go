@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -205,6 +206,110 @@ func TestVersionedConfigSyncAllowsOptionalSharedAndSelectedHostScopes(t *testing
 			t.Fatalf("other host settings reached live configuration: %v", err)
 		}
 	})
+}
+
+func TestVersionedConfigSyncKeepsPreviousScalarApplicationModes(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	const sourcePath = "shared/config.env"
+	cachePath := gitSettingsPath("overrides/shared/config.env")
+	planWithModes := func(action string, want ...config.SettingApplication) Plan {
+		t.Helper()
+		plan, err := BuildPlan(fixture.options(false))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(plan.Changes) != 1 || plan.Changes[0].Path != cachePath || plan.Changes[0].Action != action ||
+			!slices.Equal(plan.Changes[0].Applications, want) {
+			t.Fatalf("plan changes = %#v, want %s %s with modes %v", plan.Changes, action, cachePath, want)
+		}
+		return plan
+	}
+	fixture.writeSource(sourcePath, "YARD_IMAGE=images:debian/13\n")
+	fixture.commit("init-owned shared setting")
+	if err := Apply(planWithModes("add", config.SettingYardInit)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.writeSource(sourcePath, "E2E_VM_CPU=3\n")
+	fixture.commit("replace init-owned setting")
+	if err := Apply(planWithModes("update", config.SettingNextCommand, config.SettingYardInit)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fixture.source, sourcePath)); err != nil {
+		t.Fatal(err)
+	}
+	fixture.commit("drop shared scalar file")
+	planWithModes("delete", config.SettingNextCommand)
+	if err := os.Remove(filepath.Join(fixture.configHome, cachePath)); err != nil {
+		t.Fatal(err)
+	}
+	planWithModes("record-deleted", config.SettingYardInit)
+}
+
+func TestVersionedConfigSyncPlansScalarApplicationModesFromLiveBytes(t *testing.T) {
+	const sourcePath = "shared/config.env"
+	const next = "E2E_VM_CPU=3\n"
+	const init = "YARD_IMAGE=images:debian/13\n"
+	nextMode := []config.SettingApplication{config.SettingNextCommand}
+	bothModes := []config.SettingApplication{config.SettingNextCommand, config.SettingYardInit}
+	for _, test := range []struct {
+		action, managed, live string
+		adopt                 bool
+		want                  []config.SettingApplication
+	}{
+		{action: "add", want: nextMode},
+		{action: "adopt", live: next, adopt: true, want: nextMode},
+		{action: "adopt-update", live: init, adopt: true, want: bothModes},
+		{action: "restore-missing", managed: init, want: nextMode},
+		{action: "restore-drift", managed: next, live: init, want: bothModes},
+		{action: "record-converged", managed: init, live: next, want: nextMode},
+	} {
+		t.Run(test.action, func(t *testing.T) {
+			fixture := newSyncFixture(t, "owner-a")
+			cachePath := gitSettingsPath("overrides/shared/config.env")
+			cache := filepath.Join(fixture.configHome, cachePath)
+			if test.managed != "" {
+				fixture.writeSource(sourcePath, test.managed)
+				fixture.commit("initial managed settings")
+				plan, err := BuildPlan(fixture.options(false))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := Apply(plan); err != nil {
+					t.Fatal(err)
+				}
+				if test.live == "" {
+					if err := os.Remove(cache); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if test.live != "" {
+				writeSyncTestFile(t, cache, test.live, 0o600)
+			}
+			if test.managed != next {
+				fixture.writeSource(sourcePath, next)
+				fixture.commit("desired shared settings")
+			}
+			plan, err := BuildPlan(fixture.options(test.adopt))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(plan.Changes) != 1 || plan.Changes[0].Path != cachePath || plan.Changes[0].Action != test.action ||
+				!slices.Equal(plan.Changes[0].Applications, test.want) {
+				t.Fatalf("plan changes = %#v, want %s %s with modes %v", plan.Changes, test.action, cachePath, test.want)
+			}
+		})
+	}
+}
+
+func TestScalarApplicationModesUseInitForUnparseableLiveBytes(t *testing.T) {
+	path := gitSettingsPath("overrides/shared/config.env")
+	incoming := []config.SettingApplication{config.SettingNextCommand}
+	got := applicationsWithPrevious(config.Catalog{}, path, []byte("YARD_IMAGE='unterminated\n"), incoming)
+	want := []config.SettingApplication{config.SettingNextCommand, config.SettingYardInit}
+	if !slices.Equal(got, want) {
+		t.Fatalf("applications = %v, want %v", got, want)
+	}
 }
 
 func TestVersionedConfigSyncPreservesUnmanagedDefaultYardSettings(t *testing.T) {

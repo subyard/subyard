@@ -154,6 +154,7 @@ import sys
 import tempfile
 from itertools import product
 from pathlib import Path
+from textwrap import dedent
 root = Path(sys.argv[1])
 
 # Source-level contract for the repository's block-style workflow/job/step layout;
@@ -367,11 +368,113 @@ images = ("debian-13", "ubuntu-24.04", "ubuntu-26.04")
 assert f"        type: choice\n        default: {images[0]}\n        options:\n" + "".join(
     f"          - {image}\n" for image in images
 ) in workflow
-assert "LEASE_IMAGE: ${{ inputs.image || 'debian-13' }}" in workflow
+debian, ubuntu, _ = images
+assert re.findall(r"(?m)^    - cron: '([^']+)'", workflow) == ["23 0,12 * * *", "23 6,18 * * *"]
+assert "  push:\n    branches:\n      - 'ci-probe/**'\n" in workflow
+lease_image = "inputs.image || (github.event.schedule == '23 6,18 * * *' && 'ubuntu-24.04') || 'debian-13'"
+assert f"LEASE_IMAGE: ${{{{ {lease_image} }}}}" in workflow
+assert f"github.ref == 'refs/heads/master' && format(' ({{0}})',\n  {lease_image})" in workflow
+assert f"github.ref == 'refs/heads/master' && format(':image:{{0}}',\n    {lease_image})" in workflow
+assert "inputs.origin && format('-retry-{0}', inputs.origin)" in workflow
+assert "cancel-in-progress: ${{ !inputs.origin }}" in workflow
 assert '--image "$LEASE_IMAGE"\n          bash dev/e2e/p0-acceptance.sh --lane boundary --slot 1' in workflow
 assert '-f attempt="$attempt" -f image="$LEASE_IMAGE"' in workflow
 assert workflow.count('CHECK_COMMAND: ${{ toJSON(matrix.command) }}') == 2
 assert workflow.count('tar.gz" "${command[@]}"') == 2
+
+# Run both read/cancel steps with fake GitHub metadata and the real jq filters.
+periodic_jobs = dict(workflow_jobs(workflow))
+gh = r'''
+gh() {
+  case "$1 $2" in
+    'run list')
+      if [ "$TEST_JOB" = changes ]; then
+        [[ " $* " == *" --commit $HEAD --status completed "* ]] || return 90
+      else
+        [[ " $* " == *" --branch $REF "* ]] || return 91
+      fi
+      printf '%s\n' "$RUNS"
+      return "$LIST_EXIT" ;;
+    'run view')
+      printf 'view %s\n' "$3" >> "$TRACE"
+      [[ "$4" == --json && "$6" == --jq ]] || return 94
+      jq -c --arg id "$3" '.[$id] // error("unexpected run")' <<<"$JOB_RESULTS" | jq -r "$7" ;;
+    'run cancel') printf 'cancel %s\n' "$3" >> "$TRACE" ;;
+    *) return 92 ;;
+  esac
+}
+'''
+
+def run_metadata(run_id, event, title, status="completed", conclusion="success"):
+    return {"databaseId": run_id, "event": event, "displayTitle": title,
+            "status": status, "conclusion": conclusion}
+
+def job_result(name, conclusion):
+    return {"status": "completed", "jobs": [{"name": name, "status": "completed", "conclusion": conclusion}]}
+
+def exercise_step(job, image, runs, job_results, event="schedule", ref="master", origin="", run_id=50, list_exit=0):
+    script = dedent(periodic_jobs[job].split("        run: |\n", 1)[1])
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        trace, output, summary = (Path(directory) / name for name in ("trace", "output", "summary"))
+        trace.touch()
+        output.touch()
+        result = subprocess.run(["bash", "-euo", "pipefail", "-c", gh + script], cwd=root,
+                                env=dict(os.environ, TEST_JOB=job, RUNS=json.dumps(runs), LIST_EXIT=str(list_exit),
+                                         JOB_RESULTS=json.dumps(job_results), EVENT=event, REF=ref, HEAD="ab" * 20,
+                                         GITHUB_REF=f"refs/heads/{ref}", RUN_ID=str(run_id), ORIGIN=origin,
+                                         LEASE_IMAGE=image, TRACE=str(trace),
+                                         GITHUB_OUTPUT=str(output), GITHUB_STEP_SUMMARY=str(summary)))
+        return result.returncode, output.read_text().strip(), trace.read_text().splitlines()
+
+debian_run = run_metadata(10, "schedule", f"Periodic E2E ({debian})", conclusion="failure")
+ubuntu_run = run_metadata(20, "schedule", f"Periodic E2E ({ubuntu})")
+cancelled = run_metadata(9, "schedule", f"Periodic E2E ({ubuntu})", conclusion="cancelled")
+manual = run_metadata(8, "workflow_dispatch", f"Periodic E2E ({ubuntu})")
+probe = run_metadata(7, "push", f"Periodic E2E ({ubuntu})")  # Push titles are commit messages.
+legacy = run_metadata(6, "schedule", "Periodic E2E")
+assert exercise_step("changes", ubuntu, [debian_run, cancelled, manual, probe, legacy], {}) == (0, "run=true", [])
+pool_ok = job_result("pool", "success")
+assert exercise_step("changes", ubuntu, [ubuntu_run, debian_run], {"20": pool_ok}) == (0, "run=false", ["view 20"])
+assert exercise_step("changes", debian, [ubuntu_run, debian_run], {"10": pool_ok}) == (0, "run=false", ["view 10"])
+assert exercise_step("changes", ubuntu, [ubuntu_run], {"20": job_result("pool", "skipped")}) == (0, "run=true", ["view 20"])
+assert exercise_step("changes", debian, [probe, legacy], {"6": job_result("pool", "failure"), "7": pool_ok}) == (
+    0, "run=false", ["view 6", "view 7"])
+for event in ("push", "workflow_dispatch"):
+    assert exercise_step("changes", ubuntu, [], {}, event=event, list_exit=93) == (0, "run=true", [])
+assert exercise_step("changes", ubuntu, [], {}, list_exit=93) == (93, "", [])
+
+retry_title = "Nested VM checks on Intel, attempt 1, for run 10"
+debian_retry = run_metadata(30, "workflow_dispatch", f"{retry_title} ({debian})", "in_progress")
+ubuntu_retry = run_metadata(40, "workflow_dispatch", f"{retry_title} ({ubuntu})", "in_progress")
+legacy_retry = run_metadata(25, "workflow_dispatch", retry_title, "in_progress")
+retries = [ubuntu_retry, debian_retry, legacy_retry]
+assert exercise_step("supersede", ubuntu, retries, {}) == (0, "", ["cancel 40"])
+assert exercise_step("supersede", debian, retries, {}) == (0, "", ["cancel 30"])
+assert exercise_step("supersede", debian, [legacy_retry], {}, ref="ci-probe/test") == (0, "", ["cancel 25"])
+assert exercise_step("supersede", debian, [ubuntu_run], {}, origin="10") == (0, "", [])
+supersede_ok = job_result("supersede", "success")
+assert exercise_step("supersede", ubuntu, [ubuntu_run, debian_run], {"20": supersede_ok}, origin="5") == (
+    0, "", ["view 20", "cancel 50"])
+assert exercise_step("supersede", ubuntu, [ubuntu_run], {"20": job_result("supersede", "skipped")}, origin="5") == (
+    0, "", ["view 20"])
+assert exercise_step("supersede", ubuntu, [manual], {"8": supersede_ok}, origin="5") == (
+    0, "", ["view 8", "cancel 50"])
+
+# While its replacement was queued, a retry of run 10 could have started with a later run ID.
+late_retry = run_metadata(50, "workflow_dispatch", f"{retry_title} ({debian})", "in_progress")
+new_chain = run_metadata(55, "workflow_dispatch", f"{retry_title.replace('run 10', 'run 21')} ({debian})", "in_progress")
+assert exercise_step("supersede", debian, [new_chain, late_retry, ubuntu_retry], {}, run_id=20) == (
+    0, "", ["cancel 50"])
+
+# The old concurrency group is still active. Only the scheduled origin proves the image.
+legacy_main = run_metadata(10, "schedule", "Periodic E2E", "in_progress")
+legacy_manual = run_metadata(11, "workflow_dispatch", "Periodic E2E", "in_progress")
+manual_retry = run_metadata(26, "workflow_dispatch", retry_title.replace("run 10", "run 11"), "in_progress")
+legacy_runs = [manual_retry, legacy_retry, legacy_manual, legacy_main]
+assert exercise_step("supersede", debian, legacy_runs, {}, run_id=20) == (0, "", ["cancel 10", "cancel 25"])
+assert exercise_step("supersede", ubuntu, legacy_runs, {}, run_id=20) == (0, "", [])
+print("ok: periodic schedule tracks commit coverage and supersedes retries per lease image")
+
 for image in images:
     selected = json.loads(subprocess.check_output(planner + ["--image", image], cwd=root, text=True))
     assert selected == {

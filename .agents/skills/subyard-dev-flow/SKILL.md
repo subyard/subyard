@@ -83,8 +83,10 @@ coordinator, and do not create or close shared task files or start another full 
   while checks you still owe must pass before merging, then
   `subyard-github run -- gh pr ready NUMBER`. Update the body with
   `subyard-github run -- gh pr edit NUMBER --body-file FILE`.
-- Run standard VM checks as a [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners)
-  on the PR branch and watch them; use leased VMs for non-standard states, reproduction and
+- Before asking for merge, run as a [Periodic E2E dispatch](../../../docs/testing.md#periodic-e2e-on-hosted-runners)
+  on the PR branch not only the standard VM checks but every profile and lane check that
+  [coverage ownership](../../../docs/testing.md#coverage-ownership) assigns to the changed behavior,
+  and watch them; use leased VMs for non-standard states, reproduction and
   targeted cases. Dispatched runs are not PR checks: pass their run URLs as `--check`.
   A required check counts only when green on the current branch head, including its Intel retry
   runs; after a push, rerun what the risk policy selects for the new changes.

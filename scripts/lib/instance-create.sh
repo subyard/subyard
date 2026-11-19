@@ -72,32 +72,6 @@ subyard_instance_selected_reference() { # <present|absent>
   esac
 }
 
-# Native preparation supplies its checked SDK catalog on fixed read-only fd3.
-# Selection and initial flags use precisely the ordinary helper functions.
-subyard_instance_config_render() {
-  local reference image_type=container availability selected_image
-  subyard_instance_defaults
-  subyard_instance_base_flags
-  subyard_instance_identity_flags
-  reference=$YARD_IMAGE
-  [[ "$reference" != *:* ]] || reference=${reference#*:}
-  [ "$YARD_KIND" != vm ] || image_type=virtual-machine
-  availability="$(subyard_instance_catalog_available "$reference" "$image_type" <&3)" || return
-  subyard_instance_selected_reference "$availability" || return
-  subyard_instance_approved_config_render "$selected_image"
-}
-
-# Reproduce only the already captured selection; this guard never reads a
-# catalog or chooses a new alias/fallback.
-subyard_instance_approved_config_render() {
-  local selected_image="${1:?}"
-  subyard_instance_defaults
-  [ "$selected_image" = "$YARD_IMAGE" ] || [ "$selected_image" = "$YARD_IMAGE_FALLBACK" ] || return 2
-  subyard_instance_base_flags
-  subyard_instance_identity_flags
-  printf '%s\0' "$selected_image" "$YARD_KIND" "${LAUNCH_FLAGS[@]}"
-}
-
 yard_instance_create() (
   local reference="$YARD_IMAGE" image_type=container metadata attempt rc availability selected_image
   local remote=()

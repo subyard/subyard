@@ -68,6 +68,40 @@ sdk_api=''
 init_attempted=0
 monitor_host_stop="$state/monitor-stop"
 incus_binary=(/usr/bin/incus)
+android_start_monitor() {
+  monitor_stop="/run/subyard-e2e-android-monitor-$token.stop"
+  monitor_log="$state/first-boot-monitor.log"
+  incus_binary=(/usr/bin/incus)
+  if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
+    incus_binary=(sudo -n /usr/bin/incus)
+  fi
+  (
+    monitor_deadline=$(( $(android_phase_now) + 9000 ))
+    last_monitor_status=''
+    while [ ! -e "$monitor_host_stop" ]; do
+      monitor_seconds=$((monitor_deadline - $(android_phase_now)))
+      [ "$monitor_seconds" -gt 0 ] || break
+      monitor_status=0
+      timeout --foreground --kill-after=10 "$monitor_seconds" "${incus_binary[@]}" --project "$project" exec "$instance" -- \
+        python3 -u - "$monitor_stop" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>/dev/null \
+        || monitor_status=$?
+      [ ! -e "$monitor_host_stop" ] || break
+      if [ "$last_monitor_status" != "$monitor_status" ]; then
+        printf 'android-boot-monitor transport_exit=%s observation=unknown\n' "$monitor_status"
+        last_monitor_status="$monitor_status"
+      fi
+      sleep 2
+    done
+  ) > >(tee "$monitor_log") &
+  monitor_pid=$!
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null && break
+    kill -0 "$monitor_pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null \
+    || { printf 'android boot monitor did not start\n' >&2; return 1; }
+}
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -379,7 +413,9 @@ if [ "$lane" = projects ]; then
   printf 'android_projects=passed\n'
   exit 0
 fi
+# Retain slot cgroup samples before the connected lease is released.
 if [ "$lane" = gradle ]; then
+  android_start_monitor || true
   incus --project "$project" exec "$instance" -- timeout 30 sh -c '
     until runuser -u dev -- /usr/bin/python3 /usr/local/lib/subyard-android/client.py status >/dev/null 2>&1; do
       sleep 0.2
@@ -390,9 +426,6 @@ if [ "$lane" = gradle ]; then
   yard emu cache prepare --api 36
   android_phase_end 0
   android_phase_begin gradle
-  if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
-    incus_binary=(sudo -n /usr/bin/incus)
-  fi
   # Default-package build, broker SDK addition and connected tests through one lease.
   gradle_script="$(cat "$root/config/profiles/android/tests/e2e/android-failure-capture.sh" \
     "$root/config/profiles/android/tests/e2e/android-gradle.sh")"
@@ -584,38 +617,7 @@ android_phase_end 0
 [ "$lane" != sdk-images ] || exit 0
 android_repeat_provision toolchain-after-images toolchain_after_images
 # Monitor all viewer and restart windows, including diagnostic lanes.
-monitor_stop="/run/subyard-e2e-android-monitor-$token.stop"
-monitor_log="$state/first-boot-monitor.log"
-incus_binary=(/usr/bin/incus)
-if [ -S /var/lib/incus/unix.socket ] && [ ! -w /var/lib/incus/unix.socket ]; then
-  incus_binary=(sudo -n /usr/bin/incus)
-fi
-(
-  monitor_deadline=$(( $(android_phase_now) + 9000 ))
-  last_monitor_status=''
-  while [ ! -e "$monitor_host_stop" ]; do
-    monitor_seconds=$((monitor_deadline - $(android_phase_now)))
-    [ "$monitor_seconds" -gt 0 ] || break
-    monitor_status=0
-    timeout --foreground --kill-after=10 "$monitor_seconds" "${incus_binary[@]}" --project "$project" exec "$instance" -- \
-      python3 -u - "$monitor_stop" < "$root/config/profiles/android/tests/e2e/android-pool-monitor.py" 2>/dev/null \
-      || monitor_status=$?
-    [ ! -e "$monitor_host_stop" ] || break
-    if [ "$last_monitor_status" != "$monitor_status" ]; then
-      printf 'android-boot-monitor transport_exit=%s observation=unknown\n' "$monitor_status"
-      last_monitor_status="$monitor_status"
-    fi
-    sleep 2
-  done
-) > >(tee "$monitor_log") &
-monitor_pid=$!
-for ((attempt = 0; attempt < 100; attempt++)); do
-  grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null && break
-  kill -0 "$monitor_pid" 2>/dev/null || break
-  sleep 0.1
-done
-grep -Fxq 'android-boot-monitor ready' "$monitor_log" 2>/dev/null \
-  || { printf 'android boot monitor did not start\n' >&2; exit 1; }
+android_start_monitor
 if [ "$lane" = diagnostics ]; then
   android_phase_begin boot
   adb_log="$state/adb-getprop.log"

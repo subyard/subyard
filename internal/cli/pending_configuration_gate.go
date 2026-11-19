@@ -78,15 +78,6 @@ func (cli *CLI) pendingConfigurationOwnersTrusted(inspection *releasetransition.
 	return true
 }
 
-func ordinaryCommandDuringPendingConfiguration(handler string) bool {
-	switch handler {
-	case "@init", "@config", "@integration", "@profile", "@provision", "@update", "@migrate", "@release-transition":
-		return false
-	default:
-		return true
-	}
-}
-
 // The transaction on an operator outcome can name completed history. Its mere
 // presence cannot decide admission: read the protected journal and match it.
 func (cli *CLI) pendingIntegrationConfigurationGate(outcome *releasetransition.Outcome, inspection *releasetransition.Inspection) bool {

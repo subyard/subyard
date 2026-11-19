@@ -2551,8 +2551,8 @@ pending init; see [yard-scoped runtime failures](#yard-scoped-runtime-failures).
 and profiles with host owner or infrastructure services cannot declare it.
 The hook accepts `observe`, or `apply OPERATION_ID ACTUAL_SHA256 DESIRED_SHA256`, and emits only a
 bounded JSON object with `state`, `actual`, `desired`, optional `hook_binding` and optional
-`ownership_absent`. States are `absent`, `deferred`, `pending`, `current`
-and `stale`; installed states carry lowercase SHA-256 fingerprints. Observe must not mutate state.
+`ownership_absent`. States are `absent`, `deferred`, `current` and `stale`. Installed states
+carry lowercase SHA-256 fingerprints. Observe must not mutate state.
 A `stale` observation may add one `consequence`: a short sentence of at most 200 bytes from a
 plain-text alphabet, such as a service restart that apply performs. Update, migrate and `yard init`
 plans disclose it before their single confirmation; release plans name the yards once per distinct
@@ -2561,26 +2561,9 @@ Core bounds execution and output, checks the assessment before apply, and verifi
 state separately. Hook paths retain the updater's pinned directory descriptor; symbolic links
 below that anchor are rejected. Missing/stopped yards are absent/deferred without starting them.
 Hooks run in activation-ID order before integration project hooks; update and rollback inspect all local yards.
-A running hook whose input belongs to another owner can report `pending` with installed
-fingerprints and nonempty, validated `diagnostics`. This state is not converged and is
-not a stopped-yard deferral. Config status renders those parameters. Release activation
-postpones pending owners once, runs the other approved owners, then revisits them with
-unchanged desired bindings. Remaining pending input returns an executable config-apply
-step. A config apply on a yard limited to its repair commands applies pending input only in its
-selected targets; it never grants that profile mutation authority.
-After successful materialization, remaining profile drift names one fresh
-`yard migrate` step and does not make config apply fail.
-Missing input that the hook can safely create remains ordinary stale work.
-An optional profile merging an agent document must wait for the agent's selected managed
-configuration artifact to create it. In the shipped Telemetry profile, Claude and Codex declare
-such artifacts; their nonempty `AGENT_*_CONFIG` bindings with present, readable source files make
-absent, empty or invalid documents pending inputs. A missing source is a refusal
-naming that source; config apply cannot repair it. Telemetry does not publish partial
-agent policy. With no managed config binding,
-Telemetry may create or merge its native document, treating an empty document as
-empty configuration. Invalid unmanaged documents refuse with a preservation command.
-Its ordinary provision check reports pending input
-as drift, while runtime observation retains the diagnostic and exact config-apply continuation.
+Release activation reconciles the approved owners in one pass. Stale runtimes can provide
+validated configuration diagnostics when config status requests them.
+
 Unpublished `.subyard-config.*` files left by an interrupted materializer are outside its explicit
 artifact inventory. Later observation and replacement ignore them, including similarly named
 symlinks, without reading or deleting unrelated directory entries.

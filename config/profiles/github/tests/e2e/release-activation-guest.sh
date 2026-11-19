@@ -36,14 +36,15 @@ set_git_mode() {
   claim_units
 }
 trace_deferred_migration() {
-  local original_python source before native_exit capture_exit=0 unchanged=0
+  local original_python source before native_exit capture_exit=0 unchanged=0 wrappers="$STATE/observation-wrappers"
   original_python="$(command -v python3)"
   source="$STATE/runtime/current/config/profiles/github/runtime.py"
   before="$(hash "$source")"
-  install -m 0700 "$ROOT/config/profiles/github/tests/e2e/runtime-observer-trace.py" "$STATE/wrappers/python3"
+  install -d -m 0700 "$wrappers"
+  install -m 0700 "$ROOT/config/profiles/github/tests/e2e/runtime-observer-trace.py" "$wrappers/python3"
   # Trace only this invocation. The callback observes original Python returns;
   # installed source and functions, native status and stdout stay untouched.
-  if PATH="$STATE/wrappers:$PATH" SUBYARD_TRACE_REAL_PYTHON="$original_python" \
+  if PATH="$wrappers:$PATH" SUBYARD_TRACE_REAL_PYTHON="$original_python" \
       SUBYARD_TRACE_GITHUB_SOURCE="$source" SUBYARD_TRACE_GITHUB_LOG="$STATE/native-github-observations.log" \
       yard migrate --yes > "$STATE/deferred-migrate.log" 2>&1; then native_exit=0; else native_exit=$?; fi
   [ "$before" != "$(hash "$source")" ] || unchanged=1
@@ -630,7 +631,7 @@ fi
 
 stage capacity-and-platform
 bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
-bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$TOKEN"
+bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform-apparmor "$TOKEN"
 fresh id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin || die 'platform did not establish a usable refreshed Incus operator session'
 CREATION_GID="$(fresh id -g)"
 printf 'release_activation_creation_context uid=%s gid=%s validation_gid=%s\n' "$(id -u)" "$CREATION_GID" "$(id -g)"
@@ -801,17 +802,12 @@ yard -Y "$NAMED" stop --yes > "$STATE/stop-named.log" 2>&1
 cp "$SUBYARD_CONFIG_HOME/yards/$NAMED/config.env" "$STATE/selection-stopped"
 stopped_preview="$(incus config get "$NAMED_INSTANCE" user.subyard.preview_sha256 --project "$NAMED_PROJECT")"
 [ ! -e "$UNIT_DIR/$NAMED_UNIT" ] || die 'stopped fixture unexpectedly already has an owner broker'
-stage marker-owned-live-preview-drift
-baseline_preview="$(guest sha256sum /usr/local/bin/subyard-preview | cut -d' ' -f1)"
-[ "$baseline_preview" = "$(incus config get "$INSTANCE" user.subyard.preview_sha256 --project "$PROJECT")" ] || die 'predecessor preview marker does not own installed bytes'
-guest sh -eu -c 'test ! -L /usr/local/bin/subyard-preview; test "$(stat -c "%a:%u:%g" /usr/local/bin/subyard-preview)" = 755:0:0; printf "\n# Marker-owned release activation fixture drift.\n" >> /usr/local/bin/subyard-preview'
-drifted_preview="$(guest sha256sum /usr/local/bin/subyard-preview | cut -d' ' -f1)"
-[ "$baseline_preview" != "$drifted_preview" ] && [ "$drifted_preview" != "$(hash "$FINAL_SOURCE/config/preview/subyard-preview")" ] || die 'preview fixture did not produce meaningful installed drift'
-printf 'release_activation_preview_drift baseline=%s installed=%s candidate=%s\n' "$baseline_preview" "$drifted_preview" "$(hash "$FINAL_SOURCE/config/preview/subyard-preview")"
 stage publish-exact-candidate
 fresh env YARD_RELEASE_BASE_URL="file://$FINAL_RELEASE" bash "$FINAL_RELEASE/subyard-install.sh" \
   --version "$CANDIDATE" --publish-only --yes > "$STATE/publish.log" 2>&1
 
+# The pinned updater requires its installed release to be ready before switching targets.
+ready
 wanted="$(hash "$FINAL_SOURCE/config/profiles/github/bin/broker")"
 update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/update-a.log" 2>&1
 claim_units
@@ -899,19 +895,27 @@ incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- runuser -u dev -- \
 incus exec "$NAMED_INSTANCE" --project "$NAMED_PROJECT" -- test -r /home/dev/.agents/skills/subyard-preview/SKILL.md
 ready
 
-stage owned-timer-drift-current-repair
+stage owned-preview-and-timer-drift-current-repair
 SYNTHETIC_RELEASE="$ROOT/.subyard-acceptance/fixture-b"
 [ -f "$SYNTHETIC_RELEASE/subyard-install.sh" ] || die 'controller-packaged synthetic B unavailable'
 # Repair owned drift in the current release before requesting a different target.
 [ -f "$UNIT_DIR/.subyard-keys-sync.json" ] || die 'ordinary update did not establish timer ownership'
+# The ordinary init after deferred migration may enable the timer again.
+systemctl_user disable --now subyard-keys-sync.timer
+current_preview="$(hash "$FINAL_SOURCE/config/preview/subyard-preview")"
+[ "$current_preview" = "$(incus config get "$INSTANCE" user.subyard.preview_sha256 --project "$PROJECT")" ] || die 'current preview marker does not own installed bytes'
+guest sh -eu -c 'test ! -L /usr/local/bin/subyard-preview; test "$(stat -c "%a:%u:%g" /usr/local/bin/subyard-preview)" = 755:0:0; printf "\n# Marker-owned release activation fixture drift.\n" >> /usr/local/bin/subyard-preview'
+drifted_preview="$(guest sha256sum /usr/local/bin/subyard-preview | cut -d' ' -f1)"
+[ "$current_preview" != "$drifted_preview" ] || die 'preview fixture did not produce meaningful installed drift'
+printf 'release_activation_preview_drift current=%s installed=%s\n' "$current_preview" "$drifted_preview"
 printf '\n# Fixture template drift.\n' >> "$UNIT_DIR/subyard-keys-sync.service"
 claim_units
 systemctl_user daemon-reload
-update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/timer-repair.log" 2>&1
+update "$CANDIDATE" "$FINAL_RELEASE" --yes > "$STATE/current-repair.log" 2>&1
 claim_units
 verify_runtime "$FINAL_SOURCE"
 ready
-cmp -s "$STATE/ledger-retained" "$ledger" || die 'timer runtime repair replayed migrations'
+cmp -s "$STATE/ledger-retained" "$ledger" || die 'runtime repair replayed migrations'
 
 stage publish-exact-synthetic-candidate
 links="$(readlink "$STATE/runtime/current")|$(readlink "$STATE/runtime/previous")"

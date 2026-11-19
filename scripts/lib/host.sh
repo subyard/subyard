@@ -356,10 +356,6 @@ nm_guard_static_listed() { # <conf>: a current-format guard lists every static e
   for entry in $POWER_NM_GUARD_STATIC; do grep -Fxq -- "$entry" <<< "$entries" || return 1; done
 }
 
-nm_guard_loaded() { # [conf]
-  case "$(power_nm_guard_state "${1:-$NM_GUARD_CONF}")" in loaded|loaded-reboot) return 0 ;; *) return 1 ;; esac
-}
-
 # Planning: no released guard, a known inventory whose bridges the guard all lists, every static
 # entry, and an active NetworkManager that has read it (a migration waiting for its reboot is no
 # drift init could repair).

@@ -270,7 +270,7 @@ func (runtime Runtime) observeProfileRuntimes(
 			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", err))
 			continue
 		}
-		if observation.Diagnostics != nil && !runtime.profileDiagnostics && observation.State != ports.RuntimeStatePending {
+		if observation.Diagnostics != nil && !runtime.profileDiagnostics {
 			refusals = append(refusals, runtime.profileObservationFailure(definition.Runtime.ActivationID, "invalid-schema", errors.New("unexpected runtime diagnostics")))
 			continue
 		}
@@ -314,16 +314,6 @@ func (runtime Runtime) applyProfileRuntimes(ctx context.Context) error {
 	}
 	observations, err := runtime.observeProfileRuntimes(ctx, definitions)
 	if err != nil {
-		return err
-	}
-	var pending []error
-	for _, definition := range definitions {
-		observation := observations[definition.Runtime.ActivationID]
-		if observation.State == ports.RuntimeStatePending {
-			pending = append(pending, PendingProfileRuntimeError(runtime.Yard.YardName, definition.Runtime.ActivationID, observation))
-		}
-	}
-	if err := domain.CollectRefusals(pending...); err != nil {
 		return err
 	}
 	operationID := runtime.environmentValue("SUBYARD_OPERATION_ID")
@@ -559,7 +549,7 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 		strings.HasSuffix(observation.Consequence, " ")) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation has an invalid consequence")
 	}
-	if observation.Diagnostics != nil && (len(*observation.Diagnostics) > 128 || observation.State != ports.RuntimeStateStale && observation.State != ports.RuntimeStatePending) {
+	if observation.Diagnostics != nil && (len(*observation.Diagnostics) > 128 || observation.State != ports.RuntimeStateStale) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation has invalid diagnostics")
 	}
 	seen := map[string]bool{}
@@ -577,9 +567,6 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return ports.RuntimeObservation{}, errors.New("runtime observation contains trailing data")
 	}
-	if observation.State == ports.RuntimeStatePending && (observation.Diagnostics == nil || len(*observation.Diagnostics) == 0) {
-		return ports.RuntimeObservation{}, errors.New("pending runtime requires diagnostics")
-	}
 	switch observation.State {
 	case ports.RuntimeStateAbsent, ports.RuntimeStateDeferred:
 		if observation.Actual != "" || observation.Desired != "" {
@@ -589,7 +576,7 @@ func decodeProfileRuntimeObservation(payload []byte) (ports.RuntimeObservation, 
 		if !profileRuntimeDigest.MatchString(observation.Actual) || observation.Actual != observation.Desired {
 			return ports.RuntimeObservation{}, errors.New("current runtime observation has invalid digests")
 		}
-	case ports.RuntimeStateStale, ports.RuntimeStatePending:
+	case ports.RuntimeStateStale:
 		if (observation.Actual != "" && !profileRuntimeDigest.MatchString(observation.Actual)) ||
 			!profileRuntimeDigest.MatchString(observation.Desired) {
 			return ports.RuntimeObservation{}, errors.New("stale runtime observation has invalid digests")
@@ -651,24 +638,4 @@ func (runtime Runtime) ProfileServiceBinding(ctx context.Context, name string) (
 		return string(payload), err
 	}
 	return "", nil
-}
-
-// PendingProfileRuntimeError directs another owner's repair without claiming convergence.
-func PendingProfileRuntimeError(yard, id string, observation ports.RuntimeObservation) error {
-	message := "profile " + id + " is pending input repair"
-	if observation.Diagnostics != nil {
-		for index, detail := range *observation.Diagnostics {
-			text := "; " + detail.Parameter + ": " + detail.Installed + " -> " + detail.Desired
-			if len(message)+len(text) > 400 {
-				message += fmt.Sprintf("; %d more inputs: run yard config status", len(*observation.Diagnostics)-index)
-				break
-			}
-			message += text
-		}
-	}
-	retry := "run yard config apply"
-	if domain.SafeName(yard) {
-		retry = "run yard -Y " + yard + " config apply"
-	}
-	return &integrationLifecycleError{message: message, retry: retry}
 }

@@ -818,7 +818,7 @@ printf '%s\n' \
   'case "${1:-}" in' \
   '  test|cat|install|find) exec "$@" ;;' \
   '  systemctl)' \
-  '    case "${*:2}" in daemon-reload|"restart incus.service") exit 0 ;; esac' \
+  '    case "${*:2}" in daemon-reload|"restart incus.service"|"is-active --quiet incus.service") exit 0 ;; esac' \
   '    exit 2' \
   '    ;;' \
   '  *) exit 2 ;;' \
@@ -828,7 +828,14 @@ chmod 0700 "$nested_bin/sudo"
 printf '%s\n' \
   '#!/bin/bash' \
   'set -euo pipefail' \
-  '[ "$*" = dev/e2e/nested-teardown-data-boundary.sh ] || exit 2' \
+  'case "$*" in' \
+  '  "dev/e2e/p0-real-incus.sh --prepare-only")' \
+  '    [ ! -e "$P0_E2E_INCUS_APPARMOR_DROPIN" ] || exit 2' \
+  '    printf "ok\n" > "$P0_NESTED_CACHE_PROBE"' \
+  '    exit 0 ;;' \
+  '  dev/e2e/nested-teardown-data-boundary.sh) ;;' \
+  '  *) exit 2 ;;' \
+  'esac' \
   'expected="$HOME/.cache/subyard-p0-134/go-build"' \
   '[ "${GOCACHE:-}" = "$expected" ] || exit 3' \
   '[ "${GOMODCACHE:-}" = "$HOME/go/pkg/mod" ] || exit 4' \
@@ -847,6 +854,14 @@ fi
 grep -Fqx 'Environment=INCUS_SECURITY_APPARMOR=false' \
   "$TMP/p0-incus.service.d/compat.conf" \
   || fail "nested teardown did not install its reversible Incus compatibility boundary"
+if ! env -u GOCACHE -u GOMODCACHE \
+  PATH="$nested_bin:$PATH" P0_NESTED_CACHE_PROBE="$nested_probe.apparmor" SUBYARD_E2E_VM=2 \
+  P0_E2E_INCUS_APPARMOR_DROPIN="$TMP/p0-incus.service.d/compat.conf" \
+  /bin/bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform-apparmor 135 >/dev/null; then
+  fail 'AppArmor platform preparation did not restore the default Incus boundary'
+fi
+[ "$(cat "$nested_probe.apparmor" 2>/dev/null)" = ok ] \
+  || fail 'AppArmor platform preparation did not reach the prepare-only fixture'
 find "$HOME/.cache/subyard-p0-134" -depth -delete
 
 printf 'ok: P0 capacity layout is persistent and marker-guarded\n'

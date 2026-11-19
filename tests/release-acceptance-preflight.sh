@@ -26,6 +26,7 @@ class ProfilePreflightTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory(dir="/tmp")))
         self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        self.enterContext(patch.object(m, "broker_slots", return_value={1: "available"}))
         self.addCleanup(m.STOP.clear)
 
     def inventory(self, declarations):

@@ -92,6 +92,10 @@ func TestLegacySSHSyncBindsLocalPinAndPreservesWinningOverride(t *testing.T) {
 	if len(plan.localDesired) != 0 {
 		t.Fatal("winning local assignment was rewritten")
 	}
+	if len(plan.Changes) != 1 || plan.Changes[0].Path != gitSettingsPath("config.env") ||
+		plan.Changes[0].Action != "add" || plan.Changes[0].AfterDigest != digestBytes(nil) || len(plan.Changes[0].Applications) != 0 {
+		t.Fatalf("expected an empty normalized cache without follow-ups, got %#v", plan.Changes)
+	}
 	writeSyncTestFile(t, local, "SSH_PORT=2201\n", 0o640)
 	if err := Apply(plan); !errors.Is(err, ErrPlanStale) {
 		t.Fatalf("stale override accepted: %v", err)

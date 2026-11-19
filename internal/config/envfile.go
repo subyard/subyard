@@ -55,6 +55,10 @@ func applyEnvFile(path string, values environment) error {
 }
 
 func applyEnvFileObserved(path string, values environment, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
+	return applyShippedEnvFile(path, values, observer, discardPolicy{}, readers...)
+}
+
+func applyShippedEnvFile(path string, values environment, observer assignmentObserver, policy discardPolicy, readers ...func(string) ([]byte, error)) error {
 	var input io.Reader
 	if len(readers) != 0 && readers[0] != nil {
 		payload, err := readers[0](path)
@@ -70,7 +74,7 @@ func applyEnvFileObserved(path string, values environment, observer assignmentOb
 		defer file.Close()
 		input = file
 	}
-	return applyEnvReaderObserved(input, path, values, observer)
+	return applyShippedEnv(input, path, values, observer, policy)
 }
 
 // discardPolicy keeps retired settings and operator-only discards out of the resolved environment.

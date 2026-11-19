@@ -63,7 +63,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 sudo -n true
-bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
+bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform-apparmor "$(date +%s)"
 export SUBYARD_OPERATOR_HOME="$STATE/home" SUBYARD_CONFIG_HOME="$STATE/config" SUBYARD_HOME="$STATE/data"
 export YARD_RUNTIME_ROOT="$STATE/candidate/runtime" SUBYARD_KEYS_SYSTEMD_SKIP_ENABLE=1 MIN_DISK_GIB=1
 export STORAGE_PATH

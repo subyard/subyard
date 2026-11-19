@@ -250,8 +250,9 @@ def trial(binary, driver_binary, root, args, repetition, variant):
     directory = root / f"{repetition}-{variant}"
     directory.mkdir(mode=0o700)
     token = directory / "auth"
-    token.write_text(secrets.token_urlsafe(32))
-    token.chmod(0o600)
+    with os.fdopen(os.open(token, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(secrets.token_urlsafe(32))
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]

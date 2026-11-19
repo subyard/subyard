@@ -71,9 +71,15 @@ def main():
         if code:
             return code
         if sys.platform == "linux":
-            code = check("Linux resource probe isolation", [sys.executable, "dev/measure-veranda-test.py"], env)
-            if code:
-                return code
+            for name, script in (("Linux resource probe isolation", "dev/measure-veranda-test.py"),
+                                 ("Linux memory probe accounting", "dev/measure-veranda-memory-test.py"),
+                                 ("Linux bundle packaging", "dev/package-veranda-test.py"),
+                                 ("Cargo cache reuse", "dev/cargo-cache-test.py")):
+                # The cache test runs plain cargo; pin the stable toolchain the Rust checks use.
+                child = dict(env, RUSTUP_TOOLCHAIN="stable") if script == "dev/cargo-cache-test.py" else env
+                code = check(name, [sys.executable, script], child)
+                if code:
+                    return code
         else:
             print("Linux resource probe isolation: skipped on this platform", flush=True)
     code = check("generated Rust RPC vocabulary", [sys.executable, "veranda/dev/generate-vocabulary.py", "--check"], env)

@@ -48,70 +48,23 @@ func (store *FileStore) PreviewAdmission(
 	explicit bool,
 	workspaceNames ...string,
 ) (Admission, error) {
-	if source == "" {
-		return Admission{}, errors.New("project source is required")
-	}
-	if mode != domain.ProjectSync && mode != domain.ProjectBind && mode != domain.ProjectGit {
-		return Admission{}, fmt.Errorf("invalid project mode %q", mode)
-	}
-	if !domain.SafeProjectName(requestedName) {
-		return Admission{}, fmt.Errorf(
-			"invalid project name %q; use 1-50 ASCII letters, digits, '.', '_' or '-' and do not start with '-'",
-			requestedName,
-		)
+	if err := validateAdmissionRequest(source, mode, requestedName); err != nil {
+		return Admission{}, err
 	}
 	records, err := store.ListReadOnly(ctx)
 	if err != nil {
 		return Admission{}, err
 	}
-	for index := range records {
-		record := records[index]
-		if record.SourceKey != SourceKey(source) &&
-			(record.SourceKey != "" || record.HostPath != source) {
-			continue
-		}
-		if record.Mode != mode {
-			return Admission{}, fmt.Errorf(
-				"%q is already in the yard as %q; remove it before re-adding as %s",
-				record.Name, record.Mode, mode,
-			)
-		}
-		if mode == domain.ProjectSync || mode == domain.ProjectGit {
-			continue
-		}
-		if explicit && record.Name != requestedName {
-			return Admission{}, fmt.Errorf(
-				"source is already registered as %q; implicit rename to %q is not allowed",
-				record.Name, requestedName,
-			)
-		}
-		current := record
-		return Admission{ProjectID: record.ProjectID, Name: record.Name, Existing: &current}, nil
+	if admission, found, err := existingAdmission(records, source, mode, requestedName, explicit); err != nil || found {
+		return admission, err
 	}
 	reservations, err := store.readReservations(time.Now().UTC(), false)
 	if err != nil {
 		return Admission{}, err
 	}
-	occupied := make(map[string]string, len(records))
-	for _, record := range records {
-		occupied[domain.ProjectNameKey(record.ProjectID)] = record.ProjectID
-		occupied[domain.ProjectNameKey(record.Name)] = record.ProjectID
-	}
-	for _, reservation := range reservations {
-		occupied[domain.ProjectNameKey(reservation.ProjectID)] = reservation.ProjectID
-	}
-	for _, workspaceName := range workspaceNames {
-		occupied[domain.ProjectNameKey(workspaceName)] = workspaceName
-	}
-	name := requestedName
-	if owner, found := occupied[domain.ProjectNameKey(name)]; found {
-		if explicit {
-			return Admission{}, fmt.Errorf(
-				"project name %q conflicts with project %q; choose another explicit name such as %q",
-				name, owner, nextProjectName(requestedName, occupied),
-			)
-		}
-		name = nextProjectName(requestedName, occupied)
+	name, err := admissionName(records, reservations, workspaceNames, requestedName, explicit)
+	if err != nil {
+		return Admission{}, err
 	}
 	return Admission{ProjectID: name, Name: name}, nil
 }
@@ -127,17 +80,8 @@ func (store *FileStore) Admit(
 	if operationID == "" || !domain.SafeID(operationID) {
 		return Admission{}, errors.New("project admission requires a safe operation ID")
 	}
-	if source == "" {
-		return Admission{}, errors.New("project source is required")
-	}
-	if mode != domain.ProjectSync && mode != domain.ProjectBind && mode != domain.ProjectGit {
-		return Admission{}, fmt.Errorf("invalid project mode %q", mode)
-	}
-	if !domain.SafeProjectName(requestedName) {
-		return Admission{}, fmt.Errorf(
-			"invalid project name %q; use 1-50 ASCII letters, digits, '.', '_' or '-' and do not start with '-'",
-			requestedName,
-		)
+	if err := validateAdmissionRequest(source, mode, requestedName); err != nil {
+		return Admission{}, err
 	}
 	lock, err := store.lock(ctx, true)
 	if err != nil {
@@ -149,29 +93,8 @@ func (store *FileStore) Admit(
 	if err != nil {
 		return Admission{}, err
 	}
-	for index := range records {
-		record := records[index]
-		if record.SourceKey != SourceKey(source) &&
-			(record.SourceKey != "" || record.HostPath != source) {
-			continue
-		}
-		if record.Mode != mode {
-			return Admission{}, fmt.Errorf(
-				"%q is already in the yard as %q; remove it before re-adding as %s",
-				record.Name, record.Mode, mode,
-			)
-		}
-		if mode == domain.ProjectSync || mode == domain.ProjectGit {
-			continue
-		}
-		if explicit && record.Name != requestedName {
-			return Admission{}, fmt.Errorf(
-				"source is already registered as %q; implicit rename to %q is not allowed",
-				record.Name, requestedName,
-			)
-		}
-		current := record
-		return Admission{ProjectID: record.ProjectID, Name: record.Name, Existing: &current}, nil
+	if admission, found, err := existingAdmission(records, source, mode, requestedName, explicit); err != nil || found {
+		return admission, err
 	}
 
 	reservations, err := store.readReservations(time.Now().UTC())
@@ -199,6 +122,81 @@ func (store *FileStore) Admit(
 		}
 	}
 
+	name, err := admissionName(records, reservations, workspaceNames, requestedName, explicit)
+	if err != nil {
+		return Admission{}, err
+	}
+	reservation := ProjectReservation{
+		Schema: 1, OperationID: operationID, ProjectID: name, Name: name,
+		Source: source, Mode: mode, Requested: requestedName, Explicit: explicit,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.writeReservation(reservation); err != nil {
+		return Admission{}, err
+	}
+	return Admission{ProjectID: name, Name: name, Reservation: &reservation}, nil
+}
+
+func validateAdmissionRequest(source string, mode domain.ProjectMode, requestedName string) error {
+	if source == "" {
+		return errors.New("project source is required")
+	}
+	if mode != domain.ProjectSync && mode != domain.ProjectBind && mode != domain.ProjectGit {
+		return fmt.Errorf("invalid project mode %q", mode)
+	}
+	if !domain.SafeProjectName(requestedName) {
+		return fmt.Errorf(
+			"invalid project name %q; use 1-50 ASCII letters, digits, '.', '_' or '-' and do not start with '-'",
+			requestedName,
+		)
+	}
+	return nil
+}
+
+// existingAdmission returns the registered bind project for source. Sync and
+// Git sources may be added again under a new identity.
+func existingAdmission(
+	records []domain.ProjectRecord,
+	source string,
+	mode domain.ProjectMode,
+	requestedName string,
+	explicit bool,
+) (Admission, bool, error) {
+	for index := range records {
+		record := records[index]
+		if record.SourceKey != SourceKey(source) &&
+			(record.SourceKey != "" || record.HostPath != source) {
+			continue
+		}
+		if record.Mode != mode {
+			return Admission{}, false, fmt.Errorf(
+				"%q is already in the yard as %q; remove it before re-adding as %s",
+				record.Name, record.Mode, mode,
+			)
+		}
+		if mode == domain.ProjectSync || mode == domain.ProjectGit {
+			continue
+		}
+		if explicit && record.Name != requestedName {
+			return Admission{}, false, fmt.Errorf(
+				"source is already registered as %q; implicit rename to %q is not allowed",
+				record.Name, requestedName,
+			)
+		}
+		current := record
+		return Admission{ProjectID: record.ProjectID, Name: record.Name, Existing: &current}, true, nil
+	}
+	return Admission{}, false, nil
+}
+
+// admissionName keeps an explicit name or derives the next free implicit one.
+func admissionName(
+	records []domain.ProjectRecord,
+	reservations []ProjectReservation,
+	workspaceNames []string,
+	requestedName string,
+	explicit bool,
+) (string, error) {
 	occupied := make(map[string]string, len(records)+len(reservations))
 	for _, record := range records {
 		occupied[domain.ProjectNameKey(record.ProjectID)] = record.ProjectID
@@ -210,25 +208,17 @@ func (store *FileStore) Admit(
 	for _, workspaceName := range workspaceNames {
 		occupied[domain.ProjectNameKey(workspaceName)] = workspaceName
 	}
-	name := requestedName
-	if owner, found := occupied[domain.ProjectNameKey(name)]; found {
-		if explicit {
-			return Admission{}, fmt.Errorf(
-				"project name %q conflicts with project %q; choose another explicit name such as %q",
-				name, owner, nextProjectName(requestedName, occupied),
-			)
-		}
-		name = nextProjectName(requestedName, occupied)
+	owner, found := occupied[domain.ProjectNameKey(requestedName)]
+	if !found {
+		return requestedName, nil
 	}
-	reservation := ProjectReservation{
-		Schema: 1, OperationID: operationID, ProjectID: name, Name: name,
-		Source: source, Mode: mode, Requested: requestedName, Explicit: explicit,
-		CreatedAt: time.Now().UTC(),
+	if explicit {
+		return "", fmt.Errorf(
+			"project name %q conflicts with project %q; choose another explicit name such as %q",
+			requestedName, owner, nextProjectName(requestedName, occupied),
+		)
 	}
-	if err := store.writeReservation(reservation); err != nil {
-		return Admission{}, err
-	}
-	return Admission{ProjectID: name, Name: name, Reservation: &reservation}, nil
+	return nextProjectName(requestedName, occupied), nil
 }
 
 func (store *FileStore) FinalizeOperation(

@@ -11,6 +11,8 @@ TOKEN=$((16#$RUN_ID))
 VERSION="${1:-}"
 # shellcheck source=dev/e2e/lib-power-upgrade-contracts.sh
 . "$ROOT/dev/e2e/lib-power-upgrade-contracts.sh"
+# shellcheck source=dev/e2e/lib-p0-incus-image.sh
+. "$ROOT/dev/e2e/lib-p0-incus-image.sh"
 IFS=$'\t' read -r ANCHOR_VERSION _ _ _ < <(published_anchor)
 # Below-anchor sources step through the hop, a fix release of the anchor series.
 IFS=$'\t' read -r HOP_VERSION _ _ _ < <(published_hop)
@@ -19,6 +21,8 @@ IFS=$'\t' read -r HOP_VERSION _ _ _ < <(published_hop)
 [ "$VERSION" != hop ] || VERSION="$HOP_VERSION"
 PUBLISHED_MODE=direct
 case "${2:-}" in refusal) PUBLISHED_MODE="$2" ;; esac
+# The catalog omits Codex for the v0.28.0 anchor because its anonymous GitHub REST
+# metadata request can return HTTP 403. Later releases include the fix from #62.
 published_agent_selection() {
   local selection="${1:-none}" agent
   case "$selection" in
@@ -86,7 +90,11 @@ print(hashlib.sha256(raw).hexdigest())'
   || { printf 'published-upgrade: a frozen candidate bundle is required\n' >&2; exit 2; }
 PINS="$(awk -F '\t' -v version="$VERSION" '$1 == version' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")"
 [ -n "$PINS" ] || { printf 'published-upgrade: unpinned baseline %q\n' "$VERSION" >&2; exit 2; }
-bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
+platform=fixture-platform
+if [[ "$PUBLISHED_AGENTS" =~ (^|[[:space:]])(claude|codex)($|[[:space:]]) ]]; then
+  platform=fixture-platform-apparmor
+fi
+bash "$ROOT/dev/e2e/p0-guest.sh" "$platform" "$(date +%s)"
 
 # Reuse its marked operator/project lifecycle, host-runtime snapshot and guarded cleanup.
 set -- run "$TOKEN"
@@ -101,7 +109,7 @@ else
 fi
 INSTALLER="$STATE_ROOT/subyard-install-v$OLD_VERSION.sh"
 GUEST_MARKER=/var/tmp/subyard-published-upgrade-data
-CACHED_IMAGE=subyard-e2e-debian-13-cloud-container
+CACHED_IMAGE="${P0_REAL_INCUS_CONTAINER_CACHE_ALIAS:-subyard-e2e-debian-13-cloud-container}"
 
 die() {
   printf 'published-upgrade: %s: %s\n' "$OLD_VERSION" "$*" >&2
@@ -190,11 +198,14 @@ for command in curl incus jq script sha256sum sudo systemctl timeout; do
 done
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
 incus info >/dev/null || die 'initialized Incus is required'
-incus image info "$CACHED_IMAGE" --project default >/dev/null \
-  || die 'the P0 Debian image cache is required'
+image_reference="$(p0_container_image_reference "$CACHED_IMAGE")" || exit $?
 
 prepare_fixture
 configure_published_agents
+# Published init creates its own project. Resolve the cached image through its public remote
+# so both the old and new runtime can use it within the private project image namespace.
+operator_env sed -i -E "s/^(BASE_IMAGE|BASE_IMAGE_FALLBACK)=.*/\1=$image_reference/" \
+  "$OPERATOR_HOME/.config/subyard/config.env"
 install -d "$RELEASE_ROOT"
 cp -a "$ROOT/.subyard-acceptance/release/." "$RELEASE_ROOT/"
 chmod -R a+rX "$RELEASE_ROOT"
@@ -210,15 +221,8 @@ operator_env env YARD_RELEASE_VERSION="$OLD_VERSION" "$INSTALLER" --version "$OL
   "$OPERATOR_HOME/.subyard/releases/$OLD_VERSION/subyard-$OLD_VERSION-linux-amd64.tar.gz" \
   | awk '{print $1}')" = "$OLD_BUNDLE_SHA256" ] || die 'published runtime archive checksum changed'
 
-# Published init owns its project and later releases refuse a precreated one, so it
-# stops once at the missing cached image and resumes once the project shares that image.
 printf '%s\n' "$MARKER" > "$PROJECT_MUTATION_ARMED"
-if ! operator_yard init --yes >"$STATE_ROOT/init-first.log" 2>&1; then
-  incus project show "$PROJECT" >/dev/null 2>&1 && [ -z "$(incus list --project "$PROJECT" --format csv -c n)" ] \
-    || { cat "$STATE_ROOT/init-first.log" >&2; die 'first published init failed before its image step'; }
-  incus project set "$PROJECT" features.images=false
-  operator_yard init --yes
-fi
+operator_yard init --yes
 incus project set "$PROJECT" user.p0-power-systemd="$MARKER"
 operator_yard start --yes
 [ "$(operator_yard --version)" = "yard $OLD_VERSION" ] || die 'published runtime is not active'

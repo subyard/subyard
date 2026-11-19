@@ -1,7 +1,9 @@
 name: Periodic E2E
 run-name: >-
   ${{ inputs.origin && format('Nested VM checks on Intel, attempt {0}, for run {1}', inputs.attempt, inputs.origin)
-  || (github.event_name == 'push' && github.event.head_commit.message) || github.workflow }}
+  || (github.event_name == 'push' && github.event.head_commit.message) || github.workflow }}${{
+  github.ref == 'refs/heads/master' && format(' ({0})',
+  inputs.image || (github.event.schedule == '23 6,18 * * *' && 'ubuntu-24.04') || 'debian-13') || '' }}
 
 # Periodic full end-to-end run: the long VM checks of release acceptance on hosted runners, so
 # their failures surface between releases. A red check here is a finding to fix early; this
@@ -9,7 +11,8 @@ run-name: >-
 # runs pull request code, because the jobs run the checked out source as root.
 on:
   schedule:
-    - cron: '23 */6 * * *'
+    - cron: '23 0,12 * * *' # debian-13, UTC
+    - cron: '23 6,18 * * *' # ubuntu-24.04, UTC
   workflow_dispatch:
     inputs:
       image:
@@ -43,15 +46,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: periodic-e2e-${{ github.ref }}${{ inputs.origin && format('-retry-{0}', inputs.origin) || '' }}
-  # A new run replaces the previous one on its branch; the supersede job also stops that run's
-  # retries, which otherwise finish. A run still going when the next schedule starts six hours
-  # later is stuck, and keeping it would hold the group forever.
+  group: >-
+    periodic-e2e-${{ github.ref }}${{ inputs.origin && format('-retry-{0}', inputs.origin)
+    || (github.ref == 'refs/heads/master' && format(':image:{0}',
+    inputs.image || (github.event.schedule == '23 6,18 * * *' && 'ubuntu-24.04') || 'debian-13')) || '' }}
+  # Main runs replace earlier ones on the branch and, on master, only for the same image.
+  # Retries are grouped by their origin. The supersede job handles cancellation across groups.
   cancel-in-progress: ${{ !inputs.origin }}
 
 env:
   CANDIDATE_VERSION: 1.0.0-ci.periodic-e2e
-  LEASE_IMAGE: ${{ inputs.image || 'debian-13' }}
+  LEASE_IMAGE: ${{ inputs.image || (github.event.schedule == '23 6,18 * * *' && 'ubuntu-24.04') || 'debian-13' }}
   # The GUI accepts only a stable version, which must match its engine's. Any version above the
   # installed-source floor works; the Veranda checks install their own isolated runtime.
   VERANDA_VERSION: 0.99.1
@@ -62,9 +67,8 @@ env:
   NESTED_ATTEMPTS: 30
 
 jobs:
-  # The schedule runs only for a commit no finished push or scheduled run has covered; a cancelled
-  # run covers nothing. A failed commit is not repeated automatically; use Re-run or a manual
-  # dispatch.
+  # A finished push or scheduled run with a successful pool covers its commit and lease image.
+  # A cancelled run covers nothing. For failures after pool success, use Re-run or a manual dispatch.
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -79,16 +83,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref_name }}
           HEAD: ${{ github.sha }}
         run: |
           run=true
           if [ "$EVENT" = schedule ]; then
             # A run covers its commit only once its checks started: a run skipped as
             # covered, or one that failed before its pool was ready, checked nothing.
-            for id in $(gh run list --workflow periodic-e2e.yml --branch "$REF" --status completed \
-              --limit 30 --json databaseId,headSha,event,conclusion \
-              --jq ".[] | select(.headSha == \"$HEAD\" and (.event == \"schedule\" or .event == \"push\") and .conclusion != \"cancelled\") | .databaseId"); do
+            runs="$(gh run list --workflow periodic-e2e.yml --commit "$HEAD" --status completed \
+              --limit 1000 --json databaseId,event,conclusion,displayTitle)"
+            # Look oldest first so later skipped slots do not require a pool lookup each time.
+            # Pushes and schedules recorded before titles carried the image used Debian.
+            ids="$(jq -r --arg image "$LEASE_IMAGE" 'reverse[] | select(.conclusion != "cancelled")
+              | select((.event == "schedule" and .displayTitle == "Periodic E2E (\($image))")
+                or ($image == "debian-13" and
+                  (.event == "push" or (.event == "schedule" and .displayTitle == "Periodic E2E"))))
+              | .databaseId' <<<"$runs")"
+            for id in $ids; do
               pool="$(gh run view "$id" --json jobs --jq '.jobs[] | select(.name == "pool") | .conclusion')"
               if [ "$pool" = success ]; then
                 run=false
@@ -98,9 +108,8 @@ jobs:
           fi
           printf 'run=%s\n' "$run" >> "$GITHUB_OUTPUT"
 
-  # Concurrency replaces only the previous main run of a branch; its nested retries run in their own
-  # groups. A run that tests the branch therefore also cancels earlier retries there, and a retry
-  # dispatched while that happens cancels itself. Runs on other branches are left alone.
+  # A main run that tests the branch cancels earlier retries in its scope. A retry dispatched
+  # while that happens cancels itself. On master both checks match the lease image.
   supersede:
     needs: changes
     if: ${{ needs.changes.outputs.run == 'true' }}
@@ -118,23 +127,50 @@ jobs:
           ORIGIN: ${{ inputs.origin }}
         run: |
           retry='Nested VM checks on Intel, '
-          runs() {
-            gh run list --workflow periodic-e2e.yml --branch "$REF" --limit 100 \
-              --json databaseId,status,displayTitle --jq "$1"
-          }
+          previous="$(gh run list --workflow periodic-e2e.yml --branch "$REF" --limit 100 \
+            --json databaseId,status,displayTitle,event)"
+          if [ "$GITHUB_REF" = refs/heads/master ]; then
+            # A legacy schedule proves Debian for its unlabelled retries, even after it finishes.
+            previous="$(jq -c --arg image "$LEASE_IMAGE" --arg retry "$retry" '
+              def legacy_debian: .event == "schedule" and .displayTitle == "Periodic E2E";
+              map(select(legacy_debian) | .databaseId) as $legacy
+              | map(
+                  if legacy_debian then
+                    select($image == "debian-13") | . + {legacy_debian: true}
+                  elif .event == "workflow_dispatch" and (.displayTitle | startswith($retry)) then
+                    (.displayTitle | capture("^" + $retry + "attempt [0-9]+, for run (?<origin>[0-9]+)( \\((?<image>[^)]+)\\))?$")) as $title
+                    | ($title.origin | tonumber) as $origin
+                    | select($title.image == $image or
+                        ($image == "debian-13" and $title.image == null and ($legacy | index($origin) != null)))
+                    | . + {retry_origin: $origin}
+                  else
+                    select((.event == "schedule" or .event == "workflow_dispatch")
+                      and (.displayTitle | endswith(" (\($image))")))
+                  end
+                )' <<<"$previous")"
+          fi
           if [ -z "$ORIGIN" ]; then
-            for id in $(runs ".[] | select(.databaseId < $RUN_ID and .status != \"completed\" and (.displayTitle | startswith(\"$retry\"))) | .databaseId"); do
+            # A retry can start after its replacement was queued. Compare its origin on master,
+            # and stop any legacy main before its retries so it cannot dispatch more.
+            ids="$(jq -r --arg retry "$retry" --argjson run "$RUN_ID" 'sort_by(.legacy_debian != true)[]
+              | select(.status != "completed" and (.legacy_debian or (.displayTitle | startswith($retry))))
+              | select((.retry_origin // .databaseId) < $run)
+              | .databaseId' <<<"$previous")"
+            for id in $ids; do
               if gh run cancel "$id"; then
-                printf 'Cancelled earlier nested retry run %s.\n' "$id" >> "$GITHUB_STEP_SUMMARY"
+                printf 'Cancelled superseded run %s.\n' "$id" >> "$GITHUB_STEP_SUMMARY"
               else
-                # A retry that finished meanwhile needs no cancellation.
+                # A run that finished meanwhile needs no cancellation.
                 [ "$(gh run view "$id" --json status --jq .status)" = completed ]
               fi
             done
             exit 0
           fi
           # A newer main run that tests this branch supersedes the run this retry continues.
-          for id in $(runs ".[] | select(.databaseId > $ORIGIN and .databaseId != $RUN_ID and (.displayTitle | startswith(\"$retry\") | not)) | .databaseId"); do
+          ids="$(jq -r --arg retry "$retry" --argjson origin "$ORIGIN" --argjson run "$RUN_ID" '.[] | select(
+            .databaseId > $origin and .databaseId != $run and (.displayTitle | startswith($retry) | not))
+            | .databaseId' <<<"$previous")"
+          for id in $ids; do
             for _ in $(seq 1 36); do
               state="$(gh run view "$id" --json status,jobs --jq '"\(.status) " + ([.jobs[] | select(.name == "supersede") | "\(.status)/\(.conclusion)"] | join(""))')"
               case "$state" in
@@ -506,5 +542,5 @@ jobs:
           fi
           gh workflow run periodic-e2e.yml --ref "$REF" -f checks="$checks" -f origin="$ORIGIN" \
             -f attempt="$attempt" -f image="$LEASE_IMAGE"
-          printf 'Rescheduled on new runners at the latest %s commit, attempt %s of %s: %s\n\nSee the runs named "Nested VM checks on Intel, attempt N, for run %s".\n' \
-            "$REF" "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Rescheduled on new runners at the latest %s commit on %s, attempt %s of %s: %s\n\nLook for "Nested VM checks on Intel, attempt N, for run %s" in the run title.\n' \
+            "$REF" "$LEASE_IMAGE" "$attempt" "$NESTED_ATTEMPTS" "$checks" "$ORIGIN" >> "$GITHUB_STEP_SUMMARY"

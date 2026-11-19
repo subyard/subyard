@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Host-free cache deletion and exact project backup/restore contracts."""
+import errno
 import importlib.util
 import os
 from pathlib import Path
@@ -104,6 +105,58 @@ class Cleanup(unittest.TestCase):
         self.assertNotEqual((result / 'tracked').stat().st_ino, (source / 'tracked').stat().st_ino)
         self.assertEqual((result / 'tracked').stat().st_ino, (result.parent / 'linked').stat().st_ino)
         self.assertIn(' M tracked', subprocess.check_output(['git', '-C', str(result), 'status', '--porcelain'], text=True))
+
+    def test_inspect_retries_when_listed_git_lock_disappears(self):
+        srv, source, request = self.project()
+        objects = source / '.git/objects'
+        objects.mkdir(parents=True)
+        (source / 'keep').write_text('project data')
+        expected = hard.inspect(request, srv)
+        lock = objects / 'maintenance.lock'
+        lock.touch()
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if Path(path) == lock:
+                lock.unlink()
+            return real_lstat(path, *args, **kwargs)
+
+        with mock.patch.object(hard.os, 'lstat', side_effect=lstat):
+            self.assertEqual(hard.inspect(request, srv), expected)
+        self.assertFalse(lock.exists())
+
+    def test_inspect_retries_when_listed_directory_moves(self):
+        srv, source, request = self.project()
+        retained = source / 'retained'
+        retained.mkdir()
+        (retained / 'keep').write_text('project data')
+        expected = hard.inspect(request, srv)
+        pending = source / 'pending'
+        retained.rename(pending)
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if Path(path) == pending:
+                pending.rename(retained)
+            return real_scandir(path)
+
+        with mock.patch.object(hard.os, 'scandir', side_effect=scandir):
+            self.assertEqual(hard.inspect(request, srv), expected)
+
+    def test_inspect_refuses_unreadable_directory(self):
+        srv, source, request = self.project()
+        child = source / 'unreadable'
+        child.mkdir()
+        real_scandir = os.scandir
+
+        def scandir(path):
+            if Path(path) == child:
+                raise PermissionError(errno.EACCES, 'Permission denied', path)
+            return real_scandir(path)
+
+        with mock.patch.object(hard.os, 'scandir', side_effect=scandir):
+            with self.assertRaises(PermissionError):
+                hard.inspect(request, srv)
 
     def test_external_relative_and_absolute_alternates_refuse(self):
         for absolute in (False, True):

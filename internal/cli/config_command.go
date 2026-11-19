@@ -1060,11 +1060,7 @@ func (cli *CLI) configStatus(
 				}
 				for _, id := range slices.Sorted(maps.Keys(observations)) {
 					observation := observations[id]
-					if observation.State == ports.RuntimeStatePending {
-						drift = true
-						fmt.Fprintf(cli.options.Stdout, "profile %s pending input repair; next: run yard -Y %s config apply\n", id, target.Name)
-					}
-					if observation.State != ports.RuntimeStateStale && observation.State != ports.RuntimeStatePending {
+					if observation.State != ports.RuntimeStateStale {
 						continue
 					}
 					owner := &profileRuntimeActivationReconciler{cli: cli, request: releasetransition.ProcessRequest{ConfigHome: configHome}, id: id}

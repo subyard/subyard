@@ -15,7 +15,11 @@ for command in jq python3 sudo ss sg; do command -v "$command" >/dev/null || die
 if [ "$KIND" = local-first ]; then command -v git >/dev/null || die 'git is required'; fi
 sudo -n true || die 'passwordless sudo is required on the disposable VM'
 # Enroll the operator before the installed engine first inspects Incus.
-bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
+case "$KIND" in
+  special|vm) platform=fixture-platform ;;
+  *) platform=fixture-platform-apparmor ;;
+esac
+bash "$ROOT/dev/e2e/p0-guest.sh" "$platform" "$(date +%s)"
 if [ "$KIND" = cold ]; then
   # Only a fresh allocated host with no Incus workloads may become a cold fixture.
   # Keep the baseline state aside; package removal alone can retain the database.

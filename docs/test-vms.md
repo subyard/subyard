@@ -778,7 +778,7 @@ The authenticated v0.11.1/v0.11.2 recovery fixture retains its independent histo
 | `dependencies` | immutable image baseline; 20-minute cold Go download deadline | marker-owned cold caches only | periodic targeted bootstrap diagnostic |
 | `real-incus` | VM1 when targeted/smoke and in the full owner chain; KVM, persistent Incus pool and 15-minute mutation deadlines | marked project, container, VM and image aliases | required in smoke and full |
 | `profile-resource` | VM1 and current candidate | marked bound-resource profile | targeted physical diagnostic; generic resource consent/state checks run locally |
-| `newer-release` | VM1; published v0.28.0 direct pin, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
+| `newer-release` | VM1; published v0.30.0 direct pin with the staged candidate's migration registry, Go toolchain and prepared base image | marked fixture project and isolated runtime under `/var/tmp` | required in smoke and full |
 | `release` | VM1 fixture with two-VM allocation/preflight; bounded nested install/boot deadlines | fresh candidate yards, current and legacy convergence | targeted diagnostic; covered by the full owner chain |
 | `source-upgrade` | VM1 when targeted; two bounded reboots | pinned v0.11.0 settings creation → published hop → candidate, explicit legacy test-owner recreation and unchanged ordinary-yard data/identity/power | optional Periodic-only `p0:source-upgrade`; runnable on demand, outside full P0 and release acceptance |
 | `power-systemd` | VM1 when targeted; VM2 worker in full; real Incus, Ubuntu 24.04/systemd 255; 900-second image-cache fill, 600-second local launch, 300-second restart and bounded TERM-to-KILL Incus commands | test-owned image alias, marker-owned parser project plus snapshotted/restored host power runtime | targeted diagnostic; required in full; release acceptance runs it as `vm:p0-power-systemd` |
@@ -857,9 +857,10 @@ dev/e2e/disabled-components-release.sh --slot "$slot"
 ```
 
 The published-baseline matrix reads immutable pins and an `anchor`, `hop`, `direct`, `refusal` or
-fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0 (with agents selected
-by `all`); the v0.28.1 hop has no release check of its own (the chains pass through it, Periodic E2E
-runs it agent-free), and a later previous release distinct from both remains a direct baseline.
+fixture-only `pin` role from `dev/e2e/published-upgrade-baselines.tsv`. Direct upgrade starts at v0.28.0
+with the [catalog's selected agents](testing.md#coverage-ownership). The v0.28.1 hop has no release
+check of its own. Upgrade chains pass through it, and Periodic E2E runs it agent-free. A later
+previous release distinct from both remains a direct baseline.
 Host-free `dev/verify-release-upgrades.py --only-source-anchor` checks refusal at
 v0.11.0, v0.17.3 and v0.27.0, including update and `--check`, the exact hop command,
 unchanged protected state and rejection of Incus mutations; these have no VM catalog entries.
@@ -872,8 +873,7 @@ entries are temporary first-boundary-release acceptance. Each scenario gets a fr
 ```sh
 SUBYARD_E2E_CANDIDATE_BUNDLE=/absolute/path/to/candidate-bundle.tar.gz \
 SUBYARD_E2E_CANDIDATE_SHA256=<bundle-sha256> \
-  dev/agent-e2e.sh --slot "$slot" --purpose published-upgrade --vm-count 1 --vm 1 -- \
-  bash dev/e2e/published-upgrade.sh 0.28.0 all
+  bash dev/e2e/release-vm-check.sh published-upgrade/anchor --slot "$slot"
 ```
 
 The remote fixture runs a temporary loopback OpenSSH server with a synthetic key forced to the
@@ -1279,14 +1279,15 @@ init and both reboots must retain that ownership without a legacy continuation g
 first-release chains use staged candidate tooling to refuse their retained pre-anchor rollback
 without changing links or protected state. Published releases sit below the candidate's
 `power-metadata` epoch, so rollback to the anchor must be refused with `code=rollback-incompatible`
-without changing links, checkpoint/history, ledger, native identity or retained V1 evidence. For
-every published target before this epoch the source provenance check refuses first (the retained
-engine cannot read the newer registry), so the lane records the expected `LIMIT` line; the
-rollback-compatibility blocker itself is proven host-free, and any other refusal fails the lane.
-The release smoke and the NetworkManager guard lane classify their predecessor rollback the same
-way. The same-epoch cycle uses a compatible release built from the candidate source: a
-public `update --check --json` names its exact target with a plan and no blockers, then the lane
-updates to it, returns to the candidate, performs a real rollback to it and rolls forward again.
+without changing links, checkpoint/history, ledger, native identity or retained V1 evidence.
+The retained-release registry mismatch and rollback-compatibility blocker each have their own
+evidence line. If the source provenance check refuses first, the fixture records `LIMIT`.
+Host-free tests also cover the rollback-compatibility blocker. The release smoke and NetworkManager
+guard lanes recognize these refusal paths. Release smoke compares runtime link metadata and the
+V2 state tree's metadata and file hashes across the refusal. The same-epoch cycle uses a compatible
+release built from the candidate source. A public `update --check --json` names its exact target
+with a plan and no blockers. The lane updates to it, returns to the candidate, performs a real
+rollback to it and rolls forward again.
 Both passages preserve native policy and the registered ownership. Fresh sources below v0.11.0
 remain refused; accepted completed V2 history and recovery retain their separate supported
 contracts. The guest verifies checksum-pinned official anchor assets before creating the cold

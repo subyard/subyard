@@ -54,6 +54,16 @@ func TestCopyAdmissionFinalizesIndependentCopiesWithSharedProvenance(t *testing.
 			if err != nil || gotLegacy != legacy {
 				t.Fatalf("legacy same-source record changed: got=%#v err=%v", gotLegacy, err)
 			}
+
+			const namedCopy = "NamedCopy"
+			preview, err := store.PreviewAdmission(ctx, source, mode, namedCopy, true)
+			if err != nil || preview.ProjectID != namedCopy || preview.Existing != nil {
+				t.Fatalf("preview of explicitly named copy = %#v, %v", preview, err)
+			}
+			admission, err := store.Admit(ctx, "named-copy-op", source, mode, namedCopy, true)
+			if err != nil || admission.ProjectID != namedCopy || admission.Reservation == nil {
+				t.Fatalf("admission of explicitly named copy = %#v, %v", admission, err)
+			}
 		})
 	}
 }

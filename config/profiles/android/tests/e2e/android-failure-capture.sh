@@ -21,4 +21,5 @@ sys.stdout.buffer.write(data)
     -e 's/([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/[address]/g' |
     { head -c 65536 && cat >/dev/null; } >&2 || capture_exit=${PIPESTATUS[0]}
   printf '\ncapture_exit=%s\n' "$capture_exit" >&2
+  exit "$capture_exit"
 )

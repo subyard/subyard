@@ -259,12 +259,16 @@ func load(
 		if values[definition.Name] == "" {
 			values[definition.Name] = definition.Default
 		}
+		if catalog[definition.Name].HasDefault {
+			tracker.record(defaultLayer, definition.Name, definition.Default, "built-in resolver default", 0, "")
+			continue
+		}
 		tracker.record(defaultLayer, definition.Name, values[definition.Name], integrationDefaultSources[definition.Owner], 0, "profile default")
 	}
 	// Shipped defaults apply in precedence order before selecting user files.
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		path := filepath.Join(configDir, name)
-		if err := applyOptionalTracked(path, values, tracker, defaultLayer); err != nil {
+		if err := applyOptionalShippedDefaults(path, values, tracker, defaultLayer); err != nil {
 			return domain.Context{}, nil, err
 		}
 	}
@@ -985,50 +989,6 @@ func resetInheritedContext(values environment) {
 	}
 }
 
-func applyYardConfig(configDir, yardName, yardFile string, values environment) error {
-	return applyYardConfigTracked(configDir, yardName, yardFile, values, nil, false)
-}
-
-func applyYardConfigTracked(
-	configDir, yardName, yardFile string,
-	values environment,
-	tracker *settingTracker,
-	syncSource bool,
-) error {
-	// A named-yard settings file selects one public profile. The profile is
-	// applied first and the named-yard settings file wins last.
-	// Probe a copy because env files are declarative but may contain defaults that
-	// depend on the existing normalized environment.
-	settings := Catalog{}
-	if tracker != nil {
-		settings = tracker.catalog
-	} else {
-		var err error
-		settings, err = LoadCatalog(filepath.Dir(configDir))
-		if err != nil {
-			return err
-		}
-	}
-	probe := make(environment, len(values))
-	for name, value := range values {
-		probe[name] = value
-	}
-	delete(probe, "YARD_TEMPLATE")
-	if err := settings.applyEnvFileValidated(yardFile, probe, ScopeYard, syncSource, nil); err != nil {
-		return err
-	}
-	if err := applyYardTemplateTracked(configDir, yardName, probe["YARD_TEMPLATE"], yardFile, values, tracker); err != nil {
-		return err
-	}
-	if tracker == nil {
-		return settings.applyEnvFileValidated(yardFile, values, ScopeYard, syncSource, nil)
-	}
-	yardLayer := tracker.addLayer("yard", "scalar settings", yardFile, true, settingAny)
-	return applyEnvFileTrackedValidated(
-		yardFile, values, tracker, yardLayer, ScopeYard, syncSource,
-	)
-}
-
 func yardTemplateFile(configDir, yardName, template, yardFile string) (string, error) {
 	if !domain.SafeName(template) {
 		return "", fmt.Errorf("%w %q in %s", domain.NewConfigRefusal(domain.ConfigYardTemplateInvalid), template, yardFile)
@@ -1056,45 +1016,16 @@ func applyYardTemplateTracked(configDir, yardName, template, yardFile string, va
 		if err != nil {
 			return err
 		}
-		settings := Catalog{}
-		if tracker != nil {
-			settings = tracker.catalog
-		} else {
-			var err error
-			settings, err = LoadCatalog(filepath.Dir(configDir))
-			if err != nil {
-				return err
-			}
-		}
-		if tracker == nil {
-			if err := settings.applyEnvFileValidated(
-				templateFile, values, ScopeShipped, false, nil,
-			); err != nil {
-				return err
-			}
-		} else {
-			profileLayer := tracker.addLayer(
-				"yard", "shipped profile", templateFile, true, settingScalar,
-			)
-			if err := applyEnvFileTrackedValidated(
-				templateFile, values, tracker, profileLayer, ScopeShipped, false,
-			); err != nil {
-				return err
-			}
+		profileLayer := tracker.addLayer(
+			"yard", "shipped profile", templateFile, true, settingScalar,
+		)
+		if err := applyEnvFileTrackedValidated(
+			templateFile, values, tracker, profileLayer, ScopeShipped, false,
+		); err != nil {
+			return err
 		}
 	}
 	return nil
-}
-
-func applyEnvFileTracked(
-	path string,
-	values environment,
-	tracker *settingTracker,
-	layer settingLayerID,
-) error {
-	return applyEnvFileObserved(path, values, func(name, value string, line int) {
-		tracker.record(layer, name, value, path, line, "")
-	}, tracker.prospectiveReader())
 }
 
 type observedAssignment struct {
@@ -1331,7 +1262,7 @@ func normalizeLegacyEnvironment(values environment) error {
 	return domain.CollectRefusals(conflicts...)
 }
 
-func applyOptionalTracked(
+func applyOptionalShippedDefaults(
 	path string,
 	values environment,
 	tracker *settingTracker,
@@ -1343,7 +1274,11 @@ func applyOptionalTracked(
 		}
 		return err
 	}
-	return applyEnvFileTracked(path, values, tracker, layer)
+	// Skip old shipped assignments for defaults now owned by the core catalog.
+	policy := discardPolicy{retired: func(name string) bool { return catalog[name].HasDefault }}
+	return applyShippedEnvFile(path, values, func(name, value string, line int) {
+		tracker.record(layer, name, value, path, line, "")
+	}, policy, tracker.prospectiveReader())
 }
 
 func pathPresent(path string) bool {

@@ -189,9 +189,11 @@ Fresh pre-v0.11.0 source upgrades are outside the
 
 The published-baseline matrix defaults to no coding integrations. Its optional agent selection
 (`published-upgrade.sh VERSION all`, or a quoted selection) exercises the published release's real
-init before update, including structured configuration evidence and raw Codex rules. Run selected
-agent jobs at the ownership, manifest and provisioning boundaries described in the VM guide;
-the no-agent matrix alone does not establish agent migration compatibility.
+init before update, including structured configuration evidence and raw Codex rules when selected.
+The v0.28.0 anchor selects Claude, OpenCode and pi because its Codex provisioner can hit HTTP 403
+on GitHub's anonymous release metadata endpoint. The v0.29.0 and v0.30.0 lanes include Codex
+and its provisioning fix ([#62](https://github.com/Subyard/Subyard/pull/62)). Run selected agent
+jobs at the ownership, manifest and provisioning boundaries described in the VM guide.
 
 Bootstrap checks runtime ownership before interpreting checkout markers. Another runtime gets
 `--runtime-root` guidance; only a dispatcher or valid pending recovery is classified as legacy.
@@ -233,7 +235,7 @@ A native-only checkout gets neutral guidance. The diagnostic environment value
 | Profile fixture lifecycle and private diagnostics | GitHub `release-activation-test.py` sources release/broker/connection operations and imports connection diagnostics; Hermes `e2e-capture-test.py` sources its operations and the existing SSH transport helper | Supported scoped disable retains connection bytes; failure/timeout/signal and cleanup exits stay distinct, including original exit 3. Hermes checks bounded runtime-only readiness, ordered scoped setters, capture-before-cleanup, private modes and native transport deadlines | GitHub broker acceptance, GitHub `--installed-worker`, and Hermes acceptance own their respective operations | Lifecycle/cleanup behavior changes require the owning lane; connection installer/refresh boundaries require installed-worker |
 | Controller outcome and allocation ordering | `tests/agent-e2e.sh`, `tests/release-acceptance.sh` | Actual controller failure injection: missing/skipped/empty required cases stop before broker; native failure/signal/timeout and cleanup remain separate | Affected existing controller lane, preserving lease ownership and cleanup | Controller, phase, transport or cleanup changes; T1 before T3 |
 | Fresh default coding integrations | `go:config`: `TestResolveIntegrationSelection` | `tests/agent-e2e.sh`: isolated selection fixture cleanup; `tests/release-acceptance.sh` and `tests/workflow-real-adapter-gate.sh`: release/periodic registry contracts | `dev/e2e/integration-selection.sh default`: all four default integrations, repeated init and native teardown, registered as `integration-selection/default` for release acceptance and Periodic E2E | Default selection or its fixture/cleanup changes; normal package download access |
-| Newer release replacing an unfinished journal | `go:adapters/releaseruntime`: `TestNewerReleaseReplacementSelectsOnlyExplicitNewerVersion`, `TestPrepareTransitionRoutesNewerTargetToReplacement` | `go:releasetransition`: `TestNewerReleaseReplacesActivatedJournalAndKeepsItsBytes`, `TestNewerReleaseReplacesJournalBeforeActivation`, `TestNewerReleaseReportsEveryRefusal` | `dev/e2e/release-transition-newer-release-replacement.sh` in the P0 `newer-release` lane, also part of smoke and `full`: published v0.28.0 direct pin, named migration refusals without changes when the candidate carries migrations, withheld restart, replacement before and after activation, chained replacement, active launcher route | Journal replacement, its evidence or release selection |
+| Newer release replacing an unfinished journal | `go:adapters/releaseruntime`: `TestNewerReleaseReplacementSelectsOnlyExplicitNewerVersion`, `TestPrepareTransitionRoutesNewerTargetToReplacement` | `go:releasetransition`: `TestNewerReleaseReplacesActivatedJournalAndKeepsItsBytes`, `TestNewerReleaseReplacesJournalBeforeActivation`, `TestNewerReleaseReportsEveryRefusal` | `dev/e2e/release-transition-newer-release-replacement.sh` in the P0 `newer-release` lane, also part of smoke and `full`: published v0.30.0 direct pin with the staged candidate's migration registry, named migration refusals without changes when the candidate carries migrations, withheld restart, replacement before and after activation, chained replacement, active launcher route | Journal replacement, its evidence or release selection |
 | Guest temporary storage | `go:adapters/reconcileruntime`: `TestDiskTmpGuestPolicy`, `TestDiskTmpPolicyWaitsForGuestBoot`, `TestDiskTmpReadinessDistinguishesReboot` | `tests/create-subyard-docker-apparmor.sh`: ordinary creation, post-restart boot completion before VM network inspection, remote fixture image inputs in an isolated project, configured cloud-image user provisioning and existing-yard preservation; `tests/release-candidate.sh`: fresh native bootstrap context, failed inspection refusal and container/VM restart identities | `dev/e2e/disk-tmp-acceptance.sh`: installed minimal container/VM creation, safe active-tmpfs transition, native reboot and policy rollback | Common guest storage policy/readiness changes |
 | Disk-/tmp migration restarts | `go:migration`: safety before stop, approved session-interrupting stop, stopped-yard no-op, marker completion and identity/cancellation guards; `go:cli`: pre-execution decline, marker-derived readiness and retry; `go:releasetransition`: interrupted per-yard rows | `tests/agent-e2e.sh`: single-history dispatch and owned cleanup; `go:adapters/incusclient`: sealed-engine CPU helper | `dev/e2e/p0-acceptance.sh --slot N --lane yard-maintenance`: published 0.21.3 → 0.28.1 hop, whose guest preflight refusals leave both VM yards running and pending, then the frozen candidate's zero-step update and its current-release retry: upfront disclosure and decline, approved live SSH session interruption and the VM start policy grant, isolated guest preflight failure, ready warnings, UUID/data preservation, read-only check and marker-only retry | Disk-/tmp migration, CPU helper, selected guest init admission or maintenance lane changes |
 | Same-host network policy: links, isolation, spoofing and reboot | `go:yardnetwork`: planner, policy, ingress and service contracts including clean bounded stops | `tests/init-network-convergence.sh`, `tests/lib-power-network.sh`: shell network convergence and boot ordering | `dev/e2e/yard-network-policy.sh --slot N`: installed frozen candidate, three real yards, saved and isolated links, spoofing refusal, host reboot with resumed policy, isolated and final teardown | Network policy, ACL, NIC binding or network power changes |
@@ -727,13 +729,19 @@ acceptance. A passing default release does not claim full physical acceptance.
 #### Periodic E2E on hosted runners
 
 The Periodic E2E workflow (`.github/workflows/periodic-e2e.yml`) runs the long VM checks of release
-acceptance on GitHub-hosted runners, so their failures surface between releases. Every six hours it
-tests the latest `master` commit unless a finished push or scheduled run already covered it. Only a
-run whose `pool` job succeeded covers its commit: a cancelled run, a run skipped as covered and a run
-that failed while preparing the pool cover nothing. A new run that tests a branch replaces the run still in progress
-on that branch together with its nested retries; runs on other branches continue. A red check is a finding
-to fix early. It does not replace [release acceptance](reference/release-publication.md#one-release-candidate) and imports no evidence
-into it.
+acceptance on GitHub-hosted runners, so their failures surface between releases. It checks the latest
+`master` commit at 00:23 and 12:23 UTC on `debian-13` and at 06:23 and 18:23 UTC on
+`ubuntu-24.04`. The triggering cron entry determines the image even when GitHub starts the run
+late. Each slot checks coverage for its own commit and image. A completed push or scheduled run
+counts when its `pool` job succeeded and the run finished without cancellation. The workflow reads
+the scheduled run title for its image and treats older unlabelled schedules and `ci-probe/**`
+pushes as Debian runs. A failed check after pool success can be repeated with Re-run or a manual
+dispatch.
+
+On `master`, a new main run replaces an earlier run for the same image and, when it proceeds to
+testing, stops its Intel retries. Main runs and retries on `master` show the image in their titles.
+Other branches retain branch-wide replacement. A red check is a finding to fix early. Periodic E2E
+is separate from [release acceptance](reference/release-publication.md#one-release-candidate).
 
 `dev/ci/plan-periodic-checks.py` takes the checks from their existing owners: the release collector's
 profile lanes, smoke check and core VM catalog (`dev/e2e/release-vm-checks.json`). Published upgrades
@@ -745,9 +753,10 @@ except `boundary` and `cleanup`; a lane that the catalog also declares as its ow
 runner and holds one real lease; each check then runs on its own fresh runner through
 `dev/ci/periodic-e2e.sh`, which refuses to run anywhere but a disposable hosted runner. The runner
 becomes an ordinary owner with the packaged candidate. A dispatch can select
-`image=debian-13`, `image=ubuntu-24.04` or `image=ubuntu-26.04`. The default and scheduled
-runs use Debian 13. The planner passes `--image` to the hosted wrapper for every lane, and the
-pool boundary check uses the same image. The wrapper gives lane controllers a lease image default,
+`image=debian-13`, `image=ubuntu-24.04` or `image=ubuntu-26.04`. Manual dispatches default
+to Debian 13, which is also the image used by `ci-probe/**` pushes. The planner passes
+`--image` to the hosted wrapper for every lane, and the pool boundary check uses the same image.
+The wrapper gives lane controllers a lease image default,
 which the shared client sends to the hosted broker. The broker creates leases from the matching
 Incus VM base. Intel retries retain the original image. Lane IDs and fixture images inside the
 leased VMs are shared across the dispatch choices.
@@ -772,9 +781,10 @@ optional physical coverage; host-free checks and other required physical lanes k
 Checks that boot a VM inside the leased VM run only on Intel runners. Hosted runners are Azure
 Hyper-V VMs on Intel or AMD CPUs, and the runner label cannot choose one. On AMD, virtualization
 nested this deep is so slow that these checks cannot finish. On an AMD runner the job explains the
-skip, and a `reschedule` job dispatches runs named `Nested VM checks on Intel, attempt N, for run X`
-at the branch's latest commit. A retry runs each check on three runners at once and is repeated up to
-30 times; checks that never reached Intel fail that last run as not run. Only the `reschedule` job may
+skip, and a `reschedule` job dispatches runs at the branch's latest commit with titles starting
+with `Nested VM checks on Intel, attempt N, for run X`. A retry runs each check on three runners
+at once and is repeated up to 30 times; checks that never reached Intel fail that last run as not run.
+Only the `reschedule` job may
 start runs, and the `supersede` job cancels replaced ones; neither checks out code.
 
 Periodic-only `vm:incus-apparmor-probe` installs the packaged candidate on one standard VM and
@@ -850,7 +860,8 @@ including when `RUSTUP_TOOLCHAIN` is set.
 The target and entrypoint do not install toolchains. `make verify` retains its
 separate core and shipped-profile scope.
 
-The runner temporary-path contract runs first, then Linux resource probe isolation;
+The runner temporary-path contract runs first, then on Linux the resource probe isolation,
+memory probe accounting, bundle packaging and Cargo cache reuse tests;
 a failed prerequisite stops the run. Next, Rust formatting, Clippy, and native client
 tests with `--locked` run in that order, reporting every independent failure.
 Python fixtures use the entrypoint's own interpreter.

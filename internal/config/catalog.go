@@ -124,7 +124,7 @@ var catalog = map[string]SettingDefinition{
 	"CCUSAGE_VERSION": scalar("agent-integration", SettingVersion, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"DEV_SUDO": scalar("yard-security", SettingBoolean, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
+		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), withDefault("1")),
 	"DEV_UID": scalar("yard-runtime", SettingInteger, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(0, 1<<31-1)),
 	"DEV_USER": scalar("yard-runtime", SettingName, SettingYardInit, true,
@@ -267,6 +267,12 @@ func scalar(
 
 func scopes(values ...SettingScope) []SettingScope {
 	return values
+}
+
+func withDefault(value string) definitionOption {
+	return func(definition *SettingDefinition) {
+		definition.Default, definition.HasDefault = value, true
+	}
 }
 
 func optional() definitionOption {
