@@ -45,6 +45,7 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 	}
 	events := map[string]map[string]any{}
 	var points []map[string]any
+	var services []string
 	for rows.Next() {
 		var encoding string
 		var body, protobuf []byte
@@ -61,6 +62,8 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 				t.Fatal(err)
 			}
 			for _, rl := range r.Logs().ResourceLogs().All() {
+				service, _ := rl.Resource().Attributes().Get("service.name")
+				services = append(services, service.Str())
 				for _, sl := range rl.ScopeLogs().All() {
 					for _, record := range sl.LogRecords().All() {
 						attrs := record.Attributes().AsRaw()
@@ -144,6 +147,11 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 			t.Errorf("metric point lost fields: %v in %v", expected, points)
 		}
 	}
+	// Codex app-server reports its client name as service.name.
+	slices.Sort(services)
+	if !slices.Equal(slices.Compact(services), []string{"claude-code", "subyard-fixture"}) {
+		t.Errorf("client service names lost: %v", services)
+	}
 	if len(points) != 8 {
 		t.Errorf("metric points dropped: %d", len(points))
 	}
@@ -162,7 +170,7 @@ func readFixture(t *testing.T, name string) []byte {
 // a sibling record, while resource values still apply to every record below.
 func TestSensitiveValuesAreScopedToTheirRecord(t *testing.T) {
 	r := plogotlp.NewExportRequest()
-	if err := r.UnmarshalJSON([]byte(`{"resourceLogs":[{"resource":{"attributes":[{"key":"user.email","value":{"stringValue":"resource-private"}}]},"scopeLogs":[{"logRecords":[
+	if err := r.UnmarshalJSON([]byte(`{"resourceLogs":[{"resource":{"attributes":[{"key":"user.email","value":{"stringValue":"resource-private"}},{"key":"service.name","value":{"stringValue":"client@example.com"}}]},"scopeLogs":[{"logRecords":[
 		{"attributes":[{"key":"event.name","value":{"stringValue":"api_request"}},{"key":"model","value":{"stringValue":"claude-opus-5-5"}},{"key":"tool_name","value":{"stringValue":"resource-private"}}]},
 		{"attributes":[{"key":"event.name","value":{"stringValue":"codex.tool_result"}},{"key":"output","value":{"stringValue":"claude-opus-5-5"}},{"key":"model","value":{"stringValue":"claude-opus-5-5"}}]}]}]}]}`)); err != nil {
 		t.Fatal(err)
@@ -175,6 +183,9 @@ func TestSensitiveValuesAreScopedToTheirRecord(t *testing.T) {
 	clean := plogotlp.NewExportRequest()
 	if err := clean.UnmarshalProto(e.Protobuf); err != nil {
 		t.Fatal(err)
+	}
+	if clean.Logs().ResourceLogs().At(0).Resource().Attributes().Len() != 0 {
+		t.Fatal("unsafe client service name survived the value check")
 	}
 	records := clean.Logs().ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
 	first, second := records.At(0).Attributes().AsRaw(), records.At(1).Attributes().AsRaw()

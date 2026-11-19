@@ -36,7 +36,6 @@ type Policy struct {
 }
 
 var wireVocabulary = map[string][]string{
-	"service":    strings.Fields("codex codex_cli_rs codex_exec claude-code claude_code"),
 	"sdk":        strings.Fields("opentelemetry opentelemetry-rust opentelemetry-js"),
 	"language":   strings.Fields("rust nodejs javascript typescript python go"),
 	"agent":      strings.Fields("codex claude other"),
@@ -53,7 +52,7 @@ var wireVocabulary = map[string][]string{
 
 var attributeRules = func() map[string]string {
 	rules := map[string]string{
-		"service.name": "service", "service.version": "version",
+		"service.name": "label", "service.version": "version",
 		"telemetry.sdk.name": "sdk", "telemetry.sdk.version": "version", "telemetry.sdk.language": "language",
 		"agent.name": "agent", "agent.version": "version",
 		"subyard.agent_run.id": "id", "subyard.agent_run.evidence": "evidence",

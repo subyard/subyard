@@ -411,6 +411,8 @@ distinguished from a missing value.
   emitter uses `tool_token_count` for total tokens. `log_user_prompt` stays
   false.
 
+Both clients keep the resource `service.name`, which for Codex app-server is
+the connecting client's name; it passes the same value check as other labels.
 Both clients send `success` and several counts and durations as strings.
 `success` is accepted as a boolean or the string `true` or `false` and is
 stored as a boolean; counters are stored as integers and durations and cost
