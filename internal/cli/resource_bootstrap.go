@@ -201,7 +201,7 @@ func (execution *initExecution) needsResourceInit() bool {
 // service has never acquired an endpoint record. Remote yards belong to a
 // different owner and cannot consume ports here.
 func (cli *CLI) resourceReservedPorts(current config.Loaded, definition resource.Definition) ([]int, error) {
-	names, err := config.YardNames(current.Context.Paths.ConfigDir, current.Context.Paths.ConfigHome)
+	names, err := config.YardNames(current.Context.Paths.ConfigHome)
 	if err != nil {
 		return nil, err
 	}

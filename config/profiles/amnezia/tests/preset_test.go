@@ -43,7 +43,7 @@ func TestAmneziaDedicatedPreset(t *testing.T) {
 				command[key] = value
 			}
 			command["SUBYARD_CONFIG_HOME"] = configHome
-			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: test.yard, DisablePrivate: true, Environment: command})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: test.yard, Environment: command})
 			if test.wantError {
 				if err == nil {
 					t.Fatal("unsafe VPN selection accepted")

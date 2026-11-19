@@ -59,7 +59,7 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 				if err != nil || len(records) != 0 {
 					return nil
 				}
-				names, _ := config.YardNames(filepath.Join(cli.options.RepositoryRoot, "config"), request.ConfigHome)
+				names, _ := config.YardNames(request.ConfigHome)
 				for _, name := range names {
 					loaded, err := cli.resolveReleaseTransitionContext(context.Background(), name, request.ConfigHome, nil)
 					if err == nil && !cli.unobservedReleaseYard(name, request.ConfigHome) &&
@@ -91,7 +91,7 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 					if err != nil {
 						return nil, false, err
 					}
-					names, err := config.YardNames(filepath.Join(cli.options.RepositoryRoot, "config"), request.ConfigHome)
+					names, err := config.YardNames(request.ConfigHome)
 					if err != nil {
 						return nil, false, err
 					}

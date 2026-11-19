@@ -166,12 +166,19 @@ func (cli *CLI) prepareConfigSyncPush(
 		return nil, err
 	}
 	if repository.behind != 0 {
-		relation := configGitRelation(repository.ahead, repository.behind)
 		repository.cleanup()
+		if repository.ahead != 0 {
+			return nil, errors.New("upstream is diverged; reconcile the branch with git before pushing")
+		}
 		return nil, fmt.Errorf(
-			"upstream is %s; run %s config sync pull before pushing",
-			relation, cli.options.Program,
+			"upstream is behind; run %s config sync pull before pushing",
+			cli.options.Program,
 		)
+	}
+	scalarEdit := len(request.authoring) != 0 && (request.authoring[0].action == "set" || request.authoring[0].action == "unset")
+	if scalarEdit && repository.ahead != 0 {
+		repository.cleanup()
+		return nil, errors.New("checkout contains unpublished commits; publish or reconcile them separately before editing a Git setting")
 	}
 	options := configsync.Options{
 		SourceRoot:     record.Checkout,
@@ -203,14 +210,17 @@ func (cli *CLI) prepareConfigSyncPush(
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("validate configuration before source change: %w", err)
 	}
-	paths, err := sanitizeLegacySSHSource(repository.checkout, syncState.HostID, cli.catalog)
-	if err != nil {
-		prepared.cleanup(cli, ctx)
-		return nil, fmt.Errorf("prepare legacy SSH source cleanup: %w", err)
+	var paths []string
+	if !scalarEdit {
+		paths, err = sanitizeLegacySSHSource(repository.checkout, syncState.HostID, cli.catalog)
+		if err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, fmt.Errorf("prepare legacy SSH source cleanup: %w", err)
+		}
+		prepared.sshCleanupPaths = slices.Clone(paths)
 	}
-	prepared.sshCleanupPaths = slices.Clone(paths)
-	for _, authoring := range request.authoring {
-		selected, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, authoring, request.content)
+	if len(request.authoring) != 0 {
+		selected, err := cli.exportSelectedConfig(loaded, repository.checkout, syncState.HostID, request.authoring, request.content)
 		if err != nil {
 			prepared.cleanup(cli, ctx)
 			return nil, fmt.Errorf("prepare selected configuration change: %w", err)
@@ -259,6 +269,28 @@ func (cli *CLI) prepareConfigSyncPush(
 	if err != nil {
 		prepared.cleanup(cli, ctx)
 		return nil, fmt.Errorf("validate exported candidate: %w", err)
+	}
+	if scalarEdit && slices.ContainsFunc(prepared.preview.Changes, func(change configsync.Change) bool {
+		return !strings.HasPrefix(change.Path, config.GitSettingsRelativePath+"/") &&
+			(change.Action == "delete" || change.Action == "localize-ssh-port")
+	}) {
+		prepared.cleanup(cli, ctx)
+		return nil, config.ErrLegacyGitSettingsMigration
+	}
+	if scalarEdit {
+		target := "config.env"
+		switch request.authoring[0].scope {
+		case config.ScopeShared:
+			target = "overrides/shared/config.env"
+		case config.ScopeYard:
+			target = filepath.ToSlash(filepath.Join("yards", loaded.Context.YardName, "config.env"))
+		}
+		if err := prepared.preview.CheckScalarPublication(target, func(path string, content []byte) ([]byte, error) {
+			return cli.editGitScalars(path, content, request.authoring)
+		}); err != nil {
+			prepared.cleanup(cli, ctx)
+			return nil, err
+		}
 	}
 	prepared.repairPermissions, err = clonedConfigSourcePermissions(record.Checkout, false)
 	if err != nil {

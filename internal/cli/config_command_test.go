@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -29,7 +31,7 @@ func TestConfigPathsShowsEffectiveLayersWithoutValues(t *testing.T) {
 	hostRule := filepath.Join(configHome, "overrides", "host", "agents", "codex", "rules", "repo.rules")
 	writeConfigCommandFile(t, hostRule, "private-canary-value\n")
 	writeConfigCommandFile(t, filepath.Join(configHome, "config.env"),
-		"AGENT_codex_RULES=\"$SUBYARD_CONFIG_DIR/../private/agents/codex/rules/repo.rules\"\n", 0o600)
+		"AGENT_codex_RULES='"+filepath.Join(configDir, "../private/agents/codex/rules/repo.rules")+"'\n", 0o600)
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard", Arguments: []string{"config", "paths"},
@@ -220,7 +222,6 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 		defaultLoaded.Context.Paths.ConfigDir, "..", "private", "yards", "private.env",
 	), "SSH_PORT=5555\n")
 	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
-	privateLoaded := loadConfigCommandContext(t, root, environment, "private")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
 		defaultLoaded.Context.IncusProject + "/" + defaultLoaded.Context.YardInstanceName: {
 			Name: defaultLoaded.Context.YardInstanceName, Project: defaultLoaded.Context.IncusProject,
@@ -230,14 +231,9 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 			Name: namedLoaded.Context.YardInstanceName, Project: namedLoaded.Context.IncusProject,
 			Status: "Running",
 		},
-		privateLoaded.Context.IncusProject + "/" + privateLoaded.Context.YardInstanceName: {
-			Name: privateLoaded.Context.YardInstanceName, Project: privateLoaded.Context.IncusProject,
-			Status: "Running",
-		},
 	}}
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
-	appendHashSteps(t, fake, privateLoaded)
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
 		RepositoryRoot: root, Program: "yard",
@@ -254,7 +250,7 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "yard default materialized-config: converged") ||
 		!strings.Contains(stdout.String(), "yard named materialized-config: converged") ||
-		!strings.Contains(stdout.String(), "yard private materialized-config: converged") ||
+		strings.Contains(stdout.String(), "yard private materialized-config:") ||
 		strings.Contains(stdout.String(), "yard remote materialized-config:") {
 		t.Fatalf("all-local selection is wrong:\n%s", stdout.String())
 	}
@@ -262,10 +258,8 @@ func TestConfigStatusAndApplyAllLocalExcludeRemoteYards(t *testing.T) {
 	fake.ExecSteps = nil
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
-	appendHashSteps(t, fake, privateLoaded)
 	appendHashSteps(t, fake, defaultLoaded)
 	appendHashSteps(t, fake, namedLoaded)
-	appendHashSteps(t, fake, privateLoaded)
 	applier := &recordingConfigApplier{}
 	stdout.Reset()
 	stderr.Reset()
@@ -745,7 +739,7 @@ func TestConfigSetChangedUsesOneDefaultYesPrompt(t *testing.T) {
 	}
 }
 
-func TestConfigUnsetExistingEmptyTargetRemovesIt(t *testing.T) {
+func TestConfigUnsetExistingEmptyTargetKeepsIt(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	target := filepath.Join(configHome, "config.env")
 	writeConfigCommandFile(t, target, "")
@@ -763,10 +757,10 @@ func TestConfigUnsetExistingEmptyTargetRemovesIt(t *testing.T) {
 	if code := program.Run(context.Background()); code != 0 {
 		t.Fatalf("empty unset failed: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("empty scalar target still exists: %v", err)
+	if content, err := os.ReadFile(target); err != nil || len(content) != 0 {
+		t.Fatalf("empty scalar target = %q, %v", content, err)
 	}
-	if len(prompt.Requests) != 1 {
+	if len(prompt.Requests) != 0 {
 		t.Fatalf("empty unset prompts = %#v", prompt.Requests)
 	}
 }
@@ -2706,6 +2700,38 @@ func TestConfigSyncPullFetchesFastForwardsAndImports(t *testing.T) {
 	if head != upstream {
 		t.Fatalf("pull did not fast-forward: head=%s upstream=%s", head, upstream)
 	}
+
+	publishedYard := filepath.Join(publisher, "hosts", "owner-a", "yards", "demo", "config.env")
+	localYard := filepath.Join(configHome, "yards", "demo", "config.env")
+	const localInvalid = "SSH_PORT=invalid\n"
+	writeConfigCommandFile(t, publishedYard, "DEV_SUDO=invalid\n")
+	writeConfigCommandFile(t, localYard, localInvalid)
+	commitConfigSource(t, publisher, "Publish invalid yard settings")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	checkoutBefore := snapshotConfigCheckout(t, checkout)
+	manifestBefore := mustReadConfigFixture(t, configsync.ManifestPath(configHome))
+	stdout.Reset()
+	stderr.Reset()
+	program, err = New(Options{
+		RepositoryRoot: root, Program: "yard",
+		Arguments:   []string{"config", "sync", "pull", "--yes"},
+		Environment: environment, WorkingDir: root,
+		Stdout: &stdout, Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 1 ||
+		!strings.Contains(stderr.String(), "hosts/owner-a/yards/demo/config.env:1: DEV_SUDO") ||
+		!strings.Contains(stderr.String(), "yards/demo/config.env:1: SSH_PORT") {
+		t.Fatalf("invalid pull: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if !reflect.DeepEqual(snapshotConfigCheckout(t, checkout), checkoutBefore) ||
+		!bytes.Equal(mustReadConfigFixture(t, configsync.ManifestPath(configHome)), manifestBefore) ||
+		!bytes.Equal(mustReadConfigFixture(t, filepath.Join(configHome, config.GitSettingsRelativePath, "config.env")), content) ||
+		string(mustReadConfigFixture(t, localYard)) != localInvalid {
+		t.Fatal("refused pull changed the checkout, cache or local settings")
+	}
 }
 
 func TestConfigSyncPullPromptsForManifestOnlyApplyWithoutFastForward(t *testing.T) {
@@ -3242,9 +3268,160 @@ func TestConfigSyncOnlineStatusFetchesWithoutMutatingRegisteredCheckout(t *testi
 	}
 }
 
+func TestConfigReadsRefuseExpansionsInUserLayers(t *testing.T) {
+	for _, relative := range []string{
+		"overrides/shared/config.env", "config.env", "yards/neighbor/config.env", "yards/neighbor.env",
+		".sync/settings/overrides/shared/config.env", ".sync/settings/config.env", ".sync/settings/yards/neighbor/config.env",
+	} {
+		t.Run(relative, func(t *testing.T) {
+			root, _, home, environment := configCommandFixture(t)
+			path := filepath.Join(home, relative)
+			const original = "# existing configuration\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
+			writeConfigCommandFile(t, path, original)
+			if !strings.Contains(relative, "yards/") {
+				writeConfigCommandFile(t, filepath.Join(home, "yards/neighbor/config.env"), "# selected yard\n")
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{
+				{"config", "show", "GIT_USER_EMAIL"},
+				{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "yard", "--yes"},
+				{"config", "set", "GIT_USER_NAME", "Jane", "SSH_PORT", "BAD_PORT_MARKER", "--scope", "yard", "--yes"},
+			} {
+				var output bytes.Buffer
+				code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
+					Arguments: append([]string{"-Y", "neighbor"}, args...), Stdout: io.Discard, Stderr: &output})
+				if code != 2 || !strings.Contains(output.String(), relative+":2: GIT_USER_EMAIL") ||
+					!strings.Contains(output.String(), "Replace the parameter expansion or setting reference with its value") ||
+					strings.Contains(output.String(), "original") {
+					t.Fatalf("%v: exit=%d output=%s", args, code, &output)
+				}
+				if slices.Contains(args, "BAD_PORT_MARKER") &&
+					(!strings.Contains(output.String(), "SSH_PORT (scalar settings): invalid port value") ||
+						strings.Contains(output.String(), "BAD_PORT_MARKER")) {
+					t.Fatalf("batch diagnostics lost the invalid argument or exposed its value: %s", &output)
+				}
+			}
+			after, err := os.Stat(path)
+			if err != nil || !os.SameFile(before, after) || string(mustReadConfigFixture(t, path)) != original {
+				t.Fatal("refused read or write changed the settings file")
+			}
+		})
+	}
+}
+
+func TestConfigHostAuthoringCollectsIndependentSourceRefusals(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	host := filepath.Join(home, "config.env")
+	neighbor := filepath.Join(home, "yards/neighbor/config.env")
+	const hostContent = "GIT_USER_EMAIL=$INVALID_HOST_REFERENCE\nDEV_SUDO=invalid\n"
+	const yardContent = "GIT_USER_NAME=$INVALID_YARD_REFERENCE\n"
+	writeConfigCommandFile(t, host, hostContent)
+	writeConfigCommandFile(t, neighbor, yardContent)
+	for _, invocation := range []struct {
+		args []string
+		code int
+		want []string
+	}{
+		{[]string{"config", "validate"}, 1, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO"}},
+		{[]string{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "yards/neighbor/config.env:1: GIT_USER_NAME"}},
+		{[]string{"config", "set", "SSH_PORT", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "expects SETTING VALUE pairs"}},
+		{[]string{"config", "set", "SSH_PORT", "2298", "--scope", "host", "--scope", "yard", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "--scope may be specified only once"}},
+		{[]string{"config", "import", "SSH_PORT", "input", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "yards/neighbor/config.env:1: GIT_USER_NAME", "config import: configuration: SSH_PORT (scalar settings): setting is local-only"}},
+	} {
+		var output bytes.Buffer
+		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: invocation.args, Stdout: &output, Stderr: &output})
+		if code != invocation.code {
+			t.Fatalf("%v: exit=%d %s", invocation.args, code, &output)
+		}
+		for _, want := range invocation.want {
+			if !strings.Contains(output.String(), want) {
+				t.Fatalf("%v: missing %q in %s", invocation.args, want, &output)
+			}
+		}
+	}
+	if string(mustReadConfigFixture(t, host)) != hostContent || string(mustReadConfigFixture(t, neighbor)) != yardContent {
+		t.Fatal("refused edit changed settings")
+	}
+}
+
+// Argument refusals keep the command diagnostic when the selected yard load fails.
+func TestConfigAuthoringReportsArgumentRefusalsBesideYardLoadRefusal(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	yardFile := filepath.Join(home, "yards/default/config.env")
+	const yardContent = "GIT_USER_NAME=$INVALID_YARD_REFERENCE\n"
+	writeConfigCommandFile(t, yardFile, yardContent)
+	const sourceNext = "yard: Next: correct the named configuration source, then run config validate"
+	for _, invocation := range []struct {
+		args          []string
+		refusal, next string
+	}{
+		{[]string{"config", "set", "SSH_PORT", "--scope", "yard", "--yes"}, "config set: expects SETTING VALUE pairs", ""},
+		{[]string{"config", "set", "SSH_PORT", "2200", "--scope", "yard", "--scope", "yard", "--yes"}, "config set: --scope may be specified only once", ""},
+		{[]string{"config", "import", "SSH_PORT", "input", "--scope", "yard", "--yes"},
+			"config import: configuration: SSH_PORT (scalar settings): setting is local-only and cannot be imported from versioned configuration",
+			"yard: Next: use a supported value for the named setting"},
+	} {
+		var output bytes.Buffer
+		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: invocation.args, Stdout: &output, Stderr: &output})
+		lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+		want := []string{"yard: " + invocation.refusal}
+		if invocation.next != "" {
+			want = append(want, invocation.next)
+		}
+		want = append(want, "yard: yard default, config inspection: yards/default/config.env:1: GIT_USER_NAME (local scalar settings): "+
+			"settings files accept only literal values. Replace the parameter expansion or setting reference with its value", sourceNext)
+		if code != 2 || !slices.Equal(lines, want) {
+			t.Fatalf("%v: exit=%d\n%s\nwant:\n%s", invocation.args, code, &output, strings.Join(want, "\n"))
+		}
+	}
+	if string(mustReadConfigFixture(t, yardFile)) != yardContent {
+		t.Fatal("refused edit changed settings")
+	}
+}
+
+func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	flat := filepath.Join(home, "yards/neighbor.env")
+	overlay := filepath.Join(root, "private/yards/neighbor.env")
+	const ignored = "SSH_PORT=2399\nGIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
+	writeConfigCommandFile(t, overlay, ignored)
+	const prefix = "# existing registration\r\nSSH_PORT=2298\r\n"
+	writeConfigCommandFile(t, flat, prefix+"GIT_USER_NAME=Jane\r\n", 0o640)
+	run := func(args ...string) {
+		t.Helper()
+		var output bytes.Buffer
+		if code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment,
+			Arguments: append([]string{"-Y", "neighbor", "config", "set", "--scope", "yard", "--local", "--yes"}, args...),
+			Stdout:    io.Discard, Stderr: &output}); code != 0 {
+			t.Fatalf("exit=%d %s", code, &output)
+		}
+	}
+	run("GIT_USER_NAME", "O'Connor")
+	if got := string(mustReadConfigFixture(t, flat)); got != prefix+"GIT_USER_NAME='O'\\''Connor'\r\n" {
+		t.Fatalf("single edit changed unrelated records: %q", got)
+	}
+	run("GIT_USER_NAME", "O'Connor", "GIT_USER_EMAIL", "new@example.invalid")
+	if got := string(mustReadConfigFixture(t, flat)); got != prefix+"GIT_USER_NAME='O'\\''Connor'\r\nGIT_USER_EMAIL='new@example.invalid'\r\n" {
+		t.Fatalf("batch changed unrelated records: %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(home, "yards/neighbor/config.env")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("nested registration shadows the flat one: %v", err)
+	}
+	if content := string(mustReadConfigFixture(t, overlay)); content != ignored {
+		t.Fatalf("yard edit changed checkout overlay: %q", content)
+	}
+	loaded := loadConfigCommandContext(t, root, environment, "neighbor")
+	if loaded.Context.SSHPort != 2298 || loaded.Environment["GIT_USER_NAME"] != "O'Connor" {
+		t.Fatal("flat registration lost its effective settings")
+	}
+}
+
 func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
-	remote, _ := configBareSourceRepository(
+	remote, publisher := configBareSourceRepository(
 		t, "owner-a", "DEV_UID=2297\nDEV_SUDO=1\n",
 	)
 	environment = append(environment,
@@ -3354,6 +3531,19 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	if strings.TrimSpace(versioned) != "DEV_UID='2298'\nDEV_SUDO=1" {
 		t.Fatalf("pushed host config = %q", versioned)
 	}
+	name, email := "O'Connor $HOME \\ \" #", "new@example.invalid"
+	if code := run("config", "set", "GIT_USER_NAME", name, "GIT_USER_EMAIL", email, "--scope", "host", "--git", "--yes"); code != 0 {
+		t.Fatalf("multi-pair set: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	versioned = configSourceGitOutput(t, remote, "show", "HEAD:hosts/owner-a/config.env")
+	assignments, err := config.ParsePersistentAssignments("config.env", []byte(versioned))
+	values := make(map[string]string, len(assignments))
+	for _, assignment := range assignments {
+		values[assignment.Name] = assignment.Value
+	}
+	if err != nil || values["GIT_USER_NAME"] != name || values["GIT_USER_EMAIL"] != email || values["DEV_UID"] != "2298" {
+		t.Fatalf("multi-pair set persisted %q, %v", values, err)
+	}
 	treeBeforeShared := configSourceGitOutput(t, remote, "ls-tree", "-r", "--name-only", "HEAD")
 	if strings.Contains(treeBeforeShared, "shared/config.env") {
 		t.Fatalf("selected host write exported shared local settings: %s", treeBeforeShared)
@@ -3379,6 +3569,50 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	if code := run("config", "sync", "status", "--offline"); code != 0 {
 		t.Fatalf("post-push status: code=%d stdout=%s stderr=%s",
 			code, stdout.String(), stderr.String())
+	}
+	// A clean working tree can still have another owner's unpublished commit.
+	pending := filepath.Join(checkout, "hosts/owner-b/config.env")
+	const pendingContent = "GIT_USER_NAME='Owner B'\n"
+	writeConfigCommandFile(t, pending, pendingContent)
+	if code := run("config", "set", "GIT_USER_NAME", "Jane", "--scope", "shared", "--git", "--yes"); code == 0 || !strings.Contains(stderr.String(), "checkout is dirty") {
+		t.Fatalf("accepted unpublished file: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if got := string(mustReadConfigFixture(t, pending)); got != pendingContent {
+		t.Fatalf("unpublished file changed: %q", got)
+	}
+	runConfigSyncGit(t, checkout, "add", "--", "hosts/owner-b/config.env")
+	runConfigSyncGit(t, checkout, "-c", "user.name=Subyard Test", "-c", "user.email=test@invalid", "commit", "-m", "Save unrelated owner settings")
+	localBefore := snapshotConfigCheckout(t, checkout)
+	upstreamBefore := configSourceGitOutput(t, remote, "rev-parse", "HEAD")
+	cacheBefore := mustReadConfigFixture(t, configsync.ManifestPath(configHome))
+	for _, edit := range [][]string{
+		{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "shared", "--git", "--yes"},
+		{"config", "unset", "E2E_VM_CPU", "--scope", "shared", "--git", "--yes"},
+	} {
+		if code := run(edit...); code == 0 || !strings.Contains(stderr.String(), "checkout contains unpublished commits") {
+			t.Fatalf("accepted unpublished commit: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+		}
+		if upstream := configSourceGitOutput(t, remote, "rev-parse", "HEAD"); upstream != upstreamBefore ||
+			!reflect.DeepEqual(snapshotConfigCheckout(t, checkout), localBefore) ||
+			!bytes.Equal(mustReadConfigFixture(t, configsync.ManifestPath(configHome)), cacheBefore) {
+			t.Fatal("refused edit changed the checkout, upstream or cache")
+		}
+	}
+	runConfigSyncGit(t, publisher, "pull", "-q", "--ff-only")
+	writeConfigCommandFile(t, filepath.Join(publisher, "shared/config.env"), "GIT_USER_NAME='Upstream'\n")
+	commitConfigSource(t, publisher, "Advance upstream independently")
+	runConfigSyncGit(t, publisher, "push", "-q")
+	upstreamBefore = configSourceGitOutput(t, remote, "rev-parse", "HEAD")
+	if code := run("config", "set", "GIT_USER_NAME", "Jane", "--scope", "shared", "--git", "--yes"); code != 1 ||
+		!strings.Contains(stderr.String(), "upstream is diverged") ||
+		!strings.Contains(stderr.String(), "reconcile the branch with git") ||
+		strings.Contains(stderr.String(), "config sync pull") {
+		t.Fatalf("diverged checkout: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	if configSourceGitOutput(t, remote, "rev-parse", "HEAD") != upstreamBefore ||
+		!reflect.DeepEqual(snapshotConfigCheckout(t, checkout), localBefore) ||
+		!bytes.Equal(mustReadConfigFixture(t, configsync.ManifestPath(configHome)), cacheBefore) {
+		t.Fatal("diverged refusal changed the checkout, upstream or cache")
 	}
 	gone := remote + ".temporarily-unavailable"
 	if err := os.Rename(remote, gone); err != nil {
@@ -3605,7 +3839,7 @@ func loadConfigCommandContext(t *testing.T, root string, environment []string, y
 	}
 	loaded, err := config.Load(config.LoadOptions{
 		RepositoryRoot: root, OperatorHome: values["SUBYARD_OPERATOR_HOME"],
-		YardName: yard, Environment: values, DisablePrivate: true,
+		YardName: yard, Environment: values,
 	})
 	if err != nil {
 		t.Fatal(err)

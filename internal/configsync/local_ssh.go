@@ -26,7 +26,7 @@ func normalizeGitSSHCache(source *sourceSnapshot) ([]string, error) {
 		if bytes.Equal(content, candidate.Content) {
 			continue
 		}
-		names, err := config.AssignedSettingNames(candidate.SourcePath, func(string) ([]byte, error) { return content, nil })
+		names, err := config.AssignedSettingNames(candidate.SourcePath, content)
 		if err != nil {
 			return nil, err
 		}
@@ -150,7 +150,7 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		known := loaded.Context.YardName == "default"
 		if !known {
 			if _, rootErr := os.Stat(options.ConfigHome); !errors.Is(rootErr, os.ErrNotExist) {
-				_, registrationErr := config.FindYardRegistrationFile(filepath.Join(options.RepositoryRoot, "config"), options.ConfigHome, loaded.Context.YardName)
+				_, registrationErr := config.FindYardRegistrationFile(options.ConfigHome, loaded.Context.YardName)
 				known = registrationErr == nil
 				if registrationErr != nil && !errors.Is(registrationErr, config.ErrUnknownYard) {
 					cleanup()
@@ -160,7 +160,7 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		}
 		if known {
 			live, loadErr = config.Load(config.LoadOptions{Catalog: &loaded.Catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
-				YardName: loaded.Context.YardName, ConfigLocked: options.ConfigLocked, DisablePrivate: true,
+				YardName: loaded.Context.YardName, ConfigLocked: options.ConfigLocked,
 				Environment: candidateEnvironment(options.Environment, options.ConfigHome, loaded.Catalog)})
 		} else {
 			loadErr = config.ErrUnknownYard
@@ -181,24 +181,15 @@ func prepareLocalSSHPorts(options Options, source *sourceSnapshot, previous Mani
 		if projectedPorts[yard] == port {
 			continue
 		}
-		path := filepath.Join(options.ConfigHome, "yards", yard, "config.env")
+		path, err := config.LocalYardSettingsFile(filepath.Join(options.ConfigHome, "yards"), yard)
+		if err != nil {
+			cleanup()
+			return nil, nil, func() {}, err
+		}
 		before, err := readLocalSSHFile(options.ConfigHome, path)
 		if err != nil {
 			cleanup()
 			return nil, nil, func() {}, err
-		}
-		flatPath := filepath.Join(options.ConfigHome, "yards", yard+".env")
-		flat, err := readLocalSSHFile(options.ConfigHome, flatPath)
-		if err != nil {
-			cleanup()
-			return nil, nil, func() {}, err
-		}
-		if flat.Exists && before.Exists {
-			cleanup()
-			return nil, nil, func() {}, errors.New("SSH port migration requires unambiguous local yard settings")
-		}
-		if flat.Exists {
-			path, before = flatPath, flat
 		}
 		value := strconv.Itoa(port)
 		content, err := config.EditPersistentAssignmentContent(path, before.Content, "SSH_PORT", &value)

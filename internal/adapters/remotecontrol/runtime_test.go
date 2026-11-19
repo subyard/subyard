@@ -126,11 +126,11 @@ func TestLookupFallsBackFromSymlinkedHigherPrecedenceEntry(t *testing.T) {
 	if err := os.Symlink(target, nested); err != nil {
 		t.Fatal(err)
 	}
-	privateFlat := filepath.Join(runtime.ConfigDir, "..", "private", "yards", "demo.env")
-	writeRemoteFile(t, privateFlat, "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\n", 0o600)
+	git := filepath.Join(runtime.ConfigHome, ".sync", "settings", "yards", "demo", "config.env")
+	writeRemoteFile(t, git, "ACCESS_KIND=remote\nOWNER_ENDPOINT=owner.example\n", 0o600)
 
 	record, exists, err := runtime.Lookup(context.Background(), "demo")
-	if err != nil || !exists || record.Path != privateFlat ||
+	if err != nil || !exists || record.Path != git ||
 		record.Spec.OwnerEndpoint != "owner.example" {
 		t.Fatalf("unexpected fallback lookup: record=%#v exists=%v err=%v", record, exists, err)
 	}
@@ -545,7 +545,6 @@ func remoteFixture(t *testing.T) Runtime {
 	return Runtime{
 		Home:       filepath.Join(root, "home"),
 		ConfigHome: filepath.Join(root, "config-home"),
-		ConfigDir:  filepath.Join(root, "config"),
 		DataHome:   filepath.Join(root, "data"),
 		PublicKey:  public,
 		Timeout:    time.Second,

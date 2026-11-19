@@ -27,10 +27,14 @@ func planSettingsV2Yard(input settingsV2YardSnapshot, inherited map[string]struc
 	nestedPath, legacyPath := settingsV2YardLabels(yard)
 	nested, legacy := input.Nested, input.Legacy
 	if nested.Exists && legacy.Exists {
+		retry := "merge the named files into one, then run yard update --check"
+		if yard != "default" {
+			retry = fmt.Sprintf("after merging the settings into the nested file, run the verified candidate's yard -Y default config repair-registration %s, then run yard update --check", yard)
+		}
 		return nil, nil, &Blocker{
 			Code: CodePreconditionBlocked, Resource: "yard." + yard,
-			Message: fmt.Sprintf("yard %s has duplicate registrations: yards/%s/config.env and yards/%s.env", yard, yard, yard),
-			Retry:   fmt.Sprintf("run the verified candidate's yard -Y default config repair-registration %s, then run yard update --check", yard),
+			Message: fmt.Sprintf("yard %s has duplicate registrations: yards/%s/config.env and yards/%s.env. Merge their settings into one file", yard, yard, yard),
+			Retry:   retry,
 		}
 	}
 	if !nested.Exists && !legacy.Exists {

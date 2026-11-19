@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -223,6 +224,30 @@ func TestConfigValidateInvalidBaseAndNamedScopesIsSafeAndReadOnly(t *testing.T) 
 	}
 	if _, err := os.Lstat(filepath.Join(home, "migrations")); !os.IsNotExist(err) {
 		t.Fatal("schema validation mutated release state")
+	}
+
+	writeConfigCommandFile(t, filepath.Join(home, "config.env"), "# valid host settings\n")
+	writeConfigCommandFile(t, filepath.Join(home, "yards/sample.env"), "SSH_PORT=2400\n")
+	stdout.Reset()
+	stderr.Reset()
+	if code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: []string{"config", "validate", "--all-local", "--json"}, Stdout: &stdout, Stderr: &stderr}); code != 1 {
+		t.Fatalf("conflicting registration: code=%d stdout=%s stderr=%s", code, &stdout, &stderr)
+	}
+	var report struct {
+		Configurations []struct {
+			Yard, Diagnostic, Retry string
+			Valid                   bool
+		}
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	rows := report.Configurations
+	if len(rows) != 2 || rows[0].Yard != "default" || !rows[0].Valid ||
+		rows[1].Yard != "sample" || rows[1].Valid ||
+		!strings.Contains(rows[1].Diagnostic, "yards/sample/config.env and yards/sample.env") ||
+		!strings.Contains(rows[1].Retry, "merge the named files into one") {
+		t.Fatalf("conflict must be attributed to its yard with retry guidance: %+v", rows)
 	}
 }
 

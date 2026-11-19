@@ -57,7 +57,7 @@ func (prepared *preparedCommand) prepareLocalConfigBatch(ctx context.Context, re
 		return domain.CollectOrderedRefusals(domain.CollectOrderedRefusals(refusals...), constraints)
 	}
 	return prepared.attachLocalConfigScalars(ctx, canonical, prospective, *baseline, desired, func(guard func() error) error {
-		return config.WritePersistentFileIfUnchanged(home, path, *baseline, desired.Content, guard)
+		return config.WriteLocalScalarFileIfUnchanged(home, path, *baseline, desired.Content, guard)
 	})
 }
 
@@ -129,7 +129,7 @@ func (cli *CLI) checkLocalBatchConstraints(loaded config.Loaded, scope config.Se
 	var constraints []error
 	if scope != config.ScopeYard {
 		var err error
-		names, err = config.LocalBatchYardNames(paths.ConfigDir, paths.ConfigHome)
+		names, err = config.LocalBatchYardNames(paths.ConfigHome)
 		constraints = append(constraints, err)
 	}
 	environment := cli.configProspectiveEnvironment(loaded)

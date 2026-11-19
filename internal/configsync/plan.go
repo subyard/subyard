@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -59,20 +60,35 @@ func BuildPlan(options Options) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	source, err := readSource(options, hostID, catalog)
-	if err != nil {
-		return Plan{}, err
-	}
+	source, sourceErr := readSource(options, hostID, catalog)
 	previous, err := readManifest(options.ConfigHome)
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, domain.CollectRefusals(sourceErr, err)
 	}
 	if previous.SchemaVersion != 0 && previous.HostID != hostID {
-		return Plan{}, fmt.Errorf(
+		return Plan{}, domain.CollectRefusals(sourceErr, fmt.Errorf(
 			"managed configuration belongs to owner host %q, not %q", previous.HostID, hostID,
-		)
+		))
 	}
-	if err := guardHostSourceIdentity(source.root, hostID, previous); err != nil {
+	var identityErr error
+	if source.commonInputsRead {
+		identityErr = guardHostSourceIdentity(source.root, hostID, previous)
+		if identityErr != nil {
+			// The selected owner subtree is not the one the preserved settings came from.
+			source.commonInputsRead = false
+		}
+	}
+	var legacyContexts []config.Loaded
+	inspection := options
+	inspection.inspectionOnly = true
+	candidateErr := validateCandidate(inspection, source, previous, catalog, &legacyContexts)
+	if errors.Is(candidateErr, errIncompleteCandidate) && (sourceErr != nil || identityErr != nil) {
+		candidateErr = nil
+	}
+	if candidateErr != nil {
+		candidateErr = fmt.Errorf("candidate configuration: %w", candidateErr)
+	}
+	if err := domain.CollectRefusals(sourceErr, identityErr, candidateErr); err != nil {
 		return Plan{}, err
 	}
 	allowedAssets := map[string]bool{}
@@ -83,12 +99,6 @@ func BuildPlan(options Options) (Plan, error) {
 		if asset, _ := managedSettingRole(localSettingsPath(file.Path)); asset != "" && !allowedAssets[asset] {
 			return Plan{}, errors.New("config sync manifest contains an unknown file setting")
 		}
-	}
-	var legacyContexts []config.Loaded
-	inspection := options
-	inspection.inspectionOnly = true
-	if err := validateCandidate(inspection, source, previous, catalog, &legacyContexts); err != nil {
-		return Plan{}, fmt.Errorf("candidate configuration: %w", err)
 	}
 	localDesired, overrides, cleanup, err := prepareLocalSSHPorts(options, &source, previous, legacyContexts)
 	if err != nil {
@@ -276,6 +286,42 @@ func BuildPlan(options Options) (Plan, error) {
 	return plan, nil
 }
 
+// CheckScalarPublication proves that the full sync plan has exactly the file
+// changes the scalar editor would make to the live cache.
+func (plan Plan) CheckScalarPublication(target string, edit func(string, []byte) ([]byte, error)) error {
+	refusal := errors.New("the Git cache has differences outside this scalar edit. Run yard config sync pull before retrying")
+	target = gitSettingsPath(target)
+	for _, change := range plan.Changes {
+		if change.Path != target {
+			return refusal
+		}
+		candidate, exists := plan.desired[target]
+		if !exists {
+			return refusal
+		}
+		path := filepath.Join(plan.options.ConfigHome, filepath.FromSlash(target))
+		before, err := config.ReadPersistentFileSnapshot(plan.options.ConfigHome, path)
+		if err != nil {
+			return err
+		}
+		if (before.Exists && digestBytes(before.Content) != change.BeforeDigest) ||
+			(!before.Exists && change.BeforeDigest != "") {
+			return ErrPlanStale
+		}
+		if before.Exists && before.Identity.Mode&0o777 != candidate.Mode {
+			return refusal
+		}
+		expected, err := edit(path, before.Content)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(expected, candidate.Content) {
+			return refusal
+		}
+	}
+	return nil
+}
+
 func guardDeletedYardDefinition(options Options, path string) error {
 	yard, definition := deletedYardDefinition(path)
 	if !definition || options.YardInUse == nil {
@@ -328,26 +374,24 @@ func validateCandidate(
 		}
 		return ""
 	}
-	shared, err := selectLocal("overrides/shared/config.env")
-	if err != nil {
-		return err
+	shared, sharedErr := selectLocal("overrides/shared/config.env")
+	host, hostErr := selectLocal("config.env")
+	localYards, yardErr := candidateLocalYards(options.ConfigHome, source, excluded)
+	refusals := []error{sharedErr, hostErr, yardErr}
+	if localYards == nil {
+		localYards = map[string]string{}
 	}
-	host, err := selectLocal("config.env")
-	if err != nil {
-		return err
-	}
-	yardNames, err := candidateYardNames(options.ConfigHome, source, previous)
-	if err != nil {
-		return err
-	}
-	localYards := map[string]string{}
 	gitYards := map[string]string{}
+	yardNames := slices.DeleteFunc(slices.Sorted(maps.Keys(localYards)), func(name string) bool { return name == "default" })
 	assetYards := append([]string{"default"}, yardNames...)
 	for _, name := range assetYards {
 		target := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
-		localYards[name], err = selectLocal(target)
-		if err != nil {
-			return err
+		// SSH port migration may stage a new registration for a Git-only yard.
+		if localYards[name] == "" {
+			path := filepath.Join(options.ConfigHome, filepath.FromSlash(target))
+			if _, overridden := options.validationOverrides[path]; overridden {
+				localYards[name] = path
+			}
 		}
 		gitYards[name] = selectGit(target)
 	}
@@ -358,68 +402,74 @@ func validateCandidate(
 		GitHostSettings:   selectGit("config.env"), GitYardSettings: gitYards,
 		SharedAssets:    filepath.Join(options.ConfigHome, "overrides", "shared", "agents"),
 		HostAssets:      filepath.Join(options.ConfigHome, "overrides", "host", "agents"),
-		GitSharedAssets: filepath.Join(source.root, "shared", "overrides", "agents"),
-		GitHostAssets:   filepath.Join(source.root, "hosts", source.hostID, "overrides", "agents"),
+		GitSharedAssets: source.assetRoots["overrides/shared/agents"],
+		GitHostAssets:   source.assetRoots["overrides/host/agents"],
 		YardAssets:      map[string]string{}, GitYardAssets: map[string]string{},
 		ExcludedLocalPaths: excluded,
 	}
 	for _, name := range assetYards {
 		layerPaths.YardAssets[name] = filepath.Join(options.ConfigHome, "yards", name, "overrides", "agents")
-		layerPaths.GitYardAssets[name] = filepath.Join(source.root, "hosts", source.hostID, "yards", name, "overrides", "agents")
+		layerPaths.GitYardAssets[name] = source.assetRoots[filepath.ToSlash(filepath.Join("yards", name, "overrides", "agents"))]
 	}
-	// Reset yards are absent from effective inventory, but their retained authored
-	// source must still satisfy the same schema and runtime configuration checks.
+	sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
+	contexts := make([]config.Loaded, 0, len(yardNames)+1)
+	incomplete := false
 	for _, name := range assetYards {
 		reset, err := config.YardFallbackReset(options.ConfigHome, name)
 		if err != nil {
-			return err
-		}
-		if !reset || gitYards[name] == "" {
+			refusals = append(refusals, err)
 			continue
 		}
-		sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
-		if _, err := config.Load(config.LoadOptions{Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome, YardName: name, Environment: environment, DisablePrivate: true, ConfigLocked: options.ConfigLocked, LayerPaths: sourceLayers, FileOverrides: options.validationOverrides, SyncSource: true}); err != nil {
-			return fmt.Errorf("yard %s retained source: %w", name, err)
-		}
-	}
-	contexts := make([]config.Loaded, 0, len(yardNames)+1)
-	load := func(name string) error {
-		loaded, err := config.Load(config.LoadOptions{
+		// Effective checks of a yard with an unread Git input would refuse values
+		// that exist upstream; its local files still get per-file checks.
+		complete := source.yardInputsComplete(name)
+		loadOptions := config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
-			YardName: name, Environment: environment, DisablePrivate: true,
+			YardName: name, Environment: environment, SourceChecksOnly: !complete,
 			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides,
-		})
+		}
+		// Reset yards are absent from effective inventory, but their retained authored
+		// source must still satisfy the same schema and runtime configuration checks.
+		// Git source refusals are already reported by readSource.
+		if reset && gitYards[name] != "" && complete {
+			retained := loadOptions
+			retained.LayerPaths, retained.SyncSource = sourceLayers, true
+			if _, err := config.Load(retained); err != nil {
+				refusals = append(refusals, fmt.Errorf("yard %s retained source: %w", name, err))
+			}
+		}
+		if name != "default" && reset && localYards[name] == "" {
+			continue
+		}
+		loaded, err := config.Load(loadOptions)
 		if err != nil {
-			return fmt.Errorf("yard %s: %w", name, err)
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+			continue
+		}
+		if !complete {
+			incomplete = true
+			continue
 		}
 		contexts = append(contexts, loaded)
-		return nil
-	}
-	if err := load("default"); err != nil {
-		return err
-	}
-	for _, name := range yardNames {
-		reset, err := config.YardFallbackReset(options.ConfigHome, name)
-		if err != nil {
-			return err
-		}
-		if reset && localYards[name] == "" {
-			continue
-		}
-		if err := load(name); err != nil {
-			return err
-		}
 	}
 	if !options.inspectionOnly {
-		if err := validateInventory(contexts); err != nil {
-			return err
-		}
+		refusals = append(refusals, validateInventory(contexts))
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
+	}
+	if incomplete {
+		return errIncompleteCandidate
 	}
 	if len(capture) != 0 {
 		*capture[0] = contexts
 	}
 	return nil
 }
+
+// errIncompleteCandidate marks a candidate that passed only per-file checks
+// because some Git inputs were refused; those refusals are reported instead.
+var errIncompleteCandidate = errors.New("candidate configuration has unread Git inputs")
 
 func candidateEnvironment(
 	source map[string]string,
@@ -617,7 +667,7 @@ func applicationsWithPrevious(catalog config.Catalog, path string, live []byte, 
 		}
 		return []config.SettingApplication{config.SettingConfigApply}
 	}
-	names, err := config.AssignedSettingNames(path, func(string) ([]byte, error) { return live, nil })
+	names, err := config.AssignedSettingNames(path, live)
 	var applications []config.SettingApplication
 	if err != nil {
 		applications = []config.SettingApplication{config.SettingYardInit}

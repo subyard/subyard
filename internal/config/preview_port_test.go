@@ -22,7 +22,7 @@ func TestWebPreviewHostPortSelection(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			loaded, err := Load(LoadOptions{
-				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t), DisablePrivate: true,
+				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t),
 				Environment: map[string]string{"SSH_PORT": test.sshPort, "WEB_PREVIEW_HOST_PORT": test.port},
 			})
 			if err != nil {
@@ -38,7 +38,7 @@ func TestWebPreviewHostPortSelection(t *testing.T) {
 func TestWebPreviewRejectsInvalidAndCollidingHostPort(t *testing.T) {
 	for _, port := range []string{"0", "80", "1023", "65536", "oops", "032222", "+32222", "2222"} {
 		t.Run(port, func(t *testing.T) {
-			_, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"SSH_PORT": "2222", "WEB_PREVIEW_HOST_PORT": port, "CODING_TOOL_INTEGRATIONS": "codex"}})
+			_, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SSH_PORT": "2222", "WEB_PREVIEW_HOST_PORT": port, "CODING_TOOL_INTEGRATIONS": "codex"}})
 			if err == nil || !strings.Contains(err.Error(), "WEB_PREVIEW_HOST_PORT") {
 				t.Fatalf("invalid preview port was accepted: %v", err)
 			}
@@ -51,7 +51,7 @@ func TestWebPreviewHostPortReservesSelectedProfileListeners(t *testing.T) {
 	for _, selected := range []string{"", "fixture"} {
 		t.Run("selected="+selected, func(t *testing.T) {
 			_, err := Load(LoadOptions{
-				RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true,
+				RepositoryRoot: root, OperatorHome: testkit.TempDir(t),
 				Environment: map[string]string{
 					"WEB_PREVIEW_HOST_PORT": "18080", "ENVIRONMENT_PROFILES": selected, "FIXTURE_HOST_PORT": "18080",
 				},
@@ -80,7 +80,7 @@ func TestWebPreviewHostPortPreservesNamedYardOverrides(t *testing.T) {
 	for _, test := range []struct{ yard, port string }{{"inherited", "18080"}, {"overridden", "18081"}} {
 		t.Run(test.yard, func(t *testing.T) {
 			loaded, err := Load(LoadOptions{
-				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, YardName: test.yard, DisablePrivate: true,
+				RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, YardName: test.yard,
 				Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home},
 			})
 			if err != nil {

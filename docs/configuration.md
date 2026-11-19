@@ -70,8 +70,8 @@ sessions block teardown; an unfinished guest without SSH or an unavailable guest
 require a separate stop. An unavailable Incus daemon remains an error.
 
 The reset preserves HostID, credentials, shared and host settings, neighboring yards, and shared
-bridge/pool resources still in use. It leaves Git-authored definitions, their offline cache, and
-repository legacy definitions intact. A protected local marker prevents their yard scalars and
+bridge/pool resources still in use. It preserves Git-authored definitions and their offline cache.
+A protected local marker prevents their yard scalars and
 file assets from silently reactivating the removed registration or influencing its replacement.
 A new local registration keeps that boundary; shared and host fallback still applies. Sync can
 refresh the retained Git source without registering the reset yard again.
@@ -97,6 +97,17 @@ Each yard has its own settings, including `default`:
 SSH_PORT=2222
 ```
 
+Each local scope has one settings file. An existing flat `yards/NAME.env` can also
+supply local settings for any yard, including `default`. If both local yard paths
+exist, merge their settings into one file and remove the other before loading
+configuration. Scalar and integration edits use the existing file. Unsetting its
+final assignment leaves the file in place.
+
+Move settings from any old checkout overlay into the corresponding local or Git
+configuration before upgrading. For host settings from `private/config.env`, use
+the host file under the configuration root or the Git host layer. For a definition
+from `private/yards/NAME.env`, use the local or Git yard layer.
+
 Scalar precedence is:
 
 ```text
@@ -114,19 +125,32 @@ highest precedence. It is never persisted by config sync. `yard [-Y <yard>] conf
 is the authoritative explanation of the actual chain, including derived values. Start from
 [`config/settings.env.example`](../config/settings.env.example).
 
+User settings files at shared, host and yard scope accept literal values only. This applies to
+local overrides and Git settings. A reference such as `$NAME` or `${NAME}`, including a conditional
+default, causes a read error that identifies the file and line. Replace the expression with the
+value you want to save. To include dollar text literally, use single quotes around the value.
+Shipped release defaults still support parameter expansion.
+
+Inside a quoted multiline scalar value, line endings are part of the value.
+Both LF and CRLF are preserved. Older readers normalized CRLF to LF, so
+converting an existing multiline settings file between line-ending styles
+can now change its values.
+
 `YARD_MOUNTS`, `YARD_CAPS` and `YARD_DEVICES` belong to environment profiles. Only a selected
 profile's own `profile.conf` declares them, and operator values never reach its evaluation:
 select the profile instead. `config set` refuses to assign them. The loader ignores a value
 already in a host, shared, yard or Git settings file, or in the command environment, as it
-ignores retired settings, and no operation refuses because of it. `config show`, `status`,
+ignores retired settings. The literal-value rule still applies to assignments in settings files.
+`config show`, `status`,
 `yard update --check` and the `init` plan report each non-empty one as configuration state, not
 as a warning, with its file and line and its removal:
 `yard -Y NAME config unset NAME --scope SCOPE --local` (or `--git`) when that command writes the
-file, otherwise the line to remove from that file, such as a flat `yards/NAME.env` registration.
-A default of the setting inside another assignment, such as
-`LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"`, has no effect and is not reported; a required check such
-as `${YARD_DEVICES:?}` is ignored as well. The JSON report of `update --check` carries
-them in its `configuration` array. If such a value supplied a device, the `init` plan names each
+file, otherwise the line to remove from that file. The JSON report of `update --check` lists
+ignored literal assignments in its `configuration` array.
+
+Expressions such as `LIMITS_MEMORY="${YARD_DEVICES:=2GiB}"` or `${YARD_DEVICES:?}` cause
+a configuration read error under the literal-value rule. If an old profile-only assignment
+supplied a device, the `init` plan names each
 device that the extras stage now detaches; while the yard's instance cannot be read, it states that
 any attached `yx-*` device no selected profile requests is detached. A VM yard does not apply a
 profile's container-only `YARD_DEVICES`; the `init` plan reports each entry as not applicable to VM
@@ -1074,7 +1098,9 @@ configuration. `config edit` requires `VISUAL` or `EDITOR` to name one executabl
 
 Persistent set/unset writers canonicalize every member of the selected legacy alias family,
 including removal of all aliases on unset. They preserve unrelated records, comments and existing
-permissions. Before consent they load the prospective scoped configuration through the normal
+permissions. Each setting change edits only the requested key in the selected file. A batch
+applies all its pairs atomically to that same file. Local yard writes use an existing flat
+registration when it is the selected definition. Before consent, the writers validate the draft through the normal
 resolver, including every affected local registration for host/shared changes. Relevant source,
 profile and asset dependencies are bound by content and filesystem identity and rechecked before
 publication; changed inputs require a fresh assessment. Transient selection overrides cannot hide
@@ -1155,8 +1181,9 @@ blocked. The release settings migration pins each affected local yard's existing
 effective port, preserving winning local files and leaving external Git source and managed cache
 untouched. Command overrides do not participate. Explicit config sync transactionally removes
 legacy SSH assignments from its owned cache and adds local pins when removal would change a
-port. Prepared Git push or selected Git authoring separately removes them from the selected
-owner's source after consent, retaining empty tracked yard definitions, other owners and assets.
+port. `config sync push` can remove them from the selected owner's source after consent, retaining
+empty tracked yard definitions, other owners and assets. Run config sync separately when a
+Git scalar edit requires migration of local settings.
 Existing port collisions, permissions, ownership and stale-input checks still apply. Policies
 for other listeners remain with their declaring core or profile settings; listener classification
 alone does not make a setting portable.
@@ -1385,6 +1412,9 @@ or creates a commit. Its optional `-m`/`--message` argument remains accepted for
 Use typed writers with `--git` to create and push a setting change. Dirty, conflicted, detached,
 upstream-less or diverged checkouts fail closed; Subyard does not stash, merge, rebase, reset or
 resolve conflicts.
+Git scalar edits require a clean checkout at its upstream commit and a cache that matches
+the source outside the selected edit. Publish or reconcile pending checkout changes separately.
+Run `yard config sync pull` to reconcile any other differences before retrying the edit.
 
 `sync pull`, `sync push` and typed writers with `--git` fetch the upstream once to plan. A change
 fetches it once more after confirmation, before its first write, and fails if the upstream moved;

@@ -15,49 +15,30 @@ import (
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-func TestYardIntegrationWriteMigratesFullRegistration(t *testing.T) {
-	for _, source := range []string{"flat", "private"} {
-		t.Run(source, func(t *testing.T) {
+func TestYardIntegrationWritePreservesFlatRegistration(t *testing.T) {
+	for _, name := range []string{"demo", "default"} {
+		t.Run(name, func(t *testing.T) {
 			root := testkit.TempDir(t)
-			configHome := filepath.Join(root, "state")
-			configDir := filepath.Join(root, "config")
-			path := filepath.Join(configHome, "yards/demo.env")
-			if source == "private" {
-				path = filepath.Join(root, "private/yards/demo.env")
-			}
+			path := filepath.Join(root, "yards", name+".env")
 			original := "# operator settings\nSSH_PORT=2244\nHOST_LINKS=\nAGENTS=relay\n"
 			writeFixture(t, path, original)
-			if err := os.MkdirAll(configHome, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			loaded := Loaded{Context: domain.Context{YardName: "demo", Paths: domain.RuntimePaths{ConfigHome: configHome, ConfigDir: configDir}}}
+			loaded := Loaded{Context: domain.Context{YardName: name, Paths: domain.RuntimePaths{ConfigHome: root}}}
 			plan, err := PlanYardIntegrationWrite(loaded, []string{"relay", "pi"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !plan.Changed() || plan.SourcePath != path {
+			if !plan.Changed() || plan.Path != path || string(plan.Before.Content) != original {
 				t.Fatalf("plan=%#v", plan)
-			}
-			if _, err := os.Stat(plan.Path); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("plan created target: %v", err)
 			}
 			if err := plan.Apply(); err != nil {
 				t.Fatal(err)
 			}
-			content, err := os.ReadFile(plan.Path)
-			if err != nil {
-				t.Fatal(err)
+			content, err := os.ReadFile(path)
+			if err != nil || string(content) != "# operator settings\nSSH_PORT=2244\nHOST_LINKS=\nCODING_TOOL_INTEGRATIONS='relay pi'\n" {
+				t.Fatalf("registration lost settings: %q, %v", content, err)
 			}
-			if string(content) != "# operator settings\nSSH_PORT=2244\nHOST_LINKS=\nCODING_TOOL_INTEGRATIONS='relay pi'\n" {
-				t.Fatalf("registration lost settings: %q", content)
-			}
-			preserved := path
-			if source == "flat" {
-				preserved = filepath.Join(configHome, "recovery/yard-registrations/demo.env")
-			}
-			bytes, err := os.ReadFile(preserved)
-			if err != nil || string(bytes) != original {
-				t.Fatalf("source lost: %q, %v", bytes, err)
+			if _, err := os.Stat(filepath.Join(root, "yards", name, "config.env")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("created a competing registration: %v", err)
 			}
 			again, err := PlanYardIntegrationWrite(loaded, []string{"relay", "pi"})
 			if err != nil || again.Changed() {
@@ -69,9 +50,8 @@ func TestYardIntegrationWriteMigratesFullRegistration(t *testing.T) {
 
 func TestYardIntegrationWriteRejectsStaleSource(t *testing.T) {
 	root := testkit.TempDir(t)
-	path := filepath.Join(root, "yards/demo.env")
-	writeFixture(t, path, "SSH_PORT=2244\n")
-	loaded := Loaded{Context: domain.Context{YardName: "demo", Paths: domain.RuntimePaths{ConfigHome: root, ConfigDir: filepath.Join(root, "config")}}}
+	path := filepath.Join(root, "yards/default.env")
+	loaded := Loaded{Context: domain.Context{YardName: "default", Paths: domain.RuntimePaths{ConfigHome: root}}}
 	plan, err := PlanYardIntegrationWrite(loaded, []string{})
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +64,7 @@ func TestYardIntegrationWriteRejectsStaleSource(t *testing.T) {
 		t.Fatalf("stale adoption wrote target: %v", err)
 	}
 	content, err := os.ReadFile(path)
-	if err != nil || !strings.Contains(string(content), "2245") {
+	if err != nil || string(content) != "SSH_PORT=2245\n" {
 		t.Fatalf("source changed: %q %v", content, err)
 	}
 }

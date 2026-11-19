@@ -23,7 +23,7 @@ func TestLoadDefaultYardSettingsOverrideHostWithoutAffectingNamedYards(t *testin
 	load := func(yard string) Loaded {
 		t.Helper()
 		loaded, err := Load(LoadOptions{
-			RepositoryRoot: root, OperatorHome: operatorHome, YardName: yard, DisablePrivate: true,
+			RepositoryRoot: root, OperatorHome: operatorHome, YardName: yard,
 			Environment: map[string]string{"SUBYARD_OPERATOR_HOME": operatorHome},
 		})
 		if err != nil {
@@ -59,7 +59,7 @@ func TestDefaultYardCandidateUsesOnlyExplicitCandidateLayer(t *testing.T) {
 		{map[string]string{"default": candidate}, "fixture"},
 		{map[string]string{}, ""},
 	} {
-		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, DisablePrivate: true,
+		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home,
 			Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home},
 			LayerPaths:  &LayerPaths{YardSettings: test.paths}})
 		if err != nil {
@@ -78,7 +78,7 @@ func TestLoadUsesSavedEndpointForSelectedLocalResource(t *testing.T) {
 	writeSavedEndpointFixture(t, dataHome, `{"schema":1,"allocations":[{"yard":"default","resource":"fixture.fixture","host":"owner.example.ts.net","port":17678}]}`)
 
 	loaded, err := Load(LoadOptions{
-		RepositoryRoot: root, OperatorHome: operatorHome, DisablePrivate: true,
+		RepositoryRoot: root, OperatorHome: operatorHome,
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME": operatorHome,
 			"SUBYARD_HOME":          dataHome,
@@ -112,7 +112,7 @@ func TestLoadKeepsExplicitEndpointOverrides(t *testing.T) {
 	writeSavedEndpointFixture(t, dataHome, `{"schema":1,"allocations":[{"yard":"default","resource":"fixture.fixture","host":"saved.example.ts.net","port":17678}]}`)
 
 	loaded, err := Load(LoadOptions{
-		RepositoryRoot: root, OperatorHome: operatorHome, DisablePrivate: true,
+		RepositoryRoot: root, OperatorHome: operatorHome,
 		Environment: map[string]string{
 			"SUBYARD_OPERATOR_HOME":  operatorHome,
 			"SUBYARD_HOME":           dataHome,
@@ -242,7 +242,7 @@ func TestCapturedResourceDeclarationsKeepSavedEndpointsFresh(t *testing.T) {
 	}
 	operatorHome := testkit.TempDir(t)
 	dataHome := filepath.Join(operatorHome, ".subyard")
-	options := LoadOptions{RepositoryRoot: root, Catalog: &catalog, Resources: func(string) (resource.Registry, error) { return registry, nil }, OperatorHome: operatorHome, DisablePrivate: true, Environment: map[string]string{"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture"}}
+	options := LoadOptions{RepositoryRoot: root, Catalog: &catalog, Resources: func(string) (resource.Registry, error) { return registry, nil }, OperatorHome: operatorHome, Environment: map[string]string{"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture"}}
 	for _, port := range []string{"17678", "27678"} {
 		writeSavedEndpointFixture(t, dataHome, `{"schema":1,"allocations":[{"yard":"default","resource":"fixture.fixture","host":"owner.example.ts.net","port":`+port+`}]}`)
 		loaded, err := Load(options)
@@ -263,7 +263,7 @@ func TestUnreadableSavedEndpointKeepsIndependentPortChecks(t *testing.T) {
 	operatorHome := testkit.TempDir(t)
 	dataHome := filepath.Join(operatorHome, ".subyard")
 	writeSavedEndpointFixture(t, dataHome, `{not json`)
-	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, DisablePrivate: true, Environment: map[string]string{
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, Environment: map[string]string{
 		"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture",
 		"SSH_PORT": "3000", "WEB_PREVIEW_HOST_PORT": "3000", "FIXTURE_ADVERTISE_HOST": "owner.example.ts.net",
 	}})
@@ -275,7 +275,7 @@ func TestUnreadableSavedEndpointKeepsIndependentPortChecks(t *testing.T) {
 		t.Fatalf("independent port checks were hidden: %#v", diagnostic)
 	}
 	// An explicit endpoint port keeps its collisions even though the read failed.
-	_, err = Load(LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, DisablePrivate: true, Environment: map[string]string{
+	_, err = Load(LoadOptions{RepositoryRoot: root, OperatorHome: operatorHome, Environment: map[string]string{
 		"SUBYARD_OPERATOR_HOME": operatorHome, "SUBYARD_HOME": dataHome, "ENVIRONMENT_PROFILES": "fixture",
 		"SSH_PORT": "3000", "FIXTURE_HOST_PORT": "3000",
 	}})

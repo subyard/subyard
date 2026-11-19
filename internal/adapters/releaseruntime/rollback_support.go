@@ -77,13 +77,13 @@ func CaptureRollbackSupport(ctx context.Context, configuration Config, sourceRoo
 		if files != nil {
 			names = append([]string{}, files.Yards...)
 		} else {
-			names, err = config.YardNames(filepath.Join(sourceRoot, "config"), configHome)
+			names, err = config.YardNames(configHome)
 			if err != nil {
 				return result, err
 			}
 		}
 		for _, name := range names {
-			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: sourceRoot, OperatorHome: operator, YardName: name, Environment: environment, ProspectiveFiles: files, DisablePrivate: files != nil, ConfigLocked: files != nil})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: sourceRoot, OperatorHome: operator, YardName: name, Environment: environment, ProspectiveFiles: files, ConfigLocked: files != nil})
 			if err != nil {
 				return result, errors.New("cannot capture retained runtime selection")
 			}
@@ -173,7 +173,7 @@ func captureCoreRollbackSupport(ctx context.Context, configuration Config, sourc
 	} else if err != nil {
 		return nil, err
 	}
-	retained, err := config.Load(config.LoadOptions{RepositoryRoot: targetRoot, OperatorHome: operator, YardName: name, Environment: environment, ProspectiveFiles: files, DisablePrivate: files != nil, ConfigLocked: files != nil})
+	retained, err := config.Load(config.LoadOptions{RepositoryRoot: targetRoot, OperatorHome: operator, YardName: name, Environment: environment, ProspectiveFiles: files, ConfigLocked: files != nil})
 	if err != nil {
 		return nil, err
 	}

@@ -547,7 +547,7 @@ func (cli *CLI) writeConfigSyncFollowups(
 
 func (cli *CLI) configSyncLocalYards(loaded config.Loaded) []string {
 	names, err := config.YardNames(
-		loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome,
+		loaded.Context.Paths.ConfigHome,
 	)
 	if err != nil {
 		return []string{"default"}
@@ -924,7 +924,7 @@ func (cli *CLI) configTargets(ctx context.Context, loaded config.Loaded, allLoca
 		return []configTarget{{Name: loaded.Context.YardName, Loaded: loaded}}, nil, nil
 	}
 	names, err := config.YardNames(
-		loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome,
+		loaded.Context.Paths.ConfigHome,
 	)
 	if err != nil {
 		return nil, nil, err

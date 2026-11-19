@@ -343,6 +343,21 @@ func (tracker *settingTracker) prospectiveReader() func(string) ([]byte, error) 
 	}
 	return tracker.prospectiveFiles.readFile
 }
+
+func (tracker *settingTracker) settingsPathExists(path string) (bool, error) {
+	if tracker.batch != nil && path == tracker.batch.path {
+		return true, nil
+	}
+	if snapshot, handled, err := tracker.prospectiveFiles.snapshot(path); handled || err != nil {
+		return snapshot.Exists, err
+	}
+	source := tracker.fileSource(path)
+	if source == "" {
+		return false, nil
+	}
+	return pathExists(source)
+}
+
 func (tracker *settingTracker) fileExists(path string) (bool, error) {
 	if tracker.batch != nil && path == tracker.batch.path && path != "" {
 		return true, nil

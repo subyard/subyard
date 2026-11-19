@@ -464,10 +464,6 @@ def environment(directory, display, engine, *, wayland=False, gtk=False):
     for path in paths.values():
         path.mkdir(mode=0o700)
         path.chmod(0o700)
-    # An explicit empty host layer prevents the repository's private fallback.
-    host_layer = paths['owner-config'] / 'config.env'
-    host_layer.write_text('')
-    host_layer.chmod(0o600)
     env = {
         'PATH': f"{ROOT / 'bin'}:/usr/local/bin:/usr/bin:/bin",
         'LANG': 'C.UTF-8',
@@ -519,8 +515,7 @@ def write_metrics(path, text):
 
 
 def isolated_defaults(directory, env):
-    # Keep installed defaults, but make private-yard discovery point only into
-    # our fresh fixture even when the caller has a private repository overlay.
+    # Keep shipped defaults in the fresh fixture.
     shipped = directory / 'shipped-config'
     private_dir(shipped)
     for name in ('incus.project.env', 'subyard.env', 'host.env', 'agents.env', 'ports.env'):

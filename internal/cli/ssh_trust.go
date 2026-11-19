@@ -67,7 +67,7 @@ func (cli *CLI) sshTrust(dataHome string, assumeYes bool) *sshtrust.Manager {
 		}
 		control := remotecontrol.Runtime{SSH: program,
 			Home: loaded.Context.Paths.OperatorHome, ConfigHome: loaded.Context.Paths.ConfigHome,
-			ConfigDir: loaded.Context.Paths.ConfigDir, DataHome: loaded.Context.Paths.DataHome,
+			DataHome:    loaded.Context.Paths.DataHome,
 			Environment: manager.Environment,
 		}
 		records, err := control.List(ctx)

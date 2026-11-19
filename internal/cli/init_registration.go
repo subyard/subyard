@@ -107,7 +107,7 @@ func (execution *initExecution) checkRegistrationLocked(ctx context.Context, cli
 		return nil
 	}
 	loaded := execution.loaded
-	_, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome, loaded.Context.YardName)
+	_, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigHome, loaded.Context.YardName)
 	if !errors.Is(err, config.ErrUnknownYard) {
 		return fmt.Errorf("%w: named-yard registration is no longer absent", domain.ErrPlanStale)
 	}

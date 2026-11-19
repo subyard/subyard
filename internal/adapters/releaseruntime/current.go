@@ -566,7 +566,7 @@ func (runtime *Runtime) recoverCurrentScope(ctx context.Context, root, configHom
 	}
 	defer verified.Close()
 	ownerRoot := fmt.Sprintf("/proc/self/fd/%d", verified.root.Fd())
-	names, err := config.YardNames(filepath.Join(ownerRoot, "config"), configHome)
+	names, err := config.YardNames(configHome)
 	if err != nil {
 		return failure("the original transition yard cannot be identified from registered contexts")
 	}

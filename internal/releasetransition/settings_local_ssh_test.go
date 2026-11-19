@@ -84,7 +84,7 @@ func TestLocalSSHMigrationPinsAllPersistentYardsAndResumesCAS(t *testing.T) {
 				t.Fatalf("converge: %#v %v", outcome, err)
 			}
 			for yard, port := range map[string]int{"default": 2240, "named": 2241, "override": 2242} {
-				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: yard, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: yard, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
 				if err != nil || loaded.Context.SSHPort != port {
 					t.Fatalf("yard %s port changed: %v", yard, err)
 				}
@@ -493,14 +493,12 @@ func localSSHHistoricalRegistry(t *testing.T, payload []byte) []byte {
 	return append(encoded, '\n')
 }
 
-// The loader has never read yards/default.env, so a pin there would not hold the
-// port and that ignored file must not make the default yard's settings ambiguous.
 func TestLocalSSHMigrationPinsDefaultYardWhereTheLoaderReadsIt(t *testing.T) {
 	for name, nested := range map[string]string{"flat-only": "", "flat-and-nested": "DEV_SUDO=0\n"} {
 		t.Run(name, func(t *testing.T) {
 			home := testkit.TempDir(t)
 			configHome := filepath.Join(home, "settings")
-			files := map[string]string{".sync/settings/config.env": "SSH_PORT=2240\n", "yards/default.env": "SSH_PORT=9999\n"}
+			files := map[string]string{".sync/settings/config.env": "SSH_PORT=2240\n", "yards/default.env": "DEV_SUDO=0\n"}
 			if nested != "" {
 				files["yards/default/config.env"] = nested
 			}
@@ -526,6 +524,12 @@ func TestLocalSSHMigrationPinsDefaultYardWhereTheLoaderReadsIt(t *testing.T) {
 				t.Fatal(err)
 			}
 			inspection, err := transition.Inspect(context.Background(), Goal{Target: "release-ssh", Direction: DirectionActivateTarget})
+			if nested != "" {
+				if err == nil && len(inspection.Blockers) == 0 {
+					t.Fatal("inspection accepted duplicate default registrations")
+				}
+				return
+			}
 			if err != nil || len(inspection.Blockers) != 0 {
 				t.Fatalf("inspect: %#v %v", inspection.Blockers, err)
 			}
@@ -534,12 +538,12 @@ func TestLocalSSHMigrationPinsDefaultYardWhereTheLoaderReadsIt(t *testing.T) {
 				t.Fatalf("converge: %#v %v", outcome, err)
 			}
 			flat, err := os.ReadFile(filepath.Join(configHome, "yards/default.env"))
-			if err != nil || string(flat) != files["yards/default.env"] {
-				t.Fatalf("ignored flat file changed: %q %v", flat, err)
+			if err != nil || string(flat) != files["yards/default.env"]+"SSH_PORT='2240'\n" {
+				t.Fatalf("flat file missing its pin: %q %v", flat, err)
 			}
 			// Without the Git value only the local pin can keep the port.
 			testkit.WriteFile(t, filepath.Join(configHome, ".sync/settings/config.env"), nil, 0o600)
-			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "default", DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "default", Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
 			if err != nil || loaded.Context.SSHPort != 2240 {
 				t.Fatalf("default yard port = %d after Git cleanup, want the pinned 2240: %v", loaded.Context.SSHPort, err)
 			}
@@ -553,8 +557,8 @@ func TestRegisteredSettingsSnapshotUsesTheFileTheLoaderReads(t *testing.T) {
 		want                     string
 		refused                  bool
 	}{
-		{name: "default flat only", yard: "default", flat: "A=1\n", want: "yards/default/config.env"},
-		{name: "default flat and nested", yard: "default", flat: "A=1\n", nested: "B=1\n", want: "yards/default/config.env"},
+		{name: "default flat only", yard: "default", flat: "A=1\n", want: "yards/default.env"},
+		{name: "default flat and nested", yard: "default", flat: "A=1\n", nested: "B=1\n", refused: true},
 		{name: "named flat only", yard: "named", flat: "A=1\n", want: "yards/named.env"},
 		{name: "named flat and nested", yard: "named", flat: "A=1\n", nested: "B=1\n", refused: true},
 	} {

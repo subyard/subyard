@@ -194,10 +194,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	desired := config.PersistentFileSnapshot{Exists: true, Content: candidate}
-	if action == "unset" && len(candidate) == 0 {
-		desired = config.PersistentFileSnapshot{}
-	}
+	desired := config.PersistentFileSnapshot{Exists: baseline.Exists || action == "set", Content: candidate}
 	prospectiveRequest := request
 	if request.sourceGuard != nil && slices.Contains([]string{"CODING_TOOL_INTEGRATIONS", "ENVIRONMENT_PROFILES"}, request.name) {
 		prospectiveRequest.action = "selection-repair"
@@ -223,7 +220,7 @@ func (prepared *preparedCommand) prepareConfigScalarRequest(ctx context.Context,
 		}
 	}
 	return prepared.attachLocalConfigScalars(ctx, []configAuthoringRequest{request}, prospective, baseline, desired, func(guard func() error) error {
-		return cli.catalog.WritePersistentAssignmentIfUnchanged(loaded.Context.Paths.ConfigHome, path, request.name, value, baseline, guard)
+		return config.WriteLocalScalarFileIfUnchanged(loaded.Context.Paths.ConfigHome, path, baseline, candidate, guard)
 	})
 }
 
@@ -231,6 +228,7 @@ func (prepared *preparedCommand) attachLocalConfigScalars(ctx context.Context, r
 	cli, loaded := prepared.CLI, prepared.Loaded
 	request := requests[0]
 	action, path := request.action, prospective.path
+	storageRoot := loaded.Context.Paths.ConfigHome
 	changed := !sameConfigAuthoringSnapshot(baseline, desired)
 	names := make([]string, 0, len(requests))
 	for _, request := range requests {
@@ -342,7 +340,7 @@ func (prepared *preparedCommand) attachLocalConfigScalars(ctx context.Context, r
 		}
 		current, err := readConfigAuthoringTarget(path)
 		if changed {
-			current, err = readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
+			current, err = readConfigPersistentSnapshot(storageRoot, path)
 		}
 		if err != nil {
 			return domain.AdapterResult{}, err
@@ -406,7 +404,7 @@ func (prepared *preparedCommand) attachLocalConfigScalars(ctx context.Context, r
 			}
 		}
 
-		current, err = readConfigPersistentSnapshot(loaded.Context.Paths.ConfigHome, path)
+		current, err = readConfigPersistentSnapshot(storageRoot, path)
 		if err != nil {
 			return domain.AdapterResult{}, err
 		}

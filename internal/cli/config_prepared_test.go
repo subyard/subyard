@@ -353,7 +353,7 @@ func TestConfigExactSharedScalarValidatesRegisteredNeighbor(t *testing.T) {
 	}
 }
 
-func TestConfigExactUnsetPreservesLegacyRegistrationFallback(t *testing.T) {
+func TestConfigExactUnsetKeepsEmptyRegistration(t *testing.T) {
 	root, _, configHome, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	legacy := filepath.Join(filepath.Dir(loaded.Context.Paths.ConfigDir), "private/yards/named.env")
@@ -365,11 +365,83 @@ func TestConfigExactUnsetPreservesLegacyRegistrationFallback(t *testing.T) {
 	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unset target retained: %v", err)
+	if content, err := os.ReadFile(target); err != nil || len(content) != 0 {
+		t.Fatalf("unset registration = %q, %v", content, err)
 	}
-	if actual := loadConfigCommandContext(t, root, environment, "named").Context.SSHPort; actual != 2290 {
-		t.Fatalf("fallback port = %d", actual)
+	if actual := loadConfigCommandContext(t, root, environment, "named").Context.SSHPort; actual == 2290 || actual == 2390 {
+		t.Fatalf("unset kept the old port or selected the fallback registration: %d", actual)
+	}
+}
+
+func TestConfigExactHostScalarIgnoresCheckoutOverlay(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	host := filepath.Join(home, "config.env")
+	if err := os.Remove(host); err != nil {
+		t.Fatal(err)
+	}
+	private := filepath.Join(environmentValue(environment, "SUBYARD_CONFIG_DIR"), "..", "private", "config.env")
+	const initial = "GIT_USER_EMAIL=$IGNORED_CHECKOUT_SETTING\n"
+	writeConfigCommandFile(t, private, initial, 0o640)
+	program := configExactProgram(t, root, environment, nil, nil)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	prepared := configExactPlan(t, program, loaded, []string{"set", "GIT_USER_NAME", "Jane", "--scope", "host"})
+	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(mustReadConfigFixture(t, host)); got != "GIT_USER_NAME='Jane'\n" {
+		t.Fatalf("host settings = %q", got)
+	}
+	loaded = loadConfigCommandContext(t, root, environment, "default")
+	prepared = configExactPlan(t, program, loaded, []string{"set", "GIT_USER_NAME", "Jane", "GIT_USER_EMAIL", "next@example.invalid", "--scope", "host"})
+	if _, err := prepared.Execute(context.Background(), nil, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	loaded = loadConfigCommandContext(t, root, environment, "default")
+	if loaded.Environment["GIT_USER_EMAIL"] != "next@example.invalid" {
+		t.Fatal("canonical host settings were not loaded")
+	}
+	if got := string(mustReadConfigFixture(t, private)); got != initial {
+		t.Fatalf("checkout overlay settings changed: %q", got)
+	}
+}
+
+func TestConfigProspectiveRefusesFlatRegistrationArrivingAfterTargetSelection(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(home, config.GitSettingsRelativePath, "yards/named/config.env"), "")
+	loaded := loadConfigCommandContext(t, root, environment, "named")
+	path, err := configScalarAuthoringPath(loaded, config.ScopeYard)
+	if err != nil || path != filepath.Join(home, "yards/named/config.env") {
+		t.Fatalf("selected target = %s, %v", path, err)
+	}
+	flat := filepath.Join(home, "yards/named.env")
+	writeConfigCommandFile(t, flat, "GIT_USER_EMAIL=flat@example.invalid\n")
+	program := configExactProgram(t, root, environment, nil, nil)
+	plan, err := program.prepareConfigProspective(loaded, configAuthoringRequest{action: "set", scope: config.ScopeYard}, path,
+		config.PersistentFileSnapshot{Exists: true, Content: []byte("GIT_USER_NAME='Jane'\n")})
+	if plan != nil {
+		plan.close()
+	}
+	var conflict *config.SettingsFileConflict
+	if !errors.Is(err, domain.ErrPlanStale) || !errors.As(err, &conflict) || conflict.First != path || conflict.Second != flat {
+		t.Fatalf("conflicting draft accepted: %v", err)
+	}
+}
+
+func TestConfigProspectiveCollectsExpansionAndDependencyRefusals(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(home, "yards/alpha/config.env"), "GIT_USER_EMAIL=$GIT_USER_NAME\n")
+	writeConfigCommandFile(t, filepath.Join(home, "yards/beta/config.env"), "GIT_USER_NAME=Jane\n", 0o620)
+	loaded := loadConfigCommandContext(t, root, environment, "default")
+	program := configExactProgram(t, root, environment, nil, nil)
+	plan, err := program.prepareConfigProspective(loaded, configAuthoringRequest{action: "set", scope: config.ScopeHost}, filepath.Join(home, "config.env"),
+		config.PersistentFileSnapshot{Exists: true, Content: []byte("GIT_USER_NAME='Jane'\n")})
+	if plan != nil {
+		plan.close()
+	}
+	message := config.Diagnose(home, err).Message("invalid configuration")
+	if !strings.Contains(message, "yards/alpha/config.env:1: GIT_USER_EMAIL") ||
+		!strings.Contains(message, "yards/beta/config.env") || !strings.Contains(message, "group/world writable") {
+		t.Fatalf("expected both configuration refusals: %s", message)
 	}
 }
 
@@ -997,6 +1069,19 @@ func TestConfigSetLocalBatchValidatesBeforeWriting(t *testing.T) {
 	if loaded := loadConfigCommandContext(t, root, environment, "default"); !slices.Equal(loaded.Integrations.Effective, []string{"testhelper"}) {
 		t.Fatalf("custom integration selection = %v", loaded.Integrations.Effective)
 	}
+
+	run(0, "GIT_USER_NAME", "O'Connor", "SSH_PORT", "2390", "--scope", "yard", "--yes")
+	if loaded := loadConfigCommandContext(t, root, environment, "default"); loaded.Environment["GIT_USER_NAME"] != "O'Connor" || loaded.Environment["SSH_PORT"] != "2390" {
+		t.Fatalf("local batch did not round-trip both values")
+	}
+
+	want = `GIT_USER_EMAIL="${GIT_USER_NAME:=original}@example.invalid"` + "\n"
+	writeConfigCommandFile(t, target, want, 0o640)
+	output = run(2, "GIT_USER_EMAIL", "new@example.invalid", "SSH_PORT", "2390", "--scope", "yard", "--yes")
+	if !strings.Contains(output, "config.env:1: GIT_USER_EMAIL") || !strings.Contains(output, "only literal values") {
+		t.Fatalf("dynamic record refusal: %s", output)
+	}
+	assertFile()
 }
 
 func TestConfigSetLocalBatchRefusals(t *testing.T) {
@@ -1014,7 +1099,6 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		hardLinks       = "target has hard links"
 		interrupted     = "an interrupted configuration transaction requires recovery"
 		retiredSetting  = "setting is retired and can no longer be set"
-		preservedRecord = "a preserved record changes the requested setting"
 		unavailable     = "an input is invalid or unavailable"
 		invalidDepends  = "AGENT_blocked_DEPENDS (scalar settings): invalid name value"
 	)
@@ -1041,10 +1125,6 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		{name: "alias ambiguity", scope: "yard",
 			assignments: []string{"AGENTS", "codex", "CODING_TOOL_INTEGRATIONS", "claude"}, code: 2,
 			refusals: []string{"AGENTS: configuration (scalar settings): unknown setting", "AGENTS and CODING_TOOL_INTEGRATIONS assign the same setting"}},
-		{name: "bad pair and editor refusal", scope: "yard", yardConfig: "GIT_USER_NAME=original\n: \"${GIT_USER_NAME:=preserved}\"\n",
-			assignments: []string{"GIT_USER_NAME", "", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{unknownSetting, preservedRecord}},
-		{name: "bad value and editor refusal", scope: "yard", yardConfig: "GIT_USER_NAME=original\n: \"${GIT_USER_NAME:=preserved}\"\n",
-			assignments: []string{"GIT_USER_NAME", "", "SSH_PORT", "invalid"}, code: 2, refusals: []string{invalidPort, preservedRecord}},
 		{name: "bad pair and dependency refusal", scope: "yard", hostLink: true,
 			assignments: []string{"GIT_USER_NAME", "", "UNKNOWN_SETTING", "1"}, code: 2, refusals: []string{unknownSetting, hardLinks}},
 		{name: "sibling discovery failure and default collision", scope: "host", namedConfig: "# sibling\n", badSibling: true,
@@ -1064,9 +1144,9 @@ func TestConfigSetLocalBatchRefusals(t *testing.T) {
 		{name: "inherited integration cycle beside unavailable dependency", scope: "yard", hostConfig: "CODING_TOOL_INTEGRATIONS=relay\n" + branchMetadata,
 			assignments: []string{"AGENT_relay_DEPENDS", "blocked loop", "AGENT_blocked_DEPENDS", "bad,name", "AGENT_loop_DEPENDS", "relay"},
 			code:        2, refusals: []string{invalidDepends, unavailable}, forbidden: []string{"bad,name", "agent dependency cycle"}},
-		{name: "singleton stops at first affected yard", scope: "host", namedConfig: "SSH_PORT=invalid\n", otherConfig: "DEV_SUDO=invalid\n",
+		{name: "singleton reports invalid affected yards", scope: "host", namedConfig: "SSH_PORT=invalid\n", otherConfig: "DEV_SUDO=invalid\n",
 			assignments: []string{"GIT_USER_NAME", "new"}, code: 1,
-			refusals: []string{"yards/named/config.env:1: SSH_PORT (local scalar settings): invalid port value"}, forbidden: []string{"DEV_SUDO"}},
+			refusals: []string{"yards/named/config.env:1: SSH_PORT (local scalar settings): invalid port value", "DEV_SUDO"}},
 
 		{name: "masked integration", yardConfig: "CODING_TOOL_INTEGRATIONS=codex\n", scope: "host",
 			assignments: []string{"CODING_TOOL_INTEGRATIONS", "missing-one", "SSH_PORT", "2390"}, code: 1, refusals: []string{unknown}},

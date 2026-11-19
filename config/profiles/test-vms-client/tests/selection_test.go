@@ -53,7 +53,7 @@ func TestClientProfileSelectionFollowsHostAccess(t *testing.T) {
 			for key, value := range test.command {
 				environment[key] = value
 			}
-			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: test.yard, DisablePrivate: true, Environment: environment})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: test.yard, Environment: environment})
 			if len(test.refusals) != 0 {
 				if err == nil {
 					t.Fatal("yard role without host access accepted the client profile")

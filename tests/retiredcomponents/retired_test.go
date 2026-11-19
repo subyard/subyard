@@ -104,20 +104,20 @@ func TestShippedRetiredSettingsAndAliasesRemainReadable(t *testing.T) {
 				if aliases {
 					names = []string{"AGENTS", "YARD_PROFILES"}
 				}
-				content := names[0] + "='aiobserver paseo'\n" + names[1] + "=openlit\nOPENLIT_HOST_PORT=${UNUSED_PORT:=24318}\nAI_OBSERVER_HOST_PORT=${UNUSED_PORT:=8080}\nAGENT_paseo_COMMAND=${UNUSED_PORT:=retained}\n"
+				content := names[0] + "='aiobserver paseo'\n" + names[1] + "=openlit\nOPENLIT_HOST_PORT=24318\nAI_OBSERVER_HOST_PORT=8080\nAGENT_paseo_COMMAND=retained\n"
 				path := filepath.Join(home, location)
 				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 					t.Fatal(err)
 				}
 				testkit.WriteFile(t, path, []byte(content), 0600)
-				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": home, "OPENLIT_HOST_PORT": "24318", "AI_OBSERVER_HOST_PORT": "8080", "AGENT_paseo_COMMAND": "retained"}})
+				loaded, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_HOME": home, "OPENLIT_HOST_PORT": "24318", "AI_OBSERVER_HOST_PORT": "8080", "AGENT_paseo_COMMAND": "retained"}})
 				if err != nil {
 					t.Fatal(err)
 				}
 				if !slices.Equal(loaded.Integrations.Retired, []string{"aiobserver", "paseo"}) || len(loaded.Integrations.Effective) != 0 || !slices.Equal(loaded.EnvironmentProfiles.Requested, []string{"openlit"}) || len(loaded.EnvironmentProfiles.Effective) != 0 {
 					t.Fatal("retired input authority changed")
 				}
-				for _, key := range []string{"UNUSED_PORT", "AI_OBSERVER_HOST_PORT", "OPENLIT_HOST_PORT", "AGENT_paseo_COMMAND"} {
+				for _, key := range []string{"AI_OBSERVER_HOST_PORT", "OPENLIT_HOST_PORT", "AGENT_paseo_COMMAND"} {
 					if _, ok := loaded.Environment[key]; ok {
 						t.Fatalf("discarded assignment became effective: %s", key)
 					}

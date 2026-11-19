@@ -12,29 +12,25 @@ import (
 )
 
 // YardNames returns the configured yard names without evaluating their files.
-// The default context is always first; duplicate private/installed entries collapse.
-func YardNames(configDir, configHome string) ([]string, error) {
-	return discoverYardNames(configDir, configHome, false)
+// The default context is always first; local and Git entries for the same yard collapse.
+func YardNames(configHome string) ([]string, error) {
+	return discoverYardNames(configHome, false)
 }
 
-// LocalBatchYardNames includes the default and any other discoverable yards
-// even when a registration or enumeration fails.
-func LocalBatchYardNames(configDir, configHome string) ([]string, error) {
-	return discoverYardNames(configDir, configHome, true)
+// LocalBatchYardNames includes discoverable yards with registration errors so
+// callers can load each yard and report the error against its name.
+func LocalBatchYardNames(configHome string) ([]string, error) {
+	return discoverYardNames(configHome, true)
 }
 
-func discoverYardNames(configDir, configHome string, collect bool) ([]string, error) {
+func discoverYardNames(configHome string, collect bool) ([]string, error) {
 	seen := map[string]struct{}{}
 	var refusals []error
-	for _, root := range []struct {
-		directory   string
-		allowNested bool
-	}{
-		{directory: filepath.Join(configDir, "..", "private", "yards")},
-		{directory: filepath.Join(configHome, "yards"), allowNested: true},
-		{directory: filepath.Join(configHome, GitSettingsRelativePath, "yards"), allowNested: true},
+	for _, directory := range []string{
+		filepath.Join(configHome, "yards"),
+		filepath.Join(configHome, GitSettingsRelativePath, "yards"),
 	} {
-		entries, err := os.ReadDir(root.directory)
+		entries, err := os.ReadDir(directory)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -47,7 +43,7 @@ func discoverYardNames(configDir, configHome string, collect bool) ([]string, er
 		}
 		for _, entry := range entries {
 			name := ""
-			if root.allowNested && entry.IsDir() {
+			if entry.IsDir() {
 				name = entry.Name()
 			} else if strings.HasSuffix(entry.Name(), ".env") {
 				name = strings.TrimSuffix(entry.Name(), ".env")
@@ -67,33 +63,93 @@ func discoverYardNames(configDir, configHome string, collect bool) ([]string, er
 	}
 	sort.Strings(discovered)
 	names := []string{"default"}
+	if !collect {
+		_, err := LocalYardSettingsFile(filepath.Join(configHome, "yards"), "default")
+		refusals = append(refusals, err)
+	}
 	for _, name := range discovered {
-		if _, err := FindYardRegistrationFile(configDir, configHome, name); err != nil {
+		if _, err := FindYardRegistrationFile(configHome, name); err != nil {
 			if errors.Is(err, ErrUnknownYard) {
 				continue
 			}
 			if !collect {
-				return nil, err
+				refusals = append(refusals, err)
+				continue
 			}
-			refusals = append(refusals, err)
-			continue
 		}
 		names = append(names, name)
 	}
 	return names, domain.CollectRefusals(refusals...)
 }
 
-func YardFileCandidates(configDir, configHome, name string) []string {
-	return []string{
-		filepath.Join(configHome, "yards", name, "config.env"),
-		filepath.Join(configDir, "..", "private", "yards", name+".env"),
-		filepath.Join(configHome, "yards", name+".env"),
+// SettingsFileConflict names the two files competing for a single local scope.
+type SettingsFileConflict struct {
+	First, Second           string
+	firstLabel, secondLabel string
+}
+
+func (err *SettingsFileConflict) Error() string {
+	return fmt.Sprintf("both %s and %s exist. Merge their settings into one file and remove the other", err.firstLabel, err.secondLabel)
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
+	if err != nil {
+		return false, sourceAccessError(path, "scalar settings", err)
+	}
+	return true, nil
+}
+
+func selectSettingsFile(first, second, firstLabel, secondLabel string, exists func(string) (bool, error)) (string, error) {
+	firstExists, firstErr := exists(first)
+	secondExists, secondErr := exists(second)
+	if err := domain.CollectRefusals(firstErr, secondErr); err != nil {
+		return "", err
+	}
+	if firstExists && secondExists {
+		return "", &SettingsFileConflict{first, second, firstLabel, secondLabel}
+	}
+	if secondExists {
+		return second, nil
+	}
+	return first, nil
+}
+
+// LocalYardSettingsCandidates returns both local layouts in preference order.
+func LocalYardSettingsCandidates(yardsDir, name string) [2]string {
+	return [2]string{filepath.Join(yardsDir, name, "config.env"), filepath.Join(yardsDir, name+".env")}
+}
+
+// LocalYardSettingsFile returns the existing config-home source or the path to
+// create. A prospective caller can supply its view of file existence.
+func LocalYardSettingsFile(yardsDir, name string, readers ...func(string) (bool, error)) (string, error) {
+	exists := pathExists
+	if len(readers) > 0 {
+		exists = readers[0]
+	}
+	paths := LocalYardSettingsCandidates(yardsDir, name)
+	return selectSettingsFile(paths[0], paths[1],
+		"yards/"+name+"/config.env", "yards/"+name+".env", exists)
+}
+
+// ReadLocalYardSettingsSnapshot selects the local file in the caller's view
+// and returns the exact snapshot used for that selection.
+func ReadLocalYardSettingsSnapshot(configHome, name string, read func(string) (PersistentFileSnapshot, error)) (PersistentFileSnapshot, string, error) {
+	snapshots := make(map[string]PersistentFileSnapshot, 2)
+	path, err := LocalYardSettingsFile(filepath.Join(configHome, "yards"), name, func(path string) (bool, error) {
+		snapshot, err := read(path)
+		snapshots[path] = snapshot
+		return snapshot.Exists, err
+	})
+	return snapshots[path], path, err
 }
 
 // FindYardRegistrationFile returns the highest-precedence regular,
 // non-symlink definition for a named yard.
-func FindYardRegistrationFile(configDir, configHome, name string) (string, error) {
+func FindYardRegistrationFile(configHome, name string) (string, error) {
 	if name == "default" || !domain.SafeName(name) {
 		return "", fmt.Errorf("%w %q", ErrUnknownYard, name)
 	}
@@ -101,11 +157,19 @@ func FindYardRegistrationFile(configDir, configHome, name string) (string, error
 	if err != nil {
 		return "", err
 	}
-	if reset {
-		return findFirstYardFile([]string{filepath.Join(configHome, "yards", name, "config.env"), filepath.Join(configHome, "yards", name+".env")}, name)
+	local, err := LocalYardSettingsFile(filepath.Join(configHome, "yards"), name)
+	if err != nil {
+		return "", err
 	}
-	candidates := append(YardFileCandidates(configDir, configHome, name), filepath.Join(configHome, GitSettingsRelativePath, "yards", name, "config.env"))
-	return findFirstYardFile(candidates, name)
+	return findFirstYardFile(yardRegistrationCandidates(configHome, name, local, reset), name)
+}
+
+func yardRegistrationCandidates(configHome, name, local string, reset bool) []string {
+	candidates := []string{local}
+	if !reset {
+		candidates = append(candidates, filepath.Join(configHome, GitSettingsRelativePath, "yards", name, "config.env"))
+	}
+	return candidates
 }
 
 func findFirstYardFile(candidates []string, name string) (string, error) {
