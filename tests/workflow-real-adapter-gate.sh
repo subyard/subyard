@@ -147,8 +147,9 @@ grep -Fq 'bash dev/ci/periodic-e2e.sh acceptance' "$HOSTED_WORKFLOW" \
   || fail 'hosted VM workflow must reuse pool setup and verify terminal collector selection'
 # A rerun attempt of an older run is not stale: age counts from the latest attempt's start.
 STALE_WORKFLOW="$ROOT/.github/workflows/stale-runs.yml"
-grep -Fq "select(now - (.startedAt | fromdateiso8601) > 24 * 3600)" "$STALE_WORKFLOW" \
-  && ! grep -Fq createdAt "$STALE_WORKFLOW" || fail 'Stale runs must measure age from the latest attempt start'
+grep -Fq "select(now - (.startedAt // .createdAt | fromdateiso8601) > 24 * 3600)" "$STALE_WORKFLOW" \
+  && grep -Fq "[.databaseId, .workflowName, .headBranch, .startedAt // .createdAt]" "$STALE_WORKFLOW" \
+  || fail 'Stale runs must measure age from the latest attempt start'
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import importlib.util
 import json

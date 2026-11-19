@@ -3,7 +3,8 @@ name: Stale runs
 # GitHub can leave a run queued or in progress after every job has finished. Such a run holds its
 # concurrency group, so later runs of that workflow wait forever. No run here legitimately takes
 # a day: hosted jobs stop after their timeouts, and no workflow waits for an approval. A rerun
-# restarts the clock: its age counts from the latest attempt's start, not the run's creation.
+# restarts the clock: its age counts from the latest attempt's start, not the run's creation
+# (creation only while GitHub reports no start).
 on:
   schedule:
     - cron: '41 * * * *'
@@ -45,9 +46,9 @@ jobs:
                 gh run cancel "$id" || failed=1
               fi
             done < <(gh run list --status "$status" --limit 100 \
-              --json databaseId,workflowName,headBranch,startedAt \
-              --jq '.[] | select(now - (.startedAt | fromdateiso8601) > 24 * 3600)
-                | [.databaseId, .workflowName, .headBranch, .startedAt] | @tsv')
+              --json databaseId,workflowName,headBranch,createdAt,startedAt \
+              --jq '.[] | select(now - (.startedAt // .createdAt | fromdateiso8601) > 24 * 3600)
+                | [.databaseId, .workflowName, .headBranch, .startedAt // .createdAt] | @tsv')
           done
           [ "$found" = 1 ] || printf 'No run is older than a day.\n' >> "$GITHUB_STEP_SUMMARY"
           [ "$failed" = 0 ] || { printf '::error::Some stale runs could not be cancelled\n'; exit 1; }

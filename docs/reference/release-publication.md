@@ -62,7 +62,9 @@ request, then counts completed successful jobs of every run attempt. Locally it 
 requested hosted checks whose jobs failed, are missing or were refused; checks whose jobs still run stay
 pending (`CI-HOSTED pending: CHECKS`) and the result stays incomplete. `--ci-wait-seconds 0` collects the
 current snapshot without waiting, with the same split; a nonzero override is bounded to 86400 seconds.
-A request with no discovered run after ten minutes falls back to local runs. After a local check fails,
+With a wait of at least ten minutes, a request that still has no discovered run falls back to local runs;
+after a shorter wait, including `0`, its checks stay pending. When GitHub cannot be read or the inventory
+exceeds the reviewed limit, every requested hosted check falls back to a local run. After a local check fails,
 `accept` neither waits nor runs hosted checks locally: it counts finished hosted results and leaves the
 rest pending for a later `accept`. Collection prints `CI-HOSTED CHECK run=RUN job=JOB` or
 `CI-HOSTED-SKIP CHECK: REASON`.
@@ -73,7 +75,8 @@ Do not cancel the hosted run when one job fails. Once it finishes, rerun its fai
 dev/release.sh retry-hosted --candidate rRUN_ID-aATTEMPT
 ```
 
-It reruns failed, cancelled and timed-out jobs whose checks are still open locally and prints
+It reruns every failed, cancelled and timed-out job of the run, once at least one of their checks
+is still open locally, and prints
 `CI-HOSTED-RETRY run=RUN attempt=N checks=...`; a running `accept` then waits for attempt N too.
 GitHub keeps the only state: while the run is in progress the command prints `CI-HOSTED attempt=N running`,
 so repeating it after a lost response is safe. It refuses when the run passed, when no failed job's check
@@ -446,14 +449,14 @@ Agents preparing a release apply the
   Request long VM smoke and shipped-profile VM checks using `accept --with-vms` or collector
   `run --only CHECK`. Use `--slot-count` to cap the default dynamic use of slots 1–4, and
   `--slots` for an exact set only on the operator's request.
-- Release acceptance always has priority on local slots and CI. While a release `accept` or Release VM
-  checks run is active, agents start no new non-release physical lanes or long hosted dispatches such as
-  Periodic E2E; non-release lanes on slots the release needs stop at their next safe point.
   Core `p0-release-smoke` is mandatory and cannot be excluded or waived as optional. Local-only
   acceptance remains incomplete until it passes. Unrequested shipped-profile VM checks remain `not-run`,
   never passed; requested incomplete or failed checks block acceptance/publication.
   Optional external checks follow [external checks](#external-checks).
   Existing CI/merge checks and risk-based development validation are unchanged.
+- Release acceptance always has priority on local slots and CI. While a release `accept` or Release VM
+  checks run is active, agents start no new non-release physical lanes or long hosted dispatches such as
+  Periodic E2E; non-release lanes on slots the release needs stop at their next safe point.
 - Release repairs land as reviewed PRs to the release base. Before preparation
   CI, run the [publication preflight](#operator-commands-and-retained-state)
   and assign every required local check and explicitly requested VM gate in the existing task plan:

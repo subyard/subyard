@@ -2982,6 +2982,31 @@ class HostedChecks(unittest.TestCase):
         self.assertEqual(len(run.call_args_list), 2)
         m.a.CONTROL.clear()
 
+    def test_retry_hosted_during_final_collection_keeps_the_new_attempt_checks_pending(self):
+        # Past the deadline (always with wait 0) an accepted or unconfirmed rerun is read again before fallback.
+        outcomes = {"accepted": (True, "CI-HOSTED-RETRY run=456 attempt=2 checks=profile:sample"),
+                    "timeout": ValueError("rerun outcome unknown; repeat retry-hosted to discover the new attempt")}
+        for case, outcome in outcomes.items():
+            collected, replies = [], []
+            def collect(github, directory, identity):
+                collected.append(len(collected))
+                if len(collected) == 1:
+                    try:
+                        replies.append(m.a.CONTROL["retry-hosted"]({"action": "retry-hosted"}))
+                    except ValueError as error:
+                        replies.append(str(error))
+                    return set()
+                return {"profile:sample"}
+            with self.subTest(case=case), patch.object(m, "hosted_open", return_value=["profile:sample"]), \
+                 patch.object(m.a, "run_checks", return_value=0) as run, patch.object(m, "wait_ci_hosted", return_value=None), \
+                 patch.object(m, "retry_hosted", side_effect=[outcome]), patch.object(m, "collect_ci", side_effect=collect), \
+                 redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0), 1)
+                self.assertEqual(len(replies), 1)
+                self.assertEqual(collected, [0, 1])
+                self.assertEqual([call.args[2] for call in run.call_args_list], [[]])  # No local fallback run.
+                self.assertIn("CI-HOSTED pending: profile:sample", printed.getvalue())
+
     def test_wait_is_bounded_and_zero_override_collects_without_wait(self):
         with patch.object(m, "discover") as discover:
             m.wait_ci_hosted(self.github, self.directory, self.identity, 0)

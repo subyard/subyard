@@ -1421,7 +1421,11 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
         with control["lock"]:
             if control["phase"] == "fallback":
                 return False, "refused: hosted checks already fall back to local runs; use retry CHECK"
-            accepted, reason = retry_hosted(github, directory, identity)
+            try:
+                accepted, reason = retry_hosted(github, directory, identity)
+            except (ValueError, OSError):
+                control["retry"] = True  # A rerun may have started: read the run again before any fallback.
+                raise
             control["retry"] = control["retry"] or accepted
             return accepted, reason
 
@@ -1444,10 +1448,14 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
                 owned = collect_ci(github, directory, identity)
             with control["lock"]:
                 # A retry-hosted request during this wait started a new attempt: wait for it too.
-                if control["retry"] and not lost and not a.STOP.is_set() and time.monotonic() < deadline:
-                    control["retry"] = False
+                retried, control["retry"] = control["retry"] and not lost and not a.STOP.is_set(), False
+                if retried and time.monotonic() < deadline:
                     continue
                 control["phase"] = "fallback"
+            if retried:
+                # Past the deadline the new attempt still owns its checks: never run them locally too.
+                with a.acceptance_lock(output):
+                    owned = collect_ci(github, directory, identity)
             break
         # Running hosted jobs keep their checks pending; only the rest fall back to local runs.
         owned = set() if lost else owned.intersection(hosted)
