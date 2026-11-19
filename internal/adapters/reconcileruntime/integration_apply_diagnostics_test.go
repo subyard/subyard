@@ -541,3 +541,70 @@ func TestStepFailureKeepsSourceErrorsForTheBoundary(t *testing.T) {
 		t.Fatalf("settings capture source error was wrapped: %v", failure)
 	}
 }
+
+func TestIntegrationLinkRefusalKeepsFileSourceRefusals(t *testing.T) {
+	root := testkit.TempDir(t)
+	if err := os.Mkdir(filepath.Join(root, "config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "config/projects-changed.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	runtime := Runtime{RepositoryRoot: root, Yard: domain.Context{YardName: "sample", DevUser: "dev", DevUID: 1000},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude codex",
+			"HOST_CLAUDE_MD=" + filepath.Join(root, "claude.md"), "HOST_CODEX_AGENTS_MD=" + filepath.Join(root, "codex.md"),
+			"INTEGRATION_HOST_LINKS=.foo:/srv/foo"}}
+	bindInstructionTestPackage(t, &runtime, root, "claude")
+	bindInstructionTestPackage(t, &runtime, root, "codex")
+	_, err := runtime.integrationArtifactsWithSourceReader("apply", func(asset config.MaterializedAsset) ([]byte, error) {
+		if strings.HasSuffix(asset.Source, ".md") {
+			return nil, errors.New("private unreadable " + filepath.Base(asset.Source))
+		}
+		return asset.ReadSource()
+	})
+	var findings *domain.Refusals
+	failure := runtime.stepFailure(stepArtifacts, "", err)
+	if !errors.As(failure, &findings) || len(findings.Unwrap()) != 3 {
+		t.Fatalf("link refusal hid file-source refusals: %v", failure)
+	}
+	var messages []string
+	for _, finding := range findings.Unwrap() {
+		message, _ := finding.(*stepFailure).ActivationDiagnostic()
+		messages = append(messages, message)
+	}
+	slices.Sort(messages)
+	if !slices.Equal(messages, []string{"integration apply artifacts failed in yard sample", "integration claude apply artifacts failed in yard sample",
+		"integration codex apply artifacts failed in yard sample"}) {
+		t.Fatalf("artifact refusals = %q", messages)
+	}
+}
+
+func TestInventoryNumbersOnlyUnrecognizedConflicts(t *testing.T) {
+	incus := runningIncus(1)
+	incus.ExecSteps[0].Result = ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(`{"conflicts":[` +
+		`{"reason":"owned artifact drift","path":"/home/dev/.codex/AGENTS.md"},{"reason":"private first","path":"/x"},{"reason":"private second","path":"/y"}]}`)}
+	incus.ExecSteps[0].Err = &ports.GuestExitError{Code: 1}
+	runtime := Runtime{RepositoryRoot: testkit.TempDir(t), Integrations: []profile.IntegrationDefinition{}, Executor: incus,
+		Yard: domain.Context{YardName: "sample", YardInstanceName: "yard", IncusProject: "subyard", DevUser: "dev", DevUID: 1000}}
+	entries := []integrationArtifact{{ID: "codex", Kind: "file", Path: "/home/dev/.codex/AGENTS.md"}}
+	_, err := runtime.integrationInventory(context.Background(), "apply", entries, "")
+	var findings *domain.Refusals
+	if !errors.As(err, &findings) || len(findings.Unwrap()) != 3 || strings.Contains(err.Error(), "private") ||
+		!strings.Contains(err.Error(), "(finding 1 of 2)") || !strings.Contains(err.Error(), "(finding 2 of 2)") {
+		t.Fatalf("conflicts: %v", err)
+	}
+}
+
+func TestPersistRefusalWithoutPathInspectsStatus(t *testing.T) {
+	runtime := Runtime{Yard: domain.Context{YardName: "default", YardInstanceName: "yard-default", IncusProject: "subyard-default"},
+		Environment: []string{"CODING_TOOL_INTEGRATIONS=claude"}, Integrations: []profile.IntegrationDefinition{}}
+	stderr, _ := json.Marshal(map[string]any{"conflicts": []map[string]string{
+		{"reason": "persist filesystem error", "path": "", "detail": "Permission denied", "integration": "claude"},
+	}})
+	var public interface{ ActivationDiagnostic() (string, string) }
+	if err := runtime.persistRefusal(stderr); !errors.As(err, &public) {
+		t.Fatalf("not public: %v", err)
+	}
+	message, retry := public.ActivationDiagnostic()
+	if !strings.Contains(message, "filesystem error at an unrecognized path (Permission denied)") || retry != "'yard' '-Y' 'default' 'integration' 'status'" {
+		t.Fatalf("diagnostic = %q / %q", message, retry)
+	}
+}

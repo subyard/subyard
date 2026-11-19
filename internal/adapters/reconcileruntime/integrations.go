@@ -478,11 +478,13 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 	for _, link := range strings.Fields(runtime.environmentValue("INTEGRATION_HOST_LINKS")) {
 		parts := strings.Split(link, ":")
 		if len(parts) < 2 || len(parts) > 3 || !filepath.IsAbs(parts[1]) {
-			return nil, errors.New("invalid integration link")
+			refusals = append(refusals, errors.New("invalid integration link"))
+			continue
 		}
 		relative, err := safeGuestRelativePath(parts[0])
 		if err != nil {
-			return nil, err
+			refusals = append(refusals, err)
+			continue
 		}
 		id := ""
 		for _, candidate := range strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")) {
@@ -492,7 +494,8 @@ func (runtime Runtime) integrationArtifactsWithSourceReader(phase string, reader
 			}
 		}
 		if id == "" {
-			return nil, errors.New("integration link has no selected owner")
+			refusals = append(refusals, errors.New("integration link has no selected owner"))
+			continue
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "link", Path: "/home/" + runtime.devUser() + "/" + relative, Target: parts[1], FileTarget: len(parts) == 3 && parts[2] == "file", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(parts[1])))})
 	}
@@ -715,7 +718,8 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		if len(conflicts) == 0 {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
-		for index, conflict := range conflicts {
+		unrecognized := 0
+		for _, conflict := range conflicts {
 			cause := func() error {
 				knownPath := slices.Contains(legacy, conflict.Path)
 				for _, entry := range entries {
@@ -763,14 +767,18 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 						}
 					}
 				}
-				// Each unrecognized finding stays its own host-rendered refusal.
-				message := "integration ownership conflict or unavailable evidence; managed artifacts were preserved"
-				if len(conflicts) > 1 {
-					message = fmt.Sprintf("integration ownership conflict or unavailable evidence (finding %d of %d); managed artifacts were preserved", index+1, len(conflicts))
-				}
-				return ownershipRefusal(message, result, err)
+				unrecognized++
+				return nil
 			}()
 			causes = append(causes, cause)
+		}
+		// Each unrecognized finding stays its own host-rendered refusal.
+		for index := range unrecognized {
+			message := "integration ownership conflict or unavailable evidence; managed artifacts were preserved"
+			if unrecognized > 1 {
+				message = fmt.Sprintf("integration ownership conflict or unavailable evidence (finding %d of %d); managed artifacts were preserved", index+1, unrecognized)
+			}
+			causes = append(causes, ownershipRefusal(message, result, err))
 		}
 		return integrationObservation{Initial: report.Initial, Retired: report.Retired}, domain.CollectRefusals(causes...)
 	}

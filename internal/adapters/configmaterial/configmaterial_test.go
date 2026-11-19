@@ -415,8 +415,9 @@ func TestJSONMaterializationRejectsMalformedCurrentAndBaselineWithoutOverwrite(t
 		if err == nil || !UnownedInvalidDestination([]byte(stderr), "json") || strings.Contains(stderr, "secret") {
 			t.Fatalf("apply error = %v stderr=%q", err, stderr)
 		}
-		if !strings.Contains(stderr, "in the yard run mv --backup=numbered --") || !strings.Contains(stderr, "on the owner run yard config apply") {
-			t.Fatal("invalid unowned destination has no executable preservation step", stderr)
+		if !strings.Contains(stderr, "the preservation command the owner host prints") || !strings.Contains(stderr, "on the owner run yard config apply") ||
+			strings.Contains(stderr, harness.destination) {
+			t.Fatal("invalid unowned destination does not defer to the host preservation step", stderr)
 		}
 		after, readErr := os.ReadFile(harness.destination)
 		if readErr != nil || !bytes.Equal(before, after) {

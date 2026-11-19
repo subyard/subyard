@@ -415,12 +415,19 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 	for _, conflict := range report.Conflicts {
 		message, retry := "", shellquote.Command([]string{"yard", "-Y", yard, "init"})
 		// Guest paths are shown quoted only once they pass the path check.
-		at := "an unrecognized path"
-		if persistPath(conflict.Path) {
+		at, validPath := "an unrecognized path", persistPath(conflict.Path)
+		if validPath {
 			at = fmt.Sprintf("%q", conflict.Path)
 		}
+		// A retry that names the path needs a valid one; otherwise inspect status.
+		byPath := func(command func() string) string {
+			if validPath {
+				return command()
+			}
+			return status
+		}
 		other := "an unrecognized path"
-		if conflict.Reason == "persist paths overlap" && persistPath(conflict.Detail) && conflict.Detail != "" {
+		if conflict.Reason == "persist paths overlap" && persistPath(conflict.Detail) {
 			other = fmt.Sprintf("%q", conflict.Detail)
 		} else if detail := persistDetail(conflict.Detail); conflict.Reason == "persist target filesystem" && detail == conflict.Detail && detail != "" {
 			other = fmt.Sprintf("%q", detail)
@@ -435,19 +442,18 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 			if conflict.Detail != "" {
 				message = fmt.Sprintf("persist transfer in yard %s: %s at %s (%s); data was preserved. Inspect it, then repeat yard init", yard, conflict.Reason, at, conflict.Detail)
 			}
-			retry = inspect(conflict.Path)
+			retry = byPath(func() string { return inspect(conflict.Path) })
 		case "persist target entry refused":
 			message = fmt.Sprintf("persist transfer in yard %s: the target refused %s (%s); nothing was exchanged and the source directory is unchanged. Fix the target permissions or free space, then repeat yard init", yard, at, conflict.Detail)
-			retry = inspect(conflict.Path[:strings.LastIndex(conflict.Path, "/")+1])
+			retry = byPath(func() string { return inspect(conflict.Path[:strings.LastIndex(conflict.Path, "/")+1]) })
 		case "persist mount boundary":
 			message = fmt.Sprintf("persist transfer in yard %s: %s is a mount point inside persist data; nothing below it was copied or removed. Unmount or move it, then repeat", yard, at)
-			retry = shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "findmnt", "--target", conflict.Path})
+			retry = byPath(func() string {
+				return shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "findmnt", "--target", conflict.Path})
+			})
 		case "persist filesystem error":
 			message = fmt.Sprintf("persist transfer in yard %s: filesystem error at %s (%s); data was preserved. Inspect it, then repeat yard init", yard, at, conflict.Detail)
-			retry = inspect(conflict.Path)
-			if conflict.Path == "" {
-				retry = status
-			}
+			retry = byPath(func() string { return inspect(conflict.Path) })
 		case "persist paths overlap", "persist target filesystem":
 			message = fmt.Sprintf("persist mapping in yard %s: %s for %s and %s; data was preserved. Correct the persist mapping, then repeat yard init", yard, conflict.Reason, at, other)
 			retry = shellquote.Command([]string{"yard", "-Y", yard, "config", "show", "AGENT_" + conflict.Integration + "_PERSIST"})
@@ -456,7 +462,9 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 			}
 		case "persist space unavailable":
 			message = fmt.Sprintf("persist transfer in yard %s: not enough space for %s (%s); data was preserved. Free space on the sessions volume, then repeat yard init", yard, at, conflict.Detail)
-			retry = shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "df", "-h", "--", conflict.Path[:strings.LastIndex(conflict.Path, "/")+1]})
+			retry = byPath(func() string {
+				return shellquote.Command([]string{"incus", "exec", instance, "--project", project, "--", "df", "-h", "--", conflict.Path[:strings.LastIndex(conflict.Path, "/")+1]})
+			})
 		case "atomic exchange unsupported", "no-replace rename unsupported":
 			message = fmt.Sprintf("persist transfer for %s in yard %s: %s (%s); nothing was copied. Deselect the integration to keep its data in place", conflict.Integration, yard, conflict.Reason, conflict.Detail)
 			retry = shellquote.Command([]string{"yard", "-Y", yard, "integration", "disable", conflict.Integration})
@@ -466,16 +474,13 @@ func (runtime Runtime) persistRefusal(stderr []byte) error {
 			}
 		case "persist transfer identity unavailable":
 			message = fmt.Sprintf("persist transfer in yard %s: the transfer descriptor %s is not a complete Subyard record; data was preserved. Inspect it and move it aside, then repeat yard init", yard, at)
-			retry = inspect(conflict.Path)
+			retry = byPath(func() string { return inspect(conflict.Path) })
 		case "integration plan is stale":
 			causes = append(causes, fmt.Errorf("%w: persist transfer state changed after planning", domain.ErrPlanStale))
 			continue
 		default:
 			// The guest's reason is not in this release's vocabulary.
 			message = fmt.Sprintf("persist transfer in yard %s refused (unrecognized reason) at %s; data was preserved. Inspect the pending transfers, then repeat", yard, at)
-			retry = status
-		}
-		if !persistPath(conflict.Path) {
 			retry = status
 		}
 		causes = append(causes, integrationOwnershipError{pendingConfiguration: true, message: message, retry: retry})
@@ -491,9 +496,9 @@ var (
 	persistUnknownErrno = regexp.MustCompile(`^Unknown error -?[0-9]{1,10}$`)
 )
 
-// persistPath accepts an empty or absolute, printable guest path.
+// persistPath accepts an absolute, printable guest path.
 func persistPath(path string) bool {
-	return path == "" || len(path) <= 4096 && filepath.IsAbs(path) && utf8.ValidString(path) && !strings.ContainsFunc(path, unicode.IsControl)
+	return len(path) <= 4096 && filepath.IsAbs(path) && utf8.ValidString(path) && !strings.ContainsFunc(path, unicode.IsControl)
 }
 
 // persistDetail keeps only the persist program's fixed details, operating
