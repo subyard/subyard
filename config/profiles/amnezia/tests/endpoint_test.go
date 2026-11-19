@@ -54,7 +54,7 @@ func TestShippedAmneziaProxyUsesLoadedTypedEndpointSettings(t *testing.T) {
 		"admin port": {admin.Proxy.HostPortSetting, "42022", config.SettingPort},
 	}
 	loaded, err := config.Load(config.LoadOptions{
-		RepositoryRoot: root, OperatorHome: home, YardName: "vpn-e2e", DisablePrivate: true,
+		RepositoryRoot: root, OperatorHome: home, YardName: "vpn-e2e",
 		Environment: map[string]string{
 			"SUBYARD_CONFIG_HOME":     configHome,
 			"RESOURCE_VPN_IPV4":       endpoint["address"].value,

@@ -334,8 +334,7 @@ func TestRegisteredEndpointSettingsRetainActiveFlatRegistration(t *testing.T) {
 	}
 	flat := filepath.Join(home, "yards/named.env")
 	testkit.WriteFile(t, flat, []byte("YARD_KIND=container\nINCUS_PROJECT=existing\n"), 0600)
-	loaded := config.Loaded{Context: domain.Context{YardName: "named", Paths: domain.RuntimePaths{ConfigHome: home, ConfigDir: home + "/shipped/config"}}}
-	path, err := registeredSettingsPath(loaded)
+	path, err := config.LocalYardSettingsFile(filepath.Join(home, "yards"), "named")
 	if err != nil || path != flat {
 		t.Fatalf("migration would shadow active flat registration: %s %v", path, err)
 	}
@@ -351,7 +350,7 @@ func TestRegisteredEndpointSettingsRetainActiveFlatRegistration(t *testing.T) {
 	if err := config.CompareAndSwapLocalSettingsFile(home, path, before, desired); err != nil {
 		t.Fatal(err)
 	}
-	registration, err := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, home, "named")
+	registration, err := config.FindYardRegistrationFile(home, "named")
 	values, readErr := config.ReadAssignments(registration)
 	if err != nil || readErr != nil || registration != flat || values["YARD_KIND"] != "container" || values["INCUS_PROJECT"] != "existing" || values["SAMPLE_HOST"] != value {
 		t.Fatalf("flat identity was shadowed or changed: %s %#v %v %v", registration, values, err, readErr)
@@ -482,7 +481,7 @@ func TestRegisteredMigrationResumesAcrossVerifiedAssetAliases(t *testing.T) {
 				}
 				files = &config.ProspectiveFiles{Root: base.ConfigHome, Yards: names, ReadSnapshot: view.ReadSnapshot}
 			}
-			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: alias, OperatorHome: base.ConfigHome, YardName: "default", DisablePrivate: true, ProspectiveFiles: files, Environment: map[string]string{"HOME": base.ConfigHome, "SUBYARD_OPERATOR_HOME": base.ConfigHome, "SUBYARD_CONFIG_HOME": base.ConfigHome, "SUBYARD_HOME": base.ConfigHome + "/data", "INCUS_PROJECT": "fixture", "INCUS_BRIDGE": "fixture-br", "YARD_INSTANCE_NAME": "yard", "CODING_TOOL_INTEGRATIONS": "codex"}})
+			loaded, err := config.Load(config.LoadOptions{RepositoryRoot: alias, OperatorHome: base.ConfigHome, YardName: "default", ProspectiveFiles: files, Environment: map[string]string{"HOME": base.ConfigHome, "SUBYARD_OPERATOR_HOME": base.ConfigHome, "SUBYARD_CONFIG_HOME": base.ConfigHome, "SUBYARD_HOME": base.ConfigHome + "/data", "INCUS_PROJECT": "fixture", "INCUS_BRIDGE": "fixture-br", "YARD_INSTANCE_NAME": "yard", "CODING_TOOL_INTEGRATIONS": "codex"}})
 			if err != nil {
 				return nil, err
 			}

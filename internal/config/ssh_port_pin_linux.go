@@ -142,14 +142,14 @@ func PrepareSSHPortPin(root *os.File, yard string) (SSHPortPin, error) {
 	}
 	defer cleanup()
 	repository := prefix + "/repository"
-	names, err := YardNames(repository+"/config", prefix)
+	names, err := YardNames(prefix)
 	if err != nil {
 		return SSHPortPin{}, err
 	}
 	ports := map[int]string{}
 	var selected Loaded
 	for _, name := range append(names, "default") {
-		loaded, e := Load(LoadOptions{RepositoryRoot: repository, OperatorHome: prefix, YardName: name, DisablePrivate: true, ConfigLocked: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": prefix, "SUBYARD_CONFIG_DIR": repository + "/config", "SUBYARD_HOME": prefix + "/data"}})
+		loaded, e := Load(LoadOptions{RepositoryRoot: repository, OperatorHome: prefix, YardName: name, ConfigLocked: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": prefix, "SUBYARD_CONFIG_DIR": repository + "/config", "SUBYARD_HOME": prefix + "/data"}})
 		if e != nil {
 			return SSHPortPin{}, errors.New("pin configuration is ineligible")
 		}

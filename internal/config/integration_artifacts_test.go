@@ -19,7 +19,7 @@ func TestIntegrationArtifactsPackageLocalResolution(t *testing.T) {
 	testkit.WriteFile(t, source, []byte("// raw JSONC\n{}\n"), 0644)
 	instructions := filepath.Join(testkit.TempDir(t), "AGENTS.md")
 	testkit.WriteFile(t, instructions, []byte("operator instructions\n"), 0600)
-	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "SAMPLE_INSTRUCTIONS": instructions}})
+	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "SAMPLE_INSTRUCTIONS": instructions}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestIntegrationArtifactsPackageLocalResolution(t *testing.T) {
 	}
 	testkit.WriteFile(t, filepath.Join(root, "config/host.env"), []byte("ALLOWS_HOST_ACCESS=false\n"), 0600)
 	for _, selection := range []string{"sample", ""} {
-		_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": selection, "SAMPLE_INSTRUCTIONS": instructions}})
+		_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": selection, "SAMPLE_INSTRUCTIONS": instructions}})
 		if err == nil || !strings.Contains(err.Error(), "SAMPLE_INSTRUCTIONS") {
 			t.Fatal("role allowed declared operator instructions", err)
 		}
@@ -186,7 +186,7 @@ func TestDeclaredArtifactsRejectManagedLinkCollisions(t *testing.T) {
 		{"AGENT_sample_PERSIST": ".sample/sessions:/mnt/host/one .sample/sessions/child:/mnt/host/two"},
 	} {
 		overrides["CODING_TOOL_INTEGRATIONS"] = "sample"
-		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: overrides})
+		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: overrides})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -200,7 +200,7 @@ func TestDeclaredArtifactsRejectManagedLinkCollisions(t *testing.T) {
 		}
 	}
 	// Explicit operator links are not claimed by the integration inventory.
-	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "HOST_LINKS": ".sample/settings.jsonc:/mnt/host/operator"}})
+	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "sample", "HOST_LINKS": ".sample/settings.jsonc:/mnt/host/operator"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestDeclaredDefaultKeepsFileOverridesThroughConfigAlias(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, override, []byte("// operator override\n{}\n"), 0600)
-	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_DIR": alias, "SUBYARD_CONFIG_HOME": home, "CODING_TOOL_INTEGRATIONS": "sample", "ENVIRONMENT_PROFILES": "selected"}})
+	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_DIR": alias, "SUBYARD_CONFIG_HOME": home, "CODING_TOOL_INTEGRATIONS": "sample", "ENVIRONMENT_PROFILES": "selected"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestShippedArtifactDeclarationsPreserveDestinationPolicyAndPersistence(t *t
 	}
 	for _, agent := range []string{"claude", "codex", "opencode", "pi"} {
 		t.Run(agent, func(t *testing.T) {
-			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": agent}})
+			loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": agent}})
 			if err != nil {
 				t.Fatal(err)
 			}

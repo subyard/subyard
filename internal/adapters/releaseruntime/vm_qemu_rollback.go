@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/config"
@@ -29,7 +28,7 @@ func (runtime *Runtime) inspectVMQEMURollback(ctx context.Context, target *verif
 	environment := runtime.config.Inputs.environment(runtime.config.Context)
 	environment["SUBYARD_CONFIG_HOME"] = request.ConfigHome
 	operator := first(environment["SUBYARD_OPERATOR_HOME"], environment["HOME"])
-	names, err := config.YardNames(filepath.Join(root, "config"), request.ConfigHome)
+	names, err := config.YardNames(request.ConfigHome)
 	if err != nil {
 		return nil, errors.New("cannot safely list yards for VM rollback inspection")
 	}
@@ -100,7 +99,7 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 			"", "retain a release supporting headless VMs with free page reporting, then run yard update --rollback")
 	}
 	if len(migrationMessages) != 0 {
-		outcome.Retry = "keep the current release active and resolve all reported release compatibility requirements before retrying"
+		outcome.Retry = retainedRegistryRetry(selection)
 	}
 	if layout != nil && vmRefused && len(migrationMessages) == 0 {
 		outcome.Retry = "retain a release supporting the installed configuration and reporting VM values, then run yard update --rollback"

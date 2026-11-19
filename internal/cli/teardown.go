@@ -380,7 +380,7 @@ func (cli *CLI) observeTeardownYard(ctx context.Context, loaded config.Loaded, e
 			return err
 		}
 		if observed.Reset && loaded.Context.YardName != "default" {
-			_, registrationErr := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome, loaded.Context.YardName)
+			_, registrationErr := config.FindYardRegistrationFile(loaded.Context.Paths.ConfigHome, loaded.Context.YardName)
 			if errors.Is(registrationErr, config.ErrUnknownYard) && (incusState.InstanceFound || incusState.ProjectFound || incusState.VolumeFound || incusState.ProfileFound) {
 				return errors.New("completed configuration reset has no registered physical target; refusing derived resource deletion")
 			}

@@ -92,7 +92,7 @@ func TestBootstrapRerunRefusesAnOlderLatestRelease(t *testing.T) {
 				// Ordinary selections reach the download, whose fixture bytes stop
 				// at checksum validation before any installer can run.
 				if err == nil || strings.Contains(string(output), "newer than the latest published release") ||
-					!strings.Contains(string(output), "installer checksum mismatch") {
+					!strings.Contains(string(output), "release checksum mismatch") {
 					t.Fatalf("bootstrap = %v: %s", err, output)
 				}
 				return
@@ -105,7 +105,7 @@ func TestBootstrapRerunRefusesAnOlderLatestRelease(t *testing.T) {
 				"installed version " + version + " is newer than the latest published release 1.2.3; no release was selected and nothing was changed",
 				"subyard-install.sh --version " + version + rootArgument + "\n",
 				"an unpublished build needs its own assets",
-				"subyard-install.sh --version 1.2.3" + rootArgument + "\n",
+				"subyard-install.sh --version 1.2.3" + rootArgument + " from " + stableReleaseURL + "\n",
 			} {
 				if err == nil || !strings.Contains(string(output), want) {
 					t.Fatalf("bootstrap = %v, missing %q: %s", err, want, output)

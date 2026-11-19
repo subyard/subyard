@@ -33,7 +33,7 @@ func TestLoadLocalFirstGitFallback(t *testing.T) {
 	localAsset := filepath.Join(configHome, "overrides", "shared", "agents", "codex", "rules", "repo.rules")
 	write(gitAsset, "git\n")
 	write(localAsset, "local\n")
-	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "cached", DisablePrivate: true,
+	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "cached",
 		Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, "data")}}
 	loaded, err := Load(options)
 	if err != nil {
@@ -73,7 +73,7 @@ func TestLoadLocalFirstGitFallback(t *testing.T) {
 	}
 	assertEffectiveSetting(t, loaded.Settings["YARD_IMAGE"], "git:image", "yard", "Git scalar settings", gitYard)
 	assertEffectiveSetting(t, loaded.Settings["AGENT_codex_RULES"], gitAsset, "yard", "Git file settings", gitAsset)
-	names, err := YardNames(filepath.Join(home, "shipped"), configHome)
+	names, err := YardNames(configHome)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestLoadLocalFirstGitFallback(t *testing.T) {
 	}
 	localYard := filepath.Join(configHome, "yards", "cached", "config.env")
 	write(localYard, "YARD_IMAGE=yard:image\n")
-	registration, err := FindYardRegistrationFile(filepath.Join(root, "config"), configHome, "cached")
+	registration, err := FindYardRegistrationFile(configHome, "cached")
 	if err != nil || registration != localYard {
 		t.Fatalf("registration = %q, %v", registration, err)
 	}
@@ -106,7 +106,7 @@ func TestLoadGitTemplateResolvedOnceWithLocalOverride(t *testing.T) {
 	write(filepath.Join(configHome, GitSettingsRelativePath, "yards", "named", "config.env"), "YARD_TEMPLATE=first\nYARD_IMAGE=git:image\n")
 	localYard := filepath.Join(configHome, "yards", "named", "config.env")
 	write(localYard, "YARD_TEMPLATE=second\n")
-	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "named", DisablePrivate: true,
+	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "named",
 		Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome, "SUBYARD_HOME": filepath.Join(home, "data")}})
 	if err != nil {
 		t.Fatal(err)

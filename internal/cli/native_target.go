@@ -58,7 +58,7 @@ func (cli *CLI) checkNativeTargets(current config.Loaded, allLocal bool, owners 
 	if current.Context.AccessKind == domain.AccessRemote && !allLocal {
 		return nil
 	}
-	names, err := config.YardNames(current.Context.Paths.ConfigDir, current.Context.Paths.ConfigHome)
+	names, err := config.YardNames(current.Context.Paths.ConfigHome)
 	if err != nil {
 		return err
 	}

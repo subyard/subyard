@@ -87,9 +87,13 @@ func (tracker *settingTracker) ignoredAssignments(yard, configHome string) []Ign
 	}
 	ignored := slices.Clone(tracker.ignored)
 	for index := range ignored {
-		ignored[index].Yard = yard
-		ignored[index].authored = configHome != "" &&
-			ignored[index].Path == authoredSettingsPath(configHome, yard, ignored[index].Scope, ignored[index].Git)
+		assignment := &ignored[index]
+		assignment.Yard = yard
+		authored := authoredSettingsPath(configHome, yard, assignment.Scope, assignment.Git)
+		assignment.authored = configHome != "" && assignment.Path == authored
+		if !assignment.Git && assignment.Scope == "yard" {
+			assignment.authored = assignment.authored || assignment.Path == filepath.Join(configHome, "yards", yard+".env")
+		}
 	}
 	slices.SortStableFunc(ignored, func(left, right IgnoredAssignment) int { return strings.Compare(left.String(), right.String()) })
 	return slices.CompactFunc(ignored, func(left, right IgnoredAssignment) bool { return left.String() == right.String() })

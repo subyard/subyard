@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
@@ -87,4 +89,48 @@ func TestLegacySSHSourceCleanupUsesPreparedConsentAndRejectsNewGitAuthoring(t *t
 	if !strings.Contains(f.stderr.String(), "local-only") {
 		t.Fatalf("new Git SSH authoring lacks policy diagnostic: %s", f.stderr.String())
 	}
+}
+
+func TestGitScalarEditPreservesLegacySSHSource(t *testing.T) {
+	f := newConfigGitAuthoringFixture(t)
+	checkout := filepath.Join(f.home, ".local/share/subyard-config")
+	source := filepath.Join(checkout, "hosts/owner-a/config.env")
+	writeConfigCommandFile(t, source, "SSH_PORT=2300\nGIT_USER_NAME=Jane\n", 0o600)
+	commitConfigSource(t, checkout, "Legacy owner transport setting")
+	runConfigSyncGit(t, checkout, "push", "--quiet")
+	cache := filepath.Join(f.configHome, config.GitSettingsRelativePath, "config.env")
+	cached := mustReadConfigFixture(t, cache)
+	writeConfigCommandFile(t, cache, string(cached)+"SSH_PORT=2299\n", 0o600)
+	localYard := filepath.Join(f.configHome, "yards/default/config.env")
+	head := configSourceGitOutput(t, f.remote, "rev-parse", "HEAD")
+	f.run(1, "config", "set", "GIT_USER_NAME", "Janet", "--scope", "host", "--git", "--yes")
+	if !strings.Contains(f.stderr.String(), "migrate Git settings") ||
+		configSourceGitOutput(t, f.remote, "rev-parse", "HEAD") != head {
+		t.Fatalf("Git scalar edit included an unrelated local migration: %s", &f.stderr)
+	}
+	if _, err := os.Lstat(localYard); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Git scalar edit wrote a local SSH pin: %v", err)
+	}
+	writeConfigCommandFile(t, cache, string(cached), 0o600)
+	writeConfigCommandFile(t, filepath.Join(f.configHome, "config.env"), "SSH_PORT=2299\n", 0o640)
+	// Reconcile the unrelated source records explicitly before the scalar edit.
+	f.run(0, "config", "sync", "pull", "--yes")
+	f.stdout.Reset()
+	f.stderr.Reset()
+	prompt := &testkit.Prompt{Answers: []bool{true}}
+	args := []string{"config", "set", "GIT_USER_NAME", "Janet", "--scope", "host", "--git"}
+	program, err := New(Options{RepositoryRoot: f.root, Environment: f.environment, Arguments: args, Prompt: prompt, Stdout: &f.stdout, Stderr: &f.stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.Run(context.Background()); code != 0 || len(prompt.Requests) != 1 {
+		t.Fatalf("Git scalar edit: %d %s", code, f.stderr.String())
+	}
+	if strings.Contains(strings.Join(prompt.Requests[0].Consequences, "\n"), "remove SSH_PORT") {
+		t.Fatal("Git scalar consent included legacy port cleanup")
+	}
+	if after := configSourceGitOutput(t, f.remote, "show", "HEAD:hosts/owner-a/config.env"); after != "SSH_PORT=2300\nGIT_USER_NAME='Janet'\n" {
+		t.Fatalf("source after edit: %q", after)
+	}
+	f.assertSetting("SSH_PORT", "2299")
 }

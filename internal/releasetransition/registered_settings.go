@@ -19,21 +19,9 @@ func (t *V2Transition) registeredSettingsSnapshot(yard string, view V2SettingsSn
 	if view == nil {
 		view = posixV2SettingsSnapshotView{configHome: t.options.ConfigHome}
 	}
-	path := filepath.Join(t.options.ConfigHome, "yards", yard, "config.env")
-	snapshot, err := view.ReadSnapshot(path)
+	snapshot, path, err := config.ReadLocalYardSettingsSnapshot(t.options.ConfigHome, yard, view.ReadSnapshot)
 	if err != nil {
 		return snapshot, path, "", err
-	}
-	// The loader has never read a flat file for the default yard.
-	if yard != "default" {
-		flatPath := filepath.Join(t.options.ConfigHome, "yards", yard+".env")
-		flat, err := view.ReadSnapshot(flatPath)
-		if err != nil || snapshot.Exists && flat.Exists {
-			return snapshot, path, "", invalid("ambiguous registered local settings")
-		}
-		if flat.Exists {
-			snapshot, path = flat, flatPath
-		}
 	}
 	inputs := map[string]Fingerprint{}
 	for _, relative := range []string{"host.env", "config.env", filepath.Join(config.GitSettingsRelativePath, "host.env"), filepath.Join(config.GitSettingsRelativePath, "config.env"), filepath.Join(config.GitSettingsRelativePath, "yards", yard, "config.env")} {
@@ -126,7 +114,7 @@ func (t *V2Transition) inspectRegisteredSettings(ctx context.Context, m Migratio
 				if present[a.Name] {
 					continue
 				}
-				if !slices.Contains(t.options.RegisteredEndpointSettings, a.Name) || !a.Direct || a.Dynamic {
+				if !slices.Contains(t.options.RegisteredEndpointSettings, a.Name) {
 					return plan, invalid("registered endpoint output names an undeclared setting")
 				}
 				value := a.Value

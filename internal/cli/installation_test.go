@@ -1,15 +1,62 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
+
+func TestInstallationCacheEnrollmentRejectsVerifiedReplacement(t *testing.T) {
+	home := testkit.TempDir(t)
+	cache := filepath.Join(home, "cache")
+	runtime := filepath.Join(home, "runtime")
+	for _, path := range []string{cache, runtime} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := []string{filepath.Join(cache, "bundle"), filepath.Join(cache, "checksum")}
+	var identities []uninstall.Entry
+	for _, path := range paths {
+		testkit.WriteFile(t, path, []byte("verified"), 0o600)
+		tree, err := uninstall.CaptureRoot(path)
+		if err != nil || len(tree.Entries) != 1 {
+			t.Fatalf("capture cache artifact: %v", err)
+		}
+		entry := tree.Entries[0]
+		entry.Path = path
+		identities = append(identities, entry)
+		if err := os.Rename(path, path+".old"); err != nil {
+			t.Fatal(err)
+		}
+		testkit.WriteFile(t, path, []byte("verified"), 0o600)
+	}
+	input, err := json.Marshal(map[string][]uninstall.Entry{"VerifiedCacheInputs": identities})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: repositoryRoot(t), Stdin: bytes.NewReader(input), Stderr: &stderr,
+		Environment: []string{"HOME=" + home, "YARD_RELEASE_CACHE=" + cache, "YARD_RUNTIME_ROOT=" + runtime}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := program.runInstallation(context.Background(), []string{"runtime"}); code != 1 ||
+		strings.Count(stderr.String(), "verified installation cache artifact changed") != len(paths) {
+		t.Fatalf("cache identity refusal = %d, %s", code, stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(runtime, uninstall.ManifestName)); !os.IsNotExist(err) {
+		t.Fatalf("refused cache enrollment published inventory: %v", err)
+	}
+}
 
 func TestInstallationActivationOwnsCanonicalScope(t *testing.T) {
 	root := repositoryRoot(t)

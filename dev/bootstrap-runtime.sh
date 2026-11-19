@@ -13,15 +13,8 @@ BIN_DIR="${YARD_BIN_DIR:-$HOME/.local/bin}"
 OFFLINE=0
 PUBLISH_ONLY=0
 ASSUME_YES="${ASSUME_YES:-0}"
-
-# Package generation embeds the exact current publisher for older selected
-# helpers. A source checkout uses that same script directly.
-publisher_sha='@SUBYARD_PUBLISHER_SHA256@'
-publisher_payload() {
-  cat <<'SUBYARD_EMBEDDED_PUBLISHER'
-# SUBYARD_EMBEDDED_PUBLISHER_CONTENT
-SUBYARD_EMBEDDED_PUBLISHER
-}
+channel_explicit=0
+runtime_root_explicit=0
 
 # Startup parents and the binary directory may be existing operator directories.
 # Unlike install -d, mkdir never resets their permissions or ownership. Create
@@ -50,9 +43,9 @@ validate_data_directory() {
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --channel) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --channel needs stable\n' >&2; exit 2; }; CHANNEL="$2"; shift 2 ;;
+    --channel) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --channel needs stable\n' >&2; exit 2; }; CHANNEL="$2"; channel_explicit=1; shift 2 ;;
     --version) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --version needs a value\n' >&2; exit 2; }; VERSION="$2"; shift 2 ;;
-    --runtime-root) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --runtime-root needs a path\n' >&2; exit 2; }; RUNTIME_ROOT="$2"; shift 2 ;;
+    --runtime-root) [ $# -ge 2 ] || { printf 'bootstrap-runtime: --runtime-root needs a path\n' >&2; exit 2; }; RUNTIME_ROOT="$2"; runtime_root_explicit=1; shift 2 ;;
     --offline) OFFLINE=1; shift ;;
     --publish-only) PUBLISH_ONLY=1; shift ;;
     -y|--yes) ASSUME_YES=1; shift ;;
@@ -62,6 +55,44 @@ while [ $# -gt 0 ]; do
     *) printf 'bootstrap-runtime: unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+
+# Apply the updater's rule and refuse unclaimed paths under shared parents.
+validate_ancestry() {
+  python3 - "$1" "$2" <<'PY'
+import os, stat, sys
+
+path, name = sys.argv[1:]
+root = "/" + os.path.normpath(path).lstrip("/")
+if not os.path.isabs(path) or root == "/":
+    sys.exit(f"bootstrap-runtime: {name} must be an absolute non-root path")
+uid = os.getuid()
+current, private = "/", False
+parent_mode = os.lstat(current).st_mode
+parts = root[1:].split("/")
+for index, part in enumerate(parts):
+    current = os.path.join(current, part)
+    try:
+        info = os.lstat(current)
+    except FileNotFoundError:
+        if parent_mode & 0o022 and not private:
+            sys.exit(f"bootstrap-runtime: {name} has a missing component under a shared parent: {current!r}")
+        break
+    final = index == len(parts) - 1
+    if not stat.S_ISDIR(info.st_mode):
+        sys.exit(f"bootstrap-runtime: {name} has a symlink or non-directory ancestor: {current!r}")
+    if info.st_uid not in (0, uid):
+        sys.exit(f"bootstrap-runtime: {name} has unsafe ownership: {current!r}")
+    sticky = info.st_uid == 0 and info.st_mode & stat.S_ISVTX and not final
+    contained = info.st_uid == uid and private and not final
+    if info.st_mode & 0o022 and not (sticky or contained):
+        sys.exit(f"bootstrap-runtime: {name} has unsafe permissions: {current!r}")
+    private = private or (info.st_uid == uid and not info.st_mode & 0o077)
+    if final and info.st_uid != uid:
+        sys.exit(f"bootstrap-runtime: {name} is not operator-owned: {current!r}")
+    parent_mode = info.st_mode
+print(root)
+PY
+}
 
 # Validate existing installation ownership without changing the target.
 if [ -e "$DATA_HOME" ] || [ -L "$DATA_HOME" ]; then
@@ -74,6 +105,9 @@ fi
 [ "$CHANNEL" = stable ] || { printf 'bootstrap-runtime: unsupported channel: %s\n' "$CHANNEL" >&2; exit 2; }
 case "$RUNTIME_ROOT" in /*) ;; *) printf 'bootstrap-runtime: runtime root must be absolute\n' >&2; exit 2 ;; esac
 [ "$RUNTIME_ROOT" != / ] || { printf 'bootstrap-runtime: refusing filesystem root\n' >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 \
+  || { printf 'bootstrap-runtime: python3 is required\n' >&2; exit 2; }
+RUNTIME_ROOT="$(validate_ancestry "$RUNTIME_ROOT" 'runtime root')"
 existing_runtime=0
 if [ -e "$RUNTIME_ROOT/current" ] || [ -L "$RUNTIME_ROOT/current" ]; then
   existing_runtime=1
@@ -84,7 +118,7 @@ case "$(uname -s)/$(uname -m)" in
   Linux/aarch64|Linux/arm64) os=linux; arch=arm64 ;;
   *) printf 'bootstrap-runtime: unsupported platform: %s/%s\n' "$(uname -s)" "$(uname -m)" >&2; exit 2 ;;
 esac
-for dependency in jq sha256sum tar gzip; do
+for dependency in jq sha256sum tar gzip rmdir; do
   command -v "$dependency" >/dev/null 2>&1 \
     || { printf 'bootstrap-runtime: %s is required\n' "$dependency" >&2; exit 2; }
 done
@@ -96,11 +130,19 @@ if [ "$OFFLINE" = 0 ]; then
   esac
 fi
 
+valid_release_repository() {
+  [[ "$1" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ && "$1" != */. && "$1" != */.. ]]
+}
+valid_release_repository "$REPOSITORY" \
+  || { printf 'bootstrap-runtime: invalid release repository\n' >&2; exit 2; }
+
 latest_release_tag() (
   local headers response response_headers result status reset retry_after reason metadata_url tag path repository
   local redirects location expected_repository="$REPOSITORY"
-  headers="$(mktemp /tmp/subyard-latest.XXXXXX)" || return 1
+  headers="$(umask 077; mktemp /tmp/subyard-latest.XXXXXX)" || return 1
   trap 'rm -f -- "$headers"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   # Like Codex provisioning, use the public redirect instead of the shared REST
   # quota. Follow redirects ourselves so every hop is checked before contact.
   metadata_url="https://github.com/$REPOSITORY/releases/latest"
@@ -134,8 +176,8 @@ latest_release_tag() (
         fi
         # GitHub canonicalizes renamed/transferred repositories via this endpoint.
         path="${location#https://github.com/}"
-        if [[ "$path" =~ ^([^/?#]+)/([^/?#]+)/releases/latest$ ]]; then
-          expected_repository="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+        if [[ "$path" == */releases/latest ]] && valid_release_repository "${path%/releases/latest}"; then
+          expected_repository="${path%/releases/latest}"
         fi
         metadata_url="$location"
         continue ;;
@@ -210,7 +252,10 @@ if [ -z "$VERSION" ]; then
 else
   tag="${YARD_RELEASE_TAG:-v$VERSION}"
 fi
-case "$VERSION" in ''|*[!A-Za-z0-9._+-]*) printf 'bootstrap-runtime: unsafe version: %s\n' "$VERSION" >&2; exit 2 ;; esac
+[[ "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] \
+  || { printf 'bootstrap-runtime: unsafe version\n' >&2; exit 2; }
+[[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] \
+  || { printf 'bootstrap-runtime: invalid release tag\n' >&2; exit 2; }
 
 if [ "$PUBLISH_ONLY" = 0 ]; then
 # Pick the files that new interactive and login shells actually read. The stable `current` link
@@ -387,10 +432,170 @@ if [ "$channel_selected" = 1 ] && installed_version="$(installed_core_newer "$VE
   printf 'bootstrap-runtime: installed version %s is newer than the latest published release %s; no release was selected and nothing was changed\n' "$installed_version" "$VERSION" >&2
   printf '  to re-run the installed release, which also completes an interrupted install: subyard-install.sh --version %s%s\n' "$installed_version" "$root_argument" >&2
   printf '  (an unpublished build needs its own assets: YARD_RELEASE_BASE_URL, or --offline with a complete release cache)\n' >&2
-  printf '  to install the older release instead (downgrade): subyard-install.sh --version %s%s\n' "$VERSION" "$root_argument" >&2
+  printf '  to select the older release explicitly, use its own subyard-install.sh --version %q%s from %q\n' "$VERSION" "$root_argument" "https://github.com/$REPOSITORY/releases/tag/$tag" >&2
   exit 1
 fi
+fi
 
+name="subyard-$VERSION-$os-$arch.tar.gz"
+release_dir="$(validate_ancestry "$CACHE_ROOT/$VERSION" 'versioned release cache')"
+
+safe_release_input() {
+  local owner mode
+  [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  read -r owner mode < <(stat -c '%u %a' -- "$1") || return 1
+  [ "$owner" = 0 ] || [ "$owner" = "$UID" ] || return 1
+  (( (8#$mode & 0022) == 0 ))
+}
+
+read_release_asset() {
+  local asset="$1"
+  if [ "$OFFLINE" = 1 ]; then
+    safe_release_input "$release_dir/$asset" && cat -- "$release_dir/$asset"
+    return
+  fi
+  case "${YARD_RELEASE_BASE_URL:-}" in
+    file://*) cat -- "${YARD_RELEASE_BASE_URL#file://}/$asset" ;;
+    https://*) curl -fsSL --proto '=https' --tlsv1.2 "$YARD_RELEASE_BASE_URL/$asset" ;;
+    '') curl -fsSL --proto '=https' --tlsv1.2 "https://github.com/$REPOSITORY/releases/download/$tag/$asset" ;;
+    *) printf 'bootstrap-runtime: release base URL must use https:// or file://\n' >&2; return 2 ;;
+  esac
+}
+
+# Read the capability before writing the cache or invoking the publisher.
+bundle_metadata="$(read_release_asset "$name.manifest.json")" \
+  || { printf 'bootstrap-runtime: could not read the release manifest\n' >&2; exit 1; }
+jq -es --arg version "$VERSION" --arg arch "$arch" '
+  length == 1 and (.[0] | .schemaVersion == 1 and .kind == "runtime" and
+    .version == $version and .os == "linux" and .arch == $arch)
+' <<<"$bundle_metadata" >/dev/null \
+  || { printf 'bootstrap-runtime: incompatible release manifest\n' >&2; exit 1; }
+refuse_unsupported_bootstrap() {
+  printf 'bootstrap-runtime: Subyard %q does not support this bootstrap\n' "$VERSION" >&2
+  if [ "$PUBLISH_ONLY" = 1 ]; then
+    # The tagged bootstrap option parser first adds --publish-only in v0.18.9.
+    if ! [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+      printf '  Check the selected release\047s own installer help for publication-only staging support.\n' >&2
+      exit 1
+    fi
+    case "$tag" in
+      v0.[0-9].*|v0.1[0-7].*|v0.18.[0-8])
+        printf '  Publication-only staging is unavailable in this release\047s own installer.\n' >&2
+        exit 1 ;;
+    esac
+  fi
+  local arguments=(--version "$VERSION")
+  [ "$channel_explicit" = 0 ] || arguments+=(--channel "$CHANNEL")
+  if [ "$runtime_root_explicit" = 1 ] || [ "$RUNTIME_ROOT" != "$DATA_HOME/runtime" ]; then
+    arguments+=(--runtime-root "$RUNTIME_ROOT")
+  fi
+  [ "$OFFLINE" = 0 ] || arguments+=(--offline)
+  [ "$PUBLISH_ONLY" = 0 ] || arguments+=(--publish-only)
+  [ "$ASSUME_YES" != 1 ] || arguments+=(--yes)
+  if [ "$OFFLINE" = 0 ]; then
+    printf '  Download this release\047s own subyard-install.sh from %q\n' "https://github.com/$REPOSITORY/releases/tag/$tag" >&2
+  else
+    printf '  Use this release\047s own subyard-install.sh with your offline cache.\n' >&2
+  fi
+  { printf '  Run bash subyard-install.sh'; printf ' %q' "${arguments[@]}"; printf '\n'; } >&2
+  exit 1
+}
+jq -e '.bootstrapDraft == "private-release-draft-v1"' <<<"$bundle_metadata" >/dev/null || refuse_unsupported_bootstrap
+
+bundle="$release_dir/$name"
+checksum="$bundle.sha256"
+manifest="$bundle.manifest.json"
+provenance="$bundle.provenance.json"
+draft_root=''
+preflight_dir=''
+cleanup_bootstrap() {
+  if [ -n "$preflight_dir" ]; then
+    if ! rm -f -- "$preflight_dir/$name" "$preflight_dir/$name.sha256" "$preflight_dir/$name.provenance.json" ||
+       ! rmdir -- "$preflight_dir"; then
+      printf 'bootstrap-runtime: verification scratch remains at %q\n' "$preflight_dir" >&2
+    fi
+  fi
+  if [ -n "$draft_root" ]; then
+    if ! (
+      [ ! -L "$draft_root" ] && cd -- "$draft_root" &&
+        rm -f -- update.lock installation.json &&
+        { [ ! -e releases ] || rmdir -- releases; }
+    ) || ! rmdir -- "$draft_root"; then
+      printf 'bootstrap-runtime: draft contains preserved entries at %q\n' "$draft_root" >&2
+    fi
+  fi
+}
+
+enable_cleanup() {
+  trap cleanup_bootstrap EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+
+# Verify the exact archive before starting its engine. Online inputs are kept
+# in private scratch until the probe and any first-install confirmation pass.
+probe_dir="$release_dir"
+if [ "$OFFLINE" = 0 ]; then
+  enable_cleanup
+  preflight_dir="$(umask 077; mktemp -d /tmp/subyard-bootstrap-preflight.XXXXXX)"
+  probe_dir="$preflight_dir"
+  for suffix in '' .sha256 .provenance.json; do
+    (umask 077; read_release_asset "$name$suffix" > "$probe_dir/$name$suffix") \
+      || { printf 'bootstrap-runtime: release download failed; current runtime was not changed\n' >&2; exit 1; }
+  done
+fi
+probe_bundle="$probe_dir/$name"
+for input in "$probe_bundle" "$probe_bundle.sha256" "$probe_bundle.provenance.json"; do
+  safe_release_input "$input" \
+    || { printf 'bootstrap-runtime: release verification inputs are unavailable\n' >&2; exit 1; }
+done
+read -r expected _ < "$probe_bundle.sha256" || true
+actual="$(sha256sum < "$probe_bundle" | cut -d' ' -f1)"
+[[ "$expected" =~ ^[0-9a-fA-F]{64}$ && "${expected,,}" = "$actual" ]] \
+  || { printf 'bootstrap-runtime: release checksum mismatch\n' >&2; exit 1; }
+jq -es --arg name "$name" --arg version "$VERSION" --arg sha "$actual" '
+  length == 1 and (.[0] | .schemaVersion == 1 and .artifact == $name and
+    .version == $version and (.sha256 | ascii_downcase) == $sha and
+    .sourceRepository == "github.com/Dmitry-Borodin/Subyard" and
+    (.canonicalRepository // "github.com/Subyard/Subyard") == "github.com/Subyard/Subyard" and
+    (.sourceRevision | type == "string" and length > 0))
+' "$probe_bundle.provenance.json" >/dev/null \
+  || { printf 'bootstrap-runtime: provenance does not match the bundle\n' >&2; exit 1; }
+
+probe_engine() {
+  python3 - "$probe_bundle" <<'PY'
+import errno, fcntl, os, shutil, subprocess, sys, tarfile
+
+try:
+    with tarfile.open(sys.argv[1], "r:gz") as bundle:
+        engines = [member for member in bundle.getmembers() if member.name in ("./bin/yard-engine", "bin/yard-engine")]
+        if len(engines) != 1 or not engines[0].isreg():
+            sys.exit("bootstrap-runtime: invalid bundle engine")
+        flags = os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+        try:
+            fd = os.memfd_create("subyard-bootstrap-engine", flags | 0x0010)  # Linux MFD_EXEC
+        except OSError as err:
+            if err.errno != errno.EINVAL:
+                raise
+            fd = os.memfd_create("subyard-bootstrap-engine", flags)
+        with os.fdopen(fd, "wb", buffering=0) as sealed, bundle.extractfile(engines[0]) as engine:
+            shutil.copyfileobj(engine, sealed)
+            os.fchmod(fd, 0o500)
+            fcntl.fcntl(fd, fcntl.F_ADD_SEALS,
+                        fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+            probe = subprocess.run([f"/proc/self/fd/{fd}", "_bootstrap-draft-capability"],
+                                   pass_fds=(fd,), cwd="/", env={"PATH": os.defpath},
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, timeout=15)
+except (OSError, tarfile.TarError, subprocess.TimeoutExpired):
+    sys.exit("bootstrap-runtime: could not query the verified release engine")
+if probe.returncode or probe.stdout != b"private-release-draft-v1\n":
+    sys.exit(2)
+PY
+}
+probe_engine || { [ "$?" = 2 ] && refuse_unsupported_bootstrap; exit 1; }
+
+if [ "$PUBLISH_ONLY" = 0 ]; then
 need_path_line=1
 case ":$PATH:" in *":$BIN_DIR:"*) need_path_line=0 ;; esac
 if [ -f "$RC" ] && grep -qF "export PATH=\"$BIN_DIR:" "$RC"; then
@@ -398,7 +603,7 @@ if [ -f "$RC" ] && grep -qF "export PATH=\"$BIN_DIR:" "$RC"; then
 fi
 
 printf 'Install the yard CLI\nThis will:\n'
-printf '  - download and verify Subyard %s for %s/%s;\n' "$VERSION" "$os" "$arch"
+printf '  - use verified Subyard %s for %s/%s;\n' "$VERSION" "$os" "$arch"
 printf '  - install the immutable runtime under %s;\n' "$RUNTIME_ROOT"
 printf '  - complete the installed release transition before publishing CLI entrypoints;\n'
 printf '  - link yard and sy under %s;\n' "$BIN_DIR"
@@ -423,35 +628,28 @@ else
   printf 'Stage verified Subyard %s for %s/%s under %s; activation requires a separate plan and consent.\n' "$VERSION" "$os" "$arch" "$RUNTIME_ROOT"
 fi
 
-name="subyard-$VERSION-$os-$arch.tar.gz"
-release_dir="$CACHE_ROOT/$VERSION"
-bundle="$release_dir/$name"
-checksum="$bundle.sha256"
-manifest="$bundle.manifest.json"
-provenance="$bundle.provenance.json"
 install -d -m 0700 "$release_dir"
 
-fetch() { # <name> <destination>
+fetch() { # <name> <destination> [metadata already read]
   local asset="$1" destination="$2" temporary
-  [ "$OFFLINE" = 0 ] || { [ -f "$destination" ] && [ ! -L "$destination" ]; return; }
-  temporary="$(mktemp "$release_dir/.$asset.download.XXXXXX")"
+  [ "$OFFLINE" = 0 ] || { safe_release_input "$destination"; return; }
+  temporary="$(mktemp "$release_dir/.$asset.download.XXXXXX")" || return
   trap 'rm -f "$temporary"' RETURN
-  if [ -n "${YARD_RELEASE_BASE_URL:-}" ]; then
-    case "$YARD_RELEASE_BASE_URL" in
-      file://*) cp -- "${YARD_RELEASE_BASE_URL#file://}/$asset" "$temporary" ;;
-      https://*) curl -fsSL --proto '=https' --tlsv1.2 "$YARD_RELEASE_BASE_URL/$asset" -o "$temporary" ;;
-      *) printf 'bootstrap-runtime: release base URL must use https:// or file://\n' >&2; return 2 ;;
-    esac
+  if [ "$#" = 3 ]; then
+    printf '%s\n' "$3" > "$temporary" || return
+  elif [ -n "$preflight_dir" ] && [ -f "$preflight_dir/$asset" ]; then
+    cat -- "$preflight_dir/$asset" > "$temporary" || return
   else
-    curl -fsSL --proto '=https' --tlsv1.2 \
-      "https://github.com/$REPOSITORY/releases/download/$tag/$asset" -o "$temporary"
+    read_release_asset "$asset" > "$temporary" || return
   fi
-  chmod 0600 "$temporary"
-  mv -f "$temporary" "$destination"
+  chmod 0600 "$temporary" || return
+  mv -f "$temporary" "$destination" || return
   trap - RETURN
 }
 
-for suffix in '' .sha256 .manifest.json .provenance.json; do
+fetch "$name.manifest.json" "$manifest" "$bundle_metadata" \
+  || { printf 'bootstrap-runtime: could not cache the release manifest\n' >&2; exit 1; }
+for suffix in '' .sha256 .provenance.json; do
   fetch "$name$suffix" "$bundle$suffix" \
     || { printf 'bootstrap-runtime: release download failed; current runtime was not changed\n' >&2; exit 1; }
 done
@@ -468,36 +666,35 @@ installer_actual="$(sha256sum "$installer" | cut -d' ' -f1)"
   || { printf 'bootstrap-runtime: installer checksum mismatch\n' >&2; exit 1; }
 [ "$(stat -c '%a' "$installer")" = 700 ] || chmod 0700 "$installer"
 
+# Keep the exact cache generations verified by the publisher across consent.
+cache_request() {
+  python3 - "$bundle" "$checksum" "$manifest" "$provenance" "$installer" "$installer_checksum" <<'PY'
+import json, os, sys
+entries = []
+for path in sys.argv[1:]:
+    info = os.stat(path, follow_symlinks=False)
+    entries.append(dict(Path=path, Device=info.st_dev, Inode=info.st_ino,
+                        Mode=info.st_mode, UID=info.st_uid, GID=info.st_gid,
+                        Size=info.st_size, Modified=info.st_mtime_ns,
+                        Changed=info.st_ctime_ns, Link=""))
+print(json.dumps({"VerifiedCacheInputs": entries}))
+PY
+}
+if [ "$PUBLISH_ONLY" = 0 ] && [ "$existing_runtime" = 1 ]; then
+  verified_cache="$(cache_request)"
+fi
 # The verified candidate validates both installation scopes before activation.
 # The publisher passes this bounded request to that exact engine after verification.
-unset SUBYARD_INSTALL_ENTRYPOINTS SUBYARD_INSTALL_VERIFIED_HELPER
+unset SUBYARD_INSTALL_ENTRYPOINTS
+unset SUBYARD_INSTALL_RUNTIME_SCOPE SUBYARD_BOOTSTRAP_DRAFT_V1
+unset YARD_ENGINE_PATH
+unset SUBYARD_SOURCE_INGRESS_V1_CLASS SUBYARD_SOURCE_INGRESS_V1_ROOT SUBYARD_SOURCE_INGRESS_V1_DATA
+unset SUBYARD_SOURCE_INGRESS_V1_BIN SUBYARD_SOURCE_INGRESS_V1_RC SUBYARD_SOURCE_INGRESS_V1_LOGIN_RC
 if [ "$PUBLISH_ONLY" = 0 ]; then
+  enable_cleanup
   inventory_shell_files="$(printf '%s\n' "${login_rcs[@]}" "${shell_rcs[@]}" | jq -Rsc 'split("\n") | map(select(length > 0)) | unique')"
   SUBYARD_INSTALL_ENTRYPOINTS="$(jq -n --arg bin "$BIN_DIR" --argjson shellFiles "$inventory_shell_files" '{BinDir:$bin,ShellFiles:$shellFiles}')"
   export SUBYARD_INSTALL_ENTRYPOINTS
-  publisher="$installer"
-  publisher_source=''
-  if [[ "$publisher_sha" = @* ]]; then
-    publisher_source="$(dirname "${BASH_SOURCE[0]}")/../scripts/install-runtime-release.sh"
-    [ -f "$publisher_source" ] && [ ! -L "$publisher_source" ] \
-      || { printf 'bootstrap-runtime: current publisher is unavailable\n' >&2; exit 1; }
-    publisher_sha="$(sha256sum "$publisher_source" | cut -d' ' -f1)"
-  fi
-  if [ "${installer_actual,,}" != "$publisher_sha" ]; then
-    publisher_dir="$(mktemp -d /tmp/subyard-bootstrap-publisher.XXXXXX)"
-    publisher="$publisher_dir/installer"
-    trap 'rm -f -- "$publisher"; rmdir -- "$publisher_dir"' EXIT
-    if [ -n "${publisher_source:-}" ]; then
-      cp -- "$publisher_source" "$publisher"
-    else
-      publisher_payload > "$publisher"
-    fi
-    [ "$(sha256sum "$publisher" | cut -d' ' -f1)" = "$publisher_sha" ] \
-      || { printf 'bootstrap-runtime: current publisher integrity check failed\n' >&2; exit 1; }
-    chmod 0700 "$publisher"
-  fi
-  SUBYARD_INSTALL_VERIFIED_HELPER="$installer"
-  export SUBYARD_INSTALL_VERIFIED_HELPER
 fi
 
 printf 'channel=%s available=%s platform=%s/%s\n' "$CHANNEL" "$VERSION" "$os" "$arch"
@@ -516,19 +713,25 @@ if [ "$PUBLISH_ONLY" = 1 ]; then
 fi
 run_transition=0
 if [ "$existing_runtime" = 0 ]; then
-  "$publisher" --runtime-root "$RUNTIME_ROOT" \
+  "$installer" --runtime-root "$RUNTIME_ROOT" \
     --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance"
   candidate="$(readlink -f -- "$RUNTIME_ROOT/current")"
 else
-  published_release="$("$publisher" --runtime-root "$RUNTIME_ROOT" --publish-only \
+  # Use a sibling so the approved directory can be renamed into the live store.
+  # The publisher verifies the bundle and its engine in the isolated scope.
+  draft_root="$(mktemp -d -- "$(dirname -- "$RUNTIME_ROOT")/.subyard-release-draft-XXXXXXXX")"
+  chmod 00700 "$draft_root"
+  read -r bundle_expected _ < "$checksum" || true
+  bundle_expected="${bundle_expected,,}"
+  published_release="$(SUBYARD_INSTALL_RUNTIME_SCOPE=private-draft "$installer" --runtime-root "$draft_root" --publish-only \
     --bundle "$bundle" --checksum "$checksum" --manifest "$manifest" --provenance "$provenance")"
-  case "$published_release" in
-    releases/"$VERSION"-*) ;;
-    *) printf 'bootstrap-runtime: installer returned an invalid published release identity\n' >&2; exit 1 ;;
-  esac
-  candidate="$RUNTIME_ROOT/$published_release"
+  if [[ ! "$bundle_expected" =~ ^[0-9a-f]{64}$ || "$published_release" != "releases/$VERSION-${bundle_expected:0:12}" ]]; then
+    printf 'bootstrap-runtime: installer returned an invalid release draft identity\n' >&2
+    exit 1
+  fi
+  candidate="$draft_root/$published_release"
   [ -x "$candidate/bin/yard" ] \
-    || { printf 'bootstrap-runtime: published candidate launcher is unavailable\n' >&2; exit 1; }
+    || { printf 'bootstrap-runtime: verified draft launcher is unavailable\n' >&2; exit 1; }
   run_transition=1
 fi
 
@@ -537,12 +740,16 @@ fi
 if [ "$existing_runtime" = 0 ] || [ ! -d "$CONFIG_HOME" ]; then
   install -d -m 0700 "$CONFIG_HOME"
 fi
-unset SUBYARD_INSTALL_ENTRYPOINTS SUBYARD_INSTALL_VERIFIED_HELPER
+installation() {
+  env YARD_RUNTIME_ROOT="$RUNTIME_ROOT" YARD_RELEASE_CACHE="$CACHE_ROOT" \
+    SUBYARD_REPOSITORY_ROOT="$candidate" "$candidate/bin/yard-engine" _installation "$@"
+}
 if [ "$run_transition" = 1 ]; then
   transition_arguments=(update --runtime-root "$RUNTIME_ROOT" --version "$VERSION" --offline)
   transition_environment=(
     "YARD_RELEASE_CACHE=$CACHE_ROOT"
     "YARD_RUNTIME_ROOT=$RUNTIME_ROOT"
+    "SUBYARD_BOOTSTRAP_DRAFT_V1=$bundle_expected"
   )
   if [ "$ASSUME_YES" = 1 ]; then
     transition_arguments+=(--yes)
@@ -561,7 +768,17 @@ if [ "$run_transition" = 1 ]; then
   fi
   env "${transition_environment[@]}" \
     "$candidate/bin/yard" "${transition_arguments[@]}"
+  unset SUBYARD_INSTALL_ENTRYPOINTS
+  candidate="$RUNTIME_ROOT/$published_release"
+  if [ "$(readlink -- "$RUNTIME_ROOT/current")" != "$published_release" ] ||
+     [ ! -d "$candidate" ] || [ -L "$candidate" ]; then
+    printf 'bootstrap-runtime: requested release is not active. Follow the update guidance, then rerun bootstrap.\n' >&2
+    exit 1
+  fi
+  printf '%s\n' "$verified_cache" | installation runtime
+
 else
+  unset SUBYARD_INSTALL_ENTRYPOINTS
   # The initial link has no predecessor, but its persisted-state capabilities
   # still need the supported protected transition before init can use them.
   # The bootstrap's installation consent covers this first-install boundary.
@@ -576,11 +793,8 @@ validate_data_directory \
   && jq -e '. == {schemaVersion:1,contract:"installation-inventory-v1"}' "$candidate/config/installation-capabilities.json" >/dev/null \
   || { printf 'bootstrap-runtime: unsupported installation capability\n' >&2; exit 1; }
 jq -n --arg bin "$BIN_DIR" --argjson shellFiles "$inventory_shell_files" \
-  --arg installer "$installer" --arg checksum "$installer_checksum" \
-  '{BinDir:$bin,ShellFiles:$shellFiles,CacheInputs:[$installer,$checksum]}' \
-  | env YARD_RUNTIME_ROOT="$RUNTIME_ROOT" YARD_RELEASE_CACHE="$CACHE_ROOT" \
-    SUBYARD_REPOSITORY_ROOT="$candidate" \
-    "$candidate/bin/yard-engine" _installation full
+  '{BinDir:$bin,ShellFiles:$shellFiles}' \
+  | installation full
 
 if [ -z "$SOURCE_INGRESS_ROOT" ]; then
   ensure_directory "$BIN_DIR" 0755

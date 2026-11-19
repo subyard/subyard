@@ -101,7 +101,7 @@ func TestBrokerFixtureSeparatesDefaultAndNamedHostNamespaces(t *testing.T) {
 	}
 	load := func(name, settings string) config.Loaded {
 		t.Helper()
-		loaded, err := config.Load(config.LoadOptions{RepositoryRoot: repository, OperatorHome: home, DisablePrivate: true,
+		loaded, err := config.Load(config.LoadOptions{RepositoryRoot: repository, OperatorHome: home,
 			Environment: environment, YardName: name, YardSettingsFile: settings})
 		if err != nil {
 			t.Fatal(err)
@@ -261,7 +261,7 @@ peer_clean
 	if err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("peer cleanup did not restore SSH config mode: %v, %v", info, err)
 	}
-	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: repository, OperatorHome: home, DisablePrivate: true, Environment: map[string]string{
+	loaded, err := config.Load(config.LoadOptions{RepositoryRoot: repository, OperatorHome: home, Environment: map[string]string{
 		"HOME": home, "SUBYARD_OPERATOR_HOME": home, "SUBYARD_CONFIG_HOME": filepath.Join(peer, "config"), "SUBYARD_HOME": filepath.Join(root, "data"), "STORAGE_PATH": filepath.Join(root, "storage"), "HOST_BASE": filepath.Join(root, "host"), "RESTRICTED_DISK_PATHS": filepath.Join(root, "host"),
 	}})
 	if err != nil {

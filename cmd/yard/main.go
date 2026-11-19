@@ -52,6 +52,13 @@ func bootIncusClient(socket string) *incusclient.Client {
 }
 
 func main() {
+	// Bootstrap runs this probe from an already verified engine before it has a repository.
+	if len(os.Args) == 2 && os.Args[1] == "_bootstrap-draft-capability" {
+		if _, err := fmt.Fprintln(os.Stdout, "private-release-draft-v1"); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if len(os.Args) > 1 && (os.Args[1] == "_test-vms-facade" || os.Args[1] == "_test-vms-worker") {

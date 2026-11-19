@@ -23,7 +23,7 @@ func (cli *CLI) prepareIntegrationSettingsCaptures(ctx context.Context, loaded c
 	names := []string{loaded.Context.YardName}
 	if requests[0].scope != config.ScopeYard {
 		var err error
-		names, err = config.YardNames(loaded.Context.Paths.ConfigDir, loaded.Context.Paths.ConfigHome)
+		names, err = config.YardNames(loaded.Context.Paths.ConfigHome)
 		if err != nil {
 			return nil, err
 		}

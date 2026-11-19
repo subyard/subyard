@@ -26,10 +26,15 @@ func (owner registeredOutputOwner) ReadPreparedInput(path string) (config.Persis
 }
 
 func TestRegisteredEndpointWorkRejectsUndeclaredOrUnrelatedChanges(t *testing.T) {
-	for _, scenario := range []string{"valid", "missing-vocabulary", "core-setting", "foreign-path", "existing-value", "unrelated-record"} {
+	for _, scenario := range []string{"valid", "valid-flat-default", "missing-vocabulary", "core-setting", "foreign-path", "existing-value", "unrelated-record"} {
 		t.Run(scenario, func(t *testing.T) {
 			transition, home, _ := v2TransitionFixture(t, nil)
+			yard := "hermes"
 			path := filepath.Join(home, "yards/hermes/config.env")
+			if scenario == "valid-flat-default" {
+				yard = "default"
+				path = filepath.Join(home, "yards/default.env")
+			}
 			testkit.WriteFile(t, path, []byte("# preserve exactly\n"), 0600)
 			transition.options.RegisteredEndpointSettings = []string{"OLD_SAMPLE_HOST"}
 			value := "127.0.0.1"
@@ -49,11 +54,11 @@ func TestRegisteredEndpointWorkRejectsUndeclaredOrUnrelatedChanges(t *testing.T)
 			case "unrelated-record":
 				content = []byte("# changed comment\nOLD_SAMPLE_HOST=127.0.0.1\n")
 			}
-			owner := registeredOutputOwner{nativeConsentOwner: &nativeConsentOwner{v2TestReconciler: &v2TestReconciler{id: "yard.hermes"}}, path: path, content: content}
+			owner := registeredOutputOwner{nativeConsentOwner: &nativeConsentOwner{v2TestReconciler: &v2TestReconciler{id: "yard." + yard}}, path: path, content: content}
 			transition.options.RegisteredYards = []V2ActivationReconciler{owner}
 			plan, err := transition.inspectRegisteredSettings(context.Background(), MigrationDefinitionV2{Kind: registeredYardsMigration, Domain: "owner-registration", FromEpoch: 2, ToEpoch: 3}, nil, ReleaseLinks{})
-			if scenario == "valid" {
-				if err != nil || len(plan.Files) != 1 {
+			if strings.HasPrefix(scenario, "valid") {
+				if err != nil || len(plan.Files) != 1 || plan.Files[0].Path != path {
 					t.Fatalf("valid original descriptor vocabulary rejected: %v", err)
 				}
 			} else if err == nil {

@@ -423,8 +423,9 @@ The validated context contract includes:
 
 Source-only domain modules do not load configuration themselves.
 
-Configuration refusals that may be shown are `config.SourceError`, the retired-template diagnostic
-and `domain.ConfigRefusal`: a closed code with a fixed template and next step, built only from
+Configuration refusals that may be shown are `config.SourceError`, `config.SettingsFileConflict`,
+the retired-template diagnostic and `domain.ConfigRefusal`. A domain refusal is a closed code
+with a fixed template and next step, built only from
 validated profile, setting, integration or yard-kind names. A producer that must keep an
 unvalidated value in its error text appends it after the wrapped refusal; the renderer prints only
 the refusal. Producers collect independent role and profile
@@ -447,7 +448,8 @@ named in the loader code:
 
 - D1: the bootstrap chain, including command alias conflicts, stops at its first failed step.
 - D2: yard identity (name, registration, template) resolves before sources are selected.
-- D3: source files apply in precedence order; the first refused file stops at its first refused line.
+- D3: source files apply in precedence order. A refused file contributes its independent findings
+  and leaves its values unapplied. Evaluation continues through the remaining source files.
 - D4: native target discovery covers source and command-override refusals only.
 - D5: unresolved integration roots select nothing for later checks.
 - D6: any earlier refusal (command override, asset source, integration, role or profile
@@ -914,9 +916,7 @@ runtime scope and never donate identity to the live installation.
 The manifest-bound `config/installation-capabilities.json` admits the common installer
 leaf; retained older payloads without that contract keep their historical installer semantics.
 The current full bootstrap requires this capability and a successful candidate API inspection
-before activation or entrypoint changes. Its embedded current publisher verifies older selected
-helpers' archives without replacing their cached helper; publication-only staging retains the
-selected installer's own behavior.
+before activation or entrypoint changes.
 
 Limited legacy continuation assesses selected native declarations against observed device,
 mount and privilege facts, using the ordinary extras policy and owning host-memory validator.
@@ -1162,9 +1162,24 @@ history refuses rollback.
 
 An installed runtime whose bundled installer predates immutable `--publish-only` cannot be changed
 retroactively. Re-running the verified standalone bootstrap is its one-time bridge: the downloaded
-installer publishes the candidate without touching stable links, then the candidate performs the
-ordinary assessed `ReleaseTransition`. The superseded runtime is never allowed to call mutating
-`_migrate` verbs against the candidate.
+candidate runs the ordinary assessed `ReleaseTransition` from a verified private draft.
+After confirmation, update reverifies the plan and publishes the exact draft before convergence.
+Atomic publication requires the draft and live release store to share a mount.
+Bootstrap validates runtime ancestry on every path before staging or running release code.
+For first install, update, and `--publish-only`, bootstrap checks the bundle's SHA-256 and provenance
+and queries its engine from a sealed execution image before writing the cache or runtime. The
+manifest's `bootstrapDraft` field allows an early refusal. Online verification uses private
+temporary files and removes them on return. Older releases use their own tagged bootstrap asset.
+For v0.30.0, download `subyard-install.sh` from that release and run
+`bash subyard-install.sh --version 0.30.0`. Its published assets include the bootstrap, and its
+tagged script defines `--version`. [v0.30.0 release assets](https://github.com/Subyard/Subyard/releases/expanded_assets/v0.30.0) · [v0.30.0 bootstrap source](https://github.com/Subyard/Subyard/blob/v0.30.0/dev/bootstrap-runtime.sh#L47-L63)
+Publication-only staging first appeared in the v0.18.9 installer.
+[v0.18.9 bootstrap options](https://github.com/Subyard/Subyard/blob/v0.18.9/dev/bootstrap-runtime.sh#L17-L29)
+
+A candidate already in the live release store still has to meet retained-release compatibility.
+If a prior attempt left a published, incompatible candidate without a matching authorized
+transition, keep the active release and select a different verified forward release.
+The superseded runtime is never allowed to call mutating `_migrate` verbs against the candidate.
 
 The cross-release contract is independent of migration implementation types. The frozen
 [`protocol/v1`](../internal/releasetransition/protocol/v1) module defines the exact JSON fields,

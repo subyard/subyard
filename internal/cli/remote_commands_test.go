@@ -299,7 +299,7 @@ cat "$SSH_RPC_RESPONSE"`, 1))
 	data := environmentValue(environment, "SUBYARD_HOME")
 	conf := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	environment = append(environment, "PATH="+bin+":"+os.Getenv("PATH"), "SSH_RPC_RESPONSE="+os.Getenv("SSH_RPC_RESPONSE"), "SSH_ASSESS_LINE="+trust.KnownHostsLine, "REMOTE_OWNER_CHILD=1", "REMOTE_OWNER_INPUT="+input, "REMOTE_OWNER_BINARY="+executable, "REMOTE_YARD_KEY="+strings.Replace(trust.KnownHostsLine, "owner-alias", "subyard-remote-self-fixture", 1), "REMOTE_KNOWN="+filepath.Join(data, "ssh", "known_hosts"))
-	runtime := remotecontrol.Runtime{SSH: sshPath, Home: home, DataHome: data, ConfigHome: conf, ConfigDir: filepath.Join(root, "config"), PublicKey: key, Environment: environment, Timeout: 2 * time.Second}
+	runtime := remotecontrol.Runtime{SSH: sshPath, Home: home, DataHome: data, ConfigHome: conf, PublicKey: key, Environment: environment, Timeout: 2 * time.Second}
 	return Options{RepositoryRoot: root, Program: "yard", Arguments: []string{"remote", "add", "self-fixture", "owner-alias", "--yes"}, Environment: environment, WorkingDir: root, RemoteControl: runtime, Prompt: &testkit.Prompt{Answers: []bool{true}}}, runtime
 }
 

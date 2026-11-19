@@ -10,14 +10,14 @@ import (
 	"github.com/Subyard/Subyard/internal/profile"
 )
 
-func TestReaderLayerEvaluationIsSequentialAndAtomic(t *testing.T) {
+func TestReaderLayerEvaluationPreservesLiteralProvenanceAndIsAtomic(t *testing.T) {
 	base := map[string]string{"AGENT_synthetic_PERSIST": "base", "SSH_PORT": "2222"}
-	result, err := (Catalog{}).EvaluateLayer(strings.NewReader("# comment\nAGENT_synthetic_PERSIST='first\nsecond'\nSSH_PORT=${SSH_PORT:=2223}\nAGENT_synthetic_PERSIST=\"${AGENT_synthetic_PERSIST} last\"\n"), "logical.env", base, ScopeHost, false)
+	result, err := (Catalog{}).EvaluateLayer(strings.NewReader("# comment\nAGENT_synthetic_PERSIST='first\nsecond'\nSSH_PORT=2223\nAGENT_synthetic_PERSIST='first second last'\n"), "logical.env", base, ScopeHost, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Values["AGENT_synthetic_PERSIST"] != "first\nsecond last" || result.Values["SSH_PORT"] != "2222" || base["AGENT_synthetic_PERSIST"] != "base" {
-		t.Fatal("sequential evaluation changed base or expansion")
+	if result.Values["AGENT_synthetic_PERSIST"] != "first second last" || result.Values["SSH_PORT"] != "2223" || base["AGENT_synthetic_PERSIST"] != "base" {
+		t.Fatal("literal evaluation changed the base or lost the latest assignment")
 	}
 	if got := []int{result.Assignments[0].Line, result.Assignments[1].Line, result.Assignments[2].Line}; !reflect.DeepEqual(got, []int{2, 4, 5}) {
 		t.Fatalf("provenance = %v", got)

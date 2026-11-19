@@ -26,7 +26,7 @@ func integrationCatalogFixture(t *testing.T, declaration string) string {
 func TestIntegrationCatalogImmutableInputsAndDerivedPort(t *testing.T) {
 	root := integrationCatalogFixture(t, `{"schema_version":1,"command":"sample","inputs":[{"name":"SAMPLE_VERSION","type":"version","value":"1.2.3"}],"settings":[{"name":"SAMPLE_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"yard-init","minimum":1024,"maximum":65535,"optional":true,"host_listener":true,"default_from":{"setting":"SSH_PORT","offset":20000}}]}`)
 	for _, test := range []struct{ ssh, want string }{{"2222", "22222"}, {"60000", "15488"}} {
-		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SSH_PORT": test.ssh, "CODING_TOOL_INTEGRATIONS": "sample", "SAMPLE_VERSION": "9.9.9"}, DisablePrivate: true})
+		loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SSH_PORT": test.ssh, "CODING_TOOL_INTEGRATIONS": "sample", "SAMPLE_VERSION": "9.9.9"}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -85,7 +85,7 @@ func TestIntegrationImmutableInputsIgnoreConfigDirectoryDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(configDir, "yards/profiles/fixture.env"), []byte("SAMPLE_VERSION=7.7.7\n"), 0600)
-	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_DIR": configDir, "SAMPLE_VERSION": "8.8.8", "YARD_TEMPLATE": "fixture"}, DisablePrivate: true})
+	loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_DIR": configDir, "SAMPLE_VERSION": "8.8.8", "YARD_TEMPLATE": "fixture"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +95,7 @@ func TestIntegrationImmutableInputsIgnoreConfigDirectoryDefaults(t *testing.T) {
 	assertEffectiveSetting(t, loaded.Settings["SAMPLE_VERSION"], "1.2.3", "default", "shipped defaults", filepath.Join(root, "config/agents/sample/integration.json"))
 	configHome := testkit.TempDir(t)
 	testkit.WriteFile(t, filepath.Join(configHome, "config.env"), []byte("SAMPLE_VERSION=9.9.9\n"), 0600)
-	if _, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_DIR": configDir, "SUBYARD_CONFIG_HOME": configHome}, DisablePrivate: true}); err == nil {
+	if _, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_DIR": configDir, "SUBYARD_CONFIG_HOME": configHome}}); err == nil {
 		t.Fatal("persistent override of immutable input was accepted")
 	}
 }
@@ -109,10 +109,10 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 	catalog.integrations = append(catalog.integrations, profile.IntegrationDefinition{SchemaVersion: 1, Name: "retired-widget", Retired: true, RetiredSettings: []string{"OBSOLETE_PORT"}})
 	for _, selection := range []string{"sample retired-widget", "retired-widget", ""} {
 		home, configHome := testkit.TempDir(t), testkit.TempDir(t)
-		original := "CODING_TOOL_INTEGRATIONS=\"" + selection + "\"\nOBSOLETE_PORT=${UNUSED_PORT:=12345}\n"
+		original := "CODING_TOOL_INTEGRATIONS=\"" + selection + "\"\nOBSOLETE_PORT=12345\n"
 		path := filepath.Join(configHome, "config.env")
 		testkit.WriteFile(t, path, []byte(original), 0o600)
-		loaded, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: home, DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
+		loaded, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -150,9 +150,6 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 		if _, ok := loaded.Environment["OBSOLETE_PORT"]; ok {
 			t.Fatal("retired setting remains effective")
 		}
-		if _, ok := loaded.Environment["UNUSED_PORT"]; ok {
-			t.Fatal("retired expression mutated live environment")
-		}
 		data, _ := os.ReadFile(path)
 		if string(data) != original {
 			t.Fatal("read modified source-owned persisted inputs")
@@ -161,7 +158,7 @@ func TestRetiredIntegrationInputsPreserveSelectionAuthority(t *testing.T) {
 			t.Fatal("retired setting is writable")
 		}
 	}
-	if _, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "unknown"}}); err == nil {
+	if _, err := Load(LoadOptions{Catalog: &catalog, RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "unknown"}}); err == nil {
 		t.Fatal("arbitrary unknown integration accepted")
 	}
 }

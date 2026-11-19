@@ -1,7 +1,6 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,12 +26,12 @@ func TestRemovedIntegrationSettingsRemainReadable(t *testing.T) {
 				if legacy {
 					selection, profiles = "AGENTS", "YARD_PROFILES"
 				}
-				original := selection + "='sample retiredone retiredtwo'\n" + profiles + "='removed-profile'\nREMOVED_PROFILE_HOST_PORT=${UNUSED_PORT:=24318}\nRETIRED_ONE_HOST_PORT=${UNUSED_PORT:=8080}\n"
+				original := selection + "='sample retiredone retiredtwo'\n" + profiles + "='removed-profile'\nREMOVED_PROFILE_HOST_PORT=24318\nRETIRED_ONE_HOST_PORT=8080\n"
 				for _, suffix := range append(integrationMetadataSuffixes[:], "CLEANUP") {
-					original += "AGENT_retiredtwo_" + suffix + "=${UNUSED_PORT:=retained}\n"
+					original += "AGENT_retiredtwo_" + suffix + "=retained\n"
 				}
 				testkit.WriteFile(t, path, []byte(original), 0600)
-				loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": home}})
+				loaded, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: map[string]string{"SUBYARD_CONFIG_HOME": home}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -43,7 +42,7 @@ func TestRemovedIntegrationSettingsRemainReadable(t *testing.T) {
 					t.Fatalf("profile selection: %+v", loaded.EnvironmentProfiles)
 				}
 				for name := range loaded.Environment {
-					if name == "UNUSED_PORT" || name == "RETIRED_ONE_HOST_PORT" || name == "REMOVED_PROFILE_HOST_PORT" || strings.HasPrefix(name, "AGENT_retiredtwo_") {
+					if name == "RETIRED_ONE_HOST_PORT" || name == "REMOVED_PROFILE_HOST_PORT" || strings.HasPrefix(name, "AGENT_retiredtwo_") {
 						t.Fatalf("removed assignment escaped: %s", name)
 					}
 				}
@@ -102,22 +101,16 @@ func TestRetiredSettingsStayIsolatedDuringCatalogAuthoring(t *testing.T) {
 		t.Fatal(err)
 	}
 	value := ""
-	edited, err := catalog.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value)
-	if err != nil || string(edited) != "ENVIRONMENT_PROFILES=''\nREMOVED_PORT=${ENVIRONMENT_PROFILES:=removed-profile}\n" {
-		t.Fatalf("discarded default recaptured selection: %s %v", edited, err)
+	_, err = catalog.EditPersistentAssignmentContent(path, before.Content, "ENVIRONMENT_PROFILES", &value)
+	if err == nil || !strings.Contains(err.Error(), "Replace the parameter expansion or setting reference with its value") {
+		t.Fatalf("preview accepted the retired record: %v", err)
 	}
-	if err := catalog.WritePersistentAssignmentIfUnchanged(home, path, "ENVIRONMENT_PROFILES", &value, before, func() error { return fmt.Errorf("guard refused") }); err == nil {
-		t.Fatal("catalog authoring skipped its locked guard")
+	err = catalog.WritePersistentAssignmentIfUnchanged(home, path, "ENVIRONMENT_PROFILES", &value, before)
+	if err == nil || !strings.Contains(err.Error(), "Replace the parameter expansion or setting reference with its value") {
+		t.Fatalf("write accepted the retired record: %v", err)
 	}
 	unchanged, err := os.ReadFile(path)
 	if err != nil || string(unchanged) != content {
-		t.Fatal("refused authoring changed settings")
-	}
-	if err := catalog.WritePersistentAssignmentIfUnchanged(home, path, "ENVIRONMENT_PROFILES", &value, before); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.ReadFile(path)
-	if err != nil || string(after) != string(edited) {
-		t.Fatal("catalog authoring differs from its approved preview")
+		t.Fatalf("refused authoring changed settings: %q, %v", unchanged, err)
 	}
 }

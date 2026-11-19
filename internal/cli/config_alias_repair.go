@@ -105,7 +105,7 @@ func parseConfigAliasRepair(arguments []string) (configAliasRepairRequest, error
 }
 
 func (cli *CLI) aliasRepairContent(path string, content []byte, request configAliasRepairRequest) ([]byte, error) {
-	assignments, err := cli.catalog.ParsePersistentAssignments(path, content)
+	assignments, err := config.ParsePersistentAssignments(path, content)
 	if err != nil {
 		return nil, err
 	}
@@ -122,9 +122,6 @@ func (cli *CLI) aliasRepairContent(path string, content []byte, request configAl
 		for _, assignment := range assignments {
 			if assignment.Name != choice.name && !slices.Contains(definition.Aliases, assignment.Name) {
 				continue
-			}
-			if !assignment.Direct || assignment.Dynamic {
-				return nil, &config.SourceError{Path: path, Line: assignment.Line, Key: choice.name, Role: "alias repair", Reason: "targeted assignment must be literal and direct"}
 			}
 			if assignment.Name != choice.name {
 				legacy = true
@@ -401,13 +398,9 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		}
 		return 1
 	}
-	configDir := values["SUBYARD_CONFIG_DIR"]
-	if configDir == "" {
-		configDir = filepath.Join(cli.options.RepositoryRoot, "config")
-	}
 	names := []string{yard}
 	if all {
-		names, err = config.YardNames(configDir, home)
+		names, err = config.LocalBatchYardNames(home)
 	}
 	type row struct {
 		Yard       string `json:"yard"`
@@ -418,7 +411,8 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 	var rows []row
 	failed := err != nil
 	if err != nil {
-		rows = append(rows, row{Yard: yard, Diagnostic: "local registration inventory is invalid or unavailable"})
+		rows = append(rows, row{Diagnostic: "local registration inventory is invalid or unavailable",
+			Retry: "restore access to the local registration inventory, then run config validate --all-local"})
 	}
 	for _, name := range names {
 		loaded, err := config.Load(config.LoadOptions{RepositoryRoot: cli.options.RepositoryRoot, OperatorHome: values["SUBYARD_OPERATOR_HOME"], YardName: name, Environment: values})
@@ -450,6 +444,8 @@ func (cli *CLI) runConfigValidate(yard string, arguments []string) int {
 		for _, result := range rows {
 			if result.Valid {
 				fmt.Fprintf(cli.options.Stdout, "yard %s: configuration schema valid\n", result.Yard)
+			} else if result.Yard == "" {
+				fmt.Fprintf(cli.options.Stdout, "%s\nRetry: %s\n", result.Diagnostic, result.Retry)
 			} else {
 				fmt.Fprintf(cli.options.Stdout, "yard %s: %s\nRetry: %s\n", result.Yard, result.Diagnostic, result.Retry)
 			}

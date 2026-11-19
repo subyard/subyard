@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -249,6 +250,14 @@ func (cli *CLI) configGitScalarsRefusal(loaded config.Loaded, requests []configA
 	return domain.CollectRefusals(refusals...)
 }
 
+func configSetAssignments(requests []configAuthoringRequest) []config.PersistentAssignment {
+	assignments := make([]config.PersistentAssignment, 0, len(requests))
+	for _, request := range requests {
+		assignments = append(assignments, config.PersistentAssignment{Name: request.name, Value: request.value})
+	}
+	return assignments
+}
+
 // configGitScalarsTarget loads the selected yard with the assignments applied
 // to the Git settings cache of their scope, keeping every other layer.
 func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAuthoringRequest) (config.Loaded, error) {
@@ -269,14 +278,11 @@ func (cli *CLI) configGitScalarsTarget(loaded config.Loaded, requests []configAu
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return config.Loaded{}, err
 	}
-	for _, request := range requests {
-		value := request.value
-		if content, err = cli.catalog.EditPersistentAssignmentContent(path, content, request.name, &value); err != nil {
-			return config.Loaded{}, err
-		}
+	content, err = cli.catalog.EditPersistentAssignmentsContent(path, content, configSetAssignments(requests))
+	if err != nil {
+		return config.Loaded{}, err
 	}
-	// The same temporary root as the isolated Git candidate.
-	draft, err := os.CreateTemp("", "subyard-config-draft-*")
+	draft, err := os.CreateTemp("/tmp", "subyard-config-draft-*")
 	if err != nil {
 		return config.Loaded{}, err
 	}
@@ -337,16 +343,16 @@ func parseConfigAuthoringRequests(
 		switch arguments[index] {
 		case "--scope":
 			if index+1 >= len(arguments) {
-				return nil, errors.New("--scope needs a value")
+				return nil, configPublicRefusal("--scope needs a value")
 			}
 			index++
 			if request.scope != "" {
-				return nil, errors.New("--scope may be specified only once")
+				return nil, configPublicRefusal("--scope may be specified only once")
 			}
 			request.scope = config.SettingScope(arguments[index])
 		case "--local", "--git":
 			if request.storage != "" {
-				return nil, errors.New("choose --local or --git only once")
+				return nil, configPublicRefusal("choose --local or --git only once")
 			}
 			request.storage = arguments[index]
 			request.git = request.storage == "--git"
@@ -359,15 +365,15 @@ func parseConfigAuthoringRequests(
 	switch request.scope {
 	case config.ScopeShared, config.ScopeHost, config.ScopeYard:
 	case "":
-		return nil, errors.New(
+		return nil, configPublicRefusal(
 			"--scope shared, --scope host or --scope yard is required",
 		)
 	default:
-		return nil, fmt.Errorf("unsupported scope %q", request.scope)
+		return nil, configPublicRefusal("unsupported scope; use shared, host or yard")
 	}
 	if action == "set" {
 		if len(positional) == 0 || len(positional)%2 != 0 {
-			return nil, errors.New("expects SETTING VALUE pairs")
+			return nil, configPublicRefusal("expects SETTING VALUE pairs")
 		}
 		requests := make([]configAuthoringRequest, 0, len(positional)/2)
 		for index := 0; index < len(positional); index += 2 {
@@ -382,13 +388,49 @@ func parseConfigAuthoringRequests(
 		expected = 2
 	}
 	if len(positional) != expected {
-		return nil, fmt.Errorf("expects %d positional argument(s)", expected)
+		return nil, configPublicRefusal(fmt.Sprintf("expects %d positional argument(s)", expected))
 	}
 	request.name = positional[0]
 	if action == "import" {
 		request.inputPath = positional[1]
 	}
 	return []configAuthoringRequest{request}, nil
+}
+
+// A failed selected-yard load still permits checking arguments and inspecting
+// other yards affected by a shared or host edit. Argument refusals are returned
+// separately from configuration refusals so each keeps its own diagnostic.
+func (cli *CLI) collectConfigAuthoringRefusals(home, yard string, arguments []string, loadErr error) (string, error, error) {
+	args := configArguments(arguments)
+	if len(args) == 0 || !slices.Contains([]string{"set", "unset", "import", "edit"}, args[0]) {
+		return "", nil, loadErr
+	}
+	action := args[0]
+	requests, err := parseConfigAuthoringRequests(action, args[1:], false)
+	if err != nil {
+		return action, err, loadErr
+	}
+	var argumentErrs []error
+	if action == "set" || action == "unset" {
+		_, argumentErrs = checkLocalBatchAssignments(cli.catalog, requests)
+	} else if _, err := configAuthoringDefinition(cli.catalog, action, requests[0].scope, requests[0].name, true); err != nil {
+		argumentErrs = append(argumentErrs, err)
+	}
+	argumentErr := domain.CollectRefusals(argumentErrs...)
+	if requests[0].scope == config.ScopeYard || home == "" || !domain.SafeName(yard) {
+		return action, argumentErr, loadErr
+	}
+	names, err := config.LocalBatchYardNames(home)
+	refusals := []error{loadErr, err}
+	for _, name := range names {
+		if name == yard {
+			continue
+		}
+		if _, err := cli.resolveContextWithYardSettings(name, ""); err != nil {
+			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+		}
+	}
+	return action, argumentErr, domain.CollectRefusals(refusals...)
 }
 
 func configScalarAuthoringPath(
@@ -403,14 +445,7 @@ func configScalarAuthoringPath(
 	case config.ScopeHost:
 		return filepath.Join(loaded.Context.Paths.ConfigHome, "config.env"), nil
 	case config.ScopeYard:
-		name := loaded.Context.YardName
-		if name == "" {
-			name = "default"
-		}
-		return filepath.Join(
-			loaded.Context.Paths.ConfigHome, "yards",
-			name, "config.env",
-		), nil
+		return config.LocalYardSettingsFile(filepath.Join(loaded.Context.Paths.ConfigHome, "yards"), firstNonempty(loaded.Context.YardName, "default"))
 	default:
 		return "", errors.New("unsupported persistent scope")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
@@ -24,15 +26,25 @@ func (cli *CLI) runInstallation(ctx context.Context, arguments []string) int {
 		return 2
 	}
 	var request struct {
-		BinDir      string
-		ShellFiles  []string
-		CacheInputs []string
+		BinDir              string
+		ShellFiles          []string
+		CacheInputs         []string
+		VerifiedCacheInputs []uninstall.Entry
 	}
 	decoder := json.NewDecoder(io.LimitReader(cli.options.Stdin, 65537))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		cli.errorf("invalid installation publication request")
 		return 2
+	}
+	if len(request.VerifiedCacheInputs) != 0 {
+		if arguments[0] != "runtime" || len(request.CacheInputs) != 0 {
+			cli.errorf("invalid verified installation cache request")
+			return 2
+		}
+		for _, entry := range request.VerifiedCacheInputs {
+			request.CacheInputs = append(request.CacheInputs, entry.Path)
+		}
 	}
 	includeBootstrap := cli.env["SUBYARD_INSTALL_RUNTIME_SCOPE"] != "private-draft"
 	identity, err := cli.installationIdentity("", "", includeBootstrap)
@@ -122,19 +134,29 @@ func (cli *CLI) runInstallation(ctx context.Context, arguments []string) int {
 			records[record.Path] = record
 		}
 	}
-	for _, path := range request.CacheInputs {
+	var cacheRefusals []error
+	for index, path := range request.CacheInputs {
 		relative, relErr := filepath.Rel(identity.CacheRoot, path)
 		if relErr != nil || relative == "." || relative == ".." || filepath.IsAbs(relative) || strings.HasPrefix(relative, "../") {
 			continue
 		}
 		tree, readErr := uninstall.CaptureRoot(path)
 		if readErr != nil || len(tree.Entries) != 1 || tree.Entries[0].Mode&syscall.S_IFMT != syscall.S_IFREG || tree.Entries[0].UID != identity.OperatorUID {
-			cli.errorf("unsafe installation cache artifact")
-			return 1
+			cacheRefusals = append(cacheRefusals, errors.New("unsafe installation cache artifact"))
+			continue
 		}
 		record := tree.Entries[0]
+		record.Path = path
+		if len(request.VerifiedCacheInputs) != 0 && request.VerifiedCacheInputs[index] != record {
+			cacheRefusals = append(cacheRefusals, fmt.Errorf("%w: verified installation cache artifact changed: %s", domain.ErrPlanStale, config.QuoteMetadataPath(path)))
+			continue
+		}
 		record.Path = relative
 		records[relative] = record
+	}
+	if err := domain.CollectRefusals(cacheRefusals...); err != nil {
+		cli.errorf("installation: %v", err)
+		return 1
 	}
 	unchanged := len(records) == len(value.CacheFiles)
 	for _, record := range value.CacheFiles {

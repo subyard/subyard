@@ -78,7 +78,7 @@ func checkLocalSettingsTargetWritable(configHome, path string) error {
 	}
 	relative = filepath.ToSlash(relative)
 	if relative == "config.env" || relative == "overrides/shared/config.env" ||
-		(strings.HasPrefix(relative, "yards/") && filepath.Base(path) == "config.env") ||
+		(strings.HasPrefix(relative, "yards/") && filepath.Ext(path) == ".env") ||
 		strings.HasPrefix(relative, "overrides/shared/agents/") ||
 		strings.HasPrefix(relative, "overrides/host/agents/") ||
 		(strings.HasPrefix(relative, "yards/") && strings.Contains(relative, "/overrides/agents/")) {

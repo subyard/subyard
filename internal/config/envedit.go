@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
-
-	"github.com/Subyard/Subyard/internal/domain"
 )
 
 var ErrPersistentTargetStale = errors.New("persistent configuration target is stale")
@@ -34,17 +34,11 @@ type PersistentFileIdentity struct {
 	Links  uint64
 }
 
-// PersistentAssignment describes one assignment observed in exact file order.
-// Direct is false for assignments produced by a declarative parameter default
-// rather than by the record's left-hand side. Dynamic marks any assignment
-// whose value depended on expansion. Migration classifiers use both fields to
-// reject ambiguous ownership instead of guessing from the effective value.
+// PersistentAssignment describes one literal assignment observed in file order.
 type PersistentAssignment struct {
-	Name    string
-	Value   string
-	Line    int
-	Direct  bool
-	Dynamic bool
+	Name  string
+	Value string
+	Line  int
 }
 
 // ReadPersistentFileSnapshot observes an operator-owned persistent file
@@ -185,82 +179,40 @@ func validateOpenedPersistentDirectory(file *os.File, path string) error {
 	return nil
 }
 
-// ParsePersistentAssignments parses bounded in-memory env content while
-// preserving duplicates, line provenance, and implicit/dynamic assignments.
-func ParsePersistentAssignments(
-	path string,
-	content []byte,
-) ([]PersistentAssignment, error) {
-	return (Catalog{}).ParsePersistentAssignments(path, content)
-}
-
-// ParsePersistentAssignments applies the owning catalog's discarded-input policy.
-func (settings Catalog) ParsePersistentAssignments(path string, content []byte) ([]PersistentAssignment, error) {
-	if len(content) > 8<<20 {
-		return nil, errors.New("persistent setting content exceeds its size bound")
-	}
-	lines := bytes.SplitAfter(content, []byte{'\n'})
-	values := environment{}
+// ParsePersistentAssignments preserves order, duplicates and line provenance.
+func ParsePersistentAssignments(path string, content []byte) ([]PersistentAssignment, error) {
 	var assignments []PersistentAssignment
-	var current bytes.Buffer
-	quote := byte(0)
-	lineNumber := 0
-	recordLine := 0
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
+	err := scanPersistentEnv(path, content, func(record envRecord, name, value string) {
+		if name != "" {
+			assignments = append(assignments, PersistentAssignment{Name: name, Value: value, Line: record.line})
 		}
-		lineNumber++
-		if current.Len() == 0 {
-			recordLine = lineNumber
-		}
-		current.Write(line)
-		quote = scanQuote(strings.TrimSuffix(string(line), "\n"), quote)
-		if quote != 0 {
-			continue
-		}
-		record := strings.TrimSpace(current.String())
-		current.Reset()
-		if record == "" || strings.HasPrefix(record, "#") {
-			continue
-		}
-		direct, dynamic := persistentDirectAssignment(record)
-		observe := func(name, value string) {
-			isDirect := direct != "" && name == direct
-			assignments = append(assignments, PersistentAssignment{
-				Name: name, Value: value, Line: recordLine,
-				Direct: isDirect, Dynamic: dynamic || !isDirect,
-			})
-		}
-		// A profile-only assignment is discarded as the loader discards it: it
-		// never refuses parsing or affects later records, and only its own
-		// record remains visible, so config unset can still remove it.
-		if err := applyRecordRetired(record, values, observe, operatorDiscardPolicy(observe, settings)); err != nil {
-			return nil, sourceContext(path, recordLine, recordSettingKey(record), "persistent settings", err)
-		}
-	}
-	if quote != 0 || current.Len() != 0 {
-		return nil, sourceError(path, recordLine, recordSettingKey(current.String()), "persistent settings", "unterminated quoted assignment", nil)
+	})
+	if err != nil {
+		return nil, err
 	}
 	return assignments, nil
 }
 
-func persistentDirectAssignment(record string) (string, bool) {
-	record = strings.TrimSpace(record)
-	if strings.HasPrefix(record, ":") {
-		return "", true
+// AssignedSettingNames lists the settings that take part in an operator layer.
+func AssignedSettingNames(path string, content []byte) ([]string, error) {
+	names := map[string]struct{}{}
+	policy := discardPolicy{ignored: IsProfileOnlySetting}
+	err := scanPersistentEnv(path, content, func(_ envRecord, name, _ string) {
+		if name != "" && !policy.discards(name) {
+			names[name] = struct{}{}
+		}
+	})
+	if err != nil {
+		return nil, err
 	}
-	if strings.HasPrefix(record, "export ") {
-		record = strings.TrimSpace(strings.TrimPrefix(record, "export "))
+	return slices.Sorted(maps.Keys(names)), nil
+}
+
+func scanPersistentEnv(path string, content []byte, visit func(envRecord, string, string)) error {
+	if len(content) > 8<<20 {
+		return sourceError(path, 0, "", "persistent settings", "target exceeds its size bound", nil)
 	}
-	separator := strings.IndexByte(record, '=')
-	if separator < 1 {
-		return "", true
-	}
-	name := strings.TrimSpace(record[:separator])
-	raw := strings.TrimSpace(record[separator+1:])
-	_, expands := decodeValue(raw)
-	return name, expands && strings.ContainsRune(raw, '$')
+	return scanLiteralEnv(bytes.NewReader(content), path, "persistent settings", visit)
 }
 
 // WritePersistentAssignment updates one assignment without rewriting unrelated
@@ -325,31 +277,8 @@ func writePersistentAssignment(
 	if err != nil {
 		return err
 	}
-	if value == nil && len(updated) == 0 {
-		relative, err := filepath.Rel(configHome, path)
-		if err != nil || relative == "." || filepath.IsAbs(relative) ||
-			relative == ".." ||
-			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			return errors.New("persistent setting path escaped the configuration root")
-		}
-		info, err := os.Lstat(path)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return sourceError(path, 0, "", "persistent settings", "target must be a regular non-symlink file; "+FileMetadata(info)+"; required type=regular", nil)
-		}
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != uint32(os.Getuid()) || stat.Nlink != 1 {
-			return sourceError(path, 0, "", "persistent settings", persistentOwnershipReason(info, stat), nil)
-		}
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-		return syncPersistentDirectory(filepath.Dir(path))
+	if !current.Exists && value == nil {
+		return nil
 	}
 	return writePersistentFile(configHome, path, updated)
 }
@@ -362,12 +291,11 @@ func EditPersistentAssignmentContent(
 	name string,
 	value *string,
 ) ([]byte, error) {
-	return (Catalog{}).EditPersistentAssignmentContent(path, content, name, value)
+	return editPersistentAssignments(path, content, []PersistentAssignment{{Name: name, Value: dereference(value)}}, value == nil)
 }
 
-// EditPersistentAssignmentContent uses the catalog without reading or writing native state.
-func (settings Catalog) EditPersistentAssignmentContent(path string, content []byte, name string, value *string) ([]byte, error) {
-	return editAssignmentContent(path, content, name, value, settings)
+func (Catalog) EditPersistentAssignmentContent(path string, content []byte, name string, value *string) ([]byte, error) {
+	return EditPersistentAssignmentContent(path, content, name, value)
 }
 
 // WritePersistentFile atomically stores a validated persistent file setting.
@@ -390,6 +318,17 @@ func WritePersistentFileIfUnchanged(
 	content []byte,
 	guards ...func() error,
 ) error {
+	return writePersistentFileIfUnchanged(configHome, path, expected, content, guards)
+}
+
+// WriteLocalScalarFileIfUnchanged keeps the configuration root lock while
+// editing a selected scalar source in config home.
+func WriteLocalScalarFileIfUnchanged(configHome, path string, expected PersistentFileSnapshot, content []byte, guard func() error) error {
+	return writePersistentFileIfUnchanged(configHome, path, expected, content,
+		[]func() error{func() error { return CheckLocalSettingsWritable(configHome) }, guard})
+}
+
+func writePersistentFileIfUnchanged(configHome, path string, expected PersistentFileSnapshot, content []byte, guards []func() error) error {
 	if err := ensurePersistentRoot(configHome); err != nil {
 		return err
 	}
@@ -401,7 +340,7 @@ func WritePersistentFileIfUnchanged(
 	if err := checkLocalSettingsTargetWritable(configHome, path); err != nil {
 		return err
 	}
-	current, err := persistentFileSnapshot(path)
+	current, err := ReadPersistentFileSnapshot(configHome, path)
 	if err != nil {
 		return err
 	}
@@ -485,91 +424,54 @@ func CreatePersistentFile(configHome, path string, content []byte, guards ...fun
 }
 
 type envEditRecord struct {
+	envRecord
+	name, value string
 	replacement *PersistentAssignment
-	content     []byte
-	name        string
 }
 
-func editAssignmentContent(
-	path string,
-	content []byte,
-	name string,
-	value *string,
-	settings Catalog,
-) ([]byte, error) {
-	return settings.editPersistentAssignments(path, content, []PersistentAssignment{{Name: name, Value: dereference(value)}}, value == nil)
+// EditPersistentAssignmentsContent applies every selected assignment to one draft.
+func (Catalog) EditPersistentAssignmentsContent(path string, content []byte, assignments []PersistentAssignment) ([]byte, error) {
+	return editPersistentAssignments(path, content, assignments, false)
 }
 
-// EditPersistentAssignmentsContent sets every selected assignment in one draft,
-// then validates the final values together.
-func (settings Catalog) EditPersistentAssignmentsContent(path string, content []byte, assignments []PersistentAssignment) ([]byte, error) {
-	return settings.editPersistentAssignments(path, content, assignments, false)
-}
-
-func (settings Catalog) editPersistentAssignments(path string, content []byte, assignments []PersistentAssignment, unset bool) ([]byte, error) {
-	records, err := settings.persistentEditRecords(path, content, assignments, unset)
+func editPersistentAssignments(path string, content []byte, assignments []PersistentAssignment, unset bool) ([]byte, error) {
+	records, err := persistentEditRecords(path, content, assignments, unset)
 	if err != nil {
 		return nil, err
 	}
-	values := make(map[string]string, len(assignments))
-	for _, assignment := range assignments {
-		values[CanonicalSettingName(assignment.Name)] = assignment.Value
-	}
 	var result bytes.Buffer
+	appendEnding := "\n"
+	if last := bytes.LastIndexByte(content, '\n'); last > 0 && content[last-1] == '\r' {
+		appendEnding = "\r\n"
+	}
 	for _, record := range records {
 		if record.replacement == nil {
-			result.Write(record.content)
+			result.WriteString(record.raw)
 			continue
 		}
 		if result.Len() != 0 && result.Bytes()[result.Len()-1] != '\n' {
+			result.WriteString(appendEnding)
+		}
+		result.WriteString(record.name + "=" + quotePersistentValue(record.replacement.Value))
+		switch {
+		case strings.HasSuffix(record.raw, "\r\n"):
+			result.WriteString("\r\n")
+		case strings.HasSuffix(record.raw, "\n"):
 			result.WriteByte('\n')
-		}
-		result.WriteString(record.name + "=" + quotePersistentValue(record.replacement.Value) + "\n")
-	}
-	// Preserved records can still assign the selected settings. Verify what
-	// the final draft actually assigns before approving publication.
-	observed, err := settings.ParsePersistentAssignments(path, result.Bytes())
-	if err != nil {
-		return nil, err
-	}
-	effective := make(map[string]PersistentAssignment, len(assignments))
-	var refusals []error
-	for _, assignment := range observed {
-		name := CanonicalSettingName(assignment.Name)
-		if _, selected := values[name]; !selected {
-			continue
-		}
-		if unset || assignment.Name != name {
-			refusals = append(refusals, persistentAssignmentPreserved(path, name, assignment.Line))
-		}
-		effective[name] = assignment
-	}
-	if !unset {
-		for _, assignment := range assignments {
-			name := CanonicalSettingName(assignment.Name)
-			refusals = append(refusals, persistentAssignmentChanged(path, name, assignment.Value, effective[name]))
+		default:
+			result.WriteString(appendEnding)
 		}
 	}
-	if err := domain.CollectRefusals(refusals...); err != nil {
+	if err := scanPersistentEnv(path, result.Bytes(), func(envRecord, string, string) {}); err != nil {
 		return nil, err
 	}
 	return result.Bytes(), nil
 }
 
-func persistentAssignmentPreserved(path, name string, line int) error {
-	return sourceError(path, line, name, "persistent settings", "setting is still assigned by a preserved record; simplify conditional assignments before authoring", nil)
-}
-
-func persistentAssignmentChanged(path, name, value string, actual PersistentAssignment) error {
-	if actual.Name == "" || actual.Value != value {
-		return sourceError(path, actual.Line, name, "persistent settings", "a preserved record changes the requested setting; simplify conditional assignments before authoring", nil)
-	}
-	return nil
-}
-
-// persistentEditRecords locates replacements without evaluating their values.
-func (settings Catalog) persistentEditRecords(path string, content []byte, assignments []PersistentAssignment, unset bool) ([]envEditRecord, error) {
-	records, err := parseEnvEditRecords(path, content, settings)
+// persistentEditRecords retains unrelated records and replaces the last
+// occurrence of each selected key, including legacy names for that key.
+func persistentEditRecords(path string, content []byte, assignments []PersistentAssignment, unset bool) ([]envEditRecord, error) {
+	records, err := parseEnvEditRecords(path, content)
 	if err != nil {
 		return nil, err
 	}
@@ -577,6 +479,9 @@ func (settings Catalog) persistentEditRecords(path string, content []byte, assig
 	replacements := make(map[string]*PersistentAssignment, len(assignments))
 	for index := range assignments {
 		replacement := &assignments[index]
+		if !ValidVariable(replacement.Name) {
+			return nil, sourceError(path, 0, "", "persistent settings", "invalid variable name", nil)
+		}
 		replacements[CanonicalSettingName(replacement.Name)] = replacement
 	}
 	for index, record := range records {
@@ -591,7 +496,8 @@ func (settings Catalog) persistentEditRecords(path string, content []byte, assig
 		if replacement := replacements[name]; replacement == nil {
 			edited = append(edited, record)
 		} else if !unset && index == last[name] {
-			edited = append(edited, envEditRecord{name: name, replacement: replacement})
+			record.name, record.replacement = name, replacement
+			edited = append(edited, record)
 		}
 	}
 	if !unset {
@@ -606,53 +512,16 @@ func (settings Catalog) persistentEditRecords(path string, content []byte, assig
 	return edited, nil
 }
 
-func parseEnvEditRecords(path string, content []byte, settings Catalog) ([]envEditRecord, error) {
-	lines := bytes.SplitAfter(content, []byte{'\n'})
-	values := environment{}
+func parseEnvEditRecords(path string, content []byte) ([]envEditRecord, error) {
 	var records []envEditRecord
-	var current bytes.Buffer
-	quote := byte(0)
-	lineNumber := 0
-	recordLine := 0
-	for _, line := range lines {
-		if len(line) == 0 {
-			continue
-		}
-		lineNumber++
-		if current.Len() == 0 {
-			recordLine = lineNumber
-		}
-		current.Write(line)
-		scan := strings.TrimSuffix(string(line), "\n")
-		quote = scanQuote(scan, quote)
-		if quote != 0 {
-			continue
-		}
-		raw := append([]byte(nil), current.Bytes()...)
-		trimmed := strings.TrimSpace(string(raw))
-		record := envEditRecord{content: raw}
-		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			var assigned string
-			if err := applyRecordRetired(trimmed, values, func(name, _ string) {
-				assigned = name
-			}, operatorDiscardPolicy(func(name, _ string) {
-				assigned = name
-			}, settings)); err != nil {
-				return nil, sourceContext(path, recordLine, recordSettingKey(trimmed), "persistent settings", err)
-			}
-			record.name = assigned
-		}
-		records = append(records, record)
-		current.Reset()
-	}
-	if quote != 0 || current.Len() != 0 {
-		return nil, sourceError(path, recordLine, recordSettingKey(current.String()), "persistent settings", "unterminated quoted assignment", nil)
-	}
-	return records, nil
+	err := scanPersistentEnv(path, content, func(record envRecord, name, value string) {
+		records = append(records, envEditRecord{envRecord: record, name: name, value: value})
+	})
+	return records, err
 }
 
 func quotePersistentValue(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+	return "'" + strings.ReplaceAll(value, "'", escapedEnvApostrophe) + "'"
 }
 
 func dereference(value *string) string {

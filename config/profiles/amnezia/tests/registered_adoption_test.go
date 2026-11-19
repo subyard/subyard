@@ -97,7 +97,7 @@ func amneziaAdoptionFixture(t *testing.T, registrationSettings func(preset strin
 	}
 	registration := filepath.Join(configHome, "yards", "vpn", "config.env")
 	writeFixture(t, registration, registrationSettings(string(preset)))
-	options := config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "vpn", DisablePrivate: true, Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}}
+	options := config.LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "vpn", Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome}}
 	loaded, err := config.Load(options)
 	if err != nil {
 		t.Fatal(err)

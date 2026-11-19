@@ -33,6 +33,7 @@ type releaseSelection struct {
 	draftPath                      string
 	firstPublication               bool
 	refusal                        string
+	retry                          string
 	cause                          error
 }
 
@@ -41,6 +42,13 @@ func selectionContext(ctx context.Context, selection *releaseSelection) context.
 		return ctx
 	}
 	return context.WithValue(ctx, releaseSelectionKey{}, selection)
+}
+
+func retainedRegistryRetry(selection *releaseSelection) string {
+	if selection.retry != "" {
+		return selection.retry
+	}
+	return "keep the current release active and resolve all reported release compatibility requirements before retrying"
 }
 
 func (runtime *Runtime) ownerDataHome() string {
@@ -181,8 +189,8 @@ func solePublishedRelease(root string, target releasetransition.ReleaseID) (bool
 	return found, nil
 }
 
-// Bootstrap stages its launcher before invoking update. Preserve the source
-// floor's upgrade advice without admitting an already published engine.
+// Preserve the source floor's upgrade advice without admitting an already
+// published engine, including candidates left by earlier bootstrap versions.
 func (runtime *Runtime) stagedSourceRefusal(ctx context.Context, selection *releaseSelection, active *verifiedPublishedCandidate) error {
 	request := selection.request
 	if request.Direction != releasetransition.DirectionActivateTarget || request.Replacement != nil ||
@@ -337,7 +345,7 @@ func (runtime *Runtime) admitTransitionLaunch(ctx context.Context, engine *verif
 		}
 		if selection.refusal != "" {
 			outcome := observedPublicReleaseOutcome(request.RuntimeRoot, request.Target, nil, releasetransition.CodeRollbackIncompatible,
-				selection.refusal, "keep the current release active and resolve all reported release compatibility requirements before retrying")
+				selection.refusal, retainedRegistryRetry(selection))
 			return publicReleaseInspectionError{cause: domain.CollectRefusals(transitionOutcomeError(outcome), selection.cause), outcome: outcome}
 		}
 		if selection.activeRegistry != selection.targetRegistry {

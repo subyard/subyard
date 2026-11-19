@@ -331,13 +331,28 @@ func TestRegisteredEndpointKeepsOperatorSettingAndPublishesReceipt(t *testing.T)
 }
 
 func TestRegisteredEndpointImportsOverShippedDefault(t *testing.T) {
-	owner, _, path := registeredMigrationFixture(t)
-	if _, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err != nil {
-		t.Fatal(err)
-	}
-	prepared, present, err := owner.ReadPreparedInput(path)
-	if err != nil || !present || !strings.Contains(string(prepared.Content), "SAMPLE_PORT='32000'") {
-		t.Fatalf("shipped default not imported: %q %v", prepared.Content, err)
+	for _, layout := range []string{"nested", "flat"} {
+		t.Run(layout, func(t *testing.T) {
+			owner, _, nested := registeredMigrationFixture(t)
+			path := nested
+			if layout == "flat" {
+				path = filepath.Join(owner.ConfigHome, "yards/default.env")
+				if err := os.Rename(nested, path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := owner.Observe(context.Background(), releasetransition.ReleasePair{}, releasetransition.ReleaseLinks{}); err != nil {
+				t.Fatal(err)
+			}
+			paths, err := owner.PreparedInputPaths()
+			if err != nil || !slices.Equal(paths, []string{path}) {
+				t.Fatalf("prepared paths = %v, %v", paths, err)
+			}
+			prepared, present, err := owner.ReadPreparedInput(path)
+			if err != nil || !present || string(prepared.Content) != "ENVIRONMENT_PROFILES=sample\nSAMPLE_PORT='32000'\n" {
+				t.Fatalf("shipped default not imported: %q %v", prepared.Content, err)
+			}
+		})
 	}
 }
 

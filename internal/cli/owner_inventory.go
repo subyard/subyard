@@ -82,7 +82,7 @@ func (source cliOwnerSource) Yards(context.Context) ([]domain.Context, error) {
 		return []domain.Context{*source.selected}, nil
 	}
 	names, err := config.YardNames(
-		source.loaded.Context.Paths.ConfigDir, source.loaded.Context.Paths.ConfigHome,
+		source.loaded.Context.Paths.ConfigHome,
 	)
 	if err != nil {
 		return nil, err

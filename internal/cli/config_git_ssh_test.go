@@ -1002,3 +1002,24 @@ func TestConfigSetSeveralPairsValidatesCombinedTarget(t *testing.T) {
 		t.Fatalf("refused pairs contacted the remote: %#v", events)
 	}
 }
+
+func TestConfigSetGitBatchRefusesNonliteralSource(t *testing.T) {
+	f := newConfigSSHFixture(t)
+	checkout := filepath.Join(f.home, ".local/share/subyard-config")
+	const relative = "shared/config.env"
+	const original = "# existing source\nGIT_USER_EMAIL=\"${GIT_USER_NAME:=original}@example.invalid\"\n"
+	writeConfigCommandFile(t, filepath.Join(checkout, relative), original)
+	commitConfigSource(t, checkout, "Existing nonliteral configuration")
+	runConfigSyncGit(t, checkout, "push", "--quiet", f.remote, "HEAD")
+	head := f.commitCount()
+	localHead := configSourceGitOutput(t, checkout, "rev-parse", "HEAD")
+	f.run(1, "config", "set", "GIT_USER_NAME", "Janet", "GIT_USER_EMAIL", "new@example.invalid", "--scope", "shared", "--git", "--yes")
+	output := f.stderr.String()
+	if !strings.Contains(output, relative+":2: GIT_USER_EMAIL") || !strings.Contains(output, "only literal values") || strings.Contains(output, "original") {
+		t.Fatalf("Git authoring lost the source refusal: %s", output)
+	}
+	if f.commitCount() != head || configSourceGitOutput(t, checkout, "rev-parse", "HEAD") != localHead ||
+		string(mustReadConfigFixture(t, filepath.Join(checkout, relative))) != original {
+		t.Fatal("refused Git edit changed the source or published a commit")
+	}
+}

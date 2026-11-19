@@ -6,11 +6,14 @@ import (
 	"errors"
 	"io"
 	"os"
-	"sort"
 	"strings"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
 
 type environment map[string]string
+
+const escapedEnvApostrophe = `'\''`
 
 type assignmentObserver func(name, value string, line int)
 
@@ -33,23 +36,18 @@ func ReadAssignmentsOver(path string, base map[string]string) (map[string]string
 	return result, nil
 }
 
-// AssignedSettingNames lists the settings an operator file assigns. A
-// profile-only assignment is discarded as the loader discards it.
-func AssignedSettingNames(path string, readers ...func(string) ([]byte, error)) ([]string, error) {
+// ReadLiteralAssignments reads a user settings file without scope validation.
+func ReadLiteralAssignments(path string) (map[string]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, sourceAccessError(path, "scalar settings", err)
+	}
+	defer file.Close()
 	values := environment{}
-	seen := map[string]struct{}{}
-	var result []string
-	if err := applyEnvFileObservedRetired(path, values, func(name, _ string, _ int) {
-		if _, exists := seen[name]; exists {
-			return
-		}
-		seen[name] = struct{}{}
-		result = append(result, name)
-	}, discardPolicy{ignored: IsProfileOnlySetting}, nil, readers...); err != nil {
+	if err := applyLiteralEnv(file, path, values, nil, discardPolicy{}, nil); err != nil {
 		return nil, err
 	}
-	sort.Strings(result)
-	return result, nil
+	return values, nil
 }
 
 func applyEnvFile(path string, values environment) error {
@@ -57,10 +55,10 @@ func applyEnvFile(path string, values environment) error {
 }
 
 func applyEnvFileObserved(path string, values environment, observer assignmentObserver, readers ...func(string) ([]byte, error)) error {
-	return applyEnvFileObservedRetired(path, values, observer, discardPolicy{}, nil, readers...)
+	return applyShippedEnvFile(path, values, observer, discardPolicy{}, readers...)
 }
 
-func applyEnvFileObservedRetired(path string, values environment, observer assignmentObserver, policy discardPolicy, discarded func(name, value string, line int), readers ...func(string) ([]byte, error)) error {
+func applyShippedEnvFile(path string, values environment, observer assignmentObserver, policy discardPolicy, readers ...func(string) ([]byte, error)) error {
 	var input io.Reader
 	if len(readers) != 0 && readers[0] != nil {
 		payload, err := readers[0](path)
@@ -76,21 +74,15 @@ func applyEnvFileObservedRetired(path string, values environment, observer assig
 		defer file.Close()
 		input = file
 	}
-	return applyEnvReaderObservedRetired(input, path, values, observer, policy, discarded)
+	return applyShippedEnv(input, path, values, observer, policy)
 }
 
-// discardPolicy names discarded inputs: retired settings always, plus those
-// retired or ignored selects. A discarded assignment is evaluated in
-// isolation: neither it nor any default it performs changes values or reaches
-// the observer, so later records never see it. An ignored one also never
-// refuses: its evaluation error is dropped and its unevaluated text kept, and
-// a required check of its name is ignored.
-// report, when set, receives each discarded record's assignment.
+// discardPolicy keeps retired settings and operator-only discards out of the resolved environment.
 type discardPolicy struct {
 	retired, ignored func(string) bool
-	report           func(name, value string)
 	batch            *localBatch
 	unavailable      *bool
+	literal          bool
 }
 
 func (policy discardPolicy) discards(name string) bool {
@@ -101,71 +93,161 @@ func (policy discardPolicy) ignores(name string) bool {
 	return policy.ignored != nil && policy.ignored(name)
 }
 
-// operatorDiscardPolicy is the policy for operator-authored files: they may
-// still contain profile-only settings, which only environment profiles declare.
-func operatorDiscardPolicy(report func(name, value string), catalogs ...Catalog) discardPolicy {
-	return discardPolicy{ignored: IsProfileOnlySetting, report: report, retired: func(name string) bool {
-		for _, settings := range catalogs {
-			if settings.RetiredSetting(name) {
-				return true
-			}
-		}
-		return false
-	}}
-}
-
 func applyEnvReaderObserved(reader io.Reader, source string, values environment, observer assignmentObserver) error {
-	return applyEnvReaderObservedRetired(reader, source, values, observer, discardPolicy{}, nil)
+	return applyShippedEnv(reader, source, values, observer, discardPolicy{})
 }
 
-// applyEnvReaderObservedRetired evaluates every record under policy.
-// discarded, when set, receives each discarded assignment with its record line.
-func applyEnvReaderObservedRetired(reader io.Reader, source string, values environment, observer assignmentObserver, policy discardPolicy, discarded func(name, value string, line int)) error {
+func applyShippedEnv(reader io.Reader, source string, values environment, observer assignmentObserver, policy discardPolicy) error {
 	discardRetiredSettings(values)
 
+	return scanEnvRecords(reader, source, "scalar settings", false, func(record envRecord) error {
+		if record.text == "" {
+			return nil
+		}
+		return applyRecordRetired(record.text, values, func(name, value string) {
+			if observer != nil {
+				observer(name, value, record.line)
+			}
+		}, policy)
+	})
+}
+
+type envRecord struct {
+	raw  string
+	text string
+	line int
+}
+
+var errSettingExpansion = errors.New("settings files accept only literal values. Replace the parameter expansion or setting reference with its value")
+
+func scanLiteralEnv(reader io.Reader, path, role string, visit func(record envRecord, name, value string)) error {
+	var refusals []error
+	err := scanEnvRecords(reader, path, role, true, func(record envRecord) error {
+		if record.text == "" {
+			visit(record, "", "")
+			return nil
+		}
+		name, raw := envRecordAssignment(record.text)
+		value, expand := decodeValue(raw)
+		var err error
+		if expand {
+			value, err = expandValue(value, nil, nil, discardPolicy{literal: true})
+		} else {
+			value = strings.ReplaceAll(value, escapedEnvApostrophe, "'")
+			if strings.ContainsRune(strings.ReplaceAll(raw[1:len(raw)-1], escapedEnvApostrophe, ""), '\'') {
+				err = sourceError("", 0, "", role, "invalid single-quoted value. Replace it with one literal value", nil)
+			}
+		}
+		if err == nil {
+			switch {
+			case name == "":
+				err = sourceError("", 0, "", role, "only variable assignments are allowed", nil)
+			case !ValidVariable(name):
+				err = sourceError("", 0, "", role, "invalid variable name", nil)
+			}
+		}
+		if err != nil {
+			refusals = append(refusals, sourceContext(path, record.line, recordSettingKey(record.text), role, err))
+		} else {
+			visit(record, name, value)
+		}
+		return nil
+	})
+	return domain.CollectRefusals(append(refusals, err)...)
+}
+
+func envRecordAssignment(record string) (name, raw string) {
+	if expression, ok := strings.CutPrefix(record, ":"); ok {
+		return "", strings.TrimSpace(expression)
+	}
+	record = strings.TrimSpace(strings.TrimPrefix(record, "export "))
+	if name, raw, ok := strings.Cut(record, "="); ok {
+		return strings.TrimSpace(name), strings.TrimSpace(raw)
+	}
+	return "", ""
+}
+
+func applyLiteralEnv(reader io.Reader, path string, values environment, observe assignmentObserver, policy discardPolicy, discard assignmentObserver) error {
+	discardRetiredSettings(values)
+	return scanLiteralEnv(reader, path, "scalar settings", func(record envRecord, name, value string) {
+		if name != "" {
+			applyLiteralAssignment(name, value, record.line, values, observe, policy, discard)
+		}
+	})
+}
+
+func applyLiteralAssignment(name, value string, line int, values environment, observe assignmentObserver, policy discardPolicy, discard assignmentObserver) {
+	if policy.discards(name) {
+		if discard != nil {
+			discard(name, value, line)
+		}
+		return
+	}
+	values[name] = value
+	if policy.batch != nil {
+		policy.batch.setAvailable(name, true)
+	}
+	if observe != nil {
+		observe(name, value, line)
+	}
+}
+
+// scanEnvRecords preserves raw bytes for edits and supplies the same
+// evaluation text and line numbers to each consumer. Blank and comment lines
+// outside an assignment have empty evaluation text.
+func scanEnvRecords(reader io.Reader, source, purpose string, preserveEndings bool, visit func(envRecord) error) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	var record strings.Builder
-	quote := byte(0)
-	lineNumber := 0
-	recordLine := 0
+	if preserveEndings {
+		scanner.Split(scanEnvLine)
+	}
+	var raw strings.Builder
+	var quote byte
+	lineNumber, recordLine := 0, 0
 	for scanner.Scan() {
 		lineNumber++
 		line := scanner.Text()
-		if record.Len() == 0 {
-			trimmed := strings.TrimSpace(line)
+		body := strings.TrimSuffix(line, "\n")
+		if raw.Len() == 0 {
+			trimmed := strings.TrimSpace(body)
 			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				if err := visit(envRecord{raw: line, line: lineNumber}); err != nil {
+					return err
+				}
 				continue
 			}
 			recordLine = lineNumber
-		} else {
-			record.WriteByte('\n')
+		} else if !preserveEndings {
+			raw.WriteByte('\n')
 		}
-		record.WriteString(line)
-		quote = scanQuote(line, quote)
+		raw.WriteString(line)
+		quote = scanQuote(body, quote)
 		if quote != 0 {
 			continue
 		}
-		recordObserver := func(name, value string) {
-			if observer != nil {
-				observer(name, value, recordLine)
-			}
+		record := envRecord{raw: raw.String(), text: strings.TrimSpace(raw.String()), line: recordLine}
+		if err := visit(record); err != nil {
+			return sourceContext(source, record.line, recordSettingKey(record.text), purpose, err)
 		}
-		if discarded != nil {
-			policy.report = func(name, value string) { discarded(name, value, recordLine) }
-		}
-		if err := applyRecordRetired(record.String(), values, recordObserver, policy); err != nil {
-			return sourceContext(source, recordLine, recordSettingKey(record.String()), "scalar settings", err)
-		}
-		record.Reset()
+		raw.Reset()
 	}
 	if err := scanner.Err(); err != nil {
-		return sourceError(source, lineNumber+1, "", "scalar settings", "cannot read config within the line size bound", err)
+		return sourceError(source, lineNumber+1, "", purpose, "cannot read config within the line size bound", err)
 	}
-	if quote != 0 || record.Len() != 0 {
-		return sourceError(source, recordLine, recordSettingKey(record.String()), "scalar settings", "unterminated quoted assignment", nil)
+	if raw.Len() != 0 {
+		return sourceError(source, recordLine, recordSettingKey(raw.String()), purpose, "unterminated quoted assignment", nil)
 	}
 	return nil
+}
+
+func scanEnvLine(data []byte, atEOF bool) (int, []byte, error) {
+	if end := bytes.IndexByte(data, '\n'); end >= 0 {
+		return end + 1, data[:end+1], nil
+	}
+	if atEOF && len(data) != 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 func scanQuote(line string, quote byte) byte {
@@ -226,18 +308,13 @@ func applyRecordRetired(record string, values environment, observer func(name, v
 	raw := strings.TrimSpace(record[separator+1:])
 	value, expand := decodeValue(raw)
 	if expand {
-		expanded, err := expandValue(value, values, observer, policy)
-		if err != nil && !(discard && policy.ignores(name)) {
+		var err error
+		value, err = expandValue(value, values, observer, policy)
+		if err != nil {
 			return err
-		}
-		if err == nil {
-			value = expanded
 		}
 	}
 	if discard {
-		if policy.report != nil {
-			policy.report(name, value)
-		}
 		return nil
 	}
 	values[name] = value
@@ -288,6 +365,9 @@ func expandValue(
 			result.WriteByte('$')
 			index++
 			continue
+		}
+		if policy.literal && (value[index+1] == '{' || variableChar(value[index+1], true)) {
+			return "", sourceError("", 0, "", "scalar settings", errSettingExpansion.Error(), errSettingExpansion)
 		}
 		if value[index+1] == '{' {
 			end, err := parameterEnd(value, index+2)
@@ -367,11 +447,6 @@ func expandParameter(
 	case ":-", ":=", ":?":
 		if current != "" {
 			return current, nil
-		}
-		if operator == ":?" && policy.ignores(name) {
-			// Operators never assign an ignored name, so a required check of
-			// it is ignored too, without evaluating its message.
-			return "", nil
 		}
 		unavailable := false
 		fallbackPolicy := policy

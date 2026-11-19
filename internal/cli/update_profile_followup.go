@@ -40,8 +40,7 @@ func (cli *CLI) offerPendingProfileProvision(ctx context.Context, execution *rel
 		return
 	}
 	runtimeRoot := filepath.Dir(filepath.Dir(launcher))
-	configDir := filepath.Join(runtimeRoot, "config")
-	yards, err := config.YardNames(configDir, execution.configHome)
+	yards, err := config.YardNames(execution.configHome)
 	if err != nil {
 		return
 	}

@@ -98,14 +98,15 @@ func TestRetainedCoreGuardUsesInstalledPresenceAndPerYardPins(t *testing.T) {
 	if err := os.Remove(filepath.Join(home, "yards/named/config.env")); err != nil {
 		t.Fatal(err)
 	}
+	namedObserved = false
 	for _, entry := range []struct{ root, pin string }{{active, "21.0.0"}, {target, "22.0.0"}} {
 		if err := os.MkdirAll(filepath.Join(entry.root, "private/yards"), 0700); err != nil {
 			t.Fatal(err)
 		}
 		testkit.WriteFile(t, filepath.Join(entry.root, "private/yards/named.env"), []byte("CCUSAGE_VERSION="+entry.pin+"\n"), 0600)
 	}
-	if _, err := runtime.retainedRuntimeBinding(context.Background(), active, target, home, nil); err == nil || !namedObserved {
-		t.Fatal("named installed differing pins bypassed authority")
+	if _, err := runtime.retainedRuntimeBinding(context.Background(), active, target, home, nil); err != nil || namedObserved {
+		t.Fatalf("checkout overlay affected retained authority: %v", err)
 	}
 }
 

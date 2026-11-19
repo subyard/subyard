@@ -342,7 +342,6 @@ func loadBrokerYard(options Options, yard string) (config.Loaded, error) {
 		OperatorHome:     operatorHome,
 		YardName:         yard,
 		Environment:      environment,
-		DisablePrivate:   true,
 		ProspectiveFiles: options.ProspectiveFiles,
 	})
 	if err != nil {

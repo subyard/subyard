@@ -151,7 +151,7 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 	}
 	loaded, err := config.Load(config.LoadOptions{
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
-		Environment: fixture.options(false).Environment, DisablePrivate: true,
+		Environment: fixture.options(false).Environment,
 	})
 	if err != nil || loaded.Environment["DEV_UID"] != "2235" || loaded.Environment["CODING_TOOL_INTEGRATIONS"] != "" {
 		t.Fatalf("offline fallback/local empty resolution: value=%s err=%v", loaded.Environment["DEV_UID"], err)
@@ -161,7 +161,7 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 	}
 	demo, err := config.Load(config.LoadOptions{
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome, YardName: "demo",
-		Environment: fixture.options(false).Environment, DisablePrivate: true,
+		Environment: fixture.options(false).Environment,
 	})
 	if err != nil || demo.Environment["DEV_UID"] != "2234" {
 		t.Fatalf("offline Git-only yard: value=%s err=%v", demo.Environment["DEV_UID"], err)
@@ -171,7 +171,7 @@ func TestConfigSyncPreservesLocalScalarAndFileOverridesAcrossSyncOffline(t *test
 	}
 	loaded, err = config.Load(config.LoadOptions{
 		RepositoryRoot: fixture.root, OperatorHome: fixture.operatorHome,
-		Environment: fixture.options(false).Environment, DisablePrivate: true,
+		Environment: fixture.options(false).Environment,
 	})
 	if err != nil || loaded.Environment["AGENT_codex_RULES"] != filepath.Join(fixture.configHome, config.GitSettingsRelativePath, "overrides/host/agents/codex/rules/repo.rules") {
 		t.Fatalf("absent local file did not reveal cached Git file: %v", err)
@@ -185,6 +185,10 @@ func TestConfigSyncRejectsChangesToObservedLocalInputs(t *testing.T) {
 		{"scalar-created", "config.env", "", "DEV_UID=2299\n"},
 		{"scalar-edited", "config.env", "DEV_UID=2298\n", "DEV_UID=2299\n"},
 		{"scalar-inode-replaced", "config.env", "DEV_UID=2299\n", "DEV_UID=2299\n"},
+		{"flat-yard-created", "yards/demo.env", "", "SSH_PORT=2399\nDEV_UID=2299\n"},
+		{"flat-yard-edited", "yards/demo.env", "SSH_PORT=2399\nDEV_UID=2298\n", "SSH_PORT=2399\nDEV_UID=2299\n"},
+		{"flat-default-created", "yards/default.env", "", "DEV_UID=2299\n"},
+		{"flat-default-edited", "yards/default.env", "DEV_UID=2298\n", "DEV_UID=2299\n"},
 		{"asset-created", "overrides/host/agents/codex/rules/repo.rules", "", "operator rule\n"},
 		{"asset-edited", "overrides/host/agents/codex/rules/repo.rules", "old rule\n", "new rule\n"},
 	} {
@@ -217,36 +221,40 @@ func TestConfigSyncRejectsChangesToObservedLocalInputs(t *testing.T) {
 }
 
 func TestConfigSyncKeepsLocalYardWhenGitDefinitionIsRemoved(t *testing.T) {
-	fixture := newSyncFixture(t, "owner-a")
-	fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
-	fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
-	fixture.commit("initial")
-	plan, err := BuildPlan(fixture.options(false))
-	if err != nil {
-		t.Fatal(err)
+	for _, registration := range []string{"yards/demo/config.env", "yards/demo.env"} {
+		t.Run(registration, func(t *testing.T) {
+			fixture := newSyncFixture(t, "owner-a")
+			fixture.writeSource("hosts/owner-a/config.env", "DEV_UID=2233\n")
+			fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2234\n")
+			fixture.commit("initial")
+			plan, err := BuildPlan(fixture.options(false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(plan); err != nil {
+				t.Fatal(err)
+			}
+			local := filepath.Join(fixture.configHome, registration)
+			writeSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
+			if err := os.RemoveAll(filepath.Join(fixture.source, "hosts/owner-a/yards/demo")); err != nil {
+				t.Fatal(err)
+			}
+			fixture.commit("remove Git definition")
+			options := fixture.options(false)
+			options.YardInUse = func(string) (string, bool, error) {
+				t.Fatal("retained local yard must not be assessed as deleted")
+				return "", false, nil
+			}
+			plan, err = BuildPlan(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(plan); err != nil {
+				t.Fatal(err)
+			}
+			assertSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
+		})
 	}
-	if err := Apply(plan); err != nil {
-		t.Fatal(err)
-	}
-	local := filepath.Join(fixture.configHome, "yards/demo/config.env")
-	writeSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
-	if err := os.RemoveAll(filepath.Join(fixture.source, "hosts/owner-a/yards/demo")); err != nil {
-		t.Fatal(err)
-	}
-	fixture.commit("remove Git definition")
-	options := fixture.options(false)
-	options.YardInUse = func(string) (string, bool, error) {
-		t.Fatal("retained local yard must not be assessed as deleted")
-		return "", false, nil
-	}
-	plan, err = BuildPlan(options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Apply(plan); err != nil {
-		t.Fatal(err)
-	}
-	assertSyncTestFile(t, local, "DEV_UID=2299\nSSH_PORT=2234\n", 0o600)
 }
 
 func TestConfigSyncMigrationRecoveryUsesManifestCommitPoint(t *testing.T) {

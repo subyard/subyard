@@ -278,16 +278,6 @@ func (cli *CLI) selectionRepairContent(yard, path string, content []byte, reques
 		return nil, err
 	}
 	choice := request.choices[0]
-	assignments, err := cli.catalog.ParsePersistentAssignments(path, content)
-	if err != nil {
-		return nil, err
-	}
-	definition, _ := cli.catalog.LookupSetting(choice.name)
-	for _, assignment := range assignments {
-		if (assignment.Name == choice.name || slices.Contains(definition.Aliases, assignment.Name)) && (!assignment.Direct || assignment.Dynamic) {
-			return nil, errors.New("activation source repair requires a literal persistent selection")
-		}
-	}
 	if err := cli.catalog.ValidateSetting(request.scope, choice.name, choice.value, false); err != nil {
 		return nil, err
 	}

@@ -281,11 +281,19 @@ func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
 		testkit.WriteFile(t, path, []byte(content), 0600)
 	}
 	program.env = environmentMap(program.options.Environment)
+	_, err := program.loadContext("named")
+	var conflict *config.SettingsFileConflict
+	if !errors.As(err, &conflict) {
+		t.Fatalf("ambiguous registration loaded: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, "yards/named.env")); err != nil {
+		t.Fatal(err)
+	}
 	named, err := program.loadContext("named")
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := config.FindYardRegistrationFile(named.Context.Paths.ConfigDir, root, "named")
+	registration, err := config.FindYardRegistrationFile(root, "named")
 	if err != nil || registration != filepath.Join(root, "yards/named/config.env") {
 		t.Fatalf("canonical registration precedence: %s %v", registration, err)
 	}
@@ -294,7 +302,7 @@ func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := config.FindYardRegistrationFile(named.Context.Paths.ConfigDir, root, "named"); !errors.Is(err, config.ErrUnknownYard) {
+	if _, err := config.FindYardRegistrationFile(root, "named"); !errors.Is(err, config.ErrUnknownYard) {
 		t.Fatalf("old shadow/fallback reactivated: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, ".sync/settings/yards/named/config.env")); err != nil {

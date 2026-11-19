@@ -17,7 +17,7 @@ import (
 )
 
 func (cli *CLI) registeredYardMigrations(request releasetransition.ProcessRequest, guestTmp bool) []releasetransition.V2ActivationReconciler {
-	names, err := config.YardNames(cli.options.RepositoryRoot+"/config", request.ConfigHome)
+	names, err := config.YardNames(request.ConfigHome)
 	if err != nil {
 		return []releasetransition.V2ActivationReconciler{&migration.RegisteredYardMigration{Yard: "enumeration", LoadTargets: func(context.Context, releasetransition.V2SettingsSnapshotView) ([]migration.RegisteredYardTarget, error) {
 			return nil, err
@@ -185,7 +185,7 @@ func (cli *CLI) nativeAccessRefusal(ctx context.Context, yard string) error {
 func (cli *CLI) localYardAccessRefusals(ctx context.Context, configHome string, native interface {
 	Instance(context.Context, string, string) (ports.InstanceInfo, error)
 }, selected string, denied error) error {
-	names, err := config.YardNames(cli.options.RepositoryRoot+"/config", configHome)
+	names, err := config.YardNames(configHome)
 	if err != nil {
 		return err
 	}

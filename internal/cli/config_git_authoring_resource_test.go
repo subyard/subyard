@@ -51,10 +51,11 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 	if err := configsync.Apply(plan); err != nil {
 		t.Fatal(err)
 	}
-	// The requested change already exists in Git, while an earlier failed apply
+	// The requested change is already upstream, while an earlier failed apply
 	// left the active resource selected in the cached effective settings.
 	writeConfigCommandFile(t, source, "YARD_KIND=vm\nDEV_UID=2300\nENVIRONMENT_PROFILES=''\n", 0o600)
 	commitConfigSource(t, checkout, "Deselect sample profile")
+	runConfigSyncGit(t, checkout, "push", "--quiet")
 	cache := filepath.Join(f.configHome, config.GitSettingsRelativePath, "yards/demo/config.env")
 	cacheBefore, err := os.ReadFile(cache)
 	if err != nil || string(cacheBefore) != old {
@@ -108,6 +109,6 @@ printf '{"schema":"yard.resource-action-assessment.v1","action":"down","changed"
 		t.Fatal("unsafe retry changed the registered checkout")
 	}
 	if after := strings.TrimSpace(configSourceGitOutput(t, f.remote, "rev-parse", "HEAD")); after != remoteBefore {
-		t.Fatal("unsafe retry pushed the pending profile change")
+		t.Fatal("unsafe retry changed upstream")
 	}
 }

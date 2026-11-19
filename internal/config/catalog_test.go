@@ -231,7 +231,7 @@ func TestProfileDefaultsLayersAndListenerCollision(t *testing.T) {
 	writeCatalogProfile(t, root, "fixture", `{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","host","yard","command"],"application":"next-command","minimum":1,"maximum":65535,"default":"2345","syncable":true,"host_listener":true}]}`)
 	home := testkit.TempDir(t)
 	configHome := filepath.Join(home, ".config", "subyard")
-	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, DisablePrivate: true, Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home}}
+	options := LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"SUBYARD_OPERATOR_HOME": home}}
 	check := func(want, scope string) {
 		t.Helper()
 		loaded, err := Load(options)

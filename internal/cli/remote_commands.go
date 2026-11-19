@@ -22,7 +22,7 @@ func (cli *CLI) remoteControl(loaded config.Loaded, timeout time.Duration) ports
 	}
 	return remotecontrol.Runtime{
 		Home: loaded.Context.Paths.OperatorHome, ConfigHome: loaded.Context.Paths.ConfigHome,
-		ConfigDir: loaded.Context.Paths.ConfigDir, DataHome: loaded.Context.Paths.DataHome,
+		DataHome:    loaded.Context.Paths.DataHome,
 		PublicKey:   cli.env["SUBYARD_SSH_PUBKEY"],
 		Environment: environmentList(cli.env, nil),
 		Timeout:     timeout,

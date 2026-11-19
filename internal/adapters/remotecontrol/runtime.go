@@ -26,9 +26,9 @@ import (
 )
 
 type Runtime struct {
-	SSH, Home, ConfigHome, ConfigDir, DataHome, PublicKey string
-	Environment                                           []string
-	Timeout                                               time.Duration
+	SSH, Home, ConfigHome, DataHome, PublicKey string
+	Environment                                []string
+	Timeout                                    time.Duration
 	// AdmitMutation retains the caller's original owner authority across authorization.
 	AdmitMutation func(context.Context) (func(), error)
 	processCall   func(context.Context, string, []string, []byte) ([]byte, error)
@@ -38,14 +38,14 @@ func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteReco
 	if name == "default" {
 		return domain.RemoteRecord{Spec: domain.RemoteSpec{LegacyAlias: name}}, true, nil
 	}
-	path, err := config.FindYardRegistrationFile(runtime.ConfigDir, runtime.ConfigHome, name)
+	path, err := config.FindYardRegistrationFile(runtime.ConfigHome, name)
 	if errors.Is(err, config.ErrUnknownYard) {
 		return domain.RemoteRecord{}, false, nil
 	}
 	if err != nil {
 		return domain.RemoteRecord{}, false, err
 	}
-	values, err := config.ReadAssignments(path)
+	values, err := config.ReadLiteralAssignments(path)
 	if err != nil {
 		return domain.RemoteRecord{}, false, err
 	}
@@ -69,7 +69,7 @@ func (runtime Runtime) Lookup(_ context.Context, name string) (domain.RemoteReco
 }
 
 func (runtime Runtime) List(ctx context.Context) ([]domain.RemoteRecord, error) {
-	names, err := config.YardNames(runtime.ConfigDir, runtime.ConfigHome)
+	names, err := config.YardNames(runtime.ConfigHome)
 	if err != nil {
 		return nil, err
 	}

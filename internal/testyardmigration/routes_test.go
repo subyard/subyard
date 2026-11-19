@@ -378,7 +378,8 @@ func TestRouteConsumerAliasDiagnosticOffersReachableLocalRepair(t *testing.T) {
 		t.Fatalf("source conflict lost diagnostic: %v", err)
 	}
 	message, retry := diagnostic.ActivationDiagnostic()
-	if strings.Contains(message+retry, "SECRET_MARKER") || !strings.Contains(retry, "yard -Y demo config repair-alias ENVIRONMENT_PROFILES CHOSEN_VALUE --scope yard --local --check") {
+	if !strings.Contains(message, "invalid name value") || !strings.Contains(message, "conflicting legacy and canonical settings") ||
+		strings.Contains(message+retry, "SECRET_MARKER") || !strings.Contains(retry, "yard -Y demo config repair-alias ENVIRONMENT_PROFILES CHOSEN_VALUE --scope yard --local --check") {
 		t.Fatalf("unsafe or inaccessible source retry: %q %q", message, retry)
 	}
 }

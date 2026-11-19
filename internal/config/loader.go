@@ -21,6 +21,10 @@ type LoadOptions struct {
 	// NativeTargetOnly resolves scalar address/paths for registry assessment. Its
 	// result must never be used for guest access, provisioning or activation.
 	NativeTargetOnly bool
+	// SourceChecksOnly reports per-file source and command-override refusals and
+	// skips effective cross-setting checks. Callers use it when some layer inputs
+	// were not read; its result is never an effective configuration.
+	SourceChecksOnly bool
 	Catalog          *Catalog
 	// Resources supplies operation-scoped declarations on demand.
 	// Saved endpoint state is always read fresh. Standalone callers may omit it.
@@ -30,7 +34,6 @@ type LoadOptions struct {
 	YardName                string
 	YardSettingsFile        string
 	Environment             map[string]string
-	DisablePrivate          bool
 	SyncSource              bool
 	ConfigLocked            bool
 	AllowPendingTransaction bool
@@ -262,8 +265,7 @@ func load(
 		}
 		tracker.record(defaultLayer, definition.Name, values[definition.Name], integrationDefaultSources[definition.Owner], 0, "profile default")
 	}
-	// Edge D3: source files apply in precedence order; the first refused file,
-	// at its first refused line, stops the load.
+	// Shipped defaults apply in precedence order before selecting user files.
 	for _, name := range []string{"incus.project.env", "subyard.env", "host.env", "agents.env", "ports.env"} {
 		path := filepath.Join(configDir, name)
 		if err := applyOptionalShippedDefaults(path, values, tracker, defaultLayer); err != nil {
@@ -295,50 +297,29 @@ func load(
 	gitYard := filepath.Join(gitRoot, "yards", yardName, "config.env")
 	localShared := filepath.Join(configHome, "overrides", "shared", "config.env")
 	localHost := filepath.Join(configHome, "config.env")
-	localYard := filepath.Join(configHome, "yards", yardName, "config.env")
+	localYard, yardErr := LocalYardSettingsFile(filepath.Join(configHome, "yards"), yardName, tracker.settingsPathExists)
 	if options.LayerPaths != nil {
 		gitShared, gitHost, gitYard = options.LayerPaths.GitSharedSettings, options.LayerPaths.GitHostSettings, options.LayerPaths.GitYardSettings[yardName]
 		localShared, localHost, localYard = options.LayerPaths.SharedSettings, options.LayerPaths.HostSettings, options.LayerPaths.YardSettings[yardName]
-	} else {
-		hostExists, err := tracker.fileExists(localHost)
-		if err != nil {
-			return domain.Context{}, nil, err
+	} else if yardName != "default" && options.YardSettingsFile == "" && yardErr == nil {
+		if len(options.YardDirs) != 0 {
+			localYard, yardErr = findYardFileAt(yardName, options.YardDirs)
+		} else {
+			localYard, yardErr = tracker.findYardFile(yardRegistrationCandidates(configHome, yardName, localYard, resetFallback), yardName)
 		}
-		if !hostExists && !options.DisablePrivate {
-			privateConfig := filepath.Join(configDir, "..", "private", "config.env")
-			if pathPresent(privateConfig) {
-				localHost = privateConfig
-			}
+		if (errors.Is(yardErr, ErrUnknownYard) && options.AllowResetYard && resetFallback) || localYard == gitYard {
+			localYard, yardErr = "", nil
 		}
-		if yardName != "default" && options.YardSettingsFile == "" {
-			if (len(options.FileOverrides) != 0 || options.ProspectiveFiles != nil || tracker.batch != nil) && len(options.YardDirs) == 0 {
-				candidates := append(YardFileCandidates(configDir, configHome, yardName), gitYard)
-				if resetFallback {
-					candidates = []string{localYard, filepath.Join(configHome, "yards", yardName+".env")}
-				}
-				localYard, err = tracker.findYardFile(candidates, yardName)
-			} else {
-				localYard, err = findYardFile(root, yardName, values, options.YardDirs)
-			}
-			if errors.Is(err, ErrUnknownYard) && options.AllowResetYard && resetFallback {
-				localYard, err = "", nil
-			}
-			if err != nil {
-				return domain.Context{}, nil, err
-			}
-			if localYard == gitYard {
-				localYard = ""
-			}
-		}
+	}
+	sourceRefusals := refusalCauses(yardErr)
+	if yardErr != nil {
+		localYard = ""
 	}
 	if options.YardSettingsFile != "" && yardName != "default" {
 		localYard = options.YardSettingsFile
 	}
 	if resetFallback && !options.SyncSource {
 		gitYard = ""
-	}
-	if yardName != "default" && localYard == "" && gitYard == "" && !(options.AllowResetYard && resetFallback) {
-		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
 	}
 	if yardName != "default" {
 		yardDerivationLayer := tracker.addLayer("yard", "derived", "yard name "+yardName, true, settingScalar,
@@ -350,6 +331,7 @@ func load(
 	probe := cloneEnvironment(values)
 	delete(probe, "YARD_TEMPLATE")
 	yardPresent := false
+	yardProbeFailed := yardErr != nil
 	templateSource := gitYard
 	batch := tracker.batch
 	if batch != nil {
@@ -364,21 +346,24 @@ func load(
 		}
 		exists, err := tracker.fileExists(path)
 		if err != nil {
-			return domain.Context{}, nil, err
+			yardProbeFailed = true
+			sourceRefusals = append(sourceRefusals, refusalCauses(err)...)
+			continue
 		}
 		if exists {
 			yardPresent = true
 			templateSource = path
 			source := tracker.fileSource(path)
 			if err := tracker.applyScalarSource(path, source, probe, ScopeYard, options.SyncSource || path == gitYard, nil, nil); err != nil {
-				return domain.Context{}, nil, err
+				yardProbeFailed = true
+				sourceRefusals = append(sourceRefusals, refusalCauses(err)...)
 			}
 		}
 	}
-	if yardName != "default" && !yardPresent && !(options.AllowResetYard && resetFallback) {
-		return domain.Context{}, nil, fmt.Errorf("%w %q", ErrUnknownYard, yardName)
+	if yardName != "default" && !yardPresent && !yardProbeFailed && !(options.AllowResetYard && resetFallback) {
+		sourceRefusals = append(sourceRefusals, fmt.Errorf("%w %q", ErrUnknownYard, yardName))
 	}
-	templateAvailable := tracker.batch == nil || tracker.batch.available("YARD_TEMPLATE")
+	templateAvailable := !yardProbeFailed && (tracker.batch == nil || tracker.batch.available("YARD_TEMPLATE"))
 	tracker.batch = batch
 	err = nil
 	if templateAvailable {
@@ -391,8 +376,8 @@ func load(
 			clear(batch.unavailable)
 			batch.templateRefusal = err
 		}
-	} else if err != nil {
-		return domain.Context{}, nil, err
+	} else {
+		sourceRefusals = append(sourceRefusals, refusalCauses(err)...)
 	}
 	logicalAssets := agentAssetMappings(values, configDir)
 	// Package defaults use canonical immutable roots, even when configDir is an
@@ -437,20 +422,21 @@ func load(
 				"HOST_BASE", "INCUS_PROJECT", "YARD_INSTANCE_NAME", "RESTRICTED_DISK_PATHS", "SRV_VOLUME", "SSH_HOST")
 			applyYardDerivations(yardName, values, tracker, derivation)
 		}
-		exists := false
+		var exists bool
+		var readErr error
 		if layer.path != "" && !(options.LayerPaths != nil && layer.role == "scalar settings" && options.LayerPaths.ExcludedLocalPaths[layer.path]) {
-			exists, err = tracker.fileExists(layer.path)
-			if err != nil {
-				return domain.Context{}, nil, err
-			}
+			exists, readErr = tracker.fileExists(layer.path)
+			sourceRefusals = append(sourceRefusals, refusalCauses(readErr)...)
 		}
 		id := tracker.addLayer(layer.scope, layer.role, layer.path, exists, settingScalar)
 		if exists {
-			if err := applyEnvFileTrackedValidated(layer.path, values, tracker, id, SettingScope(layer.scope), layer.syncable); err != nil {
-				return domain.Context{}, nil, err
-			}
-			if err := validateBootstrapConfigHome(values, configHome, layer.path); err != nil {
-				return domain.Context{}, nil, tracker.sourceError("SUBYARD_CONFIG_HOME", "cannot relocate config root; set SUBYARD_CONFIG_HOME before launch", err)
+			sourceErr := applyEnvFileTrackedValidated(layer.path, values, tracker, id, SettingScope(layer.scope), layer.syncable)
+			sourceRefusals = append(sourceRefusals, refusalCauses(sourceErr)...)
+			if sourceErr == nil {
+				if err := validateBootstrapConfigHome(values, configHome, layer.path); err != nil {
+					sourceRefusals = append(sourceRefusals, tracker.sourceError("SUBYARD_CONFIG_HOME", "cannot relocate config root; set SUBYARD_CONFIG_HOME before launch", err))
+					values["SUBYARD_CONFIG_HOME"] = configHome
+				}
 			}
 		}
 		extendAgentAssetMappings(logicalAssets, values)
@@ -459,9 +445,7 @@ func load(
 		if options.LayerPaths != nil && layer.assetRole == "file settings" {
 			excluded = options.LayerPaths.ExcludedLocalPaths
 		}
-		if err := applyAgentAssetLayer(values, logicalAssets, layer.assets, tracker, assetLayer, excluded); err != nil {
-			return domain.Context{}, nil, err
-		}
+		sourceRefusals = append(sourceRefusals, refusalCauses(applyAgentAssetLayer(values, logicalAssets, layer.assets, tracker, assetLayer, excluded))...)
 	}
 	values["SUBYARD_CONFIG_DIR"] = configDir
 
@@ -493,6 +477,9 @@ func load(
 		}
 		tracker.record(commandLayer, name, value, "environment", 0, "")
 	}
+	if len(sourceRefusals) != 0 {
+		return domain.Context{}, nil, domain.CollectRefusals(append(sourceRefusals, commandRefusals...)...)
+	}
 	// A refused override is not applied; later independent checks still run on
 	// the remaining layers and every refusal is reported together below.
 	values["SUBYARD_CONFIG_DIR"] = configDir
@@ -515,6 +502,9 @@ func load(
 	normalizationLayer := tracker.addLayer(
 		"derived", "derived", "resolver normalization", true, settingScalar, "E2E_VM_CPU",
 	)
+	if options.SourceChecksOnly {
+		return domain.Context{}, nil, domain.CollectRefusals(commandRefusals...)
+	}
 	if options.NativeTargetOnly {
 		// Edge D4: native target discovery reports source and command-override
 		// refusals only; later checks are not part of address discovery.
@@ -1107,7 +1097,6 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	probe := cloneEnvironment(values)
 	var assignments []observedAssignment
 	var discarded []observedAssignment
-	var content bytes.Buffer
 	policy := discardPolicy{retired: settings.RetiredSetting, batch: batch}
 	if scope != ScopeShipped {
 		policy.ignored = IsProfileOnlySetting
@@ -1124,12 +1113,12 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 	var err error
 	if batch != nil && path == batch.path {
 		err = batch.applyTarget(reader, probe, observe, discard, policy)
+	} else if scope == ScopeShipped {
+		err = applyShippedEnv(reader, path, probe, observe, policy)
 	} else {
-		err = applyEnvReaderObservedRetired(io.TeeReader(reader, &content), path, probe, observe, policy, discard)
+		err = applyLiteralEnv(reader, path, probe, observe, policy, discard)
 	}
-	if err != nil {
-		return err
-	}
+	refusals := refusalCauses(err)
 	normalized := make([]observedAssignment, 0, len(assignments))
 	type layerValue struct {
 		input string
@@ -1146,7 +1135,7 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 		assignment.value = normalizeLegacySelection(assignment.name, assignment.value)
 		if previous, exists := seen[canonical]; exists && previous.input != assignment.name &&
 			previous.value != assignment.value {
-			return sourceError(path, assignment.line, recognizedSettingKey(settings, canonical), "scalar settings", "conflicting legacy and canonical settings", nil)
+			refusals = append(refusals, sourceError(path, assignment.line, recognizedSettingKey(settings, canonical), "scalar settings", "conflicting legacy and canonical settings", nil))
 		}
 		seen[canonical] = layerValue{input: assignment.name, value: assignment.value, line: assignment.line}
 		probe[canonical] = assignment.value
@@ -1164,16 +1153,20 @@ func (settings Catalog) evaluateScalarSource(reader io.Reader, path string, valu
 		if assignment.unavailable {
 			continue
 		}
-		syncable := requireSyncable
-		if syncable && assignment.name == "SSH_PORT" {
-			if err := LegacyGitSSHPort(path, content.Bytes()); err != nil {
-				return sourceContext(path, assignment.line, "SSH_PORT", "scalar settings", err)
+		// Legacy Git SSH ports are read for migration, while new Git authoring
+		// still requires every selected setting to be syncable.
+		err := settings.ValidateSetting(scope, assignment.name, assignment.value, requireSyncable && assignment.name != "SSH_PORT")
+		if err == nil && requireSyncable {
+			if definition, ok := settings.LookupSetting(assignment.name); ok && definition.Kind == SettingFile {
+				err = sourceError("", 0, assignment.name, "scalar settings", "store file settings under overrides/agents", nil)
 			}
-			syncable = false
 		}
-		if err := settings.ValidateSetting(scope, assignment.name, assignment.value, syncable); err != nil {
-			return sourceContext(path, assignment.line, recognizedSettingKey(settings, assignment.name), "scalar settings", err)
+		if err != nil {
+			refusals = append(refusals, sourceContext(path, assignment.line, recognizedSettingKey(settings, assignment.name), "scalar settings", err))
 		}
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	for name := range values {
 		delete(values, name)
@@ -1283,9 +1276,9 @@ func applyOptionalShippedDefaults(
 	}
 	// Skip old shipped assignments for defaults now owned by the core catalog.
 	policy := discardPolicy{retired: func(name string) bool { return catalog[name].HasDefault }}
-	return applyEnvFileObservedRetired(path, values, func(name, value string, line int) {
+	return applyShippedEnvFile(path, values, func(name, value string, line int) {
 		tracker.record(layer, name, value, path, line, "")
-	}, policy, nil, tracker.prospectiveReader())
+	}, policy, tracker.prospectiveReader())
 }
 
 func pathPresent(path string) bool {
@@ -1314,31 +1307,14 @@ func environmentFrom(explicit map[string]string) environment {
 	return values
 }
 
-// FindYardSettingsFile returns the highest-precedence supported definition for
-// a named yard.
-func FindYardSettingsFile(root, name, configHome string) (string, error) {
-	return FindYardRegistrationFile(filepath.Join(root, "config"), configHome, name)
-}
-
-func findYardFile(root, name string, values environment, explicit []string) (string, error) {
-	if len(explicit) == 0 {
-		return FindYardRegistrationFile(
-			values["SUBYARD_CONFIG_DIR"], values["SUBYARD_CONFIG_HOME"], name,
-		)
-	}
-	return findYardFileAt(root, name, values["SUBYARD_CONFIG_HOME"], explicit)
-}
-
-func findYardFileAt(root, name, configHome string, explicit []string) (string, error) {
-	if len(explicit) == 0 {
-		return FindYardRegistrationFile(filepath.Join(root, "config"), configHome, name)
-	}
+func findYardFileAt(name string, explicit []string) (string, error) {
 	var candidates []string
 	for _, directory := range explicit {
-		candidates = append(candidates,
-			filepath.Join(directory, name, "config.env"),
-			filepath.Join(directory, name+".env"),
-		)
+		path, err := LocalYardSettingsFile(directory, name)
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, path)
 	}
 	return findFirstYardFile(candidates, name)
 }

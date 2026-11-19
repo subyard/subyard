@@ -76,13 +76,7 @@ if [ -n "$RUNTIME_DIR" ]; then
 else
   [ -z "$PREBUILT_ENGINE" ] || { printf 'package-engine: --engine requires --runtime-dir\n' >&2; exit 2; }
 install -d "$OUTPUT_DIR"
-publisher_sha="$(sha256sum "$REPO/scripts/install-runtime-release.sh" | cut -d' ' -f1)"
-awk -v publisher="$REPO/scripts/install-runtime-release.sh" -v digest="$publisher_sha" '
-  /^publisher_sha=\047@SUBYARD_PUBLISHER_SHA256@\047$/ { print "publisher_sha=\047" digest "\047"; next }
-  /^# SUBYARD_EMBEDDED_PUBLISHER_CONTENT$/ { while ((getline line < publisher) > 0) print line; close(publisher); next }
-  { print }
-' "$REPO/dev/bootstrap-runtime.sh" > "$OUTPUT_DIR/subyard-install.sh"
-chmod 0755 "$OUTPUT_DIR/subyard-install.sh"
+install -m 0755 "$REPO/dev/bootstrap-runtime.sh" "$OUTPUT_DIR/subyard-install.sh"
 install -m 0755 "$RUNTIME_INSTALLER" \
   "$OUTPUT_DIR/subyard-install-runtime-release.sh"
 ( cd "$OUTPUT_DIR" && sha256sum subyard-install-runtime-release.sh \
@@ -241,7 +235,7 @@ chmod 0644 "$bundle"
   cd "$OUTPUT_DIR"
   sha256sum "$(basename "$bundle")" > "$(basename "$bundle").sha256"
 )
-printf '{"schemaVersion":1,"kind":"runtime","version":"%s","os":"%s","arch":"%s","rpc":{"min":1,"max":1},"projectStateSchema":1,"credentialSchema":1,"migrationSchema":%s,"minimumConfigLayout":%s,"configLayout":%s}\n' \
+printf '{"schemaVersion":1,"kind":"runtime","version":"%s","os":"%s","arch":"%s","bootstrapDraft":"private-release-draft-v1","rpc":{"min":1,"max":1},"projectStateSchema":1,"credentialSchema":1,"migrationSchema":%s,"minimumConfigLayout":%s,"configLayout":%s}\n' \
   "$VERSION" "$goos" "$goarch" "$migration_schema" "$minimum_layout" "$current_layout" \
   > "$bundle.manifest.json"
 bundle_hash="$(cut -d' ' -f1 "$bundle.sha256")"

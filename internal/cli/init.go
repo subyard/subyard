@@ -283,11 +283,7 @@ func (cli *CLI) loadInitContext(
 		return config.Loaded{}, nil, err
 	}
 	target := filepath.Join(configHome, "yards", yard, "config.env")
-	configDir := cli.env["SUBYARD_CONFIG_DIR"]
-	if configDir == "" {
-		configDir = filepath.Join(cli.options.RepositoryRoot, "config")
-	}
-	existingPath, existingErr := config.FindYardRegistrationFile(configDir, configHome, yard)
+	existingPath, existingErr := config.FindYardRegistrationFile(configHome, yard)
 	if existingErr == nil {
 		existing, err := cli.resolveContextWithYardSettings(yard, existingPath)
 		if err != nil {
@@ -453,7 +449,7 @@ func (cli *CLI) powerYardContexts(current config.Loaded) ([]domain.Context, erro
 
 func (cli *CLI) powerYardContextsLocked(current config.Loaded, locked bool) ([]domain.Context, error) {
 	names, err := config.YardNames(
-		current.Context.Paths.ConfigDir, current.Context.Paths.ConfigHome,
+		current.Context.Paths.ConfigHome,
 	)
 	if err != nil {
 		return nil, err

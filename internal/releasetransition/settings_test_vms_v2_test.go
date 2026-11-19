@@ -140,7 +140,9 @@ func TestTestVMSettingsV2BlocksUnknownDuplicateAndDynamicValues(t *testing.T) {
 				t.Fatalf("plan = %#v, err=%v", plan, err)
 			}
 			setting := "YARD_TEMPLATE"
-			if strings.Contains(test.name, "nested") {
+			if test.name == "implicit nested value" {
+				setting = "config.env:2 (persistent settings): settings files accept only literal values"
+			} else if strings.Contains(test.name, "nested") {
 				setting = "NESTED_E2E_VMS"
 			}
 			if !strings.HasPrefix(plan.Blockers[0].Message, "yard hermes: yards/hermes/config.env:") || !strings.Contains(plan.Blockers[0].Message, setting) {

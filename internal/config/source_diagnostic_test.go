@@ -42,11 +42,12 @@ func TestSourceDiagnosticDoesNotRenderMalformedInput(t *testing.T) {
 	for _, fixture := range []struct {
 		name, content, key, reason string
 	}{
-		{"required parameter", "SSH_PORT=${SSH_PORT:?" + secret + "}\n", "SSH_PORT", "required parameter is unset"},
-		{"invalid parameter", "SSH_PORT=${" + secret + "!}\n", "SSH_PORT", "invalid parameter name"},
+		{"required parameter", "SSH_PORT=${SSH_PORT:?" + secret + "}\n", "SSH_PORT", "only literal values"},
+		{"invalid parameter", "SSH_PORT=${" + secret + "!}\n", "SSH_PORT", "only literal values"},
 		{"invalid variable", secret + "!=value\n", "", "invalid variable name"},
 		{"unknown setting", secret + "=value\n", "", "unknown setting"},
 		{"invalid mount", "HOST_MOUNTS=" + secret + "\n", "HOST_MOUNTS", "invalid mount list"},
+		{"mixed quotes", "GIT_USER_NAME='start'$" + secret + "'end'\n", "GIT_USER_NAME", "Replace it with one literal value"},
 		{"unterminated value", "SSH_PORT='" + secret + "\n", "SSH_PORT", "unterminated quoted assignment"},
 	} {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -107,7 +108,7 @@ func TestLoadSourceDiagnosticLocalizesValidation(t *testing.T) {
 	path := filepath.Join(configHome, "config.env")
 	testkit.WriteFile(t, path, []byte("# invalid setting\nSSH_PORT=70000\n"), 0o600)
 	_, err := Load(LoadOptions{
-		RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, DisablePrivate: true,
+		RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home,
 		Environment: map[string]string{"SUBYARD_CONFIG_HOME": configHome},
 	})
 	diagnostic, ok := SourceDiagnostic(configHome, err)
@@ -325,7 +326,7 @@ func TestLoadReportsIndependentRefusalsAcrossStages(t *testing.T) {
 	writeCatalogProfile(t, root, "fixture", `{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true},{"name":"FIXTURE_ALT_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true},{"name":"FIXTURE_THIRD_PORT","type":"port","scopes":["shipped","command"],"application":"next-command","minimum":1,"maximum":65535,"optional":true,"host_listener":true}]}`)
 	load := func(environment map[string]string) ConfigDiagnostic {
 		t.Helper()
-		_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: environment, DisablePrivate: true})
+		_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: testkit.TempDir(t), Environment: environment})
 		if err == nil {
 			t.Fatal("invalid configuration loaded")
 		}
@@ -352,7 +353,7 @@ func TestLoadReportsIndependentRefusalsAcrossStages(t *testing.T) {
 	}
 	testkit.WriteFile(t, filepath.Join(home, ".config", "subyard", "config.env"), []byte("HOST_BASE=/srv/a\nRESTRICTED_DISK_PATHS=/srv/b\nE2E_VM_DISK=9GiB\n"), 0o600)
 	testkit.WriteFile(t, filepath.Join(home, ".config", "subyard", "yards", "default", "config.env"), []byte("VM_CPU_WEIGHT=1000\n"), 0o600)
-	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "missing-sentinel", "DEV_SUDO": "2"}, DisablePrivate: true})
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, Environment: map[string]string{"CODING_TOOL_INTEGRATIONS": "missing-sentinel", "DEV_SUDO": "2"}})
 	context := Diagnose("", err)
 	message = context.Message("generic")
 	for _, want := range []string{"require YARD_KIND=vm", "HOST_BASE must equal RESTRICTED_DISK_PATHS", "E2E_VM_DISK must be at least 10GiB", "unknown integration", "DEV_SUDO (command override)"} {
@@ -392,7 +393,7 @@ func TestLoadCollectsAssetPathAndCodingToolRoleRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	testkit.WriteFile(t, filepath.Join(yard, "config.env"), []byte("YARD_TEMPLATE=nocode\nCODING_TOOL_INTEGRATIONS=missing-sentinel\nVM_CPU_WEIGHT=1000\n"), 0o600)
-	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "work", DisablePrivate: true, Environment: map[string]string{
+	_, err := Load(LoadOptions{RepositoryRoot: root, OperatorHome: home, YardName: "work", Environment: map[string]string{
 		"AGENT_alpha_RULES": filepath.Join(home, "missing-alpha"), "AGENT_beta_CONFIG": filepath.Join(home, "missing-beta"),
 	}})
 	diagnostic := Diagnose(filepath.Join(home, ".config", "subyard"), err)

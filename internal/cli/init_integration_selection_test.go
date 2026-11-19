@@ -236,13 +236,15 @@ func TestInitLegacyAdoptionPreservesIntentAndRejectsStaleEvidenceBeforeSettings(
 
 func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 	for _, test := range []struct {
-		name, yard, settings, command, want string
-		existing, source, reject, inherited bool
+		name, yard, settings, command, want       string
+		existing, source, reject, inherited, flat bool
 	}{
 		{name: "fresh default", yard: "default", want: "codex relay", inherited: true},
 		{name: "fresh named", yard: "demo", want: "codex relay", inherited: true},
 		{name: "existing named roots", yard: "demo", existing: true, want: "codex relay", inherited: true},
 		{name: "legacy roots", yard: "demo", settings: "AGENTS=relay\n", existing: true, want: "relay"},
+		{name: "flat named legacy roots", yard: "demo", settings: "AGENTS=relay\n", existing: true, flat: true, want: "relay"},
+		{name: "flat default legacy roots", yard: "default", settings: "AGENTS=relay\n", existing: true, flat: true, want: "relay"},
 		{name: "source inherited roots", yard: "demo", existing: true, source: true, want: "codex relay", inherited: true},
 		{name: "source legacy roots", yard: "demo", settings: "AGENTS=relay\n", source: true, want: "relay"},
 		{name: "temporary adoption rejected", yard: "demo", command: "CODING_TOOL_INTEGRATIONS=codex", reject: true},
@@ -251,7 +253,11 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root, environment, _ := nativeFixture(t)
 			writeCLIFile(t, filepath.Join(root, "config/agents.env"), "CODING_TOOL_INTEGRATIONS='codex relay'\nAGENT_codex_COMMAND=codex\nAGENT_relay_DEPENDS=codex\n", 0o600)
-			target := filepath.Join(root, "state/yards", test.yard, "config.env")
+			nested := filepath.Join(root, "state/yards", test.yard, "config.env")
+			target := nested
+			if test.flat {
+				target = filepath.Join(root, "state/yards", test.yard+".env")
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -319,6 +325,16 @@ func TestInitIntegrationSelectionFreshAndAdopted(t *testing.T) {
 			}
 			if strings.Contains(string(content), "AGENTS=") || !strings.Contains(string(content), "CODING_TOOL_INTEGRATIONS='"+test.want+"'") {
 				t.Fatalf("persisted %q", content)
+			}
+			if test.flat {
+				if _, err := os.Lstat(nested); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("init created a competing registration: %v", err)
+				}
+			}
+			current, err := config.Load(config.LoadOptions{RepositoryRoot: root, OperatorHome: loaded.Context.Paths.OperatorHome,
+				YardName: test.yard, Environment: program.baseEnv})
+			if err != nil || strings.Join(current.Integrations.Requested, " ") != test.want {
+				t.Fatalf("edited settings requested %v on ordinary load: %v", current.Integrations.Requested, err)
 			}
 		})
 	}
@@ -572,15 +588,15 @@ func TestInitRestrictedRolePreservesTransitionOwnedRegistration(t *testing.T) {
 					if err != nil || !sameConfigAuthoringSnapshot(before, after) || before.Identity != after.Identity {
 						t.Fatalf("transition registration changed: %v", err)
 					}
-					if flat {
-						if _, err := os.Stat(canonical); !os.IsNotExist(err) {
-							t.Fatalf("transition registration was migrated: %v", err)
-						}
-					}
 				} else {
-					content, err := os.ReadFile(canonical)
+					content, err := os.ReadFile(path)
 					if err != nil || !strings.Contains(string(content), "CODING_TOOL_INTEGRATIONS=''") || strings.Contains(string(content), "AGENTS=") {
 						t.Fatalf("public init failed to adopt selection: %q, %v", content, err)
+					}
+				}
+				if flat {
+					if _, err := os.Stat(canonical); !os.IsNotExist(err) {
+						t.Fatalf("init created a competing nested registration: %v", err)
 					}
 				}
 			})

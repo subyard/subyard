@@ -60,9 +60,8 @@ func (settings Catalog) CheckLocalBatchConstraints(options LoadOptions, scope Se
 	}
 	tracker := newSettingTracker()
 	tracker.catalog, tracker.batch = settings, batch
-	editErr := batch.checkTargetEdits()
 	_, values, err := load(options, tracker)
-	return batch.assignmentRefusals, domain.CollectRefusals(editErr, err, batch.checkDependencies(options, tracker, values))
+	return batch.assignmentRefusals, domain.CollectRefusals(err, batch.checkDependencies(options, tracker, values))
 }
 
 // Check known persistent inputs even when the draft cannot reach prospective
@@ -109,38 +108,11 @@ func (batch *localBatch) checkDependencies(options LoadOptions, tracker *setting
 	for _, path := range tracker.assetValidationInputs {
 		check(path)
 	}
-	for _, path := range YardFileCandidates(configDir, home, options.YardName) {
+	for _, path := range LocalYardSettingsCandidates(filepath.Join(home, "yards"), options.YardName) {
 		check(path)
 	}
 	check(YardResetMarkerPath(home, options.YardName))
 	check(filepath.Join(home, SourceRecordRelativePath))
-	return domain.CollectRefusals(refusals...)
-}
-
-// Use the editor's empty environment and record order. Invalid replacements
-// stay in their slots, so expansions that depend on them remain unavailable.
-func (batch *localBatch) checkTargetEdits() error {
-	if batch.baseline == nil || len(batch.replacements) == 0 {
-		return nil
-	}
-	probe := batch.fork()
-	observed := map[string]PersistentAssignment{}
-	var refusals []error
-	observe := func(name, value string, line int) {
-		canonical := CanonicalSettingName(name)
-		if canonical != name && batch.valid[canonical] && probe.available(name) {
-			refusals = append(refusals, persistentAssignmentPreserved(batch.path, canonical, line))
-		}
-		observed[canonical] = PersistentAssignment{Name: name, Value: value, Line: line}
-	}
-	if err := probe.applyTarget(bytes.NewReader(batch.baseline.Content), environment{}, observe, observe, operatorDiscardPolicy(nil, batch.catalog)); err != nil {
-		return err
-	}
-	for _, edit := range batch.replacements {
-		if actual := observed[edit.Name]; batch.valid[edit.Name] && probe.available(actual.Name) {
-			refusals = append(refusals, persistentAssignmentChanged(batch.path, edit.Name, edit.Value, actual))
-		}
-	}
 	return domain.CollectRefusals(refusals...)
 }
 
@@ -224,7 +196,7 @@ func (batch *localBatch) applyTarget(reader io.Reader, values environment, obser
 	if len(content) > 8<<20 {
 		return sourceError(batch.path, 0, "", "scalar settings", "target exceeds its size bound", nil)
 	}
-	records, err := batch.catalog.persistentEditRecords(batch.path, content, batch.replacements, false)
+	records, err := persistentEditRecords(batch.path, content, batch.replacements, false)
 	if err != nil {
 		return err
 	}
@@ -243,14 +215,11 @@ func (batch *localBatch) applyTarget(reader io.Reader, values environment, obser
 			line += 1 + strings.Count(record.replacement.Value, "\n")
 			continue
 		}
-		if text := strings.TrimSpace(string(record.content)); text != "" && !strings.HasPrefix(text, "#") {
-			policy.report = func(name, value string) { discard(name, value, line) }
-			if err := applyRecordRetired(text, values, func(name, value string) { observe(name, value, line) }, policy); err != nil {
-				return sourceContext(batch.path, line, recordSettingKey(text), "scalar settings", err)
-			}
+		if record.name != "" {
+			applyLiteralAssignment(record.name, record.value, line, values, observe, policy, discard)
 		}
-		line += bytes.Count(record.content, []byte{'\n'})
-		if !bytes.HasSuffix(record.content, []byte{'\n'}) {
+		line += strings.Count(record.raw, "\n")
+		if !strings.HasSuffix(record.raw, "\n") {
 			line++
 		}
 	}
