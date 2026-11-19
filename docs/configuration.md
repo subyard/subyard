@@ -329,15 +329,8 @@ application converges. Invalid JSON or an invalid baseline fails without overwri
 configuration contents. Running tools do not share Subyard's lock: a file that a tool changed after
 the plan is kept and reported as changed, the other files of the refresh are still written, and
 `yard -Y NAME config apply` plans again on the new bytes. A destination that is not a readable
-regular file is kept; `yard -Y NAME config status` and the refused apply name it with the step to
-replace or remove it. An interrupted write can leave a file beside the destination named
-`.<name>.subyard-cas.<hex>`: the guest's own bytes, when the write could not tell which bytes it
-displaced, or the write's unpublished copy of the refreshed file, when it stopped before publishing.
-Such a file is never removed automatically, and the refusal tells the two apart: keep guest bytes by
-moving the file over the destination or delete them; delete an unpublished copy. Until none remain,
-the destination is not refreshed and not converged: `init`, `config status` and release readiness use
-the same guest observation, so `status` advises a repair, `init` refuses the file by name, and
-`config status` names it with its step. A yard with such a file, or with an unreadable one, is refused
+regular file, such as a symlink, is kept; `yard -Y NAME config status` and the refused apply name it
+with the step to replace or remove it. Such a yard, or one whose files cannot be assessed, is refused
 alone: `config apply --all-local`, `config sync --apply` and a release activation repair still refresh
 the other yards and report the refused yard with its files and next step. Invalid TOML, like invalid JSON, fails
 without overwriting the current document or printing its contents.

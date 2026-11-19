@@ -369,7 +369,7 @@ func GuestTokenObservation(command []string, token func(destination string) stri
 		if token != nil {
 			value = token(destination)
 		}
-		files = append(files, map[string]any{"destination": destination, "token": cmp.Or(value, "absent"), "leftovers": []string{}})
+		files = append(files, map[string]any{"destination": destination, "token": cmp.Or(value, "absent")})
 	}
 	payload, _ := json.Marshal(map[string]any{"files": files})
 	return payload, true

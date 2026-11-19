@@ -90,7 +90,7 @@ func TestConfigAssessmentKeepsIndependentDriftAfterSourceFailure(t *testing.T) {
 		incus.GuestTokens[asset.Destination] = testkit.HashToken(strings.Repeat("0", 64))
 		if asset.OwnedFormat != "" {
 			incus.ExecSteps = append(incus.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-				Stdout: []byte(`{"converged":false,"fingerprint":"` + strings.Repeat("0", 64) + `"}`)}})
+				Stdout: []byte(`{"converged":false,"fingerprint":"` + strings.Repeat("0", 64) + `","raw":"absent"}`)}})
 		}
 	}
 	var stdout, stderr bytes.Buffer

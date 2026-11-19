@@ -121,12 +121,7 @@ const (
 	FindingFailed        FindingKind = "failed"
 	FindingDrift         FindingKind = "drift"
 	FindingPending       FindingKind = "pending"
-	// File findings come from a yard's guest config files.
-	FindingFileChanged    FindingKind = "file-changed"
-	FindingFileUnreadable FindingKind = "file-unreadable"
-	FindingFileUnknown    FindingKind = "file-unknown"
-	FindingFileLeftover   FindingKind = "file-leftover"
-	FindingStopped        FindingKind = "stopped"
+	FindingStopped       FindingKind = "stopped"
 )
 
 // Finding is one observed cause. Public is printable; Predicate names the
@@ -183,22 +178,13 @@ func (finding Finding) Remedies(attempted Action) []Action {
 	case FindingFailed:
 		return yard(VerbInit)
 	case FindingDrift:
-		// Drift that init left names its files in config status: one it
-		// cannot read, or leftovers that are the operator's to resolve.
+		// Drift that init left names its files in config status.
 		return yard(VerbInit, VerbConfigStatus)
-	case FindingFileChanged:
-		return yard(VerbConfigApply)
-	case FindingFileUnreadable, FindingFileUnknown:
-		return yard(VerbConfigStatus)
 	case FindingStopped:
 		return yard(VerbStart)
 	}
 	return nil
 }
-
-// Retryable findings were observed after the attempt, so repeating the
-// attempted command is progress: a changed file needs a fresh plan.
-func (finding Finding) Retryable() bool { return finding.Kind == FindingFileChanged }
 
 // recoveryRank orders remedies: prerequisites before repairs, repairs before reads.
 var recoveryRank = []Verb{VerbMigrate, VerbUpdate, VerbStopForce, VerbStart, VerbInit, VerbConfigApply, VerbIntegrationStatus, VerbConfigStatus, VerbMigrateCheck, VerbUpdateCheck}
@@ -209,8 +195,8 @@ func rank(finding Finding, action Action) int {
 		return 0
 	case finding.Kind == FindingOwner:
 		return 1
-	case action.Verb == VerbConfigValidate, finding.Kind == FindingFileLeftover:
-		// Both need the operator first: no command proceeds until they do.
+	case action.Verb == VerbConfigValidate:
+		// The operator corrects the configuration first: no command proceeds until then.
 		return 2
 	case action.Verb == VerbNone:
 		return 3 + len(recoveryRank) // a terminal finding never hides a remedy
@@ -219,8 +205,7 @@ func rank(finding Finding, action Action) int {
 }
 
 // NextStep selects one action from all findings: each finding's first remedy
-// that is not the attempted command (unless the finding is retryable) and is
-// admitted, then the lowest rank, first finding on a tie. Without one it
+// that is not the attempted command and is admitted, then the lowest rank, first finding on a tie. Without one it
 // returns VerbNone and the finding that explains why; a source or owner
 // finding without a readable action is that explanation.
 func NextStep(findings []Finding, attempted Action, admitted func(Action) bool) (Action, Finding) {
@@ -228,7 +213,7 @@ func NextStep(findings []Finding, attempted Action, admitted func(Action) bool) 
 	for _, finding := range findings {
 		candidate := Action{}
 		for _, remedy := range finding.Remedies(attempted) {
-			if (remedy != attempted || finding.Retryable()) && (admitted == nil || admitted(remedy)) {
+			if remedy != attempted && (admitted == nil || admitted(remedy)) {
 				candidate = remedy
 				break
 			}
@@ -253,7 +238,7 @@ func RenderNext(action Action, chosen Finding, attempted Action) string {
 		return rendered + " (" + chosen.Public + "); if it still fails, " + RenderAction(Action{Verb: VerbMigrateCheck})
 	case chosen.Kind == FindingSource && action.Verb != VerbNone:
 		return rendered + " (" + chosen.Public + ")"
-	case chosen.Kind == FindingSource || chosen.Kind == FindingFileLeftover:
+	case chosen.Kind == FindingSource:
 		return chosen.Public
 	case chosen.Kind == FindingOwner || chosen.Kind == FindingPending:
 		if parsed, _, ok := ParseRetry(chosen.Retry); chosen.Retry != "" && (!ok || parsed == action || action.Verb == VerbNone && parsed != attempted) {

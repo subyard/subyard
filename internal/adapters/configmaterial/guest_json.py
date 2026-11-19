@@ -643,6 +643,15 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
     print(json.dumps(report, separators=(",", ":"), sort_keys=True))
 
 
+OBSERVED_RAW = None
+
+
+def emit(report):
+    if OBSERVED_RAW is not None:
+        report["raw"] = OBSERVED_RAW
+    print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+
+
 def main():
     if len(sys.argv) != 9:
         fail("invalid request")
@@ -672,6 +681,21 @@ def main():
         fail("invalid desired " + FORMAT.upper())
     if not isinstance(desired, dict):
         fail("desired configuration root must be an object")
+    # One exec observes the destination's exact bytes with its document: an
+    # observation reports their token. Where the document would be read, a
+    # path that is no readable regular file is reported, or refused by apply.
+    global OBSERVED_RAW
+    raw = cas_observe(allowed_home, destination) if mode in ("observe", "apply") else None  # noqa: F821
+    if mode == "observe":
+        OBSERVED_RAW = raw
+
+    def unreadable():
+        if raw != "unreadable":
+            return False
+        if mode == "apply":
+            raise CasRefusal("unreadable")  # noqa: F821
+        emit({"converged": False, "fingerprint": fingerprint({}, desired, "unreadable", "unreadable", [])})
+        return True
     wanted_owned = sorted(ownership(desired), key=lambda item: (item["path"], item["kind"]))
     identity = hashlib.sha256((developer + "\0" + destination).encode()).hexdigest()
     baseline_path = os.path.join(STATE_ROOT, identity + ".json")
@@ -681,13 +705,15 @@ def main():
     state_exists = validate_state_root()
 
     if mode in ("observe", "assess-adopt") and not os.path.lexists(baseline_path):
+        if unreadable():
+            return
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination, allow_invalid=True) if parent_exists else ({}, None)
         if current is None:
             if mode == "assess-adopt":
                 raise unowned_invalid_destination(destination)
-            print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
-                  hashlib.sha256(original).hexdigest(), "invalid-destination", [])}))
+            emit({"converged": False, "fingerprint": fingerprint({}, desired,
+                  hashlib.sha256(original).hexdigest(), "invalid-destination", [])})
             return
         if mode == "assess-adopt" and original is not None:
             # Recognize exact pre-baseline templates, or JSON documents whose
@@ -708,7 +734,7 @@ def main():
         else:
             report = {"converged": False,
                       "fingerprint": fingerprint(current, desired, "missing", "baseline-missing", [])}
-        print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+        emit(report)
         return
 
     if mode in ("assess-retire", "retire") and not os.path.lexists(baseline_path):
@@ -749,21 +775,22 @@ def main():
         released = (evidence is not None and evidence.get("phase") == "retired" and
                     read_release_marker(release_path, evidence))
         if released and mode == "observe":
-            print(json.dumps({"converged": False, "release": released,
-                              "fingerprint": fingerprint({}, desired, evidence["projection_digest"], "released-" + released, [])},
-                             separators=(",", ":"), sort_keys=True))
+            emit({"converged": False, "release": released,
+                  "fingerprint": fingerprint({}, desired, evidence["projection_digest"], "released-" + released, [])})
             return
         if released and installed_apply:
             raise MaterializationError("released ownership refused for the installed view")
         compatible = baseline is not None and baseline["schema"] == 1
+        if unreadable():
+            return
         parent_exists = validate_destination_parent(destination, allowed_home, uid, False)
         current, original = read_current(destination, allow_invalid=mode in ("observe", "apply")) if parent_exists else ({}, None)
         if current is None:
             if evidence is None:
                 raise unowned_invalid_destination(destination)
             if mode == "observe":
-                print(json.dumps({"converged": False, "fingerprint": fingerprint({}, desired,
-                      hashlib.sha256(original).hexdigest(), "invalid-destination", evidence["owned"])}))
+                emit({"converged": False, "fingerprint": fingerprint({}, desired,
+                      hashlib.sha256(original).hexdigest(), "invalid-destination", evidence["owned"])})
                 return
             current = {}
 
@@ -813,7 +840,7 @@ def main():
                                                  baseline["owned"])}
             if mode == "assess-adopt":
                 report["adoptable"] = adoptable
-            print(json.dumps(report, separators=(",", ":"), sort_keys=True))
+            emit(report)
             return
 
         if baseline is not None and baseline.get("phase") == "retiring":

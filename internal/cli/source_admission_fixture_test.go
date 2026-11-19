@@ -562,7 +562,7 @@ func completedSourceNativeObservation(program *CLI, ready string, call testkit.I
 		if !current {
 			digest = strings.Repeat("0", 64)
 		}
-		payload, _ := json.Marshal(map[string]any{"converged": current, "fingerprint": digest})
+		payload, _ := json.Marshal(map[string]any{"converged": current, "fingerprint": digest, "raw": "absent"})
 		return testkit.IncusServerExecStep{Stdout: payload}
 	}
 	if len(call.Command) == 3 && call.Command[0] == "sha256sum" && call.Command[1] == "--" {

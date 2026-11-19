@@ -104,10 +104,25 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	}
 }
 
-// A confirmed refresh writes only over its own tokens: another instance is a
-// stale plan, and a file outside the consent is refused while the others are
-// written and the inventory stays uncommitted.
-func TestRefreshConfigsWritesOnlyConsentedFiles(t *testing.T) {
+// staleGuest refuses, as the guest does, every write over the stale token.
+type staleGuest struct {
+	*testkit.Incus
+	stale string
+}
+
+func (guest staleGuest) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	result, err := guest.Incus.Exec(ctx, project, instance, request)
+	if command := request.Command; len(command) == 10 && command[4] == "write" && command[8] == guest.stale {
+		return ports.InstanceExecResult{ExitCode: 4}, &ports.GuestExitError{Code: 4}
+	}
+	return result, err
+}
+
+// A confirmed refresh writes over its own tokens: another instance is a stale
+// plan; a file the confirmation did not cover is written over the writer's
+// own observation; a file changed since its token is refused while the others
+// are written, and the inventory stays uncommitted.
+func TestRefreshConfigsWritesOverConsentOrItsOwnObservation(t *testing.T) {
 	root := t.TempDir()
 	source := func(name, payload string) string {
 		t.Helper()
@@ -123,41 +138,44 @@ func TestRefreshConfigsWritesOnlyConsentedFiles(t *testing.T) {
 		"AGENT_opencode_CONFIG=" + source("opencode.jsonc", "{}\n"),
 		"AGENT_opencode_CONFIG_DEST=.config/opencode/opencode.jsonc",
 	}
+	stale := "sha256:" + strings.Repeat("a", 64)
 	newRuntime := func(incus *testkit.Incus) Runtime {
 		incus.Reconcile.Instance.Config = map[string]string{"volatile.uuid": "instance-a"}
 		runtime := Runtime{
 			Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "HOST_OPENCODE_AGENTS_MD", Destination: ".config/opencode/AGENTS.md", Format: "raw"}, {ID: "config", Kind: "config", Destination: ".config/opencode/opencode.jsonc", Format: "raw"}}}},
-			Environment:  environment, Incus: incus, Executor: incus, Stdout: io.Discard,
-			Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001},
+			Environment:  environment, Incus: incus, Executor: staleGuest{incus, stale}, Stdout: io.Discard,
+			Yard: domain.Context{YardName: "named", IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001},
 		}
 		bindArtifactTestPackages(t, &runtime, root)
 		return runtime
 	}
-	stale := runningIncus(8)
-	stale.ExecSteps[0].Result.Stdout = []byte(`{}`)
-	err := newRuntime(stale).RefreshConfigs(context.Background(), &ports.ConfigConsent{InstanceUUID: "instance-b"})
-	if !errors.Is(err, domain.ErrPlanStale) || slices.ContainsFunc(stale.ExecCalls, func(call testkit.IncusExecCall) bool { return slices.Contains(call.Request.Command, "write") }) {
+	other := runningIncus(8)
+	other.ExecSteps[0].Result.Stdout = []byte(`{}`)
+	err := newRuntime(other).RefreshConfigs(context.Background(), &ports.ConfigConsent{InstanceUUID: "instance-b"})
+	if !errors.Is(err, domain.ErrPlanStale) || slices.ContainsFunc(other.ExecCalls, func(call testkit.IncusExecCall) bool { return slices.Contains(call.Request.Command, "write") }) {
 		t.Fatalf("another instance: %v", err)
 	}
 	incus := runningIncus(8)
 	incus.ExecSteps[0].Result.Stdout = []byte(`{}`)
 	err = newRuntime(incus).RefreshConfigs(context.Background(), &ports.ConfigConsent{InstanceUUID: "instance-a", Files: []ports.ConfigFileConsent{
-		{Destination: "/home/dev/.config/opencode/AGENTS.md", Token: configmaterial.TokenAbsent},
+		{Destination: "/home/dev/.config/opencode/opencode.jsonc", Token: stale},
 	}})
-	var refusal configmaterial.WriteRefusal
-	if !errors.As(err, &refusal) || refusal.Outcome != configmaterial.OutcomeMissingConsent || refusal.Destination != "/home/dev/.config/opencode/opencode.jsonc" {
-		t.Fatalf("unconsented file: %v", err)
+	var refusal configmaterial.FileRefusal
+	if !errors.As(err, &refusal) || refusal.File.State() != "changed" || refusal.File.Destination != "/home/dev/.config/opencode/opencode.jsonc" ||
+		!strings.HasSuffix(err.Error(), "; next: run yard -Y named config apply") {
+		t.Fatalf("changed file: %v", err)
 	}
-	var written []string
+	written := map[string]string{}
 	for _, call := range incus.ExecCalls {
 		if command := call.Request.Command; len(command) == 5 && command[4] == "configs-commit" {
 			t.Fatal("inventory committed after a refused file")
 		} else if len(command) == 10 && command[4] == "write" {
-			written = append(written, command[6])
+			written[command[6]] = command[8]
 		}
 	}
-	if !slices.Equal(written, []string{"/home/dev/.config/opencode/AGENTS.md"}) || len(incus.TokenObservations) != 0 {
-		t.Fatalf("writes %v, observations %d", written, len(incus.TokenObservations))
+	if written["/home/dev/.config/opencode/AGENTS.md"] != configmaterial.TokenAbsent || written["/home/dev/.config/opencode/opencode.jsonc"] != stale ||
+		len(incus.TokenObservations) != 1 || !slices.Equal(incus.TokenObservations[0].Request.Command[6:], []string{"/home/dev/.config/opencode/AGENTS.md"}) {
+		t.Fatalf("writes %v, observations %v", written, incus.TokenObservations)
 	}
 }
 
@@ -166,7 +184,7 @@ func TestGuestConfigWriteMatchesCompatibilityFixture(t *testing.T) {
 	incus := runningIncus(1)
 	runtime := Runtime{Executor: incus, Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
 	payload := []byte("desired\n")
-	if err := runtime.writeGuestFile(context.Background(), "/home/dev/config", payload, configmaterial.TokenAbsent); err != nil {
+	if err := runtime.writeGuestFile(context.Background(), "config", "/home/dev/config", payload, configmaterial.TokenAbsent); err != nil {
 		t.Fatal(err)
 	}
 	request := incus.ExecCalls[0].Request
@@ -207,7 +225,7 @@ func TestGuestConfigWriteRefusesIncompleteTransport(t *testing.T) {
 			}
 			incus := runningIncus(1)
 			runtime := Runtime{Executor: incus, Yard: domain.Context{DevUser: "next", DevUID: os.Getuid()}}
-			if err := runtime.writeGuestFile(context.Background(), "/home/next/instructions", []byte(test.desired), configmaterial.PayloadToken(original)); err != nil {
+			if err := runtime.writeGuestFile(context.Background(), "instructions", "/home/next/instructions", []byte(test.desired), configmaterial.PayloadToken(original)); err != nil {
 				t.Fatal(err)
 			}
 			request := incus.ExecCalls[0].Request
@@ -279,7 +297,7 @@ func TestPrepareConfigsReportsEveryInvalidSourceBeforeMutation(t *testing.T) {
 }
 
 // The runtime's convergence is the token observation that config status and
-// release readiness use: a leftover beside a matching file is not converged.
+// release readiness use: an unreadable file is not converged.
 func TestConfigsConvergedComparesSourceAndGuestTokensReadOnly(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "AGENTS.md")
@@ -291,8 +309,8 @@ func TestConfigsConvergedComparesSourceAndGuestTokensReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observation := func(token string, leftovers ...string) string {
-		payload, _ := json.Marshal(map[string]any{"files": []configmaterial.FileToken{{Destination: "/home/dev/.codex/AGENTS.md", Token: token, Leftovers: append([]string{}, leftovers...)}}})
+	observation := func(token string) string {
+		payload, _ := json.Marshal(map[string]any{"files": []map[string]string{{"destination": "/home/dev/.codex/AGENTS.md", "token": token}}})
 		return string(payload)
 	}
 	for _, test := range []struct {
@@ -303,7 +321,6 @@ func TestConfigsConvergedComparesSourceAndGuestTokensReadOnly(t *testing.T) {
 		{name: "converged", stdout: observation(configmaterial.PayloadToken(effective)), want: true},
 		{name: "drifted", stdout: observation("sha256:" + strings.Repeat("0", 64))},
 		{name: "unreadable", stdout: observation(configmaterial.TokenUnreadable)},
-		{name: "leftover beside a matching file", stdout: observation(configmaterial.PayloadToken(effective), "/home/dev/.codex/.AGENTS.md.subyard-cas.0123456789abcdef")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			incus := runningIncus(1)
@@ -546,7 +563,7 @@ func TestConfigsConvergedUsesOwnedTOMLObservationForImportedSource(t *testing.T)
 		t.Fatal(err)
 	}
 	incus := runningIncus(1)
-	incus.ExecSteps[0].Result.Stdout = []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
+	incus.ExecSteps[0].Result.Stdout = []byte(`{"converged":true,"fingerprint":"` + strings.Repeat("a", 64) + `","raw":"absent"}`)
 	runtime := Runtime{
 		Environment: []string{"CODING_TOOL_INTEGRATIONS=codex", "AGENT_codex_CONFIG=" + source, "AGENT_codex_CONFIG_DEST=.codex/config.toml"},
 		Incus:       incus, Executor: incus,

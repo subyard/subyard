@@ -2,7 +2,7 @@ package configmaterial
 
 import (
 	"bytes"
-	"cmp"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -14,230 +14,235 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/Subyard/Subyard/internal/config"
+	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
 
-// casWorld is one guest directory with a destination the writer replaces.
-type casWorld struct {
-	t                 *testing.T
-	home, destination string
+// localGuest runs the real guest programs on this host: /home/dev lives under
+// root, the materialization state under state, and hook is Python prepended
+// to every program, which may define CAS_HOOK(point).
+type localGuest struct {
+	root, state, hook string
 }
 
-func newCASWorld(t *testing.T) casWorld {
-	home := filepath.Join(testkit.TempDir(t), "home")
-	if err := os.MkdirAll(filepath.Join(home, ".config"), 0o755); err != nil {
+func newLocalGuest(t *testing.T) *localGuest {
+	root := testkit.TempDir(t)
+	if err := os.MkdirAll(filepath.Join(root, "home", "dev", ".config"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return casWorld{t: t, home: home, destination: filepath.Join(home, ".config", "agent.md")}
+	return &localGuest{root: root, state: filepath.Join(root, "state")}
 }
 
-// hook is Python that defines CAS_HOOK(point); GUEST(content) rename-saves the
-// destination, as an editor does, and EDIT(content) writes the displaced inode
-// in place.
-func (world casWorld) run(hook, expect string, payload []byte, arguments ...string) (int, string) {
-	world.t.Helper()
-	prelude := fmt.Sprintf(`import os as _t
-_DEST = %q
-def GUEST(content):
-    staging = _DEST + ".editor"
-    with open(staging, "w") as output:
-        output.write(content)
-    _t.rename(staging, _DEST)
-def EDIT(content):
-    directory = _t.path.dirname(_DEST)
-    for entry in _t.listdir(directory):
-        if ".subyard-cas." in entry:
-            with open(_t.path.join(directory, entry), "a") as output:
-                output.write(content)
-CALLS = {}
-def ONCE(point):
-    CALLS[point] = CALLS.get(point, 0) + 1
-    return CALLS[point] == 1
-`, world.destination)
-	if arguments == nil {
-		arguments = []string{"write", world.home, world.destination, fmt.Sprint(os.Getuid()), expect, fmt.Sprintf("%x", sha256.Sum256(payload))}
+func (guest *localGuest) path(destination string) string { return guest.root + destination }
+
+func (guest *localGuest) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	arguments := slices.Clone(request.Command)
+	for index, argument := range arguments {
+		switch {
+		case index == 3:
+			argument = strings.Replace(argument, `STATE_ROOT = "`+guestStateRoot+`"`, fmt.Sprintf("STATE_ROOT = %q", guest.state), 1)
+			argument = guest.hook + "\n" + strings.Replace(argument, `STATE_UID = int("0")`, fmt.Sprintf(`STATE_UID = int("%d")`, os.Getuid()), 1)
+		case argument == "/home/dev" || strings.HasPrefix(argument, "/home/dev/"):
+			argument = guest.path(argument)
+		}
+		arguments[index] = argument
 	}
-	command := exec.Command("python3", append([]string{"-B", "-c", prelude + hook + "\n" + casProgram()}, arguments...)...)
-	command.Stdin = bytes.NewReader(payload)
+	command := exec.Command(arguments[0], arguments[1:]...)
+	command.Stdin = bytes.NewReader(request.Stdin)
 	var stdout, stderr bytes.Buffer
 	command.Stdout, command.Stderr = &stdout, &stderr
 	err := command.Run()
-	var exit *exec.ExitError
-	if err != nil && !errors.As(err, &exit) {
-		world.t.Fatal(err)
+	// The guest reports its paths as the yard names them.
+	result := ports.InstanceExecResult{ExitCode: command.ProcessState.ExitCode(), Stdout: bytes.ReplaceAll(stdout.Bytes(), []byte(guest.root), nil), Stderr: stderr.Bytes()}
+	if errors.As(err, new(*exec.ExitError)) {
+		return result, &ports.GuestExitError{Code: result.ExitCode}
 	}
-	if code := command.ProcessState.ExitCode(); code != 0 && code != 3 && code != 4 && code != 5 && code != 97 {
-		world.t.Fatalf("writer failed: %d %s", code, stderr.String())
-	}
-	return command.ProcessState.ExitCode(), stdout.String()
+	return result, err
 }
 
-// contents maps every file in the destination directory to its bytes.
-func (world casWorld) contents() map[string]string {
-	world.t.Helper()
-	entries, err := os.ReadDir(filepath.Dir(world.destination))
+var localYard = domain.Context{YardName: "named", IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: os.Getuid()}
+
+// write runs one refresh write of desired over token, as the runtime does.
+func (guest *localGuest) write(t *testing.T, desired Desired, token string) (ports.InstanceExecResult, error) {
+	t.Helper()
+	request, err := RawRequest("dev", desired.Destination, os.Getuid(), desired.Payload, token)
+	if desired.Format != "" {
+		request, err = ApplyRequest(desired.Format, ModeApply, "dev", desired.Destination, os.Getuid(), desired.Payload, token)
+	}
 	if err != nil {
-		world.t.Fatal(err)
+		t.Fatal(err)
 	}
-	result := map[string]string{}
-	for _, entry := range entries {
-		payload, err := os.ReadFile(filepath.Join(filepath.Dir(world.destination), entry.Name()))
-		if err != nil {
-			world.t.Fatal(err)
-		}
-		name := entry.Name()
-		if strings.Contains(name, ".subyard-cas.") {
-			name = "leftover"
-		}
-		result[name] = string(payload)
-	}
-	return result
+	return guest.Exec(context.Background(), "", "", request)
 }
 
-func (world casWorld) observe() FileToken {
-	world.t.Helper()
-	_, stdout := world.run("", "", nil, "observe", world.home, world.destination)
-	tokens, err := ParseTokens([]byte(stdout), []string{world.destination})
+func (guest *localGuest) observe(t *testing.T, desired Desired) File {
+	t.Helper()
+	files, err := Observe(context.Background(), guest, localYard, []Desired{desired})
+	if err != nil || len(files) != 1 {
+		t.Fatalf("observe: %v", err)
+	}
+	return files[0]
+}
+
+// entry is what the guest has at a path: its type and, for a file, its bytes.
+func entry(path string) string {
+	info, err := os.Lstat(path)
 	if err != nil {
-		world.t.Fatalf("%v: %s", err, stdout)
+		return "missing"
 	}
-	return tokens[0]
+	if info.Mode().IsRegular() {
+		payload, _ := os.ReadFile(path)
+		return "file:" + string(payload)
+	}
+	return info.Mode().Type().String()
 }
 
-func TestCompareAndWriteReplacesOnlyConsentedBytes(t *testing.T) {
-	desired := []byte("desired\n")
-	for _, test := range []struct {
-		name, initial, hook string
-		consented           string
-		absent              bool
-		code                int
-		want                map[string]string
-	}{
-		{name: "matching file", initial: "old", want: map[string]string{"agent.md": "desired\n"}},
-		{name: "absent file", absent: true, want: map[string]string{"agent.md": "desired\n"}},
-		{name: "changed before compare", initial: "guest", consented: "old", code: 4, want: map[string]string{"agent.md": "guest"}},
-		{name: "created before no-replace", absent: true, hook: `def CAS_HOOK(point):
-    if point == "staged": GUEST("guest")`, code: 4, want: map[string]string{"agent.md": "guest"}},
-		{name: "rename-save before exchange", initial: "old", hook: `def CAS_HOOK(point):
-    if point == "staged": GUEST("guest")`, code: 4, want: map[string]string{"agent.md": "guest"}},
-		{name: "in-place write before verification", initial: "old", hook: `def CAS_HOOK(point):
-    if point == "exchanged": EDIT("+edit")`, code: 4, want: map[string]string{"agent.md": "old+edit"}},
-		// The guest saves between the exchange and the exchange-back: the newest
-		// save stays at the destination and the older one is preserved.
-		{name: "save between exchanges", initial: "old", hook: `def CAS_HOOK(point):
-    if point == "staged": GUEST("first")
-    if point == "exchanged": GUEST("second")`, code: 4, want: map[string]string{"agent.md": "second", "leftover": "first"}},
-		{name: "rename-save after replacement", initial: "old", hook: `def CAS_HOOK(point):
-    if point == "verified": GUEST("guest")`, code: 4, want: map[string]string{"agent.md": "guest"}},
-		// Without renameat2 the compare repeats right before a plain rename.
-		{name: "unsupported matching", initial: "old", hook: `def CAS_HOOK(point):
-    if point == "renameat2": raise OSError(38, "unsupported")`, want: map[string]string{"agent.md": "desired\n"}},
-		{name: "unsupported absent", absent: true, hook: `def CAS_HOOK(point):
-    if point == "renameat2": raise OSError(22, "unsupported")`, want: map[string]string{"agent.md": "desired\n"}},
-		{name: "unsupported created", absent: true, hook: `def CAS_HOOK(point):
-    if point == "renameat2": raise OSError(38, "unsupported")
-    if point == "fallback": GUEST("guest")`, code: 4, want: map[string]string{"agent.md": "guest"}},
-		{name: "unsupported changed", initial: "old", hook: `def CAS_HOOK(point):
-    if point == "renameat2": raise OSError(38, "unsupported")
-    if point == "fallback": GUEST("guest")`, code: 4, want: map[string]string{"agent.md": "guest"}},
+// Every guest state of each kind of config file, observed and then written
+// with that observation's token by the real guest programs.
+func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
+	desired := map[string][]byte{"": []byte("desired\n"), "json": []byte(`{"managed":true}`), "toml": []byte("sandbox_mode = 'danger-full-access'\n")}
+	other := map[string]string{"": "old\n", "json": `{"other":1}`, "toml": "other = 1\n"}
+	invalid := map[string]string{"": "not a document {", "json": "{invalid", "toml": "= invalid"}
+	apply := "run yard -Y named config apply"
+	for _, format := range []string{"", "json", "toml"} {
+		for _, test := range []struct {
+			kind, state, step, write string
+		}{
+			{kind: "absent", state: "drift", write: "written"},
+			{kind: "match", state: "converged", write: "converged"},
+			{kind: "differ", state: "drift", write: "written"},
+			{kind: "symlink", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
+			{kind: "directory", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
+			{kind: "fifo", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
+			{kind: "symlinked parent", state: "unreadable", step: "replace it with a regular file or remove it, then " + apply, write: "unreadable"},
+			{kind: "invalid document", state: "drift", write: "failed"},
+			{kind: "broken baseline", state: "unknown", step: "run yard -Y named config status", write: "failed"},
+		} {
+			if format == "" && (test.kind == "invalid document" || test.kind == "broken baseline") {
+				// Raw bytes have no document or baseline: an invalid one is drift.
+				if test.kind == "broken baseline" {
+					continue
+				}
+				test.write = "written"
+			}
+			t.Run(fmt.Sprintf("%s/%s", map[string]string{"": "raw"}[format]+format, test.kind), func(t *testing.T) {
+				guest := newLocalGuest(t)
+				file := Desired{Label: "agent", Destination: "/home/dev/.config/agent." + map[string]string{"": "md", "json": "json", "toml": "toml"}[format], Format: format, Payload: desired[format]}
+				local := guest.path(file.Destination)
+				outside := filepath.Join(guest.root, "outside")
+				if err := os.Mkdir(outside, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				testkit.WriteFile(t, filepath.Join(outside, filepath.Base(local)), []byte("outside"), 0o644)
+				var err error
+				switch test.kind {
+				case "match":
+					if format == "" {
+						testkit.WriteFile(t, local, file.Payload, 0o644)
+					} else if _, err = guest.write(t, file, TokenAbsent); err != nil {
+						t.Fatal(err)
+					}
+				case "differ":
+					testkit.WriteFile(t, local, []byte(other[format]), 0o644)
+				case "invalid document":
+					testkit.WriteFile(t, local, []byte(invalid[format]), 0o644)
+				case "symlink":
+					err = os.Symlink(filepath.Join(outside, filepath.Base(local)), local)
+				case "directory":
+					err = os.Mkdir(local, 0o755)
+				case "fifo":
+					err = syscall.Mkfifo(local, 0o644)
+				case "symlinked parent":
+					if err = os.RemoveAll(filepath.Dir(local)); err == nil {
+						err = os.Symlink(outside, filepath.Dir(local))
+					}
+				case "broken baseline":
+					testkit.WriteFile(t, local, []byte(other[format]), 0o644)
+					if err = os.Mkdir(guest.state, 0o700); err == nil {
+						identity := fmt.Sprintf("%x", sha256.Sum256([]byte("dev\x00"+local)))
+						testkit.WriteFile(t, filepath.Join(guest.state, identity+".json"), []byte("{broken"), 0o600)
+						testkit.WriteFile(t, filepath.Join(guest.state, identity+".lock"), nil, 0o600)
+					}
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				before := entry(local)
+				observed := guest.observe(t, file)
+				if observed.State() != test.state {
+					t.Fatalf("state %s (%#v), want %s", observed.State(), observed, test.state)
+				}
+				refusals := Refusals("named", []File{observed})
+				if test.step == "" && len(refusals) != 0 || test.step != "" && (len(refusals) != 1 ||
+					!strings.Contains(refusals[0].Error(), file.Destination) || !strings.HasSuffix(refusals[0].Error(), "; next: "+test.step)) {
+					t.Fatalf("refusals %v, want step %q", refusals, test.step)
+				}
+				token := observed.Token
+				if !ValidToken(token) {
+					token = PayloadToken([]byte(other[format])) // the writer refuses on its own
+				}
+				result, err := guest.write(t, file, token)
+				refused, isRefusal := Refused(observed, result, err)
+				switch test.write {
+				case "written", "converged":
+					if err != nil || guest.observe(t, file).State() != "converged" {
+						t.Fatalf("write: %v %s", err, result.Stderr)
+					}
+					if test.write == "converged" && entry(local) != before {
+						t.Fatal("converged file was rewritten")
+					}
+				case "unreadable":
+					if !isRefusal || refused.State() != "unreadable" || entry(local) != before || entry(filepath.Join(outside, filepath.Base(local))) != "file:outside" {
+						t.Fatalf("unreadable write: %#v %v, guest %s", refused, err, entry(local))
+					}
+				case "failed":
+					if isRefusal || err == nil || entry(local) != before {
+						t.Fatalf("failed write: %v, guest %s", err, entry(local))
+					}
+				}
+			})
+		}
+	}
+}
+
+// A write stopped at any point, or one whose destination the guest changed
+// after the observation, leaves the guest's bytes; the rerun converges.
+func TestCompareAndWriteKeepsGuestBytesAcrossCrashesAndEdits(t *testing.T) {
+	desired := Desired{Label: "agent", Destination: "/home/dev/.config/agent.md", Payload: []byte("desired\n")}
+	for _, test := range []struct{ name, hook, want string }{
+		{name: "crash after staging", hook: `if point == "staged": _t._exit(97)`, want: "old"},
+		{name: "crash before rename", hook: `if point == "rename": _t._exit(97)`, want: "old"},
+		{name: "guest edit before compare", hook: `if point == "staged": GUEST("guest")`, want: "guest"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			world := newCASWorld(t)
-			expect := TokenAbsent
-			if !test.absent {
-				testkit.WriteFile(t, world.destination, []byte(test.initial), 0o644)
-				expect = PayloadToken([]byte(cmp.Or(test.consented, test.initial)))
+			guest := newLocalGuest(t)
+			local := guest.path(desired.Destination)
+			testkit.WriteFile(t, local, []byte("old"), 0o644)
+			token := guest.observe(t, desired).Token
+			guest.hook = fmt.Sprintf(`import os as _t
+def GUEST(content):
+    with open(%[1]q + ".editor", "w") as output:
+        output.write(content)
+    _t.rename(%[1]q + ".editor", %[1]q)
+def CAS_HOOK(point):
+    %[2]s`, local, test.hook)
+			result, err := guest.write(t, desired, token)
+			if entry(local) != "file:"+test.want {
+				t.Fatalf("guest has %s after %v", entry(local), err)
 			}
-			code, stdout := world.run(test.hook, expect, desired)
-			if code != test.code {
-				t.Fatalf("exit %d, want %d: %s", code, test.code, stdout)
-			}
-			if got := world.contents(); !mapsEqual(got, test.want) {
-				t.Fatalf("guest directory %v, want %v", got, test.want)
-			}
-			refusal := ParseWriteResult(world.destination, code, []byte(stdout))
-			var typed WriteRefusal
-			if (refusal != nil) != (code != 0) || code != 0 && (!errors.As(refusal, &typed) || typed.Outcome != OutcomeChanged ||
-				len(typed.Leftovers.Kept) != len(test.want)-1) {
-				t.Fatalf("write result %v from %q", refusal, stdout)
-			}
-			if code == 0 {
-				info, err := os.Stat(world.destination)
-				if err != nil || info.Mode().Perm() != 0o644 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
-					t.Fatal("written file mode or owner", err)
+			if test.want == "guest" {
+				if refused, ok := Refused(File{Destination: desired.Destination, Token: token}, result, err); !ok || refused.State() != "changed" ||
+					!strings.HasSuffix(Refusals("named", []File{refused})[0].Error(), "; next: run yard -Y named config apply") {
+					t.Fatalf("guest edit: %#v %v", refused, err)
 				}
+			} else if result.ExitCode != 97 {
+				t.Fatalf("crash did not occur: %d", result.ExitCode)
 			}
-		})
-	}
-}
-
-func TestCompareAndWriteConvergedAndUnreadable(t *testing.T) {
-	world := newCASWorld(t)
-	testkit.WriteFile(t, world.destination, []byte("desired\n"), 0o600)
-	before, _ := os.Stat(world.destination)
-	if code, _ := world.run("", PayloadToken([]byte("other")), []byte("desired\n")); code != 0 {
-		t.Fatal("converged file refused", code)
-	}
-	// Like a write, convergence leaves the developer's owner and mode.
-	if after, _ := os.Stat(world.destination); !os.SameFile(before, after) || after.Mode().Perm() != 0o644 {
-		t.Fatal("converged file was rewritten or kept its mode")
-	}
-	for _, kind := range []string{"symlink", "directory", "fifo", "symlinked parent"} {
-		t.Run(kind, func(t *testing.T) {
-			world := newCASWorld(t)
-			target := filepath.Join(filepath.Dir(world.home), "outside")
-			testkit.WriteFile(t, target, []byte("outside"), 0o644)
-			var err error
-			switch kind {
-			case "symlink":
-				err = os.Symlink(target, world.destination)
-			case "directory":
-				err = os.Mkdir(world.destination, 0o755)
-			case "fifo":
-				err = syscall.Mkfifo(world.destination, 0o644)
-			case "symlinked parent":
-				if err = os.RemoveAll(filepath.Dir(world.destination)); err == nil {
-					err = os.Symlink(filepath.Dir(target), filepath.Dir(world.destination))
-				}
-				world.destination = filepath.Join(filepath.Dir(world.destination), "outside")
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if token := world.observe().Token; token != TokenUnreadable {
-				t.Fatalf("observed %s", token)
-			}
-			if code, _ := world.run("", PayloadToken([]byte("outside")), []byte("desired\n")); code != 3 {
-				t.Fatalf("unreadable destination written: %d", code)
-			}
-			if payload, _ := os.ReadFile(target); string(payload) != "outside" {
-				t.Fatal("writer followed a link")
-			}
-		})
-	}
-}
-
-// A crash at any point of a write over a file the guest changed keeps every
-// guest byte, and the next observation reports what was preserved.
-func TestCompareAndWriteCrashKeepsGuestBytes(t *testing.T) {
-	for _, point := range []string{"staged", "exchanged", "exchanged-back"} {
-		t.Run(point, func(t *testing.T) {
-			world := newCASWorld(t)
-			testkit.WriteFile(t, world.destination, []byte("old"), 0o644)
-			hook := fmt.Sprintf(`def CAS_HOOK(point):
-    if point == "staged": GUEST("guest")
-    if point == %q and ONCE(point): _t._exit(97)`, point)
-			if code, _ := world.run(hook, PayloadToken([]byte("old")), []byte("desired\n")); code != 97 {
-				t.Fatalf("crash did not occur: %d", code)
-			}
-			got := world.contents()
-			values := []string{got["agent.md"], got["leftover"]}
-			if len(got) != 2 || !slices.Contains(values, "guest") || !slices.Contains(values, "desired\n") {
-				t.Fatalf("guest directory after crash: %v", got)
-			}
-			if observed := world.observe(); len(observed.Leftovers) != 1 {
-				t.Fatalf("preserved file not reported: %#v", observed)
+			guest.hook = ""
+			// The rerun plans on what the guest has now.
+			if _, err := guest.write(t, desired, guest.observe(t, desired).Token); err != nil || guest.observe(t, desired).State() != "converged" {
+				t.Fatalf("rerun: %v", err)
 			}
 		})
 	}
@@ -256,103 +261,14 @@ func TestCompareAndWriteRequests(t *testing.T) {
 	if _, err := Request("json", ModeApply, "dev", "/home/dev/a.json", 1000, []byte(`{}`)); err == nil {
 		t.Fatal("structured apply through the read-only request accepted")
 	}
-	// A leftover that cannot be named, or one past the bound, is counted, and
-	// the destination still does not converge.
-	names := []string{`"/etc/x"`}
-	for index := range 65 {
-		names = append(names, fmt.Sprintf(`"/home/dev/.a.subyard-cas.%016x"`, index))
+	if _, err := Observe(context.Background(), nil, localYard, []Desired{{Destination: "/etc/passwd"}}); err == nil {
+		t.Fatal("observation outside the home accepted")
 	}
-	tokens, err := ParseTokens([]byte(`{"files":[{"destination":"/home/dev/a","token":"absent","leftovers":[`+strings.Join(names, ",")+`]}]}`), []string{"/home/dev/a"})
-	if err != nil || len(tokens) != 1 {
-		t.Fatalf("overflowing leftovers failed the observation: %v", err)
+	// A guest refusal names only its fixed category, never document details.
+	if problem := observationProblem([]byte("config materialization: unowned-invalid-destination-v1 JSON; private document details")); problem != "unowned-invalid-destination-v1 JSON" {
+		t.Fatalf("problem %q", problem)
 	}
-	if leftovers := tokens[0].LeftoversFor(""); len(leftovers.Kept) != 64 || leftovers.Unlisted != 2 || slices.Contains(leftovers.Kept, "/etc/x") ||
-		!strings.Contains(leftovers.Recovery("/home/dev/a"), "2 more files named /home/dev/.a.subyard-cas.* beside it") {
-		t.Fatalf("leftovers %#v", leftovers)
-	}
-	if assessed, err := AssessFile(config.DesiredMaterializedArtifact{Name: "a", Destination: "/home/dev/a", DesiredHash: strings.Repeat("0", 64)}, FileToken{Destination: "/home/dev/a", Token: "sha256:" + strings.Repeat("0", 64), unlisted: 1}, nil); err != nil || assessed.Converged {
-		t.Fatalf("unlisted leftover converged: %#v %v", assessed, err)
-	}
-	if err := ParseWriteResult("/home/dev/a", 4, []byte(`{"outcome":"unreadable","leftovers":[]}`)); err == nil || errors.As(err, new(WriteRefusal)) {
-		t.Fatal("mismatched outcome accepted")
-	}
-}
-
-func mapsEqual(left, right map[string]string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for key, value := range left {
-		if other, ok := right[key]; !ok || other != value {
-			return false
-		}
-	}
-	return true
-}
-
-// Guest bytes that a crash right after the exchange preserved block the next
-// write and its convergence until the operator resolves them.
-func TestCompareAndWriteLeftoverBlocksConvergence(t *testing.T) {
-	world := newCASWorld(t)
-	testkit.WriteFile(t, world.destination, []byte("old"), 0o644)
-	hook := `def CAS_HOOK(point):
-    if point == "staged": GUEST("guest")
-    if point == "exchanged": _t._exit(97)`
-	if code, _ := world.run(hook, PayloadToken([]byte("old")), []byte("desired\n")); code != 97 {
-		t.Fatalf("crash did not occur: %d", code)
-	}
-	if got := world.contents(); got["agent.md"] != "desired\n" || got["leftover"] != "guest" {
-		t.Fatalf("after crash: %v", got)
-	}
-	leftovers := world.observe().Leftovers
-	code, stdout := world.run("", PayloadToken([]byte("old")), []byte("desired\n"))
-	refusal := ParseWriteResult(world.destination, code, []byte(stdout))
-	var typed WriteRefusal
-	if code != 5 || !errors.As(refusal, &typed) || typed.Outcome != OutcomeLeftover || !slices.Equal(typed.Leftovers.Kept, leftovers) || len(typed.Leftovers.Staged) != 0 ||
-		!strings.Contains(refusal.Error(), leftovers[0]) {
-		t.Fatalf("rerun over preserved bytes: %d %v", code, refusal)
-	}
-	if got := world.contents(); got["agent.md"] != "desired\n" || got["leftover"] != "guest" {
-		t.Fatalf("rerun changed the directory: %v", got)
-	}
-}
-
-// A file that grows past the read bound after it was hashed is not verified:
-// the writer gives it back instead of unlinking or stranding it.
-func TestCompareAndWriteUnverifiableDisplacedFileIsGivenBack(t *testing.T) {
-	world := newCASWorld(t)
-	testkit.WriteFile(t, world.destination, []byte("old"), 0o644)
-	hook := fmt.Sprintf(`def CAS_HOOK(point):
-    if point == "staged":
-        with open(%q, "ab") as output: output.write(b"x" * (33 << 20))`, world.destination)
-	code, stdout := world.run(hook, PayloadToken([]byte("old")), []byte("desired\n"))
-	var typed WriteRefusal
-	if code != 4 || !errors.As(ParseWriteResult(world.destination, code, []byte(stdout)), &typed) || typed.Leftovers.Any() {
-		t.Fatalf("grown file: %d %s", code, stdout)
-	}
-	entries, _ := os.ReadDir(filepath.Dir(world.destination))
-	info, err := os.Stat(world.destination)
-	if len(entries) != 1 || err != nil || info.Size() != 3+33<<20 {
-		t.Fatalf("grown guest file not at its destination: %d entries, %v", len(entries), err)
-	}
-}
-
-// A write stopped between staging and the exchange leaves its own copy of the
-// refreshed file, which is told apart from guest bytes.
-func TestCompareAndWriteNamesItsOwnStagedCopy(t *testing.T) {
-	world := newCASWorld(t)
-	testkit.WriteFile(t, world.destination, []byte("old"), 0o644)
-	if code, _ := world.run(`def CAS_HOOK(point):
-    if point == "staged": _t._exit(97)`, PayloadToken([]byte("old")), []byte("desired\n")); code != 97 {
-		t.Fatalf("crash did not occur: %d", code)
-	}
-	if leftovers := world.observe().LeftoversFor(PayloadToken([]byte("desired\n"))); len(leftovers.Staged) != 1 || len(leftovers.Kept) != 0 ||
-		!strings.Contains(leftovers.Recovery(world.destination), "unpublished copy of the refreshed file") {
-		t.Fatalf("staged copy: %#v", leftovers)
-	}
-	code, stdout := world.run("", PayloadToken([]byte("old")), []byte("desired\n"))
-	var typed WriteRefusal
-	if code != 5 || !errors.As(ParseWriteResult(world.destination, code, []byte(stdout)), &typed) || len(typed.Leftovers.Staged) != 1 || len(typed.Leftovers.Kept) != 0 {
-		t.Fatalf("rerun over a staged copy: %d %s", code, stdout)
+	if problem := observationProblem([]byte("config materialization: changed")); problem == ProblemChanged {
+		t.Fatal("an observation refusal read as a changed write")
 	}
 }

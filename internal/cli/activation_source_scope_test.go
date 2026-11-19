@@ -36,7 +36,7 @@ func (boundary *sourceScopeConfigBoundary) Exec(
 		return ports.InstanceExecResult{}, err
 	}
 	payload, err := json.Marshal(configmaterial.Observation{
-		Converged: boundary.converged[project+"/"+instance], Fingerprint: digest,
+		Converged: boundary.converged[project+"/"+instance], Fingerprint: digest, Raw: configmaterial.TokenAbsent,
 	})
 	return ports.InstanceExecResult{Stdout: payload}, err
 }

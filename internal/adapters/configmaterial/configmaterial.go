@@ -73,6 +73,9 @@ type JSONObservation struct {
 	// print, and is empty otherwise.
 	Released      []string `json:"released,omitempty"`
 	ReleasedCount int      `json:"released_count,omitempty"`
+	// Raw is an observation's consent token of the destination's exact bytes,
+	// or TokenUnreadable; adoption and retirement assessments omit it.
+	Raw string `json:"raw,omitempty"`
 }
 
 const (
@@ -399,6 +402,7 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 		Release       string   `json:"release,omitempty"`
 		Released      []string `json:"released,omitempty"`
 		ReleasedCount int      `json:"released_count,omitempty"`
+		Raw           string   `json:"raw,omitempty"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
@@ -416,11 +420,12 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 	}
 	if !validReleasedPointers(encoded.Released) || encoded.ReleasedCount < 0 ||
 		len(encoded.Released) != 0 && len(encoded.Released) != encoded.ReleasedCount ||
-		encoded.Release != "" && encoded.Release != ReleaseChanged && encoded.Release != ReleaseMissingDocument {
+		encoded.Release != "" && encoded.Release != ReleaseChanged && encoded.Release != ReleaseMissingDocument ||
+		encoded.Raw != "" && !ValidToken(encoded.Raw) && encoded.Raw != TokenUnreadable {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
 	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint,
-		Release: encoded.Release, Released: encoded.Released, ReleasedCount: encoded.ReleasedCount}, nil
+		Release: encoded.Release, Released: encoded.Released, ReleasedCount: encoded.ReleasedCount, Raw: encoded.Raw}, nil
 }
 
 // Released pointers are rendered to the operator: accept only a bounded,

@@ -62,11 +62,6 @@ func TestNextStepNeverRepeatsTheAttemptedCommand(t *testing.T) {
 	if action, _ := NextStep([]Finding{drift}, Action{Verb: VerbInit, Yard: "named"}, nil); action != (Action{Verb: VerbConfigStatus, Yard: "named"}) {
 		t.Fatalf("attempted init repeated: %#v", action)
 	}
-	// A file that changed after the plan is a new observation: rerun the apply.
-	changed := Finding{Kind: FindingFileChanged, Yard: "named"}
-	if action, _ := NextStep([]Finding{changed}, Action{Verb: VerbConfigApply, Yard: "named"}, nil); action.Verb != VerbConfigApply {
-		t.Fatalf("changed file did not re-plan: %#v", action)
-	}
 	unreachable := Finding{Kind: FindingUnreachable, Yard: "named"}
 	var sequence []string
 	for attempted, hops := (Action{}), 0; hops < 3; hops++ {

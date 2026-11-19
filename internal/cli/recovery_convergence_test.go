@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"fmt"
 	"maps"
 	"slices"
@@ -10,9 +9,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
-	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
-	"github.com/Subyard/Subyard/internal/ports"
 )
 
 // recoveryWorld is a fixture host: a yard gate, an installed-source
@@ -24,7 +21,7 @@ type recoveryWorld struct {
 	yards     map[string]yardGateState
 	everyYard bool
 	source    string // a refused source predicate
-	files     string // "changed", "unreadable" or "leftover" in filesYard
+	files     string // "changed" or "unreadable" in filesYard
 	filesYard string
 }
 
@@ -57,53 +54,30 @@ func (world recoveryWorld) gate() yardGate {
 	return gate
 }
 
-var recoveryDesired = config.DesiredMaterializedArtifact{Name: "agent", Destination: "/home/dev/.config/agent.md", DesiredHash: fmt.Sprintf("%x", sha256.Sum256([]byte("desired\n")))}
-
-// fileToken is what the guest observation reports for the files yard; a
-// preserved file sits beside a destination that already holds the desired bytes.
-func (world recoveryWorld) fileToken() configmaterial.FileToken {
-	token := configmaterial.FileToken{Destination: recoveryDesired.Destination, Token: "sha256:" + recoveryDesired.DesiredHash}
+// file is the guest observation of the files yard's one config file: a
+// changed file differs from its desired bytes.
+func (world recoveryWorld) file() configmaterial.File {
+	file := configmaterial.File{Label: "agent", Destination: "/home/dev/.config/agent.md", Token: configmaterial.PayloadToken([]byte("desired\n")), Converged: true}
 	switch world.files {
 	case "changed":
-		token.Token = "sha256:" + strings.Repeat("a", 64)
+		file.Token, file.Converged = "sha256:"+strings.Repeat("a", 64), false
 	case "unreadable":
-		token.Token = configmaterial.TokenUnreadable
-	case "leftover":
-		token.Leftovers = []string{"/home/dev/.config/.agent.md.subyard-cas.0123456789abcdef"}
+		file.Token, file.Converged = configmaterial.TokenUnreadable, false
 	}
-	return token
+	return file
 }
 
-// filesConverged is the production check that init, config status and
+// filesConverged is the production state that init, config status and
 // release readiness share.
-func (world recoveryWorld) filesConverged() bool {
-	assessed, err := configmaterial.AssessFile(recoveryDesired, world.fileToken(), nil)
-	return err == nil && assessed.Converged
-}
+func (world recoveryWorld) filesConverged() bool { return world.file().State() == "converged" }
 
 // refresh is the real effect of init or config apply on the files yard: a
-// converged file is left alone, and a write refuses an unreadable file or
-// one with leftovers beside it.
+// changed file is written over its fresh observation, an unreadable one is
+// refused.
 func (world *recoveryWorld) refresh() {
-	if !world.filesConverged() && world.files == "changed" {
+	if world.files == "changed" {
 		world.files = ""
 	}
-}
-
-// fileAssessments are the plan and the fresh observation of the files yard.
-func (world recoveryWorld) fileAssessments() (configTargetAssessment, configTargetAssessment) {
-	destination := "/home/dev/.config/agent.md"
-	approved := configTargetAssessment{Target: configTarget{Name: world.filesYard}, Changed: true,
-		Consent: &ports.ConfigConsent{Files: []ports.ConfigFileConsent{{Destination: destination, Token: configmaterial.TokenAbsent}}}}
-	fresh := approved
-	fresh.Consent = &ports.ConfigConsent{Files: []ports.ConfigFileConsent{{Destination: destination, Token: "sha256:" + strings.Repeat("a", 64)}}}
-	switch world.files {
-	case "unreadable":
-		fresh.Consent, fresh.Unreadable = approved.Consent, []string{destination}
-	case "leftover":
-		fresh.Consent, fresh.Preserved = approved.Consent, map[string]configmaterial.Leftovers{destination: world.fileToken().LeftoversFor("")}
-	}
-	return approved, fresh
 }
 
 func (world recoveryWorld) ready() bool {
@@ -121,16 +95,14 @@ func gateEntry(render func(gate yardGate, yard string, attempted domain.Action) 
 	return func(world recoveryWorld, attempted domain.Action) (string, string) {
 		gate := world.gate()
 		// A refused refresh of the files yard names its files and next step.
+		files := []configmaterial.File{world.file()}
 		if attempted.Verb == domain.VerbConfigApply && attempted.Yard == world.filesYard && !world.filesConverged() {
-			approved, fresh := world.fileAssessments()
-			return world.filesYard, configApplyNext(approved, fresh, nil)
+			return world.filesYard, configApplyNext(world.filesYard, configmaterial.Refusals(world.filesYard, files))
 		}
 		// config status names the files a refresh refuses, with their step.
 		if attempted.Verb == domain.VerbConfigStatus && attempted.Yard == world.filesYard {
-			_, fresh := world.fileAssessments()
-			fresh.Target.Name = world.filesYard
-			if lines := configFileAttention(fresh); len(lines) != 0 {
-				return world.filesYard, strings.TrimPrefix(lines[0], "attention: yard "+world.filesYard+": ")
+			if lines := configFileAttention(configTargetAssessment{Target: configTarget{Name: world.filesYard}, Files: files}); len(lines) != 0 {
+				return world.filesYard, lastNext(lines[0])
 			}
 		}
 		yard := gate.order[0]
@@ -205,8 +177,8 @@ func (world *recoveryWorld) operatorStep(text string) {
 			world.yards[name] = state
 		}
 		world.everyYard = false
-	case strings.Contains(text, "preserved guest bytes"), strings.Contains(text, "not a readable regular file"):
-		world.files = "changed" // resolved, so the next apply plans again
+	case strings.Contains(text, "replace it with a regular file"):
+		world.files = "changed" // replaced, so the next apply plans again
 	}
 }
 
@@ -258,7 +230,6 @@ func TestRecoveryAdviceConvergesFromEveryEntryPoint(t *testing.T) {
 		"stopped mid-batch then drift":            {yards: map[string]yardGateState{"a": {drift: true}, "b": {failed: true}}},
 		"file changed after plan":                 {files: "changed", filesYard: "named", yards: map[string]yardGateState{}},
 		"unreadable peer file":                    {files: "unreadable", filesYard: "named", yards: map[string]yardGateState{}},
-		"preserved guest bytes":                   {files: "leftover", filesYard: "named", yards: map[string]yardGateState{}},
 		"ready":                                   {yards: map[string]yardGateState{}},
 		"wrong tooling":                           {yards: map[string]yardGateState{"named": {drift: true}}, source: "tooling-dir"},
 		"unreadable store":                        {yards: map[string]yardGateState{"named": {drift: true}}, source: "store"},

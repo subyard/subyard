@@ -181,14 +181,9 @@ func TestStructuredWriterRefusesStaleConsentToken(t *testing.T) {
 			}
 			command := exec.Command(request.Command[0], request.Command[1:]...)
 			command.Stdin = bytes.NewReader(request.Stdin)
-			stdout, err := command.Output()
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) {
-				t.Fatalf("stale token accepted: %v", err)
-			}
-			refusal, ok := ParseWriteResult(h.destination, exit.ExitCode(), stdout).(WriteRefusal)
-			if !ok || refusal.Outcome != OutcomeChanged || refusal.Leftovers.Any() {
-				t.Fatalf("refusal: %v", ParseWriteResult(h.destination, exit.ExitCode(), stdout))
+			err = command.Run()
+			if refused, ok := Refused(File{}, ports.InstanceExecResult{ExitCode: command.ProcessState.ExitCode()}, nil); !ok || refused.State() != "changed" {
+				t.Fatalf("stale token: %v", err)
 			}
 			if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
 				t.Fatal("stale token modified managed state")
@@ -409,7 +404,7 @@ func TestJSONMaterializationRejectsDestinationSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	stderr, err := harness.run([]byte(`{"managed":1}`), ModeApply)
-	if err == nil || !strings.Contains(stderr, "invalid destination path") {
+	if exit := new(exec.ExitError); !errors.As(err, &exit) || exit.ExitCode() != 3 || !strings.Contains(stderr, "config write: unreadable") {
 		t.Fatalf("symlink apply error=%v stderr=%q", err, stderr)
 	}
 	got, readErr := os.ReadFile(target)

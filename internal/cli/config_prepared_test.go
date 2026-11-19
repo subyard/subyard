@@ -9,7 +9,6 @@ import (
 	"io"
 	"maps"
 	"os"
-	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -1360,39 +1359,39 @@ func TestDeveloperIdentityGateRendersLoadRefusalsWithoutValues(t *testing.T) {
 	}
 }
 
-// syncLeftoverExecutor answers each consumer yard's guest files: drifted
-// until the applier refreshed that yard, and hermes with a file a refused
-// write left beside its first destination.
-type syncLeftoverExecutor struct {
+// syncUnreadableExecutor answers each consumer yard's guest files: drifted
+// until the applier refreshed that yard, and hermes with an unreadable first
+// raw file.
+type syncUnreadableExecutor struct {
 	applier *recordingConfigApplier
 	yards   map[string]string // instance -> yard
 	desired map[string]string // instance/destination -> desired sha256
 }
 
-func (executor syncLeftoverExecutor) Exec(_ context.Context, _, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+func (executor syncUnreadableExecutor) Exec(_ context.Context, _, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
 	applied := slices.Contains(executor.applier.yards, executor.yards[instance])
 	if !testkit.IsGuestTokenObservation(request.Command) {
-		return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, applied, strings.Repeat("0", 64)))}, nil
+		return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q,"raw":"absent"}`, applied, strings.Repeat("0", 64)))}, nil
 	}
-	files := []configmaterial.FileToken{}
+	files := []map[string]string{}
 	for index, destination := range request.Command[6:] {
-		file := configmaterial.FileToken{Destination: destination, Token: "sha256:" + strings.Repeat("0", 64), Leftovers: []string{}}
+		token := "sha256:" + strings.Repeat("0", 64)
 		if digest, ok := executor.desired[instance+"/"+destination]; ok && applied {
-			file.Token = "sha256:" + digest
+			token = "sha256:" + digest
 		}
 		if executor.yards[instance] == "hermes" && index == 0 {
-			file.Leftovers = []string{path.Dir(destination) + "/." + path.Base(destination) + ".subyard-cas.0123456789abcdef"}
+			token = configmaterial.TokenUnreadable
 		}
-		files = append(files, file)
+		files = append(files, map[string]string{"destination": destination, "token": token})
 	}
 	payload, _ := json.Marshal(map[string]any{"files": files})
 	return ports.InstanceExecResult{Stdout: payload}, nil
 }
 
-// One consumer's leftover refuses that yard alone: the sync publishes its
-// candidate and refreshes the other consumer, then reports the refused yard
-// with its files and next step.
-func TestConfigSyncApplyRefusesOnlyTheConsumerWithLeftovers(t *testing.T) {
+// One consumer's unreadable file refuses that yard alone: the sync publishes
+// its candidate and refreshes the other consumer, then reports the refused
+// yard with its file and next step.
+func TestConfigSyncApplyRefusesOnlyTheConsumerWithAnUnreadableFile(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
 	environment = append(environment, "SUBYARD_HOST_ID=owner-a")
 	source := filepath.Join(testkit.TempDir(t), "source")
@@ -1412,7 +1411,7 @@ func TestConfigSyncApplyRefusesOnlyTheConsumerWithLeftovers(t *testing.T) {
 	}
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
 	applier := &recordingConfigApplier{}
-	executor := syncLeftoverExecutor{applier: applier, yards: map[string]string{}, desired: map[string]string{}}
+	executor := syncUnreadableExecutor{applier: applier, yards: map[string]string{}, desired: map[string]string{}}
 	for _, candidate := range contexts {
 		instance := candidate.Context.YardInstanceName
 		fake.Instances[candidate.Context.IncusProject+"/"+instance] = ports.InstanceInfo{Name: instance, Project: candidate.Context.IncusProject, Status: "Running"}
@@ -1433,7 +1432,7 @@ func TestConfigSyncApplyRefusesOnlyTheConsumerWithLeftovers(t *testing.T) {
 	prepared := configExactPlan(t, program, loaded, []string{"sync", source, "--adopt", "--apply"})
 	var output bytes.Buffer
 	_, err = prepared.Execute(context.Background(), nil, &output)
-	if err == nil || !strings.Contains(err.Error(), "yard hermes") || !strings.Contains(err.Error(), ".subyard-cas.0123456789abcdef") ||
+	if err == nil || !strings.Contains(err.Error(), "yard hermes") || !strings.Contains(err.Error(), "is not a readable regular file") ||
 		!strings.Contains(err.Error(), "then run yard -Y hermes config apply") {
 		t.Fatalf("hermes refusal: %v\n%s", err, &output)
 	}

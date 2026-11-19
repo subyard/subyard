@@ -2,15 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -349,66 +348,59 @@ func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 	}
 }
 
-// fileFindingExecutor observes the first destination unreadable and the
-// second with bytes a refused write preserved; owned files drifted.
-type fileFindingExecutor struct{ ports.InstanceExecutor }
+// symlinkedSettingsExecutor observes every config file drifted, and in
+// instance the settings.json files unreadable, as a symlinked one is.
+type symlinkedSettingsExecutor struct{ instance string }
 
-func (fileFindingExecutor) Exec(_ context.Context, _, _ string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
-	if !testkit.IsGuestTokenObservation(request.Command) {
-		return ports.InstanceExecResult{Stdout: []byte(`{"converged":false,"fingerprint":"` + strings.Repeat("0", 64) + `"}`)}, nil
+func (executor symlinkedSettingsExecutor) Exec(_ context.Context, _, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if payload, ok := testkit.GuestTokenObservation(request.Command, nil); ok || len(request.Command) < 7 || request.Command[4] != configmaterial.ModeObserve {
+		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
-	files := []configmaterial.FileToken{}
-	for index, destination := range request.Command[6:] {
-		file := configmaterial.FileToken{Destination: destination, Token: configmaterial.TokenAbsent, Leftovers: []string{}}
-		switch index {
-		case 0:
-			file.Token = configmaterial.TokenUnreadable
-		case 1:
-			file.Leftovers = []string{path.Dir(destination) + "/." + path.Base(destination) + ".subyard-cas.0123456789abcdef"}
-		}
-		files = append(files, file)
+	raw := configmaterial.TokenAbsent
+	if instance == executor.instance && strings.HasSuffix(request.Command[6], "/settings.json") {
+		raw = configmaterial.TokenUnreadable
 	}
-	payload, _ := json.Marshal(map[string]any{"files": files})
-	return ports.InstanceExecResult{Stdout: payload}, nil
+	return ports.InstanceExecResult{Stdout: []byte(fmt.Sprintf(`{"converged":false,"fingerprint":%q,"raw":%q}`, strings.Repeat("0", 64), raw))}, nil
 }
 
-// config status names the files a refresh refuses with the operator's step,
-// and config apply refuses them at plan time, before consent.
-func TestConfigStatusAndApplyNameUnreadableAndPreservedFiles(t *testing.T) {
-	root, _, _, environment := configCommandFixture(t)
-	loaded := loadConfigCommandContext(t, root, environment, "default")
-	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
-		loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
-			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running",
-		},
-	}}
-	assets, err := effectiveConfigAssets(loaded)
-	if err != nil {
-		t.Fatal(err)
+// A symlinked settings.json refuses its yard alone, before consent, with the
+// file and the operator's step; the other yard is refreshed, and the plan
+// does not read as one without drift.
+func TestConfigApplyRefusesOnlyTheYardWithAnUnreadableFile(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
+	defaultLoaded := loadConfigCommandContext(t, root, environment, "default")
+	namedLoaded := loadConfigCommandContext(t, root, environment, "named")
+	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{}}
+	for _, loaded := range []config.Loaded{defaultLoaded, namedLoaded} {
+		fake.Instances[loaded.Context.IncusProject+"/"+loaded.Context.YardInstanceName] = ports.InstanceInfo{
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running", Config: map[string]string{"volatile.uuid": loaded.Context.YardName}}
 	}
-	destinations, err := configObservationDestinations(configTarget{Loaded: loaded}, assets)
-	if err != nil || len(destinations) < 2 {
-		t.Fatalf("fixture needs two destinations: %v %v", destinations, err)
+	assets, err := effectiveConfigAssets(namedLoaded)
+	settings := slices.IndexFunc(assets, func(asset configAsset) bool { return strings.HasSuffix(asset.Destination, "/settings.json") })
+	if err != nil || settings < 0 {
+		t.Fatalf("fixture needs a settings.json: %v", err)
 	}
-	for _, arguments := range [][]string{{"config", "status"}, {"config", "apply", "--yes"}} {
+	executor := symlinkedSettingsExecutor{instance: namedLoaded.Context.YardInstanceName}
+	step := assets[settings].Destination + " is not a readable regular file; it was kept; next: replace it with a regular file or remove it, then run yard -Y named config apply"
+	for _, arguments := range [][]string{{"-Y", "named", "config", "status"}, {"config", "apply", "--all-local", "--yes"}} {
 		applier := &recordingConfigApplier{}
 		var stdout, stderr bytes.Buffer
 		program, err := New(Options{
 			RepositoryRoot: root, Program: "yard", Arguments: arguments,
 			Environment: environment, WorkingDir: root, Prompt: &testkit.Prompt{},
-			Incus: fake, Executor: fileFindingExecutor{fake}, Config: applier, Stdout: &stdout, Stderr: &stderr,
+			Incus: fake, Executor: executor, Config: applier, Stdout: &stdout, Stderr: &stderr,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		code := program.Run(context.Background())
 		output := stdout.String() + stderr.String()
-		if code == 0 || len(applier.yards) != 0 || !strings.Contains(output, "preserved guest bytes in "+path.Dir(destinations[1])) {
-			t.Fatalf("%v: code=%d applied=%v\n%s", arguments, code, applier.yards, output)
+		if !strings.Contains(output, step) || strings.Contains(output, "no running local yards have materialized configuration drift") {
+			t.Fatalf("%v: code=%d\n%s", arguments, code, output)
 		}
-		if arguments[1] == "status" && (!strings.Contains(output, "attention: yard default: "+destinations[0]+" is not a readable regular file") ||
-			!strings.Contains(output, "then run yard -Y default config apply")) {
-			t.Fatalf("status did not name the files: %s", output)
+		if arguments[2] == "apply" && (code == 0 || !slices.Equal(applier.yards, []string{"default"})) {
+			t.Fatalf("apply: code=%d refreshed %v\n%s", code, applier.yards, output)
 		}
 	}
 }
@@ -3926,32 +3918,30 @@ func appendHashSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded) {
 	}, true)
 }
 
-// appendObservationSteps scripts one assessment of loaded: the guest token
-// observation of every destination, raw assets holding digest, then the
-// structured observation of each owned asset.
+// appendObservationSteps scripts one assessment of loaded: the structured
+// observation of each owned asset, then one observation of the raw assets,
+// each holding digest.
 func appendObservationSteps(t *testing.T, fake *testkit.Incus, loaded config.Loaded, digest func(configAsset) string, converged bool) {
 	t.Helper()
 	assets, err := effectiveConfigAssets(loaded)
 	if err != nil {
 		t.Fatal(err)
 	}
-	destinations, err := configObservationDestinations(configTarget{Loaded: loaded}, assets)
-	if err != nil {
-		t.Fatal(err)
-	}
+	command := []string{"python3", "-B", "-c", configmaterial.CompareWriteProgram(), "observe", "/home/" + loaded.Context.DevUser}
 	tokens := map[string]string{}
 	for _, asset := range assets {
-		tokens[asset.Destination] = testkit.HashToken(digest(asset))
-	}
-	command := append([]string{"python3", "-B", "-c", configmaterial.CompareWriteProgram(), "observe", "/home/" + loaded.Context.DevUser}, destinations...)
-	observation, _ := testkit.GuestTokenObservation(command, func(destination string) string { return tokens[destination] })
-	fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: observation}})
-	for _, asset := range assets {
-		if asset.OwnedFormat != "" {
-			fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-				Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, digest(asset))),
-			}})
+		token := testkit.HashToken(digest(asset))
+		if asset.OwnedFormat == "" {
+			command, tokens[asset.Destination] = append(command, asset.Destination), token
+			continue
 		}
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
+			Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q,"raw":%q}`, converged, cmp.Or(digest(asset), strings.Repeat("f", 64)), token)),
+		}})
+	}
+	if len(command) > 6 {
+		observation, _ := testkit.GuestTokenObservation(command, func(destination string) string { return tokens[destination] })
+		fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{Stdout: observation}})
 	}
 }
 
@@ -4229,7 +4219,7 @@ func TestConfigAssessmentUsesOwnedFormatForImportedSources(t *testing.T) {
 			assess := func(converged bool, fingerprint string) configTargetAssessment {
 				t.Helper()
 				fake.ExecSteps = append(fake.ExecSteps, testkit.IncusExecStep{Result: ports.InstanceExecResult{
-					Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q}`, converged, strings.Repeat(fingerprint, 64))),
+					Stdout: []byte(fmt.Sprintf(`{"converged":%t,"fingerprint":%q,"raw":"absent"}`, converged, strings.Repeat(fingerprint, 64))),
 				}})
 				result, err := program.assessConfigTarget(context.Background(), configTarget{Name: "default", Loaded: loaded}, true)
 				if err != nil {

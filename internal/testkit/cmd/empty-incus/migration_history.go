@@ -210,13 +210,13 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 			if !armDrift() {
 				return reject()
 			}
-			files := []configmaterial.FileToken{}
+			files := []map[string]string{}
 			for _, destination := range command[6:] {
 				token := configmaterial.TokenAbsent
 				if destination == control.Destination {
 					token = guestToken()
 				}
-				files = append(files, configmaterial.FileToken{Destination: destination, Token: token, Leftovers: []string{}})
+				files = append(files, map[string]string{"destination": destination, "token": token})
 			}
 			payload, _ := json.Marshal(map[string]any{"files": files})
 			return testkit.IncusServerExecStep{Stdout: payload}
@@ -227,7 +227,7 @@ func historyResponder(control historyControl, path string) func(testkit.IncusSer
 				return reject()
 			}
 			if guestToken() != command[8] && guestToken() != configmaterial.PayloadToken(expected) {
-				return testkit.IncusServerExecStep{ExitCode: 4, Stdout: []byte(`{"leftovers":[],"outcome":"changed"}`)}
+				return testkit.IncusServerExecStep{ExitCode: 4, Stderr: []byte("config write: changed\n")}
 			}
 			return testkit.IncusServerExecStep{Stderr: []byte("controlled materialized config apply fixture\n"), AfterInput: func(actual testkit.IncusServerExecCall) int {
 				historyMu.Lock()

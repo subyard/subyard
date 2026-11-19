@@ -1270,7 +1270,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 		}
 		return []testkit.IncusExecStep{
 			{}, {}, {Result: ports.InstanceExecResult{Stdout: []byte("dev:x:1000:1000::/home/dev:/bin/bash\n")}}, usage,
-			{Result: ports.InstanceExecResult{Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"sha256:` + configHash + `","leftovers":[]}]}`)}},
+			{Result: ports.InstanceExecResult{Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"sha256:` + configHash + `"}]}`)}},
 			{Result: ports.InstanceExecResult{Stdout: []byte("skills-current\n")}},
 			{}, {Result: ports.InstanceExecResult{ExitCode: 1}, Err: errors.New("not a link")}, {}, {}, {}, {},
 		}
@@ -1354,7 +1354,7 @@ func TestProvisionProbeChecksGuestAndStoppedMarker(t *testing.T) {
 	}
 	missing := steps("regular file|755|0:0", digest)
 	missing[4] = testkit.IncusExecStep{Result: ports.InstanceExecResult{
-		Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"absent","leftovers":[]}]}`),
+		Stdout: []byte(`{"files":[{"destination":"/home/dev/.config/opencode/AGENTS.md","token":"absent"}]}`),
 	}}
 	incus.ExecSteps = missing
 	assertStage(t, runtime, "provision", false, "missing materialized agent config")
