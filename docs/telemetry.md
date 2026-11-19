@@ -49,14 +49,17 @@ without reading the home document.
 
 The one-time upgrade from v0.30 restores recorded prior values where telemetry settings
 are unchanged, preserves later edits and removes leaves containing the exact collector token.
-Rewritten home documents retain at most owner read and write permissions. The upgrade
-keeps the receipt if any resulting home file still contains the token bytes. The collector
-token stays the same. Subsequent telemetry updates and disable operations leave home
-documents alone.
+Rewritten home documents retain at most owner read and write permissions. A home file the
+receipt never covered is only scanned for the token bytes. The upgrade keeps the receipt if
+any resulting home file still contains them. The collector token stays the same; a missing
+token file is restored from the token every recorded header names. Subsequent telemetry
+updates and disable operations leave home documents alone.
 
 Rolling back to v0.28–v0.30 leaves both system policy files behind if they were installed.
 Those releases can also reintroduce the collector token into home documents, where an
-older template writer can publish it with mode `0644`. Process environment settings such
+older template writer can publish it with mode `0644`. If an upgrade stopped while it was
+replacing collector assets, finish it before rolling back: those releases refuse a collector
+asset that the inventory does not record. Process environment settings such
 as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
 local drop-ins when server-managed settings apply.
 

@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 import math
 import os
+import re
 import stat
 import tempfile
 
@@ -230,10 +231,10 @@ def recorded_headers(entries):
             yield codex[key]['managed']['otlp-http']['headers']['Authorization'], 'Bearer '
 
 
-def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
+def legacy_receipt(receipt_path):
     before = snapshot(receipt_path)
     if before is None:
-        return None, []
+        return None, None
     info = receipt_path.lstat()
     if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
         raise ValueError('unsafe legacy telemetry receipt')
@@ -241,14 +242,66 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
     entries = receipt.get('agents') if isinstance(receipt, dict) and receipt.get('schema') == 1 else None
     if not isinstance(entries, dict) or entries.keys()-AGENTS.keys():
         raise ValueError('invalid legacy telemetry receipt')
+    return before, entries
+
+
+def recorded_token(entries):
+    """The one collector token that every header recorded by v0.30 names, if any."""
+    tokens = set()
+    for value, prefix in recorded_headers(entries):
+        if not isinstance(value, str) or not value.startswith(prefix):
+            return None
+        tokens.add(value.removeprefix(prefix))
+    token = tokens.pop() if len(tokens) == 1 else None
+    return token if token and re.fullmatch('[0-9a-f]{64}', token) else None
+
+
+def legacy_token(receipt_path):
+    """Recover a missing collector token from the root-owned v0.30 receipt."""
+    try:
+        before, entries = legacy_receipt(receipt_path)
+        return recorded_token(entries) if before is not None else None
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        return None
+
+
+def contains_token(path, token):
+    """Scan raw bytes of a home file the receipt never covered.
+
+    v0.30 wrote only regular files it recorded, so an unreadable or irregular
+    file cannot hold its token and is left alone."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    with os.fdopen(fd, 'rb') as stream:
+        try:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return False
+            return token.encode() in stream.read(CONFIG_LIMIT+len(token))
+        except OSError:
+            return False
+
+
+def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
+    before, entries = legacy_receipt(receipt_path)
+    if before is None:
+        return None, [], token, set()
     headers = list(recorded_headers(entries))
+    if headers and not token:
+        token = recorded_token(entries)
     if headers and (not token or any(value != prefix+token for value, prefix in headers)):
         failures.append(('legacy-token-unverified',))
     token_bytes = token.encode() if token else None
+    covered = {agent for agent in AGENTS if entries.get(agent)}
     edits = []
     with developer_files(uid, gid):
         for agent, (_, relative, section) in AGENTS.items():
             path = home/relative
+            if agent not in covered:
+                if token and contains_token(path, token):
+                    failures.append(('legacy-token-remains', agent))
+                continue
             try:
                 raw = snapshot(path)
                 if raw is None or not raw.strip():
@@ -287,7 +340,7 @@ def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
                     edits.append((path, payload, raw, info.st_mode & 0o600))
             except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
                 failures.append(('legacy-config', agent))
-    return before, edits
+    return before, edits, token, covered
 
 
 class Refusal(ValueError):
@@ -314,7 +367,9 @@ def refusal_messages(reasons):
             case ('legacy-receipt',):
                 messages.append('invalid legacy telemetry receipt')
             case ('legacy-token-unverified',):
-                messages.append('cannot identify the collector token in the legacy telemetry receipt')
+                messages.append('cannot identify the collector token in the legacy telemetry receipt; '
+                                'write the Bearer token from the legacy home agent configuration to '
+                                '/var/lib/subyard/telemetry/auth.token, then retry')
             case ('legacy-token-remains', agent) if agent in AGENTS:
                 messages.append('collector token remains in legacy '+agent+' configuration')
             case ('legacy-config', agent) if agent in AGENTS:
@@ -384,7 +439,7 @@ def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid
             if enabled:
                 failures.append(('unsafe-policy', agent))
     try:
-        receipt, edits = legacy_edits(receipt_path, home, token, writer, uid, gid, failures)
+        receipt, edits, legacy, covered = legacy_edits(receipt_path, home, token, writer, uid, gid, failures)
     except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
         failures.append(('legacy-receipt',))
     if failures:
@@ -397,10 +452,11 @@ def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid
         with developer_files(uid, gid):
             for path, payload, before, mode in edits:
                 publish(path, payload, before, mode=mode)
-            if token:
+            if legacy:
                 for agent, (_, relative, _) in AGENTS.items():
                     try:
-                        if token.encode() in (snapshot(home/relative) or b''):
+                        if (legacy.encode() in (snapshot(home/relative) or b'') if agent in covered
+                                else contains_token(home/relative, legacy)):
                             failures.append(('legacy-token-remains', agent))
                     except (OSError, ValueError):
                         failures.append(('legacy-config', agent))

@@ -212,10 +212,93 @@ class NativeTest(unittest.TestCase):
             key: {'managed': different_header, 'present': False},
         }}}).encode()
         native.publish(self.receipt, receipt, None)
-        with self.assertRaisesRegex(native.Refusal, 'cannot identify the collector token'):
+        with self.assertRaisesRegex(native.Refusal, 'cannot identify the collector token.*'
+                                    'write the Bearer token .* to /var/lib/subyard/telemetry/auth.token, then retry'):
             self.reconcile([])
         self.assertEqual(path.read_bytes(), payload)
         self.assertEqual(self.receipt.read_bytes(), receipt)
+        # Without a collector token file, headers that disagree still name no token.
+        native.publish(self.receipt, json.dumps({'schema': 1, 'agents': {'claude': {
+            key: {'managed': different_header, 'present': False},
+            'OTEL_EXPORTER_OTLP_METRICS_HEADERS': {'managed': 'Authorization=Bearer '+self.token, 'present': False},
+        }}}).encode(), receipt)
+        self.assertIsNone(native.legacy_token(self.receipt))
+        with self.assertRaisesRegex(native.Refusal, 'cannot identify the collector token'):
+            native.reconcile(self.etc, self.home, self.receipt, [], self.endpoint, None, tomli_w,
+                             self.uid, self.gid, {})
+        self.assertEqual(path.read_bytes(), payload)
+
+    def legacy(self):
+        fixture = Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz'
+        with tarfile.open(fixture) as archive:
+            source = archive.extractfile('config/profiles/telemetry/native.py').read()
+        legacy = {}
+        exec(compile(source, 'v0.30.0/native.py', 'exec'), legacy)
+        return legacy['reconcile']
+
+    def test_legacy_cleanup_recovers_a_missing_collector_token_from_the_receipt(self):
+        legacy = self.legacy()
+        for agents in ([], ['codex']):
+            with self.subTest(agents=agents):
+                codex = self.documents['codex']
+                if self.receipt.exists():
+                    self.receipt.unlink()
+                if codex.exists():
+                    codex.unlink()
+                legacy(self.home, self.receipt, ['codex'], self.endpoint, self.token, tomli_w, self.uid, self.gid)
+                self.assertIn(self.token.encode(), codex.read_bytes())
+                self.assertEqual(native.legacy_token(self.receipt), self.token)
+                missing = (self.etc, self.home, self.receipt, agents, self.endpoint, None, tomli_w,
+                           self.uid, self.gid, {})
+                self.assertFalse(native.reconcile(*missing, True))
+                if agents:
+                    # Apply restores the token file before it writes the policy.
+                    with self.assertRaisesRegex(ValueError, 'collector token required'):
+                        native.reconcile(*missing)
+                    self.assertTrue(self.receipt.exists())
+                    self.reconcile(agents)
+                else:
+                    native.reconcile(*missing)
+                self.assertFalse(self.receipt.exists())
+                self.assertNotIn(self.token.encode(), codex.read_bytes())
+
+    def test_legacy_cleanup_only_scans_files_the_receipt_never_covered(self):
+        legacy = self.legacy()
+        claude = self.documents['claude']
+        claude.parent.mkdir(parents=True)
+        dotfiles = self.root/'dotfiles/settings.json'
+        dotfiles.parent.mkdir()
+        cases = [('symlinked', b'{"env":{}}', True), ('invalid', b'{"env": {,}', False),
+                 ('symlinked token', b'{"x":"'+self.token.encode()+b'"}', True),
+                 ('invalid token', b'{"env": {,} '+self.token.encode(), False)]
+        for disabled in (False, True):
+            for name, payload, symlinked in cases:
+                with self.subTest(disabled=disabled, case=name):
+                    for path in (self.receipt, claude, self.documents['codex']):
+                        if path.exists() or path.is_symlink():
+                            path.unlink()
+                    legacy(self.home, self.receipt, ['codex'], self.endpoint, self.token, tomli_w, self.uid, self.gid)
+                    if disabled:
+                        legacy(self.home, self.receipt, [], self.endpoint, self.token, tomli_w, self.uid, self.gid)
+                        self.assertEqual(json.loads(self.receipt.read_bytes()), {'schema': 1, 'agents': {}})
+                    dotfiles.write_bytes(payload)
+                    if symlinked:
+                        claude.symlink_to(dotfiles)
+                    else:
+                        claude.write_bytes(payload)
+                    agents = [] if disabled else ['codex']
+                    if self.token.encode() in payload:
+                        for check in (True, False):
+                            with self.assertRaisesRegex(native.Refusal, r'\Acollector token remains in legacy claude configuration\Z'):
+                                self.reconcile(agents, check=check)
+                        self.assertTrue(self.receipt.exists())
+                    else:
+                        self.assertFalse(self.reconcile(agents, check=True))
+                        self.reconcile(agents)
+                        self.assertTrue(self.reconcile(agents, check=True))
+                        self.assertFalse(self.receipt.exists())
+                    self.assertEqual(claude.is_symlink(), symlinked)
+                    self.assertEqual(claude.read_bytes(), payload)
 
 
 if __name__ == '__main__':

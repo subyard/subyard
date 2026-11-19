@@ -137,10 +137,11 @@ collection failure cannot fail an agent command or resource lifecycle operation.
 The profile publishes Claude and Codex policy files readable by the developer's primary group
 and removes its policies on disable. It refuses foreign policy files on enable.
 The v0.30 migration uses the legacy receipt once to restore prior home settings and remove
-the collector token. It verifies the resulting home files for token bytes before deleting the
-receipt. Rewritten home files retain at most owner read and write permissions. Subsequent
-profile operations leave home configuration alone. Already-running agents keep their settings
-until restarted. Data from removed integrations remains untouched.
+the collector token. Home files outside the receipt are only scanned for the token. It
+verifies the resulting home files for token bytes before deleting the receipt. Rewritten home
+files retain at most owner read and write permissions. Subsequent profile operations leave
+home configuration alone. Already-running agents keep their settings until restarted. Data
+from removed integrations remains untouched.
 Enabling and deployment are operator actions after development acceptance.
 
 Nested devcontainers use an explicit private mounted socket/limited loopback

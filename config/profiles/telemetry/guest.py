@@ -20,6 +20,9 @@ MARKER = b'subyard-telemetry-v1\n'
 COLLECTOR = 'subyard-telemetry.service'
 MANAGER = 'subyard-telemetry-runs.service'
 BINARY_LIMIT = 64*1024*1024
+# Inventory key for the other digest an interrupted asset update may leave on
+# disk. Path entries stay single digests, which v0.30 can still read.
+REPLACED = 'replaced'
 
 
 def systemctl(*args):
@@ -150,8 +153,13 @@ class Runtime:
         return json.loads(native.snapshot(self.control/'assets.json') or b'{}')
 
     def recorded_digests(self, saved, path):
-        record = saved.get(str(path))
-        return record if isinstance(record, list) else [record]
+        replaced = saved.get(REPLACED)
+        if not isinstance(replaced, dict) or str(path) not in replaced:
+            return [saved.get(str(path))]
+        return [saved.get(str(path)), replaced[str(path)]]
+
+    def encode_inventory(self, recorded, replaced):
+        return (json.dumps({**recorded, REPLACED: replaced} if replaced else recorded)+'\n').encode()
 
     def retained_current(self, saved):
         """A retained path is absent, or exactly what the inventory recorded with its mode."""
@@ -352,12 +360,15 @@ class Runtime:
         token = None
         if self.selected:
             if not (self.data/'auth.token').exists():
-                native.publish(self.data/'auth.token', (secrets.token_hex(32)+'\n').encode(), None, self.uid, self.gid)
+                # v0.30 home documents still carry the token its receipt records.
+                value = native.legacy_token(self.control/'native.json') or secrets.token_hex(32)
+                native.publish(self.data/'auth.token', (value+'\n').encode(), None, self.uid, self.gid)
             token = self.token()
         inventory_path = self.control/'assets.json'
         inventory_before = native.snapshot(inventory_path)
         saved = json.loads(inventory_before)
-        pending = saved.copy()
+        pending = {key: value for key, value in saved.items() if key != REPLACED}
+        replaced = dict(saved.get(REPLACED, {}))
         restart = [unit for unit, fields in before_states.items() if fields.get('ActiveState') == 'active'
                    and not self.running_no_new_privs(fields) and (self.selected or unit == MANAGER)]
         for path in [*self.assets, *self.retained]:
@@ -372,15 +383,17 @@ class Runtime:
             wanted_digest = hashlib.sha256(wanted).hexdigest()
             if before is None:
                 pending[str(path)] = wanted_digest
+                replaced.pop(str(path), None)
             elif before != wanted:
-                pending[str(path)] = [before_digest, wanted_digest]
+                pending[str(path)] = before_digest
+                replaced[str(path)] = wanted_digest
             if path in (self.units/COLLECTOR, self.units/MANAGER) and (before != wanted or len(recorded) > 1) and before is not None:
                 unit = path.name
                 if before_states[unit].get('ActiveState') == 'active' and unit not in restart and (self.selected or unit == MANAGER):
                     restart.append(unit)
         # Record both versions before changing any asset. Keep the pair through
         # daemon-reload so a retry can also accept the previously loaded unit.
-        inventory_pending = (json.dumps(pending)+'\n').encode()
+        inventory_pending = self.encode_inventory(pending, replaced)
         if inventory_pending != inventory_before:
             native.publish(inventory_path, inventory_pending, inventory_before)
         self.reconcile_native(check=False, token=token)
@@ -392,6 +405,13 @@ class Runtime:
         for path, mode in self.retained.items():
             if self.asset_snapshot(path) is not None:
                 os.chmod(path, mode)
+        # Name the assets now on disk first; only the loaded units may differ.
+        published = json.loads(self.inventory())
+        previous = {path: digest for path, digest in [*replaced.items(), *pending.items()]
+                    if published.get(path) not in (None, digest)}
+        inventory_published = self.encode_inventory(published, previous)
+        if inventory_published != inventory_pending:
+            native.publish(inventory_path, inventory_published, inventory_pending)
         systemctl('daemon-reload')
         if self.selected:
             drain = self.data/'drain.json'
@@ -405,8 +425,8 @@ class Runtime:
         if restart:
             systemctl('restart', *restart)
         inventory_after = self.inventory()
-        if inventory_after != inventory_pending:
-            native.publish(inventory_path, inventory_after, inventory_pending)
+        if inventory_after != inventory_published:
+            native.publish(inventory_path, inventory_after, inventory_published)
 
 
 def main():

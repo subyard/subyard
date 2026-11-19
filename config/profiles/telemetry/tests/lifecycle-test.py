@@ -247,23 +247,56 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 legacy_fixture = Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz'
                 with tarfile.open(legacy_fixture) as archive:
                     legacy_native = archive.extractfile('config/profiles/telemetry/native.py').read()
+                # A v0.30 receipt names the token its home documents carry; a
+                # missing token file is restored from it rather than rotated.
+                legacy = {}
+                exec(compile(legacy_native, 'v0.30.0/native.py', 'exec'), legacy)
+                legacy_token = 'c'*64
+                (root/'data/auth.token').unlink()
+                legacy['reconcile'](root/'home', root/'control/native.json', ['codex'], runtime.endpoint, legacy_token,
+                                    guest.tomli_w, runtime.uid, runtime.gid)
+                self.assertIn(legacy_token.encode(), (root/'home/.codex/config.toml').read_bytes())
+                self.assertEqual(runtime.observe()['state'], 'stale')
+                runtime.apply()
+                self.assertEqual(runtime.observe()['state'], 'current')
+                self.assertEqual((root/'data/auth.token').read_text(), legacy_token+'\n')
+                self.assertFalse((root/'control/native.json').exists())
+                self.assertNotIn(legacy_token.encode(), (root/'home/.codex/config.toml').read_bytes())
+                self.assertIn(legacy_token.encode(), (root/'etc/codex/managed_config.toml').read_bytes())
+                shutil.rmtree(root/'home/.codex')
                 publish = guest.native.publish
-                for after_rename in (False, True):
-                    with self.subTest(after_asset_rename=after_rename):
+
+                def v030_accepts():
+                    # v0.30 apply requires each path entry to be the digest on disk.
+                    inventory = json.loads(receipt_path.read_bytes())
+                    return all(inventory.get(str(path)) == hashlib.sha256(path.read_bytes()).hexdigest()
+                               for path in [*runtime.assets, *runtime.retained] if path.exists())
+
+                for stop in ('before-rename', 'after-rename', 'daemon-reload'):
+                    after_rename = stop != 'before-rename'
+                    with self.subTest(stop=stop):
                         installed_native.write_bytes(legacy_native)
                         inventory = json.loads(receipt_path.read_bytes())
                         inventory[str(installed_native)] = hashlib.sha256(legacy_native).hexdigest()
                         receipt_path.write_text(json.dumps(inventory))
 
                         def interrupt(path, *args, **kwargs):
-                            if path == installed_native:
+                            if path == installed_native and stop != 'daemon-reload':
                                 if after_rename:
                                     publish(path, *args, **kwargs)
                                 raise InterruptedError('fixture stopped at native asset replacement')
                             publish(path, *args, **kwargs)
 
-                        with patch.object(guest.native, 'publish', side_effect=interrupt), self.assertRaises(InterruptedError):
+                        def reload(*args):
+                            if args == ('daemon-reload',) and stop == 'daemon-reload':
+                                raise InterruptedError('fixture stopped at daemon reload')
+                            return manager(*args)
+
+                        with patch.object(guest.native, 'publish', side_effect=interrupt), \
+                             patch.object(guest, 'systemctl', side_effect=reload), self.assertRaises(InterruptedError):
                             runtime.apply()
+                        # Only a stop between asset replacements is the accepted rollback residual.
+                        self.assertEqual(v030_accepts(), stop != 'after-rename')
                         self.assertEqual(runtime.observe()['state'], 'stale')
                         retry = off if after_rename else runtime
                         retry.apply()
