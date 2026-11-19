@@ -136,7 +136,8 @@ HOSTED_WORKFLOW="$ROOT/.github/workflows/release-vm.yml"
 for contract in '  workflow_dispatch:' '  actions: read' '    runs-on: ubuntu-24.04' \
   '    timeout-minutes: 350' '      max-parallel: 12' \
   '          run-id: ${{ inputs.candidate_run }}' '          name: release-candidate-${{ inputs.candidate_attempt }}' \
-  '          name: ci-hosted-${{ strategy.job-index }}' '        if: always()'; do
+  '          name: ci-hosted-${{ strategy.job-index }}-${{ github.run_attempt }}' \
+  '      fail-fast: false' '        if: always()'; do
   grep -Fq "$contract" "$HOSTED_WORKFLOW" || fail "hosted workflow lacks exact-candidate contract: $contract"
 done
 ! grep -Eq 'self-hosted|pull_request|secrets[.[]|:[[:space:]]*write' "$HOSTED_WORKFLOW" \
@@ -144,6 +145,10 @@ done
 grep -Fq 'bash dev/ci/periodic-e2e.sh acceptance' "$HOSTED_WORKFLOW" \
   && grep -Fq 'python3 -B dev/ci/release-vm.py' "$HOSTED_WORKFLOW" \
   || fail 'hosted VM workflow must reuse pool setup and verify terminal collector selection'
+# A rerun attempt of an older run is not stale: age counts from the latest attempt's start.
+STALE_WORKFLOW="$ROOT/.github/workflows/stale-runs.yml"
+grep -Fq "select(now - (.startedAt | fromdateiso8601) > 24 * 3600)" "$STALE_WORKFLOW" \
+  && ! grep -Fq createdAt "$STALE_WORKFLOW" || fail 'Stale runs must measure age from the latest attempt start'
 PYTHONDONTWRITEBYTECODE=1 python3 -B - "$ROOT" <<'PY'
 import importlib.util
 import json
@@ -358,6 +363,7 @@ for filename, count in (("release-vm.yml", 1), ("periodic-e2e.yml", 3)):
 a = module("acceptance", "dev/release-acceptance.py")
 assert a.CI_HOSTED_POLICIES == {"911e6588dded3367817a8c21c5a849dd5b945b2e",
                                 "836bbd8229d65149c75731a2f9ea46f2aa45e241",
+                                "14d5180368026f77db2f4890ec5b3d0fd9706a24",
                                 a.git_blob_sha((root / ".github/workflows/release-vm.yml").read_bytes())}
 p = module("periodic", "dev/ci/plan-periodic-checks.py")
 workflow = (root / ".github/workflows/periodic-e2e.yml").read_text()

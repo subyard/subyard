@@ -3519,6 +3519,85 @@ class FullSplitRequirement(unittest.TestCase):
             self.assert_requires_split(receipt)
 
 
+class LiveRetry(unittest.TestCase):
+    def retry(self, output, check):
+        return subprocess.run([sys.executable, "-B", str(root / "dev/release-acceptance.py"), "retry", "--output", str(output), check],
+                              text=True, capture_output=True, timeout=60)
+
+    def raw(self, output, payload):
+        with m.socket.socket(m.socket.AF_UNIX, m.socket.SOCK_STREAM) as client:
+            client.connect(m.control_address(output))
+            client.sendall(payload)
+            return m.read_message(client)
+
+    def test_second_process_retries_one_lane_while_sibling_runs_and_idle_retry_runs_it(self):
+        self.enterContext(patch.object(m, "completed_attempt", return_value={"id": "a" * 32, "sha256": "b" * 64}))
+        self.enterContext(patch.object(m, "SLOT_POLL_SECONDS", 0.2))
+        self.enterContext(patch.object(m, "broker_slots", return_value={1: "available", 2: "available"}))
+        killed, done, long = "profile:sample/killed", "profile:sample/done", "profile:sample/long"
+        checks = {name: ["true"] for name in ("verify", killed, done, long)}
+        receipt = {"version": "test", "profiles": {}, "source_fingerprint": "a" * 64, "candidate_bundle_sha256": "b" * 64,
+                   "external_obligations": {}, "checks": {name: {"status": "pending"} for name in checks}}
+        receipt["checks"]["verify"] = {"status": "passed"}
+        started, release = [], threading.Event()
+        def execute(name, command, root, output, env, slot=None):
+            started.append((name, slot))
+            if name == long:
+                self.assertTrue(release.wait(60))
+            if name == killed and len([item for item in started if item[0] == killed]) == 1:
+                return {"status": "failed", "exit_code": -9, "termination": "signal", "signal": 9}
+            return {"status": "passed", "exit_code": 0}
+        def until(condition):
+            deadline = time.monotonic() + 30
+            while not condition():
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.05)
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            output = Path(temporary)
+            self.enterContext(patch.object(m, "load_bound", return_value=(output, receipt)))
+            self.enterContext(patch.object(m, "commands", return_value=checks))
+            self.enterContext(patch.object(m, "source_fingerprint", return_value="a" * 64))
+            self.enterContext(patch.object(m, "execute", side_effect=execute))
+            outcome = []
+            def collector():
+                with m.control(output), redirect_stdout(io.StringIO()):
+                    outcome.append(m.run_checks(output, (1, 2), [], False, with_vms=True))
+            thread = threading.Thread(target=collector)
+            thread.start()
+            until(lambda: receipt["checks"][killed]["status"] == "failed" and any(name == long for name, _ in started))
+            with self.assertRaisesRegex(ValueError, "already in use"), m.control(output):
+                pass
+            refusals = {done: "refused: status is passed; force it with run --only CHECK --rerun after this collector finishes",
+                        "verify": "refused: not selected by the running collector; retry after it finishes (hosted checks: wait or use retry-hosted)"}
+            for name, reason in refusals.items():
+                result = self.retry(output, name)
+                self.assertEqual((result.returncode, result.stdout.strip()), (1, reason), result.stderr)
+            result = self.retry(output, long)
+            self.assertEqual(result.returncode, 1)
+            self.assertRegex(result.stdout, r"^refused: running on slot-[12]$")
+            self.assertEqual(self.raw(output, b"not json\n"), {"accepted": False, "reason": "refused: malformed request"})
+            self.assertEqual(self.raw(output, b'{"action": ["retry"]}\n')["reason"], "refused: malformed request")
+            with patch.object(m.os, "geteuid", return_value=os.geteuid() + 1):
+                self.assertEqual(self.raw(output, b'{"action": "retry", "check": "x"}\n')["reason"], "refused: request from another user")
+            result = self.retry(output, killed)
+            self.assertEqual((result.returncode, result.stdout.strip()), (0, f"accepted: {killed} queued"), result.stderr)
+            until(lambda: receipt["checks"][killed]["status"] == "passed")
+            self.assertEqual(receipt["checks"][done]["status"], "passed")
+            release.set()
+            thread.join(60)
+            self.assertEqual(outcome, [0])
+            # No runner after the command: the idle path needs a real frozen candidate.
+            self.assertEqual(self.retry(output, killed).returncode, 2)
+            self.assertEqual([name for name, _ in started].count(killed), 2)
+            # With no runner, retry runs the one check under the collector lock.
+            receipt["checks"][killed] = {"status": "failed"}
+            with patch.object(sys, "argv", ["release-acceptance.py", "retry", "--output", str(output), "--slot-count", "1", killed]), \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(m.main(), 0)
+            self.assertEqual(started[-1], (killed, 1))
+            self.assertEqual(receipt["checks"][long]["status"], "passed")
+
+
 class HostedInventory(unittest.TestCase):
     def test_hosted_ids_are_exact_declared_commands_and_unknown_ids_fail_closed(self):
         declared = m.commands(root, "0.0.0", m.profile_inventory(root))
