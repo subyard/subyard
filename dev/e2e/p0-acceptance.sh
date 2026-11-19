@@ -1437,12 +1437,14 @@ capture_final_baseline() {
 }
 
 # A full-matrix lane run alone keeps the full run's capacity monitors and final verification.
-split_lane() { # <lane> <lane function>
-  local lane="$1" function="$2"
+# A lane whose yards select Codex or Claude Code needs Incus AppArmor for the
+# yard's Bubblewrap policy on hosts that restrict unprivileged user namespaces.
+split_lane() { # <lane> <lane function> [platform mode]
+  local lane="$1" function="$2" platform="${3:-fixture-platform}"
   capture_final_baseline
   run_phase capacity-preflight run_vm 1 capacity-preflight
   start_capacity_monitors
-  run_phase "$lane-platform" run_vm 1 fixture-platform
+  run_phase "$lane-platform" run_vm 1 "$platform"
   run_phase "$lane" "$function" 1
   run_phase cleanup cleanup_lane
   run_phase final-verify full_final_verify
@@ -1558,7 +1560,7 @@ case "$P0_LANE" in
     find "$CAPACITY_LOG_DIR" -depth -delete
     CAPACITY_LOG_DIR=''
     ;;
-  source-upgrade) split_lane source-upgrade source_upgrade_lane ;;
+  source-upgrade) split_lane source-upgrade source_upgrade_lane fixture-platform-apparmor ;;
   power-systemd) split_lane power-systemd power_systemd_lane ;;
   init-settings)
     run_phase capacity-preflight run_vm 1 capacity-preflight
