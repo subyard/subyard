@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -71,13 +70,7 @@ func lockDirectory(path string, mode int) (*os.File, error) {
 }
 
 func publishPrivate(path string, data []byte) error {
-	info, err := os.Lstat(path)
-	if err == nil {
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || !info.Mode().IsRegular() || int(st.Uid) != os.Geteuid() || st.Nlink != 1 {
-			return errors.New("unsafe producer state file")
-		}
-	} else if !os.IsNotExist(err) {
+	if err := checkPrivateFile(path, 0600); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	dir := filepath.Dir(path)
@@ -98,7 +91,7 @@ func publishPrivate(path string, data []byte) error {
 	if err = os.Rename(f.Name(), path); err != nil {
 		return err
 	}
-	return syncArchiveDirectory(dir)
+	return syncDirectories(dir)
 }
 
 func (s *Store) publishCapturePolicy(ctx context.Context, policy Policy) error {
@@ -183,12 +176,8 @@ func openSpoolFile(path string, flags int, limit int64) (*os.File, error) {
 		return nil, err
 	}
 	info, err := f.Stat()
-	if err == nil {
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 ||
-			info.Size() > limit || st.Nlink != 1 || int(st.Uid) != os.Geteuid() {
-			err = errInvalidRecord
-		}
+	if err == nil && (checkPrivateInfo(info, 0600) != nil || info.Size() > limit) {
+		err = errInvalidRecord
 	}
 	if err != nil {
 		f.Close()
@@ -289,7 +278,7 @@ func (s *Store) drainSpool(ctx context.Context, policy Policy) error {
 	}
 	// Seal publication can race this listing. Sync after the listing so each
 	// visible sealed name is durable before advancing its checkpoint.
-	if err = syncArchiveDirectory(spool); err != nil {
+	if err = syncDirectories(spool); err != nil {
 		return err
 	}
 	blocked := map[string]bool{}
@@ -413,7 +402,7 @@ func (s *Store) drainSegment(ctx context.Context, f *os.File, name string, polic
 // Sync removals before dropping their checkpoints, including after a crash
 // between unlink and directory sync.
 func (s *Store) reclaimOffsets(spool string) error {
-	if err := syncArchiveDirectory(spool); err != nil {
+	if err := syncDirectories(spool); err != nil {
 		return err
 	}
 	rows, err := s.db.Query("SELECT id FROM spool_offsets WHERE terminal=1 AND id NOT LIKE 'loss:%'")

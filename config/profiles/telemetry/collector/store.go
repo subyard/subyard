@@ -109,6 +109,10 @@ func checkPrivateFile(path string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
+	return checkPrivateInfo(st, mode)
+}
+
+func checkPrivateInfo(st os.FileInfo, mode os.FileMode) error {
 	if !st.Mode().IsRegular() || st.Mode().Perm() != mode {
 		return fmt.Errorf("telemetry file must be regular with mode %04o", mode)
 	}

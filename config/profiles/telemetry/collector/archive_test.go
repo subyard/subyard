@@ -192,8 +192,10 @@ os._exit(0)
 
 func TestArchivePublicationRefusesForeignPaths(t *testing.T) {
 	for name, prepare := range map[string]func(dir string, c *cutover){
-		"staging":  func(dir string, _ *cutover) { testkit.WriteFile(t, filepath.Join(dir, pendingArchive), nil, 0600) },
-		"archive":  func(dir string, c *cutover) { testkit.WriteFile(t, filepath.Join(dir, c.Archive, databaseName), nil, 0400) },
+		"staging": func(dir string, _ *cutover) { testkit.WriteFile(t, filepath.Join(dir, pendingArchive), nil, 0600) },
+		"archive": func(dir string, c *cutover) {
+			testkit.WriteFile(t, filepath.Join(dir, c.Archive, databaseName), nil, 0400)
+		},
 		"database": func(_ string, c *cutover) { c.Inode++ },
 	} {
 		t.Run(name, func(t *testing.T) {

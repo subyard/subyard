@@ -30,10 +30,15 @@ type cutover struct {
 }
 
 func readCutover(dir string) (*cutover, error) {
-	data, err := readLegacyFile(filepath.Join(dir, cutoverFile), 4096)
+	f, err := openSpoolFile(filepath.Join(dir, cutoverFile), os.O_RDONLY, 4096)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, 4097))
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +75,7 @@ func (c cutover) publishArchive(dir string) error {
 		if !c.owns(filepath.Join(archive, databaseName), 0400) {
 			return errors.New("legacy archive collision")
 		}
-		return syncArchiveRename(dir, archive)
+		return syncDirectories(archive, dir)
 	}
 	if c.Inode == 0 {
 		return nil
@@ -102,7 +107,7 @@ func (c cutover) publishArchive(dir string) error {
 		if err = renameArchive(path, stagedDB); err != nil {
 			return err
 		}
-		if err = syncArchiveRename(dir, stage); err != nil {
+		if err = syncDirectories(stage, dir); err != nil {
 			return err
 		}
 	}
@@ -112,7 +117,7 @@ func (c cutover) publishArchive(dir string) error {
 	if err := renameArchive(stage, archive); err != nil {
 		return err
 	}
-	return syncArchiveRename(dir, archive)
+	return syncDirectories(archive, dir)
 }
 
 func (c cutover) checkpointArchive(path string) error {
@@ -189,15 +194,6 @@ func (c cutover) recordHistoricalGaps(db *sql.DB) error {
 	return tx.Commit()
 }
 
-func readLegacyFile(path string, limit int64) ([]byte, error) {
-	f, err := openSpoolFile(path, os.O_RDONLY, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, limit+1))
-}
-
 func retiredOutbox(dir string) (string, error) {
 	path := filepath.Join(dir, "outbox")
 	info, err := os.Lstat(path)
@@ -218,13 +214,6 @@ func renameArchive(from, to string) error {
 	return unix.Renameat2(unix.AT_FDCWD, from, unix.AT_FDCWD, to, unix.RENAME_NOREPLACE)
 }
 
-func syncArchiveRename(dir, archive string) error {
-	if err := syncArchiveDirectory(archive); err != nil {
-		return err
-	}
-	return syncArchiveDirectory(dir)
-}
-
 func sealDatabase(path string) error {
 	sealed := checkPrivateFile(path, 0400) == nil
 	if !sealed {
@@ -242,10 +231,16 @@ func sealDatabase(path string) error {
 	return errors.Join(err, file.Sync(), file.Close())
 }
 
-func syncArchiveDirectory(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open telemetry directory for sync: %w", err)
+// syncDirectories makes renames into and out of each directory durable, in order.
+func syncDirectories(paths ...string) error {
+	for _, path := range paths {
+		dir, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("open telemetry directory for sync: %w", err)
+		}
+		if err = errors.Join(dir.Sync(), dir.Close()); err != nil {
+			return err
+		}
 	}
-	return errors.Join(dir.Sync(), dir.Close())
+	return nil
 }
