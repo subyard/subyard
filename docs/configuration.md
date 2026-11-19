@@ -679,9 +679,9 @@ reconcile any existing Subyard-owned policy after that consumer is deselected.
 The boot loader verifies the two profiles against the Subyard ownership record in
 `/var/lib/subyard/bwrap-apparmor-ownership` before loading either one. Setup repairs missing boot
 registration and missing live profiles. Administrator overrides, unrecorded policy installations,
-and missing or changed owned files require operator review. A release update or `yard migrate`
-refused by this policy names the yard and the policy finding, and points to
-`yard -Y NAME integration status`.
+and missing or changed owned files require operator review. When a release update or
+`yard migrate` refuses while inspecting this policy, the refusal names the yard and the policy
+finding and points to `yard -Y NAME integration status`.
 
 To opt out, remove `codex` from the yard's `CODING_TOOL_INTEGRATIONS`, set `BWRAP_APPARMOR=off`
 in the yard's settings, and run `yard setup` for that yard. Setup refuses this setting before
