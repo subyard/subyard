@@ -442,6 +442,12 @@ wait_guest_ready
   || die 'restored-to-disabled convergence did not cross the guarded restart'
 assert_exact_mask
 docker_probe 'restored-to-disabled convergence'
+guest bash -eu -c '
+  for path in /opt/subyard/bwrap-apparmor /var/lib/subyard/bwrap-apparmor-ownership{,.pending} \
+      /etc/systemd/system/{,multi-user.target.wants/}subyard-bwrap-apparmor.service; do
+    [ ! -e "$path" ] && [ ! -L "$path" ] || exit 1
+  done
+' || die 'empty integration selection published Bubblewrap policy with Incus AppArmor disabled'
 
 assert_failed_probe_preserves_runtime existing-mask
 export SUBYARD_E2E_MALFORMED_APPARMOR=1

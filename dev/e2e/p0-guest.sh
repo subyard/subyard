@@ -1023,7 +1023,11 @@ ensure_owner_incus() {
   # Storage ancestors may belong to root; bootstrap state belongs to the operator.
   ensure_incus "$P0_CAPACITY_PLATFORM_ROOT" '' "$resume_mode" \
     "$P0_CAPACITY_PLATFORM_ROOT/incus/incus/storage"
-  reconcile_p0_incus_apparmor_compat
+  if [ "$resume_mode" = fixture-platform-apparmor ]; then
+    restore_p0_incus_apparmor_default
+  else
+    reconcile_p0_incus_apparmor_compat
+  fi
   assert_incus_daemon_line
 }
 ensure_peer_incus() {
@@ -1988,13 +1992,13 @@ capacity_verify_cleanup() {
     ensure_owner_incus nested-teardown
     bash dev/e2e/nested-teardown-data-boundary.sh
     ;;
-  fixture-platform|real-incus)
+  fixture-platform|fixture-platform-apparmor|real-incus)
     p0_capacity_use_build_cache
     ensure_owner_incus "$MODE"
-    if [ "$MODE" = fixture-platform ]; then
-      bash dev/e2e/p0-real-incus.sh --prepare-only
-    else
+    if [ "$MODE" = real-incus ]; then
       bash dev/e2e/p0-real-incus.sh
+    else
+      bash dev/e2e/p0-real-incus.sh --prepare-only
     fi
     p0_capacity_remove_build_cache
     p0_capacity_remove_root_if_empty

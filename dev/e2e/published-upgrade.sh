@@ -90,7 +90,11 @@ print(hashlib.sha256(raw).hexdigest())'
   || { printf 'published-upgrade: a frozen candidate bundle is required\n' >&2; exit 2; }
 PINS="$(awk -F '\t' -v version="$VERSION" '$1 == version' "$ROOT/dev/e2e/published-upgrade-baselines.tsv")"
 [ -n "$PINS" ] || { printf 'published-upgrade: unpinned baseline %q\n' "$VERSION" >&2; exit 2; }
-bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$(date +%s)"
+platform=fixture-platform
+if [[ "$PUBLISHED_AGENTS" =~ (^|[[:space:]])(claude|codex)($|[[:space:]]) ]]; then
+  platform=fixture-platform-apparmor
+fi
+bash "$ROOT/dev/e2e/p0-guest.sh" "$platform" "$(date +%s)"
 
 # Reuse its marked operator/project lifecycle, host-runtime snapshot and guarded cleanup.
 set -- run "$TOKEN"
