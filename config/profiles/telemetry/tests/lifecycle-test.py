@@ -352,34 +352,60 @@ assert launcher.launch(args) == 0
             self.assertEqual(list(data.glob('archive*')), [archive.parent])
             self.assertNotIn('disable', invoked)
 
+    def developer_elsewhere(self, runtime):
+        """Make the developer another account than the deploying one, as for guest root.
+
+        Ownership changes are recorded instead of applied, so this runs unprivileged."""
+        runtime.uid, runtime.gid = os.getuid()+1, os.getgid()+1
+        owners, fstat = {}, os.fstat
+
+        def changed(fd):
+            info = fstat(fd)
+            return info, (info.st_dev, info.st_ino)
+
+        def fchown(fd, uid, gid):
+            info, key = changed(fd)
+            owners[key] = (info.st_uid if uid == -1 else uid, info.st_gid if gid == -1 else gid)
+
+        def owned(fd):
+            info, key = changed(fd)
+            if key not in owners:
+                return info
+            fields = list(info)
+            fields[stat.ST_UID], fields[stat.ST_GID] = owners[key]
+            return os.stat_result(fields)
+
+        def owner(path):
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                return owned(fd).st_uid
+            finally:
+                os.close(fd)
+
+        stack = ExitStack()
+        stack.owner = owner
+        stack.enter_context(patch.object(guest.os, 'fchown', side_effect=fchown))
+        stack.enter_context(patch.object(guest.os, 'fstat', side_effect=owned))
+        return stack
+
     def test_interrupted_private_directory_creation_is_finished_on_retry(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             runtime = object.__new__(guest.Runtime)
-            runtime.uid, runtime.gid = os.getuid() or 1000, os.getgid()
+            runtime.uid, runtime.gid = os.getuid(), os.getgid()
             runtime.data, runtime.control = Path(name)/'data', Path(name)/'control'
             runtime.operational = Path(name)/'data-private'
             runtime.auth = runtime.operational/'auth.token'
             refusal = 'foreign telemetry operational directory'
-            # mkdir under a restrictive umask before chmod, and as guest root before chown.
+            # mkdir under a restrictive umask stopped before chmod.
             runtime.operational.mkdir(mode=0o500)
-            leftovers = [0o500]
-            if os.getuid() == 0:
-                leftovers.append(0o700)
-            for mode in leftovers:
-                with self.subTest(mode=oct(mode)):
-                    runtime.operational.chmod(mode)
-                    runtime.prepare_auth()
-                    info = runtime.operational.stat()
-                    self.assertEqual((stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid), (0o700, runtime.uid, runtime.gid))
-                    runtime.auth.unlink()
-                    os.chown(runtime.operational, os.getuid(), os.getgid())
+            runtime.prepare_auth()
+            self.assertEqual(stat.S_IMODE(runtime.operational.stat().st_mode), 0o700)
             # Anything else is not our half-made directory.
-            (runtime.operational/'foreign').touch()
             runtime.operational.chmod(0o500)
             with self.assertRaisesRegex(ValueError, refusal):
                 runtime.prepare_auth()
             runtime.operational.chmod(0o700)
-            (runtime.operational/'foreign').unlink()
+            runtime.auth.unlink()
             runtime.operational.chmod(0o750)
             with self.assertRaisesRegex(ValueError, refusal):
                 runtime.prepare_auth()
@@ -388,6 +414,69 @@ assert launcher.launch(args) == 0
             runtime.data.mkdir(mode=0o700)
             with self.assertRaisesRegex(ValueError, refusal):
                 runtime.prepare_auth()
+            # Guest root stopped between mkdir and chown: the leftover belongs to the deployer.
+            runtime.operational.unlink()
+            with self.developer_elsewhere(runtime) as elsewhere:
+                runtime.private_directory(runtime.operational, refusal)
+                self.assertEqual(elsewhere.owner(runtime.operational), runtime.uid)
+                (runtime.data/'foreign').touch()
+                with self.assertRaisesRegex(ValueError, 'foreign data directory'):
+                    runtime.private_directory(runtime.data, 'foreign data directory')
+
+    def test_apply_finishes_or_refuses_the_data_directory_before_the_bearer(self):
+        class Reached(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            runtime = object.__new__(guest.Runtime)
+            runtime.uid, runtime.gid, runtime.selected = os.getuid(), os.getgid(), True
+            runtime.control, runtime.library, data = root/'control', root/'library', root/'state/data'
+            runtime.data = data
+            runtime.reconcile_native = lambda check: True
+            runtime.manager = lambda unit: {}
+
+            def apply():
+                with patch.object(runtime, 'prepare_auth', side_effect=Reached), self.assertRaises(Reached):
+                    runtime.apply()
+
+            apply()
+            self.assertEqual(stat.S_IMODE(data.stat().st_mode), 0o700)
+            data.rmdir()
+            # mkdir under a restrictive umask stopped before chmod.
+            data.mkdir(mode=0o500)
+            apply()
+            self.assertEqual(stat.S_IMODE(data.stat().st_mode), 0o700)
+            for refused in ('file', 'shared', 'kept'):
+                with self.subTest(refused=refused):
+                    data.rmdir()
+                    if refused == 'file':
+                        data.touch(mode=0o700)
+                    else:
+                        data.mkdir(mode=0o750 if refused == 'shared' else 0o500)
+                        if refused == 'kept':
+                            data.chmod(0o700)
+                            (data/'history').touch()
+                            data.chmod(0o500)
+                    with self.assertRaisesRegex(ValueError, 'foreign data directory'):
+                        runtime.apply()
+                    if data.is_dir():
+                        data.chmod(0o700)
+                        for entry in data.iterdir():
+                            entry.unlink()
+                    else:
+                        data.unlink()
+                        data.mkdir()
+            data.rmdir()
+            data.symlink_to(root)
+            with self.assertRaisesRegex(ValueError, 'unsafe data directory'):
+                runtime.apply()
+            data.unlink()
+            # Guest root stopped between mkdir and chown: the leftover belongs to the deployer.
+            data.mkdir(mode=0o700)
+            with self.developer_elsewhere(runtime) as elsewhere:
+                apply()
+                self.assertEqual(elsewhere.owner(data), runtime.uid)
 
     def test_v030_policy_and_store_migrations_resume_after_every_interruption(self):
         profile = Path(guest.__file__).parent
