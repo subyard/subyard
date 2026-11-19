@@ -478,7 +478,7 @@ assert launcher.launch(args) == 0
                 apply()
                 self.assertEqual(elsewhere.owner(data), runtime.uid)
 
-    def test_v030_policy_and_store_migrations_resume_after_every_interruption(self):
+    def test_v030_and_bearer_policy_migrations_resume_after_every_interruption(self):
         profile = Path(guest.__file__).parent
         token = 'c'*64
         with tarfile.open(Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz') as archive:
@@ -585,6 +585,8 @@ for path, value in (
             effects = [(guest.native, 'publish'), (guest, 'systemctl'), (subprocess, 'run'), *((os, name) for name in (
                 'replace', 'rename', 'unlink', 'rmdir', 'mkdir', 'chmod', 'fchmod', 'chown', 'fchown'))]
 
+            previous_policies = False
+
             def check():
                 for top in private:
                     for path in (top.rglob('*') if top.exists() else ()):
@@ -594,9 +596,19 @@ for path, value in (
                 for path in (root/'data/auth.token', root/'data-private/auth.token'):
                     if path.exists():
                         self.assertEqual(path.read_bytes(), token.encode()+b'\n')
+                helper = root/'library/otlp-headers'
                 for parts in guest.native.AGENTS.values():
-                    if (root/'etc'/parts[0]).exists():
-                        self.assertIn(token.encode(), (root/'etc'/parts[0]).read_bytes())
+                    policy = root/'etc'/parts[0]
+                    if not policy.exists():
+                        continue
+                    content = policy.read_bytes()
+                    if str(helper).encode() not in content:
+                        # Only the previous candidate's own policy still holds the bearer.
+                        self.assertTrue(previous_policies and token.encode() in content, policy)
+                        continue
+                    self.assertNotIn(token.encode(), content)
+                    # A policy never names a helper that is not installed yet.
+                    self.assertEqual(helper.read_bytes(), guest.headers_helper(root/'data-private/auth.token'))
 
             def apply(stop):
                 calls, publishing = 0, None
@@ -629,9 +641,20 @@ for path, value in (
                     runtime().apply()
                 return calls
 
+            def copy(source, target):
+                # Retired v0.30 locks have no permissions; copy them with their modes.
+                locked = {path: stat.S_IMODE(path.lstat().st_mode) for path in source.rglob('*')
+                          if stat.S_ISREG(path.lstat().st_mode) and not path.lstat().st_mode & stat.S_IRUSR}
+                for path in locked:
+                    path.chmod(0o400)
+                subprocess.run(['cp', '-a', source, target], check=True)
+                for path, mode in locked.items():
+                    for entry in (path, target/path.relative_to(source)):
+                        entry.chmod(mode)
+
             def upgrade(stop):
                 remove(root)
-                subprocess.run(['cp', '-a', pristine, root], check=True)
+                copy(pristine, root)
                 states.update({unit: dict(ActiveState='active', UnitFileState='enabled') for unit in (guest.COLLECTOR, guest.MANAGER)})
                 if stop:
                     # A child failure as guest root surfaces as a failed developer operation.
@@ -647,8 +670,12 @@ for path, value in (
                 self.assertFalse((root/'data'/guest.CUTOVER).exists())
                 for parts in guest.native.AGENTS.values():
                     policy = current.etc/parts[0]
-                    self.assertIn(token.encode(), policy.read_bytes())
+                    self.assertIn(str(current.helper).encode(), policy.read_bytes())
                     self.assertEqual(stat.S_IMODE(policy.stat().st_mode), 0o640)
+                # Only the private token file names the bearer.
+                named = [path for top in private for path in (top.rglob('*') if top.exists() else ())
+                         if path.is_file() and not path.is_symlink() and os.access(path, os.R_OK) and token.encode() in path.read_bytes()]
+                self.assertEqual(named, [current.auth])
                 self.assertEqual(json.loads(claude.read_bytes()), json.loads(prior[claude]))
                 self.assertEqual(guest.native.parse('codex', codex.read_bytes()), {'analytics': {'enabled': False}})
                 # The legacy store, run, outbox and operational state are kept, once.
@@ -669,6 +696,35 @@ for path, value in (
                 self.assertGreater(steps, 40)
                 for stop in range(1, steps+1):
                     with self.subTest(stop=stop):
+                        upgrade(stop)
+                # The previous candidate kept the bearer in both policies and installed no helper.
+                upgrade(0)
+                current = runtime()
+                for agent, parts in guest.native.AGENTS.items():
+                    document = guest.native.desired(agent, current.endpoint)
+                    if agent == 'claude':
+                        del document['otelHeadersHelper']
+                        for signal in ('LOGS', 'METRICS', 'TRACES'):
+                            document['env']['OTEL_EXPORTER_OTLP_'+signal+'_HEADERS'] = 'Authorization=Bearer '+token
+                    else:
+                        del document['otel']['headers_helper'], document['otel']['headers_helper_refresh_interval_ms']
+                        for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
+                            document['otel'][key]['otlp-http']['headers'] = {'Authorization': 'Bearer '+token}
+                    path = current.etc/parts[0]
+                    guest.native.publish(path, guest.native.policy(agent, document, guest.tomli_w), path.read_bytes(),
+                                         mode=guest.native.POLICY_MODE, policy_gid=current.gid)
+                current.helper.unlink()
+                inventory = json.loads((current.control/'assets.json').read_bytes())
+                del inventory[str(current.helper)]
+                (current.control/'assets.json').write_text(json.dumps(inventory))
+                self.assertEqual(current.observe()['state'], 'stale')
+                remove(pristine)
+                copy(root, pristine)
+                previous_policies = True
+                steps = upgrade(0)
+                self.assertGreater(steps, 5)
+                for stop in range(1, steps+1):
+                    with self.subTest(previous=True, stop=stop):
                         upgrade(stop)
             finally:
                 remove(root)
@@ -935,7 +991,20 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertEqual(runtime.auth.read_text(), legacy_token+'\n')
                 self.assertFalse((root/'control/native.json').exists())
                 self.assertNotIn(legacy_token.encode(), (root/'home/.codex/config.toml').read_bytes())
-                self.assertIn(legacy_token.encode(), (root/'etc/codex/managed_config.toml').read_bytes())
+                self.assertNotIn(legacy_token.encode(), (root/'etc/codex/managed_config.toml').read_bytes())
+                # Rolled back, v0.30 mints a token in its own path; the private one stays.
+                minted = 'd'*64
+                (root/'data/auth.token').write_text(minted+'\n')
+                (root/'data/auth.token').chmod(0o600)
+                legacy['reconcile'](root/'home', root/'control/native.json', ['codex'], runtime.endpoint, minted,
+                                    guest.tomli_w, runtime.uid, runtime.gid)
+                self.assertEqual(runtime.observe()['state'], 'stale')
+                runtime.apply()
+                self.assertEqual(runtime.observe()['state'], 'current')
+                self.assertEqual(runtime.auth.read_text(), legacy_token+'\n')
+                self.assertFalse((root/'control/native.json').exists())
+                self.assertFalse((root/'data/auth.token').exists())
+                self.assertNotIn(minted.encode(), (root/'home/.codex/config.toml').read_bytes())
                 shutil.rmtree(root/'home/.codex')
                 publish = guest.native.publish
 
@@ -982,7 +1051,15 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 registered = False
                 self.assertIn({'parameter': 'telemetry.skill', 'installed': 'absent', 'desired': 'registered'},
                               runtime.observe()['diagnostics'])
-                runtime.apply()
+                # A Codex without the headers helper is only named among drift diagnostics.
+                old_codex = root/'codex'
+                old_codex.symlink_to('releases/0.169.0/bin/codex')
+                helper_diagnostic = {'parameter': 'telemetry.codex-headers-helper', 'installed': 'missing', 'desired': 'present'}
+                with patch.object(guest, 'CODEX_LINK', old_codex):
+                    self.assertIn(helper_diagnostic, runtime.observe()['diagnostics'])
+                    runtime.apply()
+                    self.assertEqual(runtime.observe()['state'], 'current')
+                self.assertNotIn(helper_diagnostic, runtime.observe().get('diagnostics', []))
                 self.assertTrue(registered)
                 for unit in (guest.COLLECTOR, guest.MANAGER):
                     states[unit].update(ActiveState='inactive', Job='17')

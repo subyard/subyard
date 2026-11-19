@@ -3,6 +3,6 @@
   "selected_provision_only": true,
   "owner_service": "profile.sh",
   "startup_readiness": "profile.sh",
-  "runtime": {"activation_id": "telemetry-runtime", "handler": "runtime.sh"},
+  "runtime": {"activation_id": "telemetry-runtime-v2", "handler": "runtime.sh"},
   "native": [{"package": "cmd/telemetry", "path": "bin/subyard-telemetry"}]
 }

@@ -8,12 +8,15 @@ import stat
 import sys
 import tomllib
 
+HELPER = '/usr/local/lib/subyard-telemetry/otlp-headers'
+
 
 def main():
     phase, = sys.argv[1:]
     assert os.getuid() == 0 and Path('/run/subyard-e2e-lease.json').is_file()
     account = pwd.getpwnam('dev')
     home = Path(account.pw_dir)
+    token = Path('/var/lib/subyard/telemetry-private/auth.token').read_bytes().strip() if phase == 'enabled' else None
     for relative, policy, initial, parse, section in (
         ('.claude/settings.json', '/etc/claude-code/managed-settings.d/60-subyard-telemetry.json',
          b'{"env":{"OTEL_LOGS_EXPORTER":"console"}}\n', json.loads, 'env'),
@@ -41,11 +44,18 @@ def main():
             assert phase == 'enabled'
             info = managed.stat()
             assert (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) == (0, account.pw_gid, 0o640)
-            fields = parse(managed.read_bytes())[section]
+            content = managed.read_bytes()
+            # Exporters read the bearer through the root-owned helper only.
+            assert token not in content and b'Authorization' not in content
+            helper = Path(HELPER).stat()
+            assert (helper.st_uid, stat.S_IMODE(helper.st_mode)) == (0, 0o755)
+            document = parse(content)
+            fields = document[section]
             if section == 'env':
                 assert fields['OTEL_LOGS_EXPORTER'] == 'otlp'
+                assert document['otelHeadersHelper'] == HELPER
             else:
-                assert fields['log_user_prompt'] is False
+                assert fields['log_user_prompt'] is False and fields['headers_helper'] == HELPER
                 for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
                     assert fields[key]['otlp-http']['tls'] == {}
     if phase == 'disabled':

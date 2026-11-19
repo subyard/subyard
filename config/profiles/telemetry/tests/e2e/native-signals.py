@@ -679,7 +679,7 @@ def exercise(args):
             threading.Thread(target=provider.serve_forever, daemon=True).start()
             config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'sandbox_mode': 'danger-full-access', 'approval_policy': 'on-request',
                       'features': {'plugins': False, 'unified_exec': False},
-                      'otel': native.desired('codex', 'http://127.0.0.1:14318', token), 'analytics': {'enabled': True},
+                      'otel': native.desired('codex', 'http://127.0.0.1:14318')['otel'], 'analytics': {'enabled': True},
                       'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                           'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
             path = state/'codex/config.toml'
@@ -696,8 +696,10 @@ def exercise(args):
             provider = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ClaudeProvider)
             provider.requests, provider.command = 0, tool_command
             threading.Thread(target=provider.serve_forever, daemon=True).start()
-            env.update(native.desired('claude', 'http://127.0.0.1:14318', token))
-            native.publish(state/'claude/settings.json', (json.dumps({'env': native.desired('claude', 'http://127.0.0.1:14318', token)})+'\n').encode(), None)
+            # The installed helper supplies Authorization; the bearer stays out of both documents.
+            settings = native.desired('claude', 'http://127.0.0.1:14318')
+            env.update(settings['env'])
+            native.publish(state/'claude/settings.json', (json.dumps(settings)+'\n').encode(), None)
             env.update(ANTHROPIC_BASE_URL=f'http://127.0.0.1:{provider.server_port}', ANTHROPIC_API_KEY='local-fixture-only',
                        DISABLE_AUTOUPDATER='1', CLAUDE_CODE_PROPAGATE_TRACEPARENT='1')
             try:
@@ -751,7 +753,7 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
               'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                   'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
     if not system_policy:
-        config['otel'] = native.desired('codex', endpoint, token)
+        config['otel'] = native.desired('codex', endpoint)['otel']
     path = codex_home/'config.toml'
     native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
     environment = dict(env, HOME=str(home), CODEX_HOME=str(codex_home), TERM='xterm-256color')
@@ -850,12 +852,12 @@ def main():
               'analytics': {'enabled': True}, # Explicit isolated fixture opt-in; production intent remains untouched.
               'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{provider.server_port}/v1',
                   'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
-    # A competing user exporter exercises the managed configuration's recursive merge.
-    config['otel'] = (native.desired('codex', 'http://127.0.0.1:1', 'fixture-user-header')
-                      if args.system_policy else native.desired('codex', endpoint, token))
+    # A competing user exporter, helper and static header exercise the managed configuration's recursive merge.
+    config['otel'] = native.desired('codex', 'http://127.0.0.1:1' if args.system_policy else endpoint,
+                                    '/bin/false' if args.system_policy else native.HELPER)['otel']
     if args.system_policy:
         for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
-            config['otel'][key]['otlp-http']['protocol'] = 'json'
+            config['otel'][key]['otlp-http'].update(protocol='json', headers={'Authorization': 'Bearer fixture-user-header'})
     path = state/'codex/config.toml'
     native.publish(path, tomli_w.dumps(config).encode(), native.snapshot(path))
     app = codex_app_class(fixture.App)(['subyard-telemetry-run', '--agent', 'codex', '--scope-mode', 'require', '--shared-backend', '--', str(binaries/'codex'), 'app-server'], env, state/'project')
@@ -888,11 +890,12 @@ def main():
     local = dict(env, ANTHROPIC_BASE_URL=f'http://127.0.0.1:{server.server_port}',
                  ANTHROPIC_API_KEY='local-fixture-only', DISABLE_AUTOUPDATER='1', CLAUDE_CODE_PROPAGATE_TRACEPARENT='1')
     if args.system_policy:
-        claude_env = {'OTEL_LOGS_EXPORTER': 'none'}
+        # The managed policy's env and helper take precedence over these user settings.
+        settings = {'env': {'OTEL_LOGS_EXPORTER': 'none'}, 'otelHeadersHelper': '/bin/false'}
     else:
-        claude_env = native.desired('claude', endpoint, token)
-        local.update(claude_env)
-    native.publish(state/'claude/settings.json', (json.dumps({'env': claude_env})+'\n').encode(), None)
+        settings = native.desired('claude', endpoint)
+        local.update(settings['env'])
+    native.publish(state/'claude/settings.json', (json.dumps(settings)+'\n').encode(), None)
     try:
         result = claude_command(['subyard-telemetry-run', '--agent', 'claude', '--scope-mode', 'require', '--', str(binaries/'claude'),
                                  '-p', 'Return probe.', '--output-format', 'stream-json', '--verbose', '--max-turns', '1'],

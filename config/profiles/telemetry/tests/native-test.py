@@ -41,10 +41,14 @@ class NativeTest(unittest.TestCase):
         claude = self.paths['claude']
         otel = native.parse('codex', codex.read_bytes())['otel']
         for key, signal in (('exporter', 'logs'), ('metrics_exporter', 'metrics'), ('trace_exporter', 'traces')):
-            self.assertEqual(otel[key]['otlp-http'], {'endpoint': self.endpoint+'/v1/'+signal, 'protocol': 'binary',
-                                                     'headers': {'Authorization': 'Bearer '+self.token}, 'tls': {}})
-        env = native.parse('claude', claude.read_bytes())['env']
-        self.assertEqual(env['OTEL_EXPORTER_OTLP_LOGS_HEADERS'], 'Authorization=Bearer '+self.token)
+            self.assertEqual(otel[key]['otlp-http'], {'endpoint': self.endpoint+'/v1/'+signal, 'protocol': 'binary', 'tls': {}})
+        self.assertEqual((otel['headers_helper'], otel['headers_helper_refresh_interval_ms']), (native.HELPER, 300000))
+        document = native.parse('claude', claude.read_bytes())
+        self.assertEqual(document['otelHeadersHelper'], native.HELPER)
+        self.assertFalse([key for key in document['env'] if 'HEADERS' in key])
+        # The bearer stays in the private token file; no policy names it.
+        for path in (claude, codex):
+            self.assertNotIn(self.token.encode(), path.read_bytes())
         self.assertFalse(otel['log_user_prompt'])
         self.assertNotIn('analytics', native.parse('codex', codex.read_bytes()))
         for path in (claude, codex):
@@ -117,12 +121,16 @@ class NativeTest(unittest.TestCase):
                      'codex': b'[otel]\nlog_user_prompt = false\n'}
         self.reconcile(agents, templates=templates)
         self.assertTrue(self.reconcile(agents, check=True, templates=templates))
-        templates = {'claude': b'{"env":{"OTEL_LOGS_EXPORTER":"private-template-value"}}',
-                     'codex': b'[otel.exporter.otlp-http.headers]\nAuthorization = "private-template-value"\n'
+        # The helper's Authorization replaces a static template header.
+        templates['codex'] += b'[otel.exporter.otlp-http.headers]\nAuthorization = "private-template-value"\n'
+        self.reconcile(agents, templates=templates)
+        self.assertTrue(self.reconcile(agents, check=True, templates=templates))
+        templates = {'claude': b'{"env":{"OTEL_LOGS_EXPORTER":"private-template-value"},"otelHeadersHelper":"/private-template-value"}',
+                     'codex': b'[otel]\nheaders_helper = "/private-template-value"\n'
                               b'[otel.exporter.otlp-http.tls]\nca-certificate = "/private.pem"\n'}
-        with self.assertRaisesRegex(native.Refusal, r'/env/OTEL_LOGS_EXPORTER.*?/otel/exporter/otlp-http/headers/Authorization') as error:
+        with self.assertRaisesRegex(native.Refusal, r'claude template at /env/OTEL_LOGS_EXPORTER and 1 more field\(s\); '
+                                    r'.*codex template at /otel/headers_helper and 1 more field\(s\)\Z') as error:
             self.reconcile(agents, templates=templates)
-        self.assertIn('and 1 more field(s)', str(error.exception))
         self.assertNotIn('private-template-value', str(error.exception))
         self.assertNotIn(self.token, str(error.exception))
 
@@ -177,9 +185,7 @@ class NativeTest(unittest.TestCase):
         self.assertTrue(native.semantic_equal(native.parse('codex', codex.read_bytes()), expected))
         self.assertEqual(stat.S_IMODE(codex.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(claude.stat().st_mode), 0o400)
-        for path in self.paths.values():
-            self.assertTrue(self.token.encode() in path.read_bytes())
-        for path in self.documents.values():
+        for path in [*self.paths.values(), *self.documents.values()]:
             self.assertFalse(self.token.encode() in path.read_bytes())
 
     def test_legacy_cleanup_refuses_token_left_in_comments_or_shadowed_members(self):
@@ -189,8 +195,9 @@ class NativeTest(unittest.TestCase):
             (codex, b'# Authorization = "Bearer '+self.token.encode()+b'"\n[otel]\nlog_user_prompt = true\n'),
         ):
             native.publish(path, payload, None, mode=0o644)
+        legacy = self.legacy_module()
         entries = {agent: {key: {'managed': value, 'present': False}
-                           for key, value in native.desired(agent, self.endpoint, self.token).items()}
+                           for key, value in legacy['desired'](agent, self.endpoint, self.token).items()}
                    for agent in native.AGENTS}
         receipt = json.dumps({'schema': 1, 'agents': entries}).encode()
         native.publish(self.receipt, receipt, None)
@@ -202,7 +209,35 @@ class NativeTest(unittest.TestCase):
         self.assertIn(self.token.encode(), claude.read_bytes())
         self.assertIn(self.token.encode(), codex.read_bytes())
 
-    def test_legacy_cleanup_does_not_infer_a_token_from_the_receipt(self):
+    def test_rollback_round_trip_cleans_the_token_the_v030_receipt_names(self):
+        # Rolled back, v0.30 mints its own token while the private one stays. The
+        # next upgrade removes what the receipt recorded and keeps the private token.
+        legacy, minted = self.legacy(), 'b'*64
+        claude, codex = (self.documents[agent] for agent in native.AGENTS)
+        native.publish(codex, b'[analytics]\nenabled = false\n', None)
+        copied = b'{"copied":"'+minted.encode()+b'"}'
+        for agents in ([], ['claude', 'codex']):
+            with self.subTest(agents=agents):
+                legacy(self.home, self.receipt, ['claude', 'codex'], self.endpoint, minted, tomli_w, self.uid, self.gid)
+                self.assertEqual(native.legacy_token(self.receipt), minted)
+                self.assertFalse(self.reconcile(agents, check=True))
+                self.reconcile(agents)
+                self.assertTrue(self.reconcile(agents, check=True))
+                self.assertFalse(self.receipt.exists())
+                self.assertNotIn(minted.encode(), claude.read_bytes())
+                self.assertEqual(codex.read_bytes(), b'[analytics]\nenabled = false\n')
+                for path in self.paths.values():
+                    self.assertEqual(path.exists(), bool(agents))
+        # A file the receipt never covered is still scanned for the recorded token.
+        legacy(self.home, self.receipt, ['codex'], self.endpoint, minted, tomli_w, self.uid, self.gid)
+        native.publish(claude, copied, native.snapshot(claude))
+        for check in (True, False):
+            with self.assertRaisesRegex(native.Refusal, r'\Acollector token remains in legacy claude configuration\Z'):
+                self.reconcile(['claude', 'codex'], check=check)
+        self.assertTrue(self.receipt.exists())
+        self.assertEqual(claude.read_bytes(), copied)
+
+    def test_legacy_cleanup_refuses_headers_that_name_no_single_token(self):
         path = self.documents['claude']
         key = 'OTEL_EXPORTER_OTLP_LOGS_HEADERS'
         different_header = 'Authorization=Bearer '+'b'*64
@@ -210,31 +245,30 @@ class NativeTest(unittest.TestCase):
         native.publish(path, payload, None)
         receipt = json.dumps({'schema': 1, 'agents': {'claude': {
             key: {'managed': different_header, 'present': False},
+            'OTEL_EXPORTER_OTLP_METRICS_HEADERS': {'managed': 'Authorization=Bearer '+self.token, 'present': False},
         }}}).encode()
         native.publish(self.receipt, receipt, None)
-        with self.assertRaisesRegex(native.Refusal, 'cannot identify the collector token.*'
-                                    'write the Bearer token .* to /var/lib/subyard/telemetry-private/auth.token, .* then retry'):
-            self.reconcile([])
-        self.assertEqual(path.read_bytes(), payload)
-        self.assertEqual(self.receipt.read_bytes(), receipt)
-        # Without a collector token file, headers that disagree still name no token.
-        native.publish(self.receipt, json.dumps({'schema': 1, 'agents': {'claude': {
-            key: {'managed': different_header, 'present': False},
-            'OTEL_EXPORTER_OTLP_METRICS_HEADERS': {'managed': 'Authorization=Bearer '+self.token, 'present': False},
-        }}}).encode(), receipt)
         self.assertIsNone(native.legacy_token(self.receipt))
-        with self.assertRaisesRegex(native.Refusal, 'cannot identify the collector token'):
-            native.reconcile(self.etc, self.home, self.receipt, [], self.endpoint, None, tomli_w,
-                             self.uid, self.gid, {})
-        self.assertEqual(path.read_bytes(), payload)
+        for token in (self.token, None):
+            with self.subTest(token=bool(token)), self.assertRaisesRegex(
+                    native.Refusal, r'\Athe legacy telemetry receipt names no single collector token; remove the collector Bearer '
+                                    r'tokens from the legacy home agent configurations, then remove the receipt '
+                                    r'/var/lib/subyard/telemetry-control/native.json and retry\Z'):
+                native.reconcile(self.etc, self.home, self.receipt, [], self.endpoint, token, tomli_w,
+                                 self.uid, self.gid, {})
+            self.assertEqual(path.read_bytes(), payload)
+            self.assertEqual(self.receipt.read_bytes(), receipt)
 
-    def legacy(self):
+    def legacy_module(self):
         fixture = Path(__file__).with_name('fixtures')/'v0.30.0-native.py.tar.gz'
         with tarfile.open(fixture) as archive:
             source = archive.extractfile('config/profiles/telemetry/native.py').read()
         legacy = {}
         exec(compile(source, 'v0.30.0/native.py', 'exec'), legacy)
-        return legacy['reconcile']
+        return legacy
+
+    def legacy(self):
+        return self.legacy_module()['reconcile']
 
     def test_legacy_cleanup_recovers_a_missing_collector_token_from_the_receipt(self):
         legacy = self.legacy()

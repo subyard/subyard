@@ -36,14 +36,25 @@ workloads.
 Telemetry writes whole policy files for selected coding-tool integrations. Both are
 `0640`, owned by root and readable by the developer's primary group.
 
-- Claude reads an `env` block from `/etc/claude-code/managed-settings.d/60-subyard-telemetry.json`.
-- Codex reads the HTTP endpoint, protocol, Authorization header and an empty TLS table for
-  each of logs, metrics and traces from `/etc/codex/managed_config.toml`. Codex merges this
-  layer recursively. Lower layers can still supply extra headers and TLS fields. A competing
-  gRPC exporter can make the merged definition invalid, and `otel.headers_helper` can replace
-  static Authorization. Codex system requirements can replace the entire exporter definition.
-  The Codex provisioner owns and verifies the requirements file, while telemetry has its
-  own enable and disable lifecycle.
+- Claude reads an `env` block and `otelHeadersHelper` from
+  `/etc/claude-code/managed-settings.d/60-subyard-telemetry.json`.
+- Codex reads `otel.headers_helper` and, for each of logs, metrics and traces, the HTTP
+  endpoint, protocol and an empty TLS table from `/etc/codex/managed_config.toml`. Codex
+  merges this layer recursively. Lower layers can still supply extra headers and TLS fields.
+  A competing gRPC exporter can make the merged definition invalid. Codex system requirements
+  can replace the entire exporter definition. The Codex provisioner owns and verifies the
+  requirements file, while telemetry has its own enable and disable lifecycle.
+
+Neither policy contains the collector bearer. Both name
+`/usr/local/lib/subyard-telemetry/otlp-headers`, a root-owned `0755` helper. The clients run
+it as the developer; it reads the private token file and prints only the `Authorization`
+header, which replaces a static `Authorization` from a lower layer. Its errors are fixed text
+that never contains the token. Export fails closed: without a valid token file the helper
+fails and the clients send nothing. The run identifier stays a static header. Codex reads the
+helper from 0.170.0; an older Codex starts normally but exports without Authorization, and
+the receiver rejects it. The Codex provisioner installs the latest release; when telemetry
+reports drift, its diagnostics name a provisioned older Codex as
+`telemetry.codex-headers-helper`.
 
 The policy overrides user values in the fields it defines while telemetry is enabled.
 Telemetry refuses a foreign file at either managed path on enable and reports fields where a
@@ -55,16 +66,19 @@ are unchanged, preserves later edits and removes leaves containing the exact col
 Rewritten home documents retain at most owner read and write permissions. A home file the
 receipt never covered is only scanned for the token bytes. The upgrade keeps the receipt if
 any resulting home file still contains them. The collector token stays the same; a missing
-token file is restored from the token every recorded header names. Subsequent telemetry
-updates and disable operations leave home documents alone.
+token file is restored from the token every recorded header names. If the receipt names a
+different token than the private file, as after a rollback to v0.30 that minted its own, the
+upgrade removes the recorded token and keeps the private one. Subsequent telemetry updates
+and disable operations leave home documents alone. Policy files that still contain the
+bearer are rewritten without it; the helper is installed before a policy names it.
 
-Rolling back to v0.28–v0.30 leaves both system policy files behind if they were installed.
-Those releases can also reintroduce the collector token into home documents, where an
-older template writer can publish it with mode `0644`. If an upgrade stopped while it was
-replacing collector assets, finish it before rolling back: those releases refuse a collector
-asset that the inventory does not record. Process environment settings such
-as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy. Claude ignores
-local drop-ins when server-managed settings apply.
+Rollback to v0.28–v0.30 is refused while telemetry is installed in a local yard, including
+after it is disabled with its data retained. Those releases put the collector token into home
+documents, where an older template writer can publish it with mode `0644`. The telemetry
+runtime's activation identity changed at this boundary, so `yard update --rollback` reports
+that the retained release cannot verify installed runtime activation. Process environment
+settings such as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy.
+Claude ignores local drop-ins when server-managed settings apply.
 
 Data, services and routes from removed integrations remain untouched. Already-running
 agents continue with their existing configuration; restart them normally when collection
