@@ -700,7 +700,7 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		if err != nil && !errors.As(err, &completed) {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
-		type conflictRecord struct{ Reason, Path, Detail string }
+		type conflictRecord struct{ Reason, Path, Detail guestText }
 		var report struct {
 			conflictRecord
 			Conflicts []conflictRecord      `json:"conflicts"`
@@ -711,58 +711,61 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
 		conflicts := report.Conflicts
-		if len(conflicts) == 0 && report.Reason != "" {
+		if len(conflicts) == 0 && report.Reason.raw != nil && !report.Reason.Matches("") {
 			conflicts = []conflictRecord{report.conflictRecord}
 		}
 		causes := []error{}
 		if len(conflicts) == 0 {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
+		// Only declared paths are rendered: the legacy catalog and the desired entries.
+		declared := slices.Clone(legacy)
+		for _, entry := range entries {
+			declared = append(declared, entry.Path)
+		}
 		unrecognized := 0
 		for _, conflict := range conflicts {
 			cause := func() error {
-				knownPath := slices.Contains(legacy, conflict.Path)
-				for _, entry := range entries {
-					knownPath = knownPath || entry.Path == conflict.Path
-				}
-				switch conflict.Reason {
+				path, knownPath := matchDeclared(conflict.Path, declared...)
+				reason, _ := matchDeclared(conflict.Reason, "artifact evidence unavailable", "owned artifact drift", "unowned selected artifact", "legacy integration artifact has no ownership evidence")
+				switch reason {
 				case "artifact evidence unavailable":
 					if knownPath {
 						return integrationOwnershipError{
-							message: fmt.Sprintf("integration ownership evidence in yard %s is unavailable at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Path),
-							retry:   shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path}),
+							message: fmt.Sprintf("integration ownership evidence in yard %s is unavailable at %q; managed artifacts were preserved", runtime.Yard.YardName, path),
+							retry:   shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", path}),
 						}
 					}
 				case "owned artifact drift", "unowned selected artifact", "legacy integration artifact has no ownership evidence":
-					if knownPath && conflict.Path != "" {
-						if conflict.Reason == "unowned selected artifact" &&
-							(conflict.Path == "/usr/local/libexec/subyard/projects-changed" || conflict.Path == "/etc/subyard/agent-project-hooks") {
+					if knownPath && path != "" {
+						if reason == "unowned selected artifact" &&
+							(path == "/usr/local/libexec/subyard/projects-changed" || path == "/etc/subyard/agent-project-hooks") {
 							detail := ""
-							probe := []string{"namei", "-l", "--", conflict.Path}
-							switch conflict.Detail {
-							case "unrecognized core content":
+							probe := []string{"namei", "-l", "--", path}
+							switch {
+							case conflict.Detail.Matches("unrecognized core content"):
 								detail = "contents do not match the current or a recognized legacy Subyard file; compare with the shipped file before replacing it"
-								probe = []string{"sha256sum", "--", conflict.Path}
-							case "unsafe core metadata":
+								probe = []string{"sha256sum", "--", path}
+							case conflict.Detail.Matches("unsafe core metadata"):
 								detail = "file must be regular, owned by root:root, with mode 0755 for projects-changed or 0644 for agent-project-hooks"
-							case "unsafe core ancestor":
+							case conflict.Detail.Matches("unsafe core ancestor"):
 								detail = "parent directories must be owned by root:root and not writable by group or others"
 							}
 							if detail != "" {
 								command := append([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--"}, probe...)
 								return integrationOwnershipError{
-									message: fmt.Sprintf("integration ownership conflict in yard %s at %q: %s. File preserved.", runtime.Yard.YardName, conflict.Path, detail),
+									message: fmt.Sprintf("integration ownership conflict in yard %s at %q: %s. File preserved.", runtime.Yard.YardName, path, detail),
 									retry:   shellquote.Command(command),
 								}
 							}
 						}
-						retry := runtime.preserveSiblingCommand(conflict.Path, "preserved")
-						if !strings.HasPrefix(conflict.Path, home+"/") {
-							retry = shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", conflict.Path})
+						retry := runtime.preserveSiblingCommand(path, "preserved")
+						if !strings.HasPrefix(path, home+"/") {
+							retry = shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "namei", "-l", "--", path})
 						}
 						return integrationOwnershipError{
-							pendingConfiguration: strings.HasPrefix(conflict.Path, home+"/"),
-							message:              fmt.Sprintf("integration ownership conflict in yard %s: %s at %q; managed artifacts were preserved", runtime.Yard.YardName, conflict.Reason, conflict.Path),
+							pendingConfiguration: strings.HasPrefix(path, home+"/"),
+							message:              fmt.Sprintf("integration ownership conflict in yard %s: %s at %q; managed artifacts were preserved", runtime.Yard.YardName, reason, path),
 							retry:                retry,
 						}
 					}

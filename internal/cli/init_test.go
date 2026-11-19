@@ -1340,7 +1340,7 @@ func TestNativeInitRefusesBubblewrapOptOutWithCodexBeforeChanges(t *testing.T) {
 }
 
 func TestNativeInitReportsPolicyConflictWithBubblewrapOptOut(t *testing.T) {
-	const conflict = "Bubblewrap AppArmor: modified policy loader"
+	const conflict = "Bubblewrap AppArmor: the owned boot loader /opt/subyard/bwrap-apparmor/load is missing or changed. Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
 	root, environment, _ := nativeFixture(t)
 	dir := filepath.Join(root, "state", "yards", "default")
 	if err := os.MkdirAll(dir, 0700); err != nil {

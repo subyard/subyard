@@ -478,7 +478,7 @@ func TestActivationProjectsNativeOwnershipExitError(t *testing.T) {
 
 func TestActivationProjectsBubblewrapPolicyRefusal(t *testing.T) {
 	root, _, _, _ := configCommandFixture(t)
-	const refusal = "Bubblewrap AppArmor: AppArmor is not in a yard policy namespace. Inspect the yard policy."
+	const refusal = "Bubblewrap AppArmor: AppArmor is not in a yard policy namespace. Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
 	fake := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}, ExecSteps: []testkit.IncusExecStep{
 		{},
 		{Result: ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false}`)}},

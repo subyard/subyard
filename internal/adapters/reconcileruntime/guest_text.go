@@ -78,6 +78,23 @@ func (text guestText) childWithPrefix(directory, prefix string) bool {
 	return found && strings.HasPrefix(name, prefix) && !strings.Contains(name, "/")
 }
 
+// wraps reports a value that starts with prefix and ends with suffix.
+func (text guestText) wraps(prefix, suffix string) bool {
+	return text.raw != nil && len(*text.raw) >= len(prefix)+len(suffix) &&
+		strings.HasPrefix(*text.raw, prefix) && strings.HasSuffix(*text.raw, suffix)
+}
+
+// guestLines holds each line of raw guest output as guest text.
+func guestLines(output []byte) []guestText {
+	var lines []guestText
+	for _, line := range strings.Split(string(output), "\n") {
+		if len(line) <= guestTextLimit {
+			lines = append(lines, guestText{raw: &line})
+		}
+	}
+	return lines
+}
+
 // guestEcho returns the value only to the guest program that reported it, as
 // the operand of an operation on that guest's own record. It is never
 // formatted, logged, compared with host text or returned to a caller.

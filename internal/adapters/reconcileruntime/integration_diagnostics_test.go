@@ -30,7 +30,7 @@ func TestIntegrationPlanReportsStructuredConfigAndBubblewrapRefusals(t *testing.
 	incus.ExecSteps[1].Result.Stdout = []byte(`{"fingerprint":"` + strings.Repeat("a", 64) + `"}`)
 	incus.ExecSteps[2].Result = ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: invalid current TOML\n")}
 	incus.ExecSteps[2].Err = &ports.GuestExitError{Code: 2}
-	const policyRefusal = "Bubblewrap AppArmor: the owned policy directory is missing or changed"
+	const policyRefusal = bubblewrapRefusalPrefix + "the owned policy directory /opt/subyard/bwrap-apparmor is missing or changed" + bubblewrapRefusalSuffix
 	incus.ExecSteps[4].Result = ports.InstanceExecResult{ExitCode: 1, Stderr: []byte(policyRefusal + "\n")}
 	runtime.Incus, runtime.Executor = incus, incus
 	_, err := runtime.IntegrationPlan(context.Background())

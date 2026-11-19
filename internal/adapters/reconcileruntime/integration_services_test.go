@@ -16,7 +16,7 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 	incus := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{
 		ExitCode: 1,
 		Stdout:   []byte("synthetic-private-stdout"),
-		Stderr:   []byte("synthetic-private-stderr\nsubyard-integration-conflict:ccusage\nBubblewrap AppArmor: the owned policy directory is missing\n"),
+		Stderr:   []byte("synthetic-private-stderr\nsubyard-integration-conflict:ccusage\n" + bubblewrapRefusalPrefix + "the owned policy directory /opt/subyard/bwrap-apparmor is missing or changed" + bubblewrapRefusalSuffix + "\n"),
 	}, Err: errors.New("guest command exited with status 1: synthetic-private-cause")}}}
 	runtime := Runtime{Executor: incus, Yard: domain.Context{YardName: "example"}}
 	fingerprint, changed, err := runtime.integrationServices(context.Background(), "observe")
@@ -42,7 +42,7 @@ func TestIntegrationServiceConflictDiagnostics(t *testing.T) {
 	if message = err.Error(); strings.Contains(message, "synthetic-private") || strings.Contains(message, "--yes") {
 		t.Fatalf("diagnostic exposed raw output or bypassed confirmation: %s", message)
 	}
-	if !strings.Contains(message, "Bubblewrap AppArmor: the owned policy directory is missing") {
+	if !strings.Contains(message, "Bubblewrap AppArmor: the owned policy directory /opt/subyard/bwrap-apparmor is missing or changed. Inspect") {
 		t.Fatalf("independent Bubblewrap refusal was lost: %s", message)
 	}
 }
@@ -72,18 +72,31 @@ func TestIntegrationServiceUnknownErrorsStaySanitized(t *testing.T) {
 
 func TestBubblewrapPolicyRefusalDiagnosticIsBounded(t *testing.T) {
 	retry := "run 'yard' '-Y' 'example' 'integration' 'status'"
-	prefix := "yard example: Bubblewrap AppArmor: "
-	for line, public := range map[string]bool{
-		"Bubblewrap AppArmor: the yard cannot load AppArmor profiles.":          true,
-		"Bubblewrap AppArmor: " + strings.Repeat("x", 480-len(prefix)):          true,
-		"Bubblewrap AppArmor: " + strings.Repeat("x", 481-len(prefix)):          false,
-		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/\x1b[0m":  false,
-		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/caf\xe9":  false,
-		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/local/x ": false,
-	} {
+	for _, reason := range bubblewrapRefusalReasons() {
+		line := bubblewrapRefusalPrefix + reason + bubblewrapRefusalSuffix
 		message, got := bubblewrapPolicyRefusal{line: line, yard: "example", retry: retry}.ActivationDiagnostic()
-		if got != retry || (message != "") != public || public && message != "yard example: "+line {
+		if got != retry || message != "yard example: "+line {
 			t.Fatalf("unexpected diagnostic for %q: %q / %q", line, message, got)
+		}
+	}
+	if message, _ := (bubblewrapPolicyRefusal{line: bubblewrapRefusalPrefix + "x", yard: strings.Repeat("y", 64), retry: retry}).ActivationDiagnostic(); message != "" {
+		t.Fatalf("invalid yard name was rendered: %q", message)
+	}
+}
+
+// The policy program prints every refusal with the suffix the host matches.
+func TestBubblewrapRefusalTextMatchesThePolicyProgram(t *testing.T) {
+	if !strings.Contains(bubblewrapPolicy, "printf '"+bubblewrapRefusalPrefix+"%s"+bubblewrapRefusalSuffix+"\\n'") {
+		t.Fatal("policy program refusal format changed")
+	}
+	for line, want := range map[string]string{
+		bubblewrapRefusalPrefix + "the yard cannot load AppArmor profiles" + bubblewrapRefusalSuffix:                "the yard cannot load AppArmor profiles",
+		bubblewrapRefusalPrefix + "administrator systemd override at /run/" + guestCanary + bubblewrapRefusalSuffix: "administrator systemd override in a systemd unit path",
+		bubblewrapRefusalPrefix + "administrator AppArmor policy at /etc/" + guestCanary + bubblewrapRefusalSuffix:  "the yard policy program refused with an unrecognized reason",
+		bubblewrapRefusalPrefix + guestCanary: "the yard policy program refused with an unrecognized reason",
+	} {
+		if got := bubblewrapRefusalLine(guestLines([]byte(line))[0]); got != bubblewrapRefusalPrefix+want+bubblewrapRefusalSuffix {
+			t.Fatalf("%q rendered as %q", line, got)
 		}
 	}
 }
