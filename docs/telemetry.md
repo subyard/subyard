@@ -75,8 +75,9 @@ bearer are rewritten without it; the helper is installed before a policy names i
 Rollback to v0.28–v0.30 is refused while telemetry is installed in a local yard, including
 after it is disabled with its data retained. Those releases put the collector token into home
 documents, where an older template writer can publish it with mode `0644`. The telemetry
-runtime's activation identity changed at this boundary, so `yard update --rollback` reports
-that the retained release cannot verify installed runtime activation. Process environment
+runtime's activation identity changed at this boundary, so `yard update --rollback` to v0.30
+reports that the retained release cannot verify installed runtime activation; v0.28 and v0.29
+are already refused because their migration registry differs. Process environment
 settings such as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy.
 Claude ignores local drop-ins when server-managed settings apply.
 
