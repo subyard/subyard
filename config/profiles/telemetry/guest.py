@@ -224,17 +224,35 @@ class Runtime:
             raise ValueError('invalid collector token')
         return token
 
-    def prepare_auth(self):
+    def private_directory(self, path, refusal):
+        """Create a developer-owned 0700 directory, or finish creating our own.
+
+        mkdir, chmod and chown are separate steps. Only the deploying account can
+        create entries in the root-owned parent, so an empty directory it owns
+        without group or other access is one an interrupted run left behind."""
         try:
-            self.operational.mkdir(mode=0o700)
+            path.mkdir(mode=0o700)
         except FileExistsError:
             pass
-        else:
-            os.chmod(self.operational, 0o700)
-            os.chown(self.operational, self.uid, self.gid)
-        info = self.operational.lstat()
-        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != self.uid:
-            raise ValueError('foreign telemetry operational directory')
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            raise ValueError(refusal) from None
+        try:
+            info = os.fstat(fd)
+            if info.st_uid in (os.getuid(), self.uid) and not info.st_mode & 0o077 and not os.listdir(fd):
+                os.fchmod(fd, 0o700)
+                os.fchown(fd, self.uid, self.gid)
+                info = os.fstat(fd)
+            if stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != self.uid:
+                raise ValueError(refusal)
+            if info.st_gid != self.gid:
+                os.fchown(fd, self.uid, self.gid)
+        finally:
+            os.close(fd)
+
+    def prepare_auth(self):
+        self.private_directory(self.operational, 'foreign telemetry operational directory')
         if not self.auth.exists():
             # Keep the v0.30 bearer: the analytics copy, else the one its home-config receipt records.
             old = self.data/'auth.token'
@@ -671,11 +689,8 @@ class Runtime:
             native.publish(self.control/'marker', MARKER, None)
         if self.data.is_symlink():
             raise ValueError('unsafe data directory')
-        if self.data.exists() and (self.data.stat().st_uid != self.uid or stat.S_IMODE(self.data.stat().st_mode) != 0o700):
-            raise ValueError('foreign data directory')
-        self.data.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(self.data, 0o700)
-        os.chown(self.data, self.uid, self.gid)
+        self.data.parent.mkdir(parents=True, exist_ok=True)
+        self.private_directory(self.data, 'foreign data directory')
         token = self.prepare_auth()
         inventory_path = self.control/'assets.json'
         inventory_before = native.snapshot(inventory_path)
