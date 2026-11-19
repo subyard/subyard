@@ -184,7 +184,14 @@ run_orca() {
 }
 
 server_cli() {
+  local -a recovery_env=()
+  # Stock rollback starts an Electron worker. Nested test guests can lack a
+  # usable Chromium sandbox, so use the same opt-in as the stock profile probe.
+  if [ "${1:-} ${2:-} ${3:-}" = 'profile state rollback' ]; then
+    recovery_env=(ORCA_ELECTRON_NO_SANDBOX=1)
+  fi
   "${incus[@]}" exec "$instance" -- runuser -u dev -- env \
+    "${recovery_env[@]}" \
     HOME=/home/dev \
     XDG_CONFIG_HOME=/srv/agents/orca/config \
     XDG_DATA_HOME=/srv/agents/orca/data \
