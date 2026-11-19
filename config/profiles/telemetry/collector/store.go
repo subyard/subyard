@@ -112,8 +112,10 @@ func checkPrivateFile(path string, mode os.FileMode) error {
 	return checkPrivateInfo(st, mode)
 }
 
+// checkPrivateInfo accepts a single-link regular file owned by this user. A zero
+// mode accepts any permissions so that a published replacement can repair them.
 func checkPrivateInfo(st os.FileInfo, mode os.FileMode) error {
-	if !st.Mode().IsRegular() || st.Mode().Perm() != mode {
+	if !st.Mode().IsRegular() || mode != 0 && st.Mode().Perm() != mode {
 		return fmt.Errorf("telemetry file must be regular with mode %04o", mode)
 	}
 	if x, ok := st.Sys().(*syscall.Stat_t); !ok || int(x.Uid) != os.Geteuid() || x.Nlink != 1 {

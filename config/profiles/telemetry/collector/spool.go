@@ -70,7 +70,7 @@ func lockDirectory(path string, mode int) (*os.File, error) {
 }
 
 func publishPrivate(path string, data []byte) error {
-	if err := checkPrivateFile(path, 0600); err != nil && !os.IsNotExist(err) {
+	if err := checkPrivateFile(path, 0); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	dir := filepath.Dir(path)
