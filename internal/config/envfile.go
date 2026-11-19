@@ -35,7 +35,7 @@ func ReadAssignmentsOver(path string, base map[string]string) (map[string]string
 
 // AssignedSettingNames lists the settings an operator file assigns. A
 // profile-only assignment is discarded as the loader discards it.
-func AssignedSettingNames(path string) ([]string, error) {
+func AssignedSettingNames(path string, readers ...func(string) ([]byte, error)) ([]string, error) {
 	values := environment{}
 	seen := map[string]struct{}{}
 	var result []string
@@ -45,7 +45,7 @@ func AssignedSettingNames(path string) ([]string, error) {
 		}
 		seen[name] = struct{}{}
 		result = append(result, name)
-	}, discardPolicy{ignored: IsProfileOnlySetting}, nil); err != nil {
+	}, discardPolicy{ignored: IsProfileOnlySetting}, nil, readers...); err != nil {
 		return nil, err
 	}
 	sort.Strings(result)

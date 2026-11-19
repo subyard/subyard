@@ -153,18 +153,18 @@ elif [ "$(id -u "$DEV_USER")" != "$DEV_UID" ]; then
 fi
 usermod -aG yard,kvm,docker "$DEV_USER"
 
-# dev sudo (DEV_SUDO; public default 0, enable in private/config.env): passwordless sudo so
-# the agent — and you, via `yard shell` — can make root changes in the yard. dev is already
-# ~root-in-yard via the docker group and the yard is unprivileged, so this doesn't widen the
-# real boundary. Reconciled: DEV_SUDO=0 removes the grant on the next provision.
-sudoers="/etc/sudoers.d/90-subyard-$DEV_USER"
-if [ "${DEV_SUDO:-0}" = 1 ]; then
-  printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$DEV_USER" > "$sudoers.tmp"
-  chmod 0440 "$sudoers.tmp"
-  visudo -cf "$sudoers.tmp" >/dev/null && mv -f "$sudoers.tmp" "$sudoers" || { rm -f "$sudoers.tmp"; echo "sudoers validation failed — left dev without sudo" >&2; }
-else
-  rm -f "$sudoers"
-fi
+# dev sudo: reconcile the developer's managed passwordless grant inside the guest.
+reconcile_dev_sudo() {
+  local sudoers="$1"
+  if [ "$DEV_SUDO" = 1 ]; then
+    printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$DEV_USER" > "$sudoers.tmp"
+    chmod 0440 "$sudoers.tmp"
+    visudo -cf "$sudoers.tmp" >/dev/null && mv -f "$sudoers.tmp" "$sudoers" || { rm -f "$sudoers.tmp"; echo "sudoers validation failed — left dev without sudo" >&2; }
+  else
+    rm -f "$sudoers"
+  fi
+}
+reconcile_dev_sudo "/etc/sudoers.d/90-subyard-$DEV_USER"
 
 # /srv skeleton (generic core; profile caches like android-sdk come in Phase 4).
 # Own + group-share ONLY the skeleton dirs this script creates, NON-recursively. A recursive
@@ -260,7 +260,7 @@ PY
   exit 1
 fi
 EOS
-} | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="${DEV_SUDO:-0}" --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s
+} | incus exec "$YARD_INSTANCE_NAME" "${PROJ[@]}" --env DEV_USER="$DEV_USER" --env DEV_UID="$DEV_UID" --env DEV_SUDO="$DEV_SUDO" --env CODING_TOOL_INTEGRATIONS="${CODING_TOOL_INTEGRATIONS:-}" --env HOST_LINKS="${HOST_LINKS:-}" -- bash -euo pipefail -s
 ok "in-yard provisioning complete"
 
 bash "$SCRIPT_DIR/refresh-installed-guest-runtime.sh" --yes
