@@ -564,14 +564,16 @@ guest_dev() {
 }
 
 # A guest instruction file that only the runtime refreshes, replaced by a
-# symlink in an existing yard: the master writer replaced the link, the
-# compare-and-write refuses it by name with the operator's step, through an
-# update and through init, and converges once the operator replaces it. Plain
-# init also repairs a default yard started past an update, which other init
-# modes wait for.
+# symlink in an existing yard: the master writer replaced the link. Now the
+# update or init refuses it by name with the operator's step, either the
+# integration ownership preservation or the compare-and-write replacement,
+# keeps the link and its target, and converges once the operator removes it.
+# Plain init also repairs a default yard started past an update, which other
+# init modes wait for.
 verify_symlinked_instruction_file() { # <update command...>
   local guest=/home/dev/.codex/AGENTS.md output rc=0
   local step='replace it with a regular file or remove it, then run yard -Y default config apply'
+  local preserve="'mv' '-T' '--backup=numbered' '--' '$guest'"
   operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
   printf 'p0 source-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
   operator_yard init --yes
@@ -583,23 +585,22 @@ verify_symlinked_instruction_file() { # <update command...>
   set -e
   printf '%s\n' "$output"
   printf 'p0-source-upgrade: update over a symlinked instruction file exited %s\n' "$rc"
-  if [ "$rc" -ne 0 ]; then
-    grep -Fq "$guest is not a readable regular file" <<<"$output" && grep -Fq "$step" <<<"$output" \
-      || die 'the update refused the symlinked instruction file without naming it and its step'
-  else
+  if [ "$rc" -eq 0 ]; then
     set +e
     output="$(operator_yard init --yes 2>&1)"
     rc=$?
     set -e
     printf '%s\n' "$output"
-    [ "$rc" -ne 0 ] && grep -Fq "$guest is not a readable regular file" <<<"$output" && grep -Fq "$step" <<<"$output" \
-      || die 'init did not refuse the symlinked instruction file by name with its step'
+    [ "$rc" -ne 0 ] || die 'init replaced the symlinked instruction file'
     rc=0
   fi
+  grep -Fq "$guest is not a readable regular file" <<<"$output" && grep -Fq "$step" <<<"$output" \
+    || grep -Fq "$preserve" <<<"$output" \
+    || die 'the symlinked instruction file was refused without its path and step'
   guest_dev test -L "$guest" && [ "$(guest_dev cat "$guest.real")" = 'p0 source-upgrade instructions' ] \
     || die 'the refusal changed the symlinked instruction file or its target'
   guest_dev rm "$guest" "$guest.real"
-  [ "$rc" -eq 0 ] || operator_yard migrate --yes
+  [ "$rc" -eq 0 ] || "$@"
   operator_yard init --yes
   guest_dev test -f "$guest" -a ! -L "$guest" && guest_dev grep -Fqx 'p0 source-upgrade instructions' "$guest" \
     || die 'the replaced instruction file did not converge'
