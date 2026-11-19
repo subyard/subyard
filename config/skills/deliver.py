@@ -12,6 +12,9 @@ import stat
 import tempfile
 
 ADAPTERS = ('.agents/skills', '.claude/skills', '.config/opencode/skills')
+SKILL_STAGING = '.subyard-skill-staging-'
+# Earlier writers staged with mkstemp inside the skill directory itself.
+OLD_STAGING = re.compile(r'\.skill-[a-z0-9_]{8}')
 EXTRA = ('.pi/agent/skills', '.hermes/skills')
 
 
@@ -44,12 +47,23 @@ def mkdir(path, mode, uid, gid):
         os.chown(current, uid, gid)
 
 
-def write(path, data, mode, uid, gid, staging_root=None):
+def write(path, data, mode, uid, gid):
+    """Replace a receipt or instruction file; stages next to it."""
+    stage(path, data, mode, uid, gid, path.parent, '.subyard-staging-')
+
+
+def write_skill(canonical, path, data, uid, gid):
+    """Replace managed skill content; stages in the canonical root, outside skill
+    directories, so a leftover from a killed run never becomes unmanaged content."""
+    if canonical not in path.parents:
+        raise ValueError('skill content outside canonical root: ' + str(path))
+    stage(path, data, 0o644, uid, gid, canonical, SKILL_STAGING)
+
+
+def stage(path, data, mode, uid, gid, staging_root, prefix):
     safe(path)
-    # mkstemp creates a fresh random name with O_EXCL and never opens an existing
-    # file. Managed writes stage in their root, outside skill directories, so a
-    # leftover from a killed run is left alone and does not block a retry.
-    fd, temporary = tempfile.mkstemp(prefix='.subyard-skill-staging-', dir=staging_root or path.parent)
+    # mkstemp creates a fresh random name with O_EXCL and never opens an existing file.
+    fd, temporary = tempfile.mkstemp(prefix=prefix, dir=staging_root)
     try:
         with os.fdopen(fd, 'wb') as stream:
             os.fchmod(stream.fileno(), mode)
@@ -61,6 +75,11 @@ def write(path, data, mode, uid, gid, staging_root=None):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def owned_file(path, uid):
+    st = path.lstat()
+    return stat.S_ISREG(st.st_mode) and st.st_uid == uid
 
 
 def metadata(path, mode, uid, gid):
@@ -156,6 +175,7 @@ def delivery(args):
             if set(json.loads(receipt.read_bytes())['skills']) & set(wanted):
                 raise ValueError('skill name already belongs to another provider')
     changed = old != desired if wanted else bool(old['skills'])
+    leftovers = []
     # Validate the whole operation before changing any artifacts.
     for name in names:
         if not re.fullmatch(r'[a-z0-9]+(?:-[a-z0-9]+)*', name):
@@ -171,7 +191,17 @@ def delivery(args):
             if (st.st_uid,st.st_gid) != (owner,os.getegid()) or st.st_mode & 0o022:
                 raise ValueError('unsafe canonical skill directory')
             changed |= stat.S_IMODE(st.st_mode) != 0o755 or (st.st_uid,st.st_gid) != (owner,os.getegid())
-            actual = {str(p.relative_to(directory)) for p in directory.rglob('*') if not p.is_dir() or p.is_symlink()}
+            actual = set()
+            for p in directory.rglob('*'):
+                if p.is_dir() and not p.is_symlink():
+                    continue
+                # Owned regular files named like the old in-place staging file are
+                # leftovers of a killed write; every directory is checked below.
+                if OLD_STAGING.fullmatch(p.name) and owned_file(p, owner):
+                    leftovers.append(p)
+                    changed = True
+                else:
+                    actual.add(str(p.relative_to(directory)))
             # Legacy package installers used this explicit managed-content marker.
             legacy = name not in old['skills'] and actual == {'SKILL.md'} and b'<!-- subyard-managed-v1 -->' in (directory / 'SKILL.md').read_bytes()
             if (name not in old['skills'] or actual - known) and not legacy:
@@ -202,6 +232,10 @@ def delivery(args):
         return 10 if changed else 0
     mkdir(state, 0o700, owner, os.getegid())
     mkdir(canonical, 0o755, owner, os.getegid())
+    # The delivery lock excludes any concurrent writer, so staging files that are
+    # still present belong to killed runs.
+    for path in leftovers + [p for p in canonical.glob(SKILL_STAGING + '*') if owned_file(p, owner)]:
+        path.unlink()
     # Record the union before writes; retries recognize files installed just
     # before an interruption without claiming any unrecognized path.
     pending = dict(desired, skills={name: dict(old['skills'].get(name, {}), **desired['skills'].get(name, {})) for name in names})
@@ -231,7 +265,7 @@ def delivery(args):
                     parent.chmod(0o755)
                     os.chown(parent,owner,os.getegid())
                 if not path.exists() or not metadata(path, 0o644, owner, os.getegid()) or path.read_bytes() != data:
-                    write(path, data, 0o644, owner, os.getegid(), canonical)
+                    write_skill(canonical, path, data, owner, os.getegid())
             for adapter in adapters:
                 link = args.home / adapter / name
                 mkdir(link.parent, 0o755, args.uid, args.gid)

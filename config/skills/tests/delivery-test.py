@@ -89,12 +89,36 @@ runpy.run_path(script, run_name='__main__')
         self.assertEqual(self.run_mode('check'), 10)
         subprocess.run([sys.executable, '-B', script, *command], check=True, timeout=5)
         self.assertEqual(target.read_bytes(), (self.skill/'SKILL.md').read_bytes())
-        self.assertEqual(list(self.installed.parent.glob('.subyard-skill-staging-*')), [unfinished])
-        self.assertNotEqual(unfinished.stat().st_ino, target.stat().st_ino)
+        self.assertFalse(unfinished.exists())
+        self.assertEqual(list(self.installed.parent.glob('.subyard-skill-staging-*')), [])
         for path, inode in zip(reserved, inodes):
             self.assertEqual(path.stat().st_ino, inode)
             self.assertEqual(path.read_text(), 'operator staging file')
         self.assertEqual(self.run_mode('check'), 0)
+
+    def test_old_in_place_staging_leftover_recovers_and_unknown_file_refuses(self):
+        self.run_mode('apply')
+        leftover = self.installed/'.skill-a1_z9xq0'
+        leftover.write_text('interrupted write')
+        (self.installed/'SKILL.md').write_text('stale')
+        self.assertEqual(self.run_mode('check'), 10)
+        self.run_mode('apply')
+        self.assertFalse(leftover.exists())
+        self.assertEqual((self.installed/'SKILL.md').read_bytes(), (self.skill/'SKILL.md').read_bytes())
+        self.assertEqual(self.run_mode('check'), 0)
+        for name in ('.skill-a1_z9xq', '.skill-A1_Z9XQ0', '.skill-a1_z9xq0x', 'notes'):
+            unknown = self.installed/name
+            unknown.write_text('operator content')
+            for mode in ('check', 'apply', 'remove'):
+                with self.assertRaisesRegex(ValueError, 'unmanaged skill content'):
+                    self.run_mode(mode)
+                self.assertEqual(unknown.read_text(), 'operator content')
+            unknown.unlink()
+        link = self.installed/'.skill-b2_y8wp1'
+        link.symlink_to(self.installed/'SKILL.md')
+        with self.assertRaisesRegex(ValueError, 'unmanaged skill content'):
+            self.run_mode('apply')
+        self.assertTrue(link.is_symlink())
 
     def test_core_native_extra_links_and_repair(self):
         self.args.provider = 'core'
