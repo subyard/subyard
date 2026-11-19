@@ -4720,10 +4720,10 @@ done
 (
   run_phase() { printf '%s\n' "$*"; }
   split_lane() { printf 'split_lane %s\n' "$*"; }
-  for split_entry in source-upgrade:source_upgrade_lane power-systemd:power_systemd_lane legacy-continuation:legacy_continuation_lane; do
+  for split_entry in source-upgrade:source_upgrade_lane:fixture-platform-apparmor power-systemd:power_systemd_lane legacy-continuation:legacy_continuation_lane; do
     split_name="${split_entry%%:*}"
     dispatch="$(sed -n "s/^  $split_name) \(.*\) ;;\$/\1/p" "$ROOT/dev/e2e/p0-acceptance.sh")"
-    [ "$(eval "$dispatch")" = "split_lane $split_name ${split_entry#*:}" ] \
+    [ "$(eval "$dispatch")" = "split_lane ${split_entry//:/ }" ] \
       || fail "standalone $split_name lost its split-lane final verification"
   done
   eval "$(fixture_functions "$ROOT/dev/e2e/p0-acceptance.sh" split_lane)"
@@ -4733,6 +4733,9 @@ done
   CAPACITY_LOG_DIR='capacity-logs'
   [ "$(split_lane power-systemd power_systemd_lane)" = $'baseline\ncapacity-preflight run_vm 1 capacity-preflight\nmonitors\npower-systemd-platform run_vm 1 fixture-platform\npower-systemd power_systemd_lane 1\ncleanup cleanup_lane\nfinal-verify full_final_verify\nremove capacity-logs' ] \
     || fail 'split lane changed its baseline, monitor, cleanup or final verification order'
+  split_lane source-upgrade source_upgrade_lane fixture-platform-apparmor \
+    | grep -Fxq 'source-upgrade-platform run_vm 1 fixture-platform-apparmor' \
+    || fail 'split lane ignored its platform mode'
 ) || fail 'split lane final verification contract failed'
 # --split-covered is bound to the release collector's receipt for the same frozen bundle.
 split_evidence="$TMP/split-collector"
