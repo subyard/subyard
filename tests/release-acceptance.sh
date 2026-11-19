@@ -2116,7 +2116,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                     "slots": [{"remaining_memory_growth_bytes": 300, "remaining_disk_growth_bytes": 400}],
                     "builder": {"reserved_memory_bytes": 50, "reserved_disk_peak_bytes": 60}}}
             inventory = m.profile_inventory(checkout)
-            def inspect(only=("profile:sample",)):
+            def inspect(only=("profile:sample",), prerequisites="managed-environment"):
                 status.write_text(json.dumps(value))
                 compact = io.StringIO()
                 with patch.object(m, "ROOT", checkout), patch.object(m, "profile_inventory", return_value=inventory), \
@@ -2128,7 +2128,8 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
                 self.assertEqual(len(compact.getvalue().splitlines()), 1)
                 self.assertIn("CAPACITY slots=slot-001:", compact.getvalue())
                 self.assertIn("types=subyard-pair", compact.getvalue())
-                self.assertIn("prerequisites=", compact.getvalue())
+                self.assertIn(f" prerequisites={prerequisites} ", compact.getvalue())
+                self.assertNotIn("approved-slots", compact.getvalue())
                 self.assertNotIn("do-not-export", compact.getvalue())
                 return report
             before = set(checkout.rglob("*"))
@@ -2174,7 +2175,7 @@ printf 'packaged candidate\\n' > "$2/subyard-$4-linux-ARCH.tar.gz"
             value["resources"]["memory"]["available_bytes"] = 1000
             value["pool"]["slots"][0]["state"] = "held"
             self.assertEqual(inspect()["capacity_summary"]["shortages"], ["slot-001: held"])
-            local_summary = inspect(only=["verify"])["capacity_summary"]
+            local_summary = inspect(only=["verify"], prerequisites="none")["capacity_summary"]
             self.assertEqual(local_summary["planning"], "not-required")
             self.assertEqual(local_summary["shortages"], [])
             status.write_text(json.dumps(value))

@@ -1215,13 +1215,14 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
     summary = report["capacity_summary"]
     slot_text = ",".join(slot["id"] + ":" + slot["state"] + "/" + slot.get("type", "unknown") for slot in selected_slots) or "unknown"
     missing_tools = ",".join(summary["prerequisites"]["missing_local_tools"]) or "none"
+    physical_prerequisites = "managed-environment" if summary["prerequisites"]["physical"] else "none"
     external_unknown = sum(item["readiness"] != "available" for item in report["external_prerequisites"])
     numeric = {key: value if value is not None else "unknown"
                for key, value in {**summary["headroom_bytes"], "age": summary["age_seconds"]}.items()}
     print(f"CAPACITY slots={slot_text} types={','.join(summary['selected_types']) or 'unknown'} "
           f"memory_headroom_bytes={numeric['memory']} disk_headroom_bytes={numeric['disk']} "
           f"observed_at={summary['observed_at'] or 'unknown'} age_seconds={numeric['age']} planning={summary['planning']} "
-          f"prerequisites=approved-slots,managed-environment missing_local_tools={missing_tools} external_not_ready={external_unknown}",
+          f"prerequisites={physical_prerequisites} missing_local_tools={missing_tools} external_not_ready={external_unknown}",
           file=sys.stderr, flush=True)
     print(json.dumps(report, indent=2, sort_keys=True))
     return report
