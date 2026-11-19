@@ -22,7 +22,6 @@ import uuid
 SCHEMA = 'subyard.telemetry.record/v1'
 POLICY_VERSION = 'subyard.telemetry.capture/v1'
 TIMESTAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.,][0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])')
-USE_CURRENT_TIME = object()
 MAX_RECORDS = 4096
 MAX_BYTES = 64*1024*1024
 FRAME_BYTES = 64*1024
@@ -316,14 +315,13 @@ def note_loss(directory, run):
         os.close(fd)
 
 
-def emit(data_dir, kind, body, source_id=None, source_time=USE_CURRENT_TIME, event_id=None, *, broker=False):
+def emit(data_dir, kind, body, source_id=None, source_time=None, event_id=None, *, broker=False):
     directory = Path(data_dir)
     run = None
     try:
         with directory_lock(directory, fcntl.LOCK_SH, time.monotonic()+LOCK_WAIT):
             settings = load_producer_state(directory)
-            if source_time is USE_CURRENT_TIME:
-                source_time = now() if not event_id else ''
+            source_time = source_time or now()
             record = dict(schema=SCHEMA, origin_id=settings['origin_id'], source_id=source_id or settings['source_id'],
                           event_id=event_id or str(uuid.uuid4()), source_version='1', source_time=source_time,
                           kind=kind, body=body)

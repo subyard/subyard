@@ -289,6 +289,30 @@ assert not records.emit(sys.argv[2], 'gap', {})
             gap = next(spooled(root))
             self.assertEqual(gap['body']['reason'], 'run_reservation_interrupted')
 
+    def test_observer_retry_after_failed_unlink_reuses_the_gap_event(self):
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            prepare(root)
+            run = fixture_run(boot_id='old-boot')
+            self.assertTrue(launcher.admit_manifest(root, run, reserve=True))
+            path = launcher.manifest_path(root/'runs-v5', run['agent_run_id'])
+            unlink = Path.unlink
+            failed = []
+            def fail_once(self, *args, **kwargs):
+                if self == path and not failed:
+                    failed.append(self)
+                    raise PermissionError('fixture unlink failure')
+                return unlink(self, *args, **kwargs)
+            with patch.object(Path, 'unlink', fail_once):
+                self.assertEqual(launcher.observe(root, once=True), 0)
+            self.assertTrue(failed and path.exists())
+            self.assertEqual(launcher.observe(root, once=True), 0)
+            self.assertFalse(path.exists())
+            gaps = [record for record in spooled(root) if record['body']['reason'] == 'run_reservation_interrupted']
+            self.assertEqual(len(gaps), 2)
+            self.assertEqual(len({record['event_id'] for record in gaps}), 1)
+            self.assertTrue(all(records.TIMESTAMP.fullmatch(record['source_time']) for record in gaps))
+
     def test_observer_overflow_foreign_prefix_does_not_starve_valid_run(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             root = Path(name)

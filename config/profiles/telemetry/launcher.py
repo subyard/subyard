@@ -311,6 +311,11 @@ def enable_delegation(data_dir):
                         'pid': os.getpid(), 'start_ticks': identity['start_ticks'], 'boot_id': boot_id()}, family='delegation')
 
 
+def recovery_event(run_id, reason):
+    # A retry after a failed unlink or second emit reuses the event ID.
+    return 'recovery-' + hashlib.sha256(f'{run_id}\0{reason}'.encode()).hexdigest()[:32]
+
+
 def removed_scope(run):
     for name, identity in (('scope_root', 'scope_root_identity'), ('cgroup', 'cgroup_identity')):
         if not run.get(name):
@@ -394,11 +399,13 @@ def observe(data_dir, once=False, interval=5, standalone_lock=None):
                         alive = run['boot_id'] == boot_id() and processes.start_ticks(run['launcher_pid']) == run['launcher_start_ticks']
                     except (FileNotFoundError, ProcessLookupError):
                         alive = False
-                    if not alive and records.emit(data_dir, 'gap', {'agent_run_id': run_id, 'reason': 'run_reservation_interrupted', 'quality': 'partial'}):
+                    if not alive and records.emit(data_dir, 'gap', {'agent_run_id': run_id, 'reason': 'run_reservation_interrupted', 'quality': 'partial'},
+                                                  event_id=recovery_event(run_id, 'run_reservation_interrupted')):
                         path.unlink()
                     continue
                 if run['boot_id'] != boot_id():
-                    if records.emit(data_dir, 'gap', {'agent_run_id': run_id, 'reason': 'boot_changed_before_final', 'quality': 'partial'}):
+                    if records.emit(data_dir, 'gap', {'agent_run_id': run_id, 'reason': 'boot_changed_before_final', 'quality': 'partial'},
+                                    event_id=recovery_event(run_id, 'boot_changed_before_final')):
                         path.unlink()
                         samplers.pop(run_id, None)
                     continue
@@ -407,8 +414,9 @@ def observe(data_dir, once=False, interval=5, standalone_lock=None):
                     body = {'agent_run_id': run_id, 'object_id': run_id+':scope', 'quality': 'partial',
                             'scope_quality': 'partial', 'reason': 'scope_removed_before_final',
                             'missing': 'final_tail', 'source': missing}
-                    if records.emit(data_dir, 'gap', body) and records.emit(data_dir, 'run',
-                            {**body, 'state': 'resources_unknown', 'resource_completed': False}):
+                    if records.emit(data_dir, 'gap', body, event_id=recovery_event(run_id, 'scope_removed_before_final')) and records.emit(
+                            data_dir, 'run', {**body, 'state': 'resources_unknown', 'resource_completed': False},
+                            event_id=recovery_event(run_id, 'resources_unknown')):
                         path.unlink()
                         samplers.pop(run_id, None)
                     continue
@@ -419,7 +427,8 @@ def observe(data_dir, once=False, interval=5, standalone_lock=None):
                     path.unlink()
                     samplers.pop(run_id, None)
             except (OSError, ValueError, KeyError):
-                records.emit(data_dir, 'gap', {'agent_run_id': run_id, 'reason': 'scope_observation_unavailable', 'quality': 'partial'})
+                records.emit(data_dir, 'gap', {'agent_run_id': run_id, 'reason': 'scope_observation_unavailable', 'quality': 'partial'},
+                             event_id=recovery_event(run_id, 'scope_observation_unavailable'))
         if once:
             if scan is not None:
                 scan.close()
