@@ -26,7 +26,7 @@ func fixtureCommandInputs(values map[string]string) CommandInputs {
 }
 
 func TestCommandInputsKeepOriginalOverridesAndInheritedIDs(t *testing.T) {
-	original := []string{"HOST_MOUNTS=first", "HOST_MOUNTS=", "AGENTS=codex", "PATH=/fixture/bin", "SUBYARD_SUDO_PREAUTHORIZED=1", "SUBYARD_PRESERVE_VM_REPORTING=1"}
+	original := []string{"HOST_MOUNTS=first", "HOST_MOUNTS=", "AGENTS=codex", "PATH=/fixture/bin", "SUBYARD_SUDO_PREAUTHORIZED=1", "SUBYARD_PRESERVE_VM_REPORTING=1", BootstrapDraftInput + "=draft"}
 	inputs := CaptureCommandInputs(original, func(name string) bool { return name == "HOST_MOUNTS" })
 	original[1] = "HOST_MOUNTS=changed"
 	ids := inputs.InheritedSettingIDs()
@@ -43,6 +43,9 @@ func TestCommandInputsKeepOriginalOverridesAndInheritedIDs(t *testing.T) {
 	}
 	if _, ok := values["SUBYARD_PRESERVE_VM_REPORTING"]; ok {
 		t.Fatal("internal VM preservation signal forwarded")
+	}
+	if _, ok := values[BootstrapDraftInput]; ok || inputs.bootstrapDraft != "draft" || inputs.WithoutBootstrapDraft().bootstrapDraft != "" {
+		t.Fatal("bootstrap handoff escaped its one update")
 	}
 	values["HOST_MOUNTS"] = "changed"
 	if !reflect.DeepEqual(inputs.InheritedSettingIDs(), []string{"HOST_MOUNTS"}) || inputs.environment(RuntimeContext{})["HOST_MOUNTS"] != "" {

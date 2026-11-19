@@ -1,6 +1,9 @@
 package migration
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -34,8 +37,10 @@ func TestBootstrapRediscoversInterruptedSourceIngressFromRecovery(t *testing.T) 
 			requestData, requestConfig, requestBin := filepath.Join(bootstrapHome, "data"), filepath.Join(bootstrapHome, "config"), filepath.Join(bootstrapHome, "bin")
 			data, bin := filepath.Join(home, "data"), filepath.Join(home, "bin")
 			runtimeRoot, source := filepath.Join(data, "runtime"), filepath.Join(home, "source")
-			candidate := filepath.Join(runtimeRoot, "releases/fixture-test-candidate")
 			cache := filepath.Join(data, "releases/fixture-test")
+			bundleDigest := writeBootstrapFixtureAssets(t, cache)
+			release := "releases/fixture-test-" + bundleDigest[:12]
+			candidate := filepath.Join(runtimeRoot, release)
 			recovery := filepath.Join(data, "recovery/pre-go-source")
 			for _, directory := range []string{bin, filepath.Join(source, "bin"), filepath.Join(candidate, "bin"), cache} {
 				if err := os.MkdirAll(directory, 0o700); err != nil {
@@ -43,7 +48,7 @@ func TestBootstrapRediscoversInterruptedSourceIngressFromRecovery(t *testing.T) 
 				}
 			}
 			for link, target := range map[string]string{
-				filepath.Join(runtimeRoot, "current"): "releases/fixture-test-candidate",
+				filepath.Join(runtimeRoot, "current"): release,
 				filepath.Join(bin, "yard"):            filepath.Join(runtimeRoot, "current/bin/yard"),
 				filepath.Join(bin, "sy"):              filepath.Join(source, "bin/yard"),
 			} {
@@ -61,8 +66,6 @@ func TestBootstrapRediscoversInterruptedSourceIngressFromRecovery(t *testing.T) 
 				}
 			}
 			// Publishing and transition application stop at local recorder boundaries.
-			// Run unchanged bootstrap bytes in a fixture source tree so its current
-			// publisher and the preseeded offline helper share the same recorder.
 			writeTestFile(t, filepath.Join(source, "bin/yard"), 0o700, "#!/bin/sh\nexit 99\n")
 			if sourceCheckout {
 				launcher := "#!/bin/sh\n# thin dispatcher over scripts/\nexit 99\n"
@@ -86,28 +89,32 @@ exit "$TEST_TRANSITION_EXIT"
 			writeTestFile(t, filepath.Join(candidate, "config/commands.registry"), 0o600, "fixture\n")
 			writeTestFile(t, filepath.Join(candidate, "completions/yard.bash"), 0o600, "fixture\n")
 			writeTestFile(t, filepath.Join(candidate, "config/installation-capabilities.json"), 0o600, `{"schemaVersion":1,"contract":"installation-inventory-v1"}`)
-			writeTestFile(t, filepath.Join(candidate, "bin/yard-engine"), 0o700, "#!/bin/sh\n[ \"$*\" = '_installation full' ] || exit 99\ncat >/dev/null\n")
+			writeTestFile(t, filepath.Join(candidate, "bin/yard-engine"), 0o700, `#!/bin/sh
+set -eu
+[ "$1" = _installation ] || exit 99
+case "$2" in
+  runtime) jq -e 'select(keys == ["VerifiedCacheInputs"] and (.VerifiedCacheInputs | length == 6))' > "$TEST_INSTALLER_LOG.cache" ;;
+  full|inspect) cat >/dev/null ;;
+  *) exit 2 ;;
+esac
+`)
 			installer := filepath.Join(cache, "subyard-install-runtime-release.sh")
 			installerPayload := `#!/bin/sh
 set -eu
 if [ "$3" = --publish-only ]; then
   printf 'publish-only\n' > "$TEST_INSTALLER_LOG"
+  [ "$SUBYARD_INSTALL_RUNTIME_SCOPE" = private-draft ]
+  mkdir "$2/releases"
+  cp -a "$TEST_CANDIDATE" "$2/$TEST_RELEASE"
 else
   printf 'initial\n' > "$TEST_INSTALLER_LOG"
-  ln -s releases/fixture-test-candidate "$2/current"
+  ln -s "$TEST_RELEASE" "$2/current"
 fi
-printf 'releases/fixture-test-candidate\n'
+printf '%s\n' "$TEST_RELEASE"
 `
 			writeTestFile(t, installer, 0o700, installerPayload)
 			writeTestFile(t, installer+".sha256", 0o600, fmt.Sprintf("%x\n", sha256.Sum256([]byte(installerPayload))))
-			bootstrap := filepath.Join(home, "bootstrap-source/dev/bootstrap-runtime.sh")
-			writeTestFile(t, bootstrap, 0o700, string(readTestFile(t, filepath.Join("..", "..", "dev", "bootstrap-runtime.sh"))))
-			writeTestFile(t, filepath.Join(home, "bootstrap-source/scripts/install-runtime-release.sh"), 0o700, installerPayload)
-			for _, arch := range []string{"amd64", "arm64"} {
-				for _, suffix := range []string{"", ".sha256", ".manifest.json", ".provenance.json"} {
-					writeTestFile(t, filepath.Join(cache, "subyard-fixture-test-linux-"+arch+".tar.gz"+suffix), 0o600, "fixture\n")
-				}
-			}
+			bootstrap := filepath.Join("..", "..", "dev", "bootstrap-runtime.sh")
 			manifest := map[string]any{"schemaVersion": 2, "sourceRoot": source, "dataHome": requestData, "configHome": requestConfig}
 			state := "schema=1\nphase=applying\nstep=entrypoint-switch\n"
 			switch scenario {
@@ -166,16 +173,24 @@ printf 'releases/fixture-test-candidate\n'
 			command.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + bootstrapHome, "SHELL=/bin/bash", "TMPDIR=/tmp",
 				"SUBYARD_HOME=" + requestData, "SUBYARD_CONFIG_HOME=" + requestConfig, "YARD_BIN_DIR=" + requestBin,
 				"YARD_SHELL_RC=" + filepath.Join(bootstrapHome, ".bashrc"), "YARD_LOGIN_RC=" + filepath.Join(bootstrapHome, ".profile"),
-				"TEST_INGRESS_LOG=" + ingressLog, "TEST_INSTALLER_LOG=" + installerLog, "TEST_TRANSITION_EXIT=" + transitionExit, "TEST_CLASS_LOG=" + classLog}
+				"TEST_INGRESS_LOG=" + ingressLog, "TEST_INSTALLER_LOG=" + installerLog, "TEST_TRANSITION_EXIT=" + transitionExit, "TEST_CLASS_LOG=" + classLog,
+				"TEST_CANDIDATE=" + candidate, "TEST_RELEASE=" + release}
 			output, err := command.CombinedOutput()
 			switch scenario {
-			case "entrypoint-switch", "entrypoint-switch-success", "entrypoint-switch-symlink-home", "runtime-symlink-home", "runtime-trailing-slash", "complete":
+			case "entrypoint-switch", "entrypoint-switch-success", "runtime-trailing-slash", "complete":
 				wantExit := 23
 				if scenario == "entrypoint-switch-success" {
 					wantExit = 0
 				}
 				if (err != nil && exitStatus(err) != wantExit) || (err == nil && wantExit != 0) {
 					t.Fatalf("bootstrap did not reach the transition recorder: %v\n%s", err, output)
+				}
+				if wantExit == 0 {
+					var enrollment struct{ VerifiedCacheInputs []struct{ Path string } }
+					if err := json.Unmarshal(readTestFile(t, installerLog+".cache"), &enrollment); err != nil ||
+						len(enrollment.VerifiedCacheInputs) != 6 || enrollment.VerifiedCacheInputs[4].Path != installer || enrollment.VerifiedCacheInputs[5].Path != installer+".sha256" {
+						t.Fatalf("verified cache enrollment = %#v, %v", enrollment, err)
+					}
 				}
 				want := source + "\n"
 				if scenario == "complete" || runtimeLinked {
@@ -200,6 +215,9 @@ printf 'releases/fixture-test-candidate\n'
 				}
 			default:
 				want := "source recovery metadata is unsafe or invalid"
+				if scenario == "entrypoint-switch-symlink-home" || scenario == "runtime-symlink-home" {
+					want = "runtime root has a symlink or non-directory ancestor"
+				}
 				if noRuntime {
 					want = "Sources before v0.11.0 are unsupported"
 					if scenario == "native-checkout" {
@@ -301,6 +319,33 @@ func bootstrapTreeSnapshot(t *testing.T, root string) map[string]string {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func writeBootstrapFixtureAssets(t *testing.T, cache string) string {
+	t.Helper()
+	const engine = "#!/bin/sh\n[ \"$1\" = _bootstrap-draft-capability ] || exit 2\nprintf 'private-release-draft-v1\\n'\n"
+	var payload bytes.Buffer
+	compressed := gzip.NewWriter(&payload)
+	archive := tar.NewWriter(compressed)
+	if err := archive.WriteHeader(&tar.Header{Name: "./bin/yard-engine", Mode: 0o755, Size: int64(len(engine))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(archive, engine); err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(archive.Close(), compressed.Close()); err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(payload.Bytes()))
+	for _, arch := range []string{"amd64", "arm64"} {
+		name := "subyard-fixture-test-linux-" + arch + ".tar.gz"
+		bundle := filepath.Join(cache, name)
+		writeTestFile(t, bundle, 0o600, payload.String())
+		writeTestFile(t, bundle+".sha256", 0o600, digest+"\n")
+		writeTestFile(t, bundle+".manifest.json", 0o600, fmt.Sprintf(`{"schemaVersion":1,"kind":"runtime","version":"fixture-test","os":"linux","arch":%q,"bootstrapDraft":"private-release-draft-v1"}`, arch))
+		writeTestFile(t, bundle+".provenance.json", 0o600, fmt.Sprintf(`{"schemaVersion":1,"artifact":%q,"version":"fixture-test","sha256":%q,"sourceRepository":"github.com/Dmitry-Borodin/Subyard","sourceRevision":"fixture"}`, name, digest))
+	}
+	return digest
 }
 
 // Enumerate marker × target × recovery × current, repeated for each path layout.
@@ -408,11 +453,12 @@ func TestBootstrapSourceClassificationMatrix(t *testing.T) {
 								}
 								writeTestFile(t, filepath.Join(data, "recovery/pre-go-source/transaction"), 0o600, state)
 							}
+							writeBootstrapFixtureAssets(t, filepath.Join(data, "releases/fixture-test"))
 							// The ordinary/recovery paths stop at their first mutating boundary.
 							// Classification is captured through a pipe, outside the file tree.
 							probe := filepath.Join(home, "probe.sh")
 							writeTestFile(t, probe, 0o600, `detector_pid=$BASHPID
-trap 'if [ "$BASHPID" = "$detector_pid" ]; then printf "%s\t%s\n" "$SOURCE_INGRESS_CLASS" "$SOURCE_INGRESS_ROOT" >&3; fi' EXIT
+trap 'if [ "$BASHPID" = "$detector_pid" ]; then printf "%s\t%s\n" "${SOURCE_INGRESS_CLASS-none}" "${SOURCE_INGRESS_ROOT-}" >&3; fi' EXIT
 install() { return 73; }
 `)
 							reader, writer, err := os.Pipe()
@@ -453,6 +499,14 @@ install() { return 73; }
 							}
 							if wantClass == "legacy" && !current {
 								wantMessage, wantCode = "bootstrap-runtime: "+legacy+"\n", 1
+							}
+							if layout == "symlink-home" || layout == "symlink-runtime" {
+								unsafe := logicalRoot
+								if layout == "symlink-home" {
+									unsafe = logicalHome
+								}
+								wantClass, wantRoot, wantCode = "none", "", 1
+								wantMessage = fmt.Sprintf("bootstrap-runtime: runtime root has a symlink or non-directory ancestor: '%s'\n", unsafe)
 							}
 							if exitStatus(err) != wantCode || stderr.String() != wantMessage || string(observed) != wantClass+"\t"+wantRoot+"\n" {
 								t.Fatalf("class=%q code=%d message=%q; want class=%q root=%q code=%d message=%q; stdout=%s", observed, exitStatus(err), stderr.String(), wantClass, wantRoot, wantCode, wantMessage, stdout.String())

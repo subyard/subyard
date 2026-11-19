@@ -43,6 +43,9 @@ func (execution *releaseExecution) needsActivationRepair() bool {
 
 func (cli *CLI) runActivationRepair(ctx context.Context, execution *releaseExecution, assumeYes bool) int {
 	options := cli.options
+	if repositoryRoot := execution.prepared.BootstrapRepositoryRoot; repositoryRoot != "" {
+		options.RepositoryRoot = repositoryRoot
+	}
 	// Reload persisted settings and admissions. Preserve the original command
 	// inputs separately; a resolved invoking-yard snapshot is never an override.
 	environment := cli.freshMigrationEnvironment(cli.baseEnv, options.RepositoryRoot)
@@ -60,7 +63,7 @@ func (cli *CLI) runActivationRepair(ctx context.Context, execution *releaseExecu
 		cli.errorf("prepare activation repair: %v", err)
 		return 1
 	}
-	operation.commandInputs = cli.commandInputs
+	operation.commandInputs = cli.commandInputs.WithoutBootstrapDraft()
 	operation.releaseRepairTarget = releasetransition.ReleaseID(execution.prepared.TargetRelease)
 	operation.promptInputTerminal = cli.promptInputTerminal
 	return operation.Run(ctx)

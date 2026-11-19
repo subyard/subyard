@@ -99,7 +99,7 @@ func (runtime *Runtime) inspectRollbackCompatibility(ctx context.Context, target
 			"", "retain a release supporting headless VMs with free page reporting, then run yard update --rollback")
 	}
 	if len(migrationMessages) != 0 {
-		outcome.Retry = "keep the current release active and resolve all reported release compatibility requirements before retrying"
+		outcome.Retry = retainedRegistryRetry(selection)
 	}
 	if layout != nil && vmRefused && len(migrationMessages) == 0 {
 		outcome.Retry = "retain a release supporting the installed configuration and reporting VM values, then run yard update --rollback"

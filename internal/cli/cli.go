@@ -446,6 +446,7 @@ func New(options Options) (*CLI, error) {
 	baseEnvironment := environmentMap(options.Environment)
 	delete(baseEnvironment, "SUBYARD_SUDO_PREAUTHORIZED")
 	delete(baseEnvironment, "SUBYARD_PRESERVE_VM_REPORTING")
+	delete(baseEnvironment, releaseruntime.BootstrapDraftInput)
 	activeEnvironment := make(map[string]string, len(baseEnvironment))
 	for name, value := range baseEnvironment {
 		activeEnvironment[name] = value
