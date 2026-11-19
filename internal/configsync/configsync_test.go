@@ -1482,6 +1482,28 @@ func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.
 	}
 }
 
+// One override tree reports every independent asset refusal.
+func TestVersionedConfigSyncReportsEveryOverrideAssetRefusal(t *testing.T) {
+	fixture := newSyncFixture(t, "owner-a")
+	fixture.writeSource("hosts/owner-a/config.env", "")
+	fixture.writeSource("hosts/owner-a/overrides/agents/notes.txt", "note\n")
+	fixture.writeSource("hosts/owner-a/overrides/agents/codex/config.toml", "api_key=\"must-not-be-versioned\"\n")
+	fixture.commit("two asset refusals")
+	_, err := BuildPlan(fixture.options(false))
+	if err == nil {
+		t.Fatal("refused override assets were accepted")
+	}
+	for _, text := range []string{
+		`owner host "owner-a" overrides: unknown file setting "notes.txt"`,
+		`owner host "owner-a" overrides: codex/config.toml`,
+		"secret material",
+	} {
+		if !strings.Contains(err.Error(), text) {
+			t.Fatalf("missing %q in %v", text, err)
+		}
+	}
+}
+
 func TestVersionedConfigSyncSkipsEffectiveChecksForUnreadGitInputs(t *testing.T) {
 	const vmYard = "DEV_UID=2233\nYARD_KIND=vm\nDEV_SUDO=0\n"
 	const spurious = "require YARD_KIND=vm"
@@ -1500,6 +1522,10 @@ func TestVersionedConfigSyncSkipsEffectiveChecksForUnreadGitInputs(t *testing.T)
 			f.writeSource("shared/config.env", "E2E_VM_CPU=invalid\n")
 			f.commit("invalid shared")
 		}, []string{"shared/config.env:1: E2E_VM_CPU"}, true},
+		{"refused yard asset", "", vmYard, func(f *syncFixture) {
+			f.writeSource("hosts/owner-a/yards/demo/overrides/agents/codex/config.toml", "api_key=\"must-not-be-versioned\"\n")
+			f.commit("secret yard asset")
+		}, []string{"yard demo overrides: codex/config.toml", "secret material"}, false},
 		{"dirty checkout", "", vmYard, func(f *syncFixture) {
 			f.writeSource("hosts/owner-a/yards/demo/config.env", vmYard+"GIT_USER_NAME=Jane\n")
 		}, []string{"changes in managed paths"}, true},
