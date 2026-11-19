@@ -32,6 +32,10 @@ cleanup() {
     if [ -f "$work/emulator-evidence.log" ]; then
       cat "$work/emulator-evidence.log" >&2 || true
     fi
+    if [ -f "$work/connected.log" ]; then
+      sed -n '/^Android ADB relay: refused a loopback connection/{s/^/android-gradle: relay refusal: /p;q}' \
+        "$work/connected.log" >&2 || true
+    fi
     for log in assemble-37.2.log assemble-35.log assemble-missing.log sdk-install.log assemble-36.1.log connected.log; do
       if [ -f "$work/$log" ]; then
         printf 'android-gradle: %s (last 80 lines)\n' "$log" >&2
@@ -198,8 +202,24 @@ stage='connected'
 connected() {
   local result=$? section
   local -a command
+  # Only reports relay health; the captures below keep run's ADB_SERVER_SOCKET.
+  local relay_probe='
+import socket, sys
+try:
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3) as stream:
+        stream.sendall(b"000chost:version")
+        reply = stream.recv(12)
+except (OSError, ValueError) as error:
+    print("relay=unhealthy error=" + type(error).__name__)
+    raise SystemExit(1)
+healthy = reply.startswith(b"OKAY")
+print("relay=" + ("healthy" if healthy else "unhealthy") + " reply=" + repr(reply))
+raise SystemExit(0 if healthy else 1)
+'
   trap - EXIT
   if [ "$result" -ne 0 ]; then
+    printf 'android-gradle evidence: relay host:version transport=tcp\n' >&2
+    android_capture_evidence python3 -c "$relay_probe" "${ANDROID_ADB_SERVER_PORT:-}" || true
     for section in logcat meminfo lowmemory; do
       printf 'android-gradle evidence: %s\n' "$section" >&2
       case "$section" in
