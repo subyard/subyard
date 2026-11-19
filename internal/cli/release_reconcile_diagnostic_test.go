@@ -476,6 +476,27 @@ func TestActivationProjectsNativeOwnershipExitError(t *testing.T) {
 	}
 }
 
+func TestActivationProjectsBubblewrapPolicyRefusal(t *testing.T) {
+	root, _, _, _ := configCommandFixture(t)
+	const refusal = "Bubblewrap AppArmor: AppArmor is not in a yard policy namespace. Inspect the yard policy."
+	fake := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}, ExecSteps: []testkit.IncusExecStep{
+		{},
+		{Result: ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false}`)}},
+		{},
+		{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte("private guest detail\n" + refusal + "\n")}, Err: errors.New("private guest exit error")},
+	}}
+	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: fake, Executor: fake, Integrations: []profile.IntegrationDefinition{}, Yard: domain.Context{YardName: "example"}}
+	_, cause := runtime.IntegrationPlan(context.Background())
+	if cause == nil {
+		t.Fatal("Bubblewrap policy refusal was accepted")
+	}
+	boundary := materializedConfigActivationError{cause: cause, yard: "example", phase: "integration plan", action: "inspect", command: "integration status"}
+	message, retry := boundary.ActivationDiagnostic()
+	if message != "yard example: "+refusal || retry != "run 'yard' '-Y' 'example' 'integration' 'status'" {
+		t.Fatalf("Bubblewrap policy cause was hidden: %q / %q", message, retry)
+	}
+}
+
 func TestMaterializedConfigObservationPreservesEarlyNativeDiagnostic(t *testing.T) {
 	for _, mode := range []os.FileMode{0, 0644} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
