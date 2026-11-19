@@ -1331,3 +1331,71 @@ func TestVersionedConfigSyncKeepsIgnoredProfileOnlyAssignments(t *testing.T) {
 		t.Fatalf("sync did not safely identify the nonliteral setting: %v", err)
 	}
 }
+
+// Effective cross-setting checks run only on yards whose Git inputs were all
+// read; refused Git inputs never turn upstream values into spurious refusals.
+func TestVersionedConfigSyncSkipsEffectiveChecksForUnreadGitInputs(t *testing.T) {
+	const vmYard = "DEV_UID=2233\nYARD_KIND=vm\nDEV_SUDO=0\n"
+	const spurious = "require YARD_KIND=vm"
+	for _, test := range []struct {
+		name         string
+		shared, yard string
+		change       func(*syncFixture)
+		want         []string
+		invalidLocal bool
+	}{
+		{"refused yard file", "", vmYard, func(f *syncFixture) {
+			f.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2233\nYARD_KIND=vm\nDEV_SUDO=invalid\n")
+			f.commit("invalid yard")
+		}, []string{"hosts/owner-a/yards/demo/config.env:3: DEV_SUDO"}, false},
+		{"refused shared file", "E2E_VM_CPU=2\n", vmYard, func(f *syncFixture) {
+			f.writeSource("shared/config.env", "E2E_VM_CPU=invalid\n")
+			f.commit("invalid shared")
+		}, []string{"shared/config.env:1: E2E_VM_CPU"}, true},
+		{"dirty checkout", "", vmYard, func(f *syncFixture) {
+			f.writeSource("hosts/owner-a/yards/demo/config.env", vmYard+"GIT_USER_NAME=Jane\n")
+		}, []string{"changes in managed paths"}, true},
+		{"unreadable owner subtree", "", vmYard, func(f *syncFixture) {
+			runSyncGit(t, f.source, "rm", "-q", "-r", "hosts/owner-a")
+			f.writeSource("hosts/owner-a", "not a directory\n")
+			f.commit("replace owner subtree")
+		}, []string{`owner host "owner-a"`}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newSyncFixture(t, "owner-a")
+			if test.shared != "" {
+				fixture.writeSource("shared/config.env", test.shared)
+			}
+			fixture.writeSource("hosts/owner-a/yards/demo/config.env", test.yard)
+			fixture.commit("vm yard")
+			plan, err := BuildPlan(fixture.options(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(plan); err != nil {
+				t.Fatal(err)
+			}
+			// The local VM setting is valid only together with YARD_KIND=vm from Git.
+			writeSyncTestFile(t, filepath.Join(fixture.configHome, "yards/demo/config.env"), "VM_PIN_IPV4=1\n", 0o600)
+			if _, err := BuildPlan(fixture.options(false)); err != nil {
+				t.Fatalf("baseline candidate: %v", err)
+			}
+			test.change(fixture)
+			want := test.want
+			if test.invalidLocal {
+				// Per-file checks of local inputs still run.
+				writeSyncTestFile(t, filepath.Join(fixture.configHome, "yards/default/config.env"), "SSH_PORT=invalid\n", 0o600)
+				want = append(want, "yards/default/config.env:1: SSH_PORT")
+			}
+			_, err = BuildPlan(fixture.options(false))
+			if err == nil || strings.Contains(err.Error(), spurious) {
+				t.Fatalf("refusal = %v", err)
+			}
+			for _, text := range want {
+				if !strings.Contains(err.Error(), text) {
+					t.Fatalf("missing %q in %v", text, err)
+				}
+			}
+		})
+	}
+}

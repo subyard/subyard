@@ -3329,6 +3329,7 @@ func TestConfigHostAuthoringCollectsIndependentSourceRefusals(t *testing.T) {
 		{[]string{"config", "set", "GIT_USER_NAME", "Jane", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "yards/neighbor/config.env:1: GIT_USER_NAME"}},
 		{[]string{"config", "set", "SSH_PORT", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "expects SETTING VALUE pairs"}},
 		{[]string{"config", "set", "SSH_PORT", "2298", "--scope", "host", "--scope", "yard", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "--scope may be specified only once"}},
+		{[]string{"config", "import", "SSH_PORT", "input", "--scope", "host", "--yes"}, 2, []string{"config.env:1: GIT_USER_EMAIL", "config.env:2: DEV_SUDO", "yards/neighbor/config.env:1: GIT_USER_NAME", "config import: configuration: SSH_PORT (scalar settings): setting is local-only"}},
 	} {
 		var output bytes.Buffer
 		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: invocation.args, Stdout: &output, Stderr: &output})
@@ -3342,6 +3343,41 @@ func TestConfigHostAuthoringCollectsIndependentSourceRefusals(t *testing.T) {
 		}
 	}
 	if string(mustReadConfigFixture(t, host)) != hostContent || string(mustReadConfigFixture(t, neighbor)) != yardContent {
+		t.Fatal("refused edit changed settings")
+	}
+}
+
+// Argument refusals keep the command diagnostic when the selected yard load fails.
+func TestConfigAuthoringReportsArgumentRefusalsBesideYardLoadRefusal(t *testing.T) {
+	root, _, home, environment := configCommandFixture(t)
+	yardFile := filepath.Join(home, "yards/default/config.env")
+	const yardContent = "GIT_USER_NAME=$INVALID_YARD_REFERENCE\n"
+	writeConfigCommandFile(t, yardFile, yardContent)
+	const sourceNext = "yard: Next: correct the named configuration source, then run config validate"
+	for _, invocation := range []struct {
+		args          []string
+		refusal, next string
+	}{
+		{[]string{"config", "set", "SSH_PORT", "--scope", "yard", "--yes"}, "config set: expects SETTING VALUE pairs", ""},
+		{[]string{"config", "set", "SSH_PORT", "2200", "--scope", "yard", "--scope", "yard", "--yes"}, "config set: --scope may be specified only once", ""},
+		{[]string{"config", "import", "SSH_PORT", "input", "--scope", "yard", "--yes"},
+			"config import: configuration: SSH_PORT (scalar settings): setting is local-only and cannot be imported from versioned configuration",
+			"yard: Next: use a supported value for the named setting"},
+	} {
+		var output bytes.Buffer
+		code := runAliasRepairFixture(t, Options{RepositoryRoot: root, Environment: environment, Arguments: invocation.args, Stdout: &output, Stderr: &output})
+		lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+		want := []string{"yard: " + invocation.refusal}
+		if invocation.next != "" {
+			want = append(want, invocation.next)
+		}
+		want = append(want, "yard: yard default, config inspection: yards/default/config.env:1: GIT_USER_NAME (local scalar settings): "+
+			"settings files accept only literal values. Replace the parameter expansion or setting reference with its value", sourceNext)
+		if code != 2 || !slices.Equal(lines, want) {
+			t.Fatalf("%v: exit=%d\n%s\nwant:\n%s", invocation.args, code, &output, strings.Join(want, "\n"))
+		}
+	}
+	if string(mustReadConfigFixture(t, yardFile)) != yardContent {
 		t.Fatal("refused edit changed settings")
 	}
 }

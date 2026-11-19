@@ -41,10 +41,21 @@ type sourceSnapshot struct {
 	scalarPath   map[string]string
 	assetRoots   map[string]string
 	fileSettings []config.FileSettingMapping
+	// commonInputsRead is true when the manifest and every shared and owner-host
+	// Git input were read; refusedYards names yards with a refused Git input.
+	commonInputsRead bool
+	refusedYards     map[string]bool
+}
+
+// yardInputsComplete reports whether every Git input of the yard was read, so
+// effective cross-setting checks of its candidate configuration are meaningful.
+func (snapshot sourceSnapshot) yardInputsComplete(name string) bool {
+	return snapshot.commonInputsRead && !snapshot.refusedYards[name]
 }
 
 // When source entries are refused, the snapshot retains validated inputs for
-// effective configuration inspection. A caller must have a nil error to use it for writes.
+// per-file inspection; yardInputsComplete gates effective checks. A caller must
+// have a nil error to use it for writes.
 func readSource(options Options, hostID string, catalog config.Catalog) (sourceSnapshot, error) {
 	root, err := filepath.Abs(options.SourceRoot)
 	if err != nil {
@@ -101,18 +112,28 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		root: root, id: digestBytes([]byte(identityRoot)), commit: commit,
 		catalog: catalog, manifest: manifest, files: map[string]candidateFile{},
 		scalarPath: map[string]string{}, assetRoots: map[string]string{}, fileSettings: options.FileSettings,
+		commonInputsRead: true, refusedYards: map[string]bool{},
 	}
 	refusals := []error{validateTopLevelRoles(root)}
+	commonRefusal := func(err error) {
+		snapshot.commonInputsRead = false
+		refusals = append(refusals, err)
+	}
+	yardRefusal := func(name string, err error) {
+		snapshot.refusedYards[name] = true
+		refusals = append(refusals, err)
+	}
 	if err := snapshot.readScope(
 		filepath.Join(root, "shared"), "overrides/shared/config.env",
 		"overrides/shared/agents", config.ScopeShared, allowedFiles, false,
 	); err != nil {
-		refusals = append(refusals, fmt.Errorf("shared source: %w", err))
+		commonRefusal(fmt.Errorf("shared source: %w", err))
 	}
 	hostsRoot := filepath.Join(root, "hosts")
 	hostEntries, err := readOptionalDirectory(root, hostsRoot)
 	if err != nil {
-		return snapshot, domain.CollectRefusals(append(refusals, fmt.Errorf("owner hosts: %w", err))...)
+		commonRefusal(fmt.Errorf("owner hosts: %w", err))
+		return snapshot, domain.CollectRefusals(refusals...)
 	}
 	hostRoot := filepath.Join(root, "hosts", hostID)
 	hostPresent := false
@@ -124,22 +145,23 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	}
 	if hostPresent {
 		if _, err := readOptionalDirectory(root, hostRoot); err != nil {
-			return snapshot, domain.CollectRefusals(append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))...)
+			commonRefusal(fmt.Errorf("owner host %q: %w", hostID, err))
+			return snapshot, domain.CollectRefusals(refusals...)
 		}
 		if err := validateChildren(hostRoot, map[string]bool{
 			"config.env": false, "overrides": true, "yards": true,
 		}); err != nil {
-			refusals = append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))
+			commonRefusal(fmt.Errorf("owner host %q: %w", hostID, err))
 		}
 		if err := snapshot.readConfig(
 			filepath.Join(hostRoot, "config.env"), "config.env", config.ScopeHost, false,
 		); err != nil {
-			refusals = append(refusals, fmt.Errorf("owner host %q: %w", hostID, err))
+			commonRefusal(fmt.Errorf("owner host %q: %w", hostID, err))
 		}
 		if err := snapshot.readOverrides(
 			filepath.Join(hostRoot, "overrides"), "overrides/host/agents", allowedFiles,
 		); err != nil {
-			refusals = append(refusals, fmt.Errorf("owner host %q overrides: %w", hostID, err))
+			commonRefusal(fmt.Errorf("owner host %q overrides: %w", hostID, err))
 		}
 	}
 	yardsRoot := filepath.Join(hostRoot, "yards")
@@ -147,25 +169,25 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	if hostPresent {
 		entries, err = readOptionalDirectory(root, yardsRoot)
 		if err != nil {
-			refusals = append(refusals, fmt.Errorf("owner host %q yards: %w", hostID, err))
+			commonRefusal(fmt.Errorf("owner host %q yards: %w", hostID, err))
 		}
 	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !domain.SafeName(name) {
-			refusals = append(refusals, fmt.Errorf("invalid versioned yard entry %q for host %s", name, hostID))
+			yardRefusal(name, fmt.Errorf("invalid versioned yard entry %q for host %s", name, hostID))
 			continue
 		}
 		yardRoot := filepath.Join(yardsRoot, name)
 		if err := validateChildren(yardRoot, map[string]bool{
 			"config.env": false, "overrides": true,
 		}); err != nil {
-			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
+			yardRefusal(name, fmt.Errorf("yard %s: %w", name, err))
 		}
 		sourceConfig := filepath.Join(yardRoot, "config.env")
 		targetConfig := filepath.ToSlash(filepath.Join("yards", name, "config.env"))
 		if err := snapshot.readConfig(sourceConfig, targetConfig, config.ScopeYard, name != "default"); err != nil {
-			refusals = append(refusals, err)
+			yardRefusal(name, err)
 		} else if name != "default" {
 			snapshot.yardNames = append(snapshot.yardNames, name)
 		}
@@ -173,11 +195,15 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		if err := snapshot.readOverrides(
 			filepath.Join(yardRoot, "overrides"), targetAssets, allowedFiles,
 		); err != nil {
-			refusals = append(refusals, fmt.Errorf("yard %s overrides: %w", name, err))
+			yardRefusal(name, fmt.Errorf("yard %s overrides: %w", name, err))
 		}
 	}
 	sort.Strings(snapshot.yardNames)
-	if err := domain.CollectRefusals(append(refusals, snapshot.ensureTracked())...); err != nil {
+	if err := snapshot.ensureTracked(); err != nil {
+		// Untracked inputs are not part of the selected commit.
+		commonRefusal(err)
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
 		return snapshot, err
 	}
 	snapshot.digest = snapshotDigest(snapshot.files, manifestContent)

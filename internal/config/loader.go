@@ -21,6 +21,10 @@ type LoadOptions struct {
 	// NativeTargetOnly resolves scalar address/paths for registry assessment. Its
 	// result must never be used for guest access, provisioning or activation.
 	NativeTargetOnly bool
+	// SourceChecksOnly reports per-file source and command-override refusals and
+	// skips effective cross-setting checks. Callers use it when some layer inputs
+	// were not read; its result is never an effective configuration.
+	SourceChecksOnly bool
 	Catalog          *Catalog
 	// Resources supplies operation-scoped declarations on demand.
 	// Saved endpoint state is always read fresh. Standalone callers may omit it.
@@ -494,6 +498,9 @@ func load(
 	normalizationLayer := tracker.addLayer(
 		"derived", "derived", "resolver normalization", true, settingScalar, "E2E_VM_CPU",
 	)
+	if options.SourceChecksOnly {
+		return domain.Context{}, nil, domain.CollectRefusals(commandRefusals...)
+	}
 	if options.NativeTargetOnly {
 		// Edge D4: native target discovery reports source and command-override
 		// refusals only; later checks are not part of address discovery.

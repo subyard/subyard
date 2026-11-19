@@ -71,13 +71,20 @@ func BuildPlan(options Options) (Plan, error) {
 		))
 	}
 	var identityErr error
-	if sourceErr == nil {
+	if source.commonInputsRead {
 		identityErr = guardHostSourceIdentity(source.root, hostID, previous)
+		if identityErr != nil {
+			// The selected owner subtree is not the one the preserved settings came from.
+			source.commonInputsRead = false
+		}
 	}
 	var legacyContexts []config.Loaded
 	inspection := options
 	inspection.inspectionOnly = true
 	candidateErr := validateCandidate(inspection, source, previous, catalog, &legacyContexts)
+	if errors.Is(candidateErr, errIncompleteCandidate) && (sourceErr != nil || identityErr != nil) {
+		candidateErr = nil
+	}
 	if candidateErr != nil {
 		candidateErr = fmt.Errorf("candidate configuration: %w", candidateErr)
 	}
@@ -403,20 +410,25 @@ func validateCandidate(
 	}
 	sourceLayers := &config.LayerPaths{GitSharedSettings: layerPaths.GitSharedSettings, GitHostSettings: layerPaths.GitHostSettings, GitYardSettings: gitYards, GitSharedAssets: layerPaths.GitSharedAssets, GitHostAssets: layerPaths.GitHostAssets, GitYardAssets: layerPaths.GitYardAssets}
 	contexts := make([]config.Loaded, 0, len(yardNames)+1)
+	incomplete := false
 	for _, name := range assetYards {
 		reset, err := config.YardFallbackReset(options.ConfigHome, name)
 		if err != nil {
 			refusals = append(refusals, err)
 			continue
 		}
+		// Effective checks of a yard with an unread Git input would refuse values
+		// that exist upstream; its local files still get per-file checks.
+		complete := source.yardInputsComplete(name)
 		loadOptions := config.LoadOptions{
 			Catalog: &catalog, RepositoryRoot: options.RepositoryRoot, OperatorHome: options.OperatorHome,
-			YardName: name, Environment: environment,
+			YardName: name, Environment: environment, SourceChecksOnly: !complete,
 			ConfigLocked: options.ConfigLocked, LayerPaths: layerPaths, FileOverrides: options.validationOverrides,
 		}
 		// Reset yards are absent from effective inventory, but their retained authored
 		// source must still satisfy the same schema and runtime configuration checks.
-		if reset && gitYards[name] != "" {
+		// Git source refusals are already reported by readSource.
+		if reset && gitYards[name] != "" && complete {
 			retained := loadOptions
 			retained.LayerPaths, retained.SyncSource = sourceLayers, true
 			if _, err := config.Load(retained); err != nil {
@@ -431,6 +443,10 @@ func validateCandidate(
 			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 			continue
 		}
+		if !complete {
+			incomplete = true
+			continue
+		}
 		contexts = append(contexts, loaded)
 	}
 	if !options.inspectionOnly {
@@ -439,11 +455,18 @@ func validateCandidate(
 	if err := domain.CollectRefusals(refusals...); err != nil {
 		return err
 	}
+	if incomplete {
+		return errIncompleteCandidate
+	}
 	if len(capture) != 0 {
 		*capture[0] = contexts
 	}
 	return nil
 }
+
+// errIncompleteCandidate marks a candidate that passed only per-file checks
+// because some Git inputs were refused; those refusals are reported instead.
+var errIncompleteCandidate = errors.New("candidate configuration has unread Git inputs")
 
 func candidateEnvironment(
 	source map[string]string,

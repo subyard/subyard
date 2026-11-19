@@ -809,7 +809,11 @@ func (cli *CLI) Run(ctx context.Context) int {
 		}
 		configHome, _ := config.ResolveConfigHome(operatorHome, cli.env)
 		if core && definition.Handler == "@config" && cli.activation == nil {
-			err = cli.collectConfigAuthoringRefusals(configHome, yard, commandArguments, err)
+			action, argumentErr, loadErr := cli.collectConfigAuthoringRefusals(configHome, yard, commandArguments, err)
+			if argumentErr != nil {
+				cli.reportConfigRefusal("config "+action, configHome, argumentErr)
+			}
+			err = loadErr
 		}
 		integrity := config.KnownCause{Err: ownerinventory.ErrIntegrity, Text: "owner inventory integrity validation failed: owner HostID mismatch or unverified response", Next: "repair the verified owner connection"}
 		diagnostic := config.Diagnose(configHome, err, integrity)

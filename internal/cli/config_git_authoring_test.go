@@ -332,3 +332,29 @@ func TestConfigSyncPushDoesNotRequireCommitIdentity(t *testing.T) {
 	f.assertSetting("DEV_UID", "2302")
 	f.run(0, "config", "sync", "push", "--yes")
 }
+
+// A refused upstream yard file must not turn the values it holds into refusals
+// of the local settings that depend on them.
+func TestConfigSyncPullSkipsEffectiveChecksForRefusedUpstreamYard(t *testing.T) {
+	f := newConfigGitAuthoringFixture(t)
+	checkout := filepath.Join(f.home, ".local/share/subyard-config")
+	local := filepath.Join(f.configHome, "yards/demo/config.env")
+	source := filepath.Join(checkout, "hosts/owner-a/yards/demo/config.env")
+	writeConfigCommandFile(t, local, "SSH_PORT=2399\n")
+	writeConfigCommandFile(t, source, "YARD_KIND=vm\nDEV_SUDO=1\n")
+	commitConfigSource(t, checkout, "Add VM demo yard")
+	runConfigSyncGit(t, checkout, "push", "-q")
+	f.run(0, "config", "sync", "pull", "--yes")
+	// The local VM setting is valid only together with YARD_KIND=vm from Git.
+	writeConfigCommandFile(t, local, "SSH_PORT=2399\nVM_PIN_IPV4=1\n")
+	f.run(0, "config", "validate")
+	writeConfigCommandFile(t, source, "YARD_KIND=vm\nDEV_SUDO=invalid\n")
+	commitConfigSource(t, checkout, "Publish invalid demo yard")
+	runConfigSyncGit(t, checkout, "push", "-q")
+	f.run(1, "config", "sync", "pull", "--yes")
+	output := f.stderr.String()
+	if !strings.Contains(output, "hosts/owner-a/yards/demo/config.env:2: DEV_SUDO (scalar settings): invalid boolean value") ||
+		strings.Contains(output, "require YARD_KIND=vm") || strings.Contains(output, "use a VM yard") {
+		t.Fatalf("refused upstream yard: %s", output)
+	}
+}

@@ -398,26 +398,30 @@ func parseConfigAuthoringRequests(
 }
 
 // A failed selected-yard load still permits checking arguments and inspecting
-// other yards affected by a shared or host edit.
-func (cli *CLI) collectConfigAuthoringRefusals(home, yard string, arguments []string, loadErr error) error {
+// other yards affected by a shared or host edit. Argument refusals are returned
+// separately from configuration refusals so each keeps its own diagnostic.
+func (cli *CLI) collectConfigAuthoringRefusals(home, yard string, arguments []string, loadErr error) (string, error, error) {
 	args := configArguments(arguments)
 	if len(args) == 0 || !slices.Contains([]string{"set", "unset", "import", "edit"}, args[0]) {
-		return loadErr
+		return "", nil, loadErr
 	}
-	requests, err := parseConfigAuthoringRequests(args[0], args[1:], false)
+	action := args[0]
+	requests, err := parseConfigAuthoringRequests(action, args[1:], false)
 	if err != nil {
-		return domain.CollectRefusals(loadErr, err)
+		return action, err, loadErr
 	}
-	refusals := []error{loadErr}
-	if args[0] == "set" || args[0] == "unset" {
-		_, argumentErrs := checkLocalBatchAssignments(cli.catalog, requests)
-		refusals = append(refusals, argumentErrs...)
+	var argumentErrs []error
+	if action == "set" || action == "unset" {
+		_, argumentErrs = checkLocalBatchAssignments(cli.catalog, requests)
+	} else if _, err := configAuthoringDefinition(cli.catalog, action, requests[0].scope, requests[0].name, true); err != nil {
+		argumentErrs = append(argumentErrs, err)
 	}
+	argumentErr := domain.CollectRefusals(argumentErrs...)
 	if requests[0].scope == config.ScopeYard || home == "" || !domain.SafeName(yard) {
-		return domain.CollectRefusals(refusals...)
+		return action, argumentErr, loadErr
 	}
 	names, err := config.LocalBatchYardNames(home)
-	refusals = append(refusals, err)
+	refusals := []error{loadErr, err}
 	for _, name := range names {
 		if name == yard {
 			continue
@@ -426,7 +430,7 @@ func (cli *CLI) collectConfigAuthoringRefusals(home, yard string, arguments []st
 			refusals = append(refusals, fmt.Errorf("yard %s: %w", name, err))
 		}
 	}
-	return domain.CollectRefusals(refusals...)
+	return action, argumentErr, domain.CollectRefusals(refusals...)
 }
 
 func configScalarAuthoringPath(
