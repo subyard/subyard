@@ -69,7 +69,7 @@ fi
 sudo -n python3 -B "$state/source/guest.py" apply 1 dev ''
 timeout 30 bash -c 'until test -S /var/lib/subyard/telemetry/control.sock && test -f /var/lib/subyard/telemetry/delegation.json; do sleep 0.2; done'
 python3 -B - /var/lib/subyard/telemetry http://127.0.0.1:14318 "$ROOT/config/profiles/telemetry" <<'PY_UNITS'
-import json, os, pathlib, sqlite3, struct, subprocess, sys, threading, time, urllib.error, urllib.request
+import json, os, pathlib, re, sqlite3, struct, subprocess, sys, threading, time, urllib.error, urllib.request
 sys.path.insert(0, sys.argv[3])
 import forward
 
@@ -81,7 +81,6 @@ api_key = 'sk-proj-telemetry-canary-secret-0123456789'
 email = 'telemetry-canary@example.invalid'
 account = '6c28464d-369f-4b50-98ac-6e3b3b9a1c13'
 prompt, output = 'telemetry-canary-prompt-content', 'telemetry-canary-tool-content'
-canaries = (bearer, password, api_key, email, account, prompt, output, token)
 
 def attribute(key, value, encoding='stringValue'):
     return dict(key=key, value={encoding: value})
@@ -102,29 +101,30 @@ def send(endpoint, signal, payload, authorization):
             time.sleep(0.1)
 
 attributes = [attribute('user.email', email), attribute('user.account_id', account),
-              attribute('authorization', 'Bearer '+bearer), attribute('slug', account),
+              attribute('authorization', 'Bearer '+bearer), attribute('slug', account), attribute('tool_namespace', 'password='+password),
               attribute('prompt', prompt), attribute('output', output), attribute(api_key, email)]
-session = 'e9afa75b-6243-404c-a18f-5ad572f01c54'
-logs = dict(resourceLogs=[dict(resource=dict(attributes=attributes), scopeLogs=[dict(logRecords=[
-    dict(eventName='codex.tool_result', timeUnixNano=str(time.time_ns()), severityNumber=9,
-         body=dict(stringValue=prompt), attributes=[
-             attribute('conversation.id', session), attribute('model', 'subyard-fixture-model'),
-             attribute('tool_name', 'exec_command'), attribute('tool_namespace', 'password='+password),
-             attribute('arguments', output), attribute('input_token_count', '17', 'intValue'),
-             attribute('cost_usd', 0.125, 'doubleValue')])])])])
+
+def fixture(name):
+    """A real-client fixture with hostile resource attributes and current timestamps."""
+    text = (pathlib.Path(sys.argv[3])/'collector/testdata'/name).read_text()
+    payload = json.loads(re.sub(r'([tT]imeUnixNano)":"[0-9]+"', rf'\1":"{time.time_ns()}"', text))
+    for group in next(iter(payload.values())):
+        group.setdefault('resource', {}).setdefault('attributes', []).extend(attributes)
+    return payload
+
 with forward.Server(('127.0.0.1', 0), data/'control.sock') as bridge:
     thread = threading.Thread(target=bridge.serve_forever, daemon=True)
     thread.start()
     try:
-        send(f'http://127.0.0.1:{bridge.server_port}', 'logs', logs, bearer)
+        for name in ('claude-code-2.1.327-logs.json', 'codex-0.170.0-logs.json'):
+            send(f'http://127.0.0.1:{bridge.server_port}', 'logs', fixture(name), bearer)
     finally:
         bridge.shutdown()
         thread.join(timeout=5)
-metrics = [dict(name=name, unit=unit, gauge=dict(dataPoints=[dict(asInt='1')]))
-           for name, unit in (('claude_code.session.count', '%'), ('codex.turn.token_usage', '{token}'))]
-metrics[0].update(description=output)
-metrics[0]['gauge']['dataPoints'][0]['attributes'] = attributes
-send(sys.argv[2], 'metrics', dict(resourceMetrics=[dict(scopeMetrics=[dict(metrics=metrics)])]), token)
+for name in ('claude-code-2.1.327-metrics.json', 'codex-0.170.0-metrics.json'):
+    payload = fixture(name)
+    payload['resourceMetrics'][0]['scopeMetrics'][0]['metrics'][0]['description'] = output
+    send(sys.argv[2], 'metrics', payload, token)
 trace_id = '38e963202beb4b94b7958e79638a0e41'
 send(sys.argv[2], 'traces', dict(resourceSpans=[dict(scopeSpans=[dict(spans=[
     dict(traceId=trace_id, spanId='52e87bd6bb2a758d', name='codex.turn', attributes=attributes,
@@ -132,16 +132,15 @@ send(sys.argv[2], 'traces', dict(resourceSpans=[dict(scopeSpans=[dict(spans=[
          status=dict(code=2, message=output))])])]), token)
 environment = dict(os.environ, SUBYARD_WORKTREE_ID='password='+password, SUBYARD_HOST_ID=api_key)
 launched = subprocess.run(['subyard-telemetry-run', '--agent', 'other', '--scope-mode', 'partial',
-    '--project-id', 'telemetry-canary-project', '--yard-id', 'telemetry-canary-yard', '--task-id', email,
+    '--project-id', 'telemetry-probe-project', '--yard-id', 'telemetry-probe-yard', '--task-id', email,
     '--', '/bin/true', prompt, output], capture_output=True, env=environment, check=True, timeout=15)
 run = next(line.partition(b'=')[2].decode() for line in launched.stderr.splitlines() if line.startswith(b'agent_run_id='))
 with sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=2) as db:
     db.execute('PRAGMA query_only=ON')
     signals = {}
     for kind in ('logs', 'metrics', 'traces'):
-        row = db.execute('SELECT protobuf FROM records WHERE encoding=? ORDER BY sequence DESC LIMIT 1', ('otlp/'+kind,)).fetchone()
-        assert row, 'installed collector did not commit a canary signal'
-        signals[kind] = row[0]
+        signals[kind] = b''.join(row[0] for row in db.execute('SELECT protobuf FROM records WHERE encoding=?', ('otlp/'+kind,)))
+        assert signals[kind], 'installed collector did not commit a canary signal'
     deadline = time.monotonic()+15
     while True:
         row = db.execute('SELECT body FROM runs WHERE agent_run_id=?', (run,)).fetchone()
@@ -150,19 +149,19 @@ with sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, ti
         assert time.monotonic() < deadline, 'launcher canary did not commit'
         time.sleep(.1)
     run_body = json.loads(row[0])
-assert all(value in signals['metrics'] for value in (b'claude_code.session.count', b'codex.turn.token_usage', b'%', b'{token}'))
-assert all(value in signals['logs'] for value in (session.encode(), b'subyard-fixture-model', b'exec_command',
-    b'input_token_count', b'cost_usd', struct.pack('<d', .125))), 'allowed native log fields missing'
+assert all(value in signals['metrics'] for value in (b'claude_code.token.usage', b'codex.turn.token_usage', b'tokens', b'USD'))
+assert all(value in signals['logs'] for value in (b'0b9f7d4e-1111-4222-8333-944455556666', b'019a0000-1111-7222-8333-944455556666',
+    b'claude-opus-5-5', b'gpt-5.5', b'exec_command', b'input_token_count', b'cost_usd', struct.pack('<d', .0421))), 'allowed native log fields missing'
 assert bytes.fromhex(trace_id) in signals['traces'], 'raw trace ID missing'
-assert run_body['project_id'] == 'telemetry-canary-project' and run_body['yard_id'] == 'telemetry-canary-yard'
-markers = tuple(marker.encode() for marker in canaries)
+assert run_body['project_id'] == 'telemetry-probe-project' and run_body['yard_id'] == 'telemetry-probe-yard'
+markers = (b'canary', account.encode(), token.encode())  # Every private fixture and probe value contains 'canary'.
 for path in data.rglob('*'):
     try:
         content = path.read_bytes() if path.is_file() else b''
     except FileNotFoundError:
         continue  # A spool segment can retire after its SQLite transaction.
     assert not any(marker in content or marker in os.fsencode(path.name) for marker in markers), 'privacy canary persisted'
-print(json.dumps(dict(schema='subyard.telemetry.unit-acceptance/v1', percent_retained=True,
+print(json.dumps(dict(schema='subyard.telemetry.unit-acceptance/v1', units_retained=True,
                       token_retained=True, sqlite_commit=True, installed_privacy_canary=True)), flush=True)
 PY_UNITS
 finals_diagnostic() {

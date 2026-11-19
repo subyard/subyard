@@ -14,8 +14,9 @@ import (
 
 // The fixtures follow the emitters of the installed clients: Claude Code
 // 2.1.327 (rl() and aje() in the bundle) and Codex 0.170.0
-// (codex-rs/otel log_event! call sites). Every value that must be dropped
-// contains "canary"; every retained value is free of it.
+// (codex-rs/otel log_event! call sites), one record per asserted event or
+// metric. Each dropped key carries one value containing "canary"; every
+// retained value is free of it.
 func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 	s := fixtureStore(t)
 	captureNativeFixtures(t, s)
@@ -132,7 +133,7 @@ func TestNativeClientFieldsSurviveSanitizer(t *testing.T) {
 	if !slices.Equal(slices.Compact(services), []string{"claude-code", "subyard-fixture"}) {
 		t.Errorf("client service names lost: %v", services)
 	}
-	if len(points) != 8 {
+	if len(points) != 4 {
 		t.Errorf("metric points dropped: %d", len(points))
 	}
 }
