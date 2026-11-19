@@ -65,6 +65,12 @@ bash() { printf '%s\\0' "$@"; }
                                 env={**environment, **invalid}, capture_output=True)
         assert result.returncode == 2 and not result.stdout, 'invalid grant reached native command'
 print('ok: only full telemetry receives 175-minute delegation and 180-minute controller budgets; narrow budgets and delegation guards preserved')
+assets = ('fixture_assets="$state/assets"\n' + owner.split('fixture_assets="$state/assets"\n', 1)[1]
+          .split('\nmkdir "$state/source"', 1)[0])
+probe = 'set -eu\nstate=/fixture-state; ROOT=/fixture\ntelemetry_prepare_assets() { :; }\n'
+result = subprocess.run(['bash', '-c', probe+assets+'\nprintenv SUBYARD_TELEMETRY_COLLECTOR'],
+                        text=True, capture_output=True, check=True)
+assert result.stdout.strip() == '/fixture-state/assets/subyard-telemetry'
 held = 'if [ "$mode" = --held-diagnostic ]; then\n' + owner.split('if [ "$mode" = --held-diagnostic ]; then\n', 1)[1].split('\nfi', 1)[0] + '\nfi'
 assert owner.index(held) < owner.index('python3 -B config/profiles/telemetry/tests/e2e/native-signals.py')
 probe = '''set -eu

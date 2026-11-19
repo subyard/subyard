@@ -53,6 +53,8 @@ fixture_assets="$state/assets"
 telemetry_prepare_assets "$ROOT" "$fixture_assets"
 export SUBYARD_TELEMETRY_FIXTURE_ASSETS="$fixture_assets"
 asset="$fixture_assets/subyard-telemetry"
+# Source-tree Python probes use the same frozen sanitizer as the installed profile.
+export SUBYARD_TELEMETRY_COLLECTOR="$asset"
 mkdir "$state/source"
 cp config/profiles/telemetry/*.py config/profiles/telemetry/record-policy.txt "$state/source/"
 cp -R config/profiles/telemetry/skills "$state/source/skills"
