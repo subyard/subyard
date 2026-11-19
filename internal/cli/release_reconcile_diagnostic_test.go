@@ -478,12 +478,12 @@ func TestActivationProjectsNativeOwnershipExitError(t *testing.T) {
 
 func TestActivationProjectsBubblewrapPolicyRefusal(t *testing.T) {
 	root, _, _, _ := configCommandFixture(t)
-	const refusal = "Bubblewrap AppArmor: AppArmor is not in a yard policy namespace. Inspect the yard policy."
+	const refusal = "Bubblewrap AppArmor: the yard's Bubblewrap AppArmor policy cannot be verified or reconciled. Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
 	fake := &testkit.Incus{Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}}, ExecSteps: []testkit.IncusExecStep{
 		{},
 		{Result: ports.InstanceExecResult{Stdout: []byte(`{"fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","changed":false}`)}},
 		{},
-		{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte("private guest detail\n" + refusal + "\n")}, Err: errors.New("private guest exit error")},
+		{Result: ports.InstanceExecResult{ExitCode: 1, Stderr: []byte("private guest detail\nBubblewrap AppArmor: AppArmor is not in a yard policy namespace. private guest finding\n")}, Err: errors.New("private guest exit error")},
 	}}
 	runtime := reconcileruntime.Runtime{RepositoryRoot: root, Incus: fake, Executor: fake, Integrations: []profile.IntegrationDefinition{}, Yard: domain.Context{YardName: "example"}}
 	_, cause := runtime.IntegrationPlan(context.Background())

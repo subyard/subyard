@@ -90,13 +90,15 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 		}
 		retry := "run " + shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 		refusals := []error{settingsErr}
-		for _, line := range strings.Split(string(result.Stderr), "\n") {
-			if line == "subyard-integration-conflict:ccusage" {
+		policyRefused := false
+		for _, line := range guestLines(result.Stderr) {
+			if line.Matches("subyard-integration-conflict:ccusage") {
 				refusals = append(refusals, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry})
 			}
-			if strings.HasPrefix(line, "Bubblewrap AppArmor: ") {
-				refusals = append(refusals, bubblewrapPolicyRefusal{line: line, yard: yard, retry: retry})
-			}
+			policyRefused = policyRefused || line.wraps(bubblewrapRefusalPrefix, "")
+		}
+		if policyRefused {
+			refusals = append(refusals, bubblewrapPolicyRefusal{line: bubblewrapRefusalText, yard: yard, retry: retry})
 		}
 		if len(refusals) == 1 {
 			refusals = append(refusals, errors.New("integration service or utility ownership is unknown or changed"))
@@ -114,9 +116,15 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 	return output, changed, nil
 }
 
-// bubblewrapPolicyRefusal is one refusal line of the yard's Bubblewrap policy
-// program. Its bounded, control-free text is the public release diagnostic;
-// other guest output stays private.
+const (
+	bubblewrapRefusalPrefix = "Bubblewrap AppArmor: "
+	// bubblewrapRefusalText replaces the policy program's own refusal lines,
+	// which are guest text.
+	bubblewrapRefusalText = bubblewrapRefusalPrefix + "the yard's Bubblewrap AppArmor policy cannot be verified or reconciled. Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
+)
+
+// bubblewrapPolicyRefusal reports that the yard's Bubblewrap policy program
+// refused, as fixed host text. Its bounded text is the public release diagnostic.
 type bubblewrapPolicyRefusal struct{ line, yard, retry string }
 
 func (err bubblewrapPolicyRefusal) Error() string { return err.line }
