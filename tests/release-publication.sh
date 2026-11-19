@@ -509,7 +509,7 @@ class Contracts(unittest.TestCase):
                 local = state_dir / identity["candidate_id"] / "prepared"
                 self.assertEqual((local / "identity.json").read_bytes(), original_identity)
                 github.repository = argv[4] = "SUBYARD/Subyard"
-                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "1"]
+                argv[5:] = ["accept", "--candidate", identity["candidate_id"], "--slots", "slot-1"]
                 with patch.object(sys, "argv", argv), patch.object(m.a, "run_checks", return_value=1) as run, \
                      patch.object(m.a, "reuse_isolated_tests", wraps=m.a.reuse_isolated_tests) as reuse:
                     self.assertEqual(m.main(), 1)
@@ -766,7 +766,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(document["schema_version"], 1)
         github = FakeGitHub(identity)
         captured = io.StringIO()
-        for slots in ([], ["--slots", "1"]):
+        for slots in ([], ["--slots", "slot-1"]):
             with patch.object(m, "GitHub", return_value=github), \
                  patch.object(m.a, "execution_environment", return_value=document["environment"]), \
                  patch.object(m.a, "execute", side_effect=AssertionError("default accept dispatched a VM")), \
@@ -805,14 +805,20 @@ class Contracts(unittest.TestCase):
         legacy["checks"]["p0-release-smoke"] = m.a.OPTIONAL_VM_NOT_RUN.copy()
         with self.assertRaises(ValueError):
             m.validate_attestation(legacy, self.identity, self.output / "source")
-        for option in (["--with-vms"], ["--only", "profile:sample"]):
-            with patch.object(m, "GitHub", return_value=github), \
-                 patch.object(m.a, "execution_environment", return_value=document["environment"]), \
-                 patch.object(m.signal, "signal"), \
-                 patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
-                                           "accept", "--candidate", identity["candidate_id"], *option]):
-                with self.assertRaisesRegex(ValueError, "require --slots"):
-                    m.main()
+        native_execute = m.a.execute
+        def execute_profile(*args):
+            return native_execute(*args) | {"environment_evidence": "recorded",
+                                            "environments": document["checks"]["p0-release-smoke"]["environments"]}
+        with patch.object(m, "GitHub", return_value=github), \
+             patch.object(m.a, "execution_environment", return_value=document["environment"]), \
+             patch.object(m.a, "broker_slots", return_value={4: "available"}), \
+             patch.object(m.a, "execute", side_effect=execute_profile) as execute, \
+             patch.object(m.signal, "signal"), \
+             patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
+                                       "accept", "--candidate", identity["candidate_id"], "--with-vms"]):
+            self.assertEqual(m.main(), 0)
+        execute.assert_called_once()
+        self.assertEqual((execute.call_args.args[0], execute.call_args.args[-1]), ("profile:sample", 4))
 
     def test_release_scope_uses_previous_merged_tag_and_product_migration_paths(self):
         repository = self.directory / "scope-repository"
@@ -961,9 +967,9 @@ class Contracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "full release required"):
             run("accept", "--level", "ordinary", scope=migration)
         self.assertEqual((output / "receipt.json").read_bytes(), before)
-        with_vms, level, _ = run("accept", "--level", "full", "--slots", "1", scope=migration)
+        with_vms, level, _ = run("accept", "--level", "full", "--slots", "slot-1", scope=migration)
         self.assertEqual((with_vms, level["level"], level["migration_changes"]), (True, "full", ["internal/migration/a.go"]))
-        with_vms, recorded, _ = run("accept", "--slots", "1")  # The recorded level persists.
+        with_vms, recorded, _ = run("accept", "--slots", "slot-1")  # The recorded level persists.
         self.assertEqual((with_vms, recorded), (True, level))
         with self.assertRaisesRegex(ValueError, "full release requires every VM check; not run: profile:sample"):
             m.attestation(output, identity)
@@ -1032,7 +1038,7 @@ class Contracts(unittest.TestCase):
              patch.object(m.a, "execute", side_effect=AssertionError("already passed")), \
              patch.object(m.signal, "signal"), redirect_stdout(captured), \
              patch.object(sys, "argv", ["release", "--state-dir", str(self.directory),
-                                       "accept", "--candidate", identity["candidate_id"], "--slots", "1"]):
+                                       "accept", "--candidate", identity["candidate_id"], "--slots", "slot-1"]):
             self.assertEqual(m.main(), 0)
         self.assertIn("external_optional_not_run=" + name, captured.getvalue())
         self.assertEqual(json.loads((directory / "attestation.json").read_text())["external_obligations"],
