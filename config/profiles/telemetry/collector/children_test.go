@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 		}
 		records = append(records, record(recordKind, body))
 		for _, run := range runs {
-			records = append(records, record("association", map[string]any{"association_id": id + ":" + run, "object_id": id, "agent_run_id": run, "quality": "explicit", "source": "fixture-explicit", "start_time": start, "end_time": end}))
+			records = append(records, record("association", map[string]any{"association_id": id + ":" + run, "object_id": id, "agent_run_id": run, "quality": "explicit", "source": "validated-grant", "start_time": start, "end_time": end}))
 		}
 		for i, at := range []string{start, end} {
 			r := record("sample", map[string]any{"object_id": id, "cpu_ns": i * cpu, "monotonic_ns": i*10000000000 + 1, "boot_id": "boot", "counter_generation": id + ":generation", "memory_bytes": 100})
@@ -62,7 +63,9 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 	if direct["attribution_mode"] != "direct_run" || len(direct["included_runs"].([]string)) != 1 || len(direct["selected_nonoverlapping"].([]any)) != 1 {
 		t.Fatalf("direct view changed: %+v", direct)
 	}
-	if inclusive["hierarchy_source"] != "run.parent_run_id" || inclusive["attribution_mode"] != "including_child_runs" || fmt.Sprint(inclusive["included_runs"]) != "[child grandchild parent sibling]" {
+	wantRuns := []string{"child", "grandchild", "parent", "sibling"}
+	slices.Sort(wantRuns)
+	if inclusive["hierarchy_source"] != "run.parent_run_id" || inclusive["attribution_mode"] != "including_child_runs" || !slices.Equal(inclusive["included_runs"].([]string), wantRuns) {
 		t.Fatalf("explicit hierarchy evidence missing: %+v", inclusive)
 	}
 	selected := inclusive["selected_nonoverlapping"].([]any)
@@ -72,11 +75,11 @@ func TestRunIncludingChildrenSelectsObjectsOnce(t *testing.T) {
 	for _, value := range selected {
 		entry := value.(map[string]any)
 		refs := entry["sample_refs"].([]any)
-		if len(refs) != 2 || refs[0].(map[string]any)["origin_id"] != "producer:fixture" || refs[0].(map[string]any)["event_id"] == "" {
+		if len(refs) != 2 || refs[0].(map[string]any)["origin_id"] != s.OriginID() || refs[0].(map[string]any)["event_id"] == "" {
 			t.Fatalf("sample identity lost: %+v", entry)
 		}
 		for _, edge := range entry["associations"].([]map[string]any) {
-			if edge["agent_run_id"] == "" || edge["source"] != "fixture-explicit" || edge["quality"] != "explicit" {
+			if edge["agent_run_id"] == "" || edge["source"] != "validated-grant" || edge["quality"] != "explicit" {
 				t.Fatalf("association provenance lost: %+v", edge)
 			}
 		}
@@ -118,5 +121,23 @@ func TestRunHierarchyCycleAndWindow(t *testing.T) {
 				t.Fatalf("expected finite %s diagnostic, got %v", want, err)
 			}
 		})
+	}
+}
+
+func TestAssociationUpdateKeepsIdentityAndClosesTheEdge(t *testing.T) {
+	s := fixtureStore(t)
+	edge := func(run, start, end string, shared bool) Record {
+		return record("association", map[string]any{"association_id": "edge", "object_id": "object", "agent_run_id": run,
+			"quality": "explicit", "source": "validated-grant", "start_time": start, "end_time": end, "shared": shared})
+	}
+	if err := s.Ingest(context.Background(), []Record{edge("", "2026-01-01T00:00:00Z", "", true),
+		edge("run", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z", false), edge("other", "", "", false)}); err != nil {
+		t.Fatal(err)
+	}
+	var run, start, end string
+	var shared bool
+	if err := s.db.QueryRow("SELECT agent_run_id,start_time,end_time,shared FROM associations").Scan(&run, &start, &end, &shared); err != nil ||
+		run != "run" || !strings.HasPrefix(start, "2026-01-01") || !strings.HasPrefix(end, "2026-01-03") || !shared {
+		t.Fatalf("merged association: %s %s %s %v (%v)", run, start, end, shared, err)
 	}
 }

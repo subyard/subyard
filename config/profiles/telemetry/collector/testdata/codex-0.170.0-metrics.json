@@ -1,0 +1,4 @@
+{"resourceMetrics":[{"scopeMetrics":[{"metrics":[
+{"name":"codex.turn.token_usage","sum":{"aggregationTemporality":1,"isMonotonic":true,"dataPoints":[{"startTimeUnixNano":"1792800000000000000","timeUnixNano":"1792800000000000000","asInt":"220","attributes":[{"key":"token_type","value":{"stringValue":"output"}},{"key":"model","value":{"stringValue":"gpt-5.5"}}]}]},"unit":"tokens"},
+{"name":"codex.tool.call","sum":{"aggregationTemporality":1,"isMonotonic":true,"dataPoints":[{"startTimeUnixNano":"1792800000000000000","timeUnixNano":"1792800000000000000","asInt":"1","attributes":[{"key":"success","value":{"stringValue":"true"}}]}]}}
+]}]}]}

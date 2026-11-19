@@ -1,58 +1,77 @@
 #!/usr/bin/env python3
-"""Private, bounded producer outbox. Collection failures never fail workloads."""
+"""Private, bounded producer spool. Collection failures never fail workloads."""
+from contextlib import contextmanager
+import ctypes
 import datetime
 import fcntl
+import hashlib
 import http.client
+import itertools
 import json
-import math
 import os
 from pathlib import Path
 import re
 import socket
+import subprocess
+import sys
 import stat
 import tempfile
+import time
 import uuid
 
 SCHEMA = 'subyard.telemetry.record/v1'
-KINDS = {'run', 'session', 'relation', 'scope', 'process', 'sample', 'allocation', 'association', 'gap'}
-FIELDS = set('''association_id purpose allocated_cpu allocated_memory_bytes allocated_disk_bytes reservation_semantics agent_run_id state agent agent_version session_id parent_run_id task_id project_id
-worktree_id yard_id host_id object_id object_kind parent_object_id accounting boot_id generation
-monotonic_ns cpu_ns cpu_user_ns cpu_system_ns memory_bytes memory_peak_bytes swap_bytes
-io_read_bytes io_write_bytes io_read_ops io_write_ops rss_bytes rss_peak_bytes pss_bytes observed_process_count
-quality scope_quality coverage_start coverage_end counter_reset cgroup_namespace_id
-process_namespace_id pid start_ticks exit_code signal relation source start_time end_time shared
-reason available sampled_peak_bytes owner_id slot_id resource_generation lease_epoch allocation_id
-acquire_id correlation_id reserved_cpu reserved_memory_bytes reserved_disk_bytes actual_cpu_ns
-actual_memory_bytes actual_disk_bytes cpu_count memory_limit_bytes disk_limit_bytes interval_ns
-status resource_kind device_count device_id sample_id source_event_id cursor missing stale
-boundary host_monotonic_ns runtime_generation requested reserved actual lifecycle type
-cpu memory disk resources present counter_generation final main_exited agent_exited resource_completed supported process_count
-value unit observed_time resource_id allocation_generation requested_cpu requested_memory_bytes
-selector phase final_complete acquired_at ready_at expires_at stopped_at last_seen source_time
-requested_disk_bytes reserved_vcpu reserved_ram_bytes measured_cpu_ns measured_memory_bytes
-vcpus disk_bytes cpu_usage_ns memory_current_bytes memory_limit swap_current_bytes
-read_bytes write_bytes read_ops write_ops populated attribution_id'''.split())
-IDENTITY = re.compile(r'[A-Za-z0-9_.:-]{1,128}\Z')
+POLICY_VERSION = 'subyard.telemetry.capture/v1'
+TIMESTAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.,][0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])')
 MAX_RECORDS = 4096
 MAX_BYTES = 64*1024*1024
+FRAME_BYTES = 64*1024
+SEGMENT_BYTES = 256*1024
+MARKER_SLOT = 4096
+SPOOL_VERSION = b'subyard-spool/1'
+LOCK_WAIT = 0.05
 
 
-def clean(value):
-    if value is None or type(value) is bool:
-        return value
-    if type(value) is int:
-        if -(2**63) <= value < 2**64:
-            return value
-        raise ValueError('counter range')
-    if type(value) is float and math.isfinite(value):
-        return value
-    if isinstance(value, str) and len(value) <= 256 and all(ord(c) >= 32 and ord(c) != 127 for c in value):
-        return value
-    if isinstance(value, list) and len(value) <= 128:
-        return [clean(item) for item in value]
-    if isinstance(value, dict) and len(value) <= 128:
-        return {key: clean(item) for key, item in value.items() if key in FIELDS}
-    raise ValueError('unsupported metadata')
+def timestamp(value):
+    if not isinstance(value, str) or not TIMESTAMP.fullmatch(value):
+        return None
+    try:
+        utc = datetime.datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(datetime.timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+    fraction = re.match(r'[.,]([0-9]+)', value[19:])
+    digits = fraction[1].ljust(9, '0') if fraction else '000000000'
+    return utc.isoformat(timespec='seconds')[:-6]+'.'+digits+'Z'
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def compact_json(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+
+
+def collector_binary():
+    installed = Path(__file__).with_name('subyard-telemetry')
+    if installed.is_file():
+        return installed
+    return Path(os.environ.get('SUBYARD_TELEMETRY_COLLECTOR', installed))
+
+
+def sanitize_state(family, value, binary=None):
+    try:
+        result = subprocess.run([binary or collector_binary(), 'sanitize', '--family', family],
+                                input=compact_json(value), capture_output=True, timeout=2, check=False)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+        pass
+    raise ValueError('invalid or unavailable telemetry sanitizer')
+
+
+def operational_directory(data_dir):
+    path = Path(data_dir)
+    return private_directory(path.with_name(path.name+'-private'))
 
 
 def private_directory(path):
@@ -60,7 +79,7 @@ def private_directory(path):
 
     Parents must already satisfy their owning contract: mkdir(parents=True) does
     not make intermediate parents private. Initialize the data root first before
-    creating sources/runs/outbox beneath it (or prepare that root in a fixture).
+    creating sources, runs or spool beneath it.
     """
     path = Path(path)
     for parent in (path, *path.parents):
@@ -73,7 +92,9 @@ def private_directory(path):
     return path
 
 
-def atomic_json(path, value):
+def atomic_json(path, value, *, family=None):
+    if family is not None:
+        value = sanitize_state(family, value)
     path = Path(path)
     private_directory(path.parent)
     if path.is_symlink():
@@ -82,7 +103,7 @@ def atomic_json(path, value):
         info = path.stat()
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
             raise ValueError('private file required')
-    content = (json.dumps(value, sort_keys=True, separators=(',', ':'))+'\n').encode()
+    content = compact_json(value)+b'\n'
     if len(content) > 65536:
         raise ValueError('record too large')
     fd, temporary = tempfile.mkstemp(prefix='.', suffix='.tmp', dir=path.parent)
@@ -93,23 +114,84 @@ def atomic_json(path, value):
             out.flush()
             os.fsync(out.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_directory(path.parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
 
 
+def checked_file(fd, maximum):
+    info = os.fstat(fd)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > maximum):
+        raise ValueError('private file required')
+    return info
+
+
+def open_private(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        checked_file(fd, FRAME_BYTES)
+        return os.fdopen(fd, 'rb')
+    except (OSError, ValueError):
+        os.close(fd)
+        raise
+
+
 def read_private(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, 'rb') as source:
-        info = os.fstat(source.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 65536:
-            raise ValueError('private file required')
+    with open_private(path) as source:
         return json.load(source)
+
+
+def lock_until(fd, mode, deadline):
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.005, remaining))
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def directory_lock(path, mode, deadline=None):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if deadline is None:
+            fcntl.flock(fd, mode)
+        else:
+            lock_until(fd, mode, deadline)
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def load_producer_state(directory, binary=None):
+    """Read and validate the same state used by emit, readiness and repair."""
+    directory = Path(directory)
+    for path in (directory, directory/'spool'):
+        info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.getuid():
+            raise ValueError('invalid telemetry producer directory')
+    with open_private(directory/'spool-loss') as slot:
+        if os.fstat(slot.fileno()).st_size != 2*MARKER_SLOT:
+            raise ValueError('invalid telemetry loss slot')
+    producer = read_private(directory/'producer.json')
+    policy = read_private(directory/'spool-policy.json')
+    state = {'producer': producer, 'policy': policy}
+    if (sanitize_state('producer_state', state, binary) != state
+            or producer['origin_id'] != policy['origin_id']):
+        raise ValueError('invalid telemetry producer state')
+    return {**producer, **policy}
 
 
 class LocalConnection(http.client.HTTPConnection):
@@ -129,86 +211,133 @@ class LocalConnection(http.client.HTTPConnection):
         self.sock.connect(str(self.path))
 
 
-def deliver(data_dir, record):
-    path = Path(data_dir)/'control.sock'
-    try:
-        info = path.lstat()
-        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+def append_frame(spool, stream, frame, deadline=None, *, run=None):
+    if deadline is None:
+        deadline = time.monotonic()+LOCK_WAIT
+    target = spool/(stream+'.open')
+    for attempt in itertools.count():
+        # Always try the uncontended path once. Bound waits and retries.
+        if attempt and time.monotonic() >= deadline:
             return False
-        with LocalConnection(path) as connection:
-            connection.request('POST', '/v1/records', json.dumps(record), {'Content-Type': 'application/json'})
-            response = connection.getresponse()
-            response.read(1024)
-            return response.status == 200
-    except (OSError, ValueError, http.client.HTTPException):
-        return False
+        try:
+            fd = os.open(target, os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            with directory_lock(spool, fcntl.LOCK_EX, deadline) as directory:
+                if target.exists() or target.is_symlink():
+                    continue
+                limit = min(MAX_RECORDS, MAX_BYTES//SEGMENT_BYTES)
+                with os.scandir(directory) as entries:
+                    names = [entry.name for entry in itertools.islice(entries, limit)]
+                if len(names) >= limit:
+                    return False
+                sealed = max((name for name in names if re.fullmatch(
+                    re.escape(stream)+r'\.[0-9a-f]{32}\.[0-9]{16}\.sealed', name)), default='')
+                generation, number = (sealed.split('.')[1:3] if sealed else (uuid.uuid4().hex, '0'))
+                fd = os.open(spool, os.O_TMPFILE | os.O_RDWR | os.O_APPEND, 0o600)
+                try:
+                    os.fchmod(fd, 0o600)
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # Linux fallocate(KEEP_SIZE) reserves bytes without hiding EOF.
+                    fallocate = ctypes.CDLL(None, use_errno=True).fallocate
+                    if fallocate(fd, 1, ctypes.c_longlong(0), ctypes.c_longlong(SEGMENT_BYTES)):
+                        raise OSError(ctypes.get_errno(), 'spool segment allocation failed')
+                    fields = [SPOOL_VERSION, stream.encode(), generation.encode(), f'{int(number)+1:016d}'.encode()]
+                    if run:
+                        fields.append(run.encode())
+                    header = b' '.join(fields)+b'\n'
+                    write_frame(fd, header+frame)
+                    os.link(f'/proc/self/fd/{fd}', target.name, dst_dir_fd=directory)
+                    os.fsync(directory)
+                finally:
+                    os.close(fd)
+                return True
+        try:
+            lock_until(fd, fcntl.LOCK_EX, deadline)
+            info = checked_file(fd, SEGMENT_BYTES)
+            try:
+                current = target.lstat()
+            except FileNotFoundError:
+                continue
+            if not os.path.samestat(info, current):
+                continue
+            fields = os.pread(fd, 1024, 0).split(b'\n', 1)[0].split(b' ')
+            if (len(fields) != (5 if run else 4) or fields[4:] != ([run.encode()] if run else []) or fields[:2] != [SPOOL_VERSION, stream.encode()]
+                    or not re.fullmatch(rb'[0-9a-f]{32}', fields[2]) or not re.fullmatch(rb'[0-9]{16}', fields[3])):
+                raise ValueError('unsupported spool segment')
+            if os.pread(fd, 1, info.st_size-1) == b'\n' and info.st_size+len(frame) <= SEGMENT_BYTES:
+                # A previous appender may have died just after linking this inode.
+                sync_directory(spool)
+                write_frame(fd, frame)
+                return True
+            # The sealed reader treats any bytes after the last newline as a gap.
+            with directory_lock(spool, fcntl.LOCK_EX, deadline) as directory:
+                sealed = spool/('.'.join(part.decode() for part in fields[1:4])+'.sealed')
+                if sealed.exists() or sealed.is_symlink():
+                    raise ValueError('spool segment collision')
+                os.rename(target, sealed)
+                os.fsync(directory)
+        finally:
+            os.close(fd)
 
 
-def emit(data_dir, kind, body, source_id=None, source_time=None, event_id=None):
+def write_frame(fd, data):
+    if os.write(fd, data) != len(data):
+        raise OSError('short spool write')
+    os.fsync(fd)
+
+
+def note_loss(directory, run):
+    path = directory/'spool-loss'
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
-        if kind not in KINDS:
-            return False
-        directory = private_directory(data_dir)
-        outbox = private_directory(directory/'outbox')
-        fd = os.open(outbox/'.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'rb') as lock:
-            info = os.fstat(lock.fileno())
-            if info.st_uid != os.getuid() or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
-                return False
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            identity = directory/'producer.json'
-            if not identity.exists():
-                atomic_json(identity, {'source_id': str(uuid.uuid4())})
-            source_id = source_id or read_private(identity)['source_id']
-            event_id = event_id or str(uuid.uuid4())
-            if not IDENTITY.fullmatch(source_id) or not IDENTITY.fullmatch(event_id):
-                return False
-            path = outbox/(event_id+'.json')
-            existing = read_private(path) if path.exists() else None
-            record = {'schema': SCHEMA, 'source_id': source_id, 'event_id': event_id,
-                      'source_version': '1', 'source_time': source_time or (existing or {}).get('source_time') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                      'kind': kind, 'body': clean(body)}
-            if existing:
-                if existing != record:
-                    return False
-            else:
-                entries = []
-                for pending in outbox.glob('*.json'):
-                    if pending.is_symlink():
-                        continue
-                    try:
-                        entries.append(pending.stat().st_size)
-                    except FileNotFoundError:
-                        # The collector may commit and remove an older record.
-                        continue
-                health_path = directory/'producer-health.json'
-                health = read_private(health_path) if health_path.exists() else None
-                gap = None
-                if health:
-                    gap = {'schema': SCHEMA, 'source_id': source_id, 'event_id': health['event_id'],
-                           'source_version': '1', 'source_time': health['first_time'], 'kind': 'gap',
-                           'body': {'reason': 'producer_outbox_capacity', 'quality': 'partial',
-                                    'missing': health['count'], 'coverage_start': health['first_time'], 'coverage_end': health['last_time']}}
-                required = len(json.dumps(record).encode())+(len(json.dumps(gap).encode()) if gap else 0)
-                if len(entries)+1+bool(gap) > MAX_RECORDS or sum(entries)+required >= MAX_BYTES:
-                    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                    health = health or {'event_id': str(uuid.uuid4()), 'first_time': now, 'count': 0, 'reason': 'outbox_capacity'}
-                    health.update(last_time=now, count=min(2**63-1, health['count']+1))
-                    atomic_json(health_path, health)
-                    return False
-                if gap:
-                    atomic_json(outbox/(gap['event_id']+'.json'), gap)
-                    health_path.unlink()
-                    parent_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                    try:
-                        os.fsync(parent_fd)
-                    finally:
-                        os.close(parent_fd)
-                atomic_json(path, record)
-        # Only initial run registration needs a committed acknowledgement before
-        # native SDK startup. Broker and sampling paths stop at the durable outbox.
-        if kind == 'run' and record['body'].get('state') == 'starting' and record['body'].get('agent'):
-            deliver(directory, record)
-        return True
-    except (OSError, ValueError, TypeError, KeyError):
-        return False
+        checked_file(fd, 2*MARKER_SLOT)
+        lock_until(fd, fcntl.LOCK_EX, time.monotonic()+LOCK_WAIT)
+        slots = []
+        for offset in (0, MARKER_SLOT):
+            digest, _, data = os.pread(fd, MARKER_SLOT, offset).partition(b' ')
+            data = data.rstrip(b'\0')
+            if digest == hashlib.sha256(data).hexdigest().encode():
+                slots.append(json.loads(data))
+        previous = max(slots, key=lambda item: item['revision'], default={'revision': 0, 'count': 0})
+        now_at = timestamp(now())
+        count = previous.get('count', 0)
+        value = dict(revision=previous['revision']+1, count=count+1, last=now_at,
+                     first=previous.get('first', now_at) if count else now_at,
+                     id=previous.get('id') if count else uuid.uuid4().hex)
+        if run and (not count or previous.get('run') == run):
+            value['run'] = run
+        data = compact_json(sanitize_state('loss_slot', value))
+        slot = (hashlib.sha256(data).hexdigest().encode()+b' '+data).ljust(MARKER_SLOT, b'\0')
+        if os.pwrite(fd, slot, (value['revision']%2)*MARKER_SLOT) != MARKER_SLOT:
+            raise OSError('short loss marker write')
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def emit(data_dir, kind, body, source_id=None, source_time=None, event_id=None, *, broker=False):
+    directory = Path(data_dir)
+    run = None
+    try:
+        with directory_lock(directory, fcntl.LOCK_SH, time.monotonic()+LOCK_WAIT):
+            settings = load_producer_state(directory)
+            source_time = source_time or now()
+            record = dict(schema=SCHEMA, origin_id=settings['origin_id'], source_id=source_id or settings['source_id'],
+                          event_id=event_id or str(uuid.uuid4()), source_version='1', source_time=source_time,
+                          kind=kind, body=body)
+            policy = {field: settings[field] for field in ('attributes', 'span_names', 'event_names')}
+            policy['schema'] = settings['policy_version']
+            record = sanitize_state('record', {'record': record, 'policy': policy})
+            if not broker:
+                run = record['body'].get('agent_run_id')
+            stream = hashlib.sha256(run.encode()).hexdigest()[:32] if run else 'broker'
+            frame = compact_json(record)+b'\n'
+            if len(frame) <= FRAME_BYTES and append_frame(directory/'spool', stream, frame, run=run):
+                return True
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    try:
+        note_loss(directory, run)
+    except (OSError, ValueError, KeyError, TypeError):
+        print('Telemetry coverage gap could not be saved', file=sys.stderr, flush=True)
+    return False

@@ -86,13 +86,8 @@ func TestReadOnlyAuthorizerAndDeadline(t *testing.T) {
 		t.Fatal("unbounded recursive query ignored deadline")
 	}
 	missing := filepath.Join(testkit.TempDir(t), "not-created")
-	empty, err := OpenReadOnly(missing)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = Stats(context.Background(), empty)
-	empty.Close()
-	if err == nil {
+	if empty, err := OpenReadOnly(missing); err == nil {
+		empty.Close()
 		t.Fatal("missing database read succeeded")
 	}
 	if _, err = os.Stat(missing); !os.IsNotExist(err) {
@@ -100,10 +95,10 @@ func TestReadOnlyAuthorizerAndDeadline(t *testing.T) {
 	}
 }
 
-func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
+func TestPrecisionTemporalClosureAndFirstWins(t *testing.T) {
 	s := fixtureStore(t)
 	ctx := context.Background()
-	r := record("run", map[string]any{"agent_run_id": "r", "agent": "fixture"})
+	r := record("run", map[string]any{"agent_run_id": "r", "agent": "other"})
 	scope := record("scope", map[string]any{"object_id": "obj", "agent_run_id": "r", "quality": "explicit", "accounting": "inclusive"})
 	scope.SourceTime = "2026-01-01T00:00:00Z"
 	a := record("sample", map[string]any{"object_id": "obj", "cpu_ns": json.Number("9223372036854775805"), "monotonic_ns": json.Number("10000000000000000000"), "boot_id": "boot", "generation": "g"})
@@ -131,7 +126,7 @@ func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
 	if fmt.Sprint(entry["cpu_ns_delta"]) != "1" {
 		t.Fatalf("precision lost: %+v", entry)
 	}
-	if result["run"].(map[string]any)["agent"] != "fixture" {
+	if result["run"].(map[string]any)["agent"] != "other" {
 		t.Fatal("lifecycle update erased run metadata")
 	}
 	var exported bytes.Buffer
@@ -146,17 +141,20 @@ func TestPrecisionTemporalClosureAndCollision(t *testing.T) {
 		t.Fatal("counter precision lost in export")
 	}
 	r.Body = map[string]any{"agent_run_id": "different"}
-	if err = s.Ingest(ctx, []Record{r}); err == nil {
-		t.Fatal("conflicting replay identity silently discarded")
+	if err = s.Ingest(ctx, []Record{r}); err != nil {
+		t.Fatal(err)
 	}
-	start := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "membership", "start_time": "2026-01-01T00:00:00Z", "quality": "explicit"})
-	end := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "membership", "end_time": "2026-01-01T00:00:03Z", "quality": "explicit"})
+	if s.RegisteredRun(ctx, "different") {
+		t.Fatal("changed duplicate affected the run projection")
+	}
+	start := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "managed_scope_membership", "start_time": "2026-01-01T00:00:00Z", "quality": "explicit"})
+	end := record("association", map[string]any{"object_id": "proc", "agent_run_id": "r", "source": "managed_scope_membership", "end_time": "2026-01-01T00:00:03Z", "quality": "explicit"})
 	if err = s.Ingest(ctx, []Record{end, start}); err != nil {
 		t.Fatal(err)
 	}
 	var count int
 	var from, to string
-	if err = s.db.QueryRow("SELECT count(*),start_time,end_time FROM associations WHERE object_id='proc'").Scan(&count, &from, &to); err != nil || count != 1 || from == "" || to == "" {
+	if err = s.db.QueryRow("SELECT count(*),start_time,end_time FROM associations WHERE object_id=?", "proc").Scan(&count, &from, &to); err != nil || count != 1 || from == "" || to == "" {
 		t.Fatalf("end/start closure %d %q %q %v", count, from, to, err)
 	}
 }
@@ -211,7 +209,8 @@ func TestReplayReportsTruncatedAndOversizedTail(t *testing.T) {
 	if err := destination.Replay(ctx, bytes.NewReader(tail)); err == nil {
 		t.Fatal("truncated JSONL tail reported success")
 	}
-	oversized := strings.NewReader(strings.Repeat("x", int(destination.limits.RequestBytes*2+65537)))
+	destination.limits.QueueBytes = 1 << 16
+	oversized := strings.NewReader(strings.Repeat("x", int(destination.limits.QueueBytes*2+65537)))
 	if err := destination.Replay(ctx, oversized); err == nil {
 		t.Fatal("oversized JSONL record reported success")
 	}

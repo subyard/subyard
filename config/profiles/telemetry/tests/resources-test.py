@@ -16,6 +16,7 @@ import time
 import tempfile
 import threading
 import unittest
+import uuid
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
@@ -23,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import records
 import resources
 import sources
+from spool_fixture import prepare, spooled
 
 spec = importlib.util.spec_from_file_location('correlation', Path(__file__).resolve().parents[1] / 'broker-correlation.py')
 correlation = importlib.util.module_from_spec(spec)
@@ -51,7 +53,8 @@ class Resources(unittest.TestCase):
         stderr = io.StringIO()
         with patch.dict(os.environ, SUBYARD_E2E_VM='1', SUBYARD_AGENT_RUN_ID='fixture'), \
              patch.object(Path, 'is_file', return_value=True), \
-             patch.object(resource_observer, 'configs', return_value=[dict(kind='vm')]), \
+             patch.object(resource_observer, 'configs', return_value=[dict(kind='vm', route_id='0'*32)]), \
+             patch.object(sources, 'read_transport', return_value={}), \
              patch.object(sources, 'merge_intents'), patch.object(sources, 'fetch', return_value=dict(events=[{}],more=False)), \
              patch.object(sources, 'consume', return_value=True), patch.object(records, 'read_private', side_effect=removed_before_read), \
              redirect_stderr(stderr):
@@ -65,46 +68,20 @@ class Resources(unittest.TestCase):
         for private in (str(self.root), path.name, 'never-print-this'):
             self.assertNotIn(private, stderr.getvalue())
 
-    def test_outbox_drain_requires_actual_canonical_commit_when_collector_unlinks(self):
+    def test_spool_drain_requires_actual_canonical_commit(self):
         import contextlib
-        with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
+        database = self.root/'telemetry.sqlite'
+        database.unlink()
+        with contextlib.closing(sqlite3.connect(database)) as db:
+            database.chmod(0o600)
             db.execute('CREATE TABLE records(event_id TEXT, source_id TEXT, origin_id TEXT, encoding TEXT)')
+            db.executemany('INSERT INTO records VALUES(?,?,?,?)', (
+                ('foreign', 'other', 'producer:other', 'json'),
+                ('committed', 'source', 'producer:source', 'json')))
             db.commit()
-        records.atomic_json(self.root/'producer.json',dict(source_id='fixture-source'))
-        outbox = records.private_directory(self.root/'outbox')
-        original = records.read_private
-        for scenario in ('committed','deleted','foreign-source','ambiguous','permission','failed-delivery'):
-            with self.subTest(scenario=scenario):
-                path = outbox/(scenario+'.json')
-                records.atomic_json(path,dict(source_id='fixture-source',event_id=scenario))
-
-                def concurrent_reader(target):
-                    if target == path:
-                        if scenario == 'permission':
-                            raise PermissionError(13,'private error',str(target))
-                        if scenario != 'failed-delivery':
-                            with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
-                                for source in (['fixture-source'] if scenario == 'committed' else
-                                               ['foreign'] if scenario == 'foreign-source' else
-                                               ['fixture-source','foreign'] if scenario == 'ambiguous' else []):
-                                    db.execute('INSERT INTO records VALUES(?,?,?,?)',(scenario,source,'producer:'+source,'json'))
-                                db.commit()
-                            target.unlink()
-                    return original(target)
-
-                with patch.object(records,'read_private',side_effect=concurrent_reader), patch.object(records,'deliver',return_value=False):
-                    if scenario == 'committed':
-                        resource_observer.drain_outbox(self.root)
-                        with contextlib.closing(sqlite3.connect(self.root/'telemetry.sqlite')) as db:
-                            self.assertEqual(db.execute('SELECT source_id,event_id FROM records WHERE event_id=?',(scenario,)).fetchall(),
-                                             [('fixture-source',scenario)])
-                    elif scenario == 'permission':
-                        with self.assertRaises(PermissionError):
-                            resource_observer.drain_outbox(self.root)
-                    else:
-                        with self.assertRaises(resource_observer.Failure):
-                            resource_observer.drain_outbox(self.root)
-                path.unlink(missing_ok=True)
+        resource_observer.wait_for_records(self.root, {('producer:source', 'committed')}, timeout=0)
+        with self.assertRaises(resource_observer.Failure):
+            resource_observer.wait_for_records(self.root, {('producer:source', 'foreign')}, timeout=0)
 
     def test_observer_key_diagnostic_is_closed_and_does_not_render_payload(self):
         for field in ('transport','secret-private-field'):
@@ -233,8 +210,8 @@ class Resources(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='telemetry-resources-', dir='/tmp')
-        self.root = Path(self.temp.name)
-        self.config = dict(kind='vm', owner_id='owner', source_id='resource-fixture',
+        self.root = prepare(Path(self.temp.name)/'data')
+        self.config = dict(kind='vm', owner_id='owner', registration_owner='owner', source_id='resource-fixture',
                            cursor='-', registered_at=NOW,
                            associations={'broker-run': dict(agent_run_id='agent-run', start_time=NOW,
                                slot_id='slot-001',resource_generation=2,lease_epoch=3)})
@@ -243,7 +220,15 @@ class Resources(unittest.TestCase):
         self.temp.cleanup()
 
     def rows(self):
-        return [records.read_private(path) for path in (self.root / 'outbox').glob('*.json')]
+        return list({(row['origin_id'], row['event_id']): row for row in spooled(self.root)}.values())
+
+    def seed_reader(self, data, transport, **settings):
+        route_id = uuid.uuid4().hex
+        sources.write_transport(data, route_id, transport)
+        path = records.private_directory(data/'sources')/('observer-'+route_id+'.json')
+        config = dict(self.config, associations={}, route_id=route_id, **settings)
+        records.atomic_json(path, config, family='broker_observer')
+        return path
 
     def page(self):
         event = dict(event_id=EVENT, timestamp=NOW, kind='lease.available', to_state='available',
@@ -260,14 +245,8 @@ class Resources(unittest.TestCase):
             transport=dict(script='/tmp/fixture/dev/agent-e2e.sh',yard='owner'))
 
     def test_reader_lock_cannot_drop_durable_registration_and_restart_merge(self):
-        # Exercise the normal request -> held flow with an absent data root.
-        # request owns root initialization; held must not be fixture-repaired.
-        self.root = self.root/'data'
-        self.assertFalse(self.root.exists())
-        self.assertTrue(correlation.register(self.root, 'agent-run', dict(self.held(), phase='request')),
-                        'request must initialize the private data root before held')
-        self.assertEqual(f'{stat.S_IMODE(self.root.stat().st_mode):04o}', '0700',
-                         'request data root mode')
+        # Request evidence is admitted after the private spool is prepared.
+        self.assertTrue(correlation.register(self.root, 'agent-run', dict(self.held(), phase='request')))
         root = records.private_directory(self.root/'sources')
         fd = os.open(root/'.lock',os.O_CREAT|os.O_RDWR,0o600)
         os.fchmod(fd,0o600)
@@ -291,10 +270,7 @@ class Resources(unittest.TestCase):
 
     def test_late_mapping_rewinds_completed_journal_and_duplicate_does_not_rewind(self):
         request = self.held()
-        root = records.private_directory(self.root/'sources')
-        path, _ = sources.registration_paths(root,request)
-        config = dict(self.config,owner_id='a'*64,cursor=EVENT,associations={},transport=request['transport'])
-        records.atomic_json(path,config)
+        self.seed_reader(self.root, request['transport'], owner_id='a'*64, cursor=EVENT)
         self.assertTrue(correlation.register(self.root,'agent-run',request))
         cursors=[]
         def fetch(config):
@@ -338,9 +314,7 @@ class Resources(unittest.TestCase):
 
     def test_mapping_arriving_during_fetch_prevents_old_cursor_commit(self):
         request = self.held()
-        root = records.private_directory(self.root/'sources')
-        path, _ = sources.registration_paths(root,request)
-        records.atomic_json(path,dict(self.config,associations={},cursor=EVENT,transport=request['transport']))
+        path = self.seed_reader(self.root, request['transport'], cursor=EVENT)
         def fetch(config):
             self.assertTrue(correlation.register(self.root,'agent-run',request))
             return self.page()
@@ -352,7 +326,7 @@ class Resources(unittest.TestCase):
             self.assertTrue(sources.poll(self.root))
         self.assertEqual(len([row for row in self.rows() if row['kind']=='association']),2)
 
-    def test_registration_failure_marker_recovers_after_outbox_admission(self):
+    def test_registration_failure_marker_recovers_after_spool_admission(self):
         with patch.object(records,'emit',return_value=False):
             self.assertFalse(correlation.register(self.root,'agent-run',dict(self.held(),unknown='private')))
         marker = self.root/'sources/intents/registration-health'
@@ -373,12 +347,9 @@ class Resources(unittest.TestCase):
 
     def test_merge_during_other_reader_fetch_does_not_overwrite_new_mapping(self):
         request = self.held()
-        root = records.private_directory(self.root/'sources')
-        second, _ = sources.registration_paths(root,request)
         first_request = dict(request,transport=dict(request['transport'],yard='first'))
-        first, _ = sources.registration_paths(root,first_request)
-        for path, transport, order in ((first,first_request['transport'],'0'),(second,request['transport'],'1')):
-            records.atomic_json(path,dict(self.config,associations={},cursor=EVENT,transport=transport,polled_at=order))
+        self.seed_reader(self.root, first_request['transport'], cursor=EVENT, polled_at=NOW)
+        second = self.seed_reader(self.root, request['transport'], cursor=EVENT, polled_at='2026-10-24T00:00:01Z')
         def fetch(config):
             if config['transport']['yard']=='first':
                 self.assertTrue(correlation.register(self.root,'agent-run',request))
@@ -421,6 +392,22 @@ class Resources(unittest.TestCase):
         self.assertIsNone(body['reserved_disk_bytes'])
         self.assertEqual(body['reservation_semantics'], 'allocated_virtual_capacity_held')
 
+    def test_android_allocation_spool_drops_private_purpose_and_cpu(self):
+        config = dict(self.config, kind='android', associations={}, source_id='resource-'+'a'*64)
+        private = '/home/fixture/private-notes'
+        allocation = dict(slot_id='001', generation=2, state='held',
+                          owner=dict(purpose=private), allocated_cpu=private, requested_cpu=2)
+        event = dict(event_id=EVENT, source_time=NOW, phase='baseline', allocation=allocation)
+        self.assertTrue(resources.emit_event(self.root, config, event))
+        row = self.rows()[0]
+        body = row['body']
+        raw_object = resources.allocation(config, allocation, 'emulator')['object_id']
+        self.assertEqual(row['source_id'], config['source_id'])
+        self.assertEqual(body['object_id'], raw_object)
+        for field in ('purpose', 'allocated_cpu', 'reserved_cpu'):
+            self.assertNotIn(field, body)
+        self.assertEqual(body['requested_cpu'], 2)
+
     def test_cursor_not_advanced_on_failed_durable_admission(self):
         with patch.object(records, 'emit', return_value=False):
             self.assertFalse(sources.consume(self.root, self.config, self.page()))
@@ -446,14 +433,15 @@ class Resources(unittest.TestCase):
         self.assertNotEqual(resources.object_id('vm', 'owner', 'slot-001', 2, 3, '1'),
                             resources.object_id('vm', 'owner', 'slot-001', 3, 4, '1'))
 
-    def test_capability_only_private_registration_not_outbox(self):
+    def test_capability_only_private_registration_not_spool(self):
         request = dict(kind='android', phase='held', owner_id='owner', correlation_id='broker-run',
                        slot_id='001', resource_generation=2,
                        transport=dict(control='/srv/cache/android/.subyard/control.sock', capability='b' * 64))
         self.assertTrue(correlation.register(self.root, 'agent-run', request))
         sources.merge_intents(self.root,self.root/'sources')
         config = records.read_private(next((self.root / 'sources').glob('*.json')))
-        self.assertEqual(config['transport']['capability'], 'b' * 64)
+        self.assertNotIn('transport', config)
+        self.assertEqual(sources.read_transport(self.root, config['route_id'])['capability'], 'b' * 64)
         self.assertNotIn('b' * 64, json.dumps(self.rows()))
         self.assertEqual(next((self.root / 'sources').glob('*.json')).stat().st_mode & 0o777, 0o600)
 
@@ -466,17 +454,14 @@ class Resources(unittest.TestCase):
         sources.merge_intents(self.root,self.root/'sources')
         readers = [records.read_private(path) for path in (self.root / 'sources').glob('*.json')]
         self.assertEqual(len(readers), 2)
-        self.assertEqual({item['transport']['capability'] for item in readers}, {'a' * 64, 'b' * 64})
+        self.assertEqual({sources.read_transport(self.root, item['route_id'])['capability'] for item in readers},
+                         {'a' * 64, 'b' * 64})
         self.assertEqual(len({item['source_id'] for item in readers}), 1)
         for capability in ('a' * 64, 'b' * 64):
             self.assertNotIn(capability, json.dumps(self.rows()))
 
     def test_collector_projects_one_owner_interval_and_actual_cpu(self):
-        binary = self.root / 'collector'
-        subprocess.run(['go', 'build', '-mod=readonly', '-o', str(binary),
-                        './config/profiles/telemetry/cmd/telemetry'],
-                       cwd=Path(__file__).resolve().parents[4], check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        binary = records.collector_binary()
         data = self.root / 'data'
         data.mkdir(mode=0o700)
         token = self.root / 'auth'
@@ -519,7 +504,7 @@ class Resources(unittest.TestCase):
             self.assertTrue(resources.emit_event(data, config, stop))
             # A delayed open sample association must not reopen the confirmed end.
             self.assertTrue(resources.emit_sample(data, config, dict(sample(10, 600), acquired_at=NOW), 'late-periodic'))
-            resource_observer.drain_outbox(data)
+            resource_observer.drain_spool(data)
             result = json.loads(subprocess.check_output([str(binary), 'show-run', '--data-dir', str(data), '--run', 'agent-run']))
             self.assertEqual(len(result['selected_nonoverlapping']), 1)
             selected = result['selected_nonoverlapping'][0]
@@ -543,7 +528,7 @@ class Resources(unittest.TestCase):
             self.assertEqual(float(totals['reserved_vcpu_seconds']['known_sum']), 84)
             self.assertEqual(float(totals['reserved_memory_byte_seconds']['known_sum']), 4 * 1024**3 * 21)
             body = selected['object']
-            self.assertEqual(body['purpose'], 'bounded-workload')
+            self.assertNotIn('purpose', body)
             self.assertEqual(body['requested_disk_bytes'], 20 * 1024**3)
             self.assertEqual(body['allocated_disk_bytes'], 20 * 1024**3)
             self.assertEqual(body['requested_memory_bytes'], 4 * 1024**3)
@@ -561,60 +546,37 @@ class Resources(unittest.TestCase):
             request = self.held('late-correlation',4)
             request.update(slot_id='slot-002',lease_epoch='5')
             source_root = records.private_directory(data/'sources')
-            source_path, _ = sources.registration_paths(source_root,request)
-            records.atomic_json(source_path,dict(kind='vm',owner_id='a'*64,source_id='late-source',
-                cursor=EVENT,registered_at=NOW,associations={},transport=request['transport']))
-            self.assertTrue(records.emit(data,'run',dict(agent_run_id='late-agent',state='starting')))
+            source_path = self.seed_reader(data, request['transport'], owner_id='a'*64, source_id='late-source', cursor=EVENT)
+            late_run = '01234567-0123-4123-8123-0123456789ab'
+            self.assertTrue(records.emit(data,'run',dict(agent_run_id=late_run,state='starting')))
             late = dict(slot_id='slot-002',resource_generation=4,lease_epoch=5,state='draining',acquired_at=NOW,
                 context=dict(run='late-correlation'),environment=dict(vm_count=1,cpu_per_vm=2,memory_per_vm='1GiB'))
             page = dict(owner_id='a'*64,events=[dict(event_id='late-stop',timestamp='2026-10-24T00:00:21Z',
                 kind='lease.transition',to_state='available',allocation=late,observations=[dict(sample(20,1100),
                     slot_id='slot-002',resource_generation=4,lease_epoch=5,phase='pre_stop',io_read_bytes=20,io_write_bytes=30)])],
                 observations=[],allocations=[],next_cursor=EVENT,gap=False,more=False)
-            self.assertTrue(correlation.register(data,'late-agent',request))
+            self.assertTrue(correlation.register(data,late_run,request))
             self.assertTrue(list((source_root/'intents').glob('intent-*.json')))
             self.assertEqual(records.read_private(source_path)['cursor'],EVENT)
             cursors=[]
             def retained(config):
                 cursors.append(config['cursor'])
                 return page
-            # Force the collector's commit/unlink between directory snapshot
-            # and open, including when its background tick already removed it.
-            pending = data/'outbox'/'late-periodic-association.json'
-            original_glob, original_drain = Path.glob, resource_observer.drain_outbox
-            removed = []
-            def delayed_snapshot(directory, pattern):
-                paths = list(original_glob(directory, pattern))
-                if directory == pending.parent and pattern == '*.json':
-                    if pending not in paths:
-                        paths.append(pending)
-                    committed = json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
-                        "SELECT source_id,origin_id,encoding FROM records WHERE event_id='late-periodic-association'"]))
-                    self.assertEqual(committed,[dict(source_id=config['source_id'],
-                        origin_id='producer:'+config['source_id'],encoding='json')])
-                    pending.unlink(missing_ok=True)
-                    removed.append(pending.stem)
-                return iter(paths)
-            def drain_after_unlink(directory):
-                with patch.object(Path,'glob',delayed_snapshot):
-                    return original_drain(directory)
-            with patch.object(resource_observer,'drain_outbox',side_effect=drain_after_unlink), \
-                 patch.object(sources,'fetch',side_effect=retained), patch.dict(os.environ,SUBYARD_AGENT_RUN_ID='late-agent'), redirect_stdout(io.StringIO()):
+            with patch.object(sources,'fetch',side_effect=retained), patch.dict(os.environ,SUBYARD_AGENT_RUN_ID=late_run), redirect_stdout(io.StringIO()):
                 resource_observer.capture(data,'vm')
                 resource_observer.assert_records(data,'vm','final')
-            self.assertEqual(removed,['late-periodic-association'])
             self.assertEqual(cursors,['-'])
-            self.assertTrue(correlation.register(data,'late-agent',request))
+            self.assertTrue(correlation.register(data,late_run,request))
             with patch.object(sources,'fetch',side_effect=retained):
                 self.assertTrue(sources.poll(data))
             self.assertEqual(cursors,['-','-'])  # Independent capture did not advance the service cursor.
-            self.assertTrue(correlation.register(data,'late-agent',request))
+            self.assertTrue(correlation.register(data,late_run,request))
             with patch.object(sources,'fetch',side_effect=retained):
                 self.assertTrue(sources.poll(data))
             self.assertEqual(cursors,['-','-',EVENT])
-            resource_observer.drain_outbox(data)
+            resource_observer.drain_spool(data)
             rows=json.loads(subprocess.check_output([str(binary),'query','--data-dir',str(data),'--sql',
-                "SELECT count(*) AS edges,min(start_time) AS start,max(end_time) AS end FROM associations WHERE agent_run_id='late-agent'"]))
+                f"SELECT count(*) AS edges,min(start_time) AS start,max(end_time) AS end FROM associations WHERE agent_run_id='{late_run}'"]))
             self.assertEqual(rows[0],dict(edges=1,start='2026-10-24T00:00:00.000000000Z',end='2026-10-24T00:00:21.000000000Z'))
             with patch.dict(os.environ,SUBYARD_AGENT_RUN_ID='unknown-agent'):
                 with self.assertRaisesRegex(resource_observer.Failure,'explicit managed-run association'):
@@ -657,11 +619,8 @@ class Resources(unittest.TestCase):
                         failures.append(type(error).__name__)
                 worker = threading.Thread(target=respond, daemon=True)
                 worker.start()
-                observer = dict(kind='android', source_id='native-reader-fixture', owner_id='a'*64,
-                                cursor=EVENT, last_seen=NOW, registered_at=NOW, associations={},
-                                transport=dict(control=str(control), capability='b'*64))
-                path = records.private_directory(data/'sources')/'native-reader.json'
-                records.atomic_json(path, observer)
+                path = self.seed_reader(data, dict(control=str(control), capability='b'*64),
+                    kind='android', source_id='native-reader-fixture', owner_id='a'*64, cursor=EVENT, last_seen=NOW)
                 before = path.read_bytes()
                 resource_observer.offline_reader(data, 'android')
                 self.assertEqual(path.read_bytes(), before)
@@ -703,9 +662,9 @@ class Resources(unittest.TestCase):
             self.assertEqual({body['state'] for body in allocations if body['object_id'] == object_id},
                              {'draining', 'available'})
             final = next(body for body in allocations if body['object_id'] == object_id and body['state'] == 'available')
-            self.assertEqual(final['stopped_at'], stopped['timestamp'])
+            self.assertEqual(final['stopped_at'], records.timestamp(stopped['timestamp']))
             for kind, key, value in (('sample', 'phase', 'pre_stop'), ('gap', 'reason', 'final_tail_missing'),
-                                     ('association', 'end_time', stopped['timestamp'])):
+                                     ('association', 'end_time', records.timestamp(stopped['timestamp']))):
                 self.assertTrue(any(row['kind'] == kind and row['body'].get('object_id') == object_id
                                     and row['body'].get(key) == value for row in rows), (object_id, kind))
 

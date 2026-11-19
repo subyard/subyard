@@ -12,6 +12,7 @@ import queue
 import shlex
 import signal
 import sqlite3
+import struct
 import subprocess
 import sys
 import tarfile
@@ -20,11 +21,17 @@ import threading
 import time
 from types import SimpleNamespace
 import unittest
+import uuid
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('native_signals_fixture', Path(__file__).parent/'e2e/native-signals.py')
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import launcher
+import records
+from spool_fixture import prepare
 
 
 class NativeSignalsTest(unittest.TestCase):
@@ -100,6 +107,21 @@ class NativeSignalsTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'fixture tool permissions were not applied'):
             app.start_fixture_thread(Path('/tmp/fixture'))
 
+    def register_run(self, data, run_id):
+        prepare(data)
+        run = dict(agent_run_id=run_id, agent='codex', host_id='private-fixture', boot_id=launcher.boot_id(),
+                   pid=os.getpid(), start_ticks=launcher.processes.start_ticks(os.getpid()))
+        self.assertTrue(launcher.admit_manifest(data, run, reserve=True))
+        launcher.finish_manifest(data, run)
+        self.assertNotIn('agent', records.read_private(data/'runs-v5'/(run_id+'.json')))
+        database = data/'telemetry.sqlite'
+        database.unlink()
+        with closing(sqlite3.connect(database)) as db:
+            database.chmod(0o600)
+            db.execute('CREATE TABLE runs(agent_run_id TEXT PRIMARY KEY, body TEXT)')
+            db.execute('INSERT INTO runs VALUES(?,?)', (run_id, json.dumps(dict(agent='codex'))))
+            db.commit()
+
     def test_missing_bubblewrap_tool_error_fails_before_the_completion_deadline(self):
         provider = fixture.load(Path(__file__).parents[2]/'orca/tests/e2e/codex-permissions.py', 'codex_missing_sandbox_fixture')
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.codex_provider_class(provider.Provider))
@@ -155,12 +177,12 @@ class NativeSignalsTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
-            (root/'runs').mkdir(mode=0o700)
-            (root/'runs/local.json').write_text(json.dumps(dict(agent='codex', agent_run_id='local')))
+            run = str(uuid.uuid4())
+            self.register_run(root, run)
             before = set(root.rglob('*'))
             command = fixture.native_context_command(root, root)
             completed = subprocess.run(shlex.split(command), capture_output=True, timeout=5,
-                env=dict(PATH=os.defpath, HOME=str(root), SUBYARD_TELEMETRY_DATA_DIR=str(root), SUBYARD_AGENT_RUN_ID='local'))
+                env=dict(PATH=os.defpath, HOME=str(root), SUBYARD_TELEMETRY_DATA_DIR=str(root), SUBYARD_AGENT_RUN_ID=run))
             self.assertEqual(completed.returncode, 0)
             self.assertEqual(set(root.rglob('*')), before)
             self.assertTrue(all(value is True for key, value in json.loads(completed.stdout).items() if key != 'schema'))
@@ -322,8 +344,8 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
             root = Path(directory)
             data, state, home = root/'data', root/'state', root/'home'
-            (data/'runs').mkdir(parents=True)
-            (data/'runs/native-run.json').write_text(json.dumps(dict(agent='codex', agent_run_id='native-run')))
+            run = str(uuid.uuid4())
+            self.register_run(data, run)
             (state/'yards/test-yard').mkdir(parents=True)
             for path in (state/'id_ed25519', state/'id_ed25519.pub', state/'yards/test-yard/client-id'):
                 path.write_text('PRIVATE_CONTENT')
@@ -333,7 +355,7 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
             receipt = root/'context.json'
             command = fixture.command_with_receipt(['/bin/sh', '-c', 'exit 2'], receipt, expected)
             environment = dict(PATH=os.defpath, HOME=str(home), SUBYARD_E2E_STATE_DIR=str(state),
-                               SUBYARD_AGENT_RUN_ID='native-run', SUBYARD_E2E_ROUTE_REGISTRY=str(root/'absent-routes'))
+                               SUBYARD_AGENT_RUN_ID=run, SUBYARD_E2E_ROUTE_REGISTRY=str(root/'absent-routes'))
             result = subprocess.run(shlex.split(command), env=environment, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 2)
             context = json.loads(receipt.read_text())['context']
@@ -450,18 +472,68 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
     def database(self, directory):
         data = Path(directory)
         with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
-            db.executescript('''CREATE TABLE runs(agent_run_id TEXT,body TEXT);
-                CREATE TABLE relations(agent_run_id TEXT,session_id TEXT);
-                CREATE TABLE objects(object_id TEXT,body TEXT);
-                INSERT INTO runs VALUES('run','{"agent":"codex"}');
-                INSERT INTO relations VALUES('run','session');''')
+            db.executescript('''CREATE TABLE runs(agent_run_id TEXT,body TEXT,origin_id TEXT DEFAULT 'fixture');
+                CREATE TABLE relations(agent_run_id TEXT,session_id TEXT,origin_id TEXT DEFAULT 'fixture');
+                CREATE TABLE objects(object_id TEXT,body TEXT,kind TEXT,accounting TEXT,origin_id TEXT DEFAULT 'fixture');
+                CREATE TABLE associations(object_id TEXT,agent_run_id TEXT,origin_id TEXT DEFAULT 'fixture');
+                INSERT INTO runs(agent_run_id,body) VALUES('run','{"agent":"codex"}');
+                INSERT INTO relations(agent_run_id,session_id) VALUES('run','session');''')
             db.commit()
         return data
 
     def insert_scope(self, data, shared):
         with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
-            db.execute('INSERT INTO objects VALUES(?,?)', ('run:scope', json.dumps({'shared': shared})))
+            db.execute("INSERT INTO objects(object_id,body,kind,accounting) VALUES(?,?,'scope','inclusive')", ('scope-digest', json.dumps({'shared': shared})))
+            db.execute("INSERT INTO associations(object_id,agent_run_id) VALUES('scope-digest','run')")
             db.commit()
+
+    def test_native_log_fields_are_read_from_stored_protobuf(self):
+        def varint(value):
+            out = bytearray()
+            while True:
+                out.append((value & 0x7f) | (0x80 if value > 0x7f else 0))
+                value >>= 7
+                if not value:
+                    return bytes(out)
+        def field(number, payload):
+            return varint(number << 3 | 2)+varint(len(payload))+payload
+        def attribute(key, value):
+            if isinstance(value, bool):
+                typed = varint(2 << 3)+varint(int(value))
+            elif isinstance(value, int):
+                typed = varint(3 << 3)+varint(value)
+            elif isinstance(value, float):
+                typed = varint(4 << 3 | 1)+struct.pack('<d', value)
+            else:
+                typed = field(1, value.encode())
+            return field(1, key.encode())+field(2, typed)
+        def logs(*records_):
+            # Resource attributes and a fixed64 timestamp precede the attributes.
+            resource = field(1, field(1, attribute('service.name', 'subyard-fixture')))
+            body = b''.join(field(2, b'\x09'+bytes(8)+b''.join(field(6, attribute(*pair)) for pair in pairs)) for pairs in records_)
+            return field(1, resource+field(2, body))
+        codex = logs([('event.name', 'codex.sse_event'), ('model', 'subyard-fixture'), ('input_token_count', 1)],
+                     [('event.name', 'codex.tool_result'), ('success', True), ('duration_ms', 12.0)])
+        claude = [('event.name', 'api_request'), ('model', 'claude-fixture'), ('input_tokens', 0), ('cost_usd', 0.5)]
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            data = Path(name)
+            with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
+                db.execute('CREATE TABLE records(kind TEXT, protobuf BLOB)')
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', codex))
+                db.commit()
+                with self.assertRaisesRegex(AssertionError, 'claude event.name and model, claude token counter: lost'):
+                    fixture.assert_native_log_fields(data, success=('codex',), timeout=0)
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs(claude, [('event.name', 'tool_result'), ('success', 'true')])))
+                db.commit()
+                fixture.assert_native_log_fields(data, success=('codex',), timeout=0)
+                with self.assertRaisesRegex(AssertionError, '^claude boolean success: lost'):
+                    fixture.assert_native_log_fields(data, timeout=0)
+                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs([('event.name', 'tool_result'), ('success', False)])))
+                db.commit()
+            fixture.assert_native_log_fields(data, timeout=0)
+            stored = fixture.stored_log_attributes(data)
+            self.assertIn({'event.name': 'codex.tool_result', 'success': True, 'duration_ms': 12.0}, stored)
+            self.assertIn({'event.name': 'api_request', 'model': 'claude-fixture', 'input_tokens': 0, 'cost_usd': 0.5}, stored)
 
     def test_session_can_precede_scope_projection(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as directory:
@@ -479,12 +551,10 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
                 db.executescript('''CREATE TABLE records(kind TEXT,body TEXT);
                     INSERT INTO records VALUES('otlp/logs','PRIVATE_PROMPT');
                     INSERT INTO records VALUES('otlp/metrics','PRIVATE_HEADER');
-                    INSERT INTO runs VALUES('claude-run','{"agent":"claude"}');
-                    INSERT INTO runs VALUES('foreign-run','{"agent":"PRIVATE_AGENT"}');
-                    INSERT INTO runs VALUES('missing-agent','{}');
-                    INSERT INTO relations VALUES('claude-run','PRIVATE_SESSION');
-                    INSERT INTO relations VALUES('foreign-run','PRIVATE_FOREIGN_SESSION');
-                    INSERT INTO relations VALUES('orphan','PRIVATE_ORPHAN_SESSION');''')
+                    INSERT INTO runs(agent_run_id,body) VALUES
+                        ('claude-run','{"agent":"claude"}'),('foreign-run','{"agent":"PRIVATE_AGENT"}'),('missing-agent','{}');
+                    INSERT INTO relations(agent_run_id,session_id) VALUES
+                        ('claude-run','PRIVATE_SESSION'),('foreign-run','PRIVATE_FOREIGN_SESSION'),('orphan','PRIVATE_ORPHAN_SESSION');''')
                 db.commit()
             with redirect_stdout(io.StringIO()) as output, patch.object(fixture.time, 'monotonic', side_effect=[0, 0, 41]), \
                  patch.object(fixture.time, 'sleep') as sleep:

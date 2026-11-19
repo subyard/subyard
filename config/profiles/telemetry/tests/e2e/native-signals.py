@@ -5,6 +5,7 @@ from contextlib import closing
 import hashlib
 import http.server
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -14,6 +15,7 @@ import re
 import shutil
 import shlex
 import sqlite3
+import struct
 import subprocess
 import sys
 import tarfile
@@ -102,6 +104,106 @@ def query(data, sql, args=()):
         return db.execute(sql, args).fetchall()
 
 
+def protobuf_fields(data):
+    """Yield (field, value) pairs of one protobuf message; nested messages stay bytes."""
+    offset = 0
+    def varint():
+        nonlocal offset
+        value = shift = 0
+        while True:
+            byte = data[offset]
+            offset += 1
+            value |= (byte & 0x7f) << shift
+            shift += 7
+            if byte < 0x80:
+                return value
+    while offset < len(data):
+        key = varint()
+        field, wire = key >> 3, key & 7
+        if wire == 0:
+            yield field, varint()
+        elif wire == 1:
+            yield field, data[offset:offset+8]
+            offset += 8
+        elif wire == 2:
+            size = varint()
+            yield field, data[offset:offset+size]
+            offset += size
+        elif wire == 5:
+            yield field, data[offset:offset+4]
+            offset += 4
+        else:
+            raise ValueError('unsupported protobuf wire type')
+
+
+def otlp_attributes(message, field):
+    # KeyValue: key = 1, value = 2. AnyValue: string = 1, bool = 2, int = 3, double = 4.
+    attributes = {}
+    for number, value in protobuf_fields(message):
+        if number == field:
+            pair = dict(protobuf_fields(value))
+            for kind, raw in protobuf_fields(pair.get(2, b'')):
+                if kind == 1:
+                    raw = raw.decode()
+                elif kind == 2:
+                    raw = bool(raw)
+                elif kind == 3:
+                    raw = raw-(1 << 64) if raw >= 1 << 63 else raw
+                elif kind == 4:
+                    raw = struct.unpack('<d', raw)[0]
+                else:
+                    continue
+                attributes[pair[1].decode()] = raw
+    return attributes
+
+
+def stored_log_attributes(data):
+    """Return the attributes of every stored native log record."""
+    found = []
+    for (protobuf,) in query(data, "SELECT protobuf FROM records WHERE kind='otlp/logs'"):
+        for resource_logs in (value for number, value in protobuf_fields(protobuf) if number == 1):
+            for scope_logs in (value for number, value in protobuf_fields(resource_logs) if number == 2):
+                for record in (value for number, value in protobuf_fields(scope_logs) if number == 2):
+                    found.append(otlp_attributes(record, 6))
+    return found
+
+
+NATIVE_TOKEN_COUNTERS = {
+    'codex': ('input_token_count', 'output_token_count', 'cached_token_count', 'reasoning_token_count', 'tool_token_count'),
+    'claude': ('input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens'),
+}
+
+
+def native_log_shortfalls(logs, success):
+    """Name each client field the installed clients' stored logs lack.
+
+    Codex sends prefixed event names; Claude sends them without a prefix."""
+    agents = {'codex': lambda name: name.startswith('codex.'), 'claude': lambda name: '.' not in name}
+    missing = []
+    for agent, matches in agents.items():
+        own = [fields for fields in logs if matches(fields.get('event.name') or '.')]
+        checks = {'event.name and model': lambda fields: isinstance(fields.get('model'), str) and fields['model'] != '',
+                  'token counter': lambda fields: any(type(fields.get(name)) is int and fields[name] >= 0
+                                                       for name in NATIVE_TOKEN_COUNTERS[agent])}
+        if agent in success:
+            checks['boolean success'] = lambda fields: type(fields.get('success')) is bool
+        missing += [agent+' '+label for label, check in checks.items() if not any(check(fields) for fields in own)]
+    return missing
+
+
+def assert_native_log_fields(data, success=('codex', 'claude'), timeout=20):
+    """Installed clients keep their event name, model, tokens and success through the sanitizer."""
+    deadline = time.monotonic()+timeout
+    while True:
+        logs = stored_log_attributes(data)
+        missing = native_log_shortfalls(logs, success)
+        if not missing or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    assert not missing, (', '.join(missing)+': lost from stored native logs; kept keys '+
+                         json.dumps(sorted({key for fields in logs for key in fields})))
+
+
 def session_failure_metadata(data, agent, expected, stderr):
     selected = sorted(expected)[:8]
     digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
@@ -122,11 +224,11 @@ def session_failure_metadata(data, agent, expected, stderr):
         with closing(sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=.1)) as db:
             db.set_progress_handler(lambda: int(time.perf_counter() >= deadline), 1000)
             classification = "CASE coalesce(json_extract(runs.body,'$.agent'),'missing') WHEN 'codex' THEN 'codex' WHEN 'claude' THEN 'claude' WHEN 'other' THEN 'other' WHEN 'missing' THEN 'missing' ELSE 'unknown' END"
-            for label, source in (('managed_runs', 'runs'), ('relations', 'relations LEFT JOIN runs USING(agent_run_id)')):
+            for label, source in (('managed_runs', 'runs'), ('relations', 'relations LEFT JOIN runs USING(origin_id,agent_run_id)')):
                 result[label] = dict(db.execute('SELECT '+classification+',count(*) FROM '+source+' GROUP BY 1').fetchall())
             result['otlp_signals'] = dict(db.execute("SELECT kind,count(*) FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces') GROUP BY kind").fetchall())
             placeholders = ','.join('?' for _ in selected)
-            matched = db.execute("SELECT DISTINCT relations.session_id FROM relations JOIN runs USING(agent_run_id) WHERE json_extract(runs.body,'$.agent')=? AND relations.session_id IN ("+placeholders+') LIMIT 8', (agent, *selected)).fetchall()
+            matched = db.execute("SELECT DISTINCT relations.session_id FROM relations JOIN runs USING(origin_id,agent_run_id) WHERE json_extract(runs.body,'$.agent')=? AND relations.session_id IN ("+placeholders+') LIMIT 8', (agent, *selected)).fetchall()
             result['matched_count'] = len(matched)
             result['matched_digests'] = sorted(digest(row[0]) for row in matched)
     except sqlite3.Error:
@@ -137,7 +239,7 @@ def session_failure_metadata(data, agent, expected, stderr):
 def wait_sessions(data, agent, expected, stderr=b''):
     deadline = time.monotonic()+40
     while time.monotonic() < deadline:
-        rows = query(data, 'SELECT relations.agent_run_id,relations.session_id FROM relations JOIN runs USING(agent_run_id) WHERE json_extract(runs.body,\'$.agent\')=?', (agent,))
+        rows = query(data, 'SELECT relations.agent_run_id,relations.session_id FROM relations JOIN runs USING(origin_id,agent_run_id) WHERE json_extract(runs.body,\'$.agent\')=?', (agent,))
         found = {row[1] for row in rows}
         if expected <= found:
             return {row[0] for row in rows if row[1] in expected}
@@ -152,7 +254,8 @@ def wait_sessions(data, agent, expected, stderr=b''):
 def wait_shared_scope(data, run_id, timeout=40):
     deadline = time.monotonic()+timeout
     while time.monotonic() < deadline:
-        rows = query(data, "SELECT json_extract(body,'$.shared') FROM objects WHERE object_id=?", (run_id+':scope',))
+        rows = query(data, """SELECT json_extract(objects.body,'$.shared') FROM objects JOIN associations USING(origin_id,object_id)
+                             WHERE associations.agent_run_id=? AND objects.kind='scope' AND objects.accounting='inclusive'""", (run_id,))
         if rows:
             shared = 'true' if rows[0][0] == 1 else 'false' if rows[0][0] == 0 else 'missing_or_invalid'
             if shared == 'true':
@@ -213,8 +316,38 @@ def install_agents(state):
     return binaries
 
 
+def managed_agent_matches(data, run, agent):
+    import re
+    import sqlite3
+    from contextlib import closing
+    from pathlib import Path
+    import records
+    if not re.fullmatch('[A-Za-z0-9_.:-]{1,128}', run):
+        return False
+    data = Path(data)
+    try:
+        manifest = records.read_private(data/'runs-v5'/(run+'.json'))
+        if manifest.get('agent_run_id') != run or manifest.get('manifest_state') == 'reserved':
+            return False
+        deadline = time.monotonic()+2
+        with closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=.2)) as db:
+            while time.monotonic() < deadline:
+                row = db.execute("SELECT json_extract(body,'$.agent') FROM runs WHERE agent_run_id=?", (run,)).fetchone()
+                if row and row[0]:
+                    return row[0] == agent
+                time.sleep(.05)
+    except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
+        pass
+    return False
+
+
+def run_probe_code():
+    profile = Path(__file__).resolve().parents[2]
+    return 'import sys,time\nsys.path.insert(0, '+repr(str(profile))+')\n'+inspect.getsource(managed_agent_matches)+'\n'
+
+
 def command_with_receipt(command, receipt, expected=None):
-    code = '''import hashlib,json,os,pathlib,re,signal,subprocess,sys
+    code = run_probe_code()+'''import hashlib,json,os,pathlib,re,signal,subprocess,sys
 expected=json.loads(sys.argv[2])
 context={}
 for name,value in expected.get('environment',{}).items():
@@ -222,12 +355,7 @@ for name,value in expected.get('environment',{}).items():
     context[name.lower()+'_matches']=os.environ.get(name)==value
 run=os.environ.get('SUBYARD_AGENT_RUN_ID','')
 context['agent_run_present']=bool(run)
-context['managed_agent_matches']=False
-if re.fullmatch('[A-Za-z0-9_.:-]{1,128}',run) and expected.get('data_dir'):
-    try:
-        manifest=json.loads((pathlib.Path(expected['data_dir'])/'runs'/(run+'.json')).read_text())
-        context['managed_agent_matches']=isinstance(manifest,dict) and manifest.get('agent')==expected.get('agent') and manifest.get('agent_run_id')==run
-    except (OSError,ValueError,TypeError): pass
+context['managed_agent_matches']=bool(expected.get('data_dir') and managed_agent_matches(expected['data_dir'],run,expected.get('agent')))
 yard=expected.get('yard','test-yard')
 registry=pathlib.Path(os.environ.get('SUBYARD_E2E_ROUTE_REGISTRY','/var/lib/subyard/e2e-routes'))/yard/'current'
 context['route_registry_readable']=all(os.access(registry/name,os.R_OK) for name in ('route.tsv','known_hosts'))
@@ -467,13 +595,9 @@ def codex_app_class(base):
 
 
 def native_context_command(home, data_dir):
-    code = '''import json,os,pathlib,sys,time
+    code = run_probe_code()+'''import json,os,sys,time
 run=os.environ.get('SUBYARD_AGENT_RUN_ID','')
-proof=dict(schema='subyard.telemetry.native-context/v1',agent_run_present=bool(run),managed_agent_matches=False,home_matches=os.environ.get('HOME')==sys.argv[1],data_dir_matches=os.environ.get('SUBYARD_TELEMETRY_DATA_DIR')==sys.argv[2])
-try:
-    manifest=json.loads((pathlib.Path(sys.argv[2])/'runs'/(run+'.json')).read_text())
-    proof['managed_agent_matches']=manifest.get('agent')=='codex' and manifest.get('agent_run_id')==run
-except (OSError,ValueError,TypeError): pass
+proof=dict(schema='subyard.telemetry.native-context/v1',agent_run_present=bool(run),managed_agent_matches=managed_agent_matches(sys.argv[2],run,'codex'),home_matches=os.environ.get('HOME')==sys.argv[1],data_dir_matches=os.environ.get('SUBYARD_TELEMETRY_DATA_DIR')==sys.argv[2])
 time.sleep(3)
 print(json.dumps(proof,sort_keys=True))
 '''
@@ -530,7 +654,7 @@ def exercise(args):
     fixture.TIMEOUT = 1830
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     assert command and args.kind in ('vm', 'android')
-    token = (args.data_dir/'auth.token').read_text().strip()
+    token = (args.data_dir.with_name(args.data_dir.name+'-private')/'auth.token').read_text().strip()
     identities = []
     project = prepared/'project'
     for agent in ('codex', 'claude'):
@@ -594,7 +718,7 @@ def exercise(args):
         run = next(iter(runs))
         deadline = time.monotonic()+45
         while time.monotonic() < deadline:
-            allocations = query(args.data_dir, 'SELECT DISTINCT allocations.object_id FROM allocations JOIN associations USING(object_id) WHERE associations.agent_run_id=?', (run,))
+            allocations = query(args.data_dir, 'SELECT DISTINCT allocations.object_id FROM allocations JOIN associations USING(origin_id,object_id) WHERE associations.agent_run_id=?', (run,))
             if allocations:
                 break
             time.sleep(0.2)
@@ -603,6 +727,7 @@ def exercise(args):
         identities.append(dict(agent=agent, agent_run_id=run, session_id=session, object_ids=[row[0] for row in allocations]))
     assert identities[0]['agent_run_id'] != identities[1]['agent_run_id']
     assert set(identities[0]['object_ids']).isdisjoint(identities[1]['object_ids']), 'independent acquisitions reused one resource generation'
+    assert_native_log_fields(args.data_dir)
     output = args.state/'native-resource-bindings.json'
     output.write_text(json.dumps(dict(kind=args.kind, project_id='telemetry-fixture', runs=identities), indent=2)+'\n')
     output.chmod(0o600)
@@ -654,13 +779,16 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
         client = Client([*argv, str(binaries/'codex'), '--no-alt-screen', 'Run the fixture command.'])
         try:
             client.wait('Fixture complete.', provider)
+            tool_run = (project/(name+'.run')).read_text().strip()
+            # The response can appear before the SDK exports the completed
+            # span. The terminal fixture's close() sends SIGTERM, so keep
+            # servicing the PTY until the collector observes the span.
+            deadline = time.monotonic()+30
+            while tool_run and traces(tool_run) <= counts.get(tool_run, 0) and time.monotonic() < deadline:
+                client.read(0.5)
         finally:
             client.close()
         time.sleep(4)
-        tool_run = (project/(name+'.run')).read_text().strip()
-        deadline = time.monotonic()+30
-        while tool_run and not traces(tool_run) > counts.get(tool_run, 0) and time.monotonic() < deadline:
-            time.sleep(0.5)
         new = runs()-known
         grown = {run for run in known|new if traces(run) > counts.get(run, 0)}
         result = dict(new=sorted(new), tool_run=tool_run, tool_exe=(project/(name+'.exe')).read_text().strip(), traces_grew_for=sorted(grown))
@@ -704,7 +832,7 @@ def main():
     sys.path.insert(0, str(args.source/'internal/adapters/configmaterial'))
     import native
     import tomli_w
-    token = (args.data_dir/'auth.token').read_text().strip()
+    token = (args.data_dir.with_name(args.data_dir.name+'-private')/'auth.token').read_text().strip()
     endpoint = 'http://127.0.0.1:14318'
     env = {'PATH': str(binaries)+':/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8',
            'HOME': str(state/'home'), 'CODEX_HOME': str(state/'codex'), 'CLAUDE_CONFIG_DIR': str(state/'claude'),
@@ -750,7 +878,7 @@ def main():
         app.close()
         provider.shutdown()
         provider.server_close()
-    runs = wait_sessions(args.data_dir, 'codex', threads)
+    runs = wait_sessions(args.data_dir, 'codex', set(threads))
     assert len(runs) == 1, 'two backend sessions must retain the one real shared backend run'
     run_id = next(iter(runs))
     wait_shared_scope(args.data_dir, run_id)
@@ -778,6 +906,8 @@ def main():
     wait_claude_sessions(args.data_dir, {session}, result, token)
     kinds = {row[0] for row in query(args.data_dir, "SELECT DISTINCT kind FROM records WHERE kind IN ('otlp/logs','otlp/metrics','otlp/traces')")}
     assert kinds == {'otlp/logs', 'otlp/metrics', 'otlp/traces'}, 'actual native signal coverage incomplete'
+    # The Claude probe here runs no tool; the resources exercise covers its success field.
+    assert_native_log_fields(args.data_dir, success=('codex',))
     assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir, args.system_policy)
     print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence')
 

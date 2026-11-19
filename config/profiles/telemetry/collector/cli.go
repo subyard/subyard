@@ -14,14 +14,16 @@ import (
 
 func RunCLI(args []string, receiver ReceiverFunc) error {
 	if len(args) == 0 {
-		return errors.New("usage: subyard-telemetry serve|export|replay|show-run|stats|query [options]")
+		return errors.New("usage: subyard-telemetry prepare|serve|export|replay|show-run|stats|query|sanitize [options]")
 	}
 	command := args[0]
 	f := flag.NewFlagSet(command, flag.ContinueOnError)
+	family := f.String("family", "record", "record or state family to sanitize from stdin")
+	origin := f.String("origin", "", "store origin for show-run (defaults to local, then a unique imported run)")
 	dir := f.String("data-dir", "", "private telemetry directory")
 	listen := f.String("listen", "127.0.0.1:4318", "loopback OTLP HTTP listener")
 	auth := f.String("auth-file", "", "private bearer token file")
-	spool := f.String("spool", "", "private data-dir/outbox")
+	spool := f.String("spool", "", "private data-dir/spool")
 
 	policyFile := f.String("policy-file", "", "capture policy JSON")
 	after := f.Int64("after", 0, "exclusive export sequence cursor")
@@ -37,27 +39,33 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
+	if command == "sanitize" {
+		return runSanitizer(*family, os.Stdin, os.Stdout)
+	}
 	if *dir == "" {
 		return errors.New("--data-dir is required")
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if command == "serve" || command == "replay" {
+	if command == "serve" || command == "replay" || command == "prepare" {
+		policy, err := LoadPolicy(*policyFile)
+		if err != nil {
+			return err
+		}
 		limits := DefaultLimits()
 		limits.DiskBytes = *disk
 		limits.QueueBytes = *queue
 		limits.QueueRequests = *requests
 		limits.Retention = *retention
-		store, err := Open(*dir, limits)
+		store, err := openStore(*dir, limits)
 		if err != nil {
 			return err
 		}
+		if command == "prepare" {
+			return errors.Join(store.publishCapturePolicy(ctx, policy), store.Close())
+		}
 		defer store.Close()
 		if command == "serve" {
-			policy, err := LoadPolicy(*policyFile)
-			if err != nil {
-				return err
-			}
 			return Serve(ctx, store, Options{Listen: *listen, AuthFile: *auth, Spool: *spool, Receiver: receiver, Policy: policy})
 		}
 		var reader io.Reader = os.Stdin
@@ -69,7 +77,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 			defer file.Close()
 			reader = file
 		}
-		return store.Replay(ctx, reader)
+		return store.replay(ctx, reader, policy)
 	}
 	db, err := OpenReadOnly(*dir)
 	if err != nil {
@@ -87,11 +95,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		if *runID == "" {
 			return errors.New("--run is required")
 		}
-		if *includeChildren {
-			result, err = ShowRunIncludingChildren(ctx, db, *runID)
-		} else {
-			result, err = ShowRun(ctx, db, *runID)
-		}
+		result, err = showRunOrigin(ctx, db, *runID, *origin, *includeChildren)
 	case "stats":
 		result, err = Stats(ctx, db)
 	case "query":
@@ -103,4 +107,36 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(result)
+}
+
+func runSanitizer(family string, reader io.Reader, writer io.Writer) error {
+	const limit = 2 << 20
+	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil || len(data) > limit {
+		return errInvalidRecord
+	}
+	input, err := decodeBody(data)
+	if err != nil || !json.Valid(data) {
+		return errInvalidRecord
+	}
+	encoder := json.NewEncoder(writer)
+	if family != "record" {
+		clean, err := sanitizeState(family, input)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(clean)
+	}
+	var command struct {
+		Record Record `json:"record"`
+		Policy Policy `json:"policy"`
+	}
+	if err := json.Unmarshal(data, &command); err != nil || command.Policy.Schema != PolicyVersion {
+		return errInvalidRecord
+	}
+	clean, err := sanitizeRecord(command.Record, command.Policy, command.Record.filter)
+	if err != nil {
+		return errInvalidRecord
+	}
+	return encoder.Encode(clean)
 }

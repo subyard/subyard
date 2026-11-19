@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +24,29 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace/ptraceotlp"
 )
 
+func TestMain(m *testing.M) {
+	if os.Getenv("SUBYARD_TELEMETRY_TEST_CLI") == "1" {
+		if err := RunCLI(os.Args[1:], nil); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func pythonCollectorCommand(t *testing.T, code string, args ...string) *exec.Cmd {
+	t.Helper()
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", append([]string{"-B", "-c", code}, args...)...)
+	cmd.Env = append(os.Environ(), "SUBYARD_TELEMETRY_COLLECTOR="+binary,
+		"SUBYARD_TELEMETRY_TEST_CLI=1", "GORACE=atexit_sleep_ms=0")
+	return cmd
+}
+
 func fixtureStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := Open(testkit.TempDir(t), DefaultLimits())
@@ -31,8 +56,11 @@ func fixtureStore(t *testing.T) *Store {
 	t.Cleanup(func() { s.Close() })
 	return s
 }
+
+const fixtureSourceID = "0123456789abcdef0123456789abcdef"
+
 func record(kind string, body map[string]any) Record {
-	return Record{Schema: RecordSchema, SourceID: "fixture", EventID: newID(), SourceVersion: "fixture/1", SourceTime: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Body: body}
+	return Record{Schema: RecordSchema, SourceID: fixtureSourceID, EventID: newID(), SourceVersion: "1", SourceTime: time.Now().UTC().Format(time.RFC3339Nano), Kind: kind, Body: body}
 }
 func TestStoreAtomicReplayAndIdenticalEvents(t *testing.T) {
 	s := fixtureStore(t)
@@ -75,6 +103,18 @@ func TestStoreAtomicReplayAndIdenticalEvents(t *testing.T) {
 	}
 	if err := destination.db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("replay identity: %d %v", count, err)
+	}
+	if destination.RegisteredRun(ctx, "run-one") {
+		t.Fatal("foreign replay registered a local run")
+	}
+	if err := destination.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": "run-one", "project_id": "local"})}); err != nil {
+		t.Fatal(err)
+	}
+	if !destination.RegisteredRun(ctx, "run-one") {
+		t.Fatal("local run registration was refused after foreign replay")
+	}
+	if err := destination.db.QueryRow("SELECT count(*) FROM runs WHERE agent_run_id='run-one'").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("identical run IDs across origins merged: %d (%v)", count, err)
 	}
 }
 func TestStorageFailureAndRestart(t *testing.T) {
@@ -130,7 +170,7 @@ func TestBoundsAndFutureSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = other.db.Exec("PRAGMA user_version=3"); err != nil {
+	if _, err = other.db.Exec(fmt.Sprintf("PRAGMA user_version=%d", storeVersion+1)); err != nil {
 		t.Fatal(err)
 	}
 	other.Close()
@@ -150,7 +190,7 @@ func TestOTLPSanitizationPreservesMetricKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: proto}
-	if err = SanitizeEnvelope(&e, DefaultPolicy()); err != nil {
+	if _, err = sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(e.Protobuf, []byte("fixture-private")) {
@@ -186,7 +226,7 @@ func TestTraceLinksAndPolicy(t *testing.T) {
 	}
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/traces", Protobuf: raw}
-	if err = SanitizeEnvelope(&e, DefaultPolicy()); err != nil {
+	if _, err = sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(e.Protobuf, []byte("fixture-private")) {
@@ -202,13 +242,22 @@ func TestTraceLinksAndPolicy(t *testing.T) {
 
 func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	r := pmetricotlp.NewExportRequest()
-	err := r.UnmarshalJSON([]byte(`{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"gauge","gauge":{"dataPoints":[{"asDouble":"NaN","attributes":[{"key":"numeric.value","value":{"doubleValue":"NaN"}}]}]}},{"name":"histogram","histogram":{"dataPoints":[{"count":"1","sum":"Infinity","min":"-Infinity","max":"Infinity","explicitBounds":["Infinity"],"bucketCounts":["1","0"]}]}},{"name":"exponential","exponentialHistogram":{"dataPoints":[{"count":"1","zeroThreshold":"NaN"}]}},{"name":"summary","summary":{"dataPoints":[{"count":"1","sum":1,"quantileValues":[{"quantile":0.5,"value":"NaN"}]}]}}]}]}]}`))
+	err := r.UnmarshalJSON([]byte(`{"resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"gauge","gauge":{"dataPoints":[{"asDouble":"NaN","attributes":[{"key":"gen_ai.usage.input_tokens","value":{"doubleValue":"NaN"}}]}]}},{"name":"histogram","histogram":{"dataPoints":[{"count":"1","sum":"Infinity","min":"-Infinity","max":"Infinity","explicitBounds":["Infinity"],"bucketCounts":["1","0"]}]}},{"name":"exponential","exponentialHistogram":{"dataPoints":[{"count":"1","zeroThreshold":"NaN"}]}},{"name":"summary","summary":{"dataPoints":[{"count":"1","sum":1,"quantileValues":[{"quantile":0.5,"value":"NaN"}]}]}}]}]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+	attrs := r.Metrics().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(0).Gauge().DataPoints().At(0).Attributes()
+	attrs.PutInt("private integer key", 1)
+	attrs.PutDouble("private double key", 2)
+	attrs.PutBool("private boolean key", true)
+	attrs.PutInt("", 3)
+	attrs.PutInt("/home/fixture/private-notes", 4)
+	attrs.PutDouble("fixture.unlisted", 5)
+	attrs.PutBool("fixture.unlisted.flag", true)
+	attrs.PutBool("gen_ai.usage.output_tokens", true)
 	raw, _ := r.MarshalProto()
 	e := Envelope{Encoding: "otlp/metrics", Protobuf: raw}
-	if err = SanitizeEnvelope(&e, DefaultPolicy()); err != nil {
+	if _, err = sanitizeOTLP(&e, DefaultPolicy(), valueFilter{}); err != nil {
 		t.Fatal(err)
 	}
 	clean := pmetricotlp.NewExportRequest()
@@ -217,9 +266,11 @@ func TestOTLPNumericSpecialValuesSurvivePolicy(t *testing.T) {
 	}
 	metrics := clean.Metrics().ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
 	gauge := metrics.At(0).Gauge().DataPoints().At(0)
-	attribute, ok := gauge.Attributes().Get("numeric.value")
-	if !math.IsNaN(gauge.DoubleValue()) || !ok || !math.IsNaN(attribute.Double()) {
-		t.Fatal("numeric special attribute or gauge changed")
+	if !math.IsNaN(gauge.DoubleValue()) {
+		t.Fatal("numeric special gauge changed")
+	}
+	if gauge.Attributes().Len() != 0 || e.Redactions == 0 || bytes.Contains(e.Protobuf, []byte("/home/fixture/private-notes")) {
+		t.Fatal("unsafe numeric attribute keys survived sanitization")
 	}
 	histogram := metrics.At(1).Histogram().DataPoints().At(0)
 	if !math.IsInf(histogram.ExplicitBounds().At(0), 1) || !math.IsInf(histogram.Sum(), 1) || !math.IsInf(histogram.Min(), -1) || !math.IsInf(histogram.Max(), 1) {
@@ -325,7 +376,7 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 		t.Fatal("explicit run context missing")
 	}
 	var session string
-	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id='pending'").Scan(&session); err != nil || session != "native-session" {
+	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id=?", "pending").Scan(&session); err != nil || session != "native-session" {
 		t.Fatalf("native session relation missing: %q %v", session, err)
 	}
 	resourceRequest := plogotlp.NewExportRequest()
@@ -336,7 +387,7 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	if code = post("logs", resourceBytes, token, ""); code != 200 {
 		t.Fatalf("resource-based run context HTTP %d", code)
 	}
-	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id='pending' AND session_id='resource-native-session'").Scan(&session); err != nil {
+	if err = s.db.QueryRow("SELECT session_id FROM relations WHERE agent_run_id=? AND session_id=?", "pending", "resource-native-session").Scan(&session); err != nil {
 		t.Fatal("resource native session missing", err)
 	}
 	resource.Resource().Attributes().PutStr("subyard.agent_run.id", "not-yet-registered")

@@ -14,7 +14,7 @@ import tarfile
 from native import refusal_messages
 
 FILES = ('guest.py', 'native.py', 'launcher.py', 'processes.py', 'records.py', 'forward.py',
-         'resources.py', 'sources.py', 'broker-correlation.py')
+         'resources.py', 'sources.py', 'broker-correlation.py', 'skills/subyard-telemetry/SKILL.md')
 GUEST_SCRIPT = 'stage="$(mktemp -d /tmp/subyard-telemetry.XXXXXX)"; trap \'rm -rf -- "$stage"\' EXIT; tar -xf - -C "$stage"; python3 -B "$stage/guest.py" "$@"'
 SAFE_GUEST_FAILURE = re.compile(r'telemetry: local reconciliation failed \((?P<kind>OSError|PermissionError|FileNotFoundError|FileExistsError|NotADirectoryError|IsADirectoryError|BlockingIOError|TimeoutError|ValueError|KeyError|TimeoutExpired|CalledProcessError|SubprocessError|UnicodeDecodeError|JSONDecodeError) at (?P<location>(?:guest|native)\.py:[1-9][0-9]{0,4})\)\Z')
 
@@ -144,6 +144,7 @@ def main():
         if binary is not None:
             archive.add(binary, arcname='subyard-telemetry', recursive=False)
         archive.add(source.parents[2]/'internal/adapters/configmaterial/tomli_w.py', arcname='tomli_w.py', recursive=False)
+        archive.add(source.parents[2]/'config/skills/deliver.py', arcname='agent-skills.py', recursive=False)
         for agent, content in templates.items():
             entry = tarfile.TarInfo(agent+'.template')
             entry.size, entry.mode = len(content), 0o600

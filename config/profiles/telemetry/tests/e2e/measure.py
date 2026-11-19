@@ -216,7 +216,7 @@ def measure_stack(args):
     workload = "import subprocess,sys,time; end=time.monotonic()+float(sys.argv[1]); memory=bytearray(16*1024*1024)\nwhile time.monotonic()<end:\n subprocess.run([sys.executable,'-c','sum(range(100000))'],check=True); time.sleep(1)"
     with (output/"load.json").open("w+") as driver_output, (output/"workload.log").open("wb") as workload_output:
         driver = subprocess.Popen([str(args.assets.resolve()/"otlp-load"), "--duration", f"{args.load}s", "--rate", str(args.rate),
-                                   "--seed", str(args.seed), "--token-file", str(data/"auth.token"), "--endpoint", "http://127.0.0.1:14318"],
+                                   "--seed", str(args.seed), "--token-file", str(data.with_name(data.name+"-private")/"auth.token"), "--endpoint", "http://127.0.0.1:14318"],
                                   stdout=driver_output, stderr=subprocess.DEVNULL)
         command = subprocess.Popen(["subyard-telemetry-run", "--agent", "other", "--agent-version", "benchmark-v1", "--scope-mode", "require",
                                     "--project-id", "telemetry-benchmark", "--", "python3", "-c", workload, str(args.load)],

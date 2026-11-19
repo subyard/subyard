@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -47,6 +48,7 @@ type Options struct {
 type LocalAuth = localAuth
 type ReceiverFunc func(context.Context, *Store, Options, *LocalAuth) error
 type runContextKey struct{}
+type sensitiveContextKey struct{}
 type localAuth struct {
 	store *Store
 	token string
@@ -68,12 +70,24 @@ func (a *localAuth) Authenticate(ctx context.Context, sources map[string][]strin
 	if len(values) != 1 || subtle.ConstantTimeCompare([]byte(values[0]), []byte("Bearer "+a.token)) != 1 {
 		return ctx, errors.New("telemetry authentication required")
 	}
+	secrets := []string{a.token}
+	for name, values := range sources {
+		if isSensitiveField(name) || strings.EqualFold(name, "x-api-key") {
+			for _, value := range values {
+				secrets = append(secrets, value)
+				if scheme, token, ok := strings.Cut(value, " "); ok && (strings.EqualFold(scheme, "bearer") || strings.EqualFold(scheme, "basic")) {
+					secrets = append(secrets, token)
+				}
+			}
+		}
+	}
+	ctx = context.WithValue(ctx, sensitiveContextKey{}, secrets)
 	runs := header(sources, "x-subyard-agent-run-id")
 	if len(runs) > 1 {
 		return ctx, errors.New("invalid run context")
 	}
 	if len(runs) == 1 {
-		if !validID(runs[0]) {
+		if !(valueFilter{}).id(runs[0]) {
 			return ctx, errors.New("invalid run context")
 		}
 		ctx = context.WithValue(ctx, runContextKey{}, runs[0])
@@ -178,19 +192,19 @@ type signalConsumers struct {
 	traces  consumer.Traces
 }
 
-type runEvidenceKey struct{}
+const nativeSourceVersion = "collector-pdata/1.69.0"
 
-func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (context.Context, error) {
+func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) error {
 	headerRun, _ := ctx.Value(runContextKey{}).(string)
 	resourceRun := ""
 	if value, ok := attributes.Get("subyard.agent_run.id"); ok {
-		if value.Type() != pcommon.ValueTypeStr || !validID(value.Str()) {
-			return ctx, status.Error(codes.InvalidArgument, "invalid resource run context")
+		if value.Type() != pcommon.ValueTypeStr || !(valueFilter{}).id(value.Str()) {
+			return status.Error(codes.InvalidArgument, "invalid resource run context")
 		}
 		resourceRun = value.Str()
 	}
 	if headerRun != "" && resourceRun != "" && headerRun != resourceRun {
-		return ctx, status.Error(codes.InvalidArgument, "conflicting resource and header run context")
+		return status.Error(codes.InvalidArgument, "conflicting resource and header run context")
 	}
 	run := headerRun
 	evidence := "authenticated-header"
@@ -201,23 +215,24 @@ func (s *Store) resourceContext(ctx context.Context, attributes pcommon.Map) (co
 	attributes.Remove("subyard.agent_run.evidence")
 	if run != "" {
 		if !s.RegisteredRun(ctx, run) {
-			return ctx, status.Error(codes.Unavailable, "run registration pending")
+			return status.Error(codes.Unavailable, "run registration pending")
 		}
 		attributes.PutStr("subyard.agent_run.id", run)
 		attributes.PutStr("subyard.agent_run.evidence", evidence)
-		ctx = context.WithValue(ctx, runContextKey{}, run)
-		ctx = context.WithValue(ctx, runEvidenceKey{}, evidence)
 	}
-	return ctx, nil
+	return nil
 }
 func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
-	submit := func(ctx context.Context, kind string, data []byte, relations []Envelope) error {
-		e := Envelope{Kind: "otlp/" + kind, Encoding: "otlp/" + kind, SourceID: "native-otlp", SourceVersion: "collector-pdata/1.69.0", Protobuf: data}
-		if err := SanitizeEnvelope(&e, p); err != nil {
+	if p.Schema != PolicyVersion {
+		return signalConsumers{}, errors.New("unsupported capture policy")
+	}
+	p.Attributes, p.SpanNames, p.EventNames = slices.Clone(p.Attributes), slices.Clone(p.SpanNames), slices.Clone(p.EventNames)
+	submit := func(ctx context.Context, kind string, data []byte) error {
+		e := Envelope{Kind: "otlp/" + kind, Encoding: "otlp/" + kind, SourceID: "native-otlp", SourceVersion: nativeSourceVersion, Protobuf: data, native: true}
+		err := s.capture(ctx, []Envelope{e}, p)
+		if errors.Is(err, errInvalidRecord) {
 			return status.Error(codes.InvalidArgument, "invalid telemetry data")
 		}
-		entries := append([]Envelope{e}, relations...)
-		err := s.submit(ctx, entries)
 		if errors.Is(err, ErrCapacity) {
 			return status.Error(codes.ResourceExhausted, ErrCapacity.Error())
 		}
@@ -227,86 +242,47 @@ func makeConsumers(s *Store, p Policy) (signalConsumers, error) {
 		return nil
 	}
 	logs, err := consumer.NewLogs(func(ctx context.Context, data plog.Logs) error {
-		relations := []Envelope{}
 		for i := 0; i < data.ResourceLogs().Len(); i++ {
-			resource := data.ResourceLogs().At(i)
-			resourceCtx, contextErr := s.resourceContext(ctx, resource.Resource().Attributes())
-			if contextErr != nil {
-				return contextErr
+			if err := s.resourceContext(ctx, data.ResourceLogs().At(i).Resource().Attributes()); err != nil {
+				return err
 			}
-			sessions := map[string]bool{}
-			sessionAttributes(resource.Resource().Attributes(), sessions, p)
-			for j := 0; j < resource.ScopeLogs().Len(); j++ {
-				scope := resource.ScopeLogs().At(j)
-				sessionAttributes(scope.Scope().Attributes(), sessions, p)
-				for k := 0; k < scope.LogRecords().Len(); k++ {
-					sessionAttributes(scope.LogRecords().At(k).Attributes(), sessions, p)
-				}
-			}
-			relations = append(relations, sessionEnvelopes(resourceCtx, sessions)...)
 		}
 		raw, err := plogotlp.NewExportRequestFromLogs(data).MarshalProto()
 		if err != nil {
 			return err
 		}
-		return submit(ctx, "logs", raw, relations)
-	})
+		return submit(ctx, "logs", raw)
+	}, consumer.WithCapabilities(consumer.Capabilities{MutatesData: true}))
 	if err != nil {
 		return signalConsumers{}, err
 	}
 	metrics, err := consumer.NewMetrics(func(ctx context.Context, data pmetric.Metrics) error {
-		relations := []Envelope{}
 		for i := 0; i < data.ResourceMetrics().Len(); i++ {
-			resource := data.ResourceMetrics().At(i)
-			resourceCtx, contextErr := s.resourceContext(ctx, resource.Resource().Attributes())
-			if contextErr != nil {
-				return contextErr
+			if err := s.resourceContext(ctx, data.ResourceMetrics().At(i).Resource().Attributes()); err != nil {
+				return err
 			}
-			sessions := map[string]bool{}
-			sessionAttributes(resource.Resource().Attributes(), sessions, p)
-			for j := 0; j < resource.ScopeMetrics().Len(); j++ {
-				scope := resource.ScopeMetrics().At(j)
-				sessionAttributes(scope.Scope().Attributes(), sessions, p)
-				for k := 0; k < scope.Metrics().Len(); k++ {
-					metricSessions(scope.Metrics().At(k), sessions, p)
-				}
-			}
-			relations = append(relations, sessionEnvelopes(resourceCtx, sessions)...)
 		}
 		raw, err := pmetricotlp.NewExportRequestFromMetrics(data).MarshalProto()
 		if err != nil {
 			return err
 		}
-		return submit(ctx, "metrics", raw, relations)
-	})
+		return submit(ctx, "metrics", raw)
+	}, consumer.WithCapabilities(consumer.Capabilities{MutatesData: true}))
 	if err != nil {
 		return signalConsumers{}, err
 	}
 	traces, err := consumer.NewTraces(func(ctx context.Context, data ptrace.Traces) error {
-		relations := []Envelope{}
 		for i := 0; i < data.ResourceSpans().Len(); i++ {
-			resource := data.ResourceSpans().At(i)
-			resourceCtx, contextErr := s.resourceContext(ctx, resource.Resource().Attributes())
-			if contextErr != nil {
-				return contextErr
+			if err := s.resourceContext(ctx, data.ResourceSpans().At(i).Resource().Attributes()); err != nil {
+				return err
 			}
-			sessions := map[string]bool{}
-			sessionAttributes(resource.Resource().Attributes(), sessions, p)
-			for j := 0; j < resource.ScopeSpans().Len(); j++ {
-				scope := resource.ScopeSpans().At(j)
-				sessionAttributes(scope.Scope().Attributes(), sessions, p)
-				for k := 0; k < scope.Spans().Len(); k++ {
-					sessionAttributes(scope.Spans().At(k).Attributes(), sessions, p)
-				}
-			}
-			relations = append(relations, sessionEnvelopes(resourceCtx, sessions)...)
 		}
 		raw, err := ptraceotlp.NewExportRequestFromTraces(data).MarshalProto()
 		if err != nil {
 			return err
 		}
-		return submit(ctx, "traces", raw, relations)
-	})
+		return submit(ctx, "traces", raw)
+	}, consumer.WithCapabilities(consumer.Capabilities{MutatesData: true}))
 	return signalConsumers{logs, metrics, traces}, err
 }
 func serveOTLP(ctx context.Context, s *Store, options Options, auth *localAuth) error {

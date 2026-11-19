@@ -28,6 +28,15 @@ install -d -m 0700 "$SUBYARD_TELEMETRY_DATA_DIR"
 # Consumed by the native correlation function sourced above.
 # shellcheck disable=SC2034
 LEASE_YARD=yard LEASE_PROJECT=project LEASE_RUN=12345678 LEASE_SLOT=slot-001 LEASE_GENERATION=2 LEASE_EPOCH=3
+# Exercise the candidate hook even on a host with a released helper installed.
+timeout() {
+  if [ "$#" -eq 4 ] && [ "${4##*/}" = broker-correlation.py ]; then
+    command timeout "$1" "$2" "$3" "$ROOT/config/profiles/telemetry/broker-correlation.py"
+  else
+    command timeout "$@"
+  fi
+}
+"$SUBYARD_TELEMETRY_COLLECTOR" prepare --data-dir "$SUBYARD_TELEMETRY_DATA_DIR"
 telemetry_correlation held
 python3 -B - "$tmp/data" "$ROOT/config/profiles/telemetry" <<'PY'
 import json
