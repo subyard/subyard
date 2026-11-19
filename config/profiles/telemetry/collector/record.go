@@ -259,7 +259,7 @@ func (f valueFilter) field(rule bodyRule, value any) (any, bool) {
 	}
 }
 
-var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true}
+var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true, "usage": true}
 
 var bodyFields = func() map[string]string {
 	fields := make(map[string]string, len(bodyRules))

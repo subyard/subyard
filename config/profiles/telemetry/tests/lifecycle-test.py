@@ -30,6 +30,18 @@ spec.loader.exec_module(fixture)
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_disk_budget_reaches_the_collector_unit(self):
+        profile = Path(guest.__file__).parent
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            source = Path(name)
+            shutil.copytree(profile, source, dirs_exist_ok=True, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
+            shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            account = types.SimpleNamespace(pw_uid=1000, pw_gid=1000, pw_dir=name)
+            for budget, flag in (('2147483648', ' --disk-bytes 2147483648'), ('', ''), ('2G', '')):
+                with patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES=budget):
+                    unit = guest.Runtime(source, 'dev', False, [], account=account).assets[Path('/etc/systemd/system')/guest.COLLECTOR][0].decode()
+                self.assertIn('--auth-file /var/lib/subyard/telemetry-private/auth.token'+flag+'\n', unit)
+
     def test_cutover_receipt_reads_the_validated_inode(self):
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             runtime = object.__new__(guest.Runtime)

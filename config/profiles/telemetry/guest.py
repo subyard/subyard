@@ -76,7 +76,10 @@ class Runtime:
             self.assets[library/name] = (content, mode)
         prefix = '# Managed by Subyard telemetry profile.\n'
         common = f'[Unit]\nDescription=Subyard local telemetry\n[Service]\nType=simple\nUser={user}\nGroup={self.gid}\nUMask=0077\nLimitCORE=0\nNoNewPrivileges=true\nRestart=on-failure\nRestartSec=5\nTimeoutStopSec=10\n'
-        self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}',
+        # The profile's TELEMETRY_DISK_BUDGET; the collector default applies without it.
+        budget = os.environ.get('SUBYARD_TELEMETRY_DISK_BYTES', '')
+        budget = ' --disk-bytes '+budget if re.fullmatch('[1-9][0-9]{0,18}', budget) else ''
+        self.starts = {COLLECTOR: f'/usr/bin/setpriv --no-new-privs {library}/subyard-telemetry serve --data-dir {data} --listen 127.0.0.1:14318 --auth-file {self.auth}{budget}',
                        MANAGER: f'/usr/bin/setpriv --no-new-privs /usr/bin/python3 -B {library}/launcher.py manager --data-dir {data} --delegate'}
         collector = prefix+common+f'ExecStart={self.starts[COLLECTOR]}\nMemoryMax=256M\nCPUQuota=25%\nTasksMax=64\nKillMode=control-group\n[Install]\nWantedBy=multi-user.target\n'
         # Workloads inherit their caller's ceilings. Do not put a low collector

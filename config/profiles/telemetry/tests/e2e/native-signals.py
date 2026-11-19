@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real native exporters, isolated homes, deterministic local providers only."""
 import argparse
+import base64
 from contextlib import closing
 import hashlib
 import http.server
@@ -21,6 +22,8 @@ import sys
 import tarfile
 import threading
 import time
+import urllib.request
+import uuid
 
 
 def load(path, name):
@@ -157,10 +160,36 @@ def otlp_attributes(message, field):
     return attributes
 
 
+def collector():
+    return os.environ.get('SUBYARD_TELEMETRY_COLLECTOR') or '/usr/local/lib/subyard-telemetry/subyard-telemetry'
+
+
+_exported = {}
+
+
+def exported(data):
+    """Return every exported row; the collector decompresses stored raw OTLP."""
+    cursor, rows = _exported.get(str(data), (0, []))
+    while True:
+        page = subprocess.run([collector(), 'export', '--data-dir', str(data), '--after', str(cursor), '--limit', '1000'],
+                              capture_output=True, check=True, timeout=60).stdout
+        batch = [json.loads(line) for line in page.splitlines() if line.strip()]
+        if not batch:
+            break
+        rows += batch
+        cursor = batch[-1]['sequence']
+    _exported[str(data)] = (cursor, rows)
+    return rows
+
+
+def raw_otlp(data, kind):
+    return [base64.b64decode(row['protobuf']) for row in exported(data) if row['kind'] == kind and row.get('protobuf')]
+
+
 def stored_log_attributes(data):
     """Return the attributes of every stored native log record."""
     found = []
-    for (protobuf,) in query(data, "SELECT protobuf FROM records WHERE kind='otlp/logs'"):
+    for protobuf in raw_otlp(data, 'otlp/logs'):
         for resource_logs in (value for number, value in protobuf_fields(protobuf) if number == 1):
             for scope_logs in (value for number, value in protobuf_fields(resource_logs) if number == 2):
                 for record in (value for number, value in protobuf_fields(scope_logs) if number == 2):
@@ -272,9 +301,11 @@ CODEX_FIXTURE_DIGESTS = {
     'x86_64': 'a77ff87be7ba809d715728270a78f5ce3527dc07529416d1ef8929b90b8475eb',
     'aarch64': '3f7e1ae38c4fe27322e082b855e8eec936d08fa538d62b71c07e2a53f34e8847',
 }
+# 2.1.327 is the first fixture release that names native subagents in its logs.
+CLAUDE_FIXTURE_VERSION = '2.1.327'
 CLAUDE_FIXTURE_PACKAGES = {
-    'x86_64': ('linux-x64', '3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0'),
-    'aarch64': ('linux-arm64', 'e4daf793d1e74fb0d9874dd09e98690bbfd7be515f78a87fd05b9e2b4bb33b03'),
+    'x86_64': ('linux-x64', '343c744baa14bfd38286a7cb90871051f04379956da6c5b803a9e66019a76ac9'),
+    'aarch64': ('linux-arm64', 'acf0ef2f9da8d5ab08f193f007e19a06cbfb608b96a2f1f758d63a92a386cff8'),
 }
 
 
@@ -299,7 +330,7 @@ def install_agents(state):
 
     platform, digest = CLAUDE_FIXTURE_PACKAGES[arch]
     archive = state/'claude-native.tgz'
-    url = f'https://registry.npmjs.org/@anthropic-ai/claude-code-{platform}/-/claude-code-{platform}-2.1.287.tgz'
+    url = f'https://registry.npmjs.org/@anthropic-ai/claude-code-{platform}/-/claude-code-{platform}-{CLAUDE_FIXTURE_VERSION}.tgz'
     subprocess.run([*download, str(archive), url], check=True, timeout=125)
     with tarfile.open(archive, 'r:gz') as package, (binaries/'claude').open('wb') as output:
         member = package.getmember('package/claude')
@@ -770,7 +801,7 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
 
     def traces(run):
         # The collector stores spans as protobuf and writes the exporting run on their resource.
-        return query(data, "SELECT count(*) FROM records WHERE kind='otlp/traces' AND instr(protobuf,CAST(? AS BLOB))>0", (run,))[0][0]
+        return sum(run.encode() in protobuf for protobuf in raw_otlp(data, 'otlp/traces'))
 
     def turn(name, argv):
         known = runs()
@@ -811,6 +842,141 @@ def assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpo
         subprocess.run(['pkill', '-KILL', '-f', str(codex_home)], check=False)
         provider.shutdown()
         provider.server_close()
+
+
+class CoordinatorProvider(http.server.BaseHTTPRequestHandler):
+    """A Claude coordinator delegates to a native subagent, then runs a worker in Bash."""
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        size = int(self.headers.get('Content-Length', '0'))
+        if not 0 < size <= 8*1024*1024:
+            self.send_error(413)
+            return
+        request = json.loads(self.rfile.read(size))
+        path = self.path.split('?')[0]
+        if path.endswith('/count_tokens'):
+            return self.reply('application/json', b'{"input_tokens":1}')
+        if not path.endswith('/messages'):
+            return self.send_error(404)
+        messages = request.get('messages') or [{}]
+        content = messages[0].get('content')
+        first = content if isinstance(content, str) else ' '.join(block.get('text', '') for block in content or [] if isinstance(block, dict))
+        tools = {tool.get('name') for tool in request.get('tools', [])}
+        results = sum(block.get('type') == 'tool_result' for message in messages if isinstance(message.get('content'), list)
+                      for block in message['content'] if isinstance(block, dict))
+        role, tool = 'other', None
+        if 'SUBAGENT-PROBE' in first:
+            role = 'subagent'
+        elif 'COORDINATOR-PROBE' in first and 'Bash' in tools:
+            role = 'coordinator'
+            agent = 'Agent' if 'Agent' in tools else 'Task'
+            if results == 0 and agent in tools:
+                tool = (agent, dict(description='Fixture subagent', prompt='SUBAGENT-PROBE: reply done.', subagent_type='general-purpose'))
+            elif results <= 1:
+                tool = ('Bash', dict(command=self.server.command, description='Run the fixture worker', timeout=600000))
+        self.server.roles.append(role)
+        # Distinct input counts let one query tell the three parties apart.
+        usage = dict(input_tokens={'coordinator': 100, 'subagent': 20}.get(role, 0), output_tokens=0, cache_read_input_tokens=3)
+        message = dict(id='msg_'+uuid.uuid4().hex, type='message', role='assistant', model=request['model'],
+                       content=[], stop_reason=None, stop_sequence=None, usage=usage)
+        if tool:
+            block = dict(type='tool_use', id='toolu_'+uuid.uuid4().hex, name=tool[0], input={})
+            delta, stop = dict(type='input_json_delta', partial_json=json.dumps(tool[1])), 'tool_use'
+        else:
+            block, delta, stop = dict(type='text', text=''), dict(type='text_delta', text='done'), 'end_turn'
+        events = [('message_start', dict(message=message)), ('content_block_start', dict(index=0, content_block=block)),
+                  ('content_block_delta', dict(index=0, delta=delta)), ('content_block_stop', dict(index=0)),
+                  ('message_delta', dict(delta=dict(stop_reason=stop, stop_sequence=None), usage=dict(output_tokens=1))),
+                  ('message_stop', {})]
+        self.reply('text/event-stream', ''.join('event: '+kind+'\ndata: '+json.dumps(dict(type=kind, **body))+'\n\n' for kind, body in events).encode())
+
+    def reply(self, kind, content):
+        self.send_response(200)
+        self.send_header('Content-Type', kind)
+        self.send_header('Content-Length', str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
+
+# The task report: the coordinator by session, its native subagents by agent
+# ID, and workers through the parent-session binding they reported.
+USAGE_REPORT = """SELECT CASE WHEN m.session_id=:session AND m.native_agent_id IS NULL THEN 'coordinator'
+    WHEN m.session_id=:session THEN 'subagent' ELSE 'worker' END AS party, m.client, count(*) AS requests,
+    sum(coalesce(m.input_tokens,0)+coalesce(m.input_token_count,0)) AS input_tokens
+  FROM model_requests m WHERE m.session_id=:session OR m.session_id IN (SELECT session_id FROM relations
+    WHERE json_extract(body,'$.relation')='parent_session' AND json_extract(body,'$.parent_session_id')=:session)
+  GROUP BY 1,2 ORDER BY 1"""
+
+
+def usage_report(data, session):
+    with closing(sqlite3.connect('file:'+str(data/'telemetry.sqlite')+'?mode=ro', uri=True, timeout=2)) as db:
+        return [tuple(row) for row in db.execute(USAGE_REPORT, dict(session=session))]
+
+
+def assert_usage_attribution(root, binaries, fixture, native, tomli_w, env, endpoint, token, data, system_policy):
+    """A plain Claude coordinator, its native subagent and a Codex worker from its Bash, by one query."""
+    home, claude, codex, project = root/'home', root/'claude', root/'codex', root/'project'
+    for path in (root, home, claude, codex, project):
+        path.mkdir(mode=0o700)
+    worker = http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.Provider)
+    worker.command, worker.failure, worker.workspace = None, None, project
+    coordinator = http.server.ThreadingHTTPServer(('127.0.0.1', 0), CoordinatorProvider)
+    coordinator.roles = []
+    # Telemetry names no parent itself; the worker reports the inherited session.
+    coordinator.command = ('OTEL_RESOURCE_ATTRIBUTES="subyard.parent_session.id=$CLAUDE_CODE_SESSION_ID${OTEL_RESOURCE_ATTRIBUTES:+,$OTEL_RESOURCE_ATTRIBUTES}" '
+                           + shlex.join([str(binaries/'codex'), 'exec', '--skip-git-repo-check', 'WORKER-PROBE: reply done.']))
+    for server in (worker, coordinator):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'sandbox_mode': 'danger-full-access', 'approval_policy': 'never',
+              'features': {'plugins': False, 'unified_exec': False}, 'analytics': {'enabled': True},
+              'model_providers': {'fixture': {'name': 'Fixture', 'base_url': f'http://127.0.0.1:{worker.server_port}/v1',
+                  'wire_api': 'responses', 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
+    claude_env = {'OTEL_LOGS_EXPORTER': 'none'} if system_policy else native.desired('claude', endpoint, token)
+    if not system_policy:
+        config['otel'] = native.desired('codex', endpoint, token)
+    native.publish(codex/'config.toml', tomli_w.dumps(config).encode(), None)
+    native.publish(claude/'settings.json', (json.dumps({'env': claude_env})+'\n').encode(), None)
+    local = dict(env, HOME=str(home), CODEX_HOME=str(codex), CLAUDE_CONFIG_DIR=str(claude), DISABLE_AUTOUPDATER='1',
+                 ANTHROPIC_BASE_URL=f'http://127.0.0.1:{coordinator.server_port}', ANTHROPIC_API_KEY='local-fixture-only')
+    if not system_policy:
+        local.update(claude_env)
+    try:
+        result = claude_command([str(binaries/'claude'), '-p', 'COORDINATOR-PROBE: delegate, then run the worker.',
+            '--allowedTools', 'Bash,Agent,Task', '--output-format', 'stream-json', '--verbose', '--max-turns', '6'],
+            token, env=local, cwd=project, capture_output=True, timeout=300, check=True)
+    finally:
+        for server in (worker, coordinator):
+            server.shutdown()
+            server.server_close()
+    session = next(json.loads(line)['session_id'] for line in result.stdout.splitlines() if line.strip() and json.loads(line).get('session_id'))
+    roles = {role: coordinator.roles.count(role) for role in set(coordinator.roles)}
+    assert roles.get('subagent') and roles.get('coordinator', 0) >= 3 and worker.request_count, json.dumps(dict(roles=roles, worker_requests=getattr(worker, 'request_count', 0)))
+    # Each fixture worker request reports one input token; Codex sends some
+    # auxiliary requests without a completed-response event.
+    expected = {'coordinator': ('claude', 100*roles['coordinator']), 'subagent': ('claude', 20*roles['subagent']), 'worker': ('codex', True)}
+    deadline = time.monotonic()+40
+    while True:
+        report = usage_report(data, session)
+        parties = {row[0]: (row[1], row[3] if row[0] != 'worker' else 0 < row[3] == row[2]) for row in report}
+        if parties == expected or time.monotonic() >= deadline:
+            break
+        time.sleep(.5)
+    assert parties == expected, json.dumps(dict(report=report, roles=roles))
+    # Re-delivered native exports add no usage.
+    for protobuf in raw_otlp(data, 'otlp/logs'):
+        request = urllib.request.Request(endpoint+'/v1/logs', data=protobuf, headers={'Content-Type': 'application/x-protobuf', 'Authorization': 'Bearer '+token})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert response.status == 200
+    assert usage_report(data, session) == report, 're-delivery changed the usage report'
+    archive, copy = root/'export.jsonl', root/'replayed'
+    archive.write_bytes(b''.join(json.dumps(row).encode()+b'\n' for row in exported(data)))
+    copy.mkdir(mode=0o700)
+    for _ in range(2):
+        subprocess.run([collector(), 'replay', '--data-dir', str(copy), '--input', str(archive)], check=True, timeout=300, capture_output=True)
+        assert usage_report(copy, session) == report, 'replay changed the usage report'
+    print('usage-report: '+json.dumps(report), flush=True)
 
 
 def main():
@@ -909,7 +1075,9 @@ def main():
     # The Claude probe here runs no tool; the resources exercise covers its success field.
     assert_native_log_fields(args.data_dir, success=('codex',))
     assert_run_attribution(state, binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir, args.system_policy)
-    print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence')
+    assert_usage_attribution(state/'usage', binaries, fixture, native, tomli_w, env, endpoint, token, args.data_dir, args.system_policy)
+    print('ok: real native versions; loopback providers; two shared Codex sessions and Claude session linked by exported evidence; '
+          'coordinator, subagent and worker usage by one query')
 
 
 if __name__ == '__main__':

@@ -14,6 +14,11 @@ data=/var/lib/subyard/telemetry
 "$collector" show-run --data-dir "$data" --run RUN_ID
 ```
 
+Model usage per request is in the `model_requests` and `tool_outputs` views;
+see the telemetry guide for the per-task query. Nothing expires automatically.
+When `stats` warns that raw OTLP is refused, free space with
+`"$collector" prune --data-dir "$data" --older-than 60d`; usage is kept.
+
 The active database is `$data/telemetry.sqlite`. The first spool upgrade
 archives the previous store under `$data/archive`. If that name is occupied,
 the archive uses `$data/archive-2`, `$data/archive-3`, and so on. Each sealed

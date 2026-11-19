@@ -64,9 +64,13 @@ func TestReplayUsesQueueBoundForLargeRows(t *testing.T) {
 	if err := store.Replay(ctx, &stream); err != nil {
 		t.Fatal(err)
 	}
-	var count, size int64
-	if err := store.db.QueryRow("SELECT count(*),max(length(protobuf)) FROM records").Scan(&count, &size); err != nil || count != 2 || size <= store.limits.RequestBytes {
-		t.Fatalf("replay did not retain the large record and its successor: %d %d (%v)", count, size, err)
+	var count int64
+	var stored []byte
+	if err := store.db.QueryRow("SELECT count(*),max(protobuf) FROM records").Scan(&count, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err = decompressOTLP(stored); err != nil || count != 2 || int64(len(stored)) <= store.limits.RequestBytes {
+		t.Fatalf("replay did not retain the large record and its successor: %d %d (%v)", count, len(stored), err)
 	}
 	stream.Reset()
 	if _, err := Export(ctx, store.db, &stream, 0, 100); err != nil {
@@ -98,7 +102,7 @@ func TestReplayRestoresPrunedSampleToItsOriginalRun(t *testing.T) {
 	if _, err := Export(ctx, reader, &exported, 0, 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.prune(); err != nil {
+	if err := prune(store); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -153,7 +157,7 @@ func TestForeignSampleStillDeduplicatesAfterLocalRestore(t *testing.T) {
 	if _, err := Export(ctx, destination.db, &local, 0, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := destination.prune(); err != nil {
+	if err := prune(destination); err != nil {
 		t.Fatal(err)
 	}
 	if err := destination.Replay(ctx, &local); err != nil {

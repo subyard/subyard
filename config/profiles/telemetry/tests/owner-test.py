@@ -61,6 +61,8 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(archive.extractfile(member).read())
     assert (stage/'agent-skills.py').is_file() and (stage/skill).is_file()
+    if os.environ.get('TELEMETRY_DISK_BUDGET')=='2GiB':
+        assert args[args.index('SUBYARD_TELEMETRY_DISK_BYTES=2147483648')-1]=='--env'
     if arguments[0]=='startup':
         assert not (stage/'subyard-telemetry').exists()
         assert '--env' in args and 'SUBYARD_STARTUP_REMAINING_MS=1234' in args
@@ -105,6 +107,7 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(json.loads(startup.stdout), {'state':'drift'})
             self.assertEqual(invoke('--check').returncode,1,'fresh selected profile must be measured drift, not an unavailable adapter')
             self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0').returncode,0)
+            self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0',TELEMETRY_DISK_BUDGET='2GiB').returncode,0)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_STATE='unsafe').returncode,2)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_BAD_OUTPUT='1').returncode,2)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_TRANSPORT_FAIL='1').returncode,2)

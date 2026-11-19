@@ -4,5 +4,9 @@
   "owner_service": "profile.sh",
   "startup_readiness": "profile.sh",
   "runtime": {"activation_id": "telemetry-runtime", "handler": "runtime.sh"},
-  "native": [{"package": "cmd/telemetry", "path": "bin/subyard-telemetry"}]
+  "native": [{"package": "cmd/telemetry", "path": "bin/subyard-telemetry"}],
+  "settings": [
+    {"name": "TELEMETRY_DISK_BUDGET", "type": "size", "scopes": ["shipped", "host", "yard", "command"],
+     "application": "next-command", "syncable": true, "default": "30GiB"}
+  ]
 }

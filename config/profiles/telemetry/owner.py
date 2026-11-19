@@ -153,6 +153,9 @@ def main():
             archive.add(source.parents[1]/'identity/authority.py',arcname='authority.py',recursive=False)
     remaining = os.environ.get('SUBYARD_STARTUP_REMAINING_MS', '')
     startup_environment = ['--env', 'SUBYARD_STARTUP_REMAINING_MS='+remaining] if operation == 'startup' and re.fullmatch('[0-9]{1,9}', remaining) else []
+    budget = re.fullmatch('([1-9][0-9]{0,8})(MiB|GiB)', os.environ.get('TELEMETRY_DISK_BUDGET', ''))
+    if budget:
+        startup_environment += ['--env', 'SUBYARD_TELEMETRY_DISK_BYTES='+str(int(budget[1]) << (20 if budget[2] == 'MiB' else 30))]
     output = run(['incus', 'exec', instance, '--project', project, *startup_environment, '--', 'bash', '-euo', 'pipefail', '-c',
                   GUEST_SCRIPT, 'subyard', operation, str(int(selected)), os.environ['DEV_USER'], agents, *bindings], input=stream.getvalue())
     if operation == 'check':

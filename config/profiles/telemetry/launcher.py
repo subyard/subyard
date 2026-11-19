@@ -173,7 +173,7 @@ def native_arguments(agent, arguments, run_id):
     return [arguments[0], *overrides, *arguments[1:]]
 
 
-def environment(data_dir, run, environ):
+def environment(data_dir, run, environ, exported=True):
     result = dict(environ)
     for field, name in [('agent_run_id', 'SUBYARD_AGENT_RUN_ID'), ('task_id', 'SUBYARD_TASK_ID'),
                         ('project_id', 'SUBYARD_PROJECT_ID'), ('worktree_id', 'SUBYARD_WORKTREE_ID'),
@@ -181,7 +181,9 @@ def environment(data_dir, run, environ):
         if run.get(field) is not None:
             result[name] = run[field]
     result['SUBYARD_TELEMETRY_DATA_DIR'] = str(data_dir)
-    if run['agent'] == 'claude':
+    # The receiver refuses exports naming an unregistered run, so a run whose
+    # registration failed exports without run context.
+    if run['agent'] == 'claude' and exported:
         fields = [entry for entry in result.get('OTEL_RESOURCE_ATTRIBUTES', '').split(',')
                   if entry and not entry.startswith('subyard.agent_run.id=')]
         result['OTEL_RESOURCE_ATTRIBUTES'] = ','.join([*fields, 'subyard.agent_run.id='+run['agent_run_id']])
@@ -551,8 +553,9 @@ def launch(args):
                 run['scope_baselines'] = baseline['scope_baselines']
         except (OSError, ValueError, KeyError):
             records.emit(data_dir, 'gap', {'agent_run_id': run['agent_run_id'], 'reason': 'scope_baseline_unavailable', 'quality': 'partial'})
-    env = environment(data_dir, run, os.environ)
-    command = native_arguments(args.agent, command, run['agent_run_id'])
+    env = environment(data_dir, run, os.environ, exported=registered)
+    if registered:
+        command = native_arguments(args.agent, command, run['agent_run_id'])
     try:
         pid, write_fd = gated_child(command, env)
     except OSError:

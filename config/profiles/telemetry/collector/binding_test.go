@@ -131,7 +131,7 @@ func TestRetentionKeepsHeldOfflineResponsibility(t *testing.T) {
 	if _, err := s.db.Exec("UPDATE records SET received_time='2020-01-01T00:00:03.000000000Z'"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.prune(); err != nil {
+	if err := prune(s); err != nil {
 		t.Fatal(err)
 	}
 	var samples int

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import base64
 from contextlib import closing, redirect_stdout
 import hashlib
 import importlib.util
@@ -47,13 +48,13 @@ class NativeSignalsTest(unittest.TestCase):
 
         codex_version = f'codex-cli {fixture.CODEX_FIXTURE_VERSION}'
         codex = f'#!/bin/sh\nprintf "{codex_version}\\n"\n'.encode()
-        claude = b'#!/bin/sh\nprintf "2.1.287 (Claude Code)\\n"\n'
+        claude = f'#!/bin/sh\nprintf "{fixture.CLAUDE_FIXTURE_VERSION} (Claude Code)\\n"\n'.encode()
         codex_archive = package({'bin/codex': codex, 'bin/fixture-sidecar': b'fixture'})
         claude_archive = package({'package/claude': claude})
         download_urls = [
             f'https://github.com/openai/codex/releases/download/rust-v{fixture.CODEX_FIXTURE_VERSION}/'
             'codex-package-x86_64-unknown-linux-musl.tar.gz',
-            'https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.287.tgz',
+            f'https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-{fixture.CLAUDE_FIXTURE_VERSION}.tgz',
         ]
         run = subprocess.run
         for corrupted in (False, True):
@@ -517,19 +518,20 @@ if (resolve_bastion_route) >/dev/null 2>&1; then exit 1; else [ "$?" = 2 ]; fi
         claude = [('event.name', 'api_request'), ('model', 'claude-fixture'), ('input_tokens', 0), ('cost_usd', 0.5)]
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             data = Path(name)
-            with closing(sqlite3.connect(data/'telemetry.sqlite')) as db:
-                db.execute('CREATE TABLE records(kind TEXT, protobuf BLOB)')
-                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', codex))
-                db.commit()
-                with self.assertRaisesRegex(AssertionError, 'claude event.name and model, claude token counter: lost'):
-                    fixture.assert_native_log_fields(data, success=('codex',), timeout=0)
-                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs(claude, [('event.name', 'tool_result'), ('success', 'true')])))
-                db.commit()
+            def store(*signals):
+                # Replay through the collector, which stores raw OTLP compressed.
+                lines = [json.dumps(dict(schema='subyard.telemetry.export/v1', origin_id='fixture-origin', event_id=str(uuid.uuid4()),
+                    source_id='native-otlp', source_version='collector-pdata/1.69.0', kind='otlp/logs', encoding='otlp/logs',
+                    policy_version='subyard.telemetry.capture/v1', protobuf=base64.b64encode(signal).decode())) for signal in signals]
+                subprocess.run([fixture.collector(), 'replay', '--data-dir', name], input='\n'.join(lines).encode(), check=True, timeout=30)
+            store(codex)
+            with self.assertRaisesRegex(AssertionError, 'claude event.name and model, claude token counter: lost'):
                 fixture.assert_native_log_fields(data, success=('codex',), timeout=0)
-                with self.assertRaisesRegex(AssertionError, '^claude boolean success: lost'):
-                    fixture.assert_native_log_fields(data, timeout=0)
-                db.execute('INSERT INTO records VALUES(?,?)', ('otlp/logs', logs([('event.name', 'tool_result'), ('success', False)])))
-                db.commit()
+            store(logs(claude, [('event.name', 'tool_result'), ('duration_ms', 1.0)]))
+            fixture.assert_native_log_fields(data, success=('codex',), timeout=0)
+            with self.assertRaisesRegex(AssertionError, '^claude boolean success: lost'):
+                fixture.assert_native_log_fields(data, timeout=0)
+            store(logs([('event.name', 'tool_result'), ('success', False)]))
             fixture.assert_native_log_fields(data, timeout=0)
             stored = fixture.stored_log_attributes(data)
             self.assertIn({'event.name': 'codex.tool_result', 'success': True, 'duration_ms': 12.0}, stored)

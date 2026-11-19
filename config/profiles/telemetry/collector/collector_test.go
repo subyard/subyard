@@ -366,6 +366,12 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	if err = s.db.QueryRow("SELECT protobuf FROM records WHERE kind='otlp/logs'").Scan(&stored); err != nil {
 		t.Fatal("ack before commit", err)
 	}
+	if !bytes.HasPrefix(stored, zstdMagic) {
+		t.Fatal("raw OTLP stored uncompressed")
+	}
+	if stored, err = decompressOTLP(stored); err != nil {
+		t.Fatal(err)
+	}
 	if bytes.Contains(stored, []byte("fixture-private")) {
 		t.Fatal("private bytes persisted")
 	}
@@ -428,4 +434,10 @@ func TestNativeHTTPCommitAuthAndRegistration(t *testing.T) {
 	if err = json.NewDecoder(&output).Decode(&exported); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// prune applies the former seven-day age to the manual cleanup.
+func prune(s *Store) error {
+	_, err := s.Prune(time.Now().Add(-7*24*time.Hour), false)
+	return err
 }
