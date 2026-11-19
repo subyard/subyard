@@ -233,31 +233,43 @@ if sys.argv[2] != "read":
 PY
 }
 
+resource_step() {
+  local label="$1" status
+  shift
+  if "$@" 2>/dev/null; then return 0; else status=$?; fi
+  printf 'orca-resource: %s failed (exit=%s)\n' "$label" "$status" >&2
+  return "$status"
+}
+
 set_server_isolation() {
-  local isolation="$1" expected="${2:-}" data_file
+  local isolation="$1" expected="${2:-}" data_file state
   # Stock settings RPC deliberately excludes this Desktop-owned preference.
   # Its offline recovery CLI validates and preserves the complete profile state.
-  run_orca down
-  if "${incus[@]}" exec "$instance" -- systemctl is-active --quiet subyard-orca.service; then
-    die 'Orca must be stopped before recovery settings changes'
-  fi
-  server_cli profile state exports --json >"$work/isolation-exports.json"
-  jq -e '.ok == true' "$work/isolation-exports.json" >/dev/null
-  data_file="$(jq -er '.result.dataFile' "$work/isolation-exports.json")"
-  profile_isolation_json "$data_file" check
-  server_cli profile state rollback --current-sqlite --json >"$work/isolation-export.json"
-  jq -e --arg path "$data_file" \
+  resource_step 'server isolation stop runtime' run_orca down >/dev/null || return
+  state="$(resource_step 'server isolation read runtime state' "${incus[@]}" exec "$instance" -- \
+    systemctl show --property=ActiveState --value subyard-orca.service)" || return
+  resource_step 'server isolation verify runtime stopped' test "$state" = inactive || return
+  resource_step 'server isolation list state exports' \
+    server_cli profile state exports --json >"$work/isolation-exports.json"
+  data_file="$(resource_step 'server isolation validate export listing' jq -er \
+    'select(.ok == true) | .result.dataFile' "$work/isolation-exports.json")"
+  resource_step 'server isolation validate export path' profile_isolation_json "$data_file" check >/dev/null
+  resource_step 'server isolation export SQLite state' \
+    server_cli profile state rollback --current-sqlite --json >"$work/isolation-export.json"
+  resource_step 'server isolation verify SQLite export' jq -e --arg path "$data_file" \
     '.ok == true and .result.storage == "sqlite" and .result.dataFile == $path' \
     "$work/isolation-export.json" >/dev/null
-  profile_isolation_json "$data_file" "$isolation" "$expected"
+  resource_step 'server isolation check or edit setting' \
+    profile_isolation_json "$data_file" "$isolation" "$expected" >/dev/null
   if [ "$isolation" != read ]; then
-    server_cli profile state rollback --current-json --json >"$work/isolation-import.json"
-    jq -e --arg path "$data_file" \
+    resource_step 'server isolation restore JSON state' \
+      server_cli profile state rollback --current-json --json >"$work/isolation-import.json"
+    resource_step 'server isolation verify JSON restore' jq -e --arg path "$data_file" \
       '.ok == true and .result.storage == "json" and .result.restoredPath == $path' \
       "$work/isolation-import.json" >/dev/null
   fi
-  run_orca up
-  first_pair="$("${incus[@]}" exec "$instance" -- \
+  resource_step 'server isolation restart runtime' run_orca up >/dev/null
+  first_pair="$(resource_step 'server isolation read runtime pairing' "${incus[@]}" exec "$instance" -- \
     jq -er '.pairing | select(.available == true and .scope == "runtime") | .url' \
     /srv/agents/orca/ready.json)"
   client_status "$first_pair" client-a
@@ -267,16 +279,8 @@ set_server_isolation() {
 client_status() {
   local pairing="$1" profile="$2"
   local output="$work/$profile-status.json"
-  local error="$work/$profile-status.err"
-  if ! client_cli "$pairing" "$profile" status --json >"$output" 2>"$error"; then
-    sed -n '1,80p' "$error" >&2
-    die "$profile stock client command failed"
-  fi
-  if ! jq -e '.ok == true and .result.runtime.reachable == true' "$output" >/dev/null; then
-    jq -c '{ok, result: {app: .result.app, runtime: .result.runtime, graph: .result.graph}}' \
-      "$output" >&2 || true
-    die "$profile did not reach the paired runtime"
-  fi
+  resource_step 'paired status command' client_cli "$pairing" "$profile" status --json >"$output" || return
+  resource_step 'paired status validation' jq -e '.ok == true and .result.runtime.reachable == true' "$output" >/dev/null
 }
 
 client_cli() {

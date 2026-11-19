@@ -303,4 +303,64 @@ time.sleep(60)
             assert dict(role='descendant', state='S', executable='sleep') in record['processes'], record
 print('ok: Orca unlock timeout preserves bounded safe progress and process states')
 PY
+
+{
+  printf 'set -euo pipefail\n'
+  sed -n '/^resource_step() {/,/^}/p; /^set_server_isolation() {/,/^}/p; /^client_status() {/,/^}/p' \
+    "$ROOT/config/profiles/orca/tests/e2e/orca-resource.sh"
+  cat <<'ORCA_STATUS'
+work="$1" scenario="$2"
+instance=fixture
+incus=(guest)
+run_orca() { printf 'ORCA-PRIVATE-CANARY\n'; }
+guest() {
+  printf 'ORCA-PRIVATE-CANARY\n' >&2
+  case "$4" in
+    systemctl)
+      if [ "$scenario" = active ]; then printf 'active\n'; return; fi
+      printf 'inactive\n'
+      if [ "$scenario" = state-read ]; then return 125; fi ;;
+    jq) printf 'ORCA-PRIVATE-CANARY\n' ;;
+  esac
+}
+server_cli() {
+  printf 'export\n' >> "$work/recovery-calls"
+  printf 'ORCA-PRIVATE-CANARY\n' >&2
+  case "$3" in
+    exports)
+      if [ "$scenario" = export ]; then return 43; fi
+      printf '{"ok":true,"result":{"dataFile":"/export"}}\n' ;;
+    rollback) printf '{"ok":true,"result":{"storage":"sqlite","dataFile":"/export"}}\n' ;;
+  esac
+}
+profile_isolation_json() { printf 'isolation %s\n' "$2" >> "$work/recovery-calls"; }
+client_cli() {
+  printf 'ORCA-PRIVATE-CANARY\n' >&2
+  if [ "$scenario" = status ]; then return 44; fi
+  printf '{"ok":true,"result":{"runtime":{"reachable":false,"detail":"ORCA-PRIVATE-CANARY"}}}\n'
+}
+case "$scenario" in
+  state-read|active) set_server_isolation false ;;
+  *) set_server_isolation read ;;
+esac
+ORCA_STATUS
+} > "$tmp/resource-failure"
+for scenario in state-read active export status unreachable; do
+  resource_work="$tmp/resource-$scenario"
+  mkdir "$resource_work"
+  rc=0
+  bash "$tmp/resource-failure" "$resource_work" "$scenario" > "$resource_work/output" 2>&1 || rc=$?
+  case "$scenario" in
+    state-read) [ "$rc" = 125 ] && expected='server isolation read runtime state failed (exit=125)' || exit 1 ;;
+    active) [ "$rc" = 1 ] && expected='server isolation verify runtime stopped failed (exit=1)' || exit 1 ;;
+    export) [ "$rc" = 43 ] && expected='server isolation list state exports failed (exit=43)' || exit 1 ;;
+    status) [ "$rc" = 44 ] && expected='paired status command failed (exit=44)' || exit 1 ;;
+    unreachable) [ "$rc" = 1 ] && expected='paired status validation failed (exit=1)' || exit 1 ;;
+  esac
+  case "$scenario" in
+    state-read|active) [ ! -e "$resource_work/recovery-calls" ] || exit 1 ;;
+  esac
+  printf 'orca-resource: %s\n' "$expected" | diff -u - "$resource_work/output"
+done
+printf 'ok: Orca verifies the runtime stopped before recovery and preserves private child output\n'
 printf 'ok: complete and independent lane dispatch, argument rejection and failure propagation\n'

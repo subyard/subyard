@@ -67,8 +67,76 @@ grep -Fq 'original_rc=42 capture_rc=2 cleanup_rc=0' "$tmp/capture-failure.out"
 install -d -m 0700 "$diagnostic_fixture"
 printf 'openclaw-profile-e2e-v1\n' > "$diagnostic_fixture/.marker"
 sed 's/sudo() { shift; "$@"; }/sudo() { return 1; }/' "$tmp/failure.sh" > "$tmp/cleanup-failure.sh"
-if bash "$tmp/cleanup-failure.sh" > "$tmp/cleanup-failure.out" 2>&1; then exit 1; else [ "$?" = 3 ]; fi
+if bash "$tmp/cleanup-failure.sh" > "$tmp/cleanup-failure.out" 2>&1; then exit 1; else [ "$?" = 42 ]; fi
 grep -Fq 'original_rc=42 capture_rc=0 cleanup_rc=3' "$tmp/cleanup-failure.out"
+
+# A fatal ownership refusal leaves the foreign tree intact and still tears down the owned yard.
+install -d -m 0700 "$tmp/subyard-p0-project-foreign" "$diagnostic_fixture/config/yards/owned"
+printf 'openclaw-profile-e2e-v1\n' > "$diagnostic_fixture/.marker"
+printf 'fixture\n' > "$diagnostic_fixture/config/yards/owned/config.env"
+{
+  printf 'set -euo pipefail\nSTATE=%q\nSUBYARD_CONFIG_HOME=%q\nTOKEN=foreign\nYARD_NAME=owned\nMARKER=owned\n' \
+    "$diagnostic_fixture" "$diagnostic_fixture/config"
+  printf 'STAGING_ORIGINAL_PATH=\nSTAGING_CAPTURE_ACTIVE=0\n'
+  sed -n '/^project_contract_clean_tree() {/,/^}/p' "$ROOT/dev/e2e/lib-owner-project-contract.sh" \
+    | sed "s|/tmp/subyard-p0-project-|$tmp/subyard-p0-project-|g"
+  sed -n '/^cleanup() {/,/^}/p' "$owner" \
+    | sed "s|/var/tmp/subyard-openclaw\.|$tmp/subyard-openclaw.|; s|/tmp/subyard-p0-project-|$tmp/subyard-p0-project-|g"
+  cat <<'REFUSED_CLEANUP'
+die() { printf '%s\n' "$1" >&2; exit 2; }
+sudo() { shift; "$@"; }
+yard() { printf '%s\n' "$*" > "$STATE/../owned-teardown"; }
+trap cleanup EXIT
+exit 42
+REFUSED_CLEANUP
+} > "$tmp/refused-cleanup.sh"
+rc=0
+bash "$tmp/refused-cleanup.sh" > "$tmp/refused-cleanup.out" 2>&1 || rc=$?
+[ "$rc" = 42 ]
+[ -d "$tmp/subyard-p0-project-foreign" ]
+[ ! -d "$diagnostic_fixture" ]
+grep -Fxq 'teardown --yes' "$tmp/owned-teardown"
+grep -Fxq 'refusing to clean an unmarked project fixture' "$tmp/refused-cleanup.out"
+grep -Fq 'original_rc=42 capture_rc=0 cleanup_rc=3' "$tmp/refused-cleanup.out"
+
+# Each launch gets one attempt, and a busy refusal is accepted only alongside a success.
+(
+  # shellcheck source=dev/e2e/lib-owner-project-contract.sh
+  . "$ROOT/dev/e2e/lib-owner-project-contract.sh"
+  busy_release_gate() {
+    printf '%s\n' \
+      'yard: release gate: release operator-action-required (plan-stale): active fixture; this command is not run' \
+      'yard: cause: release state is changing; retry' >&2
+    return 1
+  }
+  sync_once() {
+    printf 'launch\n' >> "$case_dir/launches"
+    if mkdir "$case_dir/first-sync" 2>/dev/null; then
+      case "$scenario" in
+        one-busy|both-busy) busy_release_gate; return ;;
+        other-failure) printf 'yard: a different plan-stale refusal\n' >&2; return 42 ;;
+      esac
+    fi
+    [ "$scenario" != both-busy ] || { busy_release_gate; return; }
+    sleep 0.1
+    touch "$case_dir/success-finished"
+  }
+  for scenario in two-successes one-busy both-busy other-failure; do
+    case_dir="$tmp/pair-$scenario"
+    mkdir "$case_dir"
+    rc=0
+    copies="$(project_contract_sync_pair "$case_dir" sync_once 2>"$case_dir/stderr")" || rc=$?
+    [ "$(wc -l < "$case_dir/launches")" = 2 ]
+    case "$scenario" in
+      two-successes) [ "$rc:$copies" = 0:2 ] || exit 1 ;;
+      one-busy) [ "$rc:$copies" = 0:1 ] || exit 1 ;;
+      both-busy) [ "$rc:$copies" = 1: ] && [ ! -e "$case_dir/success-finished" ] || exit 1 ;;
+      other-failure) [ "$rc:$copies" = 42: ] && [ -f "$case_dir/success-finished" ] || exit 1 ;;
+    esac
+  done
+  grep -Fxq 'concurrent project sync failed (exits=1,1)' "$tmp/pair-both-busy/stderr"
+  grep -Fxq 'yard: a different plan-stale refusal' "$tmp/pair-other-failure/stderr"
+)
 
 # The delegate itself must preserve bytes, exit and process-group cancellation.
 (

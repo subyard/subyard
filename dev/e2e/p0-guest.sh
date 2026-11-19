@@ -11,6 +11,8 @@ PEER_HOST_KEY="${5:-}"
 . "$ROOT/dev/e2e/lib-p0-capacity.sh"
 # shellcheck source=dev/e2e/lib-p0-init-retry.sh
 . "$ROOT/dev/e2e/lib-p0-init-retry.sh"
+# shellcheck source=dev/e2e/lib-p0-incus-image.sh
+. "$ROOT/dev/e2e/lib-p0-incus-image.sh"
 p0_capacity_init "$TOKEN"
 
 PEER_ROOT="/tmp/subyard-p0-peer-$TOKEN"
@@ -116,7 +118,7 @@ owner_cleanup() {
   if [ -x "${SUBYARD_HOME:-$HOME/.subyard}/runtime/current/bin/yard" ]; then
     teardown="${SUBYARD_HOME:-$HOME/.subyard}/runtime/current/bin/yard"
   fi
-  clean_tree "$source" "$MARKER" || cleanup_failed=1
+  (clean_tree "$source" "$MARKER") || cleanup_failed=1
   if [ -d "${SUBYARD_HOME:-$HOME/.subyard}/exports" ]; then
     while IFS= read -r patch; do find "$patch" -delete || cleanup_failed=1; done \
       < <(grep -RIl -- "$MARKER" "${SUBYARD_HOME:-$HOME/.subyard}/exports" 2>/dev/null)
@@ -137,7 +139,10 @@ owner_cleanup() {
       if [ "$rc" -ne 0 ] && [ "$yard" = test-yard ] && [ "${OWNER_DIAGNOSTIC_CONSOLE_CAPTURED:-0}" != 1 ]; then
         for vm in e2e-vm-1 e2e-vm-2; do
           timeout 15 incus exec "yard-$yard" --project "subyard-$yard" -- \
-            incus --project subyard-e2e-vms-slot-1 console "$vm" --show-log 2>&1 \
+            sh -c 'command -v incus >/dev/null &&
+              incus --project subyard-e2e-vms-slot-1 info "$1" >/dev/null &&
+              exec incus --project subyard-e2e-vms-slot-1 console "$1" --show-log' _ "$vm" \
+            2>/dev/null \
             | tail -n 60 >&2
         done
       fi
@@ -151,7 +156,7 @@ owner_cleanup() {
     find "$registration" -delete || cleanup_failed=1
   done
   for project in subyard-e2e-yard subyard-test-yard; do
-    reclaim_owner_project_if_present "$project" || cleanup_failed=1
+    (reclaim_owner_project_if_present "$project") || cleanup_failed=1
   done
   if [ "$OWNER_BASELINE_CAPTURED" = 1 ]; then
     while IFS= read -r fingerprint; do
@@ -616,33 +621,13 @@ reclaim_owner_project_if_present() {
 }
 
 prepare_owner_image_cache_project() {
-  local project="${1:?owner image-cache project is required}" sibling remote fingerprint info
-  local source="${P0_REAL_INCUS_CONTAINER_IMAGE:-images:debian/13/cloud}" remotes
+  local project="${1:?owner image-cache project is required}" sibling
   case "$project" in
     subyard-e2e-yard) sibling=subyard-test-yard ;;
     subyard-test-yard) sibling=subyard-e2e-yard ;;
     *) die "unsafe owner image-cache project $project" ;;
   esac
-  [[ "$source" =~ ^([[:alnum:]_.-]+):[^[:space:]]+$ ]] \
-    || die 'owner fixture requires a public image remote'
-  remote="${BASH_REMATCH[1]}"
-  [ "$remote" != local ] || die 'owner fixture requires a public image remote'
-  remotes="$(incus remote list --format=json)" || die 'cannot inspect owner image remote'
-  jq -e --arg remote "$remote" 'type=="object" and
-    (.[$remote].Public==true) and
-    (.[$remote].Protocol=="simplestreams" or .[$remote].Protocol=="incus")' \
-    <<<"$remotes" >/dev/null || die 'owner fixture requires a public Incus or simplestreams image remote'
-  info="$(incus image info "$OWNER_BASE_IMAGE" --project default)" \
-    || die "test-owned base image alias $OWNER_BASE_IMAGE is unavailable"
-  fingerprint="$(awk '/^Fingerprint: / {print $2}' <<<"$info")"
-  [[ "$fingerprint" =~ ^[a-f0-9]{64}$ ]] && grep -Fqx 'Type: container' <<<"$info" \
-    || die 'owner cached image identity is invalid'
-  info="$(timeout --foreground "${P0_REAL_INCUS_COMMAND_TIMEOUT:-900}" incus image info "$remote:$fingerprint")" \
-    || die 'exact cached owner image is unavailable from its public remote'
-  [ "$(awk '/^Fingerprint: / {print $2}' <<<"$info")" = "$fingerprint" ] \
-    && grep -Fqx 'Type: container' <<<"$info" \
-    || die 'public owner image differs from the cached image'
-  OWNER_BASE_IMAGE_REFERENCE="$remote:$fingerprint"
+  OWNER_BASE_IMAGE_REFERENCE="$(p0_container_image_reference "$OWNER_BASE_IMAGE")" || return
   reclaim_owner_project_if_present "$sibling"
   reclaim_owner_project_if_present "$project"
   # Public init owns project creation. Its isolated image cache cannot resolve
@@ -1359,10 +1344,9 @@ peer_credentials() {
 }
 
 peer_projects() {
-  local source="$PEER_ROOT/project" remote_pwd inventory owner_selector="e2e-vm-2/default"
+  local source="$PEER_ROOT/project" remote_pwd inventory copies owner_selector="e2e-vm-2/default"
   local ssh_config="$HOME/.ssh/config"
   local include="Include $HOME/.ssh/subyard-peer.config"
-  local sync_pid_one sync_pid_two
   [ "$SUBYARD_E2E_VM" = 1 ] || die 'remote project controller requires VM1'
   valid_ip "$PEER_IP" || die 'peer IP is invalid'
   install -d -m 0700 "$source"
@@ -1381,17 +1365,17 @@ peer_projects() {
   "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-2 --yes -- grep -Fxq base result.txt
   "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-3 --yes -- grep -Fxq second result.txt
   printf '%s\nconcurrent\n' "$MARKER" > "$source/result.txt"
-  "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes >/dev/null &
-  sync_pid_one=$!
-  "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes >/dev/null &
-  sync_pid_two=$!
-  wait "$sync_pid_one"
-  wait "$sync_pid_two"
+  copies="$(project_contract_sync_pair "$PEER_ROOT" "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes)"
   inventory="$("$PEER_YARD_ENTRY" list)"
-  for project in project-2 project-3 project-4 project-5; do
-    grep -Eq "(^|[[:space:]])$project([[:space:]]|$)" <<<"$inventory" \
-      || die "remote same-source sync omitted $project"
-  done
+  awk -v copies="$copies" '
+    $1 ~ /^project-[2-5]$/ { count[$1]++ }
+    END { exit !(count["project-2"] == 1 && count["project-3"] == 1 &&
+                 count["project-4"] == 1 && count["project-5"] == copies - 1) }
+  ' <<<"$inventory" || die 'remote same-source sync inventory disagrees with the launch results'
+  if [ "$copies" = 1 ]; then
+    "$PEER_YARD_ENTRY" -Y peer sync "$source" --yes >/dev/null
+    "$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-5 --yes -- grep -Fxq concurrent result.txt
+  fi
   remote_pwd="$("$PEER_YARD_ENTRY" -Y "$owner_selector" shell project-2 --yes -- pwd)"
   case "$remote_pwd" in /srv/workspaces/*/src) ;; *) die 'remote shell did not enter the synced project' ;; esac
   [ "$remote_pwd" = /srv/workspaces/project-2/src ] \

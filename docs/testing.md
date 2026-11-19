@@ -189,9 +189,11 @@ Fresh pre-v0.11.0 source upgrades are outside the
 
 The published-baseline matrix defaults to no coding integrations. Its optional agent selection
 (`published-upgrade.sh VERSION all`, or a quoted selection) exercises the published release's real
-init before update, including structured configuration evidence and raw Codex rules. Run selected
-agent jobs at the ownership, manifest and provisioning boundaries described in the VM guide;
-the no-agent matrix alone does not establish agent migration compatibility.
+init before update, including structured configuration evidence and raw Codex rules when selected.
+The v0.28.0 anchor selects Claude, OpenCode and pi because its Codex provisioner can hit HTTP 403
+on GitHub's anonymous release metadata endpoint. The v0.29.0 and v0.30.0 lanes include Codex
+and its provisioning fix ([#62](https://github.com/Subyard/Subyard/pull/62)). Run selected agent
+jobs at the ownership, manifest and provisioning boundaries described in the VM guide.
 
 Bootstrap checks runtime ownership before interpreting checkout markers. Another runtime gets
 `--runtime-root` guidance; only a dispatcher or valid pending recovery is classified as legacy.
