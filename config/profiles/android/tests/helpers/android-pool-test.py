@@ -32,10 +32,20 @@ poolmod, client = load('pool'), load('client')
 lifecycle = load('tests/e2e/android-pool-lifecycle')
 
 
+def telemetry_collector(directory):
+    """The telemetry hook sanitizes state with the collector binary, as installed."""
+    if os.environ.get('SUBYARD_TELEMETRY_COLLECTOR'):
+        return os.environ['SUBYARD_TELEMETRY_COLLECTOR']
+    binary = Path(directory) / 'subyard-telemetry'
+    subprocess.run(['go', 'build', '-o', str(binary), './config/profiles/telemetry/cmd/telemetry'], cwd=ROOT, check=True)
+    return str(binary)
+
+
 class ClientBridge(unittest.TestCase):
     def test_native_acquire_registers_managed_context_over_existing_owner_route(self):
         with tempfile.TemporaryDirectory(prefix='android-managed-correlation-', dir='/tmp') as name:
             data = Path(name) / 'telemetry'
+            collector = telemetry_collector(name)
             owner = dict(yard='fixture-owner', project='fixture-project', run='native-acquire-run', purpose='fixture')
             allocation = dict(state='held', slot_id='slot-001', generation=7)
             requests = []
@@ -53,6 +63,7 @@ class ClientBridge(unittest.TestCase):
 
             args = SimpleNamespace(device=None, api=36, variant=None, abi=None, wait=0)
             with patch.dict(os.environ, SUBYARD_AGENT_RUN_ID='managed-native-run', SUBYARD_TELEMETRY_DATA_DIR=str(data),
+                            SUBYARD_TELEMETRY_COLLECTOR=collector,
                             SUBYARD_RESOURCE_SESSION_TRANSPORT='', SUBYARD_EMU_INSTANCE='fixture-instance',
                             SUBYARD_EMU_PROJECT='fixture-incus-project'), \
                     patch.object(client.Path, 'is_file', return_value=True), \
@@ -63,8 +74,13 @@ class ClientBridge(unittest.TestCase):
                 intent = json.loads(next((data / 'sources/intents').glob('intent-*.json')).read_text())
                 self.assertEqual(intent['agent_run_id'], 'managed-native-run')
                 self.assertEqual(intent['request']['correlation_id'], owner['run'])
-                self.assertEqual(intent['request']['transport']['instance'], 'fixture-instance')
-                self.assertEqual(intent['request']['transport']['project'], 'fixture-incus-project')
+                # The route lives in private operational storage outside the data directory.
+                self.assertNotIn('transport', intent['request'])
+                route = json.loads((Path(name) / 'telemetry-private/routes' / (intent['route_id'] + '.json')).read_text())
+                self.assertEqual(route['instance'], 'fixture-instance')
+                self.assertEqual(route['project'], 'fixture-incus-project')
+                stored = b''.join(path.read_bytes() for path in data.rglob('*') if os.path.isfile(path))
+                self.assertNotIn(route['capability'].encode(), stored)
                 self.assertEqual(intent['request']['resource_generation'], 7)
                 with patch.object(client.subprocess, 'run', side_effect=OSError('observer unavailable')):
                     self.assertEqual(client.acquire(args, 'a' * 64), allocation)
