@@ -278,12 +278,16 @@ func TestFullTeardownClassifiesNativeOwnershipBeforeDestructiveInventory(t *test
 					testkit.WriteFile(t, filepath.Join(bin, "incus"), []byte("#!/bin/sh\ncase \"$2\" in *'?project=native-partial') printf '%s' '"+string(partialProfile)+"';; *) printf '%s' '{\"name\":\"default\",\"config\":{},\"devices\":{},\"description\":\"default yard profile\"}';; esac\n"), 0700)
 					values := structuredCommandContext(program.teardownLoaded(yard))
 					payload, _ := json.Marshal(yard.Snapshot.Resources)
-					command := exec.Command("python3", "../../scripts/lib/teardown-plan.py", "guard-all", owner.Project)
+					engine, err := os.Executable()
+					if err != nil {
+						t.Fatal(err)
+					}
+					command := exec.Command(engine, "_teardown-guard", "guard-all", owner.Project)
 					command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SUBYARD_TEARDOWN_INVENTORY="+string(payload))
 					if output, err := command.CombinedOutput(); err != nil {
 						t.Fatalf("original native partial facts were not accepted: %v: %s", err, output)
 					}
-					command = exec.Command("python3", "../../scripts/lib/teardown-plan.py", "guard-all", values["INCUS_PROJECT"])
+					command = exec.Command(engine, "_teardown-guard", "guard-all", values["INCUS_PROJECT"])
 					command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "SUBYARD_TEARDOWN_INVENTORY="+string(payload))
 					if output, err := command.CombinedOutput(); err != nil {
 						t.Fatalf("captured native partial profile routed to another project: %v: %s", err, output)

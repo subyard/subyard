@@ -125,7 +125,7 @@ grep -Fq '.subyard-snippet.XXXXXX' "$access_script" \
 
 teardown_script="$ROOT/scripts/teardown-physical.sh"
 # The verified runtime can be reachable only through a privileged parent's
-# /proc/PID/fd directory. The operator child must use already-loaded code.
+# /proc/PID/fd directory. The operator child must use only already-loaded code.
 cleanup_home="$TMP/"'operator home $(touch injected)'
 mkdir -m 0700 "$cleanup_home"
 mkdir -m 0700 "$cleanup_home/.ssh"
@@ -138,27 +138,22 @@ cleanup_block="$(sed -n '/^sshdir=/,/^known=/p' "$teardown_script" | sed '$d')"
   export SUBYARD_OPERATOR_HOME="$cleanup_home"
   OPERATOR_USER="$(id -un)"
   export YARD_SNIP=subyard-demo.config
-  TEARDOWN_GUARD="$ROOT/scripts/lib/teardown-plan.py"
-  SUBYARD_TEARDOWN_ARTIFACTS="$(python3 -B - "$TEARDOWN_GUARD" "$cleanup_home/.ssh/$YARD_SNIP" <<'PY'
-import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location("guard", sys.argv[1])
-guard = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(guard)
-with guard.artifact_parent(sys.argv[2]) as (fd, name):
-    binding = guard.artifact_digest(guard.artifact_entries(fd, name))
-print(json.dumps([{"Path": sys.argv[2], "Binding": binding}]))
-PY
-)"
+  # The privileged leaf owns the dispatcher; the operator child never reopens it.
+  engine="${YARD_ENGINE_PATH:-$ROOT/.build/yard}"
+  teardown_guard() { "$engine" _teardown-guard "$@"; }
+  SUBYARD_TEARDOWN_ARTIFACTS="$(SNIPPET="$cleanup_home/.ssh/$YARD_SNIP" python3 -c 'import json, os; print(json.dumps({"Path": os.environ["SNIPPET"]}))' \
+    | teardown_guard capture-artifact \
+    | python3 -c 'import json, sys; item = json.load(sys.stdin); print(json.dumps([{"Path": item["Path"], "Binding": item["Binding"]}]))')"
   export SUBYARD_TEARDOWN_ARTIFACTS
   # Run the real child bash without host privileges. Its source pathname is
   # deliberately unavailable, as it is after the actual identity drop.
   sudo() {
     [ "$1" = -n ] && [ "$2" = -u ] && [ "$3" = "$OPERATOR_USER" ] && [ "$4" = -- ] \
       || return 1
-    [ -f "$SUBYARD_OPERATOR_HOME/.ssh/$YARD_SNIP" ] \
-      || fail 'operator snippet was removed before the identity drop'
+    [ ! -e "$SUBYARD_OPERATOR_HOME/.ssh/$YARD_SNIP" ] \
+      || fail 'approved snippet was not removed by the pinned guard before the identity drop'
     shift 4
-    "$@"
+    env -u SUBYARD_DISPATCHER_PATH -u SUBYARD_TEARDOWN_ARTIFACTS "$@"
   }
   ok() { :; }
   die() { fail "$*"; }
@@ -178,9 +173,9 @@ legacy_config_tmp_pattern="\$cfg.tmp"
 typed_ssh_dir="sshdir=\"\$SUBYARD_OPERATOR_HOME/.ssh\""
 typed_ssh_paths="snip=\"\$sshdir/\$YARD_SNIP\"; cfg=\"\$sshdir/config\""
 root_snippet_remove="rm -f \"\$snip\""
-remove_helper_call="python3 -B - remove-artifact"
-operator_identity_drop="sudo -n -u \"\$OPERATOR_USER\" -- env"
-positional_helper_arguments="bash -s -- \"\$snip\" \"\$cfg\" \"Include \$YARD_SNIP\""
+remove_helper_call="teardown_guard remove-artifact \"\$snip\" || exit 75"
+operator_identity_drop="sudo -n -u \"\$OPERATOR_USER\" -- bash -s"
+positional_helper_arguments="bash -s -- \"\$cfg\" \"Include \$YARD_SNIP\""
 ! grep -Fq "$legacy_config_tmp_pattern" "$teardown_script" \
   || fail 'teardown still writes or renames through predictable config.tmp'
 if ! grep -Fq "$typed_ssh_dir" "$teardown_script" \
@@ -192,12 +187,12 @@ fi
 ! grep -Fq "$root_snippet_remove" "$teardown_script" \
   || fail 'teardown root still removes the operator SSH snippet'
 grep -Fq "$remove_helper_call" "$teardown_script" \
-  || fail 'teardown does not guard snippet removal in the operator child'
+  || fail 'teardown does not remove the snippet through the pinned native guard'
 grep -Fq "$operator_identity_drop" "$teardown_script" \
   || fail 'teardown does not drop non-interactively to the operator for SSH cleanup'
 grep -Fq "$positional_helper_arguments" \
   "$teardown_script" \
-  || fail 'teardown does not pass both operator SSH paths positionally'
+  || fail 'teardown does not pass the operator SSH config and line positionally'
 grep -Fq ': "${FORWARD_SSH_AGENT:=0}"' "$ROOT/config/subyard.env" \
   || fail 'ssh-agent forwarding is not opt-in by default'
 grep -Fq '(docs/security.md)' "$ROOT/README.md" \

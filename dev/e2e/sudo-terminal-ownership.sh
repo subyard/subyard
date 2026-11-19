@@ -184,7 +184,7 @@ if [ "${1:-}" = --check-fixture ]; then
   "$TMP/run-teardown" config show CODING_TOOL_INTEGRATIONS >/dev/null
   # Exercise the staged guard used by native teardown planning without Incus or sudo.
   printf '{"Path":"%s"}\n' "$fixture_home" \
-    | python3 -B "$fixture_repo/scripts/lib/teardown-plan.py" capture-artifact \
+    | "$fixture_repo/bin/yard-engine" _teardown-guard capture-artifact \
     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin)["Binding"] else 1)'
   printf 'ok: complete candidate runtime verified and its teardown guard captures an artifact\n'
   exit 0

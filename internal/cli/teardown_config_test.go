@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -26,14 +25,9 @@ func TestTeardownResetConfigRejectsKeepData(t *testing.T) {
 func teardownResetFixture(t *testing.T) (*CLI, config.Loaded, *testkit.Incus, string) {
 	t.Helper()
 	root, environment, _ := nativeFixture(t)
-	helper, err := os.ReadFile("../../scripts/lib/teardown-plan.py")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := os.MkdirAll(filepath.Join(root, "scripts", "lib"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, filepath.Join(root, "scripts", "lib", "teardown-plan.py"), helper, 0600)
 	incus := lifecycleIncus()
 	incus.Reconcile.InstanceFound = false
 	incus.Instances = map[string]ports.InstanceInfo{}
@@ -328,11 +322,9 @@ func TestTeardownConfigArtifactRemovalKeepsTypedStaleOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal([]ports.TeardownArtifactBinding{{Path: path, Binding: binding}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	testkit.WriteFile(t, path, []byte("SSH_PORT=4444\n"), 0600)
+	payload := []ports.TeardownArtifactBinding{{Path: path, Binding: binding}}
+	// A size change is observable within one coarse filesystem timestamp tick.
+	testkit.WriteFile(t, path, []byte("SSH_PORT=44444\n"), 0600)
 	if err := program.removeTeardownConfigArtifact(context.Background(), payload, path); err != domain.ErrPlanStale {
 		t.Fatalf("changed settings removal outcome changed: %v", err)
 	}
@@ -343,7 +335,7 @@ func TestTeardownConfigArtifactRemovalKeepsTypedStaleOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, _ = json.Marshal([]ports.TeardownArtifactBinding{{Path: path, Binding: binding}})
+	payload = []ports.TeardownArtifactBinding{{Path: path, Binding: binding}}
 	if err := program.removeTeardownConfigArtifact(context.Background(), payload, path); err != nil {
 		t.Fatal(err)
 	}

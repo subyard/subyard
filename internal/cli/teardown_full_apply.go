@@ -142,7 +142,6 @@ func (cli *CLI) executeFullTeardown(ctx context.Context, orchestrator *applicati
 			return result, err
 		}
 	}
-	uninstall.UseArtifactGuard(filepath.Join(directory, "runtime"))
 	// All following leaves use the retained engine and public assets, never a
 	// runtime root that this operation may already have removed.
 	clone := *cli

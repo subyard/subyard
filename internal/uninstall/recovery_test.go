@@ -1,14 +1,14 @@
 package uninstall
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,12 +26,12 @@ func recoveryFixture(t *testing.T) (RecoveryStore, RecoveryPlan) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return RecoveryStore{Directory: root, UID: uint32(os.Getuid())}, RecoveryPlan{Schema: 1, Installation: installation, Stage: RecoveryPrepared, Trees: []Tree{tree}}
+	return RecoveryStore{Directory: root, UID: uint32(os.Getuid())}, RecoveryPlan{Schema: RecoverySchema, Installation: installation, Stage: RecoveryPrepared, Trees: []Tree{tree}}
 }
 
 func TestRecoveryRetainsPackagedCoreDependencies(t *testing.T) {
 	source := testkit.TempDir(t)
-	paths := []string{"bin/yard", "config/commands.registry", "scripts/teardown-physical.sh", "scripts/lib/teardown-services.sh", "scripts/lib/teardown-plan.py",
+	paths := []string{"bin/yard", "config/commands.registry", "scripts/teardown-physical.sh", "scripts/lib/teardown-services.sh",
 		"internal/adapters/configmaterial/tomli_w.py", "internal/adapters/configmaterial/TOMLI_W_LICENSE", "internal/unrelated.py"}
 	var manifest strings.Builder
 	for _, path := range paths {
@@ -268,20 +268,18 @@ func TestProtectedServicePlanIgnoresMirrorsAndRejectsReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(body)
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Fatal(err)
+	inventory := func(sha string) (string, int) {
+		t.Setenv("SUBYARD_TEARDOWN_PLAN", binding.Path)
+		t.Setenv("SUBYARD_TEARDOWN_PLAN_SHA256", sha)
+		t.Setenv("SUBYARD_TEARDOWN_SERVICES", `[{"scope":"system","units":["subyard-foreign.service"]}]`)
+		var output strings.Builder
+		code := RunGuard([]string{"service-inventory"}, nil, &output, io.Discard)
+		return output.String(), code
 	}
-	helper := filepath.Join("..", "..", "scripts", "lib", "teardown-plan.py")
-	command := exec.Command(python, "-B", helper, "service-inventory")
-	command.Env = append(os.Environ(), "SUBYARD_TEARDOWN_PLAN="+binding.Path, "SUBYARD_TEARDOWN_PLAN_SHA256="+hex.EncodeToString(digest[:]), `SUBYARD_TEARDOWN_SERVICES=[{"scope":"system","units":["subyard-foreign.service"]}]`)
-	output, err := command.CombinedOutput()
-	if err != nil || string(output) != "user\tsubyard-approved.service\n" {
-		t.Fatalf("service selection escaped original plan: %s %v", output, err)
+	if output, code := inventory(hex.EncodeToString(digest[:])); code != 0 || output != "user\tsubyard-approved.service\n" {
+		t.Fatalf("service selection escaped original plan: %s %d", output, code)
 	}
-	command = exec.Command(python, "-B", helper, "service-inventory")
-	command.Env = append(os.Environ(), "SUBYARD_TEARDOWN_PLAN="+binding.Path, "SUBYARD_TEARDOWN_PLAN_SHA256="+strings.Repeat("0", 64))
-	if output, err := command.CombinedOutput(); err == nil || len(output) == 0 {
+	if output, code := inventory(strings.Repeat("0", 64)); code == 0 || output != "" {
 		t.Fatal("changed protected plan binding accepted")
 	}
 	replacement := plan
@@ -296,11 +294,13 @@ func TestProtectedServicePlanIgnoresMirrorsAndRejectsReplacement(t *testing.T) {
 	}
 }
 
+func useProducerFixture(t *testing.T, relays string) {
+	t.Helper()
+	relayUnitDirectory, producerSystemUID = relays, uint32(os.Getuid())
+	t.Cleanup(func() { relayUnitDirectory, producerSystemUID = "/etc/systemd/system", 0 })
+}
+
 func TestLegacyRelayUsesSerializedApprovedYardProof(t *testing.T) {
-	helper, err := filepath.Abs("../../scripts/lib/teardown-plan.py")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, kind := range []string{"approved", "wrong-kind", "wrong-port", "wrong-address", "absent-proof"} {
 		t.Run(kind, func(t *testing.T) {
 			yard := RecoveryYard{Context: domain.Context{YardKind: domain.YardVM, SSHPort: 24222}, Snapshot: &TeardownSnapshot{State: ports.ReconcileState{Instance: ports.InstanceInfo{Devices: map[string]map[string]string{"eth0": {"ipv4.address": "192.0.2.10"}}}}}}
@@ -316,36 +316,18 @@ func TestLegacyRelayUsesSerializedApprovedYardProof(t *testing.T) {
 			if kind == "absent-proof" {
 				yards = nil
 			}
-			body, err := json.Marshal(struct {
-				Root         string
-				Installation Installation
-				Environment  map[string]string
-				Owners       []string
-				Yards        []RecoveryYard
-				Port         int
-			}{"/source", Installation{RuntimeRoot: "/runtime"}, map[string]string{}, []string{"relay"}, yards, 24222})
-			if err != nil {
-				t.Fatal(err)
+			// Redirect only the privileged unit directory and root UID; the real
+			// producer parser and rendered identity remain exercised.
+			directory := testkit.TempDir(t)
+			useProducerFixture(t, directory)
+			unit := "[Unit]\nDescription=Subyard VM SSH relay to 192.0.2.10:22\nAfter=network-online.target\n\n[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 192.0.2.10:22\nNoNewPrivileges=yes\nPrivateTmp=yes\nProtectHome=yes\nProtectSystem=strict\nPrivateDevices=yes\nRestrictAddressFamilies=AF_INET AF_INET6\n"
+			testkit.WriteFile(t, filepath.Join(directory, "subyard-ssh-relay-24222.service"), []byte(unit), 0644)
+			services, err := CaptureProducers("/source", RecoveryPlan{Installation: Installation{RuntimeRoot: "/runtime"}, Yards: yards}, map[string]string{}, []string{"relay"}, 24222, ProducerEvidence{})
+			if (err == nil) != (kind == "approved") {
+				t.Fatalf("%s: %v", kind, err)
 			}
-			// Redirect only the privileged file adapter. The real producer parser,
-			// rendered identity and canonical Go request encoding remain exercised.
-			command := exec.Command("python3", "-B", "-c", `
-import builtins,glob,importlib.util,io,json,sys
-spec=importlib.util.spec_from_file_location("guard",sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-glob.glob=lambda _: ["/etc/systemd/system/subyard-ssh-relay-24222.service"]
-original=builtins.open
-content=b"[Service]\nExecStart=/usr/lib/systemd/systemd-socket-proxyd 192.0.2.10:22\n"
-builtins.open=lambda path,*args,**kw:io.BytesIO(content) if path=="/etc/systemd/system/subyard-ssh-relay-24222.service" else original(path,*args,**kw)
-m.capture_service=lambda scope,units,files,helpers,uid:dict(scope=scope,units=units,Artifacts=[dict(Path="/approved")])
-failed=False
-try:result=m.core_producers(json.load(sys.stdin))
-except ValueError:failed=True
-assert failed==(sys.argv[2]!="approved")
-if not failed:assert len(result)==1 and result[0]["units"]==["subyard-ssh-relay-24222.socket","subyard-ssh-relay-24222.service"]
-`, helper, kind)
-			command.Stdin = bytes.NewReader(body)
-			if output, err := command.CombinedOutput(); err != nil {
-				t.Fatalf("%s: %v %s", kind, err, output)
+			if err == nil && (len(services) != 1 || !slices.Equal(services[0].Units, []string{"subyard-ssh-relay-24222.socket", "subyard-ssh-relay-24222.service"}) || len(services[0].Artifacts) != 1) {
+				t.Fatalf("legacy relay inventory: %+v", services)
 			}
 		})
 	}
@@ -405,27 +387,17 @@ func TestHistoricalPowerProducerRequiresOriginalTemplateAndHelper(t *testing.T) 
 			if kind == "mismatched-original-helper" {
 				original.EngineSHA256 = strings.Repeat("0", 64)
 			}
-			request := map[string]any{"Root": root, "Installation": Installation{RuntimeRoot: runtimeRoot}, "Environment": map[string]string{"SUBYARD_POWER_UNIT_PATH": unit, "SUBYARD_POWER_RECONCILER_PATH": helper, "SUBYARD_DISPATCHER_PATH": dispatcher}, "Owners": []string{"power"}, "Original": original}
-			payload, _ := json.Marshal(request)
-			// The actual guard is exercised with only its root-UID argument adapted to
-			// the private, unprivileged fixture. All other native predicates stay intact.
-			script := `import importlib.util,json,os,sys
-spec=importlib.util.spec_from_file_location('guard',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-capture=m.capture_service
-m.capture_service=lambda scope,units,files,helpers,uid:capture(scope,units,files,helpers,os.getuid())
-print(json.dumps(m.core_producers(json.load(sys.stdin))))`
-			command := exec.Command("python3", "-B", "-c", script, filepath.Join(root, "scripts/lib/teardown-plan.py"))
-			command.Stdin = bytes.NewReader(payload)
-			output, err := command.Output()
+			// Only the root-UID owner is adapted to the unprivileged fixture.
+			useProducerFixture(t, "/etc/systemd/system")
+			services, err := CaptureProducers(root, RecoveryPlan{Installation: Installation{RuntimeRoot: runtimeRoot}}, map[string]string{"SUBYARD_POWER_UNIT_PATH": unit, "SUBYARD_POWER_RECONCILER_PATH": helper, "SUBYARD_DISPATCHER_PATH": dispatcher}, []string{"power"}, 0, original)
 			if (err == nil) != (kind == "original" || kind == "current-unit-retained-helper" || kind == "old-unit-current-helper") {
 				t.Fatalf("historical producer %s: %v", kind, err)
 			}
 			if err != nil {
 				return
 			}
-			var services []RecoveryService
-			if err := json.Unmarshal(output, &services); err != nil || len(services) != 1 || len(services[0].Artifacts) != 2 {
-				t.Fatalf("missing bound original producer: %v", err)
+			if len(services) != 1 || len(services[0].Artifacts) != 2 {
+				t.Fatalf("missing bound original producer: %+v", services)
 			}
 			originalArtifact := Tree(services[0].Artifacts[0])
 			testkit.WriteFile(t, originalArtifact.Path, []byte("changed after capture"), 0644)

@@ -2,7 +2,6 @@ package uninstall
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,8 +101,13 @@ func (store RecoveryStore) validateDirectory() error {
 	return nil
 }
 
+// RecoverySchema is written by this engine; Validate also accepts schema 1.
+const RecoverySchema = 2
+
 func (plan RecoveryPlan) Validate(uid uint32) error {
-	if plan.Schema != 1 {
+	// Schema 2 marks plans whose retained runtime has only the native guard;
+	// engines before it refuse them, and schema 1 stores resume unchanged.
+	if plan.Schema != 1 && plan.Schema != RecoverySchema {
 		return errors.New("unsupported full uninstall recovery schema")
 	}
 	if err := plan.Installation.Validate(plan.Installation.DataHome, uid); err != nil {
@@ -216,15 +220,7 @@ func (store RecoveryStore) Save(plan RecoveryPlan, expected *Tree) (Tree, error)
 	if len(body) > 64<<20 {
 		return Tree{}, errors.New("uninstall recovery plan exceeds the storage limit")
 	}
-	// The existing owner barrier also covers this native atomic checkpoint;
-	// its inherited descriptor survives caller interruption.
-	request := struct {
-		Path     string
-		UID      uint32
-		Body     string
-		Expected *Tree
-	}{path, store.UID, base64.StdEncoding.EncodeToString(body), expected}
-	if err := nativeArtifact("publish-plan", request, nil); err != nil {
+	if err := classify("publish-plan", publishPlan(path, store.UID, body, expected)); err != nil {
 		return Tree{}, err
 	}
 	return Capture(path)
@@ -304,26 +300,4 @@ func (store RecoveryStore) ReadBody(binding Tree) ([]byte, error) {
 		return nil, err
 	}
 	return body, nil
-}
-
-// CaptureProducers shares the native owner proof with ordinary lifecycle removal.
-type ProducerEvidence struct {
-	EngineSHA256          string
-	ExecutingEngineSHA256 string
-	Templates             map[string]string
-}
-
-func CaptureProducers(root string, plan RecoveryPlan, environment map[string]string, owners []string, port int, original ProducerEvidence) ([]RecoveryService, error) {
-	var services []RecoveryService
-	request := struct {
-		Root         string
-		Installation Installation
-		Environment  map[string]string
-		Owners       []string
-		Yards        []RecoveryYard
-		Port         int
-		Original     ProducerEvidence
-	}{root, plan.Installation, environment, owners, plan.Yards, port, original}
-	err := nativeArtifact("capture-producers", request, &services)
-	return services, err
 }
