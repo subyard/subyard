@@ -1415,7 +1415,7 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
         wanted = a.select_checks(receipt["checks"], only)
         wanted |= a.selected_requirements(receipt, wanted)
         hosted = [name for name in hosted if name in wanted]
-    control = {"phase": "local", "retry": False, "lock": threading.Lock()}
+    control = {"phase": "local", "retry": False, "unknown": False, "lock": threading.Lock()}
 
     def retry(request):
         with control["lock"]:
@@ -1423,9 +1423,10 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
                 return False, "refused: hosted checks already fall back to local runs; use retry CHECK"
             try:
                 accepted, reason = retry_hosted(github, directory, identity)
-            except (ValueError, OSError):
-                control["retry"] = True  # A rerun may have started: read the run again before any fallback.
-                raise
+            except (ValueError, OSError) as error:
+                # A rerun may have started: never run its checks locally in this accept.
+                control["retry"] = control["unknown"] = True
+                return False, f"refused: {error}; this accept keeps open hosted checks pending, so repeat retry-hosted after it exits"
             control["retry"] = control["retry"] or accepted
             return accepted, reason
 
@@ -1459,6 +1460,9 @@ def accept_checks(github, directory, identity, slots, only, with_vms, previous, 
             break
         # Running hosted jobs keep their checks pending; only the rest fall back to local runs.
         owned = set() if lost else owned.intersection(hosted)
+        if control["unknown"]:
+            print("CI-HOSTED-RETRY outcome unknown: open hosted checks stay pending; repeat retry-hosted after this accept exits", flush=True)
+            owned = set(hosted).intersection(hosted_open(directory, output))
         if owned:
             print("CI-HOSTED pending: " + ", ".join(sorted(owned)), flush=True)
         # Local failures of the first pass are not repeated; the receipt result covers every check.

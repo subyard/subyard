@@ -79,7 +79,8 @@ It reruns every failed, cancelled and timed-out job of the run, once at least on
 is still open locally, and prints
 `CI-HOSTED-RETRY run=RUN attempt=N checks=...`; a running `accept` then waits for attempt N too.
 GitHub keeps the only state: while the run is in progress the command prints `CI-HOSTED attempt=N running`,
-so repeating it after a lost response is safe. It refuses when the run passed, when no failed job's check
+so repeating it after a lost response is safe. When the outcome of its rerun request stays unknown inside a
+running `accept`, that `accept` keeps open hosted checks pending; repeat `retry-hosted` after it exits. It refuses when the run passed, when no failed job's check
 is still open (use `retry CHECK`), and once a running `accept` has started its local fallback. Evidence
 artifacts are named `ci-hosted-JOB_INDEX-ATTEMPT`; a job GitHub carries into a rerun keeps the evidence
 of the attempt that ran it. A later attempt's PASS does not count for a check already run locally.

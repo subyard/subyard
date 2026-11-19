@@ -2985,24 +2985,25 @@ class HostedChecks(unittest.TestCase):
     def test_retry_hosted_during_final_collection_keeps_the_new_attempt_checks_pending(self):
         # Past the deadline (always with wait 0) an accepted or unconfirmed rerun is read again before fallback.
         outcomes = {"accepted": (True, "CI-HOSTED-RETRY run=456 attempt=2 checks=profile:sample"),
-                    "timeout": ValueError("rerun outcome unknown; repeat retry-hosted to discover the new attempt")}
+                    "timeout": ValueError("rerun outcome unknown; repeat retry-hosted to discover the new attempt"),
+                    # The POST timed out and the second read still shows the completed attempt.
+                    "timeout-unseen": ValueError("rerun outcome unknown; repeat retry-hosted to discover the new attempt")}
         for case, outcome in outcomes.items():
             collected, replies = [], []
             def collect(github, directory, identity):
                 collected.append(len(collected))
                 if len(collected) == 1:
-                    try:
-                        replies.append(m.a.CONTROL["retry-hosted"]({"action": "retry-hosted"}))
-                    except ValueError as error:
-                        replies.append(str(error))
+                    replies.append(m.a.CONTROL["retry-hosted"]({"action": "retry-hosted"}))
                     return set()
-                return {"profile:sample"}
+                return set() if case == "timeout-unseen" else {"profile:sample"}
             with self.subTest(case=case), patch.object(m, "hosted_open", return_value=["profile:sample"]), \
                  patch.object(m.a, "run_checks", return_value=0) as run, patch.object(m, "wait_ci_hosted", return_value=None), \
                  patch.object(m, "retry_hosted", side_effect=[outcome]), patch.object(m, "collect_ci", side_effect=collect), \
                  redirect_stdout(io.StringIO()) as printed:
                 self.assertEqual(m.accept_checks(self.github, self.directory, self.identity, [1], [], True, [], 0), 1)
-                self.assertEqual(len(replies), 1)
+                self.assertEqual(replies, [outcome] if case == "accepted" else [(False, "refused: rerun outcome unknown; repeat "
+                    "retry-hosted to discover the new attempt; this accept keeps open hosted checks pending, so repeat retry-hosted after it exits")])
+                self.assertEqual("CI-HOSTED-RETRY outcome unknown" in printed.getvalue(), case != "accepted")
                 self.assertEqual(collected, [0, 1])
                 self.assertEqual([call.args[2] for call in run.call_args_list], [[]])  # No local fallback run.
                 self.assertIn("CI-HOSTED pending: profile:sample", printed.getvalue())
