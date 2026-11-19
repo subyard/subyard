@@ -3527,7 +3527,10 @@ class LiveRetry(unittest.TestCase):
     def raw(self, output, payload):
         with m.socket.socket(m.socket.AF_UNIX, m.socket.SOCK_STREAM) as client:
             client.connect(m.control_address(output))
-            client.sendall(payload)
+            try:
+                client.sendall(payload)
+            except BrokenPipeError:
+                pass  # A refused peer can get its reply before the collector reads the request.
             return m.read_message(client)
 
     def test_second_process_retries_one_lane_while_sibling_runs_and_idle_retry_runs_it(self):
