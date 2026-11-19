@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -122,8 +123,9 @@ func (err bubblewrapPolicyRefusal) Error() string { return err.line }
 
 func (err bubblewrapPolicyRefusal) ActivationDiagnostic() (string, string) {
 	message := "yard " + err.yard + ": " + err.line
-	if len(err.yard) > 63 || !domain.SafeName(err.yard) || len(message) > 480 ||
-		strings.ContainsFunc(message, unicode.IsControl) {
+	// One yard's invalid text must not invalidate the joined release message.
+	if len(err.yard) > 63 || !domain.SafeName(err.yard) || len(message) > 480 || !utf8.ValidString(message) ||
+		strings.TrimSpace(message) != message || strings.ContainsFunc(message, unicode.IsControl) {
 		return "", err.retry
 	}
 	return message, err.retry

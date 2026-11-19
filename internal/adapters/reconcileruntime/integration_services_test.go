@@ -72,10 +72,14 @@ func TestIntegrationServiceUnknownErrorsStaySanitized(t *testing.T) {
 
 func TestBubblewrapPolicyRefusalDiagnosticIsBounded(t *testing.T) {
 	retry := "run 'yard' '-Y' 'example' 'integration' 'status'"
+	prefix := "yard example: Bubblewrap AppArmor: "
 	for line, public := range map[string]bool{
-		"Bubblewrap AppArmor: the yard cannot load AppArmor profiles.":         true,
-		"Bubblewrap AppArmor: " + strings.Repeat("x", 480):                     false,
-		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/\x1b[0m": false,
+		"Bubblewrap AppArmor: the yard cannot load AppArmor profiles.":          true,
+		"Bubblewrap AppArmor: " + strings.Repeat("x", 480-len(prefix)):          true,
+		"Bubblewrap AppArmor: " + strings.Repeat("x", 481-len(prefix)):          false,
+		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/\x1b[0m":  false,
+		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/caf\xe9":  false,
+		"Bubblewrap AppArmor: administrator policy at /etc/apparmor.d/local/x ": false,
 	} {
 		message, got := bubblewrapPolicyRefusal{line: line, yard: "example", retry: retry}.ActivationDiagnostic()
 		if got != retry || (message != "") != public || public && message != "yard example: "+line {
