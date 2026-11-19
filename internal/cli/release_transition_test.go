@@ -3056,7 +3056,7 @@ func TestReleaseTransitionConfigApplierUsesTrustedInProcessChild(t *testing.T) {
 	}
 	reconciler := &materializedConfigActivationReconciler{cli: program}
 	if err := reconciler.reconcileCLI().options.Config.ApplyConfig(
-		context.Background(), "default",
+		context.Background(), "default", nil,
 	); err != nil {
 		t.Fatalf("trusted config apply: %v, stderr=%q", err, stderr.String())
 	}

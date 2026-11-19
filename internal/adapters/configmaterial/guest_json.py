@@ -1,3 +1,4 @@
+# guest_cas.py precedes this program and defines the cas_ names.
 import copy
 import fcntl
 import hashlib
@@ -500,15 +501,10 @@ def atomic_write(path, payload, uid, mode):
         os.close(directory_descriptor)
 
 
-def replace_destination(destination, allowed_home, uid, original, payload, create, file_mode=0o644):
-    validate_destination_parent(destination, allowed_home, uid, create)
-    _, latest = read_current(destination, allow_invalid=True)
-    if latest != original:
-        raise MaterializationError("concurrent destination change")
-    atomic_write(destination, payload, uid, file_mode)
-    _, latest = read_current(destination)
-    if latest != payload:
-        raise MaterializationError("destination verification failed")
+def replace_destination(destination, allowed_home, uid, original, payload, file_mode=0o644):
+    # The bytes read under the lock are the token; the compare-and-write repeats
+    # the comparison in the exec that replaces the document.
+    cas_replace(allowed_home, destination, cas_token(original), payload, uid, file_mode)  # noqa: F821
 
 
 def document_payload(current, original):
@@ -629,7 +625,7 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
             # Convert an earlier candidate's schema2 before any document edit.
             atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline)) + b"\n", STATE_UID, 0o600)
             replace_destination(destination, allowed_home, uid, original,
-                                document_payload(current, original), False,
+                                document_payload(current, original),
                                 stat.S_IMODE(os.lstat(destination).st_mode))
         atomic_write(baseline_path, semantic_payload(compatible_baseline(baseline, True)) + b"\n", STATE_UID, 0o600)
         baseline["phase"] = "retired"
@@ -648,10 +644,14 @@ def retire(mode, baseline, baseline_path, receipt_path, release_path, current, o
 
 
 def main():
-    if len(sys.argv) != 8:
+    if len(sys.argv) != 9:
         fail("invalid request")
-    mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest = sys.argv[1:]
+    mode, developer, destination, uid_text, desired_digest, allowed_home, payload_digest, expect = sys.argv[1:]
     if mode not in ("observe", "apply", "apply-installed", "assess-adopt", "assess-retire", "retire"):
+        fail("invalid request")
+    # Apply writes only over the consented token; retirement compares with the
+    # document it reads in this exec.
+    if (expect != "") != (mode in ("apply", "apply-installed")):
         fail("invalid request")
     # An installed-view repair applies like apply, but never takes back ownership
     # that a retirement released; only a deliberate enable does.
@@ -818,6 +818,8 @@ def main():
 
         if baseline is not None and baseline.get("phase") == "retiring":
             raise MaterializationError("materialization retirement pending")
+        if cas_token(original) != expect:  # noqa: F821
+            raise CasRefusal("changed")  # noqa: F821
         # Fresh ownership supersedes the reason of an earlier release.
         remove_release_marker(release_path)
         if baseline is not None and baseline.get("phase") != "retired":
@@ -831,7 +833,7 @@ def main():
         overlay(current, desired)
         file_mode = stat.S_IMODE(os.lstat(destination).st_mode) if original is not None else 0o644
         replace_destination(destination, allowed_home, uid, original,
-                            document_payload(current, original), True, file_mode)
+                            document_payload(current, original), file_mode)
         evidence = {"schema": 2, "developer": developer,
                     "destination": destination, "desired_digest": desired_digest,
                     "format": FORMAT, "phase": "applied",
@@ -843,6 +845,8 @@ def main():
 
 try:
     main()
+except CasRefusal as refusal:  # noqa: F821
+    cas_refuse(refusal)  # noqa: F821
 except MaterializationError as error:
     fail(str(error))
 except Exception:

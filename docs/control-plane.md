@@ -48,6 +48,32 @@ and fingerprints. Runtime provisioning, config refresh/status and release activa
 field ownership baseline; other consumers retain byte-exact behavior. See
 [File settings](configuration.md#file-settings) for the ownership and interrupted-write contract.
 
+Every guest config file write is a compare-and-write over a consent token: `absent`, or `sha256:`
+and the digest of the bytes the refresh may replace; a destination that is not a readable regular
+file has no token and always refuses. The invariant is detect, never lose bytes: a write that finds
+other bytes leaves the guest's newest inode at the destination and reports `changed`. In one guest
+exec the writer walks the parent with `O_NOFOLLOW`, stages a temporary file and, for `absent`,
+publishes it with `renameat2(RENAME_NOREPLACE)`; otherwise it exchanges it with the destination,
+checks right after the exchange that the displaced inode is the one it hashed, rehashes it, and only
+then unlinks it. When the displaced inode differs, it exchanges back within a bound so the newest
+guest inode stays at the destination; an inode it did not hash is never unlinked or swept, but is
+preserved as `.<name>.subyard-cas.<hex>` and reported. When `renameat2` is unsupported (`ENOSYS`
+or `EINVAL`, such as ZFS before 2.2), the same exec opens the destination with `O_NOFOLLOW`, checks
+its hash, writes the temporary file, re-checks the inode and hash and then renames over it; `absent`
+uses `link`, so an existing file refuses as changed. The window between that last re-check and the
+rename is the accepted residual: a tool write inside it can be replaced. The skills refresh is
+excluded from this contract; it replaces Subyard-owned skill trees.
+
+`config apply` takes the tokens it shows at confirmation and its writes compare with exactly those
+tokens; a file missing from them refuses as `missing-consent`. Each refused file is reported, the
+yard's other files are written, and the inventory commit runs only when nothing was refused. The
+plan rechecks the target set, desired configuration and instance identity; drift itself may change,
+because each write rechecks its own file. An `init --configs` child receives the tokens through
+`--config-consent-fd N`, an inherited file holding JSON; a release without that option rejects it
+before any write. Every other refresh plans for itself and observes the tokens immediately before
+writing: a direct `init` or `init --configs`, an init of a stopped or uninitialized yard, an
+integration apply, the follow-up after an update and a self-planned release transition.
+
 Integration selection uses the shared prepared-command boundary, the protected per-yard config
 writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used
 by full initialization after core substrate provisioning. `scripts/reconcile-integrations.sh` is a
@@ -1512,7 +1538,7 @@ inherits the owner barrier and is admitted on its own. After `config sync` publi
 consumer refresh is decided again on the state after publication: on a ready release it runs the
 ordinary child; otherwise it runs in process only as a repair of those consumers, when each is open
 or limited to repair only by drift and the installed source is bound, with release history checked
-after the refresh; anything else is refused with `yard -Y NAME config apply` for each consumer. An
+after the refresh; otherwise each refused consumer is reported with the one next step it needs. An
 init succeeds when its own yard converged and reports the other yards' findings. The default yard's
 own invalid configuration underlies every yard, so then every yard admits only its repair commands.
 An invalid configuration of another yard is that yard's finding; host power and host key tools serve
@@ -1520,15 +1546,22 @@ the yards that load. `yard status` states the release once, as `release active a
 NAME needs attention`, and each finding under its yard; it never prints the protocol word `ready`
 for a non-ready status.
 
+Recovery advice is typed until it is printed (`internal/domain/recovery.go`): the gate and the
+installed-source prerequisite are observed once, typed as findings, and one selector picks one
+action that the gate admits and that is not the command just attempted, unless its finding was
+observed after that attempt, such as a file changed since the plan. Status, refusals, sync and RPC
+use the same selection. A refused installed source ranks first and names its failed predicate, so no
+repair is advised behind it; an owner's retry ranks next and is printed verbatim when it is not one
+of the closed commands; invalid configuration advises `config validate` after it is corrected.
+
 A yard whose last init did not finish is left to that init, as described under [release
 migrations](#release-migrations); release repair of a yard holds the per-yard lock init holds, so
 release repair and init of one yard never interleave.
 
 After a failed observation or apply in a running yard, the core probes its guest agent: when Incus
 reports the yard running but a trivial command cannot run or does not finish, the yard's finding is
-`unreachable`, keeps the handler's public diagnostic and names the next steps: retry `yard migrate`,
-and if the agent stays unreachable run `yard -Y NAME stop --force`, `yard -Y NAME start` and `yard
-migrate`. A guest exit status is an answer, not agent loss. Ordinary updates still refuse before
+`unreachable`, keeps the handler's public diagnostic and names one step at a time: `yard migrate`,
+after it `yard -Y NAME stop --force`, and after that `yard -Y NAME start`. A guest exit status is an answer, not agent loss. Ordinary updates still refuse before
 activation for a yard with invalid configuration, an unreachable agent or an unknown failure; they
 proceed without a stopped, absent or uninitialized yard. The guest temporary-storage step keeps its
 own rules above. While an activation of the active release is unfinished, including when its

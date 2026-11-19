@@ -50,6 +50,9 @@ const (
 //go:embed guest_json.py
 var guestJSONProgram string
 
+//go:embed guest_cas.py
+var guestCASProgram string
+
 // Tomli-W 1.2.0, unmodified upstream writer; see TOMLI_W_LICENSE.
 //
 //go:embed tomli_w.py
@@ -104,12 +107,22 @@ func DesiredDigestFor(format string, payload []byte) (string, error) {
 	}
 }
 
+// Request builds a read-only or retirement request; ApplyRequest builds an apply.
 func Request(format, mode, developer, destination string, uid int, payload []byte, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
 	if uid <= 0 {
 		uid = 1000
 	}
 	return materializationRequest(format, mode, developer, destination, uid, payload,
-		guestStateRoot, 0, "/home/"+developer, legacyTemplates...)
+		guestStateRoot, 0, "/home/"+developer, "", legacyTemplates...)
+}
+
+// ApplyRequest applies only over the destination bytes the consent token names.
+func ApplyRequest(format, mode, developer, destination string, uid int, payload []byte, expect string) (ports.InstanceExecRequest, error) {
+	if uid <= 0 {
+		uid = 1000
+	}
+	return materializationRequest(format, mode, developer, destination, uid, payload,
+		guestStateRoot, 0, "/home/"+developer, expect)
 }
 
 func DesiredDigest(payload []byte) (string, error) {
@@ -319,12 +332,15 @@ func jsonRequest(
 	stateUID int,
 	allowedHome string,
 ) (ports.InstanceExecRequest, error) {
-	return materializationRequest("json", mode, developer, destination, uid, payload, stateRoot, stateUID, allowedHome)
+	return materializationRequest("json", mode, developer, destination, uid, payload, stateRoot, stateUID, allowedHome, "")
 }
 
-func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome string, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
+func materializationRequest(format, mode, developer, destination string, uid int, payload []byte, stateRoot string, stateUID int, allowedHome, expect string, legacyTemplates ...[]byte) (ports.InstanceExecRequest, error) {
 	if mode != ModeObserve && mode != ModeApply && mode != ModeApplyInstalled && mode != ModeAssessAdopt && mode != ModeAssessRetire && mode != ModeRetire {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization mode")
+	}
+	if apply := mode == ModeApply || mode == ModeApplyInstalled; apply != (expect != "") || apply && !ValidToken(expect) {
+		return ports.InstanceExecRequest{}, errors.New("structured configuration apply needs exactly one consent token")
 	}
 	if !domain.SafeName(developer) || uid <= 0 {
 		return ports.InstanceExecRequest{}, errors.New("invalid JSON materialization identity")
@@ -347,7 +363,7 @@ func materializationRequest(format, mode, developer, destination string, uid int
 	if err != nil {
 		return ports.InstanceExecRequest{}, err
 	}
-	program := strings.ReplaceAll(guestJSONProgram, "@STATE_ROOT@", stateRoot)
+	program := guestCASProgram + strings.ReplaceAll(guestJSONProgram, "@STATE_ROOT@", stateRoot)
 	program = strings.ReplaceAll(program, "@STATE_UID@", fmt.Sprint(stateUID))
 	program = strings.ReplaceAll(program, "@FORMAT@", format)
 	if len(legacyTemplates) != 0 {
@@ -369,7 +385,7 @@ func materializationRequest(format, mode, developer, destination string, uid int
 		Command: []string{
 			"python3", "-B", "-c", program,
 			mode, developer, cleanDestination, fmt.Sprint(uid), digest, cleanHome,
-			fmt.Sprintf("%x", sha256.Sum256(payload)),
+			fmt.Sprintf("%x", sha256.Sum256(payload)), expect,
 		},
 		Stdin: payload,
 	}, nil

@@ -336,7 +336,7 @@ func (cli *CLI) refreshReleaseConfig(ctx context.Context, execution *releaseExec
 			stdout: cli.options.Stdout, stderr: cli.options.Stderr, applyDrift: true,
 		}
 	}
-	if applyErr := applier.ApplyConfig(ctx, execution.yard); applyErr != nil {
+	if applyErr := applier.ApplyConfig(ctx, execution.yard, nil); applyErr != nil {
 		execution.failurePhase = "refresh"
 		execution.failureCode = "refresh_failed"
 		retry := "yard config apply"

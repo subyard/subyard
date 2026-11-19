@@ -49,14 +49,14 @@ func TestDeclaredArtifactsCaptureProspectiveSourcesAndRejectStalePackages(t *tes
 	}
 	overlapping := runtime
 	overlapping.Environment = append(append([]string{}, runtime.Environment...), "AGENT_fixture-tool_CONFIG_DEST=.fixture")
-	if err := overlapping.RefreshConfigs(context.Background()); err == nil {
+	if err := overlapping.RefreshConfigs(context.Background(), nil); err == nil {
 		t.Fatal("overlapping files authorized refresh")
 	}
 	if len(incus.ExecCalls) != 0 {
 		t.Fatal("overlapping files reached guest")
 	}
 	overlapping.Environment = append(append([]string{}, runtime.Environment...), "INTEGRATION_HOST_LINKS=.fixture/config.jsonc:/mnt/host/sessions")
-	if err := overlapping.RefreshConfigs(context.Background()); err == nil {
+	if err := overlapping.RefreshConfigs(context.Background(), nil); err == nil {
 		t.Fatal("managed link overlap authorized refresh")
 	}
 	if len(incus.ExecCalls) != 0 {

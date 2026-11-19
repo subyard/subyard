@@ -9,9 +9,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/testkit"
 )
@@ -44,22 +46,30 @@ func (e *previewInventoryExecutor) Exec(ctx context.Context, project, instance s
 		}
 		return result, nil
 	}
-	if len(request.Command) > 5 && request.Command[0] == "sh" && strings.HasPrefix(request.Command[5], "/home/dev/") {
-		path := strings.Replace(request.Command[5], "/home/dev", e.home, 1)
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return ports.InstanceExecResult{}, err
+	if len(request.Command) > 5 && request.Command[3] == configmaterial.CompareWriteProgram() {
+		// Run the real guest compare-and-write against this fixture's home.
+		arguments := slices.Clone(request.Command[4:])
+		for index, argument := range arguments {
+			if argument == "/home/dev" || strings.HasPrefix(argument, "/home/dev/") {
+				arguments[index] = e.home + strings.TrimPrefix(argument, "/home/dev")
+			}
 		}
-		if err := os.WriteFile(path, request.Stdin, 0o644); err != nil {
-			return ports.InstanceExecResult{}, err
+		if arguments[0] == "write" {
+			arguments[3] = fmt.Sprint(os.Getuid())
 		}
-		if err := os.Chmod(path, 0o644); err != nil {
-			return ports.InstanceExecResult{}, err
+		command := exec.CommandContext(ctx, "python3", append([]string{"-B", "-c", request.Command[3]}, arguments...)...)
+		command.Stdin = bytes.NewReader(request.Stdin)
+		var stdout bytes.Buffer
+		command.Stdout = &stdout
+		err := command.Run()
+		result := ports.InstanceExecResult{Stdout: bytes.ReplaceAll(stdout.Bytes(), []byte(e.home), []byte("/home/dev")), ExitCode: command.ProcessState.ExitCode()}
+		if err != nil {
+			return result, &ports.GuestExitError{Code: result.ExitCode}
 		}
-		if err := os.Chown(path, -1, os.Getuid()); err != nil {
-			return ports.InstanceExecResult{}, err
+		if arguments[0] == "write" {
+			e.mutations++
 		}
-		e.mutations++
-		return ports.InstanceExecResult{}, nil
+		return result, nil
 	}
 	return e.retryableIntegrationExecutor.Exec(ctx, project, instance, request)
 }
@@ -165,7 +175,7 @@ func TestCurrentPreviewRetirementMigratesBeforeStaticRefresh(t *testing.T) {
 
 func TestCurrentConfigRefreshMigratesWithMissingHostSource(t *testing.T) {
 	runtime, _, path := preparedPreviewFixture(t, true, []byte("Retained config-only text.\n"+previewInstructions))
-	if err := runtime.RefreshConfigs(context.Background()); err != nil {
+	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	actual, err := os.ReadFile(path)

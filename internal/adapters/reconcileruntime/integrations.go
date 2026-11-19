@@ -1548,7 +1548,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	if _, err := runtime.integrationInventory(ctx, "apply", entries, expectedInventory); err != nil {
 		return err
 	}
-	if err := runtime.RefreshConfigs(ctx); err != nil {
+	if err := runtime.RefreshConfigs(ctx, nil); err != nil {
 		return err
 	}
 	if err := execution.runScript(ctx, runtime.Stderr, "reconcile-integrations.sh"); err != nil {

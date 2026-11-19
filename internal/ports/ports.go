@@ -188,8 +188,21 @@ type Prompter interface {
 	Confirm(context.Context, domain.ConfirmationRequest) (bool, error)
 }
 
+// ConfigConsent is the guest state a confirmed configuration refresh may
+// replace: the instance it observed and each destination's consent token. A
+// nil consent is a refresh that plans itself and observes right before writing.
+type ConfigConsent struct {
+	InstanceUUID string              `json:"instance_uuid"`
+	Files        []ConfigFileConsent `json:"files"`
+}
+
+type ConfigFileConsent struct {
+	Destination string `json:"destination"`
+	Token       string `json:"token"`
+}
+
 type ConfigApplier interface {
-	ApplyConfig(context.Context, string) error
+	ApplyConfig(context.Context, string, *ConfigConsent) error
 }
 
 type AdapterRunner interface {
@@ -249,7 +262,7 @@ type InitPlatform interface {
 	ReconcileStageRunner
 	Preflight(context.Context, bool) error
 	ConfigsConverged(context.Context) (bool, error)
-	RefreshConfigs(context.Context) error
+	RefreshConfigs(context.Context, *ConfigConsent) error
 	ObserveProfileRuntimes(context.Context) (map[string]RuntimeObservation, error)
 	ApplyProfileRuntime(context.Context, string, string, string, string) error
 	ObserveInstalledRuntime(context.Context, string) (RuntimeObservation, error)

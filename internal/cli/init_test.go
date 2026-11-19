@@ -926,7 +926,7 @@ func (fixture *initPlatformFixture) Preflight(_ context.Context, fresh bool) err
 	return fixture.preflightErr
 }
 
-func (fixture *initPlatformFixture) RefreshConfigs(context.Context) error {
+func (fixture *initPlatformFixture) RefreshConfigs(context.Context, *ports.ConfigConsent) error {
 	fixture.configs++
 	return nil
 }

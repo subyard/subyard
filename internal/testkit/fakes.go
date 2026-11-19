@@ -4,7 +4,9 @@ package testkit
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"slices"
@@ -211,6 +213,10 @@ type Incus struct {
 	ExecSteps         []IncusExecStep
 	ExecCalls         []IncusExecCall
 	ProbeErr          error
+	// GuestTokens answer guest config token observations (absent by
+	// default) without consuming steps; TokenObservations records them.
+	GuestTokens       map[string]string
+	TokenObservations []IncusExecCall
 	ConfigUpdates     []InstanceConfigUpdate
 	PowerUpdates      []InstancePowerUpdate
 }
@@ -351,6 +357,21 @@ func (fake *Incus) Events(context.Context, []string) (<-chan domain.OperationEve
 	return fake.EventsOut, fake.ErrorsOut
 }
 
+// GuestTokenObservation answers a guest config token observation from tokens,
+// absent by default, so fixtures need not script the read before each write.
+func GuestTokenObservation(command []string, tokens map[string]string) ([]byte, bool) {
+	if len(command) < 6 || command[0] != "python3" || command[4] != "observe" || !strings.HasSuffix(command[3], "\ncas_main()\n") {
+		return nil, false
+	}
+	files := []map[string]any{}
+	for _, destination := range command[6:] {
+		token := cmp.Or(tokens[destination], "absent")
+		files = append(files, map[string]any{"destination": destination, "token": token, "leftovers": []string{}})
+	}
+	payload, _ := json.Marshal(map[string]any{"files": files})
+	return payload, true
+}
+
 func (fake *Incus) Exec(
 	_ context.Context,
 	project string,
@@ -361,6 +382,10 @@ func (fake *Incus) Exec(
 	// scripted steps; ProbeErr simulates a guest agent that does not answer.
 	if len(request.Command) == 1 && request.Command[0] == "true" {
 		return ports.InstanceExecResult{}, fake.ProbeErr
+	}
+	if payload, ok := GuestTokenObservation(request.Command, fake.GuestTokens); ok {
+		fake.TokenObservations = append(fake.TokenObservations, IncusExecCall{Project: project, Name: name, Request: request})
+		return ports.InstanceExecResult{Stdout: payload}, nil
 	}
 	fake.ExecCalls = append(fake.ExecCalls, IncusExecCall{Project: project, Name: name, Request: request})
 	if len(fake.ExecSteps) == 0 {

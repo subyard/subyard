@@ -110,7 +110,7 @@ type releaseDiagnosticConfigPlatform struct {
 	cause error
 }
 
-func (fixture *releaseDiagnosticConfigPlatform) RefreshConfigs(context.Context) error {
+func (fixture *releaseDiagnosticConfigPlatform) RefreshConfigs(context.Context, *ports.ConfigConsent) error {
 	fixture.configs++
 	if fixture.configs == 2 {
 		return fixture.cause
@@ -130,10 +130,10 @@ func TestReleaseDiagnosticsApplySecondTargetPreservesNativeCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	applier := releaseTransitionConfigApplier{cli: program}
-	if err := applier.ApplyConfig(context.Background(), "default"); err != nil {
+	if err := applier.ApplyConfig(context.Background(), "default", nil); err != nil {
 		t.Fatalf("first target failed: %v", err)
 	}
-	err = applier.ApplyConfig(context.Background(), "second")
+	err = applier.ApplyConfig(context.Background(), "second", nil)
 	var diagnostic interface{ ActivationDiagnostic() (string, string) }
 	if !errors.Is(err, cause) || !errors.As(err, &diagnostic) || platform.configs != 2 {
 		t.Fatalf("native second-target cause lost: calls=%d error=%v", platform.configs, err)

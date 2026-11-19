@@ -128,6 +128,9 @@ type CLI struct {
 	retainedAdapterCompatibility bool
 	updateProgress               io.Writer
 	releaseTransitionChild       bool
+	// configConsent is the consent an in-process init --configs child of a
+	// confirmed config apply writes with.
+	configConsent *ports.ConfigConsent
 	// gateAdmitted records how a non-ready release gate admitted this
 	// invocation; a repair admission is rechecked once after consent.
 	gateAdmitted *gateAdmission

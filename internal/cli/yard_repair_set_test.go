@@ -546,6 +546,9 @@ type materializingExecutor struct {
 }
 
 func (executor materializingExecutor) Exec(ctx context.Context, project, instance string, request ports.InstanceExecRequest) (ports.InstanceExecResult, error) {
+	if payload, ok := testkit.GuestTokenObservation(request.Command, nil); ok {
+		return ports.InstanceExecResult{Stdout: payload}, nil
+	}
 	if len(request.Command) == 3 && request.Command[0] == "sha256sum" {
 		digest, known := executor.desired[instance+"/"+request.Command[2]]
 		if !known || !executor.applied(instance) {
@@ -602,7 +605,7 @@ func TestConfigApplyWithTheProductionApplier(t *testing.T) {
 			}
 			switch yard {
 			case "default":
-				if fd, args, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(child), "fd="), " args="); fd == "" || args != "init --configs --yes" || harness.platform.configs != 0 {
+				if fd, args, _ := strings.Cut(strings.TrimPrefix(strings.TrimSpace(child), "fd="), " args="); fd == "" || args != "init --configs --yes --config-consent-fd 3" || harness.platform.configs != 0 {
 					t.Fatalf("open yard did not apply through the child with the barrier: child=%q in-process=%d", child, harness.platform.configs)
 				}
 			case "named":
@@ -795,7 +798,10 @@ func TestNetworkCommandsAreGatedByTheYardsTheyActOn(t *testing.T) {
 		t.Run("repair endpoint "+test.a+"-"+test.b+" from "+test.selected, func(t *testing.T) {
 			harness := newRepairHarness(t)
 			code, output, host := link(t, harness.scenario, "-Y", test.selected, "network", "link", test.a, test.b)
-			if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first; next: yard -Y named init") ||
+			// A fixture CLI is not the installed release's tooling, so the
+			// yard's repair would refuse; the step names that prerequisite.
+			if code == 0 || host.writes != 0 || !strings.Contains(output, "yard named needs repair first; next: a repair behind the release gate runs only with the installed release's own tooling") ||
+				!strings.Contains(output, "failed: tooling-dir") ||
 				strings.Contains(output, "Operation plan") {
 				t.Fatalf("link to a yard that needs repair: code=%d writes=%d\n%s", code, host.writes, output)
 			}
@@ -1499,7 +1505,7 @@ func TestConfigSyncConsumerRefreshIsAConsumerRepair(t *testing.T) {
 		t.Fatalf("drifted consumer: inProcess=%t err=%v", inProcess, err)
 	}
 	if _, _, err := program.consumerRefreshAdmission(context.Background(), "default", []string{"default", "named"}); err == nil ||
-		!strings.Contains(err.Error(), "next: yard -Y default config apply, yard -Y named config apply") {
+		!strings.Contains(err.Error(), "yard named: next: yard -Y named init") || strings.Contains(err.Error(), "config apply") {
 		t.Fatalf("failed consumer: %v", err)
 	}
 	program.sourceBinding = nil // the real proof refuses this fixture CLI

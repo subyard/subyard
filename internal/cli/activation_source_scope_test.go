@@ -38,7 +38,7 @@ func (boundary *sourceScopeConfigBoundary) Exec(
 	return ports.InstanceExecResult{Stdout: payload}, err
 }
 
-func (boundary *sourceScopeConfigBoundary) ApplyConfig(_ context.Context, yard string) error {
+func (boundary *sourceScopeConfigBoundary) ApplyConfig(_ context.Context, yard string, _ *ports.ConfigConsent) error {
 	boundary.applied = append(boundary.applied, yard)
 	key := "subyard/yard"
 	if yard != "default" {

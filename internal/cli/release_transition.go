@@ -979,6 +979,7 @@ type releaseTransitionConfigApplier struct {
 func (applier releaseTransitionConfigApplier) ApplyConfig(
 	ctx context.Context,
 	yard string,
+	consent *ports.ConfigConsent,
 ) error {
 	if applier.cli == nil {
 		return errors.New("release transition config applier is unavailable")
@@ -1006,9 +1007,12 @@ func (applier releaseTransitionConfigApplier) ApplyConfig(
 		// approved inputs the release plan observed. It does not author settings.
 		platform := applier.cli.initPlatform(target.Loaded, nil)
 
-		return platform.RefreshConfigs(ctx)
+		return platform.RefreshConfigs(ctx, consent)
 	}
-	return applier.cli.runReleaseTransitionYardCommandIO(
+	// The in-process init --configs child writes with this consent.
+	child := *applier.cli
+	child.configConsent = consent
+	return child.runReleaseTransitionYardCommandIO(
 		ctx,
 		yard,
 		applier.cli.options.Stdout,
@@ -1902,7 +1906,7 @@ func (reconciler *materializedConfigActivationReconciler) PrepareActivationRecov
 		return "", err
 	}
 	selector := func() ([]configTarget, error) { return reconciler.configTargets(ctx, operation, loaded, true) }
-	execution, err := operation.prepareConfigApply(ctx, targets, selector)
+	execution, err := operation.prepareConfigRefresh(ctx, targets, selector, false)
 	if err != nil {
 		return "", err
 	}
@@ -1960,7 +1964,7 @@ func (reconciler *materializedConfigActivationReconciler) Reconcile(
 	}
 	execution := reconciler.recoveryApply
 	if execution == nil {
-		execution, err = operation.prepareConfigApply(ctx, targets, selector)
+		execution, err = operation.prepareConfigRefresh(ctx, targets, selector, false)
 		if err != nil {
 			return err
 		}

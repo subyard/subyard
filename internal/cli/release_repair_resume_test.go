@@ -247,7 +247,7 @@ type installedConfigRefreshPlatform struct {
 	executor *installedConfigRepairExecutor
 }
 
-func (fixture *installedConfigRefreshPlatform) RefreshConfigs(context.Context) error {
+func (fixture *installedConfigRefreshPlatform) RefreshConfigs(context.Context, *ports.ConfigConsent) error {
 	fixture.configs++
 	fixture.executor.ready = true
 	return nil

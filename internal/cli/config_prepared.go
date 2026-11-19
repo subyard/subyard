@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/command"
 	"github.com/Subyard/Subyard/internal/config"
@@ -437,6 +438,13 @@ type configApplyExecution struct {
 }
 
 func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, selector configTargetSelector) (*configApplyExecution, error) {
+	return cli.prepareConfigRefresh(ctx, targets, selector, true)
+}
+
+// prepareConfigRefresh plans a refresh of targets. With consent, the plan
+// carries the guest tokens it shows; without, as for a release activation,
+// each yard's refresh observes them right before it writes.
+func (cli *CLI) prepareConfigRefresh(ctx context.Context, targets []configTarget, selector configTargetSelector, consent bool) (*configApplyExecution, error) {
 	if len(targets) == 0 {
 		return nil, errors.New("config apply: no local yards selected")
 	}
@@ -447,15 +455,29 @@ func (cli *CLI) prepareConfigApply(ctx context.Context, targets []configTarget, 
 		return nil, err
 	}
 	execution := &configApplyExecution{selector: selector}
+	var unreadable []error
 	for _, target := range targets {
 		if target.Loaded.Context.AccessKind == domain.AccessRemote {
 			return nil, fmt.Errorf("config apply does not implicitly operate on remote yard %s", target.Name)
 		}
-		assessment, err := cli.assessConfigTarget(ctx, target, true)
+		assess := cli.assessConfigConsent
+		if !consent {
+			assess = func(ctx context.Context, target configTarget) (configTargetAssessment, error) {
+				return cli.assessConfigTarget(ctx, target, true)
+			}
+		}
+		assessment, err := assess(ctx, target)
 		if err != nil {
 			return nil, materializedConfigActivationError{err, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome}
 		}
+		// A file without a token cannot be consented to: refuse before the prompt.
+		for _, destination := range assessment.Unreadable {
+			unreadable = append(unreadable, materializedConfigActivationError{configmaterial.WriteRefusal{Destination: destination, Outcome: configmaterial.OutcomeUnreadable}, target.Name, "materialized config", "config status", "inspect", target.Loaded.Context.Paths.ConfigHome})
+		}
 		execution.approved = append(execution.approved, assessment)
+	}
+	if err := domain.CollectRefusals(unreadable...); err != nil {
+		return nil, err
 	}
 	execution.current = slices.Clone(execution.approved)
 	return execution, nil
@@ -465,16 +487,17 @@ func (execution *configApplyExecution) changed() bool {
 	return slices.ContainsFunc(execution.current, func(item configTargetAssessment) bool { return item.Changed })
 }
 
+// steps are the approved plan's: the refresh writes with the approved consent.
 func (execution *configApplyExecution) steps() []domain.OperationStep {
 	var steps []domain.OperationStep
-	for _, assessment := range execution.current {
+	for _, assessment := range execution.approved {
 		decision := domain.StepSkip
 		if assessment.Changed {
 			decision = domain.StepApply
 		}
 		steps = append(steps, domain.OperationStep{ID: "config.apply." + assessment.Target.Name, Target: "local yard " + assessment.Target.Name,
 			Observed: assessment.State + "; fingerprint:" + assessment.MaterializedFingerprint, Desired: "fingerprint:" + assessment.DesiredFingerprint,
-			Decision: decision, Preconditions: []string{"the selected local target set and desired configuration are unchanged", "the yard is running and the captured materialized baseline matches, or its approved drift has converged"},
+			Decision: decision, Preconditions: []string{"the selected local target set, desired configuration and yard instance are unchanged", "each guest config file still holds the bytes observed here, or has converged"},
 			Verify: "check native materialized file settings against the approved desired fingerprint", Consequence: "refresh materialized agent configs in local running yard " + assessment.Target.Name})
 	}
 	return steps
@@ -505,14 +528,19 @@ func (cli *CLI) refreshConfigApply(ctx context.Context, execution *configApplyEx
 		}
 		byName[target.Name] = assessment
 	}
+	// Guest bytes are compared in the guest, by the exec that replaces them:
+	// only the host-side target, desired configuration and instance recheck here.
 	var current []configTargetAssessment
 	for _, initial := range execution.approved {
 		fresh := byName[initial.Target.Name]
 		if initial.DesiredFingerprint != fresh.DesiredFingerprint {
 			return fmt.Errorf("%w: yard %s: desired configuration or target changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
 		}
-		if !(initial.Changed && !fresh.Changed) && (initial.MaterializedFingerprint != fresh.MaterializedFingerprint || initial.Changed != fresh.Changed) {
-			return fmt.Errorf("%w: yard %s: materialized configuration changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
+		if !initial.Changed && fresh.Changed {
+			return fmt.Errorf("%w: yard %s: materialized configuration drifted after a confirmed no-op", domain.ErrPlanStale, initial.Target.Name)
+		}
+		if initial.Changed && fresh.Changed && initial.Consent != nil && initial.Consent.InstanceUUID != fresh.instance {
+			return fmt.Errorf("%w: yard %s: the yard instance changed after confirmation", domain.ErrPlanStale, initial.Target.Name)
 		}
 		current = append(current, fresh)
 	}
@@ -552,11 +580,12 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 	if err := domain.CheckOperationSteps(approvedSteps, execution.steps()); err != nil {
 		return err
 	}
-	var targets []configTarget
+	var targets []configTargetAssessment
 	for index, assessment := range execution.current {
-		if assessment.Changed {
-			targets = append(targets, assessment.Target)
-		} else if execution.approved[index].Changed {
+		switch approved := execution.approved[index]; {
+		case approved.Changed && assessment.Changed:
+			targets = append(targets, approved)
+		case approved.Changed:
 			fmt.Fprintf(output, "yard %s materialized-config: %s after confirmation; skipped\n", assessment.Target.Name, assessment.State)
 		}
 	}
@@ -570,20 +599,31 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 	if applier == nil {
 		applier = dispatcherConfigApplier{path: cli.options.DispatcherPath, environment: cli.baseEnv, stdout: output, stderr: output}
 	}
-	for _, target := range targets {
-		if err := applier.ApplyConfig(ctx, target.Name); err != nil {
-			return materializedConfigActivationError{err, target.Name, "materialized config", "config status", "apply", target.Loaded.Context.Paths.ConfigHome}
+	// Yards refresh in order, each with its own consent; one yard's refusal
+	// does not stop the next.
+	var refusals []error
+	var refreshed []configTarget
+	for _, approved := range targets {
+		target := approved.Target
+		if err := applier.ApplyConfig(ctx, target.Name, approved.Consent); err != nil {
+			refusals = append(refusals, cli.configApplyFailure(ctx, approved, err))
+			continue
 		}
+		refreshed = append(refreshed, target)
 	}
-	if len(targets) != 0 {
+	if len(refreshed) != 0 {
 		expected := make(map[string]string, len(execution.approved))
 		for _, target := range execution.approved {
 			expected[target.Target.Name] = target.DesiredFingerprint
 		}
-		if _, err := copyCLI.configStatus(ctx, targets, true, expected); err != nil {
-			return fmt.Errorf("config apply verification: %w", err)
+		if _, err := copyCLI.configStatus(ctx, refreshed, true, expected); err != nil {
+			refusals = append(refusals, fmt.Errorf("config apply verification: %w", err))
 		}
-	} else {
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
+	}
+	if len(targets) == 0 {
 		if slices.ContainsFunc(execution.approved, func(item configTargetAssessment) bool { return item.Changed }) {
 			fmt.Fprintln(output, "config apply: drift converged after confirmation; nothing to refresh")
 		} else {
@@ -591,6 +631,37 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 		}
 	}
 	return nil
+}
+
+// configApplyFailure observes the yard again after a refused refresh, so its
+// advice follows what the guest holds now: a file changed since the plan
+// needs a fresh one, and the rerun of config apply is then progress.
+func (cli *CLI) configApplyFailure(ctx context.Context, approved configTargetAssessment, cause error) error {
+	fresh, err := cli.assessConfigConsent(ctx, approved.Target)
+	action, _ := domain.NextStep(configApplyFindings(approved, fresh, err), domain.Action{Verb: domain.VerbConfigApply, Yard: approved.Target.Name}, nil)
+	command := "config status"
+	if action.Verb != domain.VerbNone && action.Yard == approved.Target.Name {
+		command = strings.TrimPrefix(domain.RenderAction(action), "yard -Y "+action.Yard+" ")
+	}
+	return materializedConfigActivationError{cause, approved.Target.Name, "materialized config", command, "apply", approved.Target.Loaded.Context.Paths.ConfigHome}
+}
+
+// configApplyFindings are a yard's file findings after a refused refresh.
+func configApplyFindings(approved, fresh configTargetAssessment, observeErr error) []domain.Finding {
+	yard := approved.Target.Name
+	var findings []domain.Finding
+	for range fresh.Unreadable {
+		findings = append(findings, domain.Finding{Kind: domain.FindingFileUnreadable, Yard: yard})
+	}
+	switch {
+	case observeErr != nil || fresh.Changed && (fresh.Consent == nil || approved.Consent == nil):
+		findings = append(findings, domain.Finding{Kind: domain.FindingFileUnknown, Yard: yard})
+	case fresh.Changed && !slices.Equal(fresh.Consent.Files, approved.Consent.Files):
+		findings = append(findings, domain.Finding{Kind: domain.FindingFileChanged, Yard: yard})
+	case fresh.Changed:
+		findings = append(findings, domain.Finding{Kind: domain.FindingDrift, Yard: yard})
+	}
+	return findings
 }
 
 // Protected drafts are captured on the dedicated owner-local authoring path.

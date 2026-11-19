@@ -436,7 +436,7 @@ func TestPendingRuntimeConfigurationReadersAndAdmission(t *testing.T) {
 	// Integration plans are outside this owner; they are current.
 	integrations := &integrationRuntimeFixture{plan: reconcileruntime.IntegrationPlan{Fingerprint: strings.Repeat("c", 64), Scope: strings.Repeat("c", 64)}}
 	scenario.fixture.cli.options.IntegrationRuntime = func(config.Loaded) IntegrationRuntime { return integrations }
-	gateRefusal := mutationGateRefusalPrefix
+	yardRefusal := mutationGateRefusalPrefix
 	for _, test := range []struct {
 		arguments []string
 		gated     bool
@@ -454,7 +454,7 @@ func TestPendingRuntimeConfigurationReadersAndAdmission(t *testing.T) {
 		code := program.Run(context.Background())
 		output := stdout.String() + stderr.String()
 		t.Logf("yard %s => %d\n%s", strings.Join(test.arguments, " "), code, output)
-		if strings.Contains(stderr.String(), gateRefusal) != test.gated {
+		if strings.Contains(stderr.String(), yardRefusal) != test.gated {
 			t.Fatalf("yard %s gate refusal=%t want %t: %s", strings.Join(test.arguments, " "), !test.gated, test.gated, output)
 		}
 		if test.output && !strings.Contains(output, "yard default: profile sample runtime failed") {

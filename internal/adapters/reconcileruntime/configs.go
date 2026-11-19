@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
@@ -76,7 +77,11 @@ func (runtime Runtime) configRuntimeBinding() string {
 	}{runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, runtime.devUser(), runtime.bindingEnvironment(runtime.Environment)})
 	return fmt.Sprintf("%x", sha256.Sum256(raw))
 }
-func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
+
+// RefreshConfigs writes each guest config file only over its consent token.
+// Agent skills keep their own receipts in refresh-agent-skills.sh and are not
+// compare-and-write files.
+func (runtime Runtime) RefreshConfigs(ctx context.Context, consent *ports.ConfigConsent) error {
 	prepared, err := runtime.PrepareConfigs(ctx)
 	if err != nil {
 		return err
@@ -92,7 +97,7 @@ func (runtime Runtime) RefreshConfigs(ctx context.Context) error {
 			}
 		}
 	}
-	return runtime.applyPreparedConfigs(ctx, prepared)
+	return runtime.applyPreparedConfigs(ctx, prepared, consent)
 }
 func (runtime Runtime) PrepareConfigs(ctx context.Context) (*PreparedConfigs, error) {
 	if runtime.Executor == nil {
@@ -223,7 +228,35 @@ func (runtime Runtime) prepareConfigPayloads(instance string) (*PreparedConfigs,
 	return &PreparedConfigs{previewSkillCutover: !runtime.legacyPreviewInstructions, files: files, payloads: payloads, entries: entries, binding: fmt.Sprintf("%x", sha256.Sum256(raw)), runtime: runtime.configRuntimeBinding(), instance: instance, sources: sources, packageSources: packageSources, packageIdentities: packageIdentities}, nil
 }
 
-func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs) error {
+// configTokens are a refresh's consent tokens: the confirmed ones for its
+// instance, or, for a refresh that plans itself (init, integration apply, a
+// self-planning config apply child), the guest bytes observed right before it
+// writes.
+func (runtime Runtime) configTokens(ctx context.Context, prepared *PreparedConfigs, consent *ports.ConfigConsent) (map[string]string, error) {
+	tokens := map[string]string{}
+	if consent != nil {
+		if consent.InstanceUUID != prepared.instance {
+			return nil, fmt.Errorf("%w: the yard instance changed after its configuration refresh was confirmed", domain.ErrPlanStale)
+		}
+		for _, file := range consent.Files {
+			tokens[file.Destination] = file.Token
+		}
+		return tokens, nil
+	}
+	var destinations []string
+	for _, file := range prepared.files {
+		if _, exists := prepared.payloads[file.destination]; exists && !slices.Contains(destinations, file.destination) {
+			destinations = append(destinations, file.destination)
+		}
+	}
+	observed, err := configmaterial.ObserveTokens(ctx, runtime.Executor, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, runtime.devUser(), destinations)
+	for _, file := range observed {
+		tokens[file.Destination] = file.Token
+	}
+	return tokens, err
+}
+
+func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *PreparedConfigs, consent *ports.ConfigConsent) error {
 	if prepared == nil || prepared.runtime != runtime.configRuntimeBinding() {
 		return domain.ErrPlanStale
 	}
@@ -247,11 +280,17 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 	if output == nil {
 		output = io.Discard
 	}
+	tokens, err := runtime.configTokens(ctx, prepared, consent)
+	if err != nil {
+		return err
+	}
 	if len(entries) != 0 || prepared.previewSkillCutover {
 		if _, err := runtime.integrationInventory(ctx, "configs-prepare", entries, ""); err != nil {
 			return err
 		}
 	}
+	// Each file is its own compare-and-write: a refused file keeps the others
+	// going, and only a yard whose every file converged commits the inventory.
 	copied := make(map[string]bool)
 	for _, file := range files {
 		payload, exists := payloads[file.destination]
@@ -259,12 +298,29 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 			fmt.Fprintf(output, "  [ ok ] %s: no source — skipping\n", file.label)
 			continue
 		}
-		if err := runtime.applyGuestConfig(ctx, file, payload); err != nil {
-			return fmt.Errorf("apply %s: %w", file.label, err)
+		token, consented := tokens[file.destination]
+		switch {
+		case !consented:
+			err = configmaterial.WriteRefusal{Destination: file.destination, Outcome: configmaterial.OutcomeMissingConsent}
+		case token == configmaterial.TokenUnreadable:
+			err = configmaterial.WriteRefusal{Destination: file.destination, Outcome: configmaterial.OutcomeUnreadable}
+		default:
+			err = runtime.applyGuestConfig(ctx, file, payload, token)
+		}
+		var refusal configmaterial.WriteRefusal
+		if errors.As(err, &refusal) {
+			refusals = append(refusals, configFileRefusal{yard: runtime.Yard.YardName, label: file.label, refusal: refusal})
+			continue
+		}
+		if err != nil {
+			return domain.CollectRefusals(append(refusals, fmt.Errorf("apply %s: %w", file.label, err))...)
 		}
 		copied[file.label] = true
 		fmt.Fprintf(output, "  [ ok ] %s -> ~%s/%s\n",
 			file.label, runtime.devUser(), strings.TrimPrefix(file.destination, "/home/"+runtime.devUser()+"/"))
+	}
+	if err := domain.CollectRefusals(refusals...); err != nil {
+		return err
 	}
 	if len(entries) != 0 || prepared.previewSkillCutover {
 		if _, err := runtime.integrationInventory(ctx, "configs-commit", entries, "", integrationInventoryCapture{config: evidence}); err != nil {
@@ -549,20 +605,23 @@ func (runtime Runtime) preserveInvalidConfigCommand(path string) string {
 	return shellquote.Command([]string{"incus", "exec", runtime.Yard.YardInstanceName, "--project", runtime.Yard.IncusProject, "--", "mv", "--backup=numbered", "--", path, path + ".subyard-invalid"})
 }
 
-func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte) error {
+func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFile, payload []byte, token string) error {
 	if file.ownedFormat == "" {
-		return runtime.writeGuestFile(ctx, file.destination, payload)
+		return runtime.writeGuestFile(ctx, file.destination, payload, token)
 	}
 	mode := configmaterial.ModeApply
 	if runtime.appliedIntegrationInspection {
 		// An installed-view repair never takes back released ownership.
 		mode = configmaterial.ModeApplyInstalled
 	}
-	request, err := configmaterial.Request(file.ownedFormat, mode, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload)
+	request, err := configmaterial.ApplyRequest(file.ownedFormat, mode, runtime.devUser(), file.destination, runtime.Yard.DevUID, payload, token)
 	if err != nil {
 		return err
 	}
 	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
+	if result.ExitCode == 3 || result.ExitCode == 4 {
+		return configmaterial.WriteResult(file.destination, result, err)
+	}
 	if err != nil || result.ExitCode != 0 {
 		var completed *ports.GuestExitError
 		if result.ExitCode == 2 && (err == nil || errors.As(err, &completed) && completed.Code == 2) && configmaterial.UnownedInvalidDestination(result.Stderr, file.ownedFormat) {
@@ -578,37 +637,32 @@ func (runtime Runtime) applyGuestConfig(ctx context.Context, file guestConfigFil
 	return nil
 }
 
-func (runtime Runtime) writeGuestFile(ctx context.Context, destination string, payload []byte) error {
-	if !domain.SafeName(runtime.devUser()) ||
-		!strings.HasPrefix(destination, "/home/"+runtime.devUser()+"/") {
-		return errors.New("guest config destination leaves the developer home")
+func (runtime Runtime) writeGuestFile(ctx context.Context, destination string, payload []byte, token string) error {
+	request, err := configmaterial.RawRequest(runtime.devUser(), destination, runtime.Yard.DevUID, payload, token)
+	if err != nil {
+		return err
 	}
-	uid := runtime.Yard.DevUID
-	if uid <= 0 {
-		uid = 1000
+	result, err := runtime.Executor.Exec(ctx, runtime.Yard.IncusProject, runtime.Yard.YardInstanceName, request)
+	return configmaterial.WriteResult(destination, result, err)
+}
+
+// configFileRefusal is one guest config file a refresh left as the guest has
+// it. A changed or unconfirmed file needs a fresh plan; an unreadable one needs
+// inspection first.
+type configFileRefusal struct {
+	yard, label string
+	refusal     configmaterial.WriteRefusal
+}
+
+func (err configFileRefusal) Error() string { return "apply " + err.label + ": " + err.refusal.Error() }
+func (err configFileRefusal) Unwrap() error { return err.refusal }
+
+func (err configFileRefusal) ActivationDiagnostic() (string, string) {
+	verb := domain.VerbConfigApply
+	if err.refusal.Outcome == configmaterial.OutcomeUnreadable {
+		verb = domain.VerbConfigStatus
 	}
-	request := ports.InstanceExecRequest{
-		Command: []string{"sh", "-eu", "-c", `
-destination=$1
-uid=$2
-digest=$3
-directory=${destination%/*}
-install -d -m 0755 -o "$uid" -g "$uid" "$directory"
-temporary=$(mktemp "$directory/.subyard-config.XXXXXX")
-trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
-cat > "$temporary"
-[ "$(sha256sum "$temporary" | cut -d ' ' -f 1)" = "$digest" ]
-chown "$uid:$uid" "$temporary"
-chmod 0644 "$temporary"
-python3 -B -c 'import os,sys; f=os.open(sys.argv[1],os.O_RDONLY); os.fsync(f); os.close(f)' "$temporary"
-mv -f -- "$temporary" "$destination"
-python3 -B -c 'import os,sys; f=os.open(sys.argv[1],os.O_RDONLY|os.O_DIRECTORY); os.fsync(f); os.close(f)' "$directory"
-[ "$(sha256sum "$destination" | cut -d ' ' -f 1)" = "$digest" ]
-trap - EXIT HUP INT TERM
-`, "subyard", destination, fmt.Sprint(uid), fmt.Sprintf("%x", sha256.Sum256(payload))},
-		Stdin: payload,
-	}
-	return runtime.runGuest(ctx, request)
+	return "yard " + err.yard + " " + err.Error(), "run " + domain.RenderAction(domain.Action{Verb: verb, Yard: err.yard})
 }
 
 func (runtime Runtime) runGuestAsDev(ctx context.Context, command []string) error {

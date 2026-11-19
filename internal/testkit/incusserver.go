@@ -586,10 +586,13 @@ func (fake *IncusServer) startExec(writer http.ResponseWriter, request *http.Req
 	responder := fake.execResponder
 	fake.mu.Unlock()
 	var step IncusServerExecStep
-	if responder != nil {
+	observation, observed := GuestTokenObservation(call.Command, nil)
+	if observed {
+		step = IncusServerExecStep{Stdout: observation}
+	} else if responder != nil {
 		step = responder(call)
 	}
-	if responder == nil || step.Queued {
+	if !observed && (responder == nil || step.Queued) {
 		fake.mu.Lock()
 		if len(fake.execSteps) == 0 {
 			fake.mu.Unlock()

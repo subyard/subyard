@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -290,26 +291,36 @@ func TestDispatcherConfigApplierSelectsDirectAndDriftAwareCommands(t *testing.T)
 	root := t.TempDir()
 	capture := filepath.Join(root, "arguments")
 	dispatcher := filepath.Join(root, "yard")
-	writeConfigCommandFile(t, dispatcher, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\n", 0o700)
+	writeConfigCommandFile(t, dispatcher, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CAPTURE\"\nif [ \"${6:-}\" = --config-consent-fd ]; then cat <&3 > \"$CAPTURE.consent\"; fi\n", 0o700)
+	consent := &ports.ConfigConsent{InstanceUUID: "uuid", Files: []ports.ConfigFileConsent{{Destination: "/home/dev/a", Token: "absent"}}}
 	for _, test := range []struct {
 		name       string
 		applyDrift bool
+		consent    *ports.ConfigConsent
 		want       string
 	}{
 		{name: "direct", want: "-Y\nnamed\ninit\n--configs\n--yes\n"},
-		{name: "drift-aware", applyDrift: true, want: "-Y\nnamed\nconfig\napply\n--yes\n"},
+		// An init child receives the confirmed tokens on a descriptor named by
+		// an option that a binary without compare-and-write rejects.
+		{name: "consented", consent: consent, want: "-Y\nnamed\ninit\n--configs\n--yes\n--config-consent-fd\n3\n"},
+		// A config apply child plans and confirms for itself.
+		{name: "drift-aware", applyDrift: true, consent: consent, want: "-Y\nnamed\nconfig\napply\n--yes\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			applier := dispatcherConfigApplier{
 				path: dispatcher, environment: map[string]string{"CAPTURE": capture},
 				applyDrift: test.applyDrift,
 			}
-			if err := applier.ApplyConfig(context.Background(), "named"); err != nil {
+			_ = os.Remove(capture + ".consent")
+			if err := applier.ApplyConfig(context.Background(), "named", test.consent); err != nil {
 				t.Fatal(err)
 			}
 			arguments, err := os.ReadFile(capture)
 			if err != nil || string(arguments) != test.want {
 				t.Fatalf("dispatcher arguments = %q, want %q, err=%v", arguments, test.want, err)
+			}
+			if passed, err := os.ReadFile(capture + ".consent"); test.name == "consented" && (err != nil || string(passed) != `{"instance_uuid":"uuid","files":[{"destination":"/home/dev/a","token":"absent"}]}`) {
+				t.Fatalf("consent descriptor = %q, %v", passed, err)
 			}
 		})
 	}
@@ -981,7 +992,9 @@ func TestConfigApplyDeclineLeavesApplierUntouched(t *testing.T) {
 	}
 }
 
-func TestConfigApplyRejectsMaterializedDriftChangeAfterConfirmation(t *testing.T) {
+// Drift that changes after confirmation is not a stale plan: the guest compares
+// each file with the confirmed tokens when it writes.
+func TestConfigApplyLeavesChangedDriftToTheGuestCompare(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")
 	fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{
@@ -991,6 +1004,7 @@ func TestConfigApplyRejectsMaterializedDriftChangeAfterConfirmation(t *testing.T
 	}}
 	appendMismatchedHashSteps(t, fake, loaded, "0")
 	appendMismatchedHashSteps(t, fake, loaded, "1")
+	appendHashSteps(t, fake, loaded)
 	applier := &recordingConfigApplier{}
 	var stdout, stderr bytes.Buffer
 	program, err := New(Options{
@@ -1001,12 +1015,11 @@ func TestConfigApplyRejectsMaterializedDriftChangeAfterConfirmation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := program.Run(context.Background()); code != 1 ||
-		!strings.Contains(stderr.String(), domain.ErrPlanStale.Error()) {
-		t.Fatalf("stale materialized state: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("changed drift: code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if len(applier.yards) != 0 {
-		t.Fatalf("stale apply reached applier: %#v", applier.yards)
+	if !slices.Equal(applier.yards, []string{"default"}) || applier.consents[0] == nil || len(applier.consents[0].Files) == 0 || len(fake.TokenObservations) != 1 {
+		t.Fatalf("apply did not carry the confirmed tokens: %#v %#v", applier.yards, applier.consents)
 	}
 }
 
@@ -3542,11 +3555,13 @@ func (prompt *callbackPrompt) Confirm(
 }
 
 type recordingConfigApplier struct {
-	yards []string
+	yards    []string
+	consents []*ports.ConfigConsent
 }
 
-func (applier *recordingConfigApplier) ApplyConfig(_ context.Context, yard string) error {
+func (applier *recordingConfigApplier) ApplyConfig(_ context.Context, yard string, consent *ports.ConfigConsent) error {
 	applier.yards = append(applier.yards, yard)
+	applier.consents = append(applier.consents, consent)
 	return nil
 }
 

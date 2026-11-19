@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +43,15 @@ type configTargetAssessment struct {
 	Differences             []domain.ConfigurationDifference
 	// StoppedInstance is the read behind a "stopped" state; it reaches no fingerprint.
 	StoppedInstance *ports.InstanceInfo
+	// Consent holds the guest bytes a confirmed refresh of a changed yard may
+	// replace; Unreadable and Leftovers are the files it cannot replace and the
+	// guest files an earlier refused write preserved.
+	Consent    *ports.ConfigConsent `json:",omitempty"`
+	Unreadable []string             `json:",omitempty"`
+	Leftovers  []string             `json:",omitempty"`
+	// running marks an observed running yard; instance is its identity.
+	running  bool
+	instance string
 }
 
 type configTargetSelector func() ([]configTarget, error)
@@ -1137,17 +1148,43 @@ type dispatcherConfigApplier struct {
 	applyDrift  bool
 }
 
-func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard string) error {
+// ApplyConfig runs the refresh child. A config apply child plans and confirms
+// for itself. An init --configs child receives the confirmed consent through
+// --config-consent-fd, which a binary without compare-and-write rejects as an
+// unknown option before it writes anything.
+func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard string, consent *ports.ConfigConsent) error {
 	arguments := []string{}
 	if yard != "" && yard != "default" {
 		arguments = append(arguments, "-Y", yard)
 	}
+	var consentFile *os.File
 	if applier.applyDrift {
 		arguments = append(arguments, "config", "apply", "--yes")
 	} else {
 		arguments = append(arguments, "init", "--configs", "--yes")
+		if consent != nil {
+			payload, err := json.Marshal(consent)
+			if err != nil {
+				return err
+			}
+			// An unlinked private file carries it, so no pipe buffer bounds it.
+			if consentFile, err = os.CreateTemp("", "subyard-config-consent-*"); err != nil {
+				return err
+			}
+			defer consentFile.Close()
+			if err := errors.Join(os.Remove(consentFile.Name()), writeAll(consentFile, payload)); err != nil {
+				return err
+			}
+			if _, err := consentFile.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+		}
 	}
 	command := exec.CommandContext(ctx, applier.path, arguments...)
+	if consentFile != nil {
+		command.Args = append(command.Args, "--config-consent-fd", fmt.Sprint(3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, consentFile)
+	}
 	command.Env = environmentList(applier.environment, map[string]string{"ASSUME_YES": "1"})
 	home := applier.environment["SUBYARD_HOME"]
 	if home == "" {
@@ -1167,6 +1204,39 @@ func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard str
 	command.Stdout = applier.stdout
 	command.Stderr = applier.stderr
 	return command.Run()
+}
+
+func writeAll(file *os.File, payload []byte) error {
+	_, err := file.Write(payload)
+	return err
+}
+
+// maxConfigConsentBytes bounds the consent an init --configs child reads.
+const maxConfigConsentBytes = 4 << 20
+
+// readConfigConsent reads the consent a config apply parent passed on fd.
+func readConfigConsent(fd int) (*ports.ConfigConsent, error) {
+	file := os.NewFile(uintptr(fd), "config-consent")
+	if file == nil {
+		return nil, errors.New("--config-consent-fd names no open file")
+	}
+	defer file.Close()
+	payload, err := io.ReadAll(io.LimitReader(file, maxConfigConsentBytes+1))
+	if err != nil || len(payload) > maxConfigConsentBytes {
+		return nil, errors.New("configuration consent is unreadable or too large")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.DisallowUnknownFields()
+	var consent ports.ConfigConsent
+	if err := decoder.Decode(&consent); err != nil || decoder.Decode(&struct{}{}) != io.EOF || consent.Files == nil {
+		return nil, errors.New("invalid configuration consent")
+	}
+	for _, file := range consent.Files {
+		if !configmaterial.ValidToken(file.Token) && file.Token != configmaterial.TokenUnreadable {
+			return nil, errors.New("invalid configuration consent")
+		}
+	}
+	return &consent, nil
 }
 
 func materializationDesired(target configTarget, check bool, reader func(config.MaterializedAsset) ([]byte, error)) (config.MaterializationTarget, []configAsset, [][]byte, error) {
@@ -1319,7 +1389,44 @@ func (cli *CLI) assessConfigTarget(
 	if err := domain.CollectRefusals(failures...); err != nil {
 		return configTargetAssessment{NativeOwner: nativeOwner, State: "running", Differences: differences}, err
 	}
-	return finish("running")
+	assessment, err := finish("running")
+	assessment.running, assessment.instance = true, info.Config["volatile.uuid"]
+	return assessment, err
+}
+
+// assessConfigConsent is a config apply plan's assessment of one target: a
+// changed running yard also records the tokens of every file its refresh
+// writes, from the runtime selection, which includes instruction files that
+// the config assets omit.
+func (cli *CLI) assessConfigConsent(ctx context.Context, target configTarget) (configTargetAssessment, error) {
+	assessment, err := cli.assessConfigTarget(ctx, target, true)
+	if err != nil || !assessment.Changed || !assessment.running {
+		return assessment, err
+	}
+	_, executor := cli.statusPorts()
+	sources, err := config.SelectMaterializationSources(target.Loaded.Environment, target.Loaded.Context.DevUser, config.MaterializationRuntime, target.Loaded.Catalog.Integrations()...)
+	if err != nil {
+		return assessment, err
+	}
+	var destinations []string
+	for _, source := range sources {
+		if !slices.Contains(destinations, source.Asset.Destination) {
+			destinations = append(destinations, source.Asset.Destination)
+		}
+	}
+	observed, err := configmaterial.ObserveTokens(ctx, executor, target.Loaded.Context.IncusProject, target.Loaded.Context.YardInstanceName, target.Loaded.Context.DevUser, destinations)
+	if err != nil {
+		return assessment, err
+	}
+	assessment.Consent = &ports.ConfigConsent{InstanceUUID: assessment.instance, Files: []ports.ConfigFileConsent{}}
+	for _, file := range observed {
+		assessment.Consent.Files = append(assessment.Consent.Files, ports.ConfigFileConsent{Destination: file.Destination, Token: file.Token})
+		if file.Token == configmaterial.TokenUnreadable {
+			assessment.Unreadable = append(assessment.Unreadable, file.Destination)
+		}
+		assessment.Leftovers = append(assessment.Leftovers, file.Leftovers...)
+	}
+	return assessment, nil
 }
 
 func sameConfigTargetSet(

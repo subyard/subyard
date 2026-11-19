@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/profile"
@@ -43,6 +45,11 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 		"AGENT_opencode_RULES_DEST=.config/opencode/repo.rules",
 	}
 	incus := runningIncus(12)
+	wantDestinations := []string{
+		"/home/dev/.config/opencode/AGENTS.md",
+		"/home/dev/.config/opencode/opencode.jsonc",
+		"/home/dev/.config/opencode/repo.rules",
+	}
 	incus.ExecSteps[0].Result.Stdout = []byte(`{}`)
 	incus.ExecSteps[6].Result.Stdout = []byte(`{}`)
 	var output bytes.Buffer
@@ -54,14 +61,14 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 		},
 	}
 	bindArtifactTestPackages(t, &runtime, root)
-	if err := runtime.RefreshConfigs(context.Background()); err != nil {
+	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.RefreshConfigs(context.Background()); err != nil {
+	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(incus.ExecCalls) != 12 {
-		t.Fatalf("config refresh calls = %d, want 6 writes and 4 inventory operations", len(incus.ExecCalls))
+	if len(incus.ExecCalls) != 12 || len(incus.TokenObservations) != 2 {
+		t.Fatalf("config refresh calls = %d, want 6 writes and 6 inventory operations after 2 observations", len(incus.ExecCalls))
 	}
 	for index, mode := range map[int]string{0: "settings", 1: "configs-prepare", 5: "configs-commit", 6: "settings", 7: "configs-prepare", 11: "configs-commit"} {
 		if command := incus.ExecCalls[index].Request.Command; len(command) != 5 || command[4] != mode {
@@ -69,21 +76,14 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 		}
 	}
 	writes := append(incus.ExecCalls[2:5:5], incus.ExecCalls[8:11]...)
-	wantDestinations := []string{
-		"/home/dev/.config/opencode/AGENTS.md",
-		"/home/dev/.config/opencode/opencode.jsonc",
-		"/home/dev/.config/opencode/repo.rules",
-	}
 	for index, call := range writes {
 		if call.Project != "subyard" || call.Name != "yard" ||
-			len(call.Request.Command) != 8 ||
-			call.Request.Command[0] != "sh" ||
-			!strings.Contains(call.Request.Command[3], "mktemp") ||
-			!strings.Contains(call.Request.Command[3], "chmod 0644") ||
-			call.Request.Command[6] != "1001" {
-			t.Fatalf("config write %d is not the atomic typed contract: %#v", index, call)
+			len(call.Request.Command) != 10 ||
+			call.Request.Command[3] != configmaterial.CompareWriteProgram() || call.Request.Command[4] != "write" ||
+			call.Request.Command[7] != "1001" || call.Request.Command[8] != configmaterial.TokenAbsent {
+			t.Fatalf("config write %d is not the compare-and-write contract: %#v", index, call)
 		}
-		destination := call.Request.Command[5]
+		destination := call.Request.Command[6]
 		if !strings.HasPrefix(destination, "/home/dev/") ||
 			strings.Contains(destination, "auth.json") {
 			t.Fatalf("unsafe config destination %q", destination)
@@ -104,20 +104,73 @@ func TestRefreshConfigsUsesTypedAtomicGuestWrites(t *testing.T) {
 	}
 }
 
-// The compatibility fixture allows only this exact command, including its script.
+// A confirmed refresh writes only over its own tokens: another instance is a
+// stale plan, and a file outside the consent is refused while the others are
+// written and the inventory stays uncommitted.
+func TestRefreshConfigsWritesOnlyConsentedFiles(t *testing.T) {
+	root := t.TempDir()
+	source := func(name, payload string) string {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	environment := []string{
+		"CODING_TOOL_INTEGRATIONS=opencode",
+		"HOST_OPENCODE_AGENTS_MD=" + source("OPENCODE.md", "opencode\n"),
+		"AGENT_opencode_CONFIG=" + source("opencode.jsonc", "{}\n"),
+		"AGENT_opencode_CONFIG_DEST=.config/opencode/opencode.jsonc",
+	}
+	newRuntime := func(incus *testkit.Incus) Runtime {
+		incus.Reconcile.Instance.Config = map[string]string{"volatile.uuid": "instance-a"}
+		runtime := Runtime{
+			Integrations: []profile.IntegrationDefinition{{Name: "opencode", Artifacts: []profile.IntegrationArtifact{{ID: "instructions", Kind: "instructions", SourceSetting: "HOST_OPENCODE_AGENTS_MD", Destination: ".config/opencode/AGENTS.md", Format: "raw"}, {ID: "config", Kind: "config", Destination: ".config/opencode/opencode.jsonc", Format: "raw"}}}},
+			Environment:  environment, Incus: incus, Executor: incus, Stdout: io.Discard,
+			Yard: domain.Context{IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev", DevUID: 1001},
+		}
+		bindArtifactTestPackages(t, &runtime, root)
+		return runtime
+	}
+	stale := runningIncus(8)
+	stale.ExecSteps[0].Result.Stdout = []byte(`{}`)
+	err := newRuntime(stale).RefreshConfigs(context.Background(), &ports.ConfigConsent{InstanceUUID: "instance-b"})
+	if !errors.Is(err, domain.ErrPlanStale) || slices.ContainsFunc(stale.ExecCalls, func(call testkit.IncusExecCall) bool { return slices.Contains(call.Request.Command, "write") }) {
+		t.Fatalf("another instance: %v", err)
+	}
+	incus := runningIncus(8)
+	incus.ExecSteps[0].Result.Stdout = []byte(`{}`)
+	err = newRuntime(incus).RefreshConfigs(context.Background(), &ports.ConfigConsent{InstanceUUID: "instance-a", Files: []ports.ConfigFileConsent{
+		{Destination: "/home/dev/.config/opencode/AGENTS.md", Token: configmaterial.TokenAbsent},
+	}})
+	var refusal configmaterial.WriteRefusal
+	if !errors.As(err, &refusal) || refusal.Outcome != configmaterial.OutcomeMissingConsent || refusal.Destination != "/home/dev/.config/opencode/opencode.jsonc" {
+		t.Fatalf("unconsented file: %v", err)
+	}
+	var written []string
+	for _, call := range incus.ExecCalls {
+		if command := call.Request.Command; len(command) == 5 && command[4] == "configs-commit" {
+			t.Fatal("inventory committed after a refused file")
+		} else if len(command) == 10 && command[4] == "write" {
+			written = append(written, command[6])
+		}
+	}
+	if !slices.Equal(written, []string{"/home/dev/.config/opencode/AGENTS.md"}) || len(incus.TokenObservations) != 0 {
+		t.Fatalf("writes %v, observations %d", written, len(incus.TokenObservations))
+	}
+}
+
+// The compatibility fixture allows only this exact command, including its program.
 func TestGuestConfigWriteMatchesCompatibilityFixture(t *testing.T) {
 	incus := runningIncus(1)
 	runtime := Runtime{Executor: incus, Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
 	payload := []byte("desired\n")
-	if err := runtime.writeGuestFile(context.Background(), "/home/dev/config", payload); err != nil {
-		t.Fatal(err)
-	}
-	script, err := os.ReadFile("../../testkit/cmd/empty-incus/config-write.sh")
-	if err != nil {
+	if err := runtime.writeGuestFile(context.Background(), "/home/dev/config", payload, configmaterial.TokenAbsent); err != nil {
 		t.Fatal(err)
 	}
 	request := incus.ExecCalls[0].Request
-	want := []string{"sh", "-eu", "-c", string(script), "subyard", "/home/dev/config", "1000", fmt.Sprintf("%x", sha256.Sum256(payload))}
+	want := []string{"python3", "-B", "-c", configmaterial.CompareWriteProgram(), "write", "/home/dev", "/home/dev/config", "1000", configmaterial.TokenAbsent, fmt.Sprintf("%x", sha256.Sum256(payload))}
 	if !slices.Equal(request.Command, want) || !bytes.Equal(request.Stdin, payload) {
 		t.Fatalf("guest writer differs from the compatibility fixture: %#v", request)
 	}
@@ -154,20 +207,12 @@ func TestGuestConfigWriteRefusesIncompleteTransport(t *testing.T) {
 			}
 			incus := runningIncus(1)
 			runtime := Runtime{Executor: incus, Yard: domain.Context{DevUser: "next", DevUID: os.Getuid()}}
-			if err := runtime.writeGuestFile(context.Background(), "/home/next/instructions", []byte(test.desired)); err != nil {
+			if err := runtime.writeGuestFile(context.Background(), "/home/next/instructions", []byte(test.desired), configmaterial.PayloadToken(original)); err != nil {
 				t.Fatal(err)
 			}
 			request := incus.ExecCalls[0].Request
-			request.Command[5] = destination
-			bin := filepath.Join(root, "bin")
-			if err := os.Mkdir(bin, 0755); err != nil {
-				t.Fatal(err)
-			}
-			for _, name := range []string{"install", "chown"} {
-				testkit.WriteFile(t, filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0755)
-			}
+			request.Command[5], request.Command[6] = filepath.Dir(root), destination
 			command := exec.Command(request.Command[0], request.Command[1:]...)
-			command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
 			command.Stdin = strings.NewReader(test.received)
 			output, err := command.CombinedOutput()
 			if (err == nil) != test.valid {
@@ -198,7 +243,7 @@ func TestUnownedInvalidConfigRefusalNamesNativePreservationStep(t *testing.T) {
 	fake := runningIncus(1)
 	fake.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: unowned-invalid-destination-v1 JSON; private document details")}}}
 	runtime := Runtime{Executor: fake, Yard: domain.Context{YardName: "default", IncusProject: "sample", YardInstanceName: "sample-yard", DevUser: "dev", DevUID: 1000}}
-	err := runtime.applyGuestConfig(context.Background(), guestConfigFile{destination: "/home/dev/settings.json", ownedFormat: "json"}, []byte(`{"managed":true}`))
+	err := runtime.applyGuestConfig(context.Background(), guestConfigFile{destination: "/home/dev/settings.json", ownedFormat: "json"}, []byte(`{"managed":true}`), configmaterial.TokenAbsent)
 	if err == nil || !strings.Contains(err.Error(), "'incus' 'exec' 'sample-yard' '--project' 'sample'") || !strings.Contains(err.Error(), "--backup=numbered") || !strings.Contains(err.Error(), "then run yard -Y default config apply") || strings.Contains(err.Error(), "private document") || strings.Contains(err.Error(), "yard shell") {
 		t.Fatal("unreachable or unsafe preservation hint", err)
 	}
@@ -208,7 +253,7 @@ func TestConfigApplyReadFailureDoesNotClaimUnownedPreservation(t *testing.T) {
 	fake := runningIncus(1)
 	fake.ExecSteps = []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 2, Stderr: []byte("config materialization: invalid current JSON")}}}
 	runtime := Runtime{Executor: fake, Yard: domain.Context{DevUser: "dev", DevUID: 1000}}
-	err := runtime.applyGuestConfig(context.Background(), guestConfigFile{destination: "/home/dev/settings.json", ownedFormat: "json"}, []byte(`{"managed":true}`))
+	err := runtime.applyGuestConfig(context.Background(), guestConfigFile{destination: "/home/dev/settings.json", ownedFormat: "json"}, []byte(`{"managed":true}`), configmaterial.TokenAbsent)
 	if err == nil || strings.Contains(err.Error(), "unowned") || strings.Contains(err.Error(), "preserved") || strings.Contains(err.Error(), "mv") {
 		t.Fatal("read failure misclassified", err)
 	}
@@ -294,7 +339,7 @@ func TestRefreshConfigsRejectsPathsOutsideDeveloperHome(t *testing.T) {
 			IncusProject: "subyard", YardInstanceName: "yard", DevUser: "dev",
 		},
 	}
-	if err := runtime.RefreshConfigs(context.Background()); err == nil ||
+	if err := runtime.RefreshConfigs(context.Background(), nil); err == nil ||
 		!strings.Contains(err.Error(), "leaves the developer home") {
 		t.Fatalf("unsafe config destination error = %v", err)
 	}
@@ -326,7 +371,7 @@ func TestRefreshConfigsRejectsSymlinkSourceBeforeGuestMutation(t *testing.T) {
 		},
 	}
 	bindInstructionTestPackage(t, &runtime, root, "codex")
-	if err := runtime.RefreshConfigs(context.Background()); err == nil ||
+	if err := runtime.RefreshConfigs(context.Background(), nil); err == nil ||
 		!strings.Contains(err.Error(), "not a regular file") {
 		t.Fatalf("symlink source error = %v", err)
 	}
@@ -362,11 +407,11 @@ func TestRefreshConfigsFollowsHostInstructionSymlink(t *testing.T) {
 		},
 	}
 	bindInstructionTestPackage(t, &runtime, root, "claude")
-	if err := runtime.RefreshConfigs(context.Background()); err != nil {
+	if err := runtime.RefreshConfigs(context.Background(), nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(incus.ExecCalls) != 3 ||
-		incus.ExecCalls[1].Request.Command[5] != "/home/dev/.claude/CLAUDE.md" ||
+		incus.ExecCalls[1].Request.Command[6] != "/home/dev/.claude/CLAUDE.md" ||
 		!bytes.HasPrefix(incus.ExecCalls[1].Request.Stdin, payload) ||
 		bytes.Contains(incus.ExecCalls[1].Request.Stdin, []byte(previewInstructions)) {
 		t.Fatalf("symlinked Claude instructions were not copied: %#v", incus.ExecCalls)
