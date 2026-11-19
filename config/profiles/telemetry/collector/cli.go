@@ -38,10 +38,9 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	includeChildren := f.Bool("include-children", false, "include explicitly related descendant runs in show-run")
 	input := f.String("input", "-", "replay JSONL file or -")
 	query := f.String("sql", "SELECT * FROM sample_values LIMIT 100", "read-only SQL")
-	disk := f.Int64("disk-bytes", DefaultDiskBytes, "telemetry disk budget; raw OTLP stops at half, the database at three quarters")
+	disk := f.Int64("disk-bytes", DefaultDiskBytes, "soft telemetry disk budget; raw OTLP stops a tenth below it")
 	queue := f.Int64("queue-bytes", 16<<20, "in-memory queued sanitized bytes")
 	requests := f.Int("queue-requests", 128, "maximum queued requests")
-	retention := f.Duration("retention", 7*24*time.Hour, "lifetime of filtered-event markers")
 	olderThan := f.String("older-than", "", "prune records received before this age, such as 60d or 1440h")
 	includeUsage := f.Bool("include-usage", false, "prune also usage records and their bindings")
 	if err := f.Parse(args[1:]); err != nil {
@@ -56,7 +55,7 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	if command == "prune" {
-		return runPrune(ctx, *dir, *olderThan, *includeUsage, *disk)
+		return runPrune(ctx, os.Stdout, *dir, *olderThan, *includeUsage, *disk)
 	}
 	if command == "serve" || command == "replay" || command == "prepare" {
 		policy, err := LoadPolicy(*policyFile)
@@ -67,7 +66,6 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		limits.DiskBytes = *disk
 		limits.QueueBytes = *queue
 		limits.QueueRequests = *requests
-		limits.Retention = *retention
 		store, err := openStore(*dir, limits)
 		if err != nil {
 			return err
@@ -108,7 +106,11 @@ func RunCLI(args []string, receiver ReceiverFunc) error {
 		}
 		result, err = showRunOrigin(ctx, db, *runID, *origin, *includeChildren)
 	case "stats":
-		result, err = Stats(ctx, db)
+		var stats map[string]any
+		if stats, err = Stats(ctx, db); err == nil {
+			addStorageWarning(stats, *dir)
+		}
+		result = stats
 	case "query":
 		result, err = Query(ctx, db, *query)
 	default:
@@ -154,7 +156,7 @@ func runSanitizer(family string, reader io.Reader, writer io.Writer) error {
 
 // runPrune asks the running collector over its control socket and opens the
 // store itself only when no collector holds it.
-func runPrune(ctx context.Context, dir, olderThan string, includeUsage bool, disk int64) error {
+func runPrune(ctx context.Context, out io.Writer, dir, olderThan string, includeUsage bool, disk int64) error {
 	age, err := parseAge(olderThan)
 	if err != nil {
 		return err
@@ -173,7 +175,32 @@ func runPrune(ctx context.Context, dir, olderThan string, includeUsage bool, dis
 	if err != nil {
 		return err
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"removed_records": removed})
+	return json.NewEncoder(out).Encode(map[string]any{"removed_records": removed})
+}
+
+// addStorageWarning names the cleanup command with this binary and data
+// directory, so it runs as printed.
+func addStorageWarning(stats map[string]any, dir string) {
+	since, ok := stats["raw_otlp_refused_since"].(string)
+	if !ok {
+		return
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		binary = "subyard-telemetry"
+	}
+	if absolute, err := filepath.Abs(dir); err == nil {
+		dir = absolute
+	}
+	stats["warnings"] = []string{"raw OTLP refused since " + since + ": disk budget or partition reserve reached; usage is still recorded. Free space with: " +
+		shellWord(binary) + " prune --data-dir " + shellWord(dir) + " --older-than 60d"}
+}
+
+func shellWord(value string) string {
+	if value != "" && strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-") == "" {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
 }
 
 func parseAge(value string) (time.Duration, error) {

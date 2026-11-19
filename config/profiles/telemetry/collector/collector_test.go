@@ -162,8 +162,8 @@ func TestBoundsAndFutureSchema(t *testing.T) {
 	}
 	s.limits.RequestBytes = 2 << 20
 	s.limits.DiskBytes = 1
-	if err := s.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": "disk-bounded"})}); err == nil {
-		t.Fatal("disk bound acknowledged")
+	if err := s.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": "disk-bounded"})}); err != nil {
+		t.Fatalf("soft disk budget refused a lifecycle record: %v", err)
 	}
 	dir := testkit.TempDir(t)
 	other, err := Open(dir, DefaultLimits())

@@ -108,6 +108,9 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
             self.assertEqual(invoke('--check').returncode,1,'fresh selected profile must be measured drift, not an unavailable adapter')
             self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0').returncode,0)
             self.assertEqual(invoke('--check',SUBYARD_PROFILE_SELECTED='0',TELEMETRY_DISK_BUDGET='2GiB').returncode,0)
+            invalid = invoke('--check',TELEMETRY_DISK_BUDGET='2GB')
+            self.assertEqual(invalid.returncode,2)
+            self.assertIn(b'TELEMETRY_DISK_BUDGET must be a positive MiB or GiB value',invalid.stderr)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_STATE='unsafe').returncode,2)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_BAD_OUTPUT='1').returncode,2)
             self.assertEqual(invoke('--check',TELEMETRY_FIXTURE_TRANSPORT_FAIL='1').returncode,2)
@@ -194,6 +197,15 @@ print(json.dumps({'state':'absent','actual':'','desired':''}))
             archives = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             return result, archives
         return profile, observe
+
+    def test_disk_budget_matches_core_size_validation(self):
+        owner = runpy.run_path(str(Path(__file__).resolve().parents[1]/'owner.py'))
+        # Core validateSize: a MiB or GiB suffix on a positive strconv.Atoi integer.
+        for value, expected in (('', None), ('30GiB', 30 << 30), ('+2GiB', 2 << 30), ('01MiB', 1 << 20),
+                                ('9223372036854775807MiB', (1 << 63) - 1), ('9223372036854775808MiB', 0),
+                                ('0GiB', 0), ('-1GiB', 0), ('2GB', 0), ('2 GiB', 0), ('1_0GiB', 0), ('GiB', 0)):
+            with self.subTest(value=value):
+                self.assertEqual(owner['disk_budget'](value), expected)
 
     def test_unselected_runtime_needs_no_collector_binary(self):
         with tempfile.TemporaryDirectory(prefix='telemetry-owner-unselected-', dir='/tmp') as name:

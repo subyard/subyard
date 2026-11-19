@@ -348,7 +348,7 @@ counted. Usage records are not rebuilt from older raw OTLP.
 | Client | Model request | Tool output | Request identity | Links |
 | --- | --- | --- | --- | --- |
 | Claude Code | `api_request`: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` (with 5m/1h), `cost_usd`, `query_source`, `request_id`, `prompt.id`, `event.sequence` | `tool_result`: `tool_use_id`, `tool_result_size_bytes`, `tool_input_size_bytes` | provider `request_id`, else log time and sequence | `session.id`; subagents by `agent_id`/`parent_agent_id` in the same session (2.1.327; earlier releases count subagents as the session) |
-| Codex | `sse_event` with `event.kind=response.completed`: `input_token_count` (includes `cached_token_count`), `output_token_count`, `reasoning_token_count`, `cache_write_token_count`; `tool_token_count` is their total | `tool_result`: `call_id`, `output_length`, `output_line_count` | log time (no response ID) | `conversation.id`; a child thread only when a log carries `parent.conversation.id` (`codex.agent_response`, off by default) |
+| Codex | `sse_event` with `event.kind=response.completed`: `input_token_count` (includes `cached_token_count`), `output_token_count`, `reasoning_token_count`, `cache_write_token_count`; `tool_token_count` is their total | `tool_result`: `call_id`, `output_length`, `output_line_count` | log time (no response ID) | `conversation.id`; a child thread by `parent.conversation.id` on its final-answer `codex.agent_response` |
 
 Claude reports absent cache counters as zero, so a zero cache value does not
 prove the provider reported one. Codex fields that are absent stay `NULL`. A
@@ -361,22 +361,31 @@ after a tool output, otherwise `unknown`.
 
 A coordinator is attributed by its own session. Native subagents appear under
 the coordinator's session with their `native_agent_id`. A worker started from a
-coordinator's shell is linked only when its exporter reports the coordinator's
-session as the resource attribute `subyard.parent_session.id`; the collector then
-records a `parent_session` relation. Claude exposes its session to tools as
-`CLAUDE_CODE_SESSION_ID`, Codex as `CODEX_THREAD_ID`, and both clients read
-`OTEL_RESOURCE_ATTRIBUTES`:
+coordinator is linked when its exporter reports the coordinator's session as the
+resource attribute `subyard.parent_session.id`; the collector then records a
+`parent_session` relation. The shipped agent bridge adds that attribute to each
+worker's `OTEL_RESOURCE_ATTRIBUTES`, from its own `CLAUDE_CODE_SESSION_ID` or else
+`CODEX_THREAD_ID`, which Claude and Codex give their tools. A worker started
+another way can set it the same way:
 
 ```sh
 OTEL_RESOURCE_ATTRIBUTES="subyard.parent_session.id=$CLAUDE_CODE_SESSION_ID${OTEL_RESOURCE_ATTRIBUTES:+,$OTEL_RESOURCE_ATTRIBUTES}" codex exec ...
 ```
 
 Without it the worker's usage is still counted under its own session and the
-link stays unknown. One query reports a task from its coordinator session:
+link stays unknown. The managed Codex policy sets `otel.log_agent_responses`, so
+Codex logs each thread's final answer with its parent thread; the collector keeps
+the thread IDs and drops the response text. A worker's child threads report the
+same resource, so they are also linked to the coordinator, and their
+`child_thread` relation names the worker thread. One query reports a task from
+its coordinator session:
 
 ```sql
 SELECT CASE WHEN m.session_id = :session AND m.native_agent_id IS NULL THEN 'coordinator'
-            WHEN m.session_id = :session THEN 'subagent' ELSE 'worker' END AS party,
+            WHEN m.session_id = :session THEN 'subagent'
+            WHEN m.session_id IN (SELECT session_id FROM relations
+                                  WHERE json_extract(body, '$.relation') = 'child_thread') THEN 'worker-thread'
+            ELSE 'worker' END AS party,
        m.client, count(*) AS requests,
        sum(coalesce(m.input_tokens, 0) + coalesce(m.input_token_count, 0)) AS input_tokens,
        sum(coalesce(m.output_tokens, 0) + coalesce(m.output_token_count, 0)) AS output_tokens
@@ -529,15 +538,17 @@ Missing or invalid producer state makes profile readiness stale.
 The serialized writer batches with SQLite WAL and `synchronous=FULL`. Defaults
 bound OTLP payloads to 2 MiB, allow 16 concurrent OTLP requests before decode,
 and limit queued sanitized data to 16 MiB/128 requests. The profile setting
-`TELEMETRY_DISK_BUDGET` (default `30GiB`) sets the collector's `--disk-bytes`.
-Raw OTLP is accepted while allocated database pages and the WAL stay below half
-of it and the data partition keeps 1 GiB free, or a twentieth of a smaller
-partition. Beyond that the collector stores the request's usage records and
-bindings, refuses the raw request with a retryable status, and `stats` warns and
-names the cleanup command. The database itself may grow to three quarters of
-the budget. Each legacy archive uses additional disk space outside it.
+`TELEMETRY_DISK_BUDGET` (default `30GiB`) sets the collector's soft
+`--disk-bytes` budget. Raw OTLP is accepted while allocated database pages and
+the WAL stay a tenth below it and the data partition keeps 1 GiB free, or a
+twentieth of a smaller partition. Beyond that the collector refuses raw OTLP and
+its per-request session correlations with a retryable status, still stores the
+request's usage records and bindings and all lifecycle, resource and sample
+records, and `stats` warns with the cleanup command for that store. Those records
+are small and are not bounded by the budget, so a store above a lowered budget
+still opens. Each legacy archive uses additional disk space outside it.
 Nothing is pruned automatically. Remove old raw OTLP, per-request session
-correlations and samples manually:
+correlations, samples and filtered-event markers manually:
 
 ```sh
 "$collector" prune --data-dir "$data" --older-than 60d
@@ -548,6 +559,11 @@ store when the collector is stopped. Usage records and their bindings stay
 unless `--include-usage` is added; run lifecycle, resource and attribution
 records always stay, so an old run's outstanding resource responsibility does
 not disappear. Freed pages are reused; the database file does not shrink.
+
+A collector release older than this budget cannot run on such a store: it
+refuses to open a database above a third of its 1 GiB default bound, and its
+export would label zstd frames as plain protobuf. Before downgrading, export
+the history with this release's collector and keep the export.
 The producer spool is bounded to 4096 files and 64 MiB using fixed allocations
 and 64 KiB frames. It keeps records ordered within each generated run stream and
 within the broker stream. SQLite commits the records, projections and byte
@@ -570,8 +586,8 @@ changing bounds. Export data before pruning it when a longer history is required
 An OTLP success acknowledges a completed SQLite commit. A storage/capacity failure
 is retryable and never acknowledges an unsaved request. Admission is atomic per
 request; there is no misleading partial-success count. Only a raw OTLP refusal
-for disk budget or partition reserve keeps the request's usage records and
-bindings. Collector failure does not
+for disk budget or partition reserve keeps the request's other records, such as
+usage and bindings. Collector failure does not
 make agent commands or broker lifecycle operations wait indefinitely. If the
 bounded local spool fills, collection records a capacity gap where the reserved
 marker can be written. Native bytes the receiver never saw cannot be recovered

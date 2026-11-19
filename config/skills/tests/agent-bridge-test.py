@@ -118,7 +118,8 @@ if marker := os.environ.get('BRIDGE_TEST_NOT_READING'):
 if os.environ.get('BRIDGE_TEST_CAPTURE'):
     Path(os.environ['BRIDGE_TEST_CAPTURE']).write_text(json.dumps({
         'argv': sys.argv[1:], 'cwd': os.getcwd(),
-        'env': {key: os.environ.get(key) for key in ('BRIDGE_TEST_VALUE', 'TMPDIR', 'PATH')}}))
+        'env': {key: os.environ.get(key) for key in ('BRIDGE_TEST_VALUE', 'TMPDIR', 'PATH')},
+        'otel': os.environ.get('OTEL_RESOURCE_ATTRIBUTES')}))
 
 def emit(message):
     print(json.dumps(message), flush=True)
@@ -675,6 +676,29 @@ runpy.run_path(bridge, run_name='__main__')
                 self.cli('resume', root)
                 self.assertEqual(self.done(root), 'resumed:next')
                 self.assertEqual(json.loads(capture.read_text())['env'], info['env'])
+
+    def test_worker_resource_names_the_starting_session(self):
+        for name in ('CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'OTEL_RESOURCE_ATTRIBUTES'):
+            self.env.pop(name, None)
+        cases = [({}, [], None),
+                 ({'CODEX_THREAD_ID': 'thread-1'}, [], 'subyard.parent_session.id=thread-1'),
+                 ({'CLAUDE_CODE_SESSION_ID': 'session 1,=%', 'CODEX_THREAD_ID': 'thread-1',
+                   'OTEL_RESOURCE_ATTRIBUTES': 'service.namespace=team,subyard.parent_session.id=stale'}, [],
+                  'service.namespace=team,subyard.parent_session.id=session%201%2C%3D%25'),
+                 ({'CODEX_THREAD_ID': 'thread-1'}, ['--env', 'OTEL_RESOURCE_ATTRIBUTES=deployment.environment=ci'],
+                  'deployment.environment=ci,subyard.parent_session.id=thread-1')]
+        for index, (own, overrides, expected) in enumerate(cases):
+            for vendor in ('codex', 'claude'):
+                with self.subTest(case=index, vendor=vendor):
+                    capture = self.root / f'otel-{index}-{vendor}.json'
+                    saved = dict(self.env)
+                    self.env.update(own)
+                    try:
+                        root = self.start(vendor, 'complete', '--env', 'BRIDGE_TEST_CAPTURE=' + str(capture), *overrides)
+                        self.done(root)
+                    finally:
+                        self.env = saved
+                    self.assertEqual(json.loads(capture.read_text())['otel'], expected)
 
     def test_codex_refuses_mismatched_sandbox_before_starting_turn(self):
         flags = (('--sandbox', 'read-only'), ('-s=read-only',), ('-c', 'sandbox_mode="read-only"'))

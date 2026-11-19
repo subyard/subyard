@@ -900,10 +900,85 @@ class CoordinatorProvider(http.server.BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
+class WorkerProvider(http.server.BaseHTTPRequestHandler):
+    """A Codex worker spawns one native child thread, waits for it and finishes."""
+    def log_message(self, *_):
+        pass
+
+    def do_POST(self):
+        size = int(self.headers.get('Content-Length', '0'))
+        if not 0 < size <= 8*1024*1024:
+            return self.send_error(413)
+        request = json.loads(self.rfile.read(size))
+        server = self.server
+        with server.lock:
+            server.request_count += 1
+        namespaces = {child.get('name'): tool.get('name') for tool in request.get('tools', []) if tool.get('type') == 'namespace'
+                      for child in tool.get('tools', [])}
+        tools = {child.get('name'): child for tool in request.get('tools', [])
+                 for child in (tool.get('tools', []) if tool.get('type') == 'namespace' else [tool])}
+        items = [item for item in request.get('input', []) if isinstance(item, dict)]
+        text = ' '.join(part.get('text', '') for item in items if item.get('role') == 'user'
+                        for part in (item.get('content') if isinstance(item.get('content'), list) else []) if isinstance(part, dict))
+        last = items[-1] if items else {}
+        call, role = None, 'worker'
+        if 'CHILD-PROBE' in text:
+            role = 'child'
+        elif last.get('type') == 'function_call_output' and server.calls.get(last.get('call_id')) == 'spawn':
+            wait = next((name for name in ('wait_agent', 'wait') if name in tools), None)
+            if wait:
+                output = last.get('output')
+                try:
+                    spawned = json.loads(output if isinstance(output, str) else json.dumps(output))
+                    agent = spawned.get('agent_id') or spawned.get('id') or spawned.get('task_name')
+                except (ValueError, AttributeError):
+                    agent = None
+                properties = tools[wait].get('parameters', {}).get('properties', {})
+                arguments = {key: [agent] for key in ('ids', 'targets') if key in properties and agent}
+                if 'timeout_ms' in properties:
+                    arguments['timeout_ms'] = 60000
+                call = (wait, arguments, 'wait')
+        elif 'WORKER-PROBE' in text and 'spawn_agent' in tools and not any(item.get('type') == 'function_call_output' for item in items):
+            properties = tools['spawn_agent'].get('parameters', {}).get('properties', {})
+            arguments = {key: 'CHILD-PROBE: reply done.' for key in ('message', 'task', 'prompt') if key in properties}
+            if 'task_name' in properties:
+                arguments['task_name'] = 'fixture_child'
+            if 'items' in properties and not arguments:
+                arguments['items'] = [{'type': 'text', 'text': 'CHILD-PROBE: reply done.'}]
+            call = ('spawn_agent', arguments, 'spawn')
+        elif not request.get('tools'):
+            role = 'other'
+        response = uuid.uuid4().hex
+        if call:
+            server.calls['call_'+response] = call[2]
+            item = {'type': 'function_call', 'id': 'fc_'+response, 'call_id': 'call_'+response, 'name': call[0], 'arguments': json.dumps(call[1])}
+            if namespaces.get(call[0]) not in (None, 'functions'):
+                item['namespace'] = namespaces[call[0]]
+        else:
+            # Codex logs an agent response only for a final answer, as real models mark it.
+            item = {'type': 'message', 'id': 'msg_'+response, 'role': 'assistant', 'status': 'completed', 'phase': 'final_answer',
+                    'content': [{'type': 'output_text', 'text': 'Fixture complete.', 'annotations': []}]}
+        with server.lock:
+            server.roles.append(role)
+        # The worker's and its child's input counts tell them apart in one query.
+        usage = {'input_tokens': {'worker': 1, 'child': 2}.get(role, 0), 'output_tokens': 1, 'total_tokens': 2}
+        events = [{'type': 'response.created', 'response': {'id': 'resp_'+response}},
+                  {'type': 'response.output_item.done', 'output_index': 0, 'item': item},
+                  {'type': 'response.completed', 'response': {'id': 'resp_'+response, 'status': 'completed', 'output': [item], 'usage': usage}}]
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.end_headers()
+        self.wfile.write(b''.join(('data: '+json.dumps(event)+'\n\n').encode() for event in events))
+        self.wfile.flush()
+
+
 # The task report: the coordinator by session, its native subagents by agent
-# ID, and workers through the parent-session binding they reported.
+# ID, workers through the parent-session binding they reported, and their
+# native child threads through the child-thread binding.
 USAGE_REPORT = """SELECT CASE WHEN m.session_id=:session AND m.native_agent_id IS NULL THEN 'coordinator'
-    WHEN m.session_id=:session THEN 'subagent' ELSE 'worker' END AS party, m.client, count(*) AS requests,
+    WHEN m.session_id=:session THEN 'subagent'
+    WHEN m.session_id IN (SELECT session_id FROM relations WHERE json_extract(body,'$.relation')='child_thread') THEN 'worker-thread'
+    ELSE 'worker' END AS party, m.client, count(*) AS requests,
     sum(coalesce(m.input_tokens,0)+coalesce(m.input_token_count,0)) AS input_tokens
   FROM model_requests m WHERE m.session_id=:session OR m.session_id IN (SELECT session_id FROM relations
     WHERE json_extract(body,'$.relation')='parent_session' AND json_extract(body,'$.parent_session_id')=:session)
@@ -916,17 +991,22 @@ def usage_report(data, session):
 
 
 def assert_usage_attribution(root, binaries, fixture, native, tomli_w, env, endpoint, token, data, system_policy):
-    """A plain Claude coordinator, its native subagent and a Codex worker from its Bash, by one query."""
+    """A plain Claude coordinator, its native subagent, a Codex worker from its Bash and the worker's child thread, by one query."""
     home, claude, codex, project = root/'home', root/'claude', root/'codex', root/'project'
     for path in (root, home, claude, codex, project):
         path.mkdir(mode=0o700)
-    worker = http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.Provider)
-    worker.command, worker.failure, worker.workspace = None, None, project
+    worker = http.server.ThreadingHTTPServer(('127.0.0.1', 0), WorkerProvider)
+    worker.request_count, worker.calls, worker.roles, worker.lock = 0, {}, [], threading.Lock()
     coordinator = http.server.ThreadingHTTPServer(('127.0.0.1', 0), CoordinatorProvider)
     coordinator.roles = []
-    # Telemetry names no parent itself; the worker reports the inherited session.
-    coordinator.command = ('OTEL_RESOURCE_ATTRIBUTES="subyard.parent_session.id=$CLAUDE_CODE_SESSION_ID${OTEL_RESOURCE_ATTRIBUTES:+,$OTEL_RESOURCE_ATTRIBUTES}" '
-                           + shlex.join([str(binaries/'codex'), 'exec', '--skip-git-repo-check', 'WORKER-PROBE: reply done.']))
+    # Telemetry names no parent itself: the worker starts with the environment
+    # the shipped agent bridge gives a worker, which names the starting session.
+    bridge = Path(__file__).resolve().parents[5]/'config/skills/core/subyard-agent-bridge/bridge.py'
+    start = ('import importlib.util,os,sys\n'
+             'spec=importlib.util.spec_from_file_location("bridge",sys.argv[1]);bridge=importlib.util.module_from_spec(spec);spec.loader.exec_module(bridge)\n'
+             'os.execve(sys.argv[2],sys.argv[2:],bridge.parent_session_hint(dict(os.environ),os.environ))')
+    coordinator.command = shlex.join(['python3', '-I', '-c', start, str(bridge), str(binaries/'codex'), 'exec',
+                                      '--skip-git-repo-check', 'WORKER-PROBE: delegate to one child, then reply done.'])
     for server in (worker, coordinator):
         threading.Thread(target=server.serve_forever, daemon=True).start()
     config = {'model': 'subyard-fixture', 'model_provider': 'fixture', 'sandbox_mode': 'danger-full-access', 'approval_policy': 'never',
@@ -952,18 +1032,21 @@ def assert_usage_attribution(root, binaries, fixture, native, tomli_w, env, endp
             server.server_close()
     session = next(json.loads(line)['session_id'] for line in result.stdout.splitlines() if line.strip() and json.loads(line).get('session_id'))
     roles = {role: coordinator.roles.count(role) for role in set(coordinator.roles)}
-    assert roles.get('subagent') and roles.get('coordinator', 0) >= 3 and worker.request_count, json.dumps(dict(roles=roles, worker_requests=getattr(worker, 'request_count', 0)))
-    # Each fixture worker request reports one input token; Codex sends some
-    # auxiliary requests without a completed-response event.
-    expected = {'coordinator': ('claude', 100*roles['coordinator']), 'subagent': ('claude', 20*roles['subagent']), 'worker': ('codex', True)}
+    threads = {role: worker.roles.count(role) for role in set(worker.roles)}
+    assert roles.get('subagent') and roles.get('coordinator', 0) >= 3 and threads.get('worker') and threads.get('child'), json.dumps(dict(roles=roles, worker=threads))
+    # Each worker request reports one input token and each child request two;
+    # Codex sends some auxiliary requests without a completed-response event.
+    expected = {'coordinator': ('claude', 100*roles['coordinator']), 'subagent': ('claude', 20*roles['subagent']),
+                'worker': ('codex', True), 'worker-thread': ('codex', True)}
+    per_request = {'worker': 1, 'worker-thread': 2}
     deadline = time.monotonic()+40
     while True:
         report = usage_report(data, session)
-        parties = {row[0]: (row[1], row[3] if row[0] != 'worker' else 0 < row[3] == row[2]) for row in report}
+        parties = {row[0]: (row[1], row[3] if row[0] not in per_request else 0 < row[3] == per_request[row[0]]*row[2]) for row in report}
         if parties == expected or time.monotonic() >= deadline:
             break
         time.sleep(.5)
-    assert parties == expected, json.dumps(dict(report=report, roles=roles))
+    assert parties == expected, json.dumps(dict(report=report, roles=roles, worker=threads))
     # Re-delivered native exports add no usage.
     for protobuf in raw_otlp(data, 'otlp/logs'):
         request = urllib.request.Request(endpoint+'/v1/logs', data=protobuf, headers={'Content-Type': 'application/x-protobuf', 'Authorization': 'Bearer '+token})

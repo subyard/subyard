@@ -52,7 +52,7 @@ func Stats(ctx context.Context, db *sql.DB) (map[string]any, error) {
 	result := map[string]any{"origin_id": origin, "store_generation_id": generation, "schema_version": schema, "sqlite_version": version, "records": count, "last_sequence": last, "kinds": counts}
 	var since string
 	if db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key=?", rawRefusedKey).Scan(&since) == nil {
-		result["warnings"] = []string{"raw OTLP refused since " + since + ": disk budget or partition reserve reached; usage is still recorded. Free space with: subyard-telemetry prune --data-dir DATA_DIR --older-than 60d"}
+		result["raw_otlp_refused_since"] = since
 	}
 	return result, rows.Err()
 }

@@ -82,6 +82,8 @@ func Serve(ctx context.Context, s *Store, options Options) error {
 			http.Error(w, "invalid age", http.StatusBadRequest)
 			return
 		}
+		// A large prune may outlast the control write timeout.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		removed, err := s.Prune(time.Now().Add(-age), r.URL.Query().Get("include_usage") == "1")
 		if err != nil {
 			http.Error(w, "telemetry prune failed", http.StatusServiceUnavailable)

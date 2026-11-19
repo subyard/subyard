@@ -45,7 +45,7 @@ def main():
             if section == 'env':
                 assert fields['OTEL_LOGS_EXPORTER'] == 'otlp'
             else:
-                assert fields['log_user_prompt'] is False
+                assert fields['log_user_prompt'] is False and fields['log_agent_responses'] is True
                 for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
                     assert fields[key]['otlp-http']['tls'] == {}
     if phase == 'disabled':

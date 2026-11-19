@@ -41,8 +41,10 @@ failure is retryable; no memory-only admission is success. Requests are atomic:
 the official receiver's consumer interface has no downstream partial-success
 counts, so the collector never commits part of a request and rejects the whole.
 The one exception is a raw OTLP refusal for disk budget or partition reserve:
-the request's derived usage records and bindings are committed, and their
-deterministic IDs make the sender's retry add nothing.
+only raw OTLP and its per-request correlations are refused; the request's
+derived usage records and bindings are committed, and their deterministic IDs
+make the sender's retry add nothing. A spool frame carrying raw OTLP is retried
+whole.
 Field redactions are counted as policy actions, not undisclosed record loss.
 
 Raw rows have stable `(origin_id, event_id)` pairs. Export and replay preserve

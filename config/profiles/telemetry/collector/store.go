@@ -33,21 +33,19 @@ type Limits struct {
 	QueueRequests int
 	QueueBytes    int64
 	RequestBytes  int64
-	DiskBytes     int64
-	// Retention bounds only filtered-event markers. Records are never pruned
-	// automatically; see Prune.
-	Retention  time.Duration
+	// DiskBytes is a soft budget: raw OTLP stops a tenth below it, other
+	// records continue. Nothing expires automatically; see Prune.
+	DiskBytes  int64
 	BatchDelay time.Duration
 	// ReserveBytes is the free space kept on the data partition, at most a
-	// twentieth of it. Below it raw OTLP is refused while usage and bindings
-	// are still accepted.
+	// twentieth of it. Below it raw OTLP is refused as well.
 	ReserveBytes int64
 }
 
 const DefaultDiskBytes = 30 << 30
 
 func DefaultLimits() Limits {
-	return Limits{128, 16 << 20, 2 << 20, DefaultDiskBytes, 7 * 24 * time.Hour, 5 * time.Millisecond, 1 << 30}
+	return Limits{128, 16 << 20, 2 << 20, DefaultDiskBytes, 5 * time.Millisecond, 1 << 30}
 }
 
 type writeRequest struct {
@@ -144,7 +142,7 @@ func openStore(dir string, limits Limits) (*Store, error) {
 	if absoluteErr != nil {
 		return nil, absoluteErr
 	}
-	if limits.QueueRequests < 1 || limits.QueueBytes < 1 || limits.RequestBytes < 1 || limits.DiskBytes < 1 || limits.Retention <= 0 || limits.BatchDelay <= 0 {
+	if limits.QueueRequests < 1 || limits.QueueBytes < 1 || limits.RequestBytes < 1 || limits.DiskBytes < 1 || limits.BatchDelay <= 0 {
 		return nil, errors.New("invalid telemetry bounds")
 	}
 	if err := privateDir(dir); err != nil {
@@ -188,22 +186,10 @@ func openStore(dir string, limits Limits) (*Store, error) {
 	if err = db.QueryRow("PRAGMA synchronous").Scan(&syncMode); err != nil || syncMode != 2 {
 		return bad(errors.New("cannot enable FULL synchronization"))
 	}
-	var pageSize int64
-	if err = db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
-		return bad(err)
-	}
-	// The database may use three quarters of the budget; raw OTLP stops at
-	// half, leaving the rest for usage, bindings and WAL growth.
-	maxPages := limits.DiskBytes / 4 * 3 / pageSize
-	if maxPages < 64 {
+	// The budget is soft, so a lowered budget or a store above it still opens
+	// and keeps accepting usage and lifecycle records.
+	if limits.DiskBytes < 1<<20 {
 		return bad(errors.New("telemetry disk bound too small"))
-	}
-	var actualMax int64
-	if err = db.QueryRow(fmt.Sprintf("PRAGMA max_page_count=%d", maxPages)).Scan(&actualMax); err != nil {
-		return bad(err)
-	}
-	if actualMax > maxPages {
-		return bad(errors.New("existing database exceeds capacity bound"))
 	}
 	if _, err = db.Exec("PRAGMA wal_autocheckpoint=128"); err != nil {
 		return bad(err)
@@ -425,8 +411,6 @@ func (s *Store) submit(ctx context.Context, entries []Envelope, replay bool, adv
 }
 func (s *Store) writer() {
 	defer close(s.done)
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
 	for {
 		var first writeRequest
 		select {
@@ -435,9 +419,6 @@ func (s *Store) writer() {
 				return
 			}
 			first = r
-		case <-ticker.C:
-			_, _ = s.db.Exec("DELETE FROM filtered_events WHERE expires_at<=?", spoolTime())
-			continue
 		}
 		batch := []writeRequest{first}
 		timer := time.NewTimer(s.limits.BatchDelay)
@@ -496,8 +477,8 @@ func (s *Store) usedBytes() (int64, error) {
 	return used, nil
 }
 
-// rawCapacity reports whether raw OTLP still fits the budget and the data
-// partition keeps its reserve.
+// rawCapacity reports whether raw OTLP still fits the budget minus a tenth
+// kept for other records, and the data partition keeps its reserve.
 func (s *Store) rawCapacity(incoming int64) (bool, error) {
 	used, err := s.usedBytes()
 	if err != nil {
@@ -509,11 +490,17 @@ func (s *Store) rawCapacity(incoming int64) (bool, error) {
 	}
 	// A small partition keeps a twentieth of its size instead.
 	free, reserve := int64(fs.Bavail)*int64(fs.Bsize), min(s.limits.ReserveBytes, int64(fs.Blocks)*int64(fs.Bsize)/20)
-	return used+incoming*8+128*1024 <= s.limits.DiskBytes/2 && free >= reserve, nil
+	return used+incoming <= s.limits.DiskBytes-s.limits.DiskBytes/10 && free >= reserve, nil
+}
+
+// raw reports whether an entry is raw OTLP or its per-request correlation,
+// the only data refused without raw capacity.
+func raw(e Envelope) bool {
+	return strings.HasPrefix(e.Kind, "otlp/") || e.SourceID == "collector:otlp-correlation"
 }
 
 // commit returns a batch error, or one result per request. Without raw
-// capacity it still stores usage and bindings and refuses the rest.
+// capacity it stores everything except raw OTLP and its correlations.
 func (s *Store) commit(batch []writeRequest) ([]error, error) {
 	// ponytail: one writer serializes bounded batches; shard only if measured throughput requires it.
 	var incoming int64
@@ -533,14 +520,14 @@ func (s *Store) commit(batch []writeRequest) ([]error, error) {
 	for i, r := range batch {
 		entries := r.entries
 		if !fits {
-			if r.advance != nil {
-				results[i] = ErrCapacity
-				continue
-			}
-			entries = slices.DeleteFunc(slices.Clone(entries), func(e Envelope) bool { return e.SourceID != usageSource })
-			if len(entries) < len(r.entries) {
-				results[i] = ErrCapacity
-			}
+			entries = slices.DeleteFunc(slices.Clone(entries), raw)
+		}
+		if len(entries) < len(r.entries) && r.advance != nil {
+			// A spool frame is retried whole rather than losing its raw part.
+			results[i] = ErrCapacity
+			continue
+		} else if len(entries) < len(r.entries) {
+			results[i] = ErrCapacity
 		} else if r.advance != nil {
 			if err = r.advance.apply(tx); err != nil {
 				return nil, err
@@ -584,10 +571,12 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
 		return nil
 	}
 	if e.filtered {
+		// Markers live as long as records: expires_at holds the marker's
+		// receive time, and Prune removes it with records of the same age.
 		_, err := tx.Exec(`INSERT INTO filtered_events
 			SELECT ?,?,? WHERE NOT EXISTS(SELECT 1 FROM records WHERE origin_id=? AND event_id=?)
 			ON CONFLICT(origin_id,event_id) DO NOTHING`, e.OriginID, e.EventID,
-			time.Now().Add(s.limits.Retention).UTC().Format(timestampLayout), e.OriginID, e.EventID)
+			spoolTime(), e.OriginID, e.EventID)
 		if err != nil {
 			return ErrStorage
 		}
@@ -638,7 +627,7 @@ func (s *Store) pruneBatch(cutoff string, includeUsage bool) (int64, error) {
 	defer tx.Rollback()
 	// Lifecycle responsibility outlives high-volume samples. In particular, an
 	// expired lease or exited agent is not evidence that its resource stopped.
-	if _, err = tx.Exec("DELETE FROM filtered_events WHERE expires_at<=?", spoolTime()); err != nil {
+	if _, err = tx.Exec("DELETE FROM filtered_events WHERE expires_at<?", cutoff); err != nil {
 		return 0, err
 	}
 	res, err := tx.Exec(`WITH expired AS MATERIALIZED (

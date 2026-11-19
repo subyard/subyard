@@ -3,10 +3,15 @@ package collector
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Subyard/Subyard/internal/testkit"
 
 	"go.opentelemetry.io/collector/pdata/plog/plogotlp"
 )
@@ -68,6 +73,23 @@ func TestUsageFromNativeLogs(t *testing.T) {
 	for _, row := range usageRows(t, s, "SELECT body FROM records WHERE source_id='"+usageSource+"'") {
 		if strings.Contains(stringValue(row, "body"), "canary") {
 			t.Fatalf("private value in derived row: %v", row)
+		}
+	}
+	// Codex agent responses are logged for their thread IDs; the text is not kept.
+	stored, err := s.db.Query("SELECT coalesce(body,''),coalesce(protobuf,x'') FROM records")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stored.Close()
+	for stored.Next() {
+		var body string
+		var protobuf []byte
+		if err = stored.Scan(&body, &protobuf); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := decompressOTLP(protobuf)
+		if err != nil || strings.Contains(body+string(raw), "canary-codex-agent-response") {
+			t.Fatalf("agent response text stored (%v): %s", err, body)
 		}
 	}
 	var version int
@@ -187,18 +209,28 @@ func TestCapacityKeepsUsageAndPruneKeepsUsage(t *testing.T) {
 		}
 		return n
 	}
-	if count("kind LIKE 'otlp/%'") != 0 || count("kind='usage'") != 5 {
-		t.Fatal("capacity refusal did not keep only usage")
+	if count("kind LIKE 'otlp/%' OR source_id='collector:otlp-correlation'") != 0 || count("kind='usage'") != 5 {
+		t.Fatal("capacity refusal did not keep usage and drop raw OTLP")
+	}
+	// Lifecycle and resource records keep flowing past the raw limit.
+	if err = s.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": "past-budget"}),
+		record("sample", map[string]any{"object_id": "scope-1", "cpu_ns": 1})}); err != nil {
+		t.Fatalf("lifecycle refused without raw capacity: %v", err)
 	}
 	stats, err := Stats(ctx, s.db)
-	if err != nil || !strings.Contains(strings.Join(stats["warnings"].([]string), ""), "subyard-telemetry prune") {
-		t.Fatalf("status names no cleanup: %v (%v)", stats["warnings"], err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addStorageWarning(stats, s.dir)
+	binary, _ := os.Executable()
+	if want := binary + " prune --data-dir " + s.dir + " --older-than 60d"; !strings.HasSuffix(stats["warnings"].([]string)[0], want) {
+		t.Fatalf("status names no runnable cleanup: %v, want %q", stats["warnings"], want)
 	}
 	s.limits.DiskBytes = DefaultDiskBytes
 	if err = consumers.logs.ConsumeLogs(ctx, logs.Logs()); err != nil {
 		t.Fatal(err)
 	}
-	if stats, _ = Stats(ctx, s.db); stats["warnings"] != nil || count("kind LIKE 'otlp/%'") != 1 {
+	if stats, _ = Stats(ctx, s.db); stats["raw_otlp_refused_since"] != nil || count("kind LIKE 'otlp/%'") != 1 {
 		t.Fatalf("raw capacity did not resume: %v", stats)
 	}
 	if _, err = s.db.Exec("UPDATE records SET received_time='2000-01-01T00:00:00.000000000Z'"); err != nil {
@@ -207,7 +239,7 @@ func TestCapacityKeepsUsageAndPruneKeepsUsage(t *testing.T) {
 	if _, err = s.Prune(time.Now().Add(-60*24*time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
-	if count("kind LIKE 'otlp/%' OR kind='session'") != 0 || count("source_id='"+usageSource+"'") != 6 {
+	if count("kind LIKE 'otlp/%' OR kind IN ('session','sample')") != 0 || count("source_id='"+usageSource+"'") != 6 || count("kind='run'") != 1 {
 		t.Fatal("prune removed usage or kept raw OTLP")
 	}
 	if _, err = s.Prune(time.Now().Add(-60*24*time.Hour), true); err != nil || count("source_id='"+usageSource+"'") != 0 {
@@ -215,8 +247,8 @@ func TestCapacityKeepsUsageAndPruneKeepsUsage(t *testing.T) {
 	}
 }
 
-// A store that filled the former one-third database share accepts data once
-// the larger budget is in effect.
+// A store that filled the former hard database bound accepts data once
+// reopened.
 func TestFullStoreResumesWithLargerBudget(t *testing.T) {
 	ctx := context.Background()
 	s := fixtureStore(t)
@@ -242,4 +274,145 @@ func TestFullStoreResumesWithLargerBudget(t *testing.T) {
 	if err = s.Ingest(ctx, []Record{record("gap", map[string]any{"reason": "source_offline"})}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// The budget is soft: a store above a lowered budget still opens, keeps
+// lifecycle and usage, and refuses only raw OTLP.
+func TestStoreAboveBudgetOpens(t *testing.T) {
+	ctx := context.Background()
+	s := fixtureStore(t)
+	captureNativeFixtures(t, s)
+	var batch []Record
+	for range 2000 {
+		batch = append(batch, record("gap", map[string]any{"reason": "source_offline"}))
+	}
+	if err := s.Ingest(ctx, batch); err != nil {
+		t.Fatal(err)
+	}
+	dir := s.dir
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultLimits()
+	limits.DiskBytes = 1 << 20
+	s, err := Open(dir, limits)
+	if err != nil {
+		t.Fatalf("store above a lowered budget did not open: %v", err)
+	}
+	defer s.Close()
+	if err = s.Ingest(ctx, []Record{record("run", map[string]any{"agent_run_id": "after-lowering"})}); err != nil {
+		t.Fatal(err)
+	}
+	before := usageSummary(t, s)
+	consumers, err := makeConsumers(s, DefaultPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	logs := plogotlp.NewExportRequest()
+	if err = logs.UnmarshalJSON([]byte(`{"resourceLogs":[{"scopeLogs":[{"logRecords":[{"observedTimeUnixNano":"1792800000000000009","attributes":[{"key":"event.name","value":{"stringValue":"codex.sse_event"}},
+		{"key":"event.kind","value":{"stringValue":"response.completed"}},{"key":"conversation.id","value":{"stringValue":"late-thread"}},{"key":"input_token_count","value":{"stringValue":"7"}}]}]}]}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err = consumers.logs.ConsumeLogs(ctx, logs.Logs()); err == nil {
+		t.Fatalf("raw OTLP above budget: %v", err)
+	}
+	if after := usageSummary(t, s); after == before {
+		t.Fatal("usage above budget was not recorded")
+	}
+}
+
+// Filtered-event markers are kept until a prune removes records of their age.
+func TestFilteredMarkersFollowPrune(t *testing.T) {
+	s := fixtureStore(t)
+	for _, id := range []string{"old", "new"} {
+		tx, err := s.db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.putRecord(tx, Envelope{OriginID: s.origin, EventID: id, filtered: true}); err != nil {
+			t.Fatal(err)
+		}
+		if err = tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec("UPDATE filtered_events SET expires_at='2000-01-01T00:00:00.000000000Z' WHERE event_id='old'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prune(time.Now().Add(-60*24*time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	rows := usageRows(t, s, "SELECT group_concat(event_id) AS ids FROM filtered_events")
+	if rows[0]["ids"] != "new" {
+		t.Fatalf("markers after prune: %v", rows)
+	}
+}
+
+// prune asks a running collector over its control socket and falls back to
+// the store when the collector is stopped.
+func TestPruneCommand(t *testing.T) {
+	ctx := context.Background()
+	s := fixtureStore(t)
+	captureNativeFixtures(t, s)
+	if _, err := s.db.Exec("UPDATE records SET received_time='2000-01-01T00:00:00.000000000Z'"); err != nil {
+		t.Fatal(err)
+	}
+	dir := s.dir
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) (int64, error) {
+		var out bytes.Buffer
+		age, usage := args[0], len(args) > 1
+		if err := runPrune(ctx, &out, dir, age, usage, DefaultDiskBytes); err != nil {
+			return 0, err
+		}
+		var result struct {
+			Removed int64 `json:"removed_records"`
+		}
+		return result.Removed, json.Unmarshal(out.Bytes(), &result)
+	}
+	if _, err := run("0d"); err == nil {
+		t.Fatal("zero age accepted")
+	}
+	// Stopped collector: the command opens the store itself.
+	if n, err := run("60d"); err != nil || n == 0 {
+		t.Fatalf("stopped prune: %d (%v)", n, err)
+	}
+	s, err := Open(dir, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows := usageRows(t, s, "SELECT count(*) AS n FROM records WHERE source_id='"+usageSource+"'"); rows[0]["n"] == int64(0) {
+		t.Fatal("prune removed usage without --include-usage")
+	}
+	// Running collector: it holds the store lock, so only the control socket works.
+	authFile := filepath.Join(testkit.TempDir(t), "auth.token")
+	testkit.WriteFile(t, authFile, []byte(strings.Repeat("a", 32)), 0600)
+	serveCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(serveCtx, s, Options{AuthFile: authFile, Receiver: func(ctx context.Context, _ *Store, _ Options, _ *localAuth) error {
+			<-ctx.Done()
+			return nil
+		}})
+	}()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "control.sock")); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n, err := run("1ns", "--include-usage"); err != nil || n == 0 {
+		t.Fatalf("control prune: %d (%v)", n, err)
+	}
+	if rows := usageRows(t, s, "SELECT count(*) AS n FROM records WHERE source_id='"+usageSource+"'"); rows[0]["n"] != int64(0) {
+		t.Fatal("--include-usage kept usage")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
 }
