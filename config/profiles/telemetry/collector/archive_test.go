@@ -189,3 +189,32 @@ os._exit(0)
 		})
 	}
 }
+
+func TestArchivePublicationRefusesForeignPaths(t *testing.T) {
+	for name, prepare := range map[string]func(dir string, c *cutover){
+		"staging":  func(dir string, _ *cutover) { testkit.WriteFile(t, filepath.Join(dir, pendingArchive), nil, 0600) },
+		"archive":  func(dir string, c *cutover) { testkit.WriteFile(t, filepath.Join(dir, c.Archive, databaseName), nil, 0400) },
+		"database": func(_ string, c *cutover) { c.Inode++ },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := testkit.TempDir(t)
+			path := filepath.Join(dir, databaseName)
+			testkit.WriteFile(t, path, nil, 0600)
+			info, _ := os.Stat(path)
+			st := info.Sys().(*syscall.Stat_t)
+			c := cutover{Device: st.Dev, Inode: st.Ino, Archive: "archive", Nonce: newID()}
+			if name == "archive" {
+				if err := privateDir(filepath.Join(dir, c.Archive)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			prepare(dir, &c)
+			if err := c.publishArchive(dir); err == nil || !strings.Contains(err.Error(), "legacy") {
+				t.Fatalf("publishArchive accepted a foreign %s: %v", name, err)
+			}
+			if after, err := os.Stat(path); err != nil || !os.SameFile(info, after) {
+				t.Fatalf("active database moved: %v", err)
+			}
+		})
+	}
+}

@@ -558,24 +558,7 @@ class Runtime:
             if info.st_uid != self.uid or stat.S_IMODE(info.st_mode) != 0o600:
                 raise ValueError('foreign telemetry cutover receipt')
             value = json.loads(existing)
-        name, nonce = value['archive'], value['nonce']
-        if not re.fullmatch(r'archive(?:-[1-9][0-9]*)?', name) or not re.fullmatch(r'[0-9a-f]{32}', nonce):
-            raise ValueError('invalid telemetry cutover receipt')
-        pending = self.data/PENDING
-        if pending.exists() or pending.is_symlink():
-            raise ValueError('legacy archive staging collision')
-        for path in (self.data/name, self.data/(PENDING+'-'+nonce)):
-            if path.exists() or path.is_symlink():
-                target = path/database.name
-                if path.is_symlink() or not path.is_dir() or path.stat().st_uid != self.uid or stat.S_IMODE(path.stat().st_mode) != 0o700:
-                    raise ValueError('legacy archive collision')
-                if not target.exists() and path.name != name and not any(path.iterdir()):
-                    continue  # The receipt owns this private staging name.
-                info = target.lstat()
-                if ((info.st_dev, info.st_ino) != (value['device'], value['inode'])
-                        or target.is_symlink() or not target.is_file() or info.st_nlink != 1 or info.st_uid != self.uid
-                        or stat.S_IMODE(info.st_mode) not in (0o400, 0o600)):
-                    raise ValueError('legacy archive collision')
+        # The collector validates the receipt, staging and archive when it publishes the archive.
         return value
 
     def retire_legacy_producers(self):
