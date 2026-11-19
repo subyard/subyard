@@ -570,7 +570,10 @@ export would label zstd frames as plain protobuf. Before `yard update --rollback
 or any downgrade, run these steps inside the yard as the developer account that
 owns `$data`. They keep a copy of this release's collector and export the whole
 history in windows of 1000 records into a private directory. The collector may
-keep running.
+keep running. The export is about 1.3 times the raw OTLP volume, because OTLP
+is decompressed and base64-encoded: roughly 8–9 GB for 60 days at about
+100 MB a day. Check free space with `df -h "$HOME"` first, or set `keep` to a
+private directory on another partition.
 
 ```sh
 collector=/usr/local/lib/subyard-telemetry/subyard-telemetry
@@ -593,6 +596,8 @@ echo "last exported sequence: $after"
 The loop stops at the first empty window and prints the last exported
 sequence. If it stops on an error instead, fix the cause and rerun the lines
 from `while :` to the end in the same shell; they resume at the failed window.
+Each export read has a 5 s deadline; if a window of large records exceeds it,
+rerun those lines with a smaller `--limit`, such as `--limit 100`.
 
 If the older collector already fails to open the store after a rollback, move
 the store aside and let the older collector start fresh. Run the two

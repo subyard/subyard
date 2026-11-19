@@ -421,7 +421,10 @@ class Runtime:
 
     def raw_refused(self):
         """Whether the collector's private marker says raw OTLP is refused for space."""
-        directory = os.open(self.data, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            directory = os.open(self.data, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return False
         try:
             fd = os.open('raw-otlp-refused', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         except FileNotFoundError:

@@ -48,11 +48,12 @@ class LifecycleTest(unittest.TestCase):
             source, data = Path(name), Path(name)/'store'
             shutil.copytree(profile, source, dirs_exist_ok=True, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
             shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
-            data.mkdir()
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=name)
             runtime = guest.Runtime(source, 'dev', False, [], data=data, account=account)
             marker = data/'raw-otlp-refused'
             with patch.object(guest.sqlite3, 'connect', side_effect=AssertionError('root opened SQLite')):
+                self.assertFalse(runtime.raw_refused())
+                data.mkdir()
                 self.assertFalse(runtime.raw_refused())
                 marker.write_bytes(b'raw_otlp_refused_since=2026-11-19T00:00:00.000000000Z\n')
                 marker.chmod(0o600)
