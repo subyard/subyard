@@ -673,10 +673,10 @@ while its timer is stopped. It restores that drop-in before native recovery, and
 refuses to restart the timer against configuration that could not be safely restored.
 
 The 40 GiB virtual disk does not guarantee 35 GiB of usable free space after filesystem,
-base-image and owner provisioning costs. The nested directory pool shares that physical
-backing. After compilation and controller preparation, the fixture reclaims its marked
-Go build cache, supported default Go build cache and the disposable VM's Go module cache
-through guarded helpers. It also cleans the verified owner container's downloaded APT
+base-image and owner provisioning costs, so nested VMs use 9 GiB disks. The nested
+directory pool shares that physical backing. After compilation and controller preparation,
+the fixture reclaims its marked Go build cache, supported default Go build cache and the
+disposable VM's Go module cache through guarded helpers. It also cleans the verified owner container's downloaded APT
 archives and removes only package staging created by this run after installed-worker
 verification. Installed runtimes, release caches, recipes, images and pins remain intact.
 Once owner installation is complete, it also removes reproducible downloaded APT
@@ -698,8 +698,9 @@ source, fixture and Incus storage costs in both scopes. Parent and child categor
 overlap and must not be summed; symlinked, inaccessible or timed-out paths report null.
 These read-only measurements do not authorize deletion of installed or cached content.
 It records numeric backing capacity and broker telemetry before and after reclamation,
-before refusing insufficient or unknown capacity. The cold builder still requires 30 GiB
-plus the normal 5 GiB physical reserve; reclamation does not guarantee admission.
+before refusing insufficient or unknown capacity. The cold builder still requires three nested
+disks (27 GiB) plus the fixture's explicit 4 GiB physical reserve; reclamation does not
+guarantee admission.
 
 Run the fixture with:
 

@@ -333,9 +333,9 @@ sample_cold_capacity() {
   fi
   read -r total used free extra <<<"$disk"
   if [[ "$total" =~ ^[0-9]{1,18}$ && "$used" =~ ^[0-9]{1,18}$ && "$free" =~ ^[0-9]{1,18}$ ]] && [ -z "$extra" ]; then
-    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","total_bytes":%s,"used_bytes":%s,"available_bytes":%s,"builder_peak_bytes":32212254720,"reserve_bytes":4294967296,"required_bytes":36507222016}\n' "$phase" "$total" "$used" "$free"
+    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","total_bytes":%s,"used_bytes":%s,"available_bytes":%s,"builder_peak_bytes":28991029248,"reserve_bytes":4294967296,"required_bytes":33285996544}\n' "$phase" "$total" "$used" "$free"
   else
-    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","error_kind":"telemetry_unavailable","required_bytes":36507222016}\n' "$phase"
+    printf 'STAGING_STORAGE_CAPACITY={"phase":"%s","error_kind":"telemetry_unavailable","required_bytes":33285996544}\n' "$phase"
     die 'cold builder storage telemetry unavailable'
   fi
   [ "$broker_known" = 1 ] || die 'cold builder broker telemetry unavailable'
@@ -910,7 +910,7 @@ func main() {
 		RepositoryRoot: os.Args[5], DataHome: home, Dispatcher: root + "/bin/yard-engine",
 		Project: "subyard-test-yard", Instance: "yard-test-yard", YardName: "test-yard", DesiredPower: "running", Output: os.Stderr,
 		Environment: map[string]string{"NESTED_E2E_VMS": "1", "DEV_USER": "dev", "E2E_VM_IMAGE": "images:debian/13/cloud",
-			"E2E_VM_CPU": cpu, "E2E_VM_MEMORY": "2GiB", "E2E_VM_DISK": "10GiB", "E2E_VM_SLOT_COUNT": "1", "E2E_VM_BOOT_TIMEOUT": "300", "E2E_DISK_RESERVE": "4GiB"},
+			"E2E_VM_CPU": cpu, "E2E_VM_MEMORY": "2GiB", "E2E_VM_DISK": "9GiB", "E2E_VM_SLOT_COUNT": "1", "E2E_VM_BOOT_TIMEOUT": "300", "E2E_DISK_RESERVE": "4GiB"},
 	}
 	if err := backend.Apply(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1195,6 +1195,9 @@ if [ "$OWNER_BASE_IMAGE_CREATED" = 1 ]; then
 fi
 # shellcheck disable=SC2034
 OWNER_DIAGNOSTIC_VM_MEMORY=2GiB
+# The cold builder reserves three nested disks; with the reserve they must fit beside the OS on a 40GiB lease.
+# shellcheck disable=SC2034
+OWNER_DIAGNOSTIC_VM_DISK=9GiB
 # Keep the product boot budget and admission reserves, never widen for PASS.
 # shellcheck disable=SC2034
 OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT=300
@@ -1255,13 +1258,13 @@ fi
 sample_disposable_capacity after_reclaim
 sample_disk_footprint
 sample_cold_capacity after_reclaim
-# A cold builder reserves 30GiB plus this fixture's explicit 4GiB physical reserve.
+# A cold builder reserves 27GiB plus this fixture's explicit 4GiB physical reserve.
 jq -e '.resources.budgets.disk_reserve_bytes == (4*1024*1024*1024)' <<<"$before" >/dev/null \
   || die 'cold builder disk reserve differs from explicit fixture setting'
-[ "$free" -ge $((34*1024*1024*1024)) ] \
+[ "$free" -ge $((31*1024*1024*1024)) ] \
   || die "cold builder cannot preserve this fixture's explicit disk reserve"
 jq -e '.resources.memory_admission | .physical_available_known==true and .headroom_bytes >= (2*1024*1024*1024+512*1024*1024)' <<<"$before" >/dev/null || die 'cold builder cannot preserve normal memory admission reserve'
-printf 'STAGING_RESOURCE_CONTRACT={"nested_cpu":%s,"memory":"2GiB","disk":"10GiB","boot_timeout_seconds":300,"historical_resource_match":false}\n' "$diagnostic_cpu"
+printf 'STAGING_RESOURCE_CONTRACT={"nested_cpu":%s,"memory":"2GiB","disk":"9GiB","boot_timeout_seconds":300,"historical_resource_match":false}\n' "$diagnostic_cpu"
 jq -e '(.resources.bases // []) | length == 0'  <<<"$before" >/dev/null || die 'cold base fixture already has a base'
 # Keep actual failures intact until durable capture; restore only owned services.
 outer_exec systemctl stop subyard-test-vms-lease-reaper.timer
