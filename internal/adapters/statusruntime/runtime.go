@@ -619,11 +619,16 @@ func (runtime Runtime) profileDashboardStatus(ctx context.Context, yard domain.C
 			continue
 		}
 		status := domain.SharedResourceStatus{Profile: definition.Name, Name: "dashboard", State: "down", Hint: runtime.program() + " init"}
+		var advisory []domain.SharedResourceStatus
 		if running {
 			started := time.Now()
 			err := phaseCtx.Err()
 			if err == nil {
-				err = runtime.profileCheck(phaseCtx, definition, nil)
+				// One probe serves the dashboard and any advisory of this profile.
+				var stderr boundedOutput
+				if err = runtime.profileCheck(phaseCtx, definition, &stderr); err == nil && phaseCtx.Err() == nil {
+					advisory = declaredAdvisory(definition, stderr)
+				}
 			}
 			if err == nil && phaseCtx.Err() == nil {
 				status.State = "up"
@@ -641,7 +646,7 @@ func (runtime Runtime) profileDashboardStatus(ctx context.Context, yard domain.C
 				status.Hint += profileCheckDiagnostic(err, contextErr, time.Since(started))
 			}
 		}
-		result = append(result, status)
+		result = append(append(result, status), advisory...)
 	}
 	return result
 }
@@ -670,19 +675,24 @@ func (runtime Runtime) profileAdvisoryStatus(ctx context.Context, yard domain.Co
 	defer cancel()
 	var result []domain.SharedResourceStatus
 	for _, definition := range runtime.Profiles {
-		if len(definition.Advisories) == 0 || !running || !definition.Selected(yard.YardName, runtime.Environment) {
+		// A dashboard profile reports its advisory from the dashboard probe.
+		if len(definition.Advisories) == 0 || definition.Dashboard != nil || !running || !definition.Selected(yard.YardName, runtime.Environment) {
 			continue
 		}
 		var stderr boundedOutput
-		if runtime.profileCheck(phaseCtx, definition, &stderr) != nil || phaseCtx.Err() != nil {
-			continue
-		}
-		code := profile.ServiceAdvisory(stderr)
-		if hint, declared := definition.Advisories[code]; declared {
-			result = append(result, domain.SharedResourceStatus{Profile: definition.Name, Name: code, State: "warning", Hint: hint})
+		if runtime.profileCheck(phaseCtx, definition, &stderr) == nil && phaseCtx.Err() == nil {
+			result = append(result, declaredAdvisory(definition, stderr)...)
 		}
 	}
 	return result
+}
+
+func declaredAdvisory(definition profile.Definition, stderr []byte) []domain.SharedResourceStatus {
+	code := profile.ServiceAdvisory(stderr)
+	if hint, declared := definition.Advisories[code]; declared {
+		return []domain.SharedResourceStatus{{Profile: definition.Name, Name: code, State: "warning", Hint: hint}}
+	}
+	return nil
 }
 
 type boundedOutput []byte

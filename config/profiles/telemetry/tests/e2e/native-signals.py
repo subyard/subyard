@@ -900,6 +900,10 @@ class CoordinatorProvider(http.server.BaseHTTPRequestHandler):
         self.wfile.write(content)
 
 
+# Codex logs each final answer as `response`; the collector must keep only IDs.
+WORKER_ANSWER_CANARY = 'Fixture complete. telemetry-canary-worker-final-answer'
+
+
 class WorkerProvider(http.server.BaseHTTPRequestHandler):
     """A Codex worker spawns one native child thread, waits for it and finishes."""
     def log_message(self, *_):
@@ -957,7 +961,7 @@ class WorkerProvider(http.server.BaseHTTPRequestHandler):
         else:
             # Codex logs an agent response only for a final answer, as real models mark it.
             item = {'type': 'message', 'id': 'msg_'+response, 'role': 'assistant', 'status': 'completed', 'phase': 'final_answer',
-                    'content': [{'type': 'output_text', 'text': 'Fixture complete.', 'annotations': []}]}
+                    'content': [{'type': 'output_text', 'text': WORKER_ANSWER_CANARY, 'annotations': []}]}
         with server.lock:
             server.roles.append(role)
         # The worker's and its child's input counts tell them apart in one query.
@@ -1047,6 +1051,13 @@ def assert_usage_attribution(root, binaries, fixture, native, tomli_w, env, endp
             break
         time.sleep(.5)
     assert parties == expected, json.dumps(dict(report=report, roles=roles, worker=threads))
+    marker = WORKER_ANSWER_CANARY.split()[-1].encode()
+    for row in exported(data):
+        assert marker not in base64.b64decode(row.get('protobuf') or '') and marker not in json.dumps(row.get('body')).encode(), \
+            'worker final-answer text reached the store: '+row['kind']
+    for name in ('telemetry.sqlite', 'telemetry.sqlite-wal'):
+        if (data/name).exists():
+            assert marker not in (data/name).read_bytes(), 'worker final-answer text reached '+name
     # Re-delivered native exports add no usage.
     for protobuf in raw_otlp(data, 'otlp/logs'):
         request = urllib.request.Request(endpoint+'/v1/logs', data=protobuf, headers={'Content-Type': 'application/x-protobuf', 'Authorization': 'Bearer '+token})

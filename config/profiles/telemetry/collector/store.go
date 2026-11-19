@@ -64,6 +64,7 @@ type Store struct {
 	pendingBytes    int64
 	pendingRequests int
 	closed          bool
+	markerMu        sync.Mutex
 	rawRefused      bool
 	queue           chan writeRequest
 	done            chan struct{}
@@ -210,7 +211,8 @@ func openStore(dir string, limits Limits) (*Store, error) {
 		return bad(err)
 	}
 	s := &Store{db: db, dir: dir, origin: origin, limits: limits, lock: lock, queue: make(chan writeRequest, limits.QueueRequests), done: make(chan struct{})}
-	s.rawRefused = db.QueryRow("SELECT 1 FROM metadata WHERE key=?", rawRefusedKey).Scan(new(int)) == nil
+	_, err = os.Lstat(filepath.Join(dir, RawRefusedMarker))
+	s.rawRefused = err == nil
 	go s.writer()
 	return s, nil
 }
@@ -296,7 +298,8 @@ func (s *Store) ingest(ctx context.Context, records []Record, policy Policy) err
 }
 
 func recordEnvelope(r Record) (Envelope, error) {
-	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) {
+	// collector:* sources are derived by the collector itself, never produced.
+	if r.Schema != RecordSchema && !(r.Schema == "" && r.SchemaVersion == 1) || strings.HasPrefix(r.SourceID, "collector:") {
 		return Envelope{}, errInvalidRecord
 	}
 	body, err := json.Marshal(r.Body)
@@ -455,7 +458,29 @@ func (s *Store) writer() {
 	}
 }
 
-const rawRefusedKey = "raw_otlp_refused_since"
+// RawRefusedMarker names a small private file present while raw OTLP is
+// refused for space, so the profile can report it without opening SQLite.
+const RawRefusedMarker = "raw-otlp-refused"
+
+// markRawRefused publishes a changed refusal state; a failed update is retried
+// at the next commit or prune.
+func (s *Store) markRawRefused(refused bool) {
+	s.markerMu.Lock()
+	defer s.markerMu.Unlock()
+	if refused == s.rawRefused {
+		return
+	}
+	path := filepath.Join(s.dir, RawRefusedMarker)
+	var err error
+	if refused {
+		err = publishPrivate(path, []byte("raw_otlp_refused_since="+spoolTime()+"\n"))
+	} else if err = os.Remove(path); err == nil || os.IsNotExist(err) {
+		err = syncDirectories(s.dir)
+	}
+	if err == nil {
+		s.rawRefused = refused
+	}
+}
 
 // usedBytes counts allocated database pages, so space freed by Prune is
 // reused, plus the WAL and its index.
@@ -519,16 +544,14 @@ func (s *Store) commit(batch []writeRequest) ([]error, error) {
 	results := make([]error, len(batch))
 	for i, r := range batch {
 		entries := r.entries
+		// Producer frames carry no raw OTLP, so spool progress is never refused.
 		if !fits {
 			entries = slices.DeleteFunc(slices.Clone(entries), raw)
 		}
-		if len(entries) < len(r.entries) && r.advance != nil {
-			// A spool frame is retried whole rather than losing its raw part.
+		if len(entries) < len(r.entries) {
 			results[i] = ErrCapacity
-			continue
-		} else if len(entries) < len(r.entries) {
-			results[i] = ErrCapacity
-		} else if r.advance != nil {
+		}
+		if r.advance != nil {
 			if err = r.advance.apply(tx); err != nil {
 				return nil, err
 			}
@@ -539,20 +562,10 @@ func (s *Store) commit(batch []writeRequest) ([]error, error) {
 			}
 		}
 	}
-	if fits == s.rawRefused {
-		if fits {
-			_, err = tx.Exec("DELETE FROM metadata WHERE key=?", rawRefusedKey)
-		} else {
-			_, err = tx.Exec("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)", rawRefusedKey, spoolTime())
-		}
-		if err != nil {
-			return nil, ErrStorage
-		}
-	}
 	if err = tx.Commit(); err != nil {
 		return nil, ErrStorage
 	}
-	s.rawRefused = !fits
+	s.markRawRefused(!fits)
 	return results, nil
 }
 
@@ -613,6 +626,10 @@ func (s *Store) Prune(cutoff time.Time, includeUsage bool) (int64, error) {
 		if err != nil || n == 0 {
 			if err == nil {
 				_, err = s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+			}
+			// A prune that freed enough space clears the warning at once.
+			if fits, capacityErr := s.rawCapacity(0); err == nil && capacityErr == nil && fits {
+				s.markRawRefused(false)
 			}
 			return total, err
 		}

@@ -1035,3 +1035,18 @@ func TestProfileAdvisoryStatusShowsConvergedWarningWithDeclaredRemediation(t *te
 		t.Fatal("stopped yard ran an advisory check")
 	}
 }
+
+func TestDashboardProfileAdvisoryUsesOneProbe(t *testing.T) {
+	root := testkit.TempDir(t)
+	runs := filepath.Join(root, "runs")
+	testkit.WriteFile(t, filepath.Join(root, "owner.sh"), []byte("#!/bin/sh\necho run >> \"$RUNS\"\nprintf 'subyard-profile-advisory-v1 storage-capacity\\n' >&2\n"), 0o700)
+	runtime := Runtime{Environment: map[string]string{"ENVIRONMENT_PROFILES": "sample", "SAMPLE_PORT": "22222", "RUNS": runs},
+		Profiles: []profile.Definition{{Name: "sample", Root: root, OwnerService: "owner.sh", Advisories: map[string]string{"storage-capacity": "run cleanup"},
+			Dashboard: &profile.IntegrationDashboard{Scheme: "http", Path: "/", PortSetting: "SAMPLE_PORT"}}}}
+	yard := domain.Context{YardName: "demo", YardKind: domain.YardVM}
+	got := append(runtime.profileDashboardStatus(context.Background(), yard, true), runtime.profileAdvisoryStatus(context.Background(), yard, true)...)
+	calls, _ := os.ReadFile(runs)
+	if len(got) != 2 || got[0].State != "up" || got[1] != (domain.SharedResourceStatus{Profile: "sample", Name: "storage-capacity", State: "warning", Hint: "run cleanup"}) || string(calls) != "run\n" {
+		t.Fatalf("status %#v after probes %q", got, calls)
+	}
+}

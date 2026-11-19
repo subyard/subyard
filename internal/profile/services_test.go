@@ -100,6 +100,11 @@ func TestAdvisoryDeclarationsAreClosed(t *testing.T) {
 			t.Fatalf("accepted %s", declaration)
 		}
 	}
+	// Every independent advisory refusal is reported, in stable order.
+	_, err := Decode("sample", []byte(`{"schema_version":1,"advisories":{"private-canary":"run $(cleanup)"}}`))
+	if err == nil || err.Error() != "profile advisories require an owner service; unknown profile advisory code; unsafe profile advisory remediation" {
+		t.Fatalf("collected advisory refusals: %v", err)
+	}
 	metadata, err := Decode("sample", []byte(`{"schema_version":1,"owner_service":"owner.sh","advisories":{"storage-capacity":"run cleanup"}}`))
 	if err != nil || metadata.definition().Advisories["storage-capacity"] != "run cleanup" {
 		t.Fatalf("valid advisory declaration: %v", err)

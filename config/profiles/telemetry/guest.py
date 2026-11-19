@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Install only the marked local collector and native exporter ownership."""
-from contextlib import closing
 import fcntl
 import hashlib
 import json
@@ -421,12 +420,22 @@ class Runtime:
         return result
 
     def raw_refused(self):
-        """Whether the collector refuses raw OTLP for space; unreadable means no advisory."""
+        """Whether the collector's private marker says raw OTLP is refused for space."""
+        directory = os.open(self.data, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            with closing(sqlite3.connect((self.data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True, timeout=1)) as db:
-                return db.execute("SELECT 1 FROM metadata WHERE key='raw_otlp_refused_since'").fetchone() is not None
-        except sqlite3.Error:
+            fd = os.open('raw-otlp-refused', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
             return False
+        finally:
+            os.close(directory)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.uid or info.st_nlink != 1
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 128):
+                raise ValueError('foreign telemetry refusal marker')
+            return re.fullmatch(rb'raw_otlp_refused_since=[0-9TZ:.-]{1,40}\n', os.pread(fd, 129, 0)) is not None
+        finally:
+            os.close(fd)
 
     def desired(self):
         value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},

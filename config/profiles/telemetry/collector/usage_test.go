@@ -226,12 +226,27 @@ func TestCapacityKeepsUsageAndPruneKeepsUsage(t *testing.T) {
 	if want := binary + " prune --data-dir " + s.dir + " --older-than 60d"; !strings.HasSuffix(stats["warnings"].([]string)[0], want) {
 		t.Fatalf("status names no runnable cleanup: %v, want %q", stats["warnings"], want)
 	}
+	marker := filepath.Join(s.dir, RawRefusedMarker)
+	if info, err := os.Lstat(marker); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("refusal marker: %v %v", info, err)
+	}
+	// A prune that frees enough space clears the warning before the next commit.
 	s.limits.DiskBytes = DefaultDiskBytes
+	if _, err = s.Prune(time.Now().Add(-60*24*time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("prune kept the refusal marker: %v", err)
+	}
 	if err = consumers.logs.ConsumeLogs(ctx, logs.Logs()); err != nil {
 		t.Fatal(err)
 	}
-	if stats, _ = Stats(ctx, s.db); stats["raw_otlp_refused_since"] != nil || count("kind LIKE 'otlp/%'") != 1 {
-		t.Fatalf("raw capacity did not resume: %v", stats)
+	if count("kind LIKE 'otlp/%'") != 1 {
+		t.Fatal("raw capacity did not resume")
+	}
+	stats, _ = Stats(ctx, s.db)
+	if addStorageWarning(stats, s.dir); stats["warnings"] != nil {
+		t.Fatalf("warning after capacity resumed: %v", stats)
 	}
 	if _, err = s.db.Exec("UPDATE records SET received_time='2000-01-01T00:00:00.000000000Z'"); err != nil {
 		t.Fatal(err)
@@ -415,4 +430,17 @@ func TestPruneCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Close()
+}
+
+// Producers cannot claim collector-derived sources, so a frame never carries
+// data refused for space.
+func TestProducerCannotUseCollectorSources(t *testing.T) {
+	s := fixtureStore(t)
+	for _, source := range []string{usageSource, "collector:otlp-correlation"} {
+		r := record("run", map[string]any{"agent_run_id": "claimed"})
+		r.SourceID = source
+		if err := s.Ingest(context.Background(), []Record{r}); !errors.Is(err, errInvalidRecord) {
+			t.Fatalf("%s accepted from a producer: %v", source, err)
+		}
+	}
 }

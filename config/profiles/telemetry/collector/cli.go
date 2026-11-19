@@ -181,10 +181,12 @@ func runPrune(ctx context.Context, out io.Writer, dir, olderThan string, include
 // addStorageWarning names the cleanup command with this binary and data
 // directory, so it runs as printed.
 func addStorageWarning(stats map[string]any, dir string) {
-	since, ok := stats["raw_otlp_refused_since"].(string)
-	if !ok {
+	marker, err := os.ReadFile(filepath.Join(dir, RawRefusedMarker))
+	since, found := strings.CutPrefix(strings.TrimSpace(string(marker)), "raw_otlp_refused_since=")
+	if err != nil || !found {
 		return
 	}
+	stats["raw_otlp_refused_since"] = since
 	binary, err := os.Executable()
 	if err != nil {
 		binary = "subyard-telemetry"

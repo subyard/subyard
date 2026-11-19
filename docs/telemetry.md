@@ -544,7 +544,9 @@ the WAL stay a tenth below it and the data partition keeps 1 GiB free, or a
 twentieth of a smaller partition. Beyond that the collector refuses raw OTLP and
 its per-request session correlations with a retryable status, still stores the
 request's usage records and bindings and all lifecycle, resource and sample
-records. `stats` warns with the cleanup command for that store, and `yard status`
+records. The collector keeps a private `raw-otlp-refused` marker in the data
+directory while this lasts and removes it once raw OTLP fits again, including
+right after a prune. `stats` warns with the cleanup command for that store, and `yard status`
 and `yard profile status telemetry` show the `storage-capacity` warning with the
 command to run inside the yard while the profile stays ready. Those records
 are small and are not bounded by the budget, so a store above a lowered budget
@@ -564,8 +566,26 @@ not disappear. Freed pages are reused; the database file does not shrink.
 
 A collector release older than this budget cannot run on such a store: it
 refuses to open a database above a third of its 1 GiB default bound, and its
-export would label zstd frames as plain protobuf. Before downgrading, export
-the history with this release's collector and keep the export.
+export would label zstd frames as plain protobuf. Before `yard update --rollback`
+or any downgrade, export the history with this release's collector and keep the
+export:
+
+```sh
+"$collector" export --data-dir "$data" --after 0 --limit 1000 > telemetry-0001.jsonl
+```
+
+Continue with `--after` until a window is empty. If the older collector already
+fails to open the store after a rollback, stop it, move the store aside and let
+it start fresh; the moved files stay readable by this release's collector:
+
+```sh
+sudo systemctl stop subyard-telemetry.service
+mv "$data/telemetry.sqlite" "$data/telemetry.sqlite.newer"
+for suffix in -wal -shm; do
+  [ ! -e "$data/telemetry.sqlite$suffix" ] || mv "$data/telemetry.sqlite$suffix" "$data/telemetry.sqlite.newer$suffix"
+done
+sudo systemctl start subyard-telemetry.service
+```
 The producer spool is bounded to 4096 files and 64 MiB using fixed allocations
 and 64 KiB frames. It keeps records ordered within each generated run stream and
 within the broker stream. SQLite commits the records, projections and byte

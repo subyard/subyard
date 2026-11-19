@@ -50,10 +50,6 @@ func Stats(ctx context.Context, db *sql.DB) (map[string]any, error) {
 		counts[kind] = n
 	}
 	result := map[string]any{"origin_id": origin, "store_generation_id": generation, "schema_version": schema, "sqlite_version": version, "records": count, "last_sequence": last, "kinds": counts}
-	var since string
-	if db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key=?", rawRefusedKey).Scan(&since) == nil {
-		result["raw_otlp_refused_since"] = since
-	}
 	return result, rows.Err()
 }
 
