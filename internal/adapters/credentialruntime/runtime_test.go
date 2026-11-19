@@ -21,6 +21,17 @@ import (
 
 const credentialFixturePublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA fixture"
 
+func TestInspectInitializationNamesMissingPathsWithoutWriting(t *testing.T) {
+	runtime := credentialFixture(t)
+	missing, err := runtime.InspectInitialization()
+	if err != nil || len(missing) != 6 || runtime.Initialized() {
+		t.Fatalf("missing=%v initialized=%v err=%v", missing, runtime.Initialized(), err)
+	}
+	if _, err := os.Lstat(runtime.config.Root); !os.IsNotExist(err) {
+		t.Fatal("inspection created credential state")
+	}
+}
+
 type credentialReadProbe struct {
 	reader io.Reader
 	reads  int

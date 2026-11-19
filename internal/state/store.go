@@ -86,6 +86,7 @@ func (store *FileStore) List(ctx context.Context) ([]domain.ProjectRecord, error
 // lock file. Records are published atomically, so it is suitable for a
 // pre-confirmation observation that must not repair or migrate local state.
 func (store *FileStore) ListReadOnly(context.Context) ([]domain.ProjectRecord, error) {
+	var failures []error
 	exists, err := validateReadOnlyStateDirectory(store.directory)
 	if err != nil {
 		return nil, err
@@ -105,9 +106,13 @@ func (store *FileStore) ListReadOnly(context.Context) ([]domain.ProjectRecord, e
 		id := strings.TrimSuffix(entry.Name(), ".json")
 		record, readErr := readRecordReadOnly(filepath.Join(store.directory, entry.Name()), id)
 		if readErr != nil {
-			return nil, fmt.Errorf("invalid project state: %w", readErr)
+			failures = append(failures, fmt.Errorf("invalid project state %s: %w", entry.Name(), readErr))
+			continue
 		}
 		records = append(records, record)
+	}
+	if err := domain.CollectRefusals(failures...); err != nil {
+		return nil, err
 	}
 	sort.Slice(records, func(left, right int) bool { return records[left].ProjectID < records[right].ProjectID })
 	return records, nil

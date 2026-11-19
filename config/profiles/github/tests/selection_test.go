@@ -250,7 +250,7 @@ peer_clean
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != "_keys-init\ninit --yes\ninit --yes\ncheck\nstart --yes\nteardown --yes\nremote remove peer --yes\n" {
+	if string(content) != "_keys-init\ninit --yes\ninit --yes\ncheck --host\nstart --yes\nteardown --yes\nremote remove peer --yes\n" {
 		t.Fatalf("peer workflow changed: %q", content)
 	}
 	content, err = os.ReadFile(filepath.Join(ssh, "config"))

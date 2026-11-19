@@ -191,6 +191,25 @@ func hardCleanupPath(yard domain.Context) string {
 	return filepath.Join(yard.Paths.DataHome, "cleanup", hex.EncodeToString(key[:12]), "journal.json")
 }
 
+// hardCleanupJournalPaths are the pending journals that block shared owner
+// configuration and runtime changes.
+func hardCleanupJournalPaths(dataHome string) ([]string, error) {
+	return filepath.Glob(filepath.Join(dataHome, "cleanup", "*", "journal.json"))
+}
+
+// inspectHardCleanupJournals also reports every journal that hard cleanup
+// recovery cannot read, without a lock or replay.
+func inspectHardCleanupJournals(dataHome string) ([]string, error) {
+	paths, err := hardCleanupJournalPaths(dataHome)
+	var failures []error
+	for _, path := range paths {
+		if _, readErr := readHardCleanup(path); readErr != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", path, readErr))
+		}
+	}
+	return paths, domain.CollectRefusals(append(failures, err)...)
+}
+
 func readHardCleanup(path string) (*hardCleanupJournal, error) {
 	if err := cleanupAncestors(path); err != nil {
 		return nil, err

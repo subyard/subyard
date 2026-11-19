@@ -214,7 +214,7 @@ require_ready() { # version
   jq -e '.outcome.status=="ready" and .outcome.reachedGoal' "$FIXTURE_ROOT/ready-$1.json" >/dev/null \
     || die "release $1 did not reach ready"
   [ "$(active_version)" = "yard $1" ] || die "release $1 is not active"
-  fixture_env "$LAUNCHER" -Y "$YARD_NAME" check
+  fixture_env "$LAUNCHER" -Y "$YARD_NAME" check --host
   incus exec "$INSTANCE" --project "$PROJECT" -- grep -Fxq "$FIXTURE_MARKER" /var/tmp/subyard-newer-release-retained \
     || die 'guest data did not survive'
 }

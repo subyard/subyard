@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -1367,39 +1368,64 @@ func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 }
 
 func validateManagedConfigTree(root string) error {
+	return domain.CollectRefusals(inspectManagedConfigTree(root)...)
+}
+
+// configPermissionError is a refused managed config path. Only a group- or
+// world-writable path the operator owns has the exact repair chmod go-w.
+type configPermissionError struct {
+	path      string
+	cause     error
+	writeable bool
+}
+
+func (err *configPermissionError) Error() string { return err.cause.Error() }
+
+func (err *configPermissionError) repair() string {
+	if err.writeable {
+		return "chmod go-w -- " + shellquote.Word(err.path)
+	}
+	return ""
+}
+
+// inspectManagedConfigTree applies the config status/apply permission
+// predicate and keeps every independent refusal instead of the first one.
+func inspectManagedConfigTree(root string) []error {
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return err
+		return []error{err}
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("config root must be a real directory")
+		return []error{errors.New("config root must be a real directory")}
 	}
 	uid := uint32(os.Getuid())
-	if err := validateConfigOwnerMode(root, info, true, uid); err != nil {
-		return err
+	var findings []error
+	check := func(path string, info os.FileInfo, directory bool) {
+		if err := validateConfigOwnerMode(path, info, directory, uid); err != nil {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			kind := directory && info.IsDir() || !directory && info.Mode().IsRegular() && ok && stat.Nlink == 1
+			findings = append(findings, &configPermissionError{path, err, ok && stat.Uid == uid && kind && info.Mode().Perm()&0o022 != 0})
+		}
 	}
+	check(root, info, true)
 	for _, relative := range []string{"config.env", "overrides", "yards", "secrets", "generated"} {
-		path := filepath.Join(root, relative)
-		if err := filepath.WalkDir(path, func(path string, entry os.DirEntry, walkErr error) error {
+		_ = filepath.WalkDir(filepath.Join(root, relative), func(path string, entry os.DirEntry, walkErr error) error {
 			if errors.Is(walkErr, os.ErrNotExist) {
 				return filepath.SkipDir
 			}
-			if walkErr != nil {
-				return walkErr
-			}
 			info, err := os.Lstat(path)
-			if err != nil {
-				return err
+			if walkErr != nil || err != nil {
+				findings = append(findings, domain.CollectRefusals(walkErr, err))
+				return nil
 			}
-			return validateConfigOwnerMode(path, info, entry.IsDir(), uid)
-		}); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+			check(path, info, entry.IsDir())
+			return nil
+		})
 	}
-	return nil
+	return findings
 }
 
 func validateConfigOwnerMode(path string, info os.FileInfo, directory bool, uid uint32) error {

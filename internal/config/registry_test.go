@@ -5,8 +5,32 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/Subyard/Subyard/internal/domain"
 )
+
+func TestHostListenerCollisionsAcrossLocalYards(t *testing.T) {
+	yard := func(name, ssh, preview string) Loaded {
+		return Loaded{Context: domain.Context{YardName: name}, Environment: map[string]string{"SSH_PORT": ssh, "WEB_PREVIEW_HOST_PORT": preview}}
+	}
+	a, b := yard("a", "2222", "32222"), yard("b", "2222", "32222")
+	err := HostListenerCollisions([]Loaded{b, a})
+	if err == nil || !strings.Contains(err.Error(), "yards a SSH_PORT and b SSH_PORT reserve the same host port 2222") ||
+		!strings.Contains(err.Error(), "yards a WEB_PREVIEW_HOST_PORT and b WEB_PREVIEW_HOST_PORT") {
+		t.Fatalf("collisions=%v", err)
+	}
+	b.Context.AccessKind = domain.AccessRemote
+	if err := HostListenerCollisions([]Loaded{a, b}); err != nil {
+		t.Fatalf("remote reservation collided locally: %v", err)
+	}
+	b.Context.AccessKind = domain.AccessLocal
+	b.Environment["SSH_PORT"], b.Environment["WEB_PREVIEW_HOST_PORT"] = "2223", "32223"
+	if err := HostListenerCollisions([]Loaded{a, b}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestYardRegistryReadsNestedAndLegacyLayouts(t *testing.T) {
 	configHome := t.TempDir()

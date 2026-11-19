@@ -382,6 +382,20 @@ func TestConfigApplyRejectsUnsafeSettingsTreeBeforeMutation(t *testing.T) {
 	}
 }
 
+func TestManagedConfigTreeReportsEveryUnsafePath(t *testing.T) {
+	root := testkit.TempDir(t)
+	testkit.WriteFile(t, filepath.Join(root, "config.env"), []byte("fixture\n"), 0o666)
+	if err := os.Mkdir(filepath.Join(root, "generated"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, filepath.Join(root, "generated", "unsafe"), []byte("fixture\n"), 0o666)
+	err := validateManagedConfigTree(root)
+	if findings := inspectManagedConfigTree(root); len(findings) != 2 || err == nil ||
+		!strings.Contains(err.Error(), "config.env") || !strings.Contains(err.Error(), "generated/unsafe") {
+		t.Fatalf("findings=%v err=%v", findings, err)
+	}
+}
+
 func TestConfigValidationAllowsReadableManagedFilesAndRejectsUnsafePermissions(t *testing.T) {
 	for _, test := range []struct {
 		name     string

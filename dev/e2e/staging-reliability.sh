@@ -1107,7 +1107,7 @@ PYBASELINE
   timeout --signal=TERM --kill-after=10 30 env -u SUBYARD_E2E_ROLLOUT_YARD \
     SUBYARD_E2E_STATE_DIR="$STATE_PARENT/registration-probe" SUBYARD_E2E_ROUTE_REGISTRY="$SUBYARD_HOME/e2e/routes" "$RUNNER" --status --json \
     | jq -e '.status == "ok"' >/dev/null || die 'agent status without --yard did not discover the broker'
-  runtime_yard -Y test-yard check
+  runtime_yard -Y test-yard check --host
   verify_broker_installation || die 'activated broker differs from candidate'
   [ "$(sha256sum "$candidate_engine" | cut -d' ' -f1)" = "$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)" ] \
     || die 'installed engine differs from frozen candidate'

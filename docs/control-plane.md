@@ -518,6 +518,38 @@ IDs or paths. Incus and Docker consumers derive collision-free technical names w
 `_hh` escaping; Docker image suffixes add a leading `p` and escape uppercase and punctuation so
 the repository name stays lowercase-safe. These encodings are not project identities or selectors.
 
+### Installation check
+
+`yard check` is a read-only installation check. It runs before owner recovery, audit and the
+release gate, with read-only SSH trust, also with `--yes`. It never applies repairs, starts
+yards, requests sudo or fetches release candidates. Sections run in a fixed order and each
+reports every independent finding:
+
+- `config`: schema of every registered local yard with config validate's repair, including alias
+  repair; ignored profile-only and retired assignments; legacy inputs; every unsafe managed config
+  path, where an operator-owned group- or world-writable path has the exact `chmod go-w` repair;
+  native target and host listener collisions between local yards.
+- `release`: `migrate --check`'s inspection of the installed release, including the activation
+  owners of every local yard. Typed pending configuration is `pending`.
+- `host`: the `check --host` facts of the default yard as notices and blockers, without its
+  new-yard SSH port probes, and credential store initialization.
+- `state`: pending owner-inventory, hard cleanup and host rename journals, flat registrations
+  that `config repair-registration` repairs, and each local yard's project store.
+
+Yard substrate is not inspected and the text report ends with that line; run
+`yard -Y NAME status` and `yard -Y NAME security` for each yard. `-Y NAME` with plain `check`
+is a usage error; `yard [-Y NAME] check --host` keeps the original host preflight and output.
+
+Owners return keyed states: drift, pending, blocked, unknown, deferred or notice; no items means
+convergence. The aggregator maps unknown and blocked to `blocker` and deferred to
+`not-inspected`. A finding ID is `section.key`, built from fixed tokens and reversibly escaped
+resource names, without hashes or ordinals. An invalid or duplicate key, or drift without a next
+action, is a programming error. `--json` prints `schemaVersion: 1`, a verdict `status` (`ok`,
+`drift` or `blocked`), `summary` counts by class and ordered `sections`, each with `id`, `status`
+and `findings` (`id`, `class`, `resource`, `installed`, `desired`, `message`, `next`). Exit 0
+allows pending, not-inspected and notice findings; exit 1 reports drift or blockers; exit 2
+reports invocation, contract or output errors.
+
 ### Release migrations
 
 Release-owned one-time transitions are declared in
