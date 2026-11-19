@@ -8,11 +8,21 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 )
 
+type observationKey struct{}
+
+// observing marks an installation observation: its unauthorized release
+// launches try the owner lock once instead of waiting for it.
+func observing(ctx context.Context) bool {
+	observed, _ := ctx.Value(observationKey{}).(bool)
+	return observed
+}
+
 // InspectInstalled shares migrate --check's read-only inspection of the
 // installed release, including the activation owners of every local yard. It
-// never selects, downloads or activates a release.
+// never selects, downloads or activates a release, and never waits for the
+// owner lock.
 func (runtime *Runtime) InspectInstalled(ctx context.Context, configHome string) []domain.Inspected {
-	prepared, err := runtime.PrepareCurrentTransition(ctx, []string{"--check"}, configHome, "default")
+	prepared, err := runtime.PrepareCurrentTransition(context.WithValue(ctx, observationKey{}, true), []string{"--check"}, configHome, "default")
 	if err != nil {
 		return []domain.Inspected{{Key: "read", State: domain.InspectedUnknown, Resource: "release", Message: err.Error(), Next: "yard migrate --check"}}
 	}

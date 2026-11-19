@@ -63,6 +63,9 @@ func TestConformanceMechanicalStatesAndProgramErrors(t *testing.T) {
 		{{ID: "host", Items: []domain.Inspected{{State: domain.InspectedUnknown, Message: "missing key"}}}},
 		{{ID: "host", Items: []domain.Inspected{{Key: "Upper", State: domain.InspectedUnknown, Message: "invalid key"}}}},
 		{{ID: "host", Items: []domain.Inspected{{Key: "a b", State: domain.InspectedUnknown, Message: "invalid key"}}}},
+		{{ID: "host", Items: []domain.Inspected{{Key: "path.%ZZ", State: domain.InspectedUnknown, Message: "malformed escape"}}}},
+		{{ID: "host", Items: []domain.Inspected{{Key: "path.%", State: domain.InspectedUnknown, Message: "truncated escape"}}}},
+		{{ID: "host", Items: []domain.Inspected{{Key: "path.%2f", State: domain.InspectedUnknown, Message: "lowercase escape"}}}},
 		{{ID: "host", Items: []domain.Inspected{{Key: "drift", State: domain.InspectedDrift, Message: "missing next"}}}},
 		{{ID: "host", Items: []domain.Inspected{{Key: "empty", State: domain.InspectedNotice}}}},
 		{{ID: "host", Items: []domain.Inspected{{Key: "state", State: "warning", Message: "unknown state"}}}},
@@ -72,6 +75,13 @@ func TestConformanceMechanicalStatesAndProgramErrors(t *testing.T) {
 		if _, err := InspectConformance(sections); err == nil {
 			t.Fatalf("programming error accepted: %v", sections)
 		}
+	}
+}
+
+func TestConformanceAcceptsEscapedResourceNames(t *testing.T) {
+	key := "permissions." + domain.InspectionName("generated/a b%")
+	if _, err := InspectConformance([]InspectionSection{{ID: "config", Items: []domain.Inspected{{Key: key, State: domain.InspectedNotice, Message: "escaped"}}}}); err != nil {
+		t.Fatalf("%s: %v", key, err)
 	}
 }
 

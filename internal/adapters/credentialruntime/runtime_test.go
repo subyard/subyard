@@ -30,6 +30,17 @@ func TestInspectInitializationNamesMissingPathsWithoutWriting(t *testing.T) {
 	if _, err := os.Lstat(runtime.config.Root); !os.IsNotExist(err) {
 		t.Fatal("inspection created credential state")
 	}
+	if partial, err := runtime.PartialIdentity(); partial != "" || err != nil {
+		t.Fatalf("absent identity reported partial: %q %v", partial, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(runtime.ageIdentity), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, runtime.ageIdentity, []byte("partial\n"), 0o600)
+	partial, err := runtime.PartialIdentity()
+	if refusal := runtime.Initialize(context.Background()); partial != runtime.ageIdentity || err != nil || refusal == nil || !strings.Contains(refusal.Error(), "incomplete key identity") {
+		t.Fatalf("partial identity %q %v is not the one init refuses: %v", partial, err, refusal)
+	}
 }
 
 type credentialReadProbe struct {

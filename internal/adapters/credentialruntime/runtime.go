@@ -209,6 +209,17 @@ func (runtime *Runtime) InspectInitialization() ([]string, error) {
 	return missing, domain.CollectRefusals(failures...)
 }
 
+// PartialIdentity is the existing age identity of an uninitialized ledger,
+// which Initialize refuses to replace, or empty when Initialize may create it.
+func (runtime *Runtime) PartialIdentity() (string, error) {
+	if _, err := os.Lstat(runtime.ageIdentity); err == nil {
+		return runtime.ageIdentity, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return "", nil
+}
+
 func (runtime *Runtime) Initialize(ctx context.Context) error {
 	if err := runtime.assertBoundary(); err != nil {
 		return err
@@ -220,10 +231,10 @@ func (runtime *Runtime) Initialize(ctx context.Context) error {
 		fmt.Fprintf(runtime.config.Stderr, "  [ ok ] host credential ledger already initialized at %s\n", runtime.config.Root)
 		return nil
 	}
-	if _, err := os.Lstat(runtime.ageIdentity); err == nil {
-		return fmt.Errorf("incomplete key identity already exists at %s", runtime.ageIdentity)
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if partial, err := runtime.PartialIdentity(); err != nil {
 		return err
+	} else if partial != "" {
+		return fmt.Errorf("incomplete key identity already exists at %s", partial)
 	}
 	for _, directory := range []string{
 		runtime.config.Root, runtime.idDirectory, runtime.peersDirectory,

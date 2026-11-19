@@ -522,8 +522,14 @@ the repository name stays lowercase-safe. These encodings are not project identi
 
 `yard check` is a read-only installation check. It runs before owner recovery, audit and the
 release gate, with read-only SSH trust, also with `--yes`. It never applies repairs, starts
-yards, requests sudo or fetches release candidates. Sections run in a fixed order and each
-reports every independent finding:
+yards, requests sudo or fetches release candidates. Readers that normally wait run in an
+observation mode instead: yard configuration is read under a shared configuration lock tried
+for at most two seconds (a writer is a `config.root.lock` blocker), the release inspection
+tries the owner lock once (a holder means release state is changing) and is bounded like
+status release readiness, and the host observation never probes the yard SSH port.
+Configuration is judged from persisted sources, as `config validate` does; host and state
+readers use the command environment. Sections run in a fixed order and each reports every
+independent finding:
 
 - `config`: schema of every registered local yard with config validate's repair, including alias
   repair; ignored profile-only and retired assignments; legacy inputs; every unsafe managed config
@@ -542,13 +548,15 @@ is a usage error; `yard [-Y NAME] check --host` keeps the original host prefligh
 
 Owners return keyed states: drift, pending, blocked, unknown, deferred or notice; no items means
 convergence. The aggregator maps unknown and blocked to `blocker` and deferred to
-`not-inspected`. A finding ID is `section.key`, built from fixed tokens and reversibly escaped
-resource names, without hashes or ordinals. An invalid or duplicate key, or drift without a next
+`not-inspected`. A finding ID is `section.key`, built from fixed tokens and resource names whose
+bytes outside `[A-Za-z0-9._-]` are escaped as `%XX`, without hashes or ordinals. IDs are stable
+identifiers; a dot inside a resource name stays a dot, so they are not parsed back into parts. An invalid or duplicate key, or drift without a next
 action, is a programming error. `--json` prints `schemaVersion: 1`, a verdict `status` (`ok`,
 `drift` or `blocked`), `summary` counts by class and ordered `sections`, each with `id`, `status`
 and `findings` (`id`, `class`, `resource`, `installed`, `desired`, `message`, `next`). Exit 0
 allows pending, not-inspected and notice findings; exit 1 reports drift or blockers; exit 2
-reports invocation, contract or output errors.
+reports invocation, contract or output errors. As for every command, a closed output pipe ends the
+process with `SIGPIPE`.
 
 ### Release migrations
 

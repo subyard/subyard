@@ -732,10 +732,19 @@ func hostListeners(values map[string]string, settings Catalog) []string {
 	return names
 }
 
+// hostListenerPort is the port a listener value reserves, so equivalent
+// spellings such as 02222 and 2222 collide.
+func hostListenerPort(value string) string {
+	if port, err := strconv.Atoi(value); err == nil {
+		return strconv.Itoa(port)
+	}
+	return value
+}
+
 func addHostListenerCollisions(values map[string]string, settings Catalog, collisions *portCollisions) {
 	ports := map[string][]string{}
 	for _, name := range hostListeners(values, settings) {
-		value := values[name]
+		value := hostListenerPort(values[name])
 		// Every listener already on this port collides with this one.
 		for _, previous := range ports[value] {
 			collisions.add(name, previous)

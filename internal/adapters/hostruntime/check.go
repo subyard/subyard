@@ -57,6 +57,10 @@ type HostCheck struct {
 	Incus       ports.Incus
 	Output      io.Writer
 	Probe       func(context.Context, HostCheck) (HostFacts, error)
+	// Observation inspects an installation instead of preflighting a new yard:
+	// it never probes or reports the yard SSH port, and reports yard storage and
+	// nested devices only for a configured Yard.
+	Observation bool
 }
 
 // finding is one keyed host preflight fact; level is ok, warn or fail.
@@ -120,7 +124,8 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	} else {
 		add("kvm", "KVM device", "warn", "/dev/kvm missing — needed for hardware-accelerated virtualization")
 	}
-	if check.Yard.NestedE2EVMs {
+	configured := !check.Observation || check.Yard.YardName != ""
+	if configured && check.Yard.NestedE2EVMs {
 		for _, path := range []string{"/dev/kvm", "/dev/vsock", "/dev/vhost-vsock", "/dev/net/tun"} {
 			if facts.NestedDevices[path] {
 				add("nested."+domain.InspectionName(path), "Nested E2E VM devices", "ok", path+" present")
@@ -151,6 +156,7 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	}
 	free := facts.StorageFree / (1024 * 1024 * 1024)
 	switch {
+	case !configured:
 	case !facts.StorageKnown:
 		add("storage", "Storage ("+check.Yard.Paths.StoragePath+")", "warn",
 			"cannot determine free space for "+facts.StoragePath)
@@ -194,6 +200,9 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 		add("network-manager.unread", "Host networking", "warn", NetworkManagerUnreadReminder)
 	}
 
+	if check.Observation {
+		return result
+	}
 	var duplicates []string
 	for _, yard := range check.Yards {
 		if yard.AccessKind == domain.AccessRemote || yard.YardName == check.Yard.YardName {
@@ -231,19 +240,17 @@ func (check HostCheck) evaluate(facts HostFacts, options CheckOptions) []finding
 	return result
 }
 
-// Observe projects the preflight onto installation inspection: ok facts are
-// convergence, warnings are notices and hard failures block. The SSH port
-// facts preflight a new yard; installed listeners are configuration conflicts.
-// Without a loaded yard configuration only host-wide facts remain.
-func (check HostCheck) Observe(ctx context.Context, configured bool) []domain.Inspected {
+// Observe projects the observation onto installation inspection: ok facts
+// are convergence, warnings are notices and hard failures block.
+func (check HostCheck) Observe(ctx context.Context) []domain.Inspected {
+	check.Observation = true
 	findings, err := check.inspect(ctx, CheckOptions{})
 	if err != nil {
 		return domain.InspectionRead("facts.read", "host", err)
 	}
 	var result []domain.Inspected
 	for _, fact := range findings {
-		yardFact := fact.key == "storage" || strings.HasPrefix(fact.key, "nested.")
-		if fact.level == "ok" || strings.HasPrefix(fact.key, "ssh-port.") || yardFact && !configured {
+		if fact.level == "ok" {
 			continue
 		}
 		state := domain.InspectedNotice
@@ -350,6 +357,9 @@ func collectHostFacts(ctx context.Context, check HostCheck) (HostFacts, error) {
 		state := LocalNetworkManagerGuardState()
 		facts.NetworkManagerRebootPending = state == "loaded-reboot" || state == "unread-migration"
 		facts.NetworkManagerGuardUnread = state == "unread-init"
+	}
+	if check.Observation {
+		return facts, nil
 	}
 	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(check.Yard.SSHPort))
 	connection, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "tcp", address)

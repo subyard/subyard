@@ -197,24 +197,42 @@ func hardCleanupJournalPaths(dataHome string) ([]string, error) {
 	return filepath.Glob(filepath.Join(dataHome, "cleanup", "*", "journal.json"))
 }
 
-// inspectHardCleanupJournals also reports every journal that hard cleanup
-// recovery cannot read, without a lock or replay.
+// inspectHardCleanupJournals returns the pending journal of each cleanup
+// directory by name, and every journal or directory that hard cleanup recovery
+// cannot read, without a lock or replay.
 func inspectHardCleanupJournals(dataHome string) ([]string, error) {
-	paths, err := hardCleanupJournalPaths(dataHome)
+	root := filepath.Join(dataHome, "cleanup")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var pending []string
 	var failures []error
-	for _, path := range paths {
-		if _, readErr := readHardCleanup(path); readErr != nil {
-			failures = append(failures, fmt.Errorf("%s: %w", path, readErr))
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name(), "journal.json")
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		pending = append(pending, entry.Name())
+		if _, err := readHardCleanup(path); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", path, err))
 		}
 	}
-	return paths, domain.CollectRefusals(append(failures, err)...)
+	return pending, domain.CollectRefusals(failures...)
 }
 
 func readHardCleanup(path string) (*hardCleanupJournal, error) {
 	if err := cleanupAncestors(path); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// A FIFO opens without waiting for a writer and then fails the type check.
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

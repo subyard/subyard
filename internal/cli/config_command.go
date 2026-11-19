@@ -1388,6 +1388,16 @@ func (err *configPermissionError) repair() string {
 	return ""
 }
 
+// configReadError is a managed config path that could not be read; no mode
+// repair applies to it.
+type configReadError struct {
+	path  string
+	cause error
+}
+
+func (err *configReadError) Error() string { return err.cause.Error() }
+func (err *configReadError) Unwrap() error { return err.cause }
+
 // inspectManagedConfigTree applies the config status/apply permission
 // predicate and keeps every independent refusal instead of the first one.
 func inspectManagedConfigTree(root string) []error {
@@ -1418,7 +1428,7 @@ func inspectManagedConfigTree(root string) []error {
 			}
 			info, err := os.Lstat(path)
 			if walkErr != nil || err != nil {
-				findings = append(findings, domain.CollectRefusals(walkErr, err))
+				findings = append(findings, &configReadError{path, domain.CollectRefusals(walkErr, err)})
 				return nil
 			}
 			check(path, info, entry.IsDir())
@@ -1455,8 +1465,14 @@ func validateConfigOwnerMode(path string, info os.FileInfo, directory bool, uid 
 }
 
 func legacyConfigInputs(loaded config.Loaded) ([]string, error) {
+	return legacyConfigInputsAt(loaded.Context.Paths.ConfigHome, loaded.Context.Paths.DataHome)
+}
+
+// legacyConfigInputsAt lists legacy inputs relative to configHome; it needs
+// no loaded yard configuration.
+func legacyConfigInputsAt(configHome, dataHome string) ([]string, error) {
 	var result []string
-	legacyRoot := filepath.Join(loaded.Context.Paths.ConfigHome, "secrets", "legacy")
+	legacyRoot := filepath.Join(configHome, "secrets", "legacy")
 	if err := filepath.WalkDir(legacyRoot, func(path string, entry os.DirEntry, err error) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return filepath.SkipDir
@@ -1465,19 +1481,19 @@ func legacyConfigInputs(loaded config.Loaded) ([]string, error) {
 			return err
 		}
 		if !entry.IsDir() {
-			relative, _ := filepath.Rel(loaded.Context.Paths.ConfigHome, path)
+			relative, _ := filepath.Rel(configHome, path)
 			result = append(result, relative)
 		}
 		return nil
 	}); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	flat, _ := filepath.Glob(filepath.Join(loaded.Context.Paths.ConfigHome, "yards", "*.env"))
+	flat, _ := filepath.Glob(filepath.Join(configHome, "yards", "*.env"))
 	for _, path := range flat {
-		relative, _ := filepath.Rel(loaded.Context.Paths.ConfigHome, path)
+		relative, _ := filepath.Rel(configHome, path)
 		result = append(result, relative)
 	}
-	if info, err := os.Lstat(filepath.Join(loaded.Context.Paths.DataHome, "operator-overlay")); err == nil && info.IsDir() {
+	if info, err := os.Lstat(filepath.Join(dataHome, "operator-overlay")); err == nil && info.IsDir() {
 		result = append(result, "legacy-data:operator-overlay (ignored)")
 	}
 	sort.Strings(result)

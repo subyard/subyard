@@ -278,8 +278,8 @@ func HostListenerCollisions(yards []Loaded) error {
 		for _, y := range ordered[index+1:] {
 			for _, a := range hostListeners(x.Environment, x.Catalog) {
 				for _, b := range hostListeners(y.Environment, y.Catalog) {
-					if x.Environment[a] == y.Environment[b] {
-						findings = append(findings, fmt.Errorf("yards %s %s and %s %s reserve the same host port %s", x.Context.YardName, a, y.Context.YardName, b, x.Environment[a]))
+					if port := hostListenerPort(x.Environment[a]); port == hostListenerPort(y.Environment[b]) {
+						findings = append(findings, fmt.Errorf("yards %s %s and %s %s reserve the same host port %s", x.Context.YardName, a, y.Context.YardName, b, port))
 					}
 				}
 			}

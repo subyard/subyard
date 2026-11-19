@@ -30,6 +30,15 @@ func TestHostListenerCollisionsAcrossLocalYards(t *testing.T) {
 	if err := HostListenerCollisions([]Loaded{a, b}); err != nil {
 		t.Fatal(err)
 	}
+	b.Environment["SSH_PORT"] = "02222"
+	if err := HostListenerCollisions([]Loaded{a, b}); err == nil || !strings.Contains(err.Error(), "SSH_PORT reserve the same host port 2222") {
+		t.Fatalf("equivalent port spelling evaded collision: %v", err)
+	}
+	collisions := newPortCollisions()
+	addHostListenerCollisions(map[string]string{"SSH_PORT": "02222", "WEB_PREVIEW_HOST_PORT": "2222"}, Catalog{}, collisions)
+	if len(collisions.refusals) == 0 {
+		t.Fatal("equivalent port spelling evaded the within-yard collision")
+	}
 }
 
 func TestYardRegistryReadsNestedAndLegacyLayouts(t *testing.T) {

@@ -60,7 +60,7 @@ type InspectionSection struct {
 // never inspects a yard's substrate, whose owners report it themselves.
 const ConformanceClosing = "Yard substrate is not inspected; run yard -Y NAME status and yard -Y NAME security for each yard."
 
-var inspectionKey = regexp.MustCompile(`^[a-z0-9][A-Za-z0-9._%-]*$`)
+var inspectionKey = regexp.MustCompile(`^[a-z0-9](?:[A-Za-z0-9._-]|%[0-9A-F]{2})*$`)
 
 // InspectConformance mechanically classifies owner observations. Finding IDs
 // are section.Key; an invalid or duplicate key is a programming error.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"reflect"
 	"strings"
 	"testing"
@@ -61,7 +62,7 @@ Host is ready.
 			t.Fatalf("check --host bytes changed: err=%v\ngot:  %q\nwant: %q", err, output.String(), want)
 		}
 		output.Reset()
-		observed := check.Observe(context.Background(), true)
+		observed := check.Observe(context.Background())
 		var expected []domain.Inspected
 		if failed {
 			expected = []domain.Inspected{
@@ -72,14 +73,46 @@ Host is ready.
 		if output.Len() != 0 || !reflect.DeepEqual(observed, expected) {
 			t.Fatalf("inspection rendered or changed the preflight: %#v output=%q", observed, output.String())
 		}
-		if failed && len(check.Observe(context.Background(), false)) != 1 {
+		unconfigured := check
+		unconfigured.Yard = domain.Context{}
+		if failed && len(unconfigured.Observe(context.Background())) != 1 {
 			t.Fatal("unconfigured inspection kept yard storage facts")
 		}
 	}
 	failure := errors.New("probe unavailable")
 	check := HostCheck{Probe: func(context.Context, HostCheck) (HostFacts, error) { return HostFacts{}, failure }}
-	if observed := check.Observe(context.Background(), true); len(observed) != 1 || observed[0].State != domain.InspectedUnknown {
+	if observed := check.Observe(context.Background()); len(observed) != 1 || observed[0].State != domain.InspectedUnknown {
 		t.Fatalf("failed facts read: %#v", observed)
+	}
+}
+
+func TestHostObservationNeverProbesTheYardSSHPort(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{}, 4)
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = connection.Close()
+			accepted <- struct{}{}
+		}
+	}()
+	check := HostCheck{Yard: testYard("alpha", listener.Addr().(*net.TCPAddr).Port), Observation: true}
+	if facts, err := collectHostFacts(context.Background(), check); err != nil || facts.PortListening {
+		t.Fatalf("observation probed the yard SSH port: %+v %v", facts, err)
+	}
+	check.Observation = false
+	if facts, err := collectHostFacts(context.Background(), check); err != nil || !facts.PortListening {
+		t.Fatalf("preflight no longer probes the yard SSH port: %+v %v", facts, err)
+	}
+	if <-accepted; len(accepted) != 0 {
+		t.Fatal("observation opened a connection to the yard SSH port")
 	}
 }
 
