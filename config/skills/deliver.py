@@ -44,9 +44,12 @@ def mkdir(path, mode, uid, gid):
         os.chown(current, uid, gid)
 
 
-def write(path, data, mode, uid, gid):
+def write(path, data, mode, uid, gid, staging_root=None):
     safe(path)
-    fd, temporary = tempfile.mkstemp(prefix='.skill-', dir=path.parent)
+    # mkstemp creates a fresh random name with O_EXCL and never opens an existing
+    # file. Managed writes stage in their root, outside skill directories, so a
+    # leftover from a killed run is left alone and does not block a retry.
+    fd, temporary = tempfile.mkstemp(prefix='.subyard-skill-staging-', dir=staging_root or path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             os.fchmod(stream.fileno(), mode)
@@ -228,7 +231,7 @@ def delivery(args):
                     parent.chmod(0o755)
                     os.chown(parent,owner,os.getegid())
                 if not path.exists() or not metadata(path, 0o644, owner, os.getegid()) or path.read_bytes() != data:
-                    write(path, data, 0o644, owner, os.getegid())
+                    write(path, data, 0o644, owner, os.getegid(), canonical)
             for adapter in adapters:
                 link = args.home / adapter / name
                 mkdir(link.parent, 0o755, args.uid, args.gid)
