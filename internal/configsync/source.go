@@ -123,10 +123,18 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		snapshot.refusedYards[name] = true
 		refusals = append(refusals, err)
 	}
-	if err := snapshot.readScope(
+	// An unexpected path is refused, but it leaves the inputs that were read complete.
+	layoutRefusal := func(prefix string, err error) {
+		if err != nil {
+			refusals = append(refusals, fmt.Errorf("%s: %w", prefix, err))
+		}
+	}
+	sharedUnexpected, err := snapshot.readScope(
 		filepath.Join(root, "shared"), "overrides/shared/config.env",
 		"overrides/shared/agents", config.ScopeShared, allowedFiles, false,
-	); err != nil {
+	)
+	layoutRefusal("shared source", sharedUnexpected)
+	if err != nil {
 		commonRefusal(fmt.Errorf("shared source: %w", err))
 	}
 	hostsRoot := filepath.Join(root, "hosts")
@@ -148,9 +156,11 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 			commonRefusal(fmt.Errorf("owner host %q: %w", hostID, err))
 			return snapshot, domain.CollectRefusals(refusals...)
 		}
-		if err := validateChildren(hostRoot, map[string]bool{
+		unexpected, err := validateChildren(hostRoot, map[string]bool{
 			"config.env": false, "overrides": true, "yards": true,
-		}); err != nil {
+		})
+		layoutRefusal(fmt.Sprintf("owner host %q", hostID), unexpected)
+		if err != nil {
 			commonRefusal(fmt.Errorf("owner host %q: %w", hostID, err))
 		}
 		if err := snapshot.readConfig(
@@ -158,9 +168,11 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 		); err != nil {
 			commonRefusal(fmt.Errorf("owner host %q: %w", hostID, err))
 		}
-		if err := snapshot.readOverrides(
+		unexpected, err = snapshot.readOverrides(
 			filepath.Join(hostRoot, "overrides"), "overrides/host/agents", allowedFiles,
-		); err != nil {
+		)
+		layoutRefusal(fmt.Sprintf("owner host %q overrides", hostID), unexpected)
+		if err != nil {
 			commonRefusal(fmt.Errorf("owner host %q overrides: %w", hostID, err))
 		}
 	}
@@ -179,9 +191,11 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 			continue
 		}
 		yardRoot := filepath.Join(yardsRoot, name)
-		if err := validateChildren(yardRoot, map[string]bool{
+		unexpected, err := validateChildren(yardRoot, map[string]bool{
 			"config.env": false, "overrides": true,
-		}); err != nil {
+		})
+		layoutRefusal("yard "+name, unexpected)
+		if err != nil {
 			yardRefusal(name, fmt.Errorf("yard %s: %w", name, err))
 		}
 		sourceConfig := filepath.Join(yardRoot, "config.env")
@@ -192,9 +206,11 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 			snapshot.yardNames = append(snapshot.yardNames, name)
 		}
 		targetAssets := filepath.ToSlash(filepath.Join("yards", name, "overrides", "agents"))
-		if err := snapshot.readOverrides(
+		unexpected, err = snapshot.readOverrides(
 			filepath.Join(yardRoot, "overrides"), targetAssets, allowedFiles,
-		); err != nil {
+		)
+		layoutRefusal("yard "+name+" overrides", unexpected)
+		if err != nil {
 			yardRefusal(name, fmt.Errorf("yard %s overrides: %w", name, err))
 		}
 	}
@@ -210,32 +226,37 @@ func readSource(options Options, hostID string, catalog config.Catalog) (sourceS
 	return snapshot, nil
 }
 
+// readScope returns unexpected paths separately from refusals of the scope inputs.
 func (snapshot *sourceSnapshot) readScope(
 	sourceRoot, targetConfig, targetAssets string,
 	scope config.SettingScope,
 	allowed map[string]config.FileSettingMapping,
 	required bool,
-) error {
+) (unexpected, err error) {
 	entries, err := readOptionalDirectory(snapshot.root, sourceRoot)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(entries) == 0 {
 		if required {
-			return errors.New("scope directory is required")
+			return nil, errors.New("scope directory is required")
 		}
-		return nil
+		return nil, nil
 	}
-	childrenErr := validateChildren(sourceRoot, map[string]bool{
+	childUnexpected, childrenErr := validateChildren(sourceRoot, map[string]bool{
 		"config.env": false, "overrides": true,
 	})
 	configErr := snapshot.readConfig(
 		filepath.Join(sourceRoot, "config.env"), targetConfig, scope, false,
 	)
-	overrideErr := snapshot.readOverrides(
+	overrideUnexpected, overrideErr := snapshot.readOverrides(
 		filepath.Join(sourceRoot, "overrides"), targetAssets, allowed,
 	)
-	return domain.CollectRefusals(childrenErr, configErr, overrideErr)
+	if overrideUnexpected != nil {
+		overrideUnexpected = fmt.Errorf("overrides: %w", overrideUnexpected)
+	}
+	return domain.CollectRefusals(childUnexpected, overrideUnexpected),
+		domain.CollectRefusals(childrenErr, configErr, overrideErr)
 }
 
 func (snapshot *sourceSnapshot) readConfig(
@@ -274,25 +295,27 @@ func (snapshot *sourceSnapshot) readConfig(
 	return nil
 }
 
+// readOverrides returns unexpected paths separately from refusals of the override inputs.
 func (snapshot *sourceSnapshot) readOverrides(
 	sourceRoot, targetRoot string,
 	allowed map[string]config.FileSettingMapping,
-) error {
+) (unexpected, err error) {
 	entries, err := readOptionalDirectory(snapshot.root, sourceRoot)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(entries) == 0 {
-		return nil
+		return nil, nil
 	}
-	if err := validateChildren(sourceRoot, map[string]bool{"agents": true}); err != nil {
-		return err
+	unexpected, err = validateChildren(sourceRoot, map[string]bool{"agents": true})
+	if err != nil {
+		return unexpected, err
 	}
 	agentsRoot := filepath.Join(sourceRoot, "agents")
 	if _, err := os.Lstat(agentsRoot); errors.Is(err, os.ErrNotExist) {
-		return nil
+		return unexpected, nil
 	} else if err != nil {
-		return err
+		return unexpected, err
 	}
 	err = filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -335,7 +358,7 @@ func (snapshot *sourceSnapshot) readOverrides(
 	if err == nil {
 		snapshot.assetRoots[targetRoot] = agentsRoot
 	}
-	return err
+	return unexpected, err
 }
 
 func validateSourceDirectory(root string) error {
@@ -415,35 +438,40 @@ func validateTopLevelRoles(root string) error {
 	return nil
 }
 
-func validateChildren(root string, allowed map[string]bool) error {
+// validateChildren checks a source directory and its registered entries. It
+// returns unexpected entries separately: they are refused, but they do not
+// prevent the registered inputs from being read.
+func validateChildren(root string, allowed map[string]bool) (unexpected, err error) {
 	info, err := os.Lstat(root)
 	if err != nil {
-		return config.OwnerMetadataError(root, "source directory", config.MetadataAccessReason(err), "", err)
+		return nil, config.OwnerMetadataError(root, "source directory", config.MetadataAccessReason(err), "", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return metadataSafetyError(root, "source root must be a real source directory", "type=directory", info)
+		return nil, metadataSafetyError(root, "source root must be a real source directory", "type=directory", info)
 	}
 	if err := validateOwnedMode(root, info, true); err != nil {
-		return err
+		return nil, err
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return config.OwnerMetadataError(root, "source directory", config.MetadataAccessReason(err), "", err)
+		return nil, config.OwnerMetadataError(root, "source directory", config.MetadataAccessReason(err), "", err)
 	}
+	var unexpectedPaths, typeErrors []error
 	for _, entry := range entries {
 		directory, ok := allowed[entry.Name()]
 		if !ok {
-			return config.OwnerMetadataError(filepath.Join(root, entry.Name()), "source entry", "unexpected source path", "required a registered source role", nil)
+			unexpectedPaths = append(unexpectedPaths, config.OwnerMetadataError(filepath.Join(root, entry.Name()), "source entry", "unexpected source path", "required a registered source role", nil))
+			continue
 		}
 		if directory != entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			kind := "regular file"
 			if directory {
 				kind = "directory"
 			}
-			return config.OwnerMetadataError(filepath.Join(root, entry.Name()), "source entry type check", fmt.Sprintf("must be a real %s (non-symlink); observed type=%s, required type=%s", kind, entry.Type(), kind), "", nil)
+			typeErrors = append(typeErrors, config.OwnerMetadataError(filepath.Join(root, entry.Name()), "source entry type check", fmt.Sprintf("must be a real %s (non-symlink); observed type=%s, required type=%s", kind, entry.Type(), kind), "", nil))
 		}
 	}
-	return nil
+	return domain.CollectRefusals(unexpectedPaths...), domain.CollectRefusals(typeErrors...)
 }
 
 func readOptionalDirectory(sourceRoot, path string) ([]os.DirEntry, error) {

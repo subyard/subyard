@@ -1334,6 +1334,44 @@ func TestVersionedConfigSyncKeepsIgnoredProfileOnlyAssignments(t *testing.T) {
 
 // Effective cross-setting checks run only on yards whose Git inputs were all
 // read; refused Git inputs never turn upstream values into spurious refusals.
+func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.T) {
+	const crossSetting = "require YARD_KIND=vm"
+	for _, test := range []struct{ stray, scope string }{
+		{"shared/notes.txt", "shared source: source entry"},
+		{"shared/overrides/notes.txt", "shared source: overrides: source entry"},
+		{"hosts/owner-a/notes.txt", `owner host "owner-a": source entry`},
+		{"hosts/owner-a/yards/demo/notes.txt", "yard demo: source entry"},
+		{"hosts/owner-a/yards/demo/overrides/notes.txt", "yard demo overrides: source entry"},
+	} {
+		t.Run(test.stray, func(t *testing.T) {
+			fixture := newSyncFixture(t, "owner-a")
+			fixture.writeSource("shared/config.env", "E2E_VM_CPU=2\n")
+			fixture.writeSource("hosts/owner-a/yards/demo/config.env", "DEV_UID=2233\nDEV_SUDO=1\n")
+			fixture.commit("demo yard")
+			plan, err := BuildPlan(fixture.options(true))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := Apply(plan); err != nil {
+				t.Fatal(err)
+			}
+			fixture.writeSource(test.stray, "note\n")
+			fixture.commit("stray path")
+			// The local VM setting conflicts with the non-VM demo yard read from Git.
+			writeSyncTestFile(t, filepath.Join(fixture.configHome, "yards/demo/config.env"), "VM_PIN_IPV4=1\n", 0o600)
+			_, err = BuildPlan(fixture.options(false))
+			if err == nil {
+				t.Fatal("unexpected source path was accepted")
+			}
+			for _, text := range []string{test.scope + ": unexpected source path", crossSetting} {
+				if !strings.Contains(err.Error(), text) {
+					t.Fatalf("missing %q in %v", text, err)
+				}
+			}
+		})
+	}
+}
+
 func TestVersionedConfigSyncSkipsEffectiveChecksForUnreadGitInputs(t *testing.T) {
 	const vmYard = "DEV_UID=2233\nYARD_KIND=vm\nDEV_SUDO=0\n"
 	const spurious = "require YARD_KIND=vm"
