@@ -120,6 +120,17 @@ runpy.run_path(script, run_name='__main__')
             self.run_mode('apply')
         self.assertTrue(link.is_symlink())
 
+    def test_shipped_file_named_like_old_staging_settles(self):
+        (self.skill/'.skill-shipped0').write_text('shipped content')
+        self.run_mode('apply')
+        shipped = self.installed/'.skill-shipped0'
+        inode = shipped.stat().st_ino
+        self.assertEqual(self.run_mode('check'), 0)
+        self.run_mode('apply')
+        self.assertEqual(shipped.stat().st_ino, inode)
+        self.assertEqual(shipped.read_text(), 'shipped content')
+        self.assertEqual(self.run_mode('check'), 0)
+
     def test_core_native_extra_links_and_repair(self):
         self.args.provider = 'core'
         self.args.extra = True

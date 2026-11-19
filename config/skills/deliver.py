@@ -197,11 +197,13 @@ def delivery(args):
                     continue
                 # Owned regular files named like the old in-place staging file are
                 # leftovers of a killed write; every directory is checked below.
-                if OLD_STAGING.fullmatch(p.name) and owned_file(p, owner):
+                relative = str(p.relative_to(directory))
+                if (OLD_STAGING.fullmatch(p.name) and relative not in known | set(wanted.get(name, {}))
+                        and owned_file(p, owner)):
                     leftovers.append(p)
                     changed = True
                 else:
-                    actual.add(str(p.relative_to(directory)))
+                    actual.add(relative)
             # Legacy package installers used this explicit managed-content marker.
             legacy = name not in old['skills'] and actual == {'SKILL.md'} and b'<!-- subyard-managed-v1 -->' in (directory / 'SKILL.md').read_bytes()
             if (name not in old['skills'] or actual - known) and not legacy:
