@@ -600,10 +600,12 @@ verify_symlinked_instruction_file() { # <update command...>
   guest_dev test -L "$guest" && [ "$(guest_dev cat "$guest.real")" = 'p0 source-upgrade instructions' ] \
     || die 'the refusal changed the symlinked instruction file or its target'
   guest_dev rm "$guest" "$guest.real"
-  [ "$rc" -eq 0 ] || "$@"
+  # A refused update first repairs the current release, then runs again.
+  [ "$rc" -eq 0 ] || operator_yard migrate --yes
   operator_yard init --yes
   guest_dev test -f "$guest" -a ! -L "$guest" && guest_dev grep -Fqx 'p0 source-upgrade instructions' "$guest" \
     || die 'the replaced instruction file did not converge'
+  [ "$rc" -eq 0 ] || "$@"
   operator_env rm "$OPERATOR_HOME/.codex/AGENTS.md"
 }
 
