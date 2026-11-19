@@ -4492,12 +4492,13 @@ func TestStatusRoutesSummaryAndExplicitYardSelectors(t *testing.T) {
 			if test.summary {
 				if !strings.Contains(stdout.String(), "owner-a/default") ||
 					!strings.Contains(stdout.String(), "owner-a/demo") ||
+					strings.Count(stdout.String(), "\n  sudo     ") != 2 ||
 					len(incus.ExecCalls) != 0 {
 					t.Fatalf("status did not use inventory summary:\n%s\nexec=%#v", stdout.String(), incus.ExecCalls)
 				}
 				return
 			}
-			if strings.Contains(stdout.String(), "owner-a/") || len(incus.ExecCalls) == 0 {
+			if strings.Contains(stdout.String(), "owner-a/") || strings.Count(stdout.String(), "\n  sudo     ") != 1 || len(incus.ExecCalls) == 0 {
 				t.Fatalf("status did not use detailed path:\n%s\nexec=%#v", stdout.String(), incus.ExecCalls)
 			}
 			for _, call := range incus.ExecCalls {

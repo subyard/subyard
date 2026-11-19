@@ -78,7 +78,8 @@ stage 'running native Claude sudo approval with installed DEV_SUDO=prompt'
 yard config set DEV_SUDO prompt --scope yard --yes >/dev/null || die 'DEV_SUDO=prompt was refused'
 yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=prompt'
 sudo_status="$(yard status 2>&1 || true)"
-grep -Fq 'sudo     prompt' <<<"$sudo_status" || die 'yard status does not name the sudo prompt mode'
+grep -Fq 'sudo     prompt' <<<"$sudo_status" \
+  || { printf '%s\n' "$sudo_status" >&2; die 'yard status does not name the sudo prompt mode'; }
 sudo_ready="$(guest_root claude-policy-check)" || die 'Claude readiness failed with DEV_SUDO=prompt'
 grep -Fq 'DEV_SUDO=prompt' <<<"$sudo_ready" || die 'Claude readiness omits the sudo prompt'
 guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=prompt removed the passwordless grant'

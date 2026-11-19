@@ -1506,6 +1506,7 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 			if index != 0 {
 				owner = result.inventory.HostID
 			} else if local, err := cli.loadInventoryLoaded(yard.Name, loaded); err == nil {
+				fmt.Fprintln(cli.options.Stdout, sudoStatusLine(local.Environment["DEV_SUDO"]))
 				printIgnoredAssignments(cli.options.Stdout, "  ", "", local)
 			}
 			if index == 0 && yardScoped {
@@ -1517,6 +1518,18 @@ With -Y/--yard or @<yard>, show detailed status for that one yard.
 	}
 	cli.printNetworkManagerRebootReminder()
 	return code
+}
+
+// sudoStatusLine names the configured DEV_SUDO mode of a local yard.
+func sudoStatusLine(mode string) string {
+	switch mode {
+	case "prompt":
+		return "  sudo     prompt  (passwordless; coding agents ask before sudo)"
+	case "no":
+		return "  sudo     no"
+	default:
+		return "  sudo     yes  (passwordless)"
+	}
 }
 
 func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
@@ -1584,14 +1597,7 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		fmt.Fprintf(cli.options.Stdout, "  vscode   %s agent-fwd=%s  (yard code <project>)\n",
 			status.VSCode, forward)
 	}
-	switch loaded.Environment["DEV_SUDO"] {
-	case "prompt":
-		fmt.Fprintln(cli.options.Stdout, "  sudo     prompt  (passwordless; coding agents ask before sudo)")
-	case "no":
-		fmt.Fprintln(cli.options.Stdout, "  sudo     no")
-	default:
-		fmt.Fprintln(cli.options.Stdout, "  sudo     yes  (passwordless)")
-	}
+	fmt.Fprintln(cli.options.Stdout, sudoStatusLine(loaded.Environment["DEV_SUDO"]))
 	fmt.Fprintf(cli.options.Stdout, "  projects %d  (%s list)\n", status.ProjectCount, cli.yardHint(status.Context))
 	profiles := "all"
 	if len(status.Facts.Profiles) != 0 {
