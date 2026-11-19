@@ -80,6 +80,31 @@ class HeadersHelperTest(unittest.TestCase):
                     self.assertNotIn(secret[:12].encode(), result.stderr)
                     self.assertNotIn(secret[:12].upper().encode(), result.stderr)
 
+    def test_observation_accepts_exactly_the_tokens_the_helper_exports(self):
+        token = '0123456789abcdef'*4
+        owner = types.SimpleNamespace(auth=self.auth, uid=os.getuid())
+        for content in (token, token+'\n', token+'\r\n', token+' \n', ' '+token+'\n', '\n'+token+'\n',
+                        token+'\n\n', token+'\nextra\n', token.upper()+'\n', token[:-1]+'\n'):
+            self.auth.write_text(content)
+            self.auth.chmod(0o600)
+            try:
+                observed = guest.Runtime.token(owner) == token
+            except ValueError:
+                observed = False
+            for shell in self.shells:
+                with self.subTest(content=content.encode(), shell=shell):
+                    # Observation may be stricter than the helper, never looser.
+                    exported = self.run_helper(shell).returncode == 0
+                    self.assertTrue(exported or not observed)
+                    self.assertEqual(observed, content in (token, token+'\n'))
+
+    def test_activation_identity_differs_from_the_bearer_releases(self):
+        # v0.28-v0.30 put the bearer into home documents. Core refuses a rollback
+        # whose retained profile runtime has a different activation identity.
+        runtime = json.loads((PROFILE/'profile.json').read_text())['runtime']
+        self.assertNotIn(runtime['activation_id'], {'telemetry-runtime'})
+        self.assertEqual(runtime['activation_id'], 'telemetry-runtime-v2')
+
     def test_only_a_provisioned_codex_older_than_the_helper_is_reported(self):
         link = self.root/'codex'
         self.assertTrue(guest.codex_helper_supported(link))

@@ -243,14 +243,17 @@ class Runtime:
             raise ValueError('foreign control state')
         return True
 
-    def token(self, path=None):
+    def token(self, path=None, strict=True):
         path = self.auth if path is None else path
         value = native.snapshot(path)
         if value is None or path.stat().st_uid != self.uid or stat.S_IMODE(path.stat().st_mode) != 0o600:
             raise ValueError('private collector token required')
-        token = value.decode().strip()
+        token = value.decode(errors='replace').strip()
         if len(token) != 64 or any(c not in '0123456789abcdef' for c in token):
             raise ValueError('invalid collector token')
+        # The headers helper reads only an exact first line; the collector trims.
+        if strict and value not in (token.encode(), token.encode()+b'\n'):
+            raise ValueError('noncanonical collector token')
         return token
 
     def private_directory(self, path, refusal):
@@ -285,9 +288,14 @@ class Runtime:
         if not self.auth.exists():
             # Keep the v0.30 bearer: the analytics copy, else the one its home-config receipt records.
             old = self.data/'auth.token'
-            token = (self.token(old) if old.exists() or old.is_symlink()
+            token = (self.token(old, strict=False) if old.exists() or old.is_symlink()
                      else native.legacy_token(self.control/'native.json') or secrets.token_hex(32))
             native.publish(self.auth, (token+'\n').encode(), None, self.uid, self.gid)
+        token = self.token(strict=False)
+        current = native.snapshot(self.auth)
+        if current != (token+'\n').encode():
+            # A hand-restored copy may carry CRLF or blanks the helper rejects.
+            native.publish(self.auth, (token+'\n').encode(), current, self.uid, self.gid)
         return self.token()
 
     def manager(self, unit, startup=False):
@@ -371,7 +379,7 @@ class Runtime:
         # Before the first apply after v0.30 the bearer is still in the analytics directory.
         for path in (self.auth, self.data/'auth.token'):
             if token is None and (self.selected or receipt.exists()) and native.snapshot(path) is not None:
-                token = self.token(path)
+                token = self.token(path, strict=False)
         return native.reconcile(self.etc, self.home, receipt, self.agents if self.selected else [],
                                 self.endpoint, token, tomli_w, self.uid, self.gid, self.templates, check,
                                 helper=str(self.helper))

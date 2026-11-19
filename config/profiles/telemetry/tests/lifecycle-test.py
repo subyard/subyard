@@ -1005,6 +1005,19 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
                 self.assertFalse((root/'control/native.json').exists())
                 self.assertFalse((root/'data/auth.token').exists())
                 self.assertNotIn(minted.encode(), (root/'home/.codex/config.toml').read_bytes())
+                # The collector trims a hand-restored token; the helper reads only an exact
+                # first line. Observation reports that drift and apply rewrites the file.
+                receiver_auth = {'parameter': 'telemetry.receiver-auth', 'installed': 'missing or invalid', 'desired': 'present'}
+                for restored in (legacy_token+'\r\n', legacy_token+' \n', '\n'+legacy_token+'\n', legacy_token):
+                    with self.subTest(restored=restored.encode()):
+                        guest.native.publish(runtime.auth, restored.encode(), runtime.auth.read_bytes(), runtime.uid, runtime.gid)
+                        helper_accepts = restored in (legacy_token, legacy_token+'\n')
+                        observed = runtime.observe()
+                        self.assertEqual(observed['state'], 'current' if helper_accepts else 'stale')
+                        self.assertEqual(receiver_auth in observed.get('diagnostics', []), not helper_accepts)
+                        runtime.apply()
+                        self.assertEqual(runtime.observe()['state'], 'current')
+                        self.assertEqual(runtime.auth.read_text(), legacy_token+'\n')
                 shutil.rmtree(root/'home/.codex')
                 publish = guest.native.publish
 
