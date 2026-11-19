@@ -175,7 +175,7 @@ func TestRuntimeOwnersShareActivationAndInitProtocol(t *testing.T) {
 	}
 	for _, definition := range owners {
 		t.Run(definition.Runtime.ActivationID, func(t *testing.T) {
-			fixture := newPendingInitFixture(t, false, map[string]string{"default": "ENVIRONMENT_PROFILES=" + definition.Name + "\nDEV_SUDO=0\n"})
+			fixture := newPendingInitFixture(t, false, map[string]string{"default": "ENVIRONMENT_PROFILES=" + definition.Name + "\nDEV_SUDO=no\n"})
 			root := fixture.cli.options.RepositoryRoot
 			// Installed commands dispatch through the release engine and name
 			// their repository root, as activation does.

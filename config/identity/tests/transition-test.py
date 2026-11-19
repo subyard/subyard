@@ -131,7 +131,7 @@ reconcile_dev_sudo "$2"
         subprocess.run(command, env=environment, check=True)
         self.assertEqual(sudoers.read_text(), 'dev ALL=(ALL) NOPASSWD:ALL\n')
         self.assertEqual(stat.S_IMODE(sudoers.stat().st_mode), 0o440)
-        subprocess.run(command, env={**environment, 'DEV_SUDO': '0'}, check=True)
+        subprocess.run(command, env={**environment, 'DEV_SUDO': 'no'}, check=True)
         self.assertFalse(sudoers.exists())
 
     def test_partial_shadow_tool_write_recovers_only_captured_account_rows(self):

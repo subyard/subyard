@@ -2054,3 +2054,28 @@ func TestReconcileIntegrationsStepIsSafePlanText(t *testing.T) {
 		}
 	}
 }
+
+// Only prompt changes the installed agent policy, so yes and no keep the package identity.
+func TestPackageDigestRecordsOnlySudoPrompt(t *testing.T) {
+	root := testkit.TempDir(t)
+	source := filepath.Join(root, "provision.sh")
+	testkit.WriteFile(t, source, []byte("#!/bin/sh\nexit 0\n"), 0o644)
+	digest := func(extra ...string) string {
+		runtime := Runtime{RepositoryRoot: root, Integrations: []profile.IntegrationDefinition{}, Profiles: []profile.Definition{},
+			Environment: append([]string{"CODING_TOOL_INTEGRATIONS=sample", "AGENT_sample_PROVISION=" + source}, extra...)}
+		entries, err := runtime.integrationPackageArtifacts("observe", nil)
+		if err != nil || len(entries) != 1 {
+			t.Fatalf("package receipt: %#v, error: %v", entries, err)
+		}
+		return entries[0].Digest
+	}
+	base := digest()
+	for _, value := range []string{"yes", "no"} {
+		if got := digest("DEV_SUDO=" + value); got != base {
+			t.Fatalf("DEV_SUDO=%s changed the package identity", value)
+		}
+	}
+	if digest("DEV_SUDO=prompt") == base {
+		t.Fatal("DEV_SUDO=prompt kept the package identity")
+	}
+}

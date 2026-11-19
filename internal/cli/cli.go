@@ -1584,6 +1584,14 @@ func (cli *CLI) printYardStatus(ctx context.Context, loaded config.Loaded) int {
 		fmt.Fprintf(cli.options.Stdout, "  vscode   %s agent-fwd=%s  (yard code <project>)\n",
 			status.VSCode, forward)
 	}
+	switch loaded.Environment["DEV_SUDO"] {
+	case "prompt":
+		fmt.Fprintln(cli.options.Stdout, "  sudo     prompt  (passwordless; coding agents ask before sudo)")
+	case "no":
+		fmt.Fprintln(cli.options.Stdout, "  sudo     no")
+	default:
+		fmt.Fprintln(cli.options.Stdout, "  sudo     yes  (passwordless)")
+	}
 	fmt.Fprintf(cli.options.Stdout, "  projects %d  (%s list)\n", status.ProjectCount, cli.yardHint(status.Context))
 	profiles := "all"
 	if len(status.Facts.Profiles) != 0 {
@@ -3439,6 +3447,12 @@ func structuredAdapterContext(yard domain.Context) map[string]string {
 		}
 		return "0"
 	}
+	// The context records only the grant; the loaded DEV_SUDO setting, which
+	// command contexts overlay, distinguishes prompt from yes.
+	devSudo := "no"
+	if yard.DevSudo {
+		devSudo = "yes"
+	}
 	yardName := yard.YardName
 	selectedYard := yardName
 	if yardName == "default" {
@@ -3469,7 +3483,7 @@ func structuredAdapterContext(yard domain.Context) map[string]string {
 		"SSH_PORT":                      strconv.Itoa(yard.SSHPort),
 		"DEV_USER":                      yard.DevUser,
 		"DEV_UID":                       strconv.Itoa(yard.DevUID),
-		"DEV_SUDO":                      boolValue(yard.DevSudo),
+		"DEV_SUDO":                      devSudo,
 		"FORWARD_SSH_AGENT":             boolValue(yard.ForwardSSHAgent),
 		"NESTED_E2E_VMS":                boolValue(yard.NestedE2EVMs),
 		"SHIFT_MODE":                    yard.ShiftMode,

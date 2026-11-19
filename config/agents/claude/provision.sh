@@ -19,13 +19,17 @@ fi
 expected_owner="$(id -u):$(id -g)"
 die() { printf 'Claude policy: %s\n' "$*" >&2; exit 1; }
 GIT_APPROVAL="${CODING_TOOL_GIT_APPROVAL:-prompt}"
+DEV_SUDO="${DEV_SUDO:-yes}"
 
 # BEGIN generated Git approval hook
 git_approval_hook() {
   cat <<'GIT_APPROVAL_HOOK'
 #!/usr/bin/python3 -I
 # Managed by Subyard Git approval provision.
-"""Recognize literal Git command words without executing or expanding shell input."""
+"""Recognize literal gated command words without executing or expanding shell input.
+
+Arguments name the gates: git (commit and push) and sudo (privilege escalation).
+"""
 
 import json
 import posixpath
@@ -43,6 +47,12 @@ GIT_FLAGS = {"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
              "--no-optional-locks", "--no-lazy-fetch", "--literal-pathspecs",
              "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
              "--bare", "--no-advice"}
+ESCALATION = {"sudo", "su", "doas", "pkexec", "sudoedit", "run0"}
+SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
+# Wrapper options that take a separate operand, per wrapper.
+WRAPPER_VALUE_OPTIONS = {"env": {"-u", "--unset", "-C", "--chdir"}, "exec": {"-a"},
+                         "nice": {"-n", "--adjustment"}, "time": set(), "nohup": set(),
+                         "command": set(), "timeout": {"-s", "--signal", "-k", "--kill-after"}}
 
 
 def git_action(words):
@@ -124,7 +134,48 @@ def shell_command(executable, args):
     return arg if command_mode and not noexec else None
 
 
-def denied_action(command, nested=False, depth=0):
+def unwrap(executable, args):
+    """Return the offset of the command a transparent wrapper runs.
+
+    None means that the wrapper runs no command; a string is an env -S command line.
+    """
+    index, values = 0, WRAPPER_VALUE_OPTIONS[executable]
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if executable == "env" and ASSIGNMENT.match(arg):
+            index += 1
+        elif executable == "env" and arg.startswith(("-S", "--split-string")):
+            script = arg[2:] if arg.startswith("-S") else arg.partition("=")[2]
+            rest = args[index + 1:]
+            if not script and "=" not in arg:
+                script, rest = (rest[0], rest[1:]) if rest else ("", [])
+            return " ".join([script, *rest])
+        elif arg.startswith("-") and arg != "-":
+            # command -v and -V only describe the named command.
+            if executable == "command" and ("v" in arg or "V" in arg):
+                return None
+            index += 2 if arg in values else 1
+        else:
+            break
+    if executable == "timeout":
+        index += 1
+    return index if index < len(args) else None
+
+
+def gated(executable, args, gates):
+    """Return the gated command name, if this simple command runs one."""
+    if "git" in gates and executable == "git":
+        action = git_action(args)
+        return action and f"git {action}"
+    if "sudo" in gates and executable in ESCALATION:
+        return executable
+    return None
+
+
+def denied_action(command, gates=("git",), nested=False, depth=0):
     if depth == 8:
         return None
     command = command.replace("\\\n", "")
@@ -136,30 +187,50 @@ def denied_action(command, nested=False, depth=0):
         start = 0
         while start < len(words) and ASSIGNMENT.match(tokens[start][0]):
             start += 1
-        if start == len(words):
+        position, wrapped = start, False
+        while position < len(words):
+            executable = posixpath.basename(words[position])
+            args = words[position + 1:]
+            if executable not in WRAPPER_VALUE_OPTIONS:
+                break
+            offset = unwrap(executable, args)
+            if isinstance(offset, str):
+                action = denied_action(offset, gates, nested=True, depth=depth + 1)
+                if action:
+                    return action
+            if not isinstance(offset, int):
+                position = len(words)
+            else:
+                position, wrapped = position + 1 + offset, True
+        if position >= len(words):
             continue
-        executable = posixpath.basename(words[start])
-        args = words[start + 1:]
-        if executable == "git":
-            action = git_action(args)
-            if action and (nested or start or
-                           command[tokens[0][1]:tokens[1][2]] != f"git {action}"):
+        action = gated(executable, args, gates)
+        if action:
+            raw = tokens[position][0] if executable in ESCALATION else (
+                command[tokens[position][1]:tokens[position + 1][2]])
+            if nested or wrapped or start or raw != action:
                 return action
-        elif executable in {"sh", "bash", "dash", "zsh", "ksh"}:
+        elif executable in SHELLS:
             script = shell_command(executable, args)
             if script is not None:
-                action = denied_action(script, nested=True, depth=depth + 1)
+                action = denied_action(script, gates, nested=True, depth=depth + 1)
                 if action:
                     return action
     return None
 
 
 def main():
+    gates = set(sys.argv[1:]) or {"git"}
     payload = json.load(sys.stdin)
-    action = denied_action(payload["tool_input"]["command"])
+    action = denied_action(payload["tool_input"]["command"], gates)
+    if action and action.startswith("git "):
+        print(f"Git approval requires a direct `{action}` command. "
+              f"For another directory, use `cd <directory> && {action}`.",
+              file=sys.stderr)
+        return 2
     if action:
-        print(f"Git approval requires a direct `git {action}` command. "
-              f"For another directory, use `cd <directory> && git {action}`.",
+        print(f"Sudo approval requires a direct `{action}` command at the start of a command, "
+              f"without a path, wrapper or nested shell.",
               file=sys.stderr)
         return 2
     return 0
@@ -172,7 +243,7 @@ GIT_APPROVAL_HOOK
 # Publish the helper before the policy that references it.
 install_git_approval_hook() {
   local hook_stage
-  [ "$GIT_APPROVAL" = prompt ] || return 0
+  [ -n "$APPROVAL_GATES" ] || return 0
   hook_stage="$(mktemp "$(dirname "$git_hook")/.git-approval.XXXXXX")"
   git_approval_hook > "$hook_stage"
   chmod 0755 "$hook_stage"
@@ -181,23 +252,26 @@ install_git_approval_hook() {
 
 check_git_approval_hook() {
   local git_hook="$1" git_hook_sha="$2" expected_owner="$3"
-  [ -x /usr/bin/python3 ] || refuse 'managed Git approval hook interpreter is missing; run yard init'
+  [ -x /usr/bin/python3 ] || refuse 'managed approval hook interpreter is missing; run yard init'
   if [ -f "$git_hook" ] && [ ! -L "$git_hook" ]; then
     [ "$(stat -c '%a:%u:%g' "$git_hook" 2>/dev/null)" = "755:$expected_owner" ] \
-      || refuse 'managed Git approval hook permissions drifted; run yard init'
+      || refuse 'managed approval hook permissions drifted; run yard init'
     [ "$(sha256sum < "$git_hook" | cut -d' ' -f1)" = "$git_hook_sha" ] \
-      || refuse 'managed Git approval hook content drifted; run yard init'
+      || refuse 'managed approval hook content drifted; run yard init'
   else
-    refuse 'managed Git approval hook is missing; run yard init'
+    refuse 'managed approval hook is missing; run yard init'
   fi
 }
 # END generated Git approval hook
 
-case "$GIT_APPROVAL" in
-  prompt) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"},"permissions":{"ask":["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"]}}' ;;
-  off) POLICY_JSON='{"$comment":"Subyard Claude permission policy","env":{"DISABLE_UPDATES":"1"}}' ;;
-  *) die 'CODING_TOOL_GIT_APPROVAL must be prompt or off' ;;
-esac
+modes_valid=1
+case "$GIT_APPROVAL" in prompt|off) ;; *) printf 'Claude policy: CODING_TOOL_GIT_APPROVAL must be prompt or off\n' >&2; modes_valid=0 ;; esac
+case "$DEV_SUDO" in yes|no|prompt) ;; *) printf 'Claude policy: DEV_SUDO must be yes, no or prompt\n' >&2; modes_valid=0 ;; esac
+[ "$modes_valid" = 1 ] || exit 1
+# The hook receives the gates whose direct commands the ask rules prompt for.
+APPROVAL_GATES=''
+[ "$GIT_APPROVAL" != prompt ] || APPROVAL_GATES=git
+[ "$DEV_SUDO" != prompt ] || APPROVAL_GATES="${APPROVAL_GATES:+$APPROVAL_GATES }sudo"
 [ "$(id -u)" = 0 ] || [ "${CLAUDE_POLICY_TEST_ALLOW_NON_ROOT:-0}" = 1 ] || die 'must run as root'
 ETC_DIR="${CLAUDE_ETC_DIR:-/etc}"
 case "$ETC_DIR" in /*) ;; *) die 'environment directory must be absolute' ;; esac
@@ -228,13 +302,13 @@ for path in "$INSTALL_ROOT" "$(dirname "$BIN_LINK")" "$(dirname "$CHECK_PATH")" 
 done
 policy="$POLICY_DIR/50-subyard-git-approval.json"
 git_hook="$(dirname "$POLICY_DIR")/subyard-git-approval-hook"
-if [ "$GIT_APPROVAL" = prompt ]; then
-  [ -x /usr/bin/python3 ] || die '/usr/bin/python3 is required for Git approval'
+if [ -n "$APPROVAL_GATES" ]; then
+  [ -x /usr/bin/python3 ] || die '/usr/bin/python3 is required for managed approval'
   if [ -L "$git_hook" ] || { [ -e "$git_hook" ] && [ ! -f "$git_hook" ]; }; then
-    die 'managed Git approval hook is not a regular file'
+    die 'managed approval hook is not a regular file'
   fi
   if [ -f "$git_hook" ] && ! grep -Fxq '# Managed by Subyard Git approval provision.' "$git_hook"; then
-    die 'existing Git approval hook belongs to another policy'
+    die 'existing approval hook belongs to another policy'
   fi
 fi
 for path in "$policy" "$CHECK_PATH"; do
@@ -256,6 +330,12 @@ fi
 for tool in curl jq sha256sum sort od timeout; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is required"
 done
+POLICY_JSON="$(jq -cn --arg git "$GIT_APPROVAL" --arg sudo "$DEV_SUDO" '
+  [if $git == "prompt" then "git commit", "git push" else empty end,
+   if $sudo == "prompt" then "sudo", "su", "doas", "pkexec", "sudoedit", "run0" else empty end]
+  | map("Bash(\(.))", "Bash(\(.):*)") as $ask
+  | {"$comment": "Subyard Claude permission policy", env: {DISABLE_UPDATES: "1"}}
+  + if $ask == [] then {} else {permissions: {ask: $ask}} end')"
 if [ -z "$ARCH" ]; then ARCH="$(dpkg --print-architecture)"; fi
 case "$ARCH" in
   amd64) platform=linux-x64 ;;
@@ -344,10 +424,12 @@ download_artifact() {
 install -d -m 0755 "$(dirname "$POLICY_DIR")" "$POLICY_DIR" "$(dirname "$CHECK_PATH")"
 stage="$(mktemp "$POLICY_DIR/.subyard.XXXXXX")"
 install_git_approval_hook
-if [ "$GIT_APPROVAL" = prompt ]; then
-  POLICY_JSON="$(jq -c --arg path "$git_hook" '
+if [ -n "$APPROVAL_GATES" ]; then
+  # Keep the historical Git-only command for unchanged installed policies.
+  POLICY_JSON="$(jq -c --arg path "$git_hook" --arg gates "$APPROVAL_GATES" '
     .hooks.PreToolUse = [{matcher:"Bash", hooks:[{
-      type:"command", command:($path | @sh), timeout:3, onFailure:"block"
+      type:"command", command:(if $gates == "git" then $path | @sh else ($path | @sh) + " " + $gates end),
+      timeout:3, onFailure:"block"
     }]}]' <<<"$POLICY_JSON")"
 fi
 jq . <<<"$POLICY_JSON" > "$stage"
@@ -418,7 +500,7 @@ stage="$(mktemp "$(dirname "$CHECK_PATH")/.claude-policy-check.XXXXXX")"
   printf 'policy=%q\npolicy_dir=%q\nexpected_owner=%q\n' "$policy" "$POLICY_DIR" "$(id -u):$(id -g)"
   printf 'runtime=%q\nlink=%q\n' "$RUNTIME_PATH" "$BIN_LINK"
   printf 'DEV_USER=%q\nDEV_HOME=%q\n' "$DEV_USER" "$DEV_HOME"
-  printf 'git_approval=%q\npolicy_json=%q\n' "$GIT_APPROVAL" "$POLICY_JSON"
+  printf 'git_approval=%q\ndev_sudo=%q\npolicy_json=%q\n' "$GIT_APPROVAL" "$DEV_SUDO" "$POLICY_JSON"
   printf 'git_hook=%q\ngit_hook_sha=%q\n' "$git_hook" "$(git_approval_hook | sha256sum | cut -d' ' -f1)"
   declare -f check_git_approval_hook is_working_binary dev_owned_directory native_shadow_state
   cat <<'CHECK'
@@ -435,10 +517,10 @@ if [ -f "$policy" ] && [ ! -L "$policy" ]; then
 else
   refuse 'managed policy is missing; run yard init'
 fi
-if [ "$git_approval" = prompt ]; then
+if [ "$git_approval" = prompt ] || [ "$dev_sudo" = prompt ]; then
   hook_dir="$(dirname "$git_hook")"
   [ ! -L "$hook_dir" ] && [ "$(stat -c '%a:%u:%g' "$hook_dir" 2>/dev/null)" = "755:$expected_owner" ] \
-    || refuse 'managed Git approval hook directory drifted; run yard init'
+    || refuse 'managed approval hook directory drifted; run yard init'
   check_git_approval_hook "$git_hook" "$git_hook_sha" "$expected_owner"
 fi
 [ -L "$link" ] && [ "$(readlink "$link")" = "$runtime" ] \
@@ -449,10 +531,12 @@ shadow="$(native_shadow_state)" || shadow=foreign
 if [ "$refusals" = 0 ]; then
   printf 'Claude %s ready. ' "$BINARY_VERSION"
   if [ "$git_approval" = off ]; then
-    printf 'Managed Claude update lock installed; managed Git prompts off (CODING_TOOL_GIT_APPROVAL=off).\n'
+    printf 'Managed Claude update lock installed; managed Git prompts off (CODING_TOOL_GIT_APPROVAL=off).'
   else
-    printf 'Managed Claude Git ask rules, Git hook and update lock installed; inspect /status and /permissions in the active client.\n'
+    printf 'Managed Claude Git ask rules, Git hook and update lock installed; inspect /status and /permissions in the active client.'
   fi
+  [ "$dev_sudo" != prompt ] || printf ' Managed sudo ask rules installed (DEV_SUDO=prompt).'
+  printf '\n'
 fi
 if [ "$shadow" = foreign ]; then
   printf 'Conflict: %s/.local/bin/claude is not Subyard-owned and was left unchanged; login shells can run it instead of %s.\n' "$DEV_HOME" "$link"

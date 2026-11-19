@@ -309,6 +309,36 @@ run_hook amd64 "$root" >/dev/null
 grep -Fq 'decision = "prompt"' "$requirements" || fail "prompt mode was not restored"
 CODEX_CHECK_DEV_USER="$(id -un)" "$tmp/prompt-check" >/dev/null || fail "restored prompt mode failed readiness"
 
+# DEV_SUDO=prompt adds escalation prompt rules and the sudo hook gate; yes and no change nothing.
+cp "$requirements" "$tmp/git-prompt-requirements"
+for git_mode in prompt off; do
+  run_hook amd64 "$root" CODING_TOOL_GIT_APPROVAL="$git_mode" DEV_SUDO=prompt >/dev/null
+  python3 - "$requirements" "$git_mode" <<'PY'
+import pathlib, shlex, sys, tomllib
+path = pathlib.Path(sys.argv[1])
+policy = tomllib.loads(path.read_text())
+git = [[{'token': 'git'}, {'any_of': ['commit', 'push']}]] if sys.argv[2] == 'prompt' else []
+sudo = [[{'token': name}] for name in ('sudo', 'su', 'doas', 'pkexec', 'sudoedit', 'run0')]
+rules = policy['rules']['prefix_rules']
+assert [rule['pattern'] for rule in rules] == git + sudo, rules
+assert {rule['decision'] for rule in rules} == {'prompt'}, rules
+hook, = policy['hooks']['PreToolUse'][0]['hooks']
+gates = ['git', 'sudo'] if git else ['sudo']
+assert shlex.split(hook['command']) == [str(path.parent / 'subyard-git-approval-hook'), *gates], hook
+PY
+  CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null || fail "sudo prompt readiness failed with Git $git_mode"
+done
+for sudo_mode in yes no; do
+  run_hook amd64 "$root" DEV_SUDO="$sudo_mode" >/dev/null
+  cmp "$requirements" "$tmp/git-prompt-requirements" || fail "DEV_SUDO=$sudo_mode changed the requirements"
+done
+if run_hook amd64 "$root" DEV_SUDO=0 CODING_TOOL_GIT_APPROVAL=sometimes >/dev/null 2>"$tmp/sudo-mode.err"; then
+  fail "legacy DEV_SUDO value accepted"
+fi
+grep -Fq 'DEV_SUDO must be yes, no or prompt' "$tmp/sudo-mode.err" || fail "invalid DEV_SUDO was not named"
+grep -Fq 'CODING_TOOL_GIT_APPROVAL must be prompt or off' "$tmp/sudo-mode.err" \
+  || fail "invalid Git mode was not reported with the DEV_SUDO refusal"
+
 # Artifact failures preserve the previous working runtime and authorization.
 before="$(sha256sum "$runtime" | cut -d' ' -f1)"
 rm "$CODEX_TEST_BWRAP_READY"
@@ -571,7 +601,7 @@ mv "$git_hook" "$tmp/expected-git-hook"
 if CODEX_CHECK_DEV_USER="$(id -un)" "$check" >/dev/null 2>"$tmp/hook-drift.err"; then
   fail "missing Git hook passed readiness"
 fi
-grep -Fq 'Git approval hook is missing' "$tmp/hook-drift.err"
+grep -Fq 'managed approval hook is missing' "$tmp/hook-drift.err"
 run_hook amd64 "$root" >/dev/null
 cmp "$git_hook" "$tmp/expected-git-hook" || fail "Git hook was not repaired"
 

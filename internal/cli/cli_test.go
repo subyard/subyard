@@ -232,7 +232,7 @@ printf '%s|%s|%s\n' "$SUBYARD_CONFIG_LOADED" "$SSH_HOST" "$HOST_BASE"
 		"SUBYARD_HOME=" + filepath.Join(root, "data"),
 		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + hostBase, "RESTRICTED_DISK_PATHS=" + hostBase,
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000", "SSH_PORT=2222",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000", "SSH_PORT=2222",
 		"SUBYARD_NO_AUDIT=1",
 	}
 	var stdout, stderr bytes.Buffer
@@ -303,7 +303,7 @@ func TestOldYardTeardownRequiresCanonicalTemplateMigration(t *testing.T) {
 		"RESTRICTED_DISK_PATHS=" + hostBase,
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",

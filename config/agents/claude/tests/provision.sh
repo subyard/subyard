@@ -186,8 +186,8 @@ jq -e --arg hook "$git_hook" '
 printf '# fixture drift\n' >> "$git_hook"
 chmod 0666 "$git_hook"
 if "$check" >/dev/null 2>"$tmp/hook-drift.err"; then fail 'Git hook drift passed readiness'; fi
-grep -Fq 'Git approval hook permissions drifted' "$tmp/hook-drift.err"
-grep -Fq 'Git approval hook content drifted' "$tmp/hook-drift.err"
+grep -Fq 'managed approval hook permissions drifted' "$tmp/hook-drift.err"
+grep -Fq 'managed approval hook content drifted' "$tmp/hook-drift.err"
 run_hook "$root" >/dev/null
 
 # Apply off to a previously managed prompt policy, then restore prompt.
@@ -204,6 +204,37 @@ run_hook "$root" >/dev/null
 jq -e '.permissions.ask | length == 4' "$policy" >/dev/null || fail 'prompt mode was not restored'
 "$check" >/dev/null || fail 'restored prompt mode failed readiness'
 [ "$before" = "$(sha256sum "$policy_dir/10-foreign.json")" ] || fail 'mode change modified a foreign policy'
+
+# DEV_SUDO=prompt adds sudo ask rules and the sudo hook gate in both Git modes; no and yes install neither.
+sudo_rules='["Bash(sudo)","Bash(sudo:*)","Bash(su)","Bash(su:*)","Bash(doas)","Bash(doas:*)","Bash(pkexec)","Bash(pkexec:*)","Bash(sudoedit)","Bash(sudoedit:*)","Bash(run0)","Bash(run0:*)"]'
+prompt_policy="$(cat "$policy")"
+for git_mode in prompt off; do
+  case "$git_mode" in prompt) gates='git sudo' ;; off) gates=sudo ;; esac
+  CODING_TOOL_GIT_APPROVAL="$git_mode" DEV_SUDO=prompt run_hook "$root" >/dev/null
+  jq -e --argjson sudo "$sudo_rules" --arg mode "$git_mode" --arg hook "$git_hook" --arg gates "$gates" '
+    .permissions.ask == (if $mode == "prompt" then ["Bash(git commit)","Bash(git commit:*)","Bash(git push)","Bash(git push:*)"] else [] end) + $sudo
+    and .hooks.PreToolUse == [{matcher:"Bash", hooks:[{
+      type:"command", command:(($hook | @sh) + " " + $gates), timeout:3, onFailure:"block"}]}]' "$policy" >/dev/null \
+    || fail "DEV_SUDO=prompt policy is wrong with Git $git_mode"
+  "$check" | grep -F >/dev/null 'Managed sudo ask rules installed (DEV_SUDO=prompt)' \
+    || fail 'sudo prompt readiness did not name the mode'
+  # shellcheck disable=SC2086 # The gates are separate hook arguments.
+  if printf '{"tool_input":{"command":"env sudo id"}}' | "$git_hook" $gates >/dev/null 2>&1; then
+    fail 'installed hook allowed a wrapped sudo'
+  fi
+done
+for sudo_mode in no yes; do
+  DEV_SUDO="$sudo_mode" run_hook "$root" >/dev/null
+  [ "$(cat "$policy")" = "$prompt_policy" ] || fail "DEV_SUDO=$sudo_mode changed the Git prompt policy"
+  if "$check" | grep -F >/dev/null 'sudo ask'; then fail "DEV_SUDO=$sudo_mode readiness named sudo prompts"; fi
+done
+if DEV_SUDO=1 CODING_TOOL_GIT_APPROVAL=sometimes run_hook "$root" >/dev/null 2>"$tmp/sudo-mode.err"; then
+  fail 'legacy DEV_SUDO value accepted'
+fi
+grep -Fq 'DEV_SUDO must be yes, no or prompt' "$tmp/sudo-mode.err" || fail 'invalid DEV_SUDO was not named'
+grep -Fq 'CODING_TOOL_GIT_APPROVAL must be prompt or off' "$tmp/sudo-mode.err" \
+  || fail 'invalid Git mode was not reported with the DEV_SUDO refusal'
+"$check" >/dev/null || fail 'restored default sudo mode failed readiness'
 
 # Only the native installer's exact link is released, and never the files it points to.
 dev_home="$tmp/dev-home"

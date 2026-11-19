@@ -387,6 +387,32 @@ func TestPendingInitReportsNewGitApprovalDefaultAgainstLegacySnapshot(t *testing
 	}
 }
 
+// Yes and no install the same agent policy; only a change to or from prompt awaits init.
+func TestPendingInitReportsOnlySudoPromptChanges(t *testing.T) {
+	catalog, err := config.LoadCatalog(repositoryRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	selection := config.IntegrationSelection{Effective: []string{"codex"}, AllowsCodingTools: true}
+	for _, test := range []struct {
+		applied, desired string
+		pending          bool
+	}{
+		{"", "yes", false}, {"", "no", false}, {"", "prompt", true}, {"prompt", "prompt", false}, {"prompt", "yes", true}, {"prompt", "no", true},
+	} {
+		applied := map[string]string{"DEV_USER": "dev"}
+		if test.applied != "" {
+			applied["DEV_SUDO"] = test.applied
+		}
+		desired := config.Loaded{Catalog: catalog, Environment: map[string]string{"DEV_USER": "dev", "DEV_SUDO": test.desired}, Integrations: selection}
+		installed := config.Loaded{Catalog: catalog, Environment: catalog.WithAppliedIntegrationInitSettings(desired.Environment, applied), Integrations: selection}
+		settings := pendingInitSettings(desired, installed)
+		if pending := len(settings) == 1 && settings[0].Name == "DEV_SUDO"; pending != test.pending || len(settings) > 1 {
+			t.Fatalf("installed %q, desired %q: %#v", test.applied, test.desired, settings)
+		}
+	}
+}
+
 // The sealed fixture owner becomes ready only at its convergence boundary. Each
 // nested init can prove the release repair already ran; planning remains read-only.
 func enablePendingRepair(t *testing.T, fixture *pendingInitFixture) {

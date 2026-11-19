@@ -74,6 +74,21 @@ guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 \
   bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
   || die 'native Claude installed policy acceptance failed'
 
+stage 'running native Claude sudo approval with installed DEV_SUDO=prompt'
+yard config set DEV_SUDO prompt --scope yard --yes >/dev/null || die 'DEV_SUDO=prompt was refused'
+yard init --yes >/dev/null || die 'yard init did not apply DEV_SUDO=prompt'
+sudo_status="$(yard status 2>&1 || true)"
+grep -Fq 'sudo     prompt' <<<"$sudo_status" || die 'yard status does not name the sudo prompt mode'
+sudo_ready="$(guest_root claude-policy-check)" || die 'Claude readiness failed with DEV_SUDO=prompt'
+grep -Fq 'DEV_SUDO=prompt' <<<"$sudo_ready" || die 'Claude readiness omits the sudo prompt'
+guest_root runuser -u dev -- sudo -n true || die 'DEV_SUDO=prompt removed the passwordless grant'
+guest_root runuser -u dev -- env HOME=/home/dev SUBYARD_E2E_VM=1 PARITY_SUDO=1 \
+  bash /tmp/subyard-claude-policy/config/agents/claude/tests/e2e/acceptance.sh --installed-policy \
+  || die 'native Claude sudo approval acceptance failed'
+yard config unset DEV_SUDO --scope yard --yes >/dev/null || die 'DEV_SUDO unset was refused'
+yard init --yes >/dev/null || die 'yard init did not restore the default sudo mode'
+if guest_root grep -Fq 'Bash(sudo' "$claude_policy"; then die 'default sudo mode kept the sudo ask rules'; fi
+
 fi
 
 stage 'creating two registered workspaces for Codex policy coverage'

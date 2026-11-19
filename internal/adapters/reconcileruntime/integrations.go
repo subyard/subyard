@@ -726,6 +726,10 @@ func (runtime Runtime) integrationPackageArtifacts(phase string, reader func(con
 			if config.GitApprovalOff(runtime.environmentValue("CODING_TOOL_GIT_APPROVAL")) {
 				inputs = append(inputs, "CODING_TOOL_GIT_APPROVAL=off")
 			}
+			// Yes and no install the same agent policy; only prompt adds sudo rules.
+			if config.SudoApprovalPrompt(runtime.environmentValue("DEV_SUDO")) {
+				inputs = append(inputs, "DEV_SUDO=prompt")
+			}
 		}
 		entries = append(entries, integrationArtifact{ID: id, Kind: "package", Digest: fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(inputs, "\x00"))))})
 	}

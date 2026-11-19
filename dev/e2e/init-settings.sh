@@ -244,7 +244,7 @@ yard init --yes
 printf 'PASS: applied settings retain missing-owned-file release refusal\n'
 # Install the relevant credential-free owners before exercising account recovery.
 yard config set ENVIRONMENT_PROFILES 'git-fetch telemetry' --scope yard --yes
-yard config set DEV_SUDO 1 --scope yard --yes
+yard config set DEV_SUDO yes --scope yard --yes
 yard stop --yes
 yard start --yes
 printf 'PASS: pending profile selection preserves ordinary stop/start before provisioning\n'

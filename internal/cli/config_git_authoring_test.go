@@ -22,7 +22,7 @@ type configGitAuthoringFixture struct {
 func newConfigGitAuthoringFixture(t *testing.T) *configGitAuthoringFixture {
 	t.Helper()
 	root, home, configHome, environment := configCommandFixture(t)
-	remote, _ := configBareSourceRepository(t, "owner-a", "# Preserve source records\nDEV_UID=2297\nDEV_SUDO=0\n")
+	remote, _ := configBareSourceRepository(t, "owner-a", "# Preserve source records\nDEV_UID=2297\nDEV_SUDO=no\n")
 	f := &configGitAuthoringFixture{t: t, root: root, home: home, configHome: configHome, remote: remote,
 		environment: append(environment, "GIT_AUTHOR_NAME=Subyard Test", "GIT_AUTHOR_EMAIL=test@invalid",
 			"GIT_COMMITTER_NAME=Subyard Test", "GIT_COMMITTER_EMAIL=test@invalid")}
@@ -57,20 +57,20 @@ func TestConfigGitAuthoringSharedDevSudo(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	peer := configGitAuthoringFixture{t: t, root: root, environment: environment}
 	peer.run(0, "config", "sync", "connect", author.remote, "--host-id", "owner-b", "--yes")
-	peer.assertSetting("DEV_SUDO", "1")
+	peer.assertSetting("DEV_SUDO", "yes")
 
-	author.run(0, "config", "set", "DEV_SUDO", "1", "--scope", "host", "--git", "--yes")
-	author.run(0, "config", "set", "DEV_SUDO", "0", "--scope", "shared", "--git", "--yes")
-	if got := configSourceGitOutput(t, author.remote, "show", "HEAD:shared/config.env"); got != "DEV_SUDO='0'\n" {
+	author.run(0, "config", "set", "DEV_SUDO", "yes", "--scope", "host", "--git", "--yes")
+	author.run(0, "config", "set", "DEV_SUDO", "no", "--scope", "shared", "--git", "--yes")
+	if got := configSourceGitOutput(t, author.remote, "show", "HEAD:shared/config.env"); got != "DEV_SUDO='no'\n" {
 		t.Fatalf("shared Git settings = %q", got)
 	}
-	author.assertSetting("DEV_SUDO", "1") // The Git host override wins on owner-a.
-	peer.assertSetting("DEV_SUDO", "1")
+	author.assertSetting("DEV_SUDO", "yes") // The Git host override wins on owner-a.
+	peer.assertSetting("DEV_SUDO", "yes")
 	peer.run(0, "config", "sync", "pull", "--yes")
-	peer.assertSetting("DEV_SUDO", "0")
+	peer.assertSetting("DEV_SUDO", "no")
 
 	peer.run(0, "config", "fields", "DEV_SUDO")
-	for _, want := range []string{"default: 1\n", "scopes: shipped,shared,host,yard,command\n", "syncable: yes\n", "applies: yard init\n"} {
+	for _, want := range []string{"default: yes\n", "scopes: shipped,shared,host,yard,command\n", "syncable: yes\n", "applies: yard init\n"} {
 		if !strings.Contains(peer.stdout.String(), want) {
 			t.Fatalf("config fields missing %q:\n%s", want, peer.stdout.String())
 		}
@@ -81,11 +81,11 @@ func TestConfigGitAuthoringSharedDevSudoWithdrawal(t *testing.T) {
 	for _, method := range []string{"unset", "delete file"} {
 		t.Run(method, func(t *testing.T) {
 			author := newConfigGitAuthoringFixture(t)
-			author.run(0, "config", "set", "DEV_SUDO", "0", "--scope", "shared", "--git", "--yes")
+			author.run(0, "config", "set", "DEV_SUDO", "no", "--scope", "shared", "--git", "--yes")
 			root, _, _, environment := configCommandFixture(t)
 			peer := configGitAuthoringFixture{t: t, root: root, environment: environment}
 			peer.run(0, "config", "sync", "connect", author.remote, "--host-id", "owner-b", "--yes")
-			peer.assertSetting("DEV_SUDO", "0")
+			peer.assertSetting("DEV_SUDO", "no")
 
 			if method == "unset" {
 				author.run(0, "config", "unset", "DEV_SUDO", "--scope", "shared", "--git", "--yes")
@@ -100,7 +100,7 @@ func TestConfigGitAuthoringSharedDevSudoWithdrawal(t *testing.T) {
 			}
 
 			peer.run(0, "config", "sync", "pull", "--yes")
-			peer.assertSetting("DEV_SUDO", "1")
+			peer.assertSetting("DEV_SUDO", "yes")
 			output := peer.stdout.String()
 			if !strings.Contains(output, "\n  yard init: yard init\n") || strings.Contains(output, "\n  config apply:") {
 				t.Fatalf("peer pull should report yard init as its follow-up:\n%s", output)
@@ -127,15 +127,15 @@ func TestConfigSyncSharedDevSudoCacheReplacement(t *testing.T) {
 				}
 			}
 			cache := filepath.Join(configHome, config.GitSettingsRelativePath, "overrides", "shared", "config.env")
-			writeConfigCommandFile(t, cache, "DEV_SUDO=0\n", 0o600)
-			peer.assertSetting("DEV_SUDO", "0")
+			writeConfigCommandFile(t, cache, "DEV_SUDO=no\n", 0o600)
+			peer.assertSetting("DEV_SUDO", "no")
 
 			if action == "restore-drift" {
 				peer.run(0, "config", "sync", "pull", "--yes")
 			} else {
 				peer.run(0, "config", "sync", "--adopt", "--yes")
 			}
-			peer.assertSetting("DEV_SUDO", "1")
+			peer.assertSetting("DEV_SUDO", "yes")
 			output := peer.stdout.String()
 			if !strings.Contains(output, "\n  yard init: yard init\n") ||
 				!strings.Contains(output, "\n  next command: effective automatically\n") || strings.Contains(output, "\n  config apply:") {
@@ -163,7 +163,7 @@ func TestConfigGitAuthoringPreservesLocalOverridesAndUnrelatedSourceRecords(t *t
 		t.Fatalf("Git save changed local settings: %q, %v", after, err)
 	}
 	versioned := configSourceGitOutput(t, f.remote, "show", "HEAD:hosts/owner-a/config.env")
-	if versioned != "# Preserve source records\nDEV_UID='2299'\nDEV_SUDO=0\n" {
+	if versioned != "# Preserve source records\nDEV_UID='2299'\nDEV_SUDO=no\n" {
 		t.Fatalf("selected save changed unrelated records: %q", versioned)
 	}
 	changed := strings.TrimSpace(configSourceGitOutput(t, f.remote, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"))
@@ -180,7 +180,7 @@ func TestConfigGitAuthoringPreservesLocalOverridesAndUnrelatedSourceRecords(t *t
 	f.assertSetting("DEV_UID", "2299")
 	f.run(0, "config", "unset", "DEV_UID", "--scope", "host", "--git", "--yes")
 	versioned = configSourceGitOutput(t, f.remote, "show", "HEAD:hosts/owner-a/config.env")
-	if versioned != "# Preserve source records\nDEV_SUDO=0\n" {
+	if versioned != "# Preserve source records\nDEV_SUDO=no\n" {
 		t.Fatalf("Git unset: %q", versioned)
 	}
 	f.assertSetting("DEV_UID", "1000")
@@ -225,7 +225,7 @@ func TestConfigGitScalarAuthoringRefusesUnrelatedCacheChanges(t *testing.T) {
 		t.Run(scope, func(t *testing.T) {
 			f := newConfigGitAuthoringFixture(t)
 			checkout := filepath.Join(f.home, ".local", "share", "subyard-config")
-			writeConfigCommandFile(t, filepath.Join(checkout, "hosts/owner-a/config.env"), "# Preserve source records\nDEV_UID=2298\nDEV_SUDO=0\n")
+			writeConfigCommandFile(t, filepath.Join(checkout, "hosts/owner-a/config.env"), "# Preserve source records\nDEV_UID=2298\nDEV_SUDO=no\n")
 			commitConfigSource(t, checkout, "change host UID")
 			runConfigSyncGit(t, checkout, "push", "-q")
 			before := configSourceGitOutput(t, f.remote, "rev-parse", "HEAD")
@@ -434,7 +434,7 @@ func TestConfigSyncPullSkipsEffectiveChecksForRefusedUpstreamYard(t *testing.T) 
 	local := filepath.Join(f.configHome, "yards/demo/config.env")
 	source := filepath.Join(checkout, "hosts/owner-a/yards/demo/config.env")
 	writeConfigCommandFile(t, local, "SSH_PORT=2399\n")
-	writeConfigCommandFile(t, source, "YARD_KIND=vm\nDEV_SUDO=1\n")
+	writeConfigCommandFile(t, source, "YARD_KIND=vm\nDEV_SUDO=yes\n")
 	commitConfigSource(t, checkout, "Add VM demo yard")
 	runConfigSyncGit(t, checkout, "push", "-q")
 	f.run(0, "config", "sync", "pull", "--yes")
@@ -446,7 +446,7 @@ func TestConfigSyncPullSkipsEffectiveChecksForRefusedUpstreamYard(t *testing.T) 
 	runConfigSyncGit(t, checkout, "push", "-q")
 	f.run(1, "config", "sync", "pull", "--yes")
 	output := f.stderr.String()
-	if !strings.Contains(output, "hosts/owner-a/yards/demo/config.env:2: DEV_SUDO (scalar settings): invalid boolean value") ||
+	if !strings.Contains(output, "hosts/owner-a/yards/demo/config.env:2: DEV_SUDO (scalar settings): invalid value; must be one of yes, no, prompt") ||
 		strings.Contains(output, "require YARD_KIND=vm") || strings.Contains(output, "use a VM yard") {
 		t.Fatalf("refused upstream yard: %s", output)
 	}

@@ -152,7 +152,7 @@ func TestConfigExactRPCUsesRetainedNativeCaptureAndSafeDiagnostics(t *testing.T)
 	}
 	handler := &rpcHandler{cli: program, loaded: loaded}
 	defer handler.closePlans()
-	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "config-native", Params: json.RawMessage(`{"command":"config","arguments":["set","SSH_PORT","2390","DEV_SUDO","1","--scope","host"],"exact":true,"stepSchema":1}`)}, nil)
+	value, err := handler.Handle(context.Background(), rpc.Call{Method: "operation.plan", OperationID: "config-native", Params: json.RawMessage(`{"command":"config","arguments":["set","SSH_PORT","2390","DEV_SUDO","yes","--scope","host"],"exact":true,"stepSchema":1}`)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestConfigExactRPCUsesRetainedNativeCaptureAndSafeDiagnostics(t *testing.T)
 		t.Fatal(err)
 	}
 	after, err := os.ReadFile(filepath.Join(configHome, "config.env"))
-	if err != nil || string(after) != "SSH_PORT='2390'\nDEV_SUDO='1'\n" {
+	if err != nil || string(after) != "SSH_PORT='2390'\nDEV_SUDO='yes'\n" {
 		t.Fatalf("native config execution did not publish approved assignments: %v", err)
 	}
 	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "config set: updated") {
@@ -470,7 +470,7 @@ func TestConfigExactScalarRewritesLegacyProfileAliasWithoutConflict(t *testing.T
 func TestConfigExactScalarValidatesProspectiveProfileCompatibility(t *testing.T) {
 	root, environment, _ := nativeFixture(t)
 	configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
+	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
 	writeConfigCommandFile(t, filepath.Join(root, "config/yards/profiles/isolated.env"), "YARD_KIND=vm\nREQUIRED_YARD_KIND=vm\nEXCLUSIVE_ENVIRONMENT_PROFILE=service\nENVIRONMENT_PROFILES=service\nALLOWS_CODING_TOOLS=false\n")
 	writeConfigCommandFile(t, filepath.Join(root, "config/profiles/service/profile.conf"), "PROVISION_SCOPE=dedicated\n")
 	target := filepath.Join(configHome, "yards/named/config.env")
@@ -649,7 +649,7 @@ func TestConfigProspectiveBindsValidatedPackageInputs(t *testing.T) {
 			t.Run(input+"/"+change, func(t *testing.T) {
 				root, environment, _ := nativeFixture(t)
 				configHome := environmentValue(environment, "SUBYARD_CONFIG_HOME")
-				writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
+				writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSHIFT_MODE=shift\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n")
 				target := filepath.Join(configHome, "yards/named/config.env")
 				initial := "SSH_PORT=2290\n"
 				dependency := filepath.Join(root, "config/profiles/sample/handler.sh")

@@ -1,6 +1,9 @@
 #!/usr/bin/python3 -I
 # Managed by Subyard Git approval provision.
-"""Recognize literal Git command words without executing or expanding shell input."""
+"""Recognize literal gated command words without executing or expanding shell input.
+
+Arguments name the gates: git (commit and push) and sudo (privilege escalation).
+"""
 
 import json
 import posixpath
@@ -18,6 +21,12 @@ GIT_FLAGS = {"-p", "--paginate", "-P", "--no-pager", "--no-replace-objects",
              "--no-optional-locks", "--no-lazy-fetch", "--literal-pathspecs",
              "--glob-pathspecs", "--noglob-pathspecs", "--icase-pathspecs",
              "--bare", "--no-advice"}
+ESCALATION = {"sudo", "su", "doas", "pkexec", "sudoedit", "run0"}
+SHELLS = {"sh", "bash", "dash", "zsh", "ksh"}
+# Wrapper options that take a separate operand, per wrapper.
+WRAPPER_VALUE_OPTIONS = {"env": {"-u", "--unset", "-C", "--chdir"}, "exec": {"-a"},
+                         "nice": {"-n", "--adjustment"}, "time": set(), "nohup": set(),
+                         "command": set(), "timeout": {"-s", "--signal", "-k", "--kill-after"}}
 
 
 def git_action(words):
@@ -99,7 +108,48 @@ def shell_command(executable, args):
     return arg if command_mode and not noexec else None
 
 
-def denied_action(command, nested=False, depth=0):
+def unwrap(executable, args):
+    """Return the offset of the command a transparent wrapper runs.
+
+    None means that the wrapper runs no command; a string is an env -S command line.
+    """
+    index, values = 0, WRAPPER_VALUE_OPTIONS[executable]
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if executable == "env" and ASSIGNMENT.match(arg):
+            index += 1
+        elif executable == "env" and arg.startswith(("-S", "--split-string")):
+            script = arg[2:] if arg.startswith("-S") else arg.partition("=")[2]
+            rest = args[index + 1:]
+            if not script and "=" not in arg:
+                script, rest = (rest[0], rest[1:]) if rest else ("", [])
+            return " ".join([script, *rest])
+        elif arg.startswith("-") and arg != "-":
+            # command -v and -V only describe the named command.
+            if executable == "command" and ("v" in arg or "V" in arg):
+                return None
+            index += 2 if arg in values else 1
+        else:
+            break
+    if executable == "timeout":
+        index += 1
+    return index if index < len(args) else None
+
+
+def gated(executable, args, gates):
+    """Return the gated command name, if this simple command runs one."""
+    if "git" in gates and executable == "git":
+        action = git_action(args)
+        return action and f"git {action}"
+    if "sudo" in gates and executable in ESCALATION:
+        return executable
+    return None
+
+
+def denied_action(command, gates=("git",), nested=False, depth=0):
     if depth == 8:
         return None
     command = command.replace("\\\n", "")
@@ -111,30 +161,50 @@ def denied_action(command, nested=False, depth=0):
         start = 0
         while start < len(words) and ASSIGNMENT.match(tokens[start][0]):
             start += 1
-        if start == len(words):
+        position, wrapped = start, False
+        while position < len(words):
+            executable = posixpath.basename(words[position])
+            args = words[position + 1:]
+            if executable not in WRAPPER_VALUE_OPTIONS:
+                break
+            offset = unwrap(executable, args)
+            if isinstance(offset, str):
+                action = denied_action(offset, gates, nested=True, depth=depth + 1)
+                if action:
+                    return action
+            if not isinstance(offset, int):
+                position = len(words)
+            else:
+                position, wrapped = position + 1 + offset, True
+        if position >= len(words):
             continue
-        executable = posixpath.basename(words[start])
-        args = words[start + 1:]
-        if executable == "git":
-            action = git_action(args)
-            if action and (nested or start or
-                           command[tokens[0][1]:tokens[1][2]] != f"git {action}"):
+        action = gated(executable, args, gates)
+        if action:
+            raw = tokens[position][0] if executable in ESCALATION else (
+                command[tokens[position][1]:tokens[position + 1][2]])
+            if nested or wrapped or start or raw != action:
                 return action
-        elif executable in {"sh", "bash", "dash", "zsh", "ksh"}:
+        elif executable in SHELLS:
             script = shell_command(executable, args)
             if script is not None:
-                action = denied_action(script, nested=True, depth=depth + 1)
+                action = denied_action(script, gates, nested=True, depth=depth + 1)
                 if action:
                     return action
     return None
 
 
 def main():
+    gates = set(sys.argv[1:]) or {"git"}
     payload = json.load(sys.stdin)
-    action = denied_action(payload["tool_input"]["command"])
+    action = denied_action(payload["tool_input"]["command"], gates)
+    if action and action.startswith("git "):
+        print(f"Git approval requires a direct `{action}` command. "
+              f"For another directory, use `cd <directory> && {action}`.",
+              file=sys.stderr)
+        return 2
     if action:
-        print(f"Git approval requires a direct `git {action}` command. "
-              f"For another directory, use `cd <directory> && git {action}`.",
+        print(f"Sudo approval requires a direct `{action}` command at the start of a command, "
+              f"without a path, wrapper or nested shell.",
               file=sys.stderr)
         return 2
     return 0

@@ -3817,7 +3817,7 @@ func TestTrustedInProcessReleaseTransitionChildBypassesMutationGate(t *testing.T
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -3869,7 +3869,7 @@ func TestReleaseTransitionChildUsesSanitizedCandidateContext(t *testing.T) {
 	writeCLIFile(t, filepath.Join(root, "config", "subyard.env"), strings.Join([]string{
 		"SHIFT_MODE=shift",
 		"FORWARD_SSH_AGENT=0",
-		"DEV_SUDO=0",
+		"DEV_SUDO=no",
 		"DEV_UID=1000",
 		"DEV_USER=dev",
 		"SSH_PORT=2222",
@@ -5760,7 +5760,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		// Required context has persistent shipped defaults; command values may
 		// override these for ordinary requests but cannot mask authored drafts.
 		if name == "subyard.env" {
-			content = fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data", "storage"), filepath.Join(root, "host"), filepath.Join(root, "host"))
+			content = fmt.Sprintf("STORAGE_PATH='%s'\nHOST_BASE='%s'\nRESTRICTED_DISK_PATHS='%s'\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nDEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\n", filepath.Join(root, "data", "storage"), filepath.Join(root, "host"), filepath.Join(root, "host"))
 		}
 		if name == "agents.env" {
 			content = "CODING_TOOL_INTEGRATIONS=\nAGENT_codex_COMMAND=codex\nAGENT_claude_COMMAND=claude\n"
@@ -5776,7 +5776,7 @@ func nativeFixture(t *testing.T) (string, []string, string) {
 		"SUBYARD_HOME=" + filepath.Join(root, "data"),
 		"STORAGE_PATH=" + filepath.Join(root, "data", "storage"),
 		"HOST_BASE=" + hostBase, "RESTRICTED_DISK_PATHS=" + hostBase,
-		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=0", "DEV_UID=1000",
+		"SHIFT_MODE=shift", "FORWARD_SSH_AGENT=0", "DEV_SUDO=no", "DEV_UID=1000",
 		"DEV_USER=dev", "SSH_PORT=2222", "SUBYARD_NO_AUDIT=1",
 	}
 	return root, environment, stateDirectory

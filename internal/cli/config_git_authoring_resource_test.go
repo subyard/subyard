@@ -17,7 +17,7 @@ import (
 func TestConfigGitAuthoringRetryRequiresShutdownBeforeApplyingCommittedProfileChange(t *testing.T) {
 	f := newConfigGitAuthoringFixture(t)
 	root, nativeEnvironment, _ := nativeFixture(t)
-	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\nYARD_KIND=container\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n", 0o600)
+	writeConfigCommandFile(t, filepath.Join(root, "config/subyard.env"), "DEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\nYARD_KIND=container\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=/srv/subyard\nRESTRICTED_DISK_PATHS=/srv/subyard\n", 0o600)
 	resourceDir := filepath.Join(root, "config/profiles/sample/resources")
 	writeConfigCommandFile(t, filepath.Join(resourceDir, "relay.res"), `COMMAND=relay
 HANDLER=resources/relay/handler.sh

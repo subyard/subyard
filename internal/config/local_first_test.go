@@ -100,7 +100,7 @@ func TestLoadGitTemplateResolvedOnceWithLocalOverride(t *testing.T) {
 		testkit.WriteFile(t, path, []byte(content), 0o600)
 	}
 	write(filepath.Join(root, "config", "host.env"), "HOST_BASE="+filepath.Join(home, "host")+"\nSTORAGE_PATH="+filepath.Join(home, "storage")+"\nRESTRICTED_DISK_PATHS="+filepath.Join(home, "host")+"\n")
-	write(filepath.Join(root, "config", "subyard.env"), "DEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\nYARD_KIND=container\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\n")
+	write(filepath.Join(root, "config", "subyard.env"), "DEV_UID=1000\nDEV_USER=dev\nSSH_PORT=2222\nYARD_KIND=container\nSHIFT_MODE=shift\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\n")
 	write(filepath.Join(root, "config", "yards", "profiles", "first.env"), "YARD_IMAGE=first:image\nSSH_PORT=3001\n")
 	write(filepath.Join(root, "config", "yards", "profiles", "second.env"), "YARD_IMAGE=second:image\nSSH_PORT=3002\n")
 	write(filepath.Join(configHome, GitSettingsRelativePath, "yards", "named", "config.env"), "YARD_TEMPLATE=first\nYARD_IMAGE=git:image\n")

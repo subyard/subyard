@@ -77,3 +77,36 @@ func TestAppliedIntegrationSettingsPreserveGitApprovalEncoding(t *testing.T) {
 		t.Fatal("closed applied-settings domain accepted an unknown field")
 	}
 }
+
+// Yes and no install the same agent policy, so only prompt enters the snapshot
+// and the projection keeps the desired grant.
+func TestAppliedIntegrationSettingsRecordOnlySudoPrompt(t *testing.T) {
+	catalog := Catalog{}
+	for _, value := range []string{"yes", "no"} {
+		if settings := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": value}); len(settings) != 0 {
+			t.Fatalf("sudo mode %q entered the snapshot: %#v", value, settings)
+		}
+	}
+	settings := catalog.IntegrationInitSettings(map[string]string{"DEV_SUDO": "prompt"})
+	if settings["DEV_SUDO"] != "prompt" || catalog.ValidateIntegrationInitSettings(settings) != nil {
+		t.Fatalf("sudo prompt was not recorded: %#v", settings)
+	}
+	for _, test := range []struct {
+		desired string
+		applied map[string]string
+		want    string
+	}{
+		{"yes", map[string]string{}, "yes"}, {"no", map[string]string{}, "no"}, {"prompt", map[string]string{}, "yes"},
+		{"", map[string]string{}, "yes"}, {"no", nil, "no"}, {"prompt", nil, "yes"},
+		{"yes", settings, "prompt"}, {"no", settings, "prompt"},
+	} {
+		if got := catalog.WithAppliedIntegrationInitSettings(map[string]string{"DEV_SUDO": test.desired}, test.applied)["DEV_SUDO"]; got != test.want {
+			t.Fatalf("desired %q with snapshot %#v projected as %q, want %q", test.desired, test.applied, got, test.want)
+		}
+	}
+	for _, value := range []string{"1", "0"} {
+		if catalog.ValidateIntegrationInitSettings(map[string]string{"DEV_SUDO": value}) == nil {
+			t.Fatalf("installed snapshot accepted legacy DEV_SUDO=%s", value)
+		}
+	}
+}

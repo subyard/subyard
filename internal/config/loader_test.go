@@ -27,7 +27,7 @@ func TestLoadNamedContext(t *testing.T) {
 : "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
-: "${DEV_SUDO:=0}"
+: "${DEV_SUDO:=no}"
 : "${DEV_UID:=1000}"
 : "${SSH_HOST:=yard}"
 : "${SSH_PORT:=2222}"`)
@@ -58,9 +58,9 @@ func TestLoadNamedContext(t *testing.T) {
 		t.Fatalf("public yard template was not applied: %#v", ctx)
 	}
 	if !ctx.DevSudo {
-		t.Fatal("retained shipped DEV_SUDO=0 replaced the catalog default")
+		t.Fatal("retained shipped DEV_SUDO=no replaced the catalog default")
 	}
-	assertEffectiveSetting(t, loaded.Settings["DEV_SUDO"], "1", "default", "shipped defaults", "built-in resolver default")
+	assertEffectiveSetting(t, loaded.Settings["DEV_SUDO"], "yes", "default", "shipped defaults", "built-in resolver default")
 	if loaded.Environment["E2E_VM_CPU"] != "1" {
 		t.Fatalf("yard settings did not override the selected template: %#v", loaded.Environment)
 	}
@@ -124,7 +124,7 @@ func TestLoadExactYardSettingsFile(t *testing.T) {
 : "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
-DEV_SUDO=0
+DEV_SUDO=no
 : "${DEV_UID:=1000}"
 : "${SSH_HOST:=yard}"
 : "${SSH_PORT:=2222}"`)
@@ -153,7 +153,7 @@ DEV_SUDO=0
 		t.Fatalf("exact yard settings were not loaded: %#v %#v", loaded.Context, loaded.Environment)
 	}
 	if !loaded.Context.DevSudo {
-		t.Fatal("literal DEV_SUDO=0 in shipped settings replaced the catalog default")
+		t.Fatal("literal DEV_SUDO=no in shipped settings replaced the catalog default")
 	}
 	assertEffectiveSetting(t, loaded.Settings["SSH_PORT"], "3333", "yard", "scalar settings", preset)
 }
@@ -205,7 +205,7 @@ func TestLoadHostSettingsAndMigratedPrivateAssets(t *testing.T) {
 : "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
-: "${DEV_SUDO:=0}"
+: "${DEV_SUDO:=no}"
 : "${DEV_UID:=1000}"
 : "${SSH_HOST:=yard}"
 : "${SSH_PORT:=2222}"`)
@@ -216,7 +216,7 @@ func TestLoadHostSettingsAndMigratedPrivateAssets(t *testing.T) {
 	writeFixture(t, filepath.Join(shipped, "agents.env"),
 		`AGENT_codex_RULES="$SUBYARD_CONFIG_DIR/agents/codex/rules/repo.rules"`)
 	writeFixture(t, filepath.Join(configHome, "config.env"),
-		"DEV_SUDO=1\nAGENT_codex_RULES="+filepath.Join(root, "private/agents/codex/repo.rules")+"\n")
+		"DEV_SUDO=yes\nAGENT_codex_RULES="+filepath.Join(root, "private/agents/codex/repo.rules")+"\n")
 	writeFixture(t, filepath.Join(hostAgents, "codex", "repo.rules"), "fixture\n")
 	writeFixture(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
 
@@ -301,21 +301,22 @@ func TestGitApprovalDefaultAndExplicitPromptScopes(t *testing.T) {
 
 func TestDevSudoDefaultAndScopePrecedence(t *testing.T) {
 	definition, ok := LookupSetting("DEV_SUDO")
-	if !ok || !definition.HasDefault || definition.Default != "1" {
+	if !ok || !definition.HasDefault || definition.Default != "yes" {
 		t.Fatalf("DEV_SUDO catalog default = %#v", definition)
 	}
 	for _, test := range []struct {
 		name, gitHost, gitYard, shared, host, yard, command string
 		want, scope, role                                   string
 	}{
-		{name: "shipped default", want: "1", scope: "default", role: "shipped defaults"},
-		{name: "Git host turns off", gitHost: "0", want: "0", scope: "host", role: "Git scalar settings"},
-		{name: "Git yard turns off", gitYard: "0", want: "0", scope: "yard", role: "Git scalar settings"},
-		{name: "shared turns off", shared: "0", want: "0", scope: "shared", role: "scalar settings"},
-		{name: "host overrides shared", shared: "1", host: "0", want: "0", scope: "host", role: "scalar settings"},
-		{name: "yard overrides shared", shared: "0", yard: "1", want: "1", scope: "yard", role: "scalar settings"},
-		{name: "yard turns off", host: "1", yard: "0", want: "0", scope: "yard", role: "scalar settings"},
-		{name: "command overrides yard", shared: "0", yard: "1", command: "0", want: "0", scope: "command", role: "command override"},
+		{name: "shipped default", want: "yes", scope: "default", role: "shipped defaults"},
+		{name: "Git host turns off", gitHost: "no", want: "no", scope: "host", role: "Git scalar settings"},
+		{name: "Git yard prompts", gitYard: "prompt", want: "prompt", scope: "yard", role: "Git scalar settings"},
+		{name: "shared turns off", shared: "no", want: "no", scope: "shared", role: "scalar settings"},
+		{name: "shared prompts", shared: "prompt", want: "prompt", scope: "shared", role: "scalar settings"},
+		{name: "host overrides shared", shared: "yes", host: "no", want: "no", scope: "host", role: "scalar settings"},
+		{name: "yard overrides shared", shared: "no", yard: "yes", want: "yes", scope: "yard", role: "scalar settings"},
+		{name: "yard turns off", host: "prompt", yard: "no", want: "no", scope: "yard", role: "scalar settings"},
+		{name: "command overrides yard", shared: "no", yard: "yes", command: "no", want: "no", scope: "command", role: "command override"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -339,11 +340,30 @@ func TestDevSudoDefaultAndScopePrecedence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if loaded.Context.DevSudo != (test.want == "1") {
+			if loaded.Context.DevSudo != (test.want != "no") {
 				t.Fatalf("context DevSudo = %v, want DEV_SUDO=%s", loaded.Context.DevSudo, test.want)
 			}
 			assertEffectiveSetting(t, loaded.Settings["DEV_SUDO"], test.want, test.scope, test.role, "")
 		})
+	}
+}
+
+func TestDevSudoRefusesLegacyBooleanValues(t *testing.T) {
+	for _, value := range []string{"1", "0", "true"} {
+		for _, scope := range []string{"host", "command"} {
+			home := t.TempDir()
+			configHome := filepath.Join(home, "config")
+			environment := map[string]string{"SUBYARD_CONFIG_HOME": configHome}
+			if scope == "host" {
+				writeFixture(t, filepath.Join(configHome, "config.env"), "DEV_SUDO="+value+"\n")
+			} else {
+				environment["DEV_SUDO"] = value
+			}
+			_, err := Load(LoadOptions{RepositoryRoot: filepath.Join("..", ".."), OperatorHome: home, Environment: environment})
+			if err == nil || !strings.Contains(err.Error(), "DEV_SUDO") || !strings.Contains(err.Error(), "must be one of yes, no, prompt") {
+				t.Fatalf("%s DEV_SUDO=%s: %v", scope, value, err)
+			}
+		}
 	}
 }
 
@@ -358,10 +378,10 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	external := filepath.Join(temp, "external.rules")
 	for path, value := range map[string]string{
 		shared: "shared\n", host: "host\n", yard: "yard\n", external: "external\n",
-		filepath.Join(configHome, "overrides", "shared", "config.env"): "YARD_IMAGE=shared:image\nDEV_SUDO=0\n",
-		filepath.Join(configHome, "config.env"): "DEV_SUDO=1\nBASE_IMAGE=host:image\n" +
+		filepath.Join(configHome, "overrides", "shared", "config.env"): "YARD_IMAGE=shared:image\nDEV_SUDO=no\n",
+		filepath.Join(configHome, "config.env"): "DEV_SUDO=yes\nBASE_IMAGE=host:image\n" +
 			"AGENT_codex_RULES=" + external + "\n",
-		filepath.Join(configHome, "yards", "named", "config.env"): "DEV_SUDO=0\nSSH_PORT=3333\nBASE_IMAGE=yard:image\n",
+		filepath.Join(configHome, "yards", "named", "config.env"): "DEV_SUDO=no\nSSH_PORT=3333\nBASE_IMAGE=yard:image\n",
 	} {
 		writeFixture(t, path, value)
 	}
@@ -380,7 +400,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 			defaultLoaded.Environment["AGENT_codex_RULES"])
 	}
 	if !defaultLoaded.Context.DevSudo {
-		t.Fatal("host DEV_SUDO=1 did not override local shared DEV_SUDO=0")
+		t.Fatal("host DEV_SUDO=yes did not override local shared DEV_SUDO=no")
 	}
 	defaultAsset := filepath.Join(configHome, "yards", "default", "overrides", "agents", "codex", "rules", "repo.rules")
 	writeFixture(t, defaultAsset, "default yard rules\n")
@@ -407,7 +427,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 	}
 	withEnvironment := cloneStringMap(base)
 	withEnvironment["AGENT_codex_RULES"] = external
-	withEnvironment["DEV_SUDO"] = "1"
+	withEnvironment["DEV_SUDO"] = "yes"
 	withEnvironment["YARD_IMAGE"] = "command:image"
 	withEnvironment["SECRET_TOKEN"] = "must-not-be-traced"
 	environmentLoaded, err := Load(LoadOptions{
@@ -426,7 +446,7 @@ func TestSettingsPrecedenceAndYardFileOverride(t *testing.T) {
 		t.Fatal("unknown environment variable was exposed as a Subyard setting")
 	}
 	assertEffectiveSetting(
-		t, environmentLoaded.Settings["DEV_SUDO"], "1", "command", "command override", "environment",
+		t, environmentLoaded.Settings["DEV_SUDO"], "yes", "command", "command override", "environment",
 	)
 	assertEffectiveSetting(
 		t, environmentLoaded.Settings["YARD_IMAGE"], "command:image",
@@ -896,7 +916,7 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 : "${YARD_KIND:=container}"
 : "${SHIFT_MODE:=shift}"
 : "${FORWARD_SSH_AGENT:=0}"
-: "${DEV_SUDO:=0}"
+: "${DEV_SUDO:=no}"
 : "${DEV_UID:=1000}"
 : "${SSH_HOST:=yard}"
 : "${SSH_PORT:=2222}"`)
@@ -913,7 +933,7 @@ func TestEngineReexecDoesNotLeakPriorYardContext(t *testing.T) {
 			"SUBYARD_ENGINE_CONTEXT": "1", "YARD_INSTANCE_NAME": "yard", "INCUS_PROJECT": "subyard",
 			"SSH_HOST": "yard", "SSH_PORT": "2222", "RESTRICTED_DISK_PATHS": "/srv/subyard",
 			"HOST_BASE": "/srv/subyard", "YARD_KIND": "container", "SHIFT_MODE": "shift",
-			"FORWARD_SSH_AGENT": "0", "DEV_SUDO": "0", "DEV_UID": "1000",
+			"FORWARD_SSH_AGENT": "0", "DEV_SUDO": "no", "DEV_UID": "1000",
 			"YARD_TEMPLATE": "stale", "NESTED_E2E_VMS": "1",
 			"E2E_DISK_BUDGET":    "999GiB",
 			"E2E_CACHE_BUDGET":   "999GiB",

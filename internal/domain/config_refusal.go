@@ -74,6 +74,7 @@ const (
 	ConfigSyncManifestInvalid
 	ConfigSyncManifestUnsupported
 	ConfigConflictingCommandSettings
+	ConfigDevSudoMode
 )
 
 const (
@@ -146,6 +147,7 @@ var configRefusalTexts = map[ConfigRefusalCode]struct{ template, next string }{
 	ConfigSyncManifestUnsupported:     {"unsupported configuration sync manifest schema", "use a Subyard release that supports this configuration sync manifest"},
 	ConfigIntegrationRetired:          {"integration %s is retired and can no longer be selected", "remove the retired integration from CODING_TOOL_INTEGRATIONS"},
 	ConfigConflictingCommandSettings:  {"conflicting command environment settings %s and %s", "pass only the canonical setting in the command environment"},
+	ConfigDevSudoMode:                 {"DEV_SUDO must be yes, no or prompt; 1 and 0 are no longer accepted", settingNext},
 }
 
 // ConfigName is a profile, setting or yard-kind name that passed validation. Its

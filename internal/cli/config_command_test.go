@@ -3422,7 +3422,7 @@ func TestConfigSetPreservesFlatYardRegistration(t *testing.T) {
 func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	root, home, configHome, environment := configCommandFixture(t)
 	remote, publisher := configBareSourceRepository(
-		t, "owner-a", "DEV_UID=2297\nDEV_SUDO=1\n",
+		t, "owner-a", "DEV_UID=2297\nDEV_SUDO=yes\n",
 	)
 	environment = append(environment,
 		"GIT_AUTHOR_NAME=Subyard Test",
@@ -3528,7 +3528,7 @@ func TestConfigSetAndSyncPushCommitPersistentHostSettings(t *testing.T) {
 	versioned := configSourceGitOutput(
 		t, remote, "show", "HEAD:hosts/owner-a/config.env",
 	)
-	if strings.TrimSpace(versioned) != "DEV_UID='2298'\nDEV_SUDO=1" {
+	if strings.TrimSpace(versioned) != "DEV_UID='2298'\nDEV_SUDO=yes" {
 		t.Fatalf("pushed host config = %q", versioned)
 	}
 	name, email := "O'Connor $HOME \\ \" #", "new@example.invalid"

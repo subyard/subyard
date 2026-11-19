@@ -200,22 +200,54 @@ same explicit yard-scope repair.
 
 ### Passwordless sudo inside the yard
 
-`DEV_SUDO` defaults to `1`. The yard's developer account can run commands as guest root without
-a password. Set `DEV_SUDO=0` at shared, host or yard scope, or for one command, and run `yard init`
-to remove the managed grant. Hermes and Amnezia yard presets explicitly set `DEV_SUDO=0`.
-Removing the grant leaves the developer's Docker group access, which can still provide
-root-equivalent access inside the guest.
+`DEV_SUDO` takes one of three values:
+
+| Value | Effect after `yard init` |
+| --- | --- |
+| `yes` (default) | The yard's developer account runs commands as guest root without a password. |
+| `no` | Subyard removes its managed grant and installs no sudo approval rules. |
+| `prompt` | The grant stays as with `yes`. Claude, Codex and OpenCode ask for approval before `sudo`, `su`, `doas`, `pkexec`, `sudoedit` and `run0`. |
+
+Set `DEV_SUDO` at shared, host or yard scope, or for one command, and run `yard init` to apply it.
+Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`. Removing the grant leaves the
+developer's Docker group access, which can still provide root-equivalent access inside the guest.
+
+The earlier values `1` and `0` are not migrated. Commands refuse them with a message that names
+the file, the line and the new values, and `yard config set` cannot replace such an assignment.
+Edit each named assignment yourself: `1` becomes `yes` and `0` becomes `no`.
+
+`prompt` is a guardrail against casual escalation, not a security boundary. It covers commands
+an agent writes directly. Scripts, Make targets, aliases, setuid binaries and access to the
+Docker or Incus socket bypass it. Use `no` when the agent must not become root. Provisioning
+writes the prompt rules to the same root-owned policies as
+[Git approval](#commit-and-push-approval-prompts):
+
+- Claude: `permissions.ask` entries in the managed drop-in, plus the managed hook's `sudo` gate.
+- Codex: `prompt` prefix rules in `/etc/codex/requirements.toml`, plus the managed hook's `sudo` gate.
+- OpenCode: `ask` entries for `permission.bash` in the shipped home template.
+- pi: unsupported; it has no per-command approval gate.
+
+For Claude and Codex, the hook rejects other literal spellings of the escalation commands: an
+executable path such as `/usr/bin/sudo`, a quoted command word, an assignment prefix, a wrapper
+such as `env`, `command`, `exec`, `nohup`, `nice`, `time` or `timeout`, and literal shell `-c`
+commands such as `bash -c 'sudo …'`. Use the bare command, such as `sudo apt-get install …`, to
+reach the approval prompt. OpenCode has no hook; its ask patterns match only the bare command.
+`yard status` names the configured mode, and its Codex rules line reports the installed sudo
+prompts; `claude-policy-check` reports the installed Claude rules. Existing sessions keep their
+loaded policy until restarted.
 
 After an upgrade, an existing yard that inherits the shipped default gets the grant on its next
 `yard init`. Release activation leaves the guest sudoers file alone. `yard config show DEV_SUDO`
-shows the desired value. `yard config status` does not inspect guest sudoers, so it can report a
-clean yard while the grant still awaits `yard init`.
+shows the desired value and `yard status` names it. `yard config status` does not inspect guest
+sudoers, so it can report a clean yard while the grant still awaits `yard init`. A change to or
+from `prompt` changes the agent policies, so it is listed as a pending init-owned setting until
+`yard init` applies it.
 
 To disable the grant across owner hosts, publish a shared override in the connected private
 configuration repository:
 
 ```sh
-yard config set DEV_SUDO 0 --scope shared --git
+yard config set DEV_SUDO no --scope shared --git
 ```
 
 Run `yard config sync pull` on the other owner hosts, then run `yard init` for each yard where
@@ -223,8 +255,10 @@ you want to apply the change. Host, yard and command values follow the scalar pr
 Restrict write access to the configuration repository to trusted operators.
 
 Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject
-the shared scope for this field. Before downgrading, remove any shared assignment and, if it was
-Git-backed, sync the removal while the runtime still supports it.
+the shared scope and the values `yes`, `no` and `prompt`. Before downgrading, remove every
+`DEV_SUDO` assignment and, if one was Git-backed, sync the removal while the runtime still
+supports it. If a yard has applied `prompt`, also run `yard init` without it before
+downgrading, because older runtimes cannot read an installed record of that value.
 
 ### Git identity
 

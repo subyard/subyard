@@ -17,7 +17,7 @@ func (catalog Catalog) IntegrationDiagnosticSetting(name string) bool {
 func integrationInitDefinition(name string, definition SettingDefinition) bool {
 	return definition.Application == SettingYardInit &&
 		(definition.Owner == "agent-integration" || definition.Owner == "coding-tool-integration" || definition.Owner == "host-files" ||
-			strings.HasPrefix(definition.Owner, "integration:") || name == "HOST_LINKS" || name == "ALLOWS_HOST_ACCESS" || name == "ALLOWS_CODING_TOOLS" || name == "DEV_USER" || name == "DEV_UID")
+			strings.HasPrefix(definition.Owner, "integration:") || name == "HOST_LINKS" || name == "ALLOWS_HOST_ACCESS" || name == "ALLOWS_CODING_TOOLS" || name == "DEV_USER" || name == "DEV_UID" || name == "DEV_SUDO")
 }
 
 func (catalog Catalog) IntegrationInitSettings(values map[string]string) map[string]string {
@@ -25,7 +25,7 @@ func (catalog Catalog) IntegrationInitSettings(values map[string]string) map[str
 	// keys record absence; nil remains the legacy "baseline unavailable" state.
 	result := map[string]string{}
 	for name, value := range values {
-		if catalog.IntegrationInitSetting(name) && name != "CODING_TOOL_INTEGRATIONS" && !ImplicitAppliedGitApproval(name, value) {
+		if catalog.IntegrationInitSetting(name) && name != "CODING_TOOL_INTEGRATIONS" && !ImplicitAppliedSetting(name, value) {
 			result[name] = value
 		}
 	}
@@ -48,6 +48,13 @@ func (catalog Catalog) WithAppliedIntegrationInitSettings(values, applied map[st
 	// Both legacy inventories without a snapshot and snapshots that omit the
 	// setting record the installed prompt mode. Explicit off overrides it below.
 	result["CODING_TOOL_GIT_APPROVAL"] = "prompt"
+	// Only prompt changes agent policy, so snapshots record only prompt and the
+	// grant keeps its desired value. No earlier runtime installed sudo prompts.
+	if value := values["DEV_SUDO"]; value == "no" {
+		result["DEV_SUDO"] = value
+	} else {
+		result["DEV_SUDO"] = "yes"
+	}
 	for name, value := range applied {
 		result[name] = value
 	}
@@ -78,8 +85,10 @@ func (catalog Catalog) ValidateIntegrationInitSettings(values map[string]string)
 	return nil
 }
 
-// ImplicitAppliedGitApproval reports the legacy snapshot encoding for prompt.
-// Keep that encoding so readers from before the setting can still read it.
-func ImplicitAppliedGitApproval(name, value string) bool {
-	return name == "CODING_TOOL_GIT_APPROVAL" && (value == "" || value == "prompt")
+// ImplicitAppliedSetting reports the values a snapshot omits: the legacy
+// encoding for Git prompt, which readers from before the setting can still
+// read, and DEV_SUDO yes and no, which install the same agent policy.
+func ImplicitAppliedSetting(name, value string) bool {
+	return name == "CODING_TOOL_GIT_APPROVAL" && (value == "" || value == "prompt") ||
+		name == "DEV_SUDO" && (value == "yes" || value == "no")
 }

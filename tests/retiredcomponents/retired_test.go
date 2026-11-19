@@ -99,7 +99,7 @@ func TestShippedRetiredSettingsAndAliasesRemainReadable(t *testing.T) {
 					t.Fatal(err)
 				}
 				testkit.WriteFile(t, filepath.Join(root, "config/retired-components.json"), declaration, 0644)
-				testkit.WriteFile(t, filepath.Join(root, "config/subyard.env"), []byte("SHIFT_MODE=shift\nDEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nNESTED_E2E_VMS=0\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=$SUBYARD_HOME/host\nRESTRICTED_DISK_PATHS=$SUBYARD_HOME/host\nSSH_PORT=2222\n"), 0600)
+				testkit.WriteFile(t, filepath.Join(root, "config/subyard.env"), []byte("SHIFT_MODE=shift\nDEV_UID=1000\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nNESTED_E2E_VMS=0\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=$SUBYARD_HOME/host\nRESTRICTED_DISK_PATHS=$SUBYARD_HOME/host\nSSH_PORT=2222\n"), 0600)
 				names := []string{"CODING_TOOL_INTEGRATIONS", "ENVIRONMENT_PROFILES"}
 				if aliases {
 					names = []string{"AGENTS", "YARD_PROFILES"}
@@ -142,7 +142,7 @@ func TestShippedRemovedProfileEnableReportsRemoval(t *testing.T) {
 	}
 	testkit.WriteFile(t, filepath.Join(root, "config/retired-components.json"), declaration, 0644)
 	testkit.WriteFile(t, filepath.Join(root, "config/commands.registry"), []byte("profile||@profile||deny|mutate|dynamic|public|lifecycle|profile|profile <command> <id>|profiles|--json --yes --help|enable disable setup status\n"), 0600)
-	testkit.WriteFile(t, filepath.Join(root, "config/subyard.env"), []byte("SHIFT_MODE=shift\nDEV_UID=1000\nDEV_USER=dev\nFORWARD_SSH_AGENT=0\nDEV_SUDO=0\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=$SUBYARD_HOME/host\nRESTRICTED_DISK_PATHS=$SUBYARD_HOME/host\nSSH_PORT=2222\n"), 0600)
+	testkit.WriteFile(t, filepath.Join(root, "config/subyard.env"), []byte("SHIFT_MODE=shift\nDEV_UID=1000\nDEV_USER=dev\nFORWARD_SSH_AGENT=0\nDEV_SUDO=no\nSTORAGE_PATH=$SUBYARD_HOME/storage\nHOST_BASE=$SUBYARD_HOME/host\nRESTRICTED_DISK_PATHS=$SUBYARD_HOME/host\nSSH_PORT=2222\n"), 0600)
 	path := filepath.Join(home, "config.env")
 	before := []byte("ENVIRONMENT_PROFILES=openlit\n")
 	testkit.WriteFile(t, path, before, 0600)

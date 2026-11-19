@@ -123,8 +123,9 @@ var catalog = map[string]SettingDefinition{
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
 	"CCUSAGE_VERSION": scalar("agent-integration", SettingVersion, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand)),
-	"DEV_SUDO": scalar("yard-security", SettingBoolean, SettingYardInit, true,
-		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), withDefault("1")),
+	// Yes and prompt grant passwordless sudo; prompt also makes coding agents ask first.
+	"DEV_SUDO": scalar("yard-security", SettingString, SettingYardInit, true,
+		scopes(ScopeShipped, ScopeShared, ScopeHost, ScopeYard, ScopeCommand), withDefault("yes"), enum("yes", "no", "prompt")),
 	"DEV_UID": scalar("yard-runtime", SettingInteger, SettingYardInit, true,
 		scopes(ScopeShipped, ScopeHost, ScopeYard, ScopeCommand), numberRange(0, 1<<31-1)),
 	"DEV_USER": scalar("yard-runtime", SettingName, SettingYardInit, true,

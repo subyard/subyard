@@ -3,11 +3,7 @@
   "permission": {
     "*": "allow",
     "bash": {
-      "*": "allow",
-      "git commit": "ask",
-      "git commit *": "ask",
-      "git push": "ask",
-      "git push *": "ask"
+      "*": "allow"
     }
   }
 }

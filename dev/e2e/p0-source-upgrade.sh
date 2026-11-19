@@ -939,6 +939,11 @@ prepare() {
   seed_installed_shapes
   local update_rc=0 legacy_before
   legacy_before="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
+  # The candidate accepts only yes, no or prompt; the operator replaces the baseline's
+  # DEV_SUDO 1 before updating, as the release notes ask.
+  operator_env sed -i -E "s/^DEV_SUDO='?1'?\$/DEV_SUDO=yes/" "$OPERATOR_HOME/.config/subyard/config.env"
+  operator_env grep -Eqx 'DEV_SUDO=yes' "$OPERATOR_HOME/.config/subyard/config.env" \
+    || die 'baseline DEV_SUDO assignment was not replaced'
   if bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
     cat "$SHARED_ROOT/first-update.log"
   else
