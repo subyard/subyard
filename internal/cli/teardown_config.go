@@ -108,6 +108,19 @@ func checkTeardownConfig(before, after *teardownConfigSnapshot) error {
 	return nil
 }
 
+func (cli *CLI) removeTeardownConfigArtifact(ctx context.Context, payload []byte, path string) error {
+	child := exec.CommandContext(ctx, "python3", "-B", filepath.Join(cli.options.RepositoryRoot, "scripts", "lib", "teardown-plan.py"), "remove-artifact", path)
+	child.Env = append(os.Environ(), "SUBYARD_TEARDOWN_ARTIFACTS="+string(payload))
+	if err := child.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 75 {
+			return domain.ErrPlanStale
+		}
+		return fmt.Errorf("remove approved local yard settings: %w", err)
+	}
+	return nil
+}
+
 func (cli *CLI) resetTeardownConfiguration(ctx context.Context, loaded config.Loaded, execution *teardownExecution) error {
 	yard := loaded.Context
 	registration := func(path string) bool {
@@ -124,14 +137,8 @@ func (cli *CLI) resetTeardownConfiguration(ctx context.Context, loaded config.Lo
 			if registration(artifact.Path) != registrations {
 				continue
 			}
-			child := exec.CommandContext(ctx, "python3", "-B", filepath.Join(cli.options.RepositoryRoot, "scripts", "lib", "teardown-plan.py"), "remove-artifact", artifact.Path)
-			child.Env = append(os.Environ(), "SUBYARD_TEARDOWN_ARTIFACTS="+string(payload))
-			if err := child.Run(); err != nil {
-				var exit *exec.ExitError
-				if errors.As(err, &exit) && exit.ExitCode() == 75 {
-					return domain.ErrPlanStale
-				}
-				return fmt.Errorf("remove approved local yard settings: %w", err)
+			if err := cli.removeTeardownConfigArtifact(ctx, payload, artifact.Path); err != nil {
+				return err
 			}
 		}
 		return nil

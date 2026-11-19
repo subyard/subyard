@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -318,5 +319,35 @@ func TestTeardownResetNamedLocalShadowAndCompletedCLIRetry(t *testing.T) {
 	}
 	if code := retry.Run(context.Background()); code != 0 {
 		t.Fatalf("completed public CLI retry failed: %d", code)
+	}
+}
+
+func TestTeardownConfigArtifactRemovalKeepsTypedStaleOutcome(t *testing.T) {
+	program, _, _, path := teardownResetFixture(t)
+	binding, err := teardownArtifactBinding(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal([]ports.TeardownArtifactBinding{{Path: path, Binding: binding}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, []byte("SSH_PORT=4444\n"), 0600)
+	if err := program.removeTeardownConfigArtifact(context.Background(), payload, path); err != domain.ErrPlanStale {
+		t.Fatalf("changed settings removal outcome changed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("changed settings were removed", err)
+	}
+	binding, err = teardownArtifactBinding(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ = json.Marshal([]ports.TeardownArtifactBinding{{Path: path, Binding: binding}})
+	if err := program.removeTeardownConfigArtifact(context.Background(), payload, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("approved settings remain", err)
 	}
 }
