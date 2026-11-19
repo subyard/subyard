@@ -566,14 +566,15 @@ guest_dev() {
 # A guest instruction file that only the runtime refreshes, replaced by a
 # symlink in an existing yard: the master writer replaced the link, the
 # compare-and-write refuses it by name with the operator's step, through an
-# update and through init, and converges once the operator replaces it.
+# update and through init, and converges once the operator replaces it. Plain
+# init also repairs a default yard started past an update, which other init
+# modes wait for.
 verify_symlinked_instruction_file() { # <update command...>
   local guest=/home/dev/.codex/AGENTS.md output rc=0
   local step='replace it with a regular file or remove it, then run yard -Y default config apply'
   operator_env install -d -m 0700 "$OPERATOR_HOME/.codex"
   printf 'p0 source-upgrade instructions\n' | operator_env tee "$OPERATOR_HOME/.codex/AGENTS.md" >/dev/null
-  operator_yard init --configs --yes
-  operator_yard -Y "$YARD_NAME" init --configs --yes
+  operator_yard init --yes
   guest_dev test -f "$guest" -a ! -L "$guest" || die 'the instruction file was not refreshed as a regular file'
   guest_dev sh -c 'mv "$1" "$1.real" && ln -s AGENTS.md.real "$1"' _ "$guest"
   set +e
@@ -587,7 +588,7 @@ verify_symlinked_instruction_file() { # <update command...>
       || die 'the update refused the symlinked instruction file without naming it and its step'
   else
     set +e
-    output="$(operator_yard init --configs --yes 2>&1)"
+    output="$(operator_yard init --yes 2>&1)"
     rc=$?
     set -e
     printf '%s\n' "$output"
@@ -599,7 +600,7 @@ verify_symlinked_instruction_file() { # <update command...>
     || die 'the refusal changed the symlinked instruction file or its target'
   guest_dev rm "$guest" "$guest.real"
   [ "$rc" -eq 0 ] || operator_yard migrate --yes
-  operator_yard init --configs --yes
+  operator_yard init --yes
   guest_dev test -f "$guest" -a ! -L "$guest" && guest_dev grep -Fqx 'p0 source-upgrade instructions' "$guest" \
     || die 'the replaced instruction file did not converge'
   operator_env rm "$OPERATOR_HOME/.codex/AGENTS.md"
