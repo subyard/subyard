@@ -31,7 +31,6 @@ class OwnerTest(unittest.TestCase):
             profile.mkdir(parents=True)
             for path in source.glob('*.py'):
                 shutil.copyfile(path,profile/path.name)
-            shutil.copyfile(source/'record-policy.txt', profile/'record-policy.txt')
             shutil.copyfile(source/'profile.sh',profile/'profile.sh')
             copy_skill_assets(repository, profile)
             (root/'scripts/lib').mkdir(parents=True)
@@ -165,7 +164,6 @@ with tempfile.TemporaryDirectory(dir='/tmp',prefix='telemetry-guest-contract-') 
         profile.mkdir(parents=True)
         for path in source.glob('*.py'):
             shutil.copyfile(path, profile/path.name)
-        shutil.copyfile(source/'record-policy.txt', profile/'record-policy.txt')
         copy_skill_assets(repository, profile)
         for name in ('profile.sh', 'runtime.sh'):
             shutil.copyfile(source/name, profile/name)

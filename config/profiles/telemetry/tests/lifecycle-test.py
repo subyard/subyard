@@ -563,7 +563,6 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             source.mkdir()
             for path in Path(guest.__file__).parent.glob('*.py'):
                 shutil.copyfile(path, source/path.name)
-            shutil.copyfile(Path(guest.__file__).with_name('record-policy.txt'), source/'record-policy.txt')
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
             # Match the compiled collector's observed 25 MiB size, not a tiny stub.
             (source/'subyard-telemetry').write_bytes(b'\x7fELF'+b'\0'*(25_333_922-4))
@@ -807,7 +806,6 @@ print('\\n'.join(key+'='+value for key,value in fields.items()))
             source.mkdir()
             for path in Path(guest.__file__).parent.glob('*.py'):
                 shutil.copyfile(path, source/path.name)
-            shutil.copyfile(Path(guest.__file__).with_name('record-policy.txt'), source/'record-policy.txt')
             shutil.copyfile(Path(guest.tomli_w.__file__), source/'tomli_w.py')
             account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=str(root/'home'))
             def runtime(selected, origin=source):

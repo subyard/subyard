@@ -362,7 +362,6 @@ def main():
     files = {'source/config/profiles/telemetry/tests/e2e/native-signals.py': args.source/'config/profiles/telemetry/tests/e2e/native-signals.py',
              'source/config/profiles/telemetry/tests/e2e/failure-evidence.py': args.source/'config/profiles/telemetry/tests/e2e/failure-evidence.py',
              'source/config/profiles/telemetry/records.py': args.source/'config/profiles/telemetry/records.py',
-             'source/config/profiles/telemetry/record-policy.txt': args.source/'config/profiles/telemetry/record-policy.txt',
              'source/config/profiles/telemetry/native.py': args.source/'config/profiles/telemetry/native.py',
              'source/internal/adapters/configmaterial/tomli_w.py': args.source/'internal/adapters/configmaterial/tomli_w.py',
              'source/config/profiles/orca/tests/e2e/codex-permissions.py': args.source/'config/profiles/orca/tests/e2e/codex-permissions.py',
