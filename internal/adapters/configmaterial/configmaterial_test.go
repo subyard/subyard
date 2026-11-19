@@ -1221,7 +1221,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				released := []string{"/edited/mode", "/kept"}
 				before := snapshotMaterialization(t, h.root)
 				assessed := h.observeMode(t, nil, ModeAssessRetire)
-				if assessed.Converged || assessed.Release != ReleaseChanged || !slices.Equal(assessed.Released, released) {
+				if assessed.Converged || assessed.Release != ReleaseChanged || !slices.Equal(assessed.released, released) {
 					t.Fatalf("assessment did not report the release: %#v", assessed)
 				}
 				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
@@ -1242,12 +1242,12 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 					if err := command.Run(); err == nil {
 						t.Fatal("interruption did not occur")
 					}
-					if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged || resumed.Release != ReleaseChanged || !slices.Equal(resumed.Released, released) {
+					if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged || resumed.Release != ReleaseChanged || !slices.Equal(resumed.released, released) {
 						t.Fatalf("interrupted release was not resumable: %#v", resumed)
 					}
 				}
 				result := h.observeMode(t, nil, ModeRetire)
-				if !result.Converged || !slices.Equal(result.Released, released) || result.Release != ReleaseChanged {
+				if !result.Converged || !slices.Equal(result.released, released) || result.Release != ReleaseChanged {
 					t.Fatalf("release did not converge or name its fields: %#v", result)
 				}
 				if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
@@ -1269,7 +1269,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				}
 				before = snapshotMaterialization(t, h.root)
 				for _, mode := range []string{ModeAssessRetire, ModeRetire} {
-					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != ReleaseChanged || !slices.Equal(repeated.Released, released) {
+					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != ReleaseChanged || !slices.Equal(repeated.released, released) {
 						t.Fatalf("released retirement is not idempotent: %s %#v", mode, repeated)
 					}
 				}
@@ -1308,10 +1308,10 @@ func TestRetirementReleasesWithoutRetainedPaths(t *testing.T) {
 				}
 			}
 			home := snapshotMaterialization(t, filepath.Join(h.root, "home"))
-			if assessed := h.observeMode(t, nil, ModeAssessRetire); assessed.Converged || assessed.Release != want || len(assessed.Released) != 0 {
+			if assessed := h.observeMode(t, nil, ModeAssessRetire); assessed.Converged || assessed.Release != want || len(assessed.released) != 0 {
 				t.Fatalf("pending release not detectable: %#v", assessed)
 			}
-			if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want || len(result.Released) != 0 {
+			if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want || len(result.released) != 0 {
 				t.Fatalf("release did not complete: %#v", result)
 			}
 			if !jsonEqual(home, snapshotMaterialization(t, filepath.Join(h.root, "home"))) {
@@ -1348,8 +1348,8 @@ func TestReleaseListsOrCountsRetainedFields(t *testing.T) {
 			h.writeDestination(t, string(drifted))
 			for _, mode := range []string{ModeAssessRetire, ModeRetire} {
 				result := h.observeMode(t, nil, mode)
-				if result.Release != ReleaseChanged || len(result.Released) != scenario.listed || result.ReleasedCount != scenario.count {
-					t.Fatalf("%s: listed=%d count=%d release=%q", mode, len(result.Released), result.ReleasedCount, result.Release)
+				if result.Release != ReleaseChanged || len(result.released) != scenario.listed || result.ReleasedCount != scenario.count {
+					t.Fatalf("%s: listed=%d count=%d release=%q", mode, len(result.released), result.ReleasedCount, result.Release)
 				}
 			}
 		})
@@ -1402,7 +1402,7 @@ func TestInterruptedReleaseKeepsItsReason(t *testing.T) {
 				}
 				// Only the final receipt write completes the ownership release.
 				final := index == len(points)-1
-				if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged != final || resumed.Release != want || len(resumed.Released) != 0 {
+				if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged != final || resumed.Release != want || len(resumed.released) != 0 {
 					t.Fatalf("interrupted release lost its reason: %#v", resumed)
 				}
 				if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want {
@@ -1482,7 +1482,7 @@ func TestResumedReleaseNeverRemovesRestoredFields(t *testing.T) {
 	h.writeDestination(t, `{"managed":{"mode":"ask"}}`)
 	document := snapshotMaterialization(t, filepath.Dir(h.destination))
 	result := h.observeMode(t, nil, ModeRetire)
-	if !result.Converged || result.Release != ReleaseChanged || !slices.Equal(result.Released, []string{"/managed/mode"}) || result.ReleasedCount != 1 {
+	if !result.Converged || result.Release != ReleaseChanged || !slices.Equal(result.released, []string{"/managed/mode"}) || result.ReleasedCount != 1 {
 		t.Fatalf("resumed release misreported: %#v", result)
 	}
 	if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
@@ -1503,7 +1503,7 @@ func TestCompletedReleaseKeepsItsSignalUntilFreshOwnership(t *testing.T) {
 	}
 	document := snapshotMaterialization(t, filepath.Dir(h.destination))
 	if assessed := h.observeMode(t, nil, ModeAssessRetire); !assessed.Converged || assessed.Release != ReleaseChanged ||
-		!slices.Equal(assessed.Released, []string{"/managed/mode"}) {
+		!slices.Equal(assessed.released, []string{"/managed/mode"}) {
 		t.Fatalf("completed release lost the guard signal: %#v", assessed)
 	}
 	// The installed view still selecting this document sees the release too.
@@ -1720,7 +1720,7 @@ func TestMaterializationResumesInterruptedReceiptPublication(t *testing.T) {
 				if _, err := h.run(nil, ModeRetire); err == nil {
 					t.Fatal("incomplete ownership publication authorized retirement")
 				}
-			} else if result := h.observeMode(t, nil, ModeRetire); !result.Converged || !slices.Equal(result.Released, []string{"/managed"}) {
+			} else if result := h.observeMode(t, nil, ModeRetire); !result.Converged || !slices.Equal(result.released, []string{"/managed"}) {
 				t.Fatalf("incomplete ownership publication was not released: %#v", result)
 			}
 			if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {

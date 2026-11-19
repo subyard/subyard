@@ -49,7 +49,7 @@ func TestGuestTextNeverRendersItsValue(t *testing.T) {
 	if string(first) == string(second) || !strings.HasPrefix(string(first), `"guest-text sha256:`) {
 		t.Fatalf("binding encodings %s and %s", first, second)
 	}
-	if !text.Matches("/home/dev/"+guestCanary) || text.Matches("/home/dev") || (guestText{}).Matches("") {
+	if !text.Matches("/home/dev/"+guestCanary) || text.Matches("/home/dev") || !(guestText{}).Matches("") {
 		t.Fatal("exact matching changed")
 	}
 	if declared, ok := matchDeclared(text, "/home/dev/x", "/home/dev/"+guestCanary); !ok || declared != "/home/dev/"+guestCanary {

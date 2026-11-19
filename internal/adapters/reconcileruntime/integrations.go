@@ -152,6 +152,151 @@ type integrationArtifact struct {
 	FileTarget   bool   `json:"file_target,omitempty"`
 	Content      string `json:"content,omitempty"`
 	Mode         int    `json:"mode,omitempty"`
+	// undeclaredPath is a retired record's guest path that matches no declared
+	// path. It is only returned to the guest program that reported it.
+	undeclaredPath guestText
+}
+
+// owner names the declaring integration of a resolved artifact.
+func (entry integrationArtifact) owner() string {
+	if entry.ID == "" {
+		return "an undeclared integration"
+	}
+	return entry.ID
+}
+
+// location is the declared path, or the digest of an undeclared one.
+func (entry integrationArtifact) location() string {
+	if entry.Path != "" || entry.undeclaredPath.Matches("") {
+		return entry.Path
+	}
+	return "an undeclared path (" + entry.undeclaredPath.label() + ")"
+}
+
+// guestArtifact is an inventory record as the guest reports it.
+type guestArtifact struct {
+	ID     guestText `json:"id"`
+	Kind   guestText `json:"kind"`
+	Path   guestText `json:"path"`
+	Format guestText `json:"format"`
+}
+
+type integrationFactWire struct {
+	Key       guestText `json:"key"`
+	Desired   string    `json:"desired"`
+	Observed  string    `json:"observed"`
+	AtDesired bool      `json:"at_desired"`
+}
+
+// integrationObservationWire is the inventory program's report before its
+// artifacts and fact keys are resolved against declared values.
+type integrationObservationWire struct {
+	Fingerprint     string                         `json:"fingerprint"`
+	Changed         bool                           `json:"changed"`
+	Pending         bool                           `json:"pending"`
+	Retired         []guestArtifact                `json:"retired"`
+	Adopted         []guestArtifact                `json:"adopted"`
+	Initial         bool                           `json:"initial"`
+	Facts           []integrationFactWire          `json:"facts"`
+	Installed       bool                           `json:"installed"`
+	Selected        []string                       `json:"selected"`
+	AppliedSettings map[string]string              `json:"applied_settings"`
+	Diagnostics     *IntegrationDiagnosticEvidence `json:"diagnostics"`
+}
+
+// declaredArtifacts resolves reported inventory records with declared values.
+type declaredArtifacts struct {
+	desired []integrationArtifact
+	paths   []string
+	owners  []string
+}
+
+// declaredArtifactCatalog lists what this release can declare: the desired
+// entries, the legacy destinations and persist links, and the materialized
+// destinations and owners of every catalog integration.
+func (runtime Runtime) declaredArtifactCatalog(entries []integrationArtifact, legacy []string) declaredArtifacts {
+	catalog := declaredArtifacts{desired: entries, paths: slices.Clone(legacy), owners: append([]string{"_projects"}, strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS"))...)}
+	for _, entry := range entries {
+		catalog.paths = append(catalog.paths, entry.Path)
+		catalog.owners = append(catalog.owners, entry.ID)
+	}
+	if definitions, err := runtime.integrationDefinitions(); err == nil {
+		values := runtimeEnvironment(runtime.Environment)
+		names := []string{}
+		for _, definition := range definitions {
+			names = append(names, definition.Name)
+		}
+		catalog.owners = append(catalog.owners, names...)
+		values["CODING_TOOL_INTEGRATIONS"] = strings.Join(names, " ")
+		if sources, err := config.SelectMaterializationSources(values, runtime.devUser(), config.MaterializationRuntime, definitions...); err == nil {
+			for _, source := range sources {
+				catalog.paths = append(catalog.paths, source.Asset.Destination)
+			}
+		}
+	}
+	if mappings, err := runtime.persistMappings(nil); err == nil {
+		for _, mapping := range mappings {
+			catalog.paths = append(catalog.paths, mapping.Source)
+		}
+	}
+	return catalog
+}
+
+// retired resolves records the desired selection no longer contains. An
+// undeclared path is kept opaque for the guest operation that retires it.
+func (catalog declaredArtifacts) retired(records []guestArtifact) []integrationArtifact {
+	var result []integrationArtifact
+	for _, record := range records {
+		entry := integrationArtifact{}
+		entry.Kind, _ = matchDeclared(record.Kind, "file", "link", "structured", "package")
+		entry.ID, _ = matchDeclared(record.ID, catalog.owners...)
+		entry.Format, _ = matchDeclared(record.Format, "json", "toml")
+		if path, ok := matchDeclared(record.Path, catalog.paths...); ok {
+			entry.Path = path
+		} else {
+			entry.undeclaredPath = record.Path
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+
+// adopted resolves adoptions, which the guest reports only for desired entries.
+func (catalog declaredArtifacts) adopted(records []guestArtifact) ([]integrationArtifact, error) {
+	var result []integrationArtifact
+	for _, record := range records {
+		index := slices.IndexFunc(catalog.desired, func(entry integrationArtifact) bool {
+			return record.Kind.Matches(entry.Kind) && record.ID.Matches(entry.ID) && record.Path.Matches(entry.Path)
+		})
+		if index < 0 {
+			return nil, errors.New("invalid integration ownership observation")
+		}
+		entry := catalog.desired[index]
+		entry.Content = ""
+		result = append(result, entry)
+	}
+	return result, nil
+}
+
+// facts keys each fact by its declared artifact, or by a digest of the guest key.
+func (catalog declaredArtifacts) facts(facts []integrationFactWire, retired []integrationArtifact) []integrationFact {
+	keys := []string{}
+	for _, entry := range append(slices.Clone(catalog.desired), retired...) {
+		if entry.Path != "" {
+			keys = append(keys, entry.Kind+":"+entry.Path)
+		} else if entry.ID != "" && entry.undeclaredPath.Matches("") {
+			keys = append(keys, entry.Kind+":"+entry.ID)
+		}
+	}
+	var result []integrationFact
+	for _, fact := range facts {
+		key, ok := matchDeclared(fact.Key, keys...)
+		if !ok {
+			key = "owned artifact " + fact.Key.label()
+		}
+		result = append(result, integrationFact{Key: key, Desired: fact.Desired, Observed: fact.Observed, AtDesired: fact.AtDesired})
+	}
+	return result
 }
 
 type integrationObservation struct {
@@ -703,15 +848,15 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		type conflictRecord struct{ Reason, Path, Detail guestText }
 		var report struct {
 			conflictRecord
-			Conflicts []conflictRecord      `json:"conflicts"`
-			Initial   bool                  `json:"initial"`
-			Retired   []integrationArtifact `json:"retired"`
+			Conflicts []conflictRecord `json:"conflicts"`
+			Initial   bool             `json:"initial"`
+			Retired   []guestArtifact  `json:"retired"`
 		}
 		if json.Unmarshal(result.Stderr, &report) != nil {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
 		conflicts := report.Conflicts
-		if len(conflicts) == 0 && report.Reason.raw != nil && !report.Reason.Matches("") {
+		if len(conflicts) == 0 && !report.Reason.Matches("") {
 			conflicts = []conflictRecord{report.conflictRecord}
 		}
 		causes := []error{}
@@ -783,13 +928,23 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 			}
 			causes = append(causes, ownershipRefusal(message, result, err))
 		}
-		return integrationObservation{Initial: report.Initial, Retired: report.Retired}, domain.CollectRefusals(causes...)
+		retired := runtime.declaredArtifactCatalog(entries, legacy).retired(report.Retired)
+		return integrationObservation{Initial: report.Initial, Retired: retired}, domain.CollectRefusals(causes...)
 	}
 
 	var observed integrationObservation
 	if mode == "observe" || mode == "observe-applied" || mode == "selection" || mode == "settings" {
-		if json.Unmarshal(result.Stdout, &observed) != nil || (mode == "observe" || mode == "observe-applied") && len(observed.Fingerprint) != 64 {
+		var wire integrationObservationWire
+		if json.Unmarshal(result.Stdout, &wire) != nil || (mode == "observe" || mode == "observe-applied") && len(wire.Fingerprint) != 64 {
 			return observed, errors.New("invalid integration ownership observation")
+		}
+		catalog := runtime.declaredArtifactCatalog(entries, legacy)
+		observed = integrationObservation{Fingerprint: wire.Fingerprint, Changed: wire.Changed, Pending: wire.Pending, Initial: wire.Initial,
+			Installed: wire.Installed, Selected: wire.Selected, AppliedSettings: wire.AppliedSettings, Diagnostics: wire.Diagnostics,
+			Retired: catalog.retired(wire.Retired)}
+		observed.Facts = catalog.facts(wire.Facts, observed.Retired)
+		if observed.Adopted, err = catalog.adopted(wire.Adopted); err != nil {
+			return integrationObservation{}, err
 		}
 	}
 	if observed.Diagnostics != nil {
@@ -871,7 +1026,7 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 	if err != nil {
 		return plan, observed, err
 	}
-	plan.facts = append(slices.Clone(observed.Facts), persist.facts()...)
+	plan.facts = append(slices.Clone(observed.Facts), persist.facts(runtime.Yard.YardInstanceName, runtime.Yard.IncusProject)...)
 	scope, _, err := runtime.integrationScopeFromInputs(entries, plan.sources)
 	if err != nil {
 		return plan, observed, err
@@ -944,18 +1099,18 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 		if entry.Kind != "structured" {
 			continue
 		}
-		observation, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
+		observation, err := runtime.observeRetiredIntegrationConfig(ctx, configmaterial.ModeAssessRetire, entry)
 		if err != nil {
 			causes = append(causes, bind(entry.ID, err))
 			continue
 		}
 		fingerprints = append(fingerprints, observation.Fingerprint)
-		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.Path, Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged, owner: entry.ID})
+		plan.facts = append(plan.facts, integrationFact{Key: "retired-structured:" + entry.location(), Desired: "absent", Observed: observation.Fingerprint, AtDesired: observation.Converged, owner: entry.ID})
 		plan.Changed = plan.Changed || !observation.Converged
 		if observation.Release != "" {
-			notice := ownershipReleaseNotice(entry.ID, entry.Path, observation)
+			notice := ownershipReleaseNotice(entry.owner(), entry.location(), observation)
 			plan.Warnings = append(plan.Warnings, notice)
-			plan.ownershipReleases = append(plan.ownershipReleases, entry.Path)
+			plan.ownershipReleases = append(plan.ownershipReleases, entry.location())
 			plan.ownershipReleaseNotices = append(plan.ownershipReleaseNotices, notice)
 		}
 	}
@@ -997,10 +1152,14 @@ func (runtime Runtime) observeIntegrationsWithSourceReader(ctx context.Context, 
 			plan.Steps = append(plan.Steps, step.Consequence)
 		}
 		for _, entry := range observed.Retired {
+			kind := entry.Kind
+			if kind == "" {
+				kind = "artifact"
+			}
 			if entry.Kind == "package" {
-				plan.Steps = append(plan.Steps, "disable managed startup for "+entry.ID+"; preserve binaries and user data")
+				plan.Steps = append(plan.Steps, "disable managed startup for "+entry.owner()+"; preserve binaries and user data")
 			} else {
-				plan.Steps = append(plan.Steps, "retire owned "+entry.Kind+" for "+entry.ID+": "+entry.Path)
+				plan.Steps = append(plan.Steps, "retire owned "+kind+" for "+entry.owner()+": "+entry.location())
 			}
 		}
 		for _, entry := range observed.Adopted {
@@ -1173,7 +1332,7 @@ func (runtime Runtime) collectIntegrationConfigRefusals(ctx context.Context, rea
 		if entry.Kind != "structured" {
 			continue
 		}
-		_, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeAssessRetire, entry.Path, nil)
+		_, err := runtime.observeRetiredIntegrationConfig(ctx, configmaterial.ModeAssessRetire, entry)
 		causes = append(causes, owned(entry.ID, err))
 	}
 	return domain.CollectRefusals(causes...)
@@ -1250,7 +1409,27 @@ func (runtime Runtime) legacyIntegrationConfigDigest(file guestConfigFile) (stri
 }
 
 func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mode, path string, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
-	request, err := configmaterial.Request(format, mode, runtime.devUser(), path, runtime.Yard.DevUID, payload, legacyTemplates...)
+	return runtime.observeIntegrationConfigAt(ctx, format, mode, path, integrationArtifact{Path: path}, payload, legacyTemplates...)
+}
+
+// observeRetiredIntegrationConfig assesses or retires a retired structured
+// record. An undeclared path is returned only to the guest writer.
+func (runtime Runtime) observeRetiredIntegrationConfig(ctx context.Context, mode string, entry integrationArtifact) (configmaterial.Observation, error) {
+	operand := entry.Path
+	if operand == "" {
+		operand = entry.undeclaredPath.guestEcho()
+	}
+	return runtime.observeIntegrationConfigAt(ctx, entry.Format, mode, operand, entry, nil)
+}
+
+// observeIntegrationConfigAt runs the guest writer on operand and renders only
+// the declared location of entry.
+func (runtime Runtime) observeIntegrationConfigAt(ctx context.Context, format, mode, operand string, entry integrationArtifact, payload []byte, legacyTemplates ...[]byte) (configmaterial.Observation, error) {
+	path, at := entry.Path, entry.location()
+	if path != "" {
+		at = fmt.Sprintf("%q", path)
+	}
+	request, err := configmaterial.Request(format, mode, runtime.devUser(), operand, runtime.Yard.DevUID, payload, legacyTemplates...)
 	if err != nil {
 		return configmaterial.Observation{}, err
 	}
@@ -1277,9 +1456,12 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 			if unownedInvalid {
 				retry = runtime.preserveInvalidConfigCommand(path)
 			}
+			if path == "" {
+				retry = shellquote.Command([]string{"yard", "-Y", runtime.Yard.YardName, "integration", "status"})
+			}
 			return configmaterial.Observation{}, integrationOwnershipError{
 				pendingConfiguration: detail == "no protected baseline or exact recognized legacy template" || detail == "owned fields or protected evidence changed",
-				message:              fmt.Sprintf("integration ownership conflict in yard %s at %q: %s; file preserved. Compare with the integration's shipped legacy templates before retrying", runtime.Yard.YardName, path, detail),
+				message:              fmt.Sprintf("integration ownership conflict in yard %s at %s: %s; file preserved. Compare with the integration's shipped legacy templates before retrying", runtime.Yard.YardName, at, detail),
 				retry:                retry,
 			}
 		}
@@ -1288,7 +1470,7 @@ func (runtime Runtime) observeIntegrationConfig(ctx context.Context, format, mod
 	observation, err := configmaterial.ParseObservation(result.Stdout)
 	if err == nil && mode == configmaterial.ModeRetire && observation.Release != "" && runtime.Stdout != nil {
 		// Report the completed release once, from the call that performed it.
-		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+path+": ", observation, "; Subyard no longer manages it"))
+		fmt.Fprintln(runtime.Stdout, boundedNotice("  [ ok ] yard "+runtime.Yard.YardName+": released ownership of "+entry.location()+": ", observation, "; Subyard no longer manages it"))
 	}
 	return observation, err
 }
@@ -1327,9 +1509,8 @@ func boundedNotice(prefix string, observation configmaterial.Observation, suffix
 	if observation.Release == configmaterial.ReleaseMissingDocument {
 		reason = "the document is missing"
 	}
+	// The guest's field pointers are guest text; only their count is shown.
 	switch {
-	case len(observation.Released) != 0:
-		fields = "fields left in place: " + strings.Join(observation.Released, ", ")
 	case observation.ReleasedCount != 0:
 		fields = fmt.Sprintf("%d fields left in place", observation.ReleasedCount)
 	case observation.Release == configmaterial.ReleaseMissingDocument:
@@ -1617,7 +1798,7 @@ func (runtime Runtime) ApplyIntegrations(ctx context.Context, plan IntegrationPl
 	// state, which the next successful init retires.
 	for _, entry := range observed.Retired {
 		if entry.Kind == "structured" {
-			if _, err := runtime.observeIntegrationConfig(ctx, entry.Format, configmaterial.ModeRetire, entry.Path, nil); err != nil {
+			if _, err := runtime.observeRetiredIntegrationConfig(ctx, configmaterial.ModeRetire, entry); err != nil {
 				return runtime.stepFailure(stepRetire, entry.ID, err)
 			}
 		}

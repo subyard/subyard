@@ -673,7 +673,8 @@ func TestInstalledViewRetiresCommittedLabelledRecordLeavingInstalledScope(t *tes
 	installed := []map[string]any{settings}
 	installedView := Runtime{Executor: f}.WithInstalledConfiguration()
 	passive, err := installedView.integrationInventory(context.Background(), "observe", artifacts(installed), "")
-	if err != nil || !passive.Changed || len(passive.Retired) != 1 || passive.Retired[0].Path != codex["path"] {
+	// The fixture declares no catalog, so the retired path stays opaque guest text.
+	if err != nil || !passive.Changed || len(passive.Retired) != 1 || !passive.Retired[0].undeclaredPath.Matches(codex["path"].(string)) {
 		t.Fatalf("installed view hid retirement of a committed record: %#v %v", passive, err)
 	}
 	for _, mode := range []string{"apply", "commit"} {

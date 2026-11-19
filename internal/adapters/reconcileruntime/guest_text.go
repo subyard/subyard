@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -49,7 +50,13 @@ func (guestText) GoString() string { return "<guest text>" }
 func (guestText) Format(state fmt.State, _ rune) { _, _ = state.Write([]byte("<guest text>")) }
 
 // Matches reports whether the guest reported exactly the declared host value.
-func (text guestText) Matches(declared string) bool { return text.raw != nil && *text.raw == declared }
+// An absent value equals the empty string, as a decoded string would.
+func (text guestText) Matches(declared string) bool {
+	if text.raw == nil {
+		return declared == ""
+	}
+	return *text.raw == declared
+}
 
 // Digest is the SHA-256 of the reported value, for bindings and opaque labels.
 func (text guestText) Digest() string {
@@ -82,6 +89,16 @@ func (text guestText) childWithPrefix(directory, prefix string) bool {
 func (text guestText) wraps(prefix, suffix string) bool {
 	return text.raw != nil && len(*text.raw) >= len(prefix)+len(suffix) &&
 		strings.HasPrefix(*text.raw, prefix) && strings.HasSuffix(*text.raw, suffix)
+}
+
+// fits reports a value that the pattern matches.
+func (text guestText) fits(pattern *regexp.Regexp) bool {
+	return text.raw != nil && pattern.MatchString(*text.raw)
+}
+
+// matchesFold reports a value equal to the declared text ignoring case.
+func (text guestText) matchesFold(declared string) bool {
+	return text.raw != nil && strings.EqualFold(*text.raw, declared)
 }
 
 // guestLines holds each line of raw guest output as guest text.
