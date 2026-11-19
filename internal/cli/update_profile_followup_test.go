@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,5 +116,55 @@ func TestPendingProfileProvisionIsSuppressedInsideInit(t *testing.T) {
 	cli.offerPendingProfileProvision(context.Background(), execution, false)
 	if _, err := os.Stat(log); !os.IsNotExist(err) || output.Len() != 0 {
 		t.Fatalf("init-embedded migration offered provisioning: %v\n%s", err, output)
+	}
+}
+
+// installPendingProfileLauncher installs, in the verified active release of the
+// repair fixture, a launcher that reports a selected but unprovisioned profile.
+func installPendingProfileLauncher(t *testing.T, fixture *pendingInitFixture) {
+	t.Helper()
+	release := filepath.Join(fixture.cli.env["YARD_RUNTIME_ROOT"], "releases", "1.2.3-aaaaaaaaaaaa")
+	if target, err := filepath.EvalSymlinks(filepath.Join(fixture.cli.env["YARD_RUNTIME_ROOT"], "current")); err != nil || target != release {
+		t.Fatalf("active release = %q, %v", target, err)
+	}
+	testkit.WriteFile(t, filepath.Join(release, "bin", "yard"), []byte(pendingProfileLauncher), 0o700)
+	writePendingRepairEngine(t, fixture, mustReadConfigFixture(t, filepath.Join(release, "bin", "yard-engine")))
+}
+
+func TestRepairWithPostRepairInitOffersPendingProfile(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, nil)
+	enablePendingRepair(t, &fixture)
+	fixture.setPower(t, "default", "Stopped")
+	installPendingProfileLauncher(t, &fixture)
+	program, calls, stdout, stderr := fixture.program(t, []string{"migrate", "--yes"}, nil, func(nestedCall, io.Writer) int {
+		t.Fatal("stopped yard has no pending init")
+		return 1
+	})
+	if code := program.Run(context.Background()); code != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, stdout, stderr)
+	}
+	text := stdout.String()
+	if len(*calls) != 0 || !strings.Contains(text, "yard default: stopped; not inspected") {
+		t.Fatalf("repair carried no post-repair init plan: calls=%v stdout=%s", *calls, text)
+	}
+	if !strings.Contains(text, "Profile synthetic in yard default is selected but not provisioned for this release.") ||
+		!strings.Contains(text, "Provision it with: ") {
+		t.Fatalf("post-repair init skipped the profile offer:\n%s", text)
+	}
+}
+
+func TestFailedPostRepairInitDoesNotOfferPendingProfile(t *testing.T) {
+	fixture := newPendingInitFixture(t, false, map[string]string{"default": pendingRename})
+	enablePendingRepair(t, &fixture)
+	installPendingProfileLauncher(t, &fixture)
+	program, calls, stdout, stderr := fixture.program(t, []string{"migrate", "--yes"}, nil, func(_ nestedCall, diagnostics io.Writer) int {
+		fmt.Fprintln(diagnostics, "yard: init: refused")
+		return 1
+	})
+	if code := program.Run(context.Background()); code != 1 || len(*calls) != 1 {
+		t.Fatalf("code=%d calls=%v stdout=%s stderr=%s", code, *calls, stdout, stderr)
+	}
+	if strings.Contains(stdout.String(), "selected but not provisioned") || strings.Contains(stdout.String(), "Provision it with:") {
+		t.Fatalf("failed post-repair init offered provisioning:\n%s", stdout)
 	}
 }
