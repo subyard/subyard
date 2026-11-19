@@ -68,10 +68,13 @@ type Prepared struct {
 	Close          func() error `json:"-"`
 	// RepairCurrent identifies protected recovery of the active release before release selection.
 	RepairCurrent bool
-	run           func(context.Context) error
-	check         func(context.Context) (releasetransition.Inspection, error)
-	nativePlan    releasetransition.PlanToken
-	currentReport *currentReport
+	// BootstrapRepositoryRoot is the canonical repository to use for a fresh
+	// post-activation repair after the bootstrap's own repository was moved.
+	BootstrapRepositoryRoot string `json:"-"`
+	run                     func(context.Context) error
+	check                   func(context.Context) (releasetransition.Inspection, error)
+	nativePlan              releasetransition.PlanToken
+	currentReport           *currentReport
 	// Set only after the verified owner returns a validated ready convergence.
 	convergedOutcome *releasetransition.Outcome
 	// Set only for an ordinary resume of an unfinished journal.
@@ -605,6 +608,61 @@ func (runtime *Runtime) PrepareTransition(
 			}
 		}
 	}
+	bootstrapDraft := runtime.config.Inputs.bootstrapDraft
+	var draftRoot string
+	var verified *verifiedPublishedCandidate
+	closeDraft := func() error {
+		var err error
+		if verified != nil {
+			err = errors.Join(verified.cleanupDraft(), verified.Close())
+		}
+		if draftRoot != "" && bootstrapDraft == "" {
+			err = errors.Join(err, cleanupDraftWrapper(draftRoot))
+		}
+		if err != nil {
+			err = fmt.Errorf("release draft preserved at %q: %w", draftRoot, err)
+			if runtime.config.Stderr != nil {
+				fmt.Fprintln(runtime.config.Stderr, err)
+			}
+		}
+		return err
+	}
+	draftOwned := true
+	defer func() {
+		if draftOwned {
+			_ = closeDraft()
+		}
+	}()
+	adoptBootstrapDraft := func(inspectEntrypoints bool) error {
+		if err := requirePreparedReleaseRoots(parsed, true); err != nil {
+			return err
+		}
+		root, candidate, err := runtime.verifyBootstrapDraft(ctx, parsed, bootstrapDraft)
+		draftRoot, verified = root, candidate
+		if err != nil {
+			return fmt.Errorf("bootstrap release draft is not verified: %w", err)
+		}
+		if entrypoints := runtime.config.Inputs.values["SUBYARD_INSTALL_ENTRYPOINTS"]; inspectEntrypoints && entrypoints != "" {
+			if err := runtime.runVerifiedCandidate(ctx, verified, parsed.root, []string{"_installation", "inspect"}, strings.NewReader(entrypoints), io.Discard, ""); err != nil {
+				return fmt.Errorf("inspect installation with verified bootstrap candidate: %w", err)
+			}
+		}
+		return nil
+	}
+	retainDraft := func(prepared *Prepared) {
+		if bootstrapDraft != "" {
+			prepared.BootstrapRepositoryRoot = filepath.Join(parsed.root, "releases", prepared.TargetRelease)
+		}
+		originalClose := prepared.Close
+		prepared.Close = func() error {
+			var closeErr error
+			if originalClose != nil {
+				closeErr = originalClose()
+			}
+			return errors.Join(closeErr, closeDraft())
+		}
+		draftOwned = false
+	}
 	if !parsed.check && runtime.config.Progress != nil {
 		version := "unknown"
 		if current, err := inspectRuntimeLink(parsed.root, "current"); err == nil && current.present {
@@ -669,7 +727,15 @@ func (runtime *Runtime) PrepareTransition(
 			if newerRelease == nil {
 				runtime.setV0111StandaloneRetry(ctx, parsed.root, protected)
 				runtime.setV0173StandaloneRetry(ctx, parsed.root, protected)
+				if bootstrapDraft != "" {
+					if err := adoptBootstrapDraft(parsed.version == protected.target.version); err != nil {
+						return Prepared{}, err
+					}
+				}
 				prepared, err := runtime.prepareProtectedTransition(parsed, protected)
+				if err == nil && verified != nil && !parsed.check {
+					retainDraft(&prepared)
+				}
 				if err == nil && unfinished {
 					prepared.newerRelease = runtime.newerReleaseProbe(parsed, configHome)
 				}
@@ -715,14 +781,16 @@ func (runtime *Runtime) PrepareTransition(
 			"release-transition-uninitialized: current runtime is missing; use the verified bootstrap installer",
 		)
 	}
-	publishOnly, err := installerSupportsPublishOnly(runtime.config.Installer)
-	if err != nil {
-		return Prepared{}, err
-	}
-	if !publishOnly {
-		return Prepared{}, errors.New(
-			"release-transition-unsupported: active runtime requires a bridge release with immutable publication support",
-		)
+	if bootstrapDraft == "" {
+		publishOnly, err := installerSupportsPublishOnly(runtime.config.Installer)
+		if err != nil {
+			return Prepared{}, err
+		}
+		if !publishOnly {
+			return Prepared{}, errors.New(
+				"release-transition-unsupported: active runtime requires a bridge release with immutable publication support",
+			)
+		}
 	}
 	discovered := parsed.version == ""
 	if discovered {
@@ -765,31 +833,30 @@ func (runtime *Runtime) PrepareTransition(
 	if err != nil {
 		return Prepared{}, err
 	}
-	draftRoot, err := os.MkdirTemp(filepath.Dir(parsed.root), ".subyard-release-draft-")
-	if err != nil {
-		return Prepared{}, err
-	}
-	if err := os.Chmod(draftRoot, 0o700); err != nil {
-		os.Remove(draftRoot)
-		return Prepared{}, err
-	}
-	draftOwned := true
-	defer func() {
-		if draftOwned {
-			_ = os.RemoveAll(draftRoot)
+	if bootstrapDraft != "" {
+		if err := adoptBootstrapDraft(true); err != nil {
+			return Prepared{}, err
 		}
-	}()
-	draftOptions := parsed
-	draftOptions.root = draftRoot
-	candidate, _, err := runtime.publishCandidate(ctx, draftOptions)
-	if err != nil {
-		return Prepared{}, err
+	} else {
+		draftRoot, err = os.MkdirTemp(filepath.Dir(parsed.root), releaseDraftPrefix)
+		if err != nil {
+			return Prepared{}, err
+		}
+		if err := os.Chmod(draftRoot, 0o700); err != nil {
+			return Prepared{}, err
+		}
+		draftOptions := parsed
+		draftOptions.root = draftRoot
+		candidate, _, err := runtime.publishCandidate(ctx, draftOptions)
+		if err != nil {
+			return Prepared{}, err
+		}
+		verified, err = runtime.verifyPublishedCandidate(ctx, candidate, draftRoot, nil)
+		if err != nil {
+			return Prepared{}, fmt.Errorf("published runtime is not verified: %w", err)
+		}
 	}
-	verified, err := runtime.verifyPublishedCandidate(ctx, candidate, draftRoot, nil)
-	if err != nil {
-		return Prepared{}, fmt.Errorf("published runtime is not verified: %w", err)
-	}
-	defer verified.Close()
+	candidate := verified.candidate
 	if verified.version != parsed.version {
 		return Prepared{}, errors.New("published runtime version does not match the requested release")
 	}
@@ -800,7 +867,6 @@ func (runtime *Runtime) PrepareTransition(
 	retainedTarget := linksBefore.previous.target == "releases/"+string(candidate.release)
 	canonicalPresent := false
 	inspectionCandidate := verified
-	inspectionRoot := draftRoot
 	if _, err := os.Lstat(canonicalCandidate.root); err == nil {
 		canonicalPresent = true
 		existing, err := runtime.verifyPublishedCandidate(ctx, canonicalCandidate, parsed.root, &verified.manifestDigest)
@@ -818,7 +884,6 @@ func (runtime *Runtime) PrepareTransition(
 		// A completed journal may already pin this release. Inspect that same
 		// immutable directory, rather than a second inode with identical bytes.
 		inspectionCandidate = existing
-		inspectionRoot = parsed.root
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Prepared{}, err
 	} else if retainedTarget {
@@ -836,6 +901,10 @@ func (runtime *Runtime) PrepareTransition(
 	parsed.selection, err = runtime.captureTransitionSelection(ctx, inspectionCandidate, request, linksBefore, !canonicalPresent)
 	if err != nil {
 		return runtime.inspectionFailure(parsed, err)
+	}
+	if bootstrapDraft != "" && canonicalPresent && unapprovedBootstrapPublication(parsed.selection) {
+		parsed.selection.refusal = "the candidate is already published without a matching authorized transition and its migration registry differs from the active release's registry"
+		parsed.selection.retry = "keep the current release active and rerun bootstrap with a different verified forward release"
 	}
 	ctx = selectionContext(ctx, parsed.selection)
 	runtime.progress(parsed, "Checking update requirements...")
@@ -883,14 +952,6 @@ func (runtime *Runtime) PrepareTransition(
 			prepared.Steps[index].DependsOn = append(prepared.Steps[index].DependsOn, publication.ID)
 		}
 		prepared.Steps = append([]domain.OperationStep{publication}, prepared.Steps...)
-		originalClose := prepared.Close
-		prepared.Close = func() error {
-			var closeErr error
-			if originalClose != nil {
-				closeErr = originalClose()
-			}
-			return errors.Join(closeErr, os.RemoveAll(draftRoot))
-		}
 		prepared.run = func(ctx context.Context) error {
 			ctx = selectionContext(ctx, parsed.selection)
 			if err := requirePreparedReleaseRoots(parsed, false); err != nil {
@@ -905,6 +966,7 @@ func (runtime *Runtime) PrepareTransition(
 					return fmt.Errorf("%w: runtime links changed after inspection", domain.ErrPlanStale)
 				}
 			}
+			fresh := verified
 			if canonicalPresent {
 				fd, err := openApprovedReleaseDirectory(parsed.root, rootBefore, releasesBefore)
 				if err != nil {
@@ -913,15 +975,15 @@ func (runtime *Runtime) PrepareTransition(
 				if err := unix.Close(fd); err != nil {
 					return err
 				}
-			}
-			fresh, err := runtime.verifyPublishedCandidate(ctx, inspectionCandidate.candidate, inspectionRoot, &verified.manifestDigest)
-			if err != nil {
-				if parsed.selection != nil && ctx.Err() == nil {
-					return staleRetainedSelection(request.RuntimeRoot, request.Target)
+				fresh, err = runtime.verifyPublishedCandidate(ctx, canonicalCandidate, parsed.root, &verified.manifestDigest)
+				if err != nil {
+					if ctx.Err() == nil {
+						return staleRetainedSelection(request.RuntimeRoot, request.Target)
+					}
+					return err
 				}
-				return fmt.Errorf("reverify draft candidate: %w", err)
+				defer fresh.Close()
 			}
-			defer fresh.Close()
 			if err := runtime.inspectRollbackCompatibility(ctx, fresh, request, parsed.selection); err != nil {
 				return err
 			}
@@ -933,13 +995,8 @@ func (runtime *Runtime) PrepareTransition(
 				return fmt.Errorf("%w: release inspection changed before publication", domain.ErrPlanStale)
 			}
 			canonical := filepath.Join(parsed.root, "releases", string(candidate.release))
-			if canonicalPresent {
-				if _, err := os.Lstat(canonical); err != nil {
-					return fmt.Errorf("%w: approved published release disappeared", domain.ErrPlanStale)
-				}
-			}
 			if !canonicalPresent {
-				if err := publishApprovedDraft(candidate, parsed.root, rootBefore, releasesBefore); err != nil {
+				if err := publishApprovedDraft(verified, parsed.root, rootBefore, releasesBefore); err != nil {
 					if !errors.Is(err, unix.EEXIST) {
 						return fmt.Errorf("publish approved release: %w", err)
 					}
@@ -952,7 +1009,7 @@ func (runtime *Runtime) PrepareTransition(
 			}
 			return originalRun(ctx)
 		}
-		draftOwned = false
+		retainDraft(&prepared)
 		return prepared, nil
 	}
 	verifiedPreparation := Prepared{
@@ -2163,31 +2220,41 @@ func requirePreparedReleaseRoots(options options, requireCache bool) error {
 }
 
 func releaseBundleIdentity(version, bundle string) (string, string, error) {
-	info, err := os.Lstat(bundle)
-	if err != nil {
-		return "", "", err
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", "", errors.New("downloaded release bundle is not a regular file")
-	}
-	file, err := os.OpenFile(bundle, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	file, err := openReleaseBundle(bundle)
 	if err != nil {
 		return "", "", err
 	}
 	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return "", "", err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
-		return "", "", errors.New("downloaded release bundle changed while opening")
-	}
 	digest := sha256.New()
 	if _, err := io.Copy(digest, file); err != nil {
 		return "", "", err
 	}
 	encoded := hex.EncodeToString(digest.Sum(nil))
 	return filepath.Join("releases", version+"-"+encoded[:12]), encoded, nil
+}
+
+func openReleaseBundle(bundle string) (*os.File, error) {
+	info, err := os.Lstat(bundle)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("downloaded release bundle is not a regular file")
+	}
+	file, err := os.OpenFile(bundle, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
+		file.Close()
+		return nil, errors.New("downloaded release bundle changed while opening")
+	}
+	return file, nil
 }
 
 func releaseMigrationEnvironment(

@@ -13,7 +13,10 @@ import (
 type CommandInputs struct {
 	values              map[string]string
 	inheritedSettingIDs []string
+	bootstrapDraft      string
 }
+
+const BootstrapDraftInput = "SUBYARD_BOOTSTRAP_DRAFT_V1"
 
 // CaptureCommandInputs belongs at command ingress. isSetting recognizes canonical
 // setting names; legacy names remain exact process overrides without becoming IDs.
@@ -27,6 +30,8 @@ func CaptureCommandInputs(environment []string, isSetting func(string) bool) Com
 	}
 	delete(inputs.values, "SUBYARD_SUDO_PREAUTHORIZED")
 	delete(inputs.values, "SUBYARD_PRESERVE_VM_REPORTING")
+	inputs.bootstrapDraft = inputs.values[BootstrapDraftInput]
+	delete(inputs.values, BootstrapDraftInput)
 	if isSetting != nil {
 		for name := range inputs.values {
 			if isSetting(name) {
@@ -35,6 +40,11 @@ func CaptureCommandInputs(environment []string, isSetting func(string) bool) Com
 		}
 		sort.Strings(inputs.inheritedSettingIDs)
 	}
+	return inputs
+}
+
+func (inputs CommandInputs) WithoutBootstrapDraft() CommandInputs {
+	inputs.bootstrapDraft = ""
 	return inputs
 }
 

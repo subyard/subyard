@@ -471,25 +471,110 @@ HOME="$standalone_home" SUBYARD_HOME="$standalone_home/.subyard" \
 [ "$(directory_identity "$standalone_home")" = "$standalone_home_before" ] \
   && [ "$(directory_identity "$standalone_bin")" = "$standalone_bin_before" ] \
   || fail 'bootstrap retry changed existing default shell parent or binary directory identity'
-# An authentic retained publisher cannot bypass the current full-bootstrap API
-# boundary. The same verified archive remains stageable by a current publisher.
+# An older bundle is refused based on its published metadata before fetching
+# the bundle, creating a cache, or invoking any installer.
+older_assets="$TMP/older-bootstrap-assets"
+mkdir -m 0700 "$older_assets"
+jq '.version = "0.30.0" | del(.bootstrapDraft)' "$bundle_one.manifest.json" \
+  > "$older_assets/subyard-0.30.0-linux-amd64.tar.gz.manifest.json"
+for older_mode in first existing publish-only offline; do
+  older_home="$TMP/older-bootstrap-$older_mode"
+  older_args=()
+  mkdir -m 0700 "$older_home"
+  if [ "$older_mode" = existing ]; then
+    mkdir -p "$older_home/runtime/releases/0.30.0-fixture"
+    ln -s releases/0.30.0-fixture "$older_home/runtime/current"
+  elif [ "$older_mode" = publish-only ]; then
+    older_args+=(--publish-only)
+  elif [ "$older_mode" = offline ]; then
+    mkdir -p "$older_home/cache/0.30.0"
+    cp "$older_assets/"*.json "$older_home/cache/0.30.0/"
+    older_args+=(--channel stable --runtime-root "$older_home/runtime with space" --offline --publish-only)
+  fi
+  older_before="$(find "$older_home" -printf '%P %m %i %l\n' | sort)"
+  older_result=0
+  HOME="$older_home" SUBYARD_HOME="$older_home/data" SUBYARD_CONFIG_HOME="$older_home/config" \
+    YARD_RUNTIME_ROOT="$older_home/runtime" YARD_RELEASE_CACHE="$older_home/cache" \
+    YARD_BIN_DIR="$older_home/bin" YARD_RELEASE_BASE_URL="file://$older_assets" \
+    "$release/subyard-install.sh" --version 0.30.0 --yes "${older_args[@]}" \
+    > "$TMP/older-bootstrap-$older_mode.log" 2>&1 || older_result=$?
+  older_log="$TMP/older-bootstrap-$older_mode.log"
+  [ "$older_result" = 1 ] && grep -Fq 'Subyard 0.30.0 does not support this bootstrap' "$older_log" \
+    && [ "$(find "$older_home" -printf '%P %m %i %l\n' | sort)" = "$older_before" ] \
+    || fail "older release bootstrap $older_mode did not give a read-only refusal with guidance"
+  if [ "$older_mode" = offline ]; then
+    ! grep -Fq 'https://' "$older_log" \
+      && grep -Fxq "  Run bash subyard-install.sh --version 0.30.0 --channel stable --runtime-root $(printf '%q' "$older_home/runtime with space") --offline --publish-only --yes" "$older_log" \
+      || fail 'offline refusal printed a URL or lost an option'
+  else
+    grep -Fq 'https://github.com/Subyard/Subyard/releases/tag/v0.30.0' "$older_log" \
+      && grep -Fq 'Run bash subyard-install.sh --version 0.30.0' "$older_log" \
+      || fail 'online refusal lost tagged bootstrap guidance'
+  fi
+done
+for older_version in 0.17.3 0.18.8 0.18.9; do
+  mkdir -p "$older_home/cache/$older_version"
+  jq --arg version "$older_version" '.version = $version | del(.bootstrapDraft)' "$bundle_one.manifest.json" \
+    > "$older_home/cache/$older_version/subyard-$older_version-linux-amd64.tar.gz.manifest.json"
+  older_log="$TMP/older-publish-only-$older_version.log"
+  older_result=0
+  HOME="$older_home" SUBYARD_HOME="$older_home/data" YARD_RUNTIME_ROOT="$older_home/data/runtime" \
+    YARD_RELEASE_CACHE="$older_home/cache" "$release/subyard-install.sh" \
+    --version "$older_version" --offline --publish-only --yes > "$older_log" 2>&1 || older_result=$?
+  [ "$older_result" = 1 ] && ! grep -Fq 'https://' "$older_log" || fail 'offline staging refusal changed behavior'
+  if [ "$older_version" = 0.18.9 ]; then
+    grep -Fxq "  Run bash subyard-install.sh --version $older_version --offline --publish-only --yes" "$older_log" \
+      || fail 'staging refusal omitted supported flags at the v0.18.9 boundary'
+  else
+    grep -Fq 'Publication-only staging is unavailable' "$older_log" && ! grep -Fq 'Run bash' "$older_log" \
+      || fail "staging refusal suggested an unsupported command for $older_version"
+  fi
+done
+for release_input in YARD_RELEASE_REPOSITORY YARD_RELEASE_TAG; do
+  invalid_result=0
+  env "$release_input="'invalid/segment?query#fragment' HOME="$older_home" \
+    SUBYARD_HOME="$older_home/data" YARD_RUNTIME_ROOT="$older_home/runtime" YARD_RELEASE_CACHE="$older_home/cache" \
+    "$release/subyard-install.sh" --version 0.30.0 --offline --publish-only --yes \
+    > "$TMP/invalid-release-$release_input.log" 2>&1 || invalid_result=$?
+  [ "$invalid_result" = 2 ] && grep -Eq 'invalid release (repository|tag)$' "$TMP/invalid-release-$release_input.log" \
+    && ! grep -Eq 'segment|query|fragment|https://' "$TMP/invalid-release-$release_input.log" \
+    || fail "invalid $release_input reached the diagnostic"
+done
+
+# Full bootstrap checks the installation API even if the bundle advertises the
+# private draft protocol. Staging may omit the optional installation API.
 boundary_assets="$TMP/boundary-assets"
 mkdir -m 0700 "$boundary_assets"
 boundary_bundle="$boundary_assets/$(basename "$bundle_one")"
-cp "$legacy_031_installer" "$boundary_assets/subyard-install-runtime-release.sh"
+cp "$ROOT/scripts/install-runtime-release.sh" "$boundary_assets/subyard-install-runtime-release.sh"
 (cd "$boundary_assets" && sha256sum subyard-install-runtime-release.sh > subyard-install-runtime-release.sh.sha256)
+preflight_hook="$TMP/preflight-hook.sh"
+cat > "$preflight_hook" <<'PREFLIGHT_HOOK'
+mktemp() {
+  local path
+  path="$(command mktemp "$@")" || return
+  if [[ "$path" == /tmp/subyard-bootstrap-preflight.* ]]; then
+    stat -c '%a' -- "$path" > "$TEST_PREFLIGHT_PATH"
+    printf '%s\n' "$path" >> "$TEST_PREFLIGHT_PATH"
+  fi
+  printf '%s\n' "$path"
+}
+PREFLIGHT_HOOK
 rmdir "$bundle_extract/config/installation-capabilities.json"
-for boundary_case in absent malformed api; do
+for boundary_case in absent malformed old-engine api; do
   case "$boundary_case" in
     absent) ;;
     malformed) printf '{' > "$bundle_extract/config/installation-capabilities.json" ;;
-    api)
+    old-engine|api)
       cp "$ROOT/config/installation-capabilities.json" "$bundle_extract/config/installation-capabilities.json"
       cat > "$bundle_extract/bin/yard-engine" <<'NO_INSTALLATION_API'
 #!/bin/sh
 [ "${1:-}" = --version ] && { echo 'yard-engine 1.0.0-test'; exit 0; }
-exit 2
 NO_INSTALLATION_API
+      if [ "$boundary_case" = api ]; then
+        printf '%s\n' '[ "${1:-}" = _bootstrap-draft-capability ] && { echo private-release-draft-v1; exit 0; }' >> "$bundle_extract/bin/yard-engine"
+      fi
+      printf 'exit 2\n' >> "$bundle_extract/bin/yard-engine"
       chmod 0755 "$bundle_extract/bin/yard-engine" ;;
   esac
   (cd "$bundle_extract" && find . -type f ! -path './runtime-files.sha256' -print0 | sort -z | xargs -0 sha256sum > runtime-files.sha256)
@@ -501,6 +586,11 @@ NO_INSTALLATION_API
   for boundary_kind in initial-absent initial-existing existing; do
     boundary_home="$TMP/boundary-$boundary_case-$boundary_kind"
     boundary_bin="$boundary_home/bin"
+    boundary_env=()
+    if [ "$boundary_case" = old-engine ]; then
+      preflight_record="$TMP/preflight-$boundary_kind"
+      boundary_env+=(BASH_ENV="$preflight_hook" TEST_PREFLIGHT_PATH="$preflight_record")
+    fi
     if [ "$boundary_kind" = existing ]; then
       boundary_home="$standalone_home"
       boundary_bin="$standalone_bin"
@@ -514,7 +604,7 @@ NO_INSTALLATION_API
         boundary_config_before="$(directory_identity "$boundary_home/.config/subyard")"
       fi
     fi
-    if HOME="$boundary_home" SUBYARD_HOME="$boundary_home/.subyard" \
+    if env "${boundary_env[@]}" HOME="$boundary_home" SUBYARD_HOME="$boundary_home/.subyard" \
       SUBYARD_CONFIG_HOME="$boundary_home/.config/subyard" YARD_BIN_DIR="$boundary_bin" \
       SHELL=/bin/bash ZDOTDIR="$boundary_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
       YARD_RELEASE_BASE_URL="file://$boundary_assets" YARD_RELEASE_VERSION=1.0.0-test \
@@ -524,6 +614,14 @@ NO_INSTALLATION_API
     case "$boundary_case" in
       absent) grep -Fq 'full bootstrap requires installation-inventory-v1 capability' "$TMP/boundary-$boundary_case-$boundary_kind.log" ;;
       malformed) grep -Fq 'unsupported installation capability' "$TMP/boundary-$boundary_case-$boundary_kind.log" ;;
+      old-engine)
+        grep -Fq 'Subyard 1.0.0-test does not support this bootstrap' "$TMP/boundary-$boundary_case-$boundary_kind.log"
+        mapfile -t preflight < "$preflight_record"
+        [ "${preflight[0]}" = 700 ] && [ ! -e "${preflight[1]}" ] \
+          || fail 'engine refusal left its verification scratch or used a non-private directory'
+        if [ "$boundary_kind" != existing ]; then
+          [ ! -e "$boundary_home/.subyard" ] || fail 'engine without draft support wrote to installation data or cache'
+        fi ;;
     esac
     if [ "$boundary_kind" = existing ]; then
       [ "$boundary_before" = "$(readlink "$standalone_home/.subyard/runtime/current"):$(readlink "$standalone_home/.subyard/runtime/previous" || true):$(readlink "$standalone_bin/yard"):$(sha256sum "$standalone_home/.subyard/installation.json" "$standalone_home/.subyard/runtime/installation.json" "$standalone_home/.bashrc" "$standalone_home/.profile" "$standalone_ledger")" ] \
@@ -546,36 +644,15 @@ NO_INSTALLATION_API
     fi
   done
   if [ "$boundary_case" = absent ]; then
-    cp "$ROOT/scripts/install-runtime-release.sh" "$boundary_assets/subyard-install-runtime-release.sh"
-    (cd "$boundary_assets" && sha256sum subyard-install-runtime-release.sh > subyard-install-runtime-release.sh.sha256)
     HOME="$TMP/boundary-stage" SUBYARD_HOME="$TMP/boundary-stage/data" \
       SUBYARD_CONFIG_HOME="$TMP/boundary-stage/config" YARD_RUNTIME_ROOT="$TMP/boundary-stage/runtime" \
       YARD_RELEASE_BASE_URL="file://$boundary_assets" \
       "$release/subyard-install.sh" --version 1.0.0-test --publish-only --yes > "$TMP/boundary-stage.log" \
-      || fail 'publication-only rejected a verified legacy archive'
+      || fail 'publication-only rejected an archive without the optional installation API'
     [ ! -e "$TMP/boundary-stage/runtime/current" ] && [ ! -L "$TMP/boundary-stage/runtime/current" ] \
-      || fail 'publication-only activated a legacy archive'
-    cp "$legacy_031_installer" "$boundary_assets/subyard-install-runtime-release.sh"
-    (cd "$boundary_assets" && sha256sum subyard-install-runtime-release.sh > subyard-install-runtime-release.sh.sha256)
+      || fail 'publication-only activated the staged archive'
   fi
 done
-# A capable archive delivered alongside an old helper uses the embedded current
-# publisher and records the exact downloaded helper, not the temporary publisher.
-cp "$bundle_one" "$boundary_bundle"
-cp "$bundle_one.sha256" "$boundary_bundle.sha256"
-cp "$bundle_one.manifest.json" "$boundary_bundle.manifest.json"
-cp "$bundle_one.provenance.json" "$boundary_bundle.provenance.json"
-boundary_home="$TMP/boundary-capable"
-mkdir -m 0700 "$boundary_home"
-HOME="$boundary_home" SUBYARD_HOME="$boundary_home/.subyard" \
-  SUBYARD_CONFIG_HOME="$boundary_home/.config/subyard" YARD_BIN_DIR="$boundary_home/bin" \
-  SHELL=/bin/bash ZDOTDIR="$boundary_home" YARD_SHELL_RC='' YARD_LOGIN_RC='' \
-  YARD_RELEASE_BASE_URL="file://$boundary_assets" YARD_RELEASE_VERSION=1.0.0-test \
-  "$release/subyard-install.sh" --yes > "$TMP/boundary-capable.log" 2>&1 \
-  || fail 'capable full bootstrap with historical helper failed'
-jq -e '[.cacheFiles[].Path] | index("1.0.0-test/subyard-install-runtime-release.sh") != null and index("1.0.0-test/subyard-install-runtime-release.sh.sha256") != null' \
-  "$boundary_home/.subyard/runtime/installation.json" >/dev/null \
-  || fail 'historical downloaded helper was not recorded as a verified cache input'
 # Full-scope metadata is assessed by the verified candidate before activation.
 full_inventory="$standalone_home/.subyard/installation.json"
 established_cache="$(jq -er '.cacheRoot' "$full_inventory")"
@@ -833,12 +910,15 @@ bad_release="$TMP/bad-standalone-release"
 cp -a "$release" "$bad_release"
 printf 'corrupt\n' >> "$bad_release/subyard-install-runtime-release.sh"
 if HOME="$TMP/bad-standalone-home" YARD_RUNTIME_ROOT="$TMP/bad-standalone-runtime" \
+  YARD_RELEASE_CACHE="$TMP/bad-standalone-cache" \
   YARD_RELEASE_BASE_URL="file://$bad_release" YARD_RELEASE_VERSION=1.0.0-test \
   "$bad_release/subyard-install.sh" --yes >/dev/null 2>&1; then
   fail 'standalone bootstrap accepted a corrupt installer'
 fi
 [ ! -e "$TMP/bad-standalone-runtime/current" ] \
   || fail 'corrupt standalone installer changed the current runtime'
+[ "$(stat -c '%a' "$TMP/bad-standalone-cache/1.0.0-test/subyard-install-runtime-release.sh")" = 600 ] \
+  || fail 'corrupt cached installer became executable'
 
 artifact_arm="$("$ROOT/dev/package-engine.sh" --output-dir "$release" --version 1.0.0-test --arch arm64)"
 jq -e '.os == "linux" and .arch == "arm64" and .version == "1.0.0-test"' \
@@ -957,6 +1037,164 @@ grep -Fq 'published release identity conflicts' "$TMP/damaged-reuse.err" \
   && [ "$(sha256sum "$damaged_file")" = "$damaged_digest" ] \
   || fail 'failed publication reuse changed retained bytes or stable links'
 assert_publication_cleanup
+
+# Exercise the real standalone bridge on a forward-only registry boundary.
+# Package a supported predecessor with the same registry up to power epoch 3.
+forward_predecessor="$TMP/forward-predecessor"
+registry="$ROOT/config/release-transition.json"
+cp "$registry" "$TMP/forward-registry.json"
+jq '.currentEpochs["power-metadata"] = 3 |
+    .migrations |= map(select(.id != "introduce-nm-device-guard-v4"))' \
+  "$TMP/forward-registry.json" > "$registry"
+"$ROOT/dev/package-engine.sh" --output-dir "$forward_predecessor" --version 0.28.1-bridge.test >/dev/null
+cp "$TMP/forward-registry.json" "$registry"
+(
+  export HOME="$TMP/forward-bridge-home" SUBYARD_OPERATOR_HOME="$TMP/forward-bridge-home"
+  export SUBYARD_HOME="$HOME/data" SUBYARD_CONFIG_HOME="$HOME/config"
+  export YARD_RUNTIME_ROOT="$HOME/runtime-parent/runtime" YARD_RELEASE_CACHE="$HOME/cache" YARD_BIN_DIR="$HOME/bin"
+  export YARD_SHELL_RC="$HOME/.bashrc" YARD_LOGIN_RC="$HOME/.profile" SHELL=/bin/bash
+  mkdir -m 0700 "$HOME" "$HOME/runtime-parent"
+  chmod 02700 "$HOME/runtime-parent"
+  YARD_ENGINE_PATH=/does-not-exist YARD_RELEASE_BASE_URL="file://$forward_predecessor" "$forward_predecessor/subyard-install.sh" \
+    --version 0.28.1-bridge.test --yes > "$TMP/forward-bridge-base.log"
+  predecessor="$(readlink "$YARD_RUNTIME_ROOT/current")"
+  read -r bundle_digest _ < "$bundle_two.sha256"
+  selected="releases/1.1.0-test-${bundle_digest:0:12}"
+  history="$SUBYARD_CONFIG_HOME/release-transition/v2"
+  snapshot() {
+    readlink "$YARD_RUNTIME_ROOT/current"
+    if [ -L "$YARD_RUNTIME_ROOT/previous" ]; then readlink "$YARD_RUNTIME_ROOT/previous"; fi
+    readlink "$YARD_BIN_DIR/yard" "$YARD_BIN_DIR/sy"
+    sha256sum "$history/journal.json" "$history/ledger.json" "$history/history-checkpoint.json" \
+      "$SUBYARD_HOME/installation.json" "$YARD_RUNTIME_ROOT/installation.json" "$YARD_SHELL_RC" "$YARD_LOGIN_RC"
+  }
+  assert_no_draft() {
+    [ -z "$(find "$HOME/runtime-parent" -maxdepth 1 -name '.subyard-release-draft-*' -print)" ] ||
+      fail 'standalone bridge left a private draft after exit'
+  }
+  before="$(snapshot)"
+  result=0
+  YARD_RELEASE_BASE_URL="file://$release" "$release/subyard-install.sh" --version 1.1.0-test \
+    </dev/null > "$TMP/forward-bridge-decline.log" 2>&1 || result=$?
+  if [ "$result" != 1 ] || ! grep -Fq 'confirmation required: interactive terminal required' "$TMP/forward-bridge-decline.log"; then
+    cat "$TMP/forward-bridge-decline.log" >&2
+    fail 'standalone bridge did not reach candidate-owned confirmation'
+  fi
+  if [ -e "$YARD_RUNTIME_ROOT/$selected" ] || [ -L "$YARD_RUNTIME_ROOT/$selected" ] || [ "$(snapshot)" != "$before" ]; then
+    fail 'declined bridge published or changed the installation'
+  fi
+  assert_no_draft
+  python3 - "$release/subyard-install.sh" <<'PY'
+import os, subprocess, sys, tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory(prefix="subyard-unsafe-runtime-", dir="/tmp") as parent:
+    root = Path(parent) / "runtime"
+    root.mkdir(mode=0o700)
+    probe = Path(parent) / "probe"
+    probe.write_text("mktemp() { echo unexpected-mktemp >&2; return 99; }\n"
+                     "install() { echo unexpected-install >&2; return 99; }\n")
+    Path(parent).chmod(0o0770)
+    for mode, args in (("first install", []), ("publish-only", ["--publish-only"]), ("existing runtime", [])):
+        if mode == "existing runtime":
+            (root / "current").symlink_to("releases/fixture")
+        release = ["--offline", "--version", "1.1.0-test", "--yes"]
+        result = subprocess.run([sys.argv[1], "--runtime-root", str(root), *release, *args],
+                                env=dict(os.environ, BASH_ENV=str(probe), YARD_BIN_DIR=str(root / "bin")),
+                                capture_output=True, text=True)
+        assert result.returncode == 1 and "runtime root has unsafe permissions" in result.stderr, (mode, result.stderr)
+        assert "unexpected-" not in result.stderr, (mode, result.stderr)
+    missing = Path(parent + "-unclaimed")
+    result = subprocess.run([sys.argv[1], "--runtime-root", str(missing / "runtime"), *release],
+                            env=dict(os.environ, BASH_ENV=str(probe)), capture_output=True, text=True)
+    assert result.returncode == 1 and "runtime root has a missing component under a shared parent" in result.stderr, result.stderr
+    assert not missing.exists() and "unexpected-" not in result.stderr, result.stderr
+PY
+  # Replace an installation cache input while the real confirmation is pending.
+  SUBYARD_SOURCE_INGRESS_V1_ROOT=/stale python3 - "$TMP/forward-bridge-cache-replaced.log" "$release/subyard-install.sh" <<'PY'
+import errno, os, pty, select, shutil, signal, sys, time
+from pathlib import Path
+
+log, installer = sys.argv[1:]
+cache_file = Path(os.environ["YARD_RELEASE_CACHE"]) / "1.1.0-test/subyard-1.1.0-test-linux-amd64.tar.gz.provenance.json"
+pid, terminal = pty.fork()
+if pid == 0:
+    os.execv(installer, [installer, "--offline", "--version", "1.1.0-test"])
+
+answered = False
+buffer = b""
+deadline = time.monotonic() + 90
+try:
+    with open(log, "wb") as output:
+        while select.select([terminal], [], [], max(0, deadline - time.monotonic()))[0]:
+            try:
+                data = os.read(terminal, 65536)
+            except OSError as err:
+                if err.errno == errno.EIO:
+                    break
+                raise
+            output.write(data)
+            if not answered and b"Proceed?" in buffer + data:
+                backup = cache_file.with_suffix(".verified-original")
+                cache_file.rename(backup)
+                shutil.copy2(backup, cache_file)
+                os.write(terminal, b"y\n")
+                answered = True
+            buffer = data[-16:]
+        else:
+            raise TimeoutError("bootstrap confirmation did not finish")
+except BaseException:
+    os.killpg(pid, signal.SIGKILL)
+    os.waitpid(pid, 0)
+    raise
+finally:
+    os.close(terminal)
+
+_, status = os.waitpid(pid, 0)
+assert answered and os.waitstatus_to_exitcode(status) == 1
+assert cache_file.stat().st_ino != backup.stat().st_ino
+os.replace(backup, cache_file)
+PY
+  grep -Fq 'verified installation cache artifact changed' "$TMP/forward-bridge-cache-replaced.log" || fail 'changed cache enrollment was not refused'
+  for inventory in "$YARD_RUNTIME_ROOT/installation.json" "$SUBYARD_HOME/installation.json"; do
+    jq -e 'all(.cacheFiles[]; .Path | startswith("1.1.0-test/") | not)' "$inventory" >/dev/null \
+      || fail 'bootstrap claimed cache files after the verification became stale'
+  done
+  assert_no_draft
+  YARD_ENGINE_PATH=/does-not-exist SUBYARD_SOURCE_INGRESS_V1_ROOT=/stale \
+    "$release/subyard-install.sh" --offline --version 1.1.0-test --yes \
+    > "$TMP/forward-bridge-apply.log" 2>&1 \
+    || { cat "$TMP/forward-bridge-apply.log" >&2; fail 'approved standalone bridge did not activate the new registry'; }
+  if [ "$(readlink "$YARD_RUNTIME_ROOT/current")" != "$selected" ] ||
+     [ "$(readlink "$YARD_RUNTIME_ROOT/previous")" != "$predecessor" ] ||
+     ! jq -e --arg selected "${selected#releases/}" '.checkpoint == "complete" and .goal.target == $selected and
+       any(.steps[]; .migration == "introduce-nm-device-guard-v4")' "$history/journal.json" >/dev/null ||
+     ! jq -e '.domains["power-metadata"].epoch == 4' "$history/history-checkpoint.json" >/dev/null; then
+    fail 'standalone bridge did not complete the exact release transition'
+  fi
+  for inventory in "$YARD_RUNTIME_ROOT/installation.json" "$SUBYARD_HOME/installation.json"; do
+    python3 - "$YARD_RELEASE_CACHE" "$inventory" <<'PY'
+import json, sys
+from pathlib import Path
+
+cache, inventory = map(Path, sys.argv[1:])
+entries = [e for e in json.loads(inventory.read_text())["cacheFiles"] if e["Path"].startswith("1.1.0-test/")]
+assert len(entries) == 6
+for entry in entries:
+    info = (cache / entry["Path"]).lstat()
+    assert (entry["Device"], entry["Inode"], entry["Changed"]) == (info.st_dev, info.st_ino, info.st_ctime_ns)
+PY
+  done
+  before="$(snapshot)"
+  if "$YARD_BIN_DIR/yard" update --rollback --yes > "$TMP/forward-bridge-rollback.log" 2>&1; then
+    fail 'standalone bridge allowed rollback across the registry change'
+  fi
+  grep -Fq 'rollback-incompatible' "$TMP/forward-bridge-rollback.log" || fail 'registry rollback refusal lost its diagnostic'
+  "$release/subyard-install.sh" --offline --version 1.1.0-test --yes > "$TMP/forward-bridge-retry.log" 2>&1 \
+    || { cat "$TMP/forward-bridge-retry.log" >&2; fail 'standalone bridge retry failed'; }
+  [ "$(snapshot)" = "$before" ] || fail 'same-release bridge retry changed the installation'
+  assert_no_draft
+)
 
 # Installed release ingress: bootstrap creates only the first link; every
 # subsequent activation, same-version retry, and explicit rollback is owned by

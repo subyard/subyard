@@ -680,6 +680,12 @@ func TestEnvironmentPinnedUpdateRefusesPublicationCollisionWithDifferentArtifact
 }
 
 func TestForwardUpdateUsesFreshDraftAcrossRegistryChange(t *testing.T) {
+	t.Run("approved draft", func(t *testing.T) { checkForwardDraftPublication(t, false) })
+	t.Run("content changed during final inspection", func(t *testing.T) { checkForwardDraftPublication(t, true) })
+}
+
+func checkForwardDraftPublication(t *testing.T, changeContent bool) {
+	t.Helper()
 	runtime, candidate, request, called, args := retainedVersionFixture(t)
 	if err := os.Remove(filepath.Join(request.RuntimeRoot, "previous")); err != nil {
 		t.Fatal(err)
@@ -690,6 +696,9 @@ func TestForwardUpdateUsesFreshDraftAcrossRegistryChange(t *testing.T) {
 	ready := fmt.Sprintf(`{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true,"active":%q,"previous":"release-a","target":%q,"code":"ready","message":"verified","transaction":"tx-0123456789abcdef"}}`,
 		candidate.release, candidate.release)
 	converge := fmt.Sprintf(`if grep -q '"mode":"converge"'; then printf 'called\n' >> %q; printf '%%s\n' '%s'; exit 0; fi;`, called, ready)
+	if changeContent {
+		converge += fmt.Sprintf(`if [ -f %q ]; then printf 'changed' > "$SUBYARD_REPOSITORY_ROOT/config/release-transition.json"; fi;`, called)
+	}
 	enginePayload := bytes.Replace(mustReadFile(t, engine), []byte("cat >/dev/null;"), []byte(converge), 1)
 	testkit.WriteFile(t, engine, enginePayload, 0o700)
 	rewriteReleaseOwnerManifest(t, candidate)
@@ -710,7 +719,17 @@ func TestForwardUpdateUsesFreshDraftAcrossRegistryChange(t *testing.T) {
 	if _, err := os.Lstat(candidate.root); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("inspection published the draft: %v", err)
 	}
-	if err := prepared.Execute(context.Background()); err != nil {
+	err = prepared.Execute(context.Background())
+	if changeContent {
+		if !errors.Is(err, domain.ErrPlanStale) || !strings.Contains(err.Error(), "reverify approved release draft") {
+			t.Fatalf("content change did not fail before publication: %v", err)
+		}
+		if _, err := os.Lstat(candidate.root); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("content change left a canonical release: %v", err)
+		}
+		return
+	}
+	if err != nil {
 		t.Fatalf("the published draft could not converge: %v", err)
 	}
 	if got := string(mustReadFile(t, called)); got != "called\ncalled\ncalled\n" {

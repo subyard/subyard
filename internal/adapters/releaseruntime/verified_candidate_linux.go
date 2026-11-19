@@ -36,6 +36,8 @@ type verifiedPublishedCandidate struct {
 	checkpointRaw         []byte
 	checkpointDigest      [sha256.Size]byte
 	version               string
+	inventory             map[string]bool // true for directories
+	published             bool
 }
 
 func (candidate *verifiedPublishedCandidate) Close() error {
@@ -97,47 +99,52 @@ func (runtime *Runtime) verifyPublishedCandidateFiles(candidate publishedCandida
 		candidate: candidate,
 		root:      root,
 	}
-	fail := func(err error) (*verifiedPublishedCandidate, error) {
+	if err := verifyOpenCandidateFiles(verified, expectedDigest, sealEngine); err != nil {
 		verified.Close()
 		return nil, err
 	}
+	return verified, nil
+}
+
+func verifyOpenCandidateFiles(verified *verifiedPublishedCandidate, expectedDigest *releasetransition.Fingerprint, sealEngine bool) error {
 	rootFD := int(verified.root.Fd())
 	manifest, err := openCandidateFile(rootFD, "runtime-files.sha256")
 	if err != nil {
-		return fail(errors.New("published runtime file manifest is unavailable"))
+		return errors.New("published runtime file manifest is unavailable")
 	}
 	payload, err := io.ReadAll(io.LimitReader(manifest, 1<<20+1))
 	closeErr := manifest.Close()
 	if err != nil || closeErr != nil || len(payload) == 0 || len(payload) > 1<<20 {
-		return fail(errors.New("published runtime file manifest is invalid"))
+		return errors.New("published runtime file manifest is invalid")
 	}
 	manifestDigest := sha256.Sum256(payload)
 	verified.manifestDigest = releasetransition.Fingerprint(hex.EncodeToString(manifestDigest[:]))
 	if expectedDigest != nil && verified.manifestDigest != *expectedDigest {
-		return fail(errors.New("published runtime manifest does not match the protected transition"))
+		return errors.New("published runtime manifest does not match the protected transition")
 	}
 	entries, err := parseCandidateManifest(payload)
 	if err != nil {
-		return fail(err)
+		return err
 	}
 	for _, entry := range entries {
 		if experimentalReleaseOwnerPath(entry.path) {
-			return fail(unsupportedReleaseOwnerError{})
+			return unsupportedReleaseOwnerError{}
 		}
 	}
-	if err := verifyCandidateInventory(rootFD, entries); err != nil {
-		return fail(err)
+	verified.inventory, err = verifyCandidateInventory(rootFD, entries)
+	if err != nil {
+		return err
 	}
 	for _, entry := range entries {
 		file, openErr := openCandidateFile(rootFD, entry.path)
 		if openErr != nil {
-			return fail(errors.New("published runtime contains an unavailable manifest entry"))
+			return errors.New("published runtime contains an unavailable manifest entry")
 		}
 		if entry.path == "bin/yard-engine" {
 			info, statErr := file.Stat()
 			if statErr != nil || info.Mode().Perm()&0o111 == 0 {
 				file.Close()
-				return fail(errors.New("published runtime engine is unavailable"))
+				return errors.New("published runtime engine is unavailable")
 			}
 			verified.producerEvidence.EngineSHA256 = hex.EncodeToString(entry.digest[:])
 			if sealEngine {
@@ -181,11 +188,11 @@ func (runtime *Runtime) verifyPublishedCandidateFiles(candidate publishedCandida
 		}
 		file.Close()
 		if err != nil {
-			return fail(err)
+			return err
 		}
 	}
 	if verified.producerEvidence.EngineSHA256 == "" {
-		return fail(errors.New("published runtime manifest does not bind yard-engine"))
+		return errors.New("published runtime manifest does not bind yard-engine")
 	}
 	if verified.registryDigest == "" {
 		registry, err := openCandidateFile(rootFD, "config/release-transition.json")
@@ -193,13 +200,14 @@ func (runtime *Runtime) verifyPublishedCandidateFiles(candidate publishedCandida
 			registry.Close()
 		}
 		if !errors.Is(err, os.ErrNotExist) {
-			return fail(errors.New("published runtime registry is not bound by its manifest"))
+			return errors.New("published runtime registry is not bound by its manifest")
 		}
 	}
-	return verified, nil
+	return nil
 }
 
-func verifyCandidateInventory(rootFD int, entries []candidateManifestEntry) error {
+func verifyCandidateInventory(rootFD int, entries []candidateManifestEntry) (map[string]bool, error) {
+	inventory := make(map[string]bool, len(entries))
 	remaining := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		remaining[entry.path] = struct{}{}
@@ -228,10 +236,12 @@ func verifyCandidateInventory(rootFD int, entries []candidateManifestEntry) erro
 			}
 			switch stat.Mode & unix.S_IFMT {
 			case unix.S_IFDIR:
+				inventory[path] = true
 				if err := walk(fd, name, path); err != nil {
 					return err
 				}
 			case unix.S_IFREG:
+				inventory[path] = false
 				if path == "runtime-files.sha256" {
 					continue
 				}
@@ -246,12 +256,12 @@ func verifyCandidateInventory(rootFD int, entries []candidateManifestEntry) erro
 		return nil
 	}
 	if err := walk(rootFD, ".", ""); err != nil {
-		return err
+		return nil, err
 	}
 	if len(remaining) != 0 {
-		return errors.New("published runtime file manifest is not exact")
+		return nil, errors.New("published runtime file manifest is not exact")
 	}
-	return nil
+	return inventory, nil
 }
 
 func openVerifiedCandidateRoot(

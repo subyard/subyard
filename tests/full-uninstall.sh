@@ -121,7 +121,7 @@ fi
 printf 'ok: current installed custom runtime fully uninstalls before Incus or host prerequisites exist\n'
 # Supported bootstrap owns exact versioned cache artifacts. Foreign content
 # beside them, including inside the same version directory, must survive.
-for command in jq curl tar gzip stat uname sha256sum awk cut sed grep install mkdir mktemp mv rm ln chmod sync cp cmp sort tr cat getent readlink dirname basename flock find xargs touch date wc head id sleep; do
+for command in jq curl tar gzip stat uname sha256sum awk cut sed grep install mkdir mktemp mv rm rmdir ln chmod sync cp cmp sort tr cat getent readlink dirname basename flock find xargs touch date wc head id sleep; do
   for directory in /usr/bin /bin /usr/local/bin; do
     if [ -x "$directory/$command" ]; then /bin/ln -sf "$directory/$command" "$fixture/tools/$command"; break; fi
   done

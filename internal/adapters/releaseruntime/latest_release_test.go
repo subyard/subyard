@@ -231,11 +231,18 @@ func TestBootstrapLatestReleaseDiscovery(t *testing.T) {
 			// at checksum validation, before any installer can run.
 			wantError := test.wantError
 			if test.wantTag != "" {
-				wantError = "installer checksum mismatch"
+				wantError = "release checksum mismatch"
 			}
 			if err == nil || !strings.Contains(string(output), wantError) ||
 				strings.Contains(string(output), "GitHub rate limit") != test.rateLimit {
 				t.Fatalf("bootstrap = %v: %s", err, output)
+			}
+			headerPath, err := os.ReadFile(filepath.Join(root, "header-path"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(string(headerPath)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("discovery left its temporary header file: %v", err)
 			}
 			requests, err := os.ReadFile(filepath.Join(root, "requests"))
 			if err != nil {
@@ -255,8 +262,8 @@ func TestBootstrapLatestReleaseDiscovery(t *testing.T) {
 				}
 			}
 			if test.wantTag != "" {
-				if len(lines) != wantLookups+6 {
-					t.Fatalf("expected tag lookup and six pinned assets: %s", requests)
+				if len(lines) != wantLookups+4 {
+					t.Fatalf("expected tag lookup and four pinned verification inputs: %s", requests)
 				}
 				for _, url := range lines[wantLookups:] {
 					if !strings.HasPrefix(url, "https://github.com/"+repository+"/releases/download/"+test.wantTag+"/") {
@@ -289,6 +296,8 @@ done
 printf '%s\n' "$url" >> "$FAKE_LOG"
 if [ "$head" = 1 ]; then
   [ "$proto/$retry/$follow/$disabled/$max_redirs" = '=https/0/0/1/0' ]
+  [ "$(stat -c '%a' -- "$headers")" = 600 ]
+  printf '%s' "$headers" > "$FAKE_RESPONSES/header-path"
   index="$(wc -l < "$FAKE_LOG")"
   cat "$FAKE_RESPONSES/headers-$index" > "$headers"
   status="$(cat "$FAKE_RESPONSES/status-$index")"
@@ -297,6 +306,14 @@ if [ "$head" = 1 ]; then
   [ "$status" -lt 400 ] || exit 22
 else
   # A real download never runs in this fixture.
-  printf 'invalid fixture bytes\n' > "$output"
+  case "$url" in
+    */subyard-*-linux-*.tar.gz.manifest.json)
+      asset="${url##*/subyard-}"
+      version="${asset%-linux-*}"
+      arch="${asset##*-linux-}"
+      printf '{"schemaVersion":1,"kind":"runtime","version":"%s","os":"linux","arch":"%s","bootstrapDraft":"private-release-draft-v1"}\n' \
+        "$version" "${arch%%.*}" ;;
+    *) printf 'invalid fixture bytes\n' ;;
+  esac > "${output:-/dev/stdout}"
 fi
 `

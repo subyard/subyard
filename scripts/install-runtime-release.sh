@@ -243,16 +243,6 @@ if [ "$CHECK_ONLY" = 1 ]; then
   exit 0
 fi
 
-helper="${SUBYARD_INSTALL_VERIFIED_HELPER:-$0}"
-if [ "$helper" != "$0" ]; then
-  [ -f "$helper" ] && [ ! -L "$helper" ] && [ -f "$helper.sha256" ] && [ ! -L "$helper.sha256" ] \
-    || { printf 'install-runtime-release: verified installer inputs are unavailable\n' >&2; exit 1; }
-  read -r helper_expected _ < "$helper.sha256" || true
-  helper_actual="$(sha256sum "$helper" | cut -d' ' -f1)"
-  [ "${helper_actual,,}" = "${helper_expected,,}" ] && [ "${#helper_actual}" = 64 ] \
-    || { printf 'install-runtime-release: verified installer checksum changed\n' >&2; exit 1; }
-fi
-
 if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
   if mv -T "$candidate" "$destination"; then
     published=1
@@ -278,9 +268,9 @@ fi
 # the installer barrier; metadata inspection is bounded and matching is no-op.
 if [ "$inventory_capable" = 1 ]; then
 cache_inputs=("$BUNDLE" "$CHECKSUM" "$MANIFEST" "$PROVENANCE")
-case "$helper" in
+case "$0" in
   "${YARD_RELEASE_CACHE:-${SUBYARD_HOME:-$HOME/.subyard}/releases}"/*)
-    cache_inputs+=("$helper" "${helper}.sha256") ;;
+    cache_inputs+=("$0" "$0.sha256") ;;
 esac
 jq -n --args '{CacheInputs:$ARGS.positional}' "${cache_inputs[@]}" \
   | env SUBYARD_OWNER_LOCK_FD="${SUBYARD_INSTALL_OWNER_FD:-}" \

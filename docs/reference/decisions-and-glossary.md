@@ -392,10 +392,15 @@ design](resumable-release-transition-design.md).
 
 Artifact protection covers corruption/publication errors with existing SHA-256,
 manifest/provenance, safe unpack, rename publication, stale guards, pinned root, sealed engine.
-Operator/same-UID processes are trusted and release tree is not concurrently edited. Every
-regular runtime file occurs exactly once in manifest except root runtime-files manifest; nested
+Every regular runtime file occurs exactly once in manifest except root runtime-files manifest; nested
 names are ordinary entries. Symlinks/special files reject. Corrupt republication preserves
 bytes/stable links while removing temporaries. Process V1/journal V2 meanings remain frozen.
+
+Bootstrap and update validate runtime path ancestry to exclude other users from writing the
+runtime tree. During an update, other processes running with the operator's UID or as root leave
+release, draft, and wrapper paths untouched. Agents run only inside yards.
+Bootstrap trusts release artifacts that pass checksum and provenance verification as published.
+A crafted archive is a supply-chain issue outside bootstrap's threat model.
 Independent trust anchors/TUF/signatures/root-owned helper/fs-verity/FD-backed trees/coordinated
 same-UID replacement defense are outside accepted scope; chmod/rehash wrappers would add no
 promised guarantee.
