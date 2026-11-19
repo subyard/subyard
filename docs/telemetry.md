@@ -567,24 +567,59 @@ not disappear. Freed pages are reused; the database file does not shrink.
 A collector release older than this budget cannot run on such a store: it
 refuses to open a database above a third of its 1 GiB default bound, and its
 export would label zstd frames as plain protobuf. Before `yard update --rollback`
-or any downgrade, export the history with this release's collector and keep the
-export:
+or any downgrade, run these steps inside the yard as the developer account that
+owns `$data`. They keep a copy of this release's collector and export the whole
+history in windows of 1000 records into a private directory. The collector may
+keep running.
 
 ```sh
-"$collector" export --data-dir "$data" --after 0 --limit 1000 > telemetry-0001.jsonl
+collector=/usr/local/lib/subyard-telemetry/subyard-telemetry
+data=/var/lib/subyard/telemetry
+keep="$HOME/telemetry-before-rollback"
+mkdir -m 0700 "$keep"
+cp "$collector" "$keep/subyard-telemetry"
+after=0
+n=1
+while :; do
+  file=$(printf '%s/telemetry-%04d.jsonl' "$keep" "$n")
+  (umask 077 && "$keep/subyard-telemetry" export --data-dir "$data" --after "$after" --limit 1000 > "$file") || break
+  if [ ! -s "$file" ]; then rm "$file"; break; fi
+  after=$(tail -n 1 "$file" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["sequence"])') || break
+  n=$((n + 1))
+done
+echo "last exported sequence: $after"
 ```
 
-Continue with `--after` until a window is empty. If the older collector already
-fails to open the store after a rollback, stop it, move the store aside and let
-it start fresh; the moved files stay readable by this release's collector:
+The loop stops at the first empty window and prints the last exported
+sequence. If it stops on an error instead, fix the cause and rerun the lines
+from `while :` to the end in the same shell; they resume at the failed window.
+
+If the older collector already fails to open the store after a rollback, move
+the store aside and let the older collector start fresh. Run the two
+`systemctl` commands with `sudo`; run the `mv` commands as the developer
+account, with the same `data` value:
 
 ```sh
 sudo systemctl stop subyard-telemetry.service
+data=/var/lib/subyard/telemetry
 mv "$data/telemetry.sqlite" "$data/telemetry.sqlite.newer"
 for suffix in -wal -shm; do
-  [ ! -e "$data/telemetry.sqlite$suffix" ] || mv "$data/telemetry.sqlite$suffix" "$data/telemetry.sqlite.newer$suffix"
+  if [ -e "$data/telemetry.sqlite$suffix" ]; then mv "$data/telemetry.sqlite$suffix" "$data/telemetry.sqlite.newer$suffix"; fi
 done
 sudo systemctl start subyard-telemetry.service
+```
+
+The kept collector still reads the moved store. Give it a directory that holds
+the three files under their original names:
+
+```sh
+data=/var/lib/subyard/telemetry
+keep="$HOME/telemetry-before-rollback"
+mkdir -m 0700 "$keep/store"
+for suffix in "" -wal -shm; do
+  if [ -e "$data/telemetry.sqlite.newer$suffix" ]; then mv "$data/telemetry.sqlite.newer$suffix" "$keep/store/telemetry.sqlite$suffix"; fi
+done
+"$keep/subyard-telemetry" stats --data-dir "$keep/store"
 ```
 The producer spool is bounded to 4096 files and 64 MiB using fixed allocations
 and 64 KiB frames. It keeps records ordered within each generated run stream and
