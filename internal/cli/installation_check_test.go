@@ -132,3 +132,13 @@ func TestInstallationCheckReportsEveryIndependentFinding(t *testing.T) {
 		t.Fatalf("code=%d findings=%+v", code, findings)
 	}
 }
+
+func TestInstallationCheckUsesEnvironmentSuppliedSettings(t *testing.T) {
+	root, environment := installationCheckFixture(t)
+	keys := filepath.Join(root, "custom keys")
+	environment = append(slices.DeleteFunc(environment, func(value string) bool { return strings.HasPrefix(value, "SUBYARD_KEYS_ROOT=") }), "SUBYARD_KEYS_ROOT="+keys)
+	_, report, _ := runInstallationCheck(t, root, environment)
+	if message := reportFindings(report)["host.credentials.initialization"].Message; !strings.Contains(message, filepath.Join(keys, "identity.json")) {
+		t.Fatalf("credential inspection ignored SUBYARD_KEYS_ROOT: %q", message)
+	}
+}

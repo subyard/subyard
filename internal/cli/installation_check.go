@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,7 +52,14 @@ func (cli *CLI) runInstallationCheck(ctx context.Context, explicit bool, argumen
 		cli.errorf("check inspects the whole installation; -Y NAME applies only to check --host")
 		return 2
 	}
-	values := cli.configSourceEnvironment()
+	// Yards load with the command environment, as other commands see them.
+	values := maps.Clone(cli.baseEnv)
+	for _, key := range []string{"SUBYARD_YARD", "YARD_NAME", "ACCESS_KIND", "OWNER_ENDPOINT", "OWNER_YARD_NAME"} {
+		delete(values, key)
+	}
+	if values["SUBYARD_OPERATOR_HOME"] == "" {
+		values["SUBYARD_OPERATOR_HOME"] = values["HOME"]
+	}
 	trust := cli.sshTrust(installationDataHome(values), false)
 	trust.ReadOnly = true
 	defer trust.Close()
