@@ -50,11 +50,13 @@ Neither policy contains the collector bearer. Both name
 it as the developer; it reads the private token file and prints only the `Authorization`
 header, which replaces a static `Authorization` from a lower layer. Its errors are fixed text
 that never contains the token. Export fails closed: without a valid token file the helper
-fails and the clients send nothing. The run identifier stays a static header. Codex reads the
+fails and the clients send nothing. The helper accepts only a first line of exactly 64
+lowercase hexadecimal digits; telemetry reports any other token file, such as a restored copy
+with CRLF or blanks, as drift, and apply rewrites it. The run identifier stays a static header. Codex reads the
 helper from 0.170.0; an older Codex starts normally but exports without Authorization, and
-the receiver rejects it. The Codex provisioner installs the latest release; when telemetry
-reports drift, its diagnostics name a provisioned older Codex as
-`telemetry.codex-headers-helper`.
+the receiver rejects it. The Codex provisioner installs the latest release; check an
+existing yard with `codex --version`. When telemetry reports drift, its diagnostics also name
+a provisioned older Codex as `telemetry.codex-headers-helper`.
 
 The policy overrides user values in the fields it defines while telemetry is enabled.
 Telemetry refuses a foreign file at either managed path on enable and reports fields where a
@@ -65,7 +67,7 @@ The one-time upgrade from v0.30 restores recorded prior values where telemetry s
 are unchanged, preserves later edits and removes leaves containing the exact collector token.
 Rewritten home documents retain at most owner read and write permissions. A home file the
 receipt never covered is only scanned for the token bytes. The upgrade keeps the receipt if
-any resulting home file still contains them. The collector token stays the same; a missing
+any resulting home file still contains the recorded or the private token. The collector token stays the same; a missing
 token file is restored from the token every recorded header names. If the receipt names a
 different token than the private file, as after a rollback to v0.30 that minted its own, the
 upgrade removes the recorded token and keeps the private one. Subsequent telemetry updates
@@ -75,9 +77,12 @@ bearer are rewritten without it; the helper is installed before a policy names i
 Rollback to v0.28–v0.30 is refused while telemetry is installed in a local yard, including
 after it is disabled with its data retained. Those releases put the collector token into home
 documents, where an older template writer can publish it with mode `0644`. The telemetry
-runtime's activation identity changed at this boundary, so `yard update --rollback` to v0.30
-reports that the retained release cannot verify installed runtime activation; v0.28 and v0.29
-are already refused because their migration registry differs. Process environment
+runtime's activation identity changed at this boundary. `yard update --rollback` to v0.30
+then reports the general refusal that the retained release cannot verify installed runtime
+activation, without naming telemetry; v0.28 and v0.29 are already refused because their
+migration registry differs. Absence must be observed in a running yard: a stopped yard, or one
+that init never provisioned, is refused even if telemetry was never enabled there. Start or
+initialize it, then retry. Process environment
 settings such as `OTEL_EXPORTER_OTLP_*` and `HTTP_PROXY` can bypass the managed policy.
 Claude ignores local drop-ins when server-managed settings apply.
 
