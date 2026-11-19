@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
@@ -93,7 +94,7 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 				refusals = append(refusals, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry})
 			}
 			if strings.HasPrefix(line, "Bubblewrap AppArmor: ") {
-				refusals = append(refusals, errors.New(line))
+				refusals = append(refusals, bubblewrapPolicyRefusal{line: line, yard: yard, retry: retry})
 			}
 		}
 		if len(refusals) == 1 {
@@ -110,6 +111,22 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 		slices.Contains(lines, "bwrap=retire") || slices.Contains(lines, "bwrap=repair") ||
 		slices.Contains(lines, "bwrap=enable") || slices.Contains(lines, "bwrap=cleanup")
 	return output, changed, nil
+}
+
+// bubblewrapPolicyRefusal is one refusal line of the yard's Bubblewrap policy
+// program. Its bounded, control-free text is the public release diagnostic;
+// other guest output stays private.
+type bubblewrapPolicyRefusal struct{ line, yard, retry string }
+
+func (err bubblewrapPolicyRefusal) Error() string { return err.line }
+
+func (err bubblewrapPolicyRefusal) ActivationDiagnostic() (string, string) {
+	message := "yard " + err.yard + ": " + err.line
+	if len(err.yard) > 63 || !domain.SafeName(err.yard) || len(message) > 480 ||
+		strings.ContainsFunc(message, unicode.IsControl) {
+		return "", err.retry
+	}
+	return message, err.retry
 }
 
 func (runtime Runtime) reconcileIntegrationServices(ctx context.Context) error {
