@@ -207,7 +207,9 @@ func (cli *CLI) runPreparedCommand(ctx context.Context, prepared *preparedComman
 			cli.errorf("close completed %s: %v", prepared.Definition.Name, err)
 			return 1
 		}
-		return cli.runPostRepairInit(ctx, *prepared.pendingInit, assumeYes)
+		if code := cli.runPostRepairInit(ctx, *prepared.pendingInit, assumeYes); code != 0 {
+			return code
+		}
 	}
 	if followup := prepared.profileFollowup; followup != nil &&
 		(followup.prepared.Action == "update.activate" || followup.prepared.Action == "migrate.apply") {

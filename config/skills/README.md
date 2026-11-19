@@ -45,7 +45,8 @@ file modes, missing content and link drift. New sources join the prepared runtim
 closed inventory; historical frozen recipes retain their original inventory and bytes.
 
 Installed runtime readiness includes static skill drift, including missing links and
-artifacts from a deselected provider. The provision stage owns the static refresh, so
+artifacts from a provider deselected in the installed selection; a desired-only deselection
+leaves release repair ready until init applies it. The provision stage owns the static refresh, so
 ordinary `yard init` of the selected running yard repairs that drift and retires a
 deselected provider's skills, also when the selection returned to the recorded one.
 Drift in another yard, host tools and an unfinished release transition stay outside

@@ -407,6 +407,9 @@ func writePendingRepairEngine(t *testing.T, fixture *pendingInitFixture, payload
 	testkit.WriteFile(t, engine, payload, 0o700)
 	registry := mustReadConfigFixture(t, filepath.Join(release, "config/release-transition.json"))
 	manifest := []byte(fmt.Sprintf("%x  ./bin/yard-engine\n%x  ./config/release-transition.json\n", sha256.Sum256(payload), sha256.Sum256(registry)))
+	if launcher, err := os.ReadFile(filepath.Join(release, "bin/yard")); err == nil {
+		manifest = append([]byte(fmt.Sprintf("%x  ./bin/yard\n", sha256.Sum256(launcher))), manifest...)
+	}
 	testkit.WriteFile(t, filepath.Join(release, "runtime-files.sha256"), manifest, 0o600)
 	journal, err := releasetransition.ParseJournal(mustReadConfigFixture(t, fixture.journalPath))
 	if err != nil {
