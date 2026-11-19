@@ -133,8 +133,8 @@ pending_stage="$(guest_root sh -c 'ls -d /mnt/host/agent-sessions/claude/.subyar
 pending_logs=("$STATE/claude-adoption-pending-status.json" "$STATE/claude-adoption-pending-status.err")
 yard integration status claude --json >"${pending_logs[0]}" 2>"${pending_logs[1]}" \
   || fail_with 'status failed while a projects adoption is pending' "${pending_logs[@]}"
-jq -e --arg stage "$pending_stage" \
-  '[(.persist_retained // [])[].path] | index($stage) == null' "${pending_logs[0]}" >/dev/null \
+# Retained items name only their declared directory and prefix; no stage may be listed.
+jq -e '[(.persist_retained // [])[] | select(.kind == "stage")] | length == 0' "${pending_logs[0]}" >/dev/null \
   || fail_with 'status reported the pending stage as retained' "${pending_logs[@]}"
 # Disable plans and applies the runtime reconciliation for the deselected
 # selection itself: its confirmed plan discloses and performs the cancellation
