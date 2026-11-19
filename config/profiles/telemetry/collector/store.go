@@ -190,7 +190,7 @@ func openStore(dir string, limits Limits) (*Store, error) {
 		return bad(err)
 	}
 	if version == 0 {
-		if err = initializeStore(db, cutover); err != nil {
+		if err = initializeStore(db); err != nil {
 			return bad(err)
 		}
 		if _, err = db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
@@ -226,24 +226,17 @@ func openWriterDatabase(path string) (*sql.DB, int, error) {
 	return db, version, nil
 }
 
-func initializeStore(db *sql.DB, cutover *cutover) error {
+func initializeStore(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(schema + spoolSchema + receiverSchema); err != nil {
+	if _, err = tx.Exec(schema + spoolSchema); err != nil {
 		return err
 	}
 	generation := newID()
 	if _, err = tx.Exec("INSERT INTO metadata(key,value) VALUES('origin_id',?),('store_generation_id',?),('producer_id',?)", generation, generation, newID()); err != nil {
-		return err
-	}
-	since := spoolTime()
-	if cutover != nil {
-		since = cutover.Started
-	}
-	if _, err = tx.Exec("INSERT INTO metadata VALUES('receiver_heartbeat',?)", since); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", storeVersion)); err != nil {
@@ -257,7 +250,6 @@ CREATE TABLE IF NOT EXISTS records(sequence INTEGER PRIMARY KEY AUTOINCREMENT,or
 CREATE INDEX IF NOT EXISTS records_time ON records(received_time);
 CREATE TABLE IF NOT EXISTS filtered_events(origin_id TEXT NOT NULL,event_id TEXT NOT NULL,expires_at TEXT NOT NULL,PRIMARY KEY(origin_id,event_id));
 CREATE INDEX IF NOT EXISTS filtered_expiry ON filtered_events(expires_at);
-CREATE TABLE IF NOT EXISTS local_runs(agent_run_id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS runs(agent_run_id TEXT NOT NULL,body TEXT NOT NULL,source_time TEXT NOT NULL,origin_id TEXT NOT NULL,PRIMARY KEY(origin_id,agent_run_id));
 CREATE TABLE IF NOT EXISTS objects(object_id TEXT NOT NULL,kind TEXT NOT NULL,parent_object_id TEXT,accounting TEXT,body TEXT NOT NULL,source_time TEXT NOT NULL,origin_id TEXT NOT NULL,PRIMARY KEY(origin_id,object_id));
 CREATE TABLE IF NOT EXISTS samples(origin_id TEXT NOT NULL,event_id TEXT NOT NULL,object_id TEXT NOT NULL,source_time TEXT NOT NULL,body TEXT NOT NULL,PRIMARY KEY(origin_id,event_id));
@@ -276,7 +268,7 @@ func (s *Store) RegisteredRun(ctx context.Context, id string) bool {
 		return false
 	}
 	var n int
-	return s.db.QueryRowContext(ctx, "SELECT 1 FROM local_runs WHERE agent_run_id=?", id).Scan(&n) == nil
+	return s.db.QueryRowContext(ctx, "SELECT 1 FROM runs WHERE origin_id=? AND agent_run_id=?", s.origin, id).Scan(&n) == nil
 }
 func (s *Store) Ingest(ctx context.Context, records []Record) error {
 	return s.ingest(ctx, records, DefaultPolicy())
@@ -552,17 +544,6 @@ func (s *Store) putRecord(tx *sql.Tx, e Envelope) error {
 	}
 	if err = project(tx, e); err != nil {
 		return ErrStorage
-	}
-	if e.Kind == "run" && !e.replay && e.OriginID == s.origin {
-		body, err := decodeBody(e.Body)
-		if err != nil {
-			return ErrStorage
-		}
-		run := stringValue(body, "agent_run_id")
-		if _, err = tx.Exec("INSERT INTO local_runs VALUES(?) ON CONFLICT DO NOTHING", run); err != nil {
-			return ErrStorage
-		}
-		return s.nativeLoss(tx, run, "")
 	}
 	return nil
 }

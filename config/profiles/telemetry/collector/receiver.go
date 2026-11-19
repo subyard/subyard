@@ -3,7 +3,6 @@ package collector
 import (
 	"context"
 	"crypto/subtle"
-	"database/sql"
 	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
@@ -316,23 +315,9 @@ func serveOTLP(ctx context.Context, s *Store, options Options, auth *localAuth) 
 			return fmt.Errorf("start OTLP: %w", err)
 		}
 	}
-	if err = s.receiverReady(); err == nil {
-		heartbeat := time.NewTicker(5 * time.Second)
-		defer heartbeat.Stop()
-	healthy:
-		for {
-			select {
-			case <-ctx.Done():
-				err = s.receiverHeartbeat()
-				break healthy
-			case err = <-host.failures:
-				break healthy
-			case <-heartbeat.C:
-				if err = s.receiverHeartbeat(); err != nil {
-					break healthy
-				}
-			}
-		}
+	select {
+	case <-ctx.Done():
+	case err = <-host.failures:
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -347,89 +332,3 @@ func (s *Store) Consumers(p Policy) (consumer.Logs, consumer.Metrics, consumer.T
 	return c.logs, c.metrics, c.traces, err
 }
 
-const receiverSchema = `
-CREATE TABLE IF NOT EXISTS receiver_outages(start TEXT PRIMARY KEY,end TEXT NOT NULL);
-`
-
-func (s *Store) receiverReady() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	at := spoolTime()
-	_, err = tx.Exec(`INSERT INTO receiver_outages SELECT value,? FROM metadata
-		WHERE key='receiver_heartbeat' AND value<? ON CONFLICT DO NOTHING`, at, at)
-	if err != nil {
-		return err
-	}
-	if err = s.nativeLoss(tx, "", at); err != nil {
-		return err
-	}
-	if _, err = tx.Exec("UPDATE metadata SET value=? WHERE key='receiver_heartbeat'", at); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-// A pre-outage run without an end time has provisional coverage. Keep that
-// evidence in the local projection until a late record establishes overlap.
-func (s *Store) nativeLoss(tx *sql.Tx, run, readyAt string) error {
-	const source = "native-receiver"
-	query := `SELECT r.agent_run_id,o.start,o.end,
-		json_extract(r.body,'$.end_time') IS NOT NULL OR json_extract(r.body,'$.start_time') >= o.start
-		FROM receiver_outages o JOIN runs r ON json_extract(r.body,'$.start_time') < o.end
-		AND coalesce(json_extract(r.body,'$.end_time'),o.end) > o.start
-		WHERE r.origin_id=? AND coalesce(json_extract(r.body,'$.state'),'') NOT IN ('not_started','starting')
-		AND (json_extract(r.body,'$.state') IS NOT 'resources_observing' OR EXISTS(
-			SELECT 1 FROM records WHERE origin_id=r.origin_id AND kind='run' AND import_policy_version=''
-			AND json_extract(body,'$.agent_run_id')=r.agent_run_id AND json_extract(body,'$.state')='running'))`
-	args := []any{s.origin}
-	if run == "" {
-		query += ` AND o.end=? AND r.agent_run_id IN (SELECT agent_run_id FROM local_runs)`
-		args = append(args, readyAt)
-	} else {
-		// Rebuild provisional gaps when a local run update arrives.
-		if _, err := tx.Exec(`DELETE FROM gaps WHERE agent_run_id=? AND origin_id=?
-			AND json_extract(body,'$.reason')='possible_native_loss'
-			AND NOT EXISTS(SELECT 1 FROM records r WHERE r.origin_id=gaps.origin_id AND r.event_id=gaps.event_id)`,
-			run, s.origin); err != nil {
-			return err
-		}
-		query += " AND r.agent_run_id=?"
-		args = append(args, run)
-	}
-	rows, err := tx.Query(query, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, first, last string
-		var confirmed bool
-		if err = rows.Scan(&id, &first, &last, &confirmed); err != nil {
-			return err
-		}
-		e := s.localRecord("gap", source, id+":"+first, first,
-			map[string]any{"agent_run_id": id, "reason": "possible_native_loss", "quality": "partial",
-				"coverage_start": first, "coverage_end": last})
-		e.ReceivedTime, e.filter = last, valueFilter{}
-		if _, err = sanitizeEnvelope(&e, DefaultPolicy()); err != nil {
-			return err
-		}
-		if confirmed {
-			err = s.putRecord(tx, e)
-		} else {
-			err = project(tx, e)
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return rows.Err()
-}
-
-func (s *Store) receiverHeartbeat() error {
-	_, err := s.db.Exec("UPDATE metadata SET value=? WHERE key='receiver_heartbeat'", spoolTime())
-	return err
-}

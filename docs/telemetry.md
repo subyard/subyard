@@ -466,11 +466,8 @@ is retryable and never acknowledges an unsaved request. Admission is atomic per
 request; there is no misleading partial-success count. Collector failure does not
 make agent commands or broker lifecycle operations wait indefinitely. If the
 bounded local spool fills, collection records a capacity gap where the reserved
-marker can be written. A run overlapping receiver downtime can carry a
-`possible_native_loss` gap. For a run already open at the start of an outage,
-the gap stays in the local projection until a completion establishes overlap.
-An earlier completion clears the provisional gap. Native bytes the receiver
-never saw cannot be recovered by the spool.
+marker can be written. Native bytes the receiver never saw cannot be recovered
+by the spool, and receiver downtime is not recorded as a gap.
 
 ## Export and replay
 

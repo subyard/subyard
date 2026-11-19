@@ -270,9 +270,9 @@ for _ in range(60):
 import sys, types
 sys.path.insert(0, sys.argv[1])
 import launcher, records
-assert records.emit(sys.argv[2], 'run', {'agent_run_id':'before-outage', 'state':'running',
+assert records.emit(sys.argv[2], 'run', {'agent_run_id':'before-ready', 'state':'running',
     'start_time':'2000-01-01T00:00:00Z'}, source_time='2000-01-01T00:00:00Z')
-assert records.emit(sys.argv[2], 'run', {'agent_run_id':'before-outage', 'agent_exited':True,
+assert records.emit(sys.argv[2], 'run', {'agent_run_id':'before-ready', 'agent_exited':True,
     'end_time':'2000-01-01T00:00:01Z'}, source_time='2000-01-01T00:00:01Z')
 launcher.MAX_RUNS = 0
 args = types.SimpleNamespace(command=['/bin/true'], data_dir=sys.argv[2], agent='other',
@@ -288,24 +288,16 @@ assert launcher.launch(args) == 0
             self.assertTrue(select.select([workload.stdout], [], [], 10)[0])
             self.assertEqual(workload.stdout.readline(), b'200\n')
             deadline = time.monotonic()+10
-            before_id = 'before-outage'
             self.assertFalse((data/'auth.token').exists())
             self.assertFalse((data/'sources/observer-old.json').exists())
             self.assertEqual(runtime.auth.read_bytes(), b'a'*64+b'\n')
             with closing(sqlite3.connect((data/'telemetry.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
-                while True:
-                    reason = "json_extract(body,'$.reason')"
-                    count, = db.execute(f"SELECT count(*) FROM gaps WHERE {reason}='possible_native_loss' AND agent_run_id=?",
-                                        (offline_id,)).fetchone()
-                    done = db.execute("SELECT 1 FROM runs WHERE agent_run_id=? AND json_extract(body,'$.end_time') IS NOT NULL",
-                                      (before_id,)).fetchone()
-                    if count and done:
-                        break
+                reason = "json_extract(body,'$.reason')"
+                # Both spooled runs drain once the collector is ready.
+                while db.execute("SELECT count(*) FROM runs WHERE agent_run_id IN (?,?) AND (agent_run_id=? OR json_extract(body,'$.end_time') IS NOT NULL)",
+                                 (offline_id, 'before-ready', offline_id)).fetchone() != (2,):
                     self.assertLess(time.monotonic(), deadline)
                     time.sleep(.05)
-                self.assertEqual(count, 1)
-                self.assertIsNone(db.execute(f"SELECT 1 FROM gaps WHERE {reason}='possible_native_loss' AND agent_run_id=?",
-                                             (before_id,)).fetchone())
                 self.assertEqual(db.execute("SELECT count(*) FROM runs WHERE agent_run_id='legacy-run'").fetchone(), (0,))
                 self.assertEqual(db.execute(f"SELECT count(*) FROM gaps WHERE {reason}='source_offline'").fetchone(), (0,))
             archive = data/'archive/telemetry.sqlite'
