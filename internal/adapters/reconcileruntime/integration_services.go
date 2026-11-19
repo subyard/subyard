@@ -90,13 +90,15 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 		}
 		retry := "run " + shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 		refusals := []error{settingsErr}
+		policyRefused := false
 		for _, line := range guestLines(result.Stderr) {
 			if line.Matches("subyard-integration-conflict:ccusage") {
 				refusals = append(refusals, integrationOwnershipError{message: "this yard has ALLOWS_CODING_TOOLS=false, but /usr/local/bin/ccusage remains and ownership cannot be verified using /var/lib/subyard/ccusage-ownership; utility preserved. Inspect its installation before explicitly retiring the unwanted utility", retry: retry})
 			}
-			if line.wraps(bubblewrapRefusalPrefix, "") {
-				refusals = append(refusals, bubblewrapPolicyRefusal{line: bubblewrapRefusalLine(line), yard: yard, retry: retry})
-			}
+			policyRefused = policyRefused || line.wraps(bubblewrapRefusalPrefix, "")
+		}
+		if policyRefused {
+			refusals = append(refusals, bubblewrapPolicyRefusal{line: bubblewrapRefusalText, yard: yard, retry: retry})
 		}
 		if len(refusals) == 1 {
 			refusals = append(refusals, errors.New("integration service or utility ownership is unknown or changed"))
@@ -116,71 +118,13 @@ bash -c "$3" subyard "$mode" "$4" "$5" "$6" "$7" "$8" || bubblewrap_status=$?
 
 const (
 	bubblewrapRefusalPrefix = "Bubblewrap AppArmor: "
-	bubblewrapRefusalSuffix = ". Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
+	// bubblewrapRefusalText replaces the policy program's own refusal lines,
+	// which are guest text.
+	bubblewrapRefusalText = bubblewrapRefusalPrefix + "the yard's Bubblewrap AppArmor policy cannot be verified or reconciled. Inspect the yard policy and restore the original Subyard files from backup or resolve the administrator policy before rerunning yard setup."
 )
 
-// bubblewrapRefusalReasons lists every fixed refusal of bwrap_policy.sh with
-// its paths, which are the program's own constants.
-func bubblewrapRefusalReasons() []string {
-	const (
-		policyParent, policy = "/opt/subyard", "/opt/subyard/bwrap-apparmor"
-		recordParent, marker = "/var/lib/subyard", "/var/lib/subyard/bwrap-apparmor-ownership"
-		pending              = marker + ".pending"
-		unit                 = "/etc/systemd/system/subyard-bwrap-apparmor.service"
-		link                 = "/etc/systemd/system/multi-user.target.wants/subyard-bwrap-apparmor.service"
-		legacyUnit           = "/etc/systemd/system/subyard-codex-bwrap.service"
-	)
-	reasons := []string{
-		"ownership of " + unit + " cannot be verified", "ownership of " + link + " cannot be verified",
-		"the systemd unit lookup paths could not be verified", "AppArmor is not in a yard policy namespace",
-		"the yard cannot inspect its AppArmor profiles", "the owned boot loader " + policy + "/load is missing or changed",
-		"unexpected entry in the owned policy directory " + policy, "the owned policy directory " + policy + " is missing or changed",
-		"the developer's Bubblewrap sandbox could not create user and network namespaces", "the yard cannot load AppArmor profiles",
-		"both ownership records " + marker + " and " + pending + " exist", "boot registration exists without the policy directory",
-		"existing policy or boot registration has no ownership record at " + marker, "the boot loader has no verified ownership or is disabled",
-		"could not disable " + unit, "could not compile the distribution Bubblewrap profiles",
-	}
-	for _, path := range []string{unit, pending, policy, marker} {
-		reasons = append(reasons, path+" appeared during reconciliation")
-	}
-	for _, parent := range []string{policyParent, recordParent} {
-		reasons = append(reasons, "ownership of the parent directory "+parent+" cannot be verified")
-	}
-	for _, record := range []string{marker, pending} {
-		reasons = append(reasons, "the ownership record "+record+" is missing or invalid", "the two profile hashes in "+record+" do not match the files")
-	}
-	for _, name := range []string{"unpriv_bwrap", "bwrap"} {
-		reasons = append(reasons, "the owned file "+policy+"/"+name+" is missing or changed",
-			"the loaded AppArmor profile "+name+" cannot be verified as Subyard-owned",
-			"could not load AppArmor profile "+name, "could not undo loading AppArmor profile "+name)
-	}
-	for _, directory := range []string{"", "local/", "disable/", "force-complain/"} {
-		for _, name := range []string{"bwrap", "bwrap-userns-restrict", "unpriv_bwrap"} {
-			reasons = append(reasons, "administrator AppArmor policy at /etc/apparmor.d/"+directory+name)
-		}
-	}
-	for _, old := range []string{"/opt/subyard/codex/apparmor", legacyUnit, "/etc/systemd/system/multi-user.target.wants/subyard-codex-bwrap.service"} {
-		reasons = append(reasons, "legacy policy at "+old+" has no ownership record")
-	}
-	return reasons
-}
-
-// bubblewrapRefusalLine replaces a guest refusal line with the matching fixed
-// host text. An override found in a systemd unit path keeps only its class.
-func bubblewrapRefusalLine(line guestText) string {
-	for _, reason := range bubblewrapRefusalReasons() {
-		if text := bubblewrapRefusalPrefix + reason + bubblewrapRefusalSuffix; line.Matches(text) {
-			return text
-		}
-	}
-	if line.wraps(bubblewrapRefusalPrefix+"administrator systemd override at /", bubblewrapRefusalSuffix) {
-		return bubblewrapRefusalPrefix + "administrator systemd override in a systemd unit path" + bubblewrapRefusalSuffix
-	}
-	return bubblewrapRefusalPrefix + "the yard policy program refused with an unrecognized reason" + bubblewrapRefusalSuffix
-}
-
-// bubblewrapPolicyRefusal is one refusal of the yard's Bubblewrap policy
-// program, as fixed host text. Its bounded text is the public release diagnostic.
+// bubblewrapPolicyRefusal reports that the yard's Bubblewrap policy program
+// refused, as fixed host text. Its bounded text is the public release diagnostic.
 type bubblewrapPolicyRefusal struct{ line, yard, retry string }
 
 func (err bubblewrapPolicyRefusal) Error() string { return err.line }

@@ -569,26 +569,24 @@ func persistLocation(path guestText, mappings []PersistMapping) (string, string,
 	return "an unrecognized path", "", false
 }
 
-// declaredGuestOwner names the declared integration the guest reported.
-func (runtime Runtime) declaredGuestOwner(owner guestText, mappings []PersistMapping) string {
-	candidates := append(strings.Fields(runtime.environmentValue("CODING_TOOL_INTEGRATIONS")), persistOwners(mappings)...)
-	if definitions, err := runtime.integrationDefinitions(); err == nil {
-		for _, definition := range definitions {
-			candidates = append(candidates, definition.Name)
-		}
-	}
-	declared, _ := matchDeclared(owner, candidates...)
-	return runtime.declaredOwner(declared)
+// persistRefusalWire is the persist program's refusal report.
+type persistRefusalWire struct {
+	Conflicts []persistConflictWire `json:"conflicts"`
+	Entries   []persistEntryWire    `json:"entries"`
+	Error     guestText             `json:"error"`
+}
+
+type persistConflictWire struct {
+	Reason      guestText `json:"reason"`
+	Path        guestText `json:"path"`
+	Detail      guestText `json:"detail"`
+	Integration guestText `json:"integration"`
 }
 
 // Only typed persist conflicts are pending configuration. Every rendered value
 // is a declared mapping value or fixed host text.
 func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping) error {
-	var report struct {
-		Conflicts []struct{ Reason, Path, Detail, Integration guestText } `json:"conflicts"`
-		Entries   []persistEntryWire                                      `json:"entries"`
-		Error     guestText                                               `json:"error"`
-	}
+	var report persistRefusalWire
 	yard, instance, project := runtime.Yard.YardName, runtime.Yard.YardInstanceName, runtime.Yard.IncusProject
 	status := shellquote.Command([]string{"yard", "-Y", yard, "integration", "status"})
 	if json.Unmarshal(stderr, &report) != nil || len(report.Conflicts) == 0 {
@@ -630,7 +628,7 @@ func (runtime Runtime) persistRefusal(stderr []byte, mappings []PersistMapping) 
 		if reason == "persist target filesystem" && detail != "unrecognized detail" && detail != "" {
 			other = fmt.Sprintf("%q", detail)
 		}
-		owner := runtime.declaredGuestOwner(conflict.Integration, mappings)
+		owner, _ := matchDeclared(conflict.Integration, persistOwners(mappings)...)
 		switch reason {
 		case "persist adoption pending":
 			message = fmt.Sprintf("persist adoption of %s in yard %s is pending: release activation does not start data transfers; data was preserved", at, yard)

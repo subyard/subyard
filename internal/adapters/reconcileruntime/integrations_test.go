@@ -582,7 +582,7 @@ func TestPrepareLegacyIntegrationAdoptionSkipsUnavailableIncus(t *testing.T) {
 }
 
 func TestIntegrationPlanReportsServiceConflictWithoutSubstrate(t *testing.T) {
-	const conflict = bubblewrapRefusalPrefix + "the owned boot loader /opt/subyard/bwrap-apparmor/load is missing or changed" + bubblewrapRefusalSuffix
+	const conflict = bubblewrapRefusalText
 	incus := &testkit.Incus{
 		Reconcile: ports.ReconcileState{InstanceFound: true, Instance: ports.InstanceInfo{Status: "Running"}},
 		ExecSteps: []testkit.IncusExecStep{

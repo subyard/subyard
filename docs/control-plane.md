@@ -947,7 +947,9 @@ Configuration failures retain the failing yard, inspect/apply/verify phase, sour
 path relative to config home, canonical key and line when known. Their public reason is fixed;
 assignment values, arbitrary parser text and guest stderr are never rendered. Guest-reported strings
 are decoded as opaque guest text and matched against host-declared values; only the matched
-host value, a fixed reason or a short digest is rendered. A suggested
+host value, a fixed reason or a short digest is rendered. Installed configuration values
+(applied diagnostic file paths and non-sensitive applied settings) are host-recorded and
+shape-validated, so `yard config status` may show them. A suggested
 `yard -Y <yard> config status` remains read-only during recovery and preserves this source context.
 Post-apply observation failure retains its adapter diagnostic; invalid observation requires
 operator action, while valid remaining drift stays recoverable.

@@ -289,7 +289,7 @@ foreign fields/document/auth/history. Other artifacts have a small root-owned ve
 inventory, not another desired database. Missing/corrupt/drifted evidence preserves data with
 conflict, never claims success. Retirement of an applied JSON/TOML document whose owned fields
 changed, or that is missing, is the exception: it releases ownership and leaves the document
-byte-for-byte unchanged (or absent), with a notice naming the retained fields, so a disabled
+byte-for-byte unchanged (or absent), with a notice counting the retained fields, so a disabled
 integration cannot wedge the yard. Stop proven service before removing wiring; preserve explicit
 links, session targets, unmanaged binaries, credentials, and user CLI sessions. Special
 test-role proven cleanup is a stated preservation exception, but unknown artifacts block a

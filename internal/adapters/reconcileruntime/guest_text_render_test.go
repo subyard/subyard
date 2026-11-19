@@ -152,7 +152,7 @@ func TestGuestTextNeverRendered(t *testing.T) {
 	assertNoCanary(t, "persist failure", renderedErrors(runtime.persistRefusal(failure, mappings))...)
 
 	services := &testkit.Incus{ExecSteps: []testkit.IncusExecStep{{Result: ports.InstanceExecResult{ExitCode: 1,
-		Stderr: []byte(bubblewrapRefusalPrefix + guestCanary + "\n" + bubblewrapRefusalPrefix + "administrator systemd override at /" + guestCanary + bubblewrapRefusalSuffix + "\n")},
+		Stderr: []byte(bubblewrapRefusalPrefix + guestCanary + "\n" + bubblewrapRefusalPrefix + "administrator systemd override at /" + guestCanary + "\n")},
 		Err: &ports.GuestExitError{Code: 1}}}}
 	_, _, err := (Runtime{Executor: services, Yard: domain.Context{YardName: "sample"}}).integrationServices(context.Background(), "observe")
 	assertNoCanary(t, "services refusal", renderedErrors(err)...)
@@ -161,8 +161,11 @@ func TestGuestTextNeverRendered(t *testing.T) {
 	assertNoCanary(t, "services print", buffer.String())
 }
 
-// Every string a guest decode struct holds is guest text, except values that
-// are only hashed, compared or validated against the catalog before use.
+// Every string a guest decode struct holds is guest text, except the
+// allow-listed values. Fingerprints, digests and desired or observed facts are
+// only hashed, compared or validated before use. Installed configuration
+// values (applied diagnostic file paths and non-sensitive AppliedSettings) are
+// host-recorded and shape-validated, so yard config status may show them.
 func TestGuestWireTypesHoldOnlyGuestText(t *testing.T) {
 	allowed := map[string]bool{
 		"persistObservationWire.Fingerprint": true, "integrationObservationWire.Fingerprint": true,
@@ -193,7 +196,7 @@ func TestGuestWireTypesHoldOnlyGuestText(t *testing.T) {
 			}
 		}
 	}
-	for _, wire := range []any{persistObservationWire{}, persistOutcomeWire{}, persistRetainedWire{}, integrationObservationWire{}} {
+	for _, wire := range []any{persistObservationWire{}, persistOutcomeWire{}, persistRetainedWire{}, persistRefusalWire{}, integrationObservationWire{}, inventoryRefusalWire{}} {
 		walk(reflect.TypeOf(wire), reflect.TypeOf(wire).Name())
 	}
 }

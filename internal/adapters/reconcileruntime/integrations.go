@@ -181,6 +181,21 @@ type guestArtifact struct {
 	Format guestText `json:"format"`
 }
 
+// inventoryRefusalWire is the inventory program's conflict report: one
+// conflict inline, or a list of them.
+type inventoryRefusalWire struct {
+	inventoryConflictWire
+	Conflicts []inventoryConflictWire `json:"conflicts"`
+	Initial   bool                    `json:"initial"`
+	Retired   []guestArtifact         `json:"retired"`
+}
+
+type inventoryConflictWire struct {
+	Reason guestText `json:"reason"`
+	Path   guestText `json:"path"`
+	Detail guestText `json:"detail"`
+}
+
 type integrationFactWire struct {
 	Key       guestText `json:"key"`
 	Desired   string    `json:"desired"`
@@ -845,19 +860,13 @@ func (runtime Runtime) integrationInventory(ctx context.Context, mode string, en
 		if err != nil && !errors.As(err, &completed) {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
-		type conflictRecord struct{ Reason, Path, Detail guestText }
-		var report struct {
-			conflictRecord
-			Conflicts []conflictRecord `json:"conflicts"`
-			Initial   bool             `json:"initial"`
-			Retired   []guestArtifact  `json:"retired"`
-		}
+		var report inventoryRefusalWire
 		if json.Unmarshal(result.Stderr, &report) != nil {
 			return integrationObservation{}, ownershipRefusal("integration ownership conflict or unavailable evidence; managed artifacts were preserved", result, err)
 		}
 		conflicts := report.Conflicts
 		if len(conflicts) == 0 && !report.Reason.Matches("") {
-			conflicts = []conflictRecord{report.conflictRecord}
+			conflicts = []inventoryConflictWire{report.inventoryConflictWire}
 		}
 		causes := []error{}
 		if len(conflicts) == 0 {
@@ -1500,8 +1509,8 @@ func ownershipReleaseNotice(integration, path string, observation configmaterial
 	return boundedNotice("retiring "+integration+" releases ownership of "+path+": ", observation, "")
 }
 
-// Activation warnings share the release diagnostic bound: the notice lists the
-// retained fields when the whole list fits, and otherwise only counts them.
+// Activation warnings share the release diagnostic bound: the notice counts the
+// retained fields, whose names are guest text.
 const ownershipNoticeLimit = 384
 
 func boundedNotice(prefix string, observation configmaterial.Observation, suffix string) string {

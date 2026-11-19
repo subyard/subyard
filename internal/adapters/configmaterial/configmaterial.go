@@ -66,9 +66,7 @@ type JSONObservation struct {
 	// document: ReleaseChanged or ReleaseMissingDocument. Empty otherwise.
 	Release string `json:"release,omitempty"`
 	// ReleasedCount counts the owned field pointers that such a release leaves
-	// in place. The guest's pointer list is validated but kept unexported:
-	// it is guest text, so only the count is rendered.
-	released      []string
+	// in place. The guest's pointer list is guest text and is not kept.
 	ReleasedCount int `json:"released_count,omitempty"`
 }
 
@@ -375,18 +373,22 @@ func materializationRequest(format, mode, developer, destination string, uid int
 	}, nil
 }
 
+// wireObservation is the guest writer's report. Its strings are validated
+// here and never kept: the fingerprint is hex, the release is a fixed value
+// and the released pointers are guest text whose count alone is returned.
+type wireObservation struct {
+	Converged     *bool    `json:"converged"`
+	Adoptable     bool     `json:"adoptable,omitempty"`
+	Fingerprint   string   `json:"fingerprint"`
+	Release       string   `json:"release,omitempty"`
+	Released      []string `json:"released,omitempty"`
+	ReleasedCount int      `json:"released_count,omitempty"`
+}
+
 func ParseJSONObservation(payload []byte) (JSONObservation, error) {
-	type encodedObservation struct {
-		Converged     *bool    `json:"converged"`
-		Adoptable     bool     `json:"adoptable,omitempty"`
-		Fingerprint   string   `json:"fingerprint"`
-		Release       string   `json:"release,omitempty"`
-		Released      []string `json:"released,omitempty"`
-		ReleasedCount int      `json:"released_count,omitempty"`
-	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
-	var encoded encodedObservation
+	var encoded wireObservation
 	if err := decoder.Decode(&encoded); err != nil {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
@@ -404,7 +406,7 @@ func ParseJSONObservation(payload []byte) (JSONObservation, error) {
 		return JSONObservation{}, errors.New("invalid JSON materialization observation")
 	}
 	return JSONObservation{Converged: *encoded.Converged, Adoptable: encoded.Adoptable, Fingerprint: encoded.Fingerprint,
-		Release: encoded.Release, released: encoded.Released, ReleasedCount: encoded.ReleasedCount}, nil
+		Release: encoded.Release, ReleasedCount: encoded.ReleasedCount}, nil
 }
 
 // Released pointers must be a bounded, sorted, unique list of printable JSON pointers.

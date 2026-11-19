@@ -8,7 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1221,7 +1221,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				released := []string{"/edited/mode", "/kept"}
 				before := snapshotMaterialization(t, h.root)
 				assessed := h.observeMode(t, nil, ModeAssessRetire)
-				if assessed.Converged || assessed.Release != ReleaseChanged || !slices.Equal(assessed.released, released) {
+				if assessed.Converged || assessed.Release != ReleaseChanged || assessed.ReleasedCount != len(released) {
 					t.Fatalf("assessment did not report the release: %#v", assessed)
 				}
 				if !jsonEqual(before, snapshotMaterialization(t, h.root)) {
@@ -1242,12 +1242,12 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 					if err := command.Run(); err == nil {
 						t.Fatal("interruption did not occur")
 					}
-					if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged || resumed.Release != ReleaseChanged || !slices.Equal(resumed.released, released) {
+					if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged || resumed.Release != ReleaseChanged || resumed.ReleasedCount != len(released) {
 						t.Fatalf("interrupted release was not resumable: %#v", resumed)
 					}
 				}
 				result := h.observeMode(t, nil, ModeRetire)
-				if !result.Converged || !slices.Equal(result.released, released) || result.Release != ReleaseChanged {
+				if !result.Converged || result.ReleasedCount != len(released) || result.Release != ReleaseChanged {
 					t.Fatalf("release did not converge or name its fields: %#v", result)
 				}
 				if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
@@ -1269,7 +1269,7 @@ func TestRetirementReleasesChangedOwnershipWithoutChangingDocument(t *testing.T)
 				}
 				before = snapshotMaterialization(t, h.root)
 				for _, mode := range []string{ModeAssessRetire, ModeRetire} {
-					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != ReleaseChanged || !slices.Equal(repeated.released, released) {
+					if repeated := h.observeMode(t, nil, mode); !repeated.Converged || repeated.Release != ReleaseChanged || repeated.ReleasedCount != len(released) {
 						t.Fatalf("released retirement is not idempotent: %s %#v", mode, repeated)
 					}
 				}
@@ -1308,10 +1308,10 @@ func TestRetirementReleasesWithoutRetainedPaths(t *testing.T) {
 				}
 			}
 			home := snapshotMaterialization(t, filepath.Join(h.root, "home"))
-			if assessed := h.observeMode(t, nil, ModeAssessRetire); assessed.Converged || assessed.Release != want || len(assessed.released) != 0 {
+			if assessed := h.observeMode(t, nil, ModeAssessRetire); assessed.Converged || assessed.Release != want || assessed.ReleasedCount != 0 {
 				t.Fatalf("pending release not detectable: %#v", assessed)
 			}
-			if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want || len(result.released) != 0 {
+			if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want || result.ReleasedCount != 0 {
 				t.Fatalf("release did not complete: %#v", result)
 			}
 			if !jsonEqual(home, snapshotMaterialization(t, filepath.Join(h.root, "home"))) {
@@ -1324,9 +1324,8 @@ func TestRetirementReleasesWithoutRetainedPaths(t *testing.T) {
 	}
 }
 
-// The guest lists retained fields only when the whole list is short and safe to
-// print; otherwise it reports just their count.
-func TestReleaseListsOrCountsRetainedFields(t *testing.T) {
+// The guest counts every retained field, however many or long they are.
+func TestReleaseCountsRetainedFields(t *testing.T) {
 	many := map[string]any{}
 	for index := range 300 {
 		many[fmt.Sprintf("k%03d", index)] = index
@@ -1334,11 +1333,11 @@ func TestReleaseListsOrCountsRetainedFields(t *testing.T) {
 	for _, scenario := range []struct {
 		name             string
 		desired, drifted map[string]any
-		listed, count    int
+		count            int
 	}{
-		{"short", map[string]any{"kept": 1, "edited": "ask"}, map[string]any{"kept": 1, "edited": "operator"}, 2, 2},
-		{"many", map[string]any{"fields": many, "edited": "ask"}, map[string]any{"fields": many, "edited": "operator"}, 0, 301},
-		{"long-key", map[string]any{strings.Repeat("k", 600): 1, "edited": "ask"}, map[string]any{strings.Repeat("k", 600): 1}, 0, 1},
+		{"short", map[string]any{"kept": 1, "edited": "ask"}, map[string]any{"kept": 1, "edited": "operator"}, 2},
+		{"many", map[string]any{"fields": many, "edited": "ask"}, map[string]any{"fields": many, "edited": "operator"}, 301},
+		{"long-key", map[string]any{strings.Repeat("k", 600): 1, "edited": "ask"}, map[string]any{strings.Repeat("k", 600): 1}, 1},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			h := newGuestHarness(t)
@@ -1348,8 +1347,8 @@ func TestReleaseListsOrCountsRetainedFields(t *testing.T) {
 			h.writeDestination(t, string(drifted))
 			for _, mode := range []string{ModeAssessRetire, ModeRetire} {
 				result := h.observeMode(t, nil, mode)
-				if result.Release != ReleaseChanged || len(result.released) != scenario.listed || result.ReleasedCount != scenario.count {
-					t.Fatalf("%s: listed=%d count=%d release=%q", mode, len(result.released), result.ReleasedCount, result.Release)
+				if result.Release != ReleaseChanged || result.ReleasedCount != scenario.count {
+					t.Fatalf("%s: count=%d release=%q", mode, result.ReleasedCount, result.Release)
 				}
 			}
 		})
@@ -1402,7 +1401,7 @@ func TestInterruptedReleaseKeepsItsReason(t *testing.T) {
 				}
 				// Only the final receipt write completes the ownership release.
 				final := index == len(points)-1
-				if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged != final || resumed.Release != want || len(resumed.released) != 0 {
+				if resumed := h.observeMode(t, nil, ModeAssessRetire); resumed.Converged != final || resumed.Release != want || resumed.ReleasedCount != 0 {
 					t.Fatalf("interrupted release lost its reason: %#v", resumed)
 				}
 				if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.Release != want {
@@ -1482,7 +1481,7 @@ func TestResumedReleaseNeverRemovesRestoredFields(t *testing.T) {
 	h.writeDestination(t, `{"managed":{"mode":"ask"}}`)
 	document := snapshotMaterialization(t, filepath.Dir(h.destination))
 	result := h.observeMode(t, nil, ModeRetire)
-	if !result.Converged || result.Release != ReleaseChanged || !slices.Equal(result.released, []string{"/managed/mode"}) || result.ReleasedCount != 1 {
+	if !result.Converged || result.Release != ReleaseChanged || result.ReleasedCount != 1 {
 		t.Fatalf("resumed release misreported: %#v", result)
 	}
 	if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
@@ -1503,7 +1502,7 @@ func TestCompletedReleaseKeepsItsSignalUntilFreshOwnership(t *testing.T) {
 	}
 	document := snapshotMaterialization(t, filepath.Dir(h.destination))
 	if assessed := h.observeMode(t, nil, ModeAssessRetire); !assessed.Converged || assessed.Release != ReleaseChanged ||
-		!slices.Equal(assessed.released, []string{"/managed/mode"}) {
+		assessed.ReleasedCount != 1 {
 		t.Fatalf("completed release lost the guard signal: %#v", assessed)
 	}
 	// The installed view still selecting this document sees the release too.
@@ -1720,7 +1719,7 @@ func TestMaterializationResumesInterruptedReceiptPublication(t *testing.T) {
 				if _, err := h.run(nil, ModeRetire); err == nil {
 					t.Fatal("incomplete ownership publication authorized retirement")
 				}
-			} else if result := h.observeMode(t, nil, ModeRetire); !result.Converged || !slices.Equal(result.released, []string{"/managed"}) {
+			} else if result := h.observeMode(t, nil, ModeRetire); !result.Converged || result.ReleasedCount != 1 {
 				t.Fatalf("incomplete ownership publication was not released: %#v", result)
 			}
 			if !jsonEqual(document, snapshotMaterialization(t, filepath.Dir(h.destination))) {
@@ -1853,4 +1852,22 @@ func snapshotMaterialization(t *testing.T, root string) map[string]string {
 		}
 	}
 	return result
+}
+
+// The guest writer's report keeps no guest string: each is validated, and
+// only the count of released pointers is returned.
+func TestWireObservationStringsAreValidatedOnly(t *testing.T) {
+	allowed := map[string]bool{"Fingerprint": true, "Release": true, "Released": true}
+	kind := reflect.TypeOf(wireObservation{})
+	for index := range kind.NumField() {
+		field := kind.Field(index)
+		if (field.Type.Kind() == reflect.String || field.Type.Kind() == reflect.Slice) && !allowed[field.Name] {
+			t.Errorf("wire observation field %s holds guest strings", field.Name)
+		}
+	}
+	for index := range reflect.TypeOf(JSONObservation{}).NumField() {
+		if field := reflect.TypeOf(JSONObservation{}).Field(index); field.Type.Kind() == reflect.Slice {
+			t.Errorf("observation keeps guest list %s", field.Name)
+		}
+	}
 }
