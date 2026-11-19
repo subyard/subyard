@@ -236,6 +236,24 @@ func (f valueFilter) field(rule bodyRule, value any) (any, bool) {
 		return s, s != ""
 	case "version":
 		return s, versionPattern.MatchString(s)
+	case "hex32":
+		return s, hex32.MatchString(s)
+	case "cursor":
+		return s, s == "-" || ownerCursor.MatchString(s)
+	case "cutover_archive":
+		return s, archiveName.MatchString(s)
+	case "attribute_name":
+		return s, attributeRules[s] != ""
+	case "capture_version":
+		return s, s == PolicyVersion
+	case "reserved":
+		return s, s == "reserved"
+	case "known_span_name":
+		return s, slices.Contains(wireVocabulary["spanName"], s)
+	case "known_event_name":
+		return s, slices.Contains(wireVocabulary["eventName"], s)
+	case "traceID", "spanID":
+		return s, true
 	default:
 		return nil, false
 	}
@@ -243,25 +261,18 @@ func (f valueFilter) field(rule bodyRule, value any) (any, bool) {
 
 var kinds = map[string]bool{"run": true, "session": true, "relation": true, "scope": true, "process": true, "sample": true, "allocation": true, "association": true, "gap": true}
 
-func (f valueFilter) body(input map[string]any) (map[string]any, int64) {
-	out := make(map[string]any, len(bodyRules))
-	var removed int64
-	for name, value := range input {
-		clean, ok := f.field(bodyRules[name], value)
-		if ok && f.safe(name) {
-			out[name] = clean
-		}
-		if list, isList := value.([]any); isList {
-			accepted, _ := clean.([]any)
-			removed += int64(len(list) - len(accepted))
-			if !ok && len(list) == 0 {
-				removed++
-			}
-		} else if !ok {
-			removed++
-		}
+var bodyFields = func() map[string]string {
+	fields := make(map[string]string, len(bodyRules))
+	for name := range bodyRules {
+		fields[name] = "body:" + name
 	}
-	return out, removed
+	return fields
+}()
+
+func (f valueFilter) body(input map[string]any) (map[string]any, int64) {
+	p := wirePolicy{filter: f}
+	out, _ := p.message("", bodyFields, input)
+	return out.(map[string]any), p.removed
 }
 
 func (f valueFilter) cleanRecord(r Record) (Record, int64, error) {

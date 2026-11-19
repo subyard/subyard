@@ -187,11 +187,11 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 		}
 		rule = optional
 	}
-	if value == nil {
-		return nil, false
-	}
 	if field, ok := strings.CutPrefix(rule, "body:"); ok {
 		return p.filter.field(bodyRules[field], value)
+	}
+	if value == nil {
+		return nil, false
 	}
 	if element, ok := strings.CutPrefix(rule, "@"); ok {
 		input, ok := value.(map[string]any)
@@ -252,49 +252,20 @@ func (p *wirePolicy) clean(rule string, value any) (any, bool) {
 			return nil, false
 		}
 		return value, true
-	case "counter", "uint", "int", "time", "id", "label", "decimal":
-		if rule == "counter" {
-			rule = "uint"
+	case "spanName", "eventName":
+		s, ok := value.(string)
+		name, allowed := qualifiedEventName(s), p.policy.EventNames
+		if rule == "spanName" {
+			name, allowed = s, p.policy.SpanNames
 		}
-		return p.filter.field(bodyRule{kind: rule}, value)
-
-	case "bool":
-		_, ok := value.(bool)
-		return value, ok
+		return s, ok && p.filter.safe(s) && slices.Contains(wireVocabulary[rule], name) && slices.Contains(allowed, name)
+	case "counter":
+		rule = "uint"
 	}
-	s, ok := value.(string)
-	if !ok || !p.filter.safe(s) {
-		return nil, false
+	if choices, ok := wireVocabulary[rule]; ok {
+		return p.filter.field(bodyRule{kind: "enum", choices: choices}, value)
 	}
-	switch rule {
-	case "version":
-		return s, versionPattern.MatchString(s)
-	case "hex32":
-		return s, hex32.MatchString(s)
-	case "capture_version":
-		return s, s == PolicyVersion
-	case "attribute_name":
-		return s, attributeRules[s] != ""
-	case "cutover_archive":
-		return s, archiveName.MatchString(s)
-	case "reserved":
-		return s, s == "reserved"
-	case "cursor":
-		return s, s == "-" || ownerCursor.MatchString(s)
-	case "known_span_name":
-		return s, slices.Contains(wireVocabulary["spanName"], s)
-	case "known_event_name":
-		return s, slices.Contains(wireVocabulary["eventName"], s)
-	case "traceID", "spanID":
-		return s, true
-	case "spanName":
-		return s, slices.Contains(wireVocabulary[rule], s) && slices.Contains(p.policy.SpanNames, s)
-	case "eventName":
-		name := qualifiedEventName(s)
-		return s, slices.Contains(wireVocabulary[rule], name) && slices.Contains(p.policy.EventNames, name)
-	default:
-		return s, slices.Contains(wireVocabulary[rule], s)
-	}
+	return p.filter.field(bodyRule{kind: rule}, value)
 }
 
 // Claude sends the unprefixed event name in event.name; the prefixed name is
@@ -324,6 +295,10 @@ func (p *wirePolicy) message(rule string, fields map[string]string, input map[st
 		}
 		if clean, keep := p.clean(fields[name], child); keep && p.filter.safe(name) {
 			out[name] = clean
+			if list, ok := child.([]any); ok && strings.HasPrefix(fields[name], "body:") {
+				kept, _ := clean.([]any)
+				p.removed += int64(len(list) - len(kept)) // Record lists drop unknown names in place.
+			}
 		} else {
 			p.removed++
 		}
