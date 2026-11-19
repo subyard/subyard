@@ -1441,12 +1441,17 @@ func TestVersionedConfigSyncKeepsIgnoredProfileOnlyAssignments(t *testing.T) {
 // read; refused Git inputs never turn upstream values into spurious refusals.
 func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.T) {
 	const crossSetting = "require YARD_KIND=vm"
-	for _, test := range []struct{ stray, scope string }{
-		{"shared/notes.txt", "shared source: source entry"},
-		{"shared/overrides/notes.txt", "shared source: overrides: source entry"},
-		{"hosts/owner-a/notes.txt", `owner host "owner-a": source entry`},
-		{"hosts/owner-a/yards/demo/notes.txt", "yard demo: source entry"},
-		{"hosts/owner-a/yards/demo/overrides/notes.txt", "yard demo overrides: source entry"},
+	const unexpected = "source entry: unexpected source path"
+	const unknown = `unknown file setting "notes.txt"`
+	for _, test := range []struct{ stray, refusal string }{
+		{"shared/notes.txt", "shared source: " + unexpected},
+		{"shared/overrides/notes.txt", "shared source: overrides: " + unexpected},
+		{"shared/overrides/agents/notes.txt", "shared source: overrides: " + unknown},
+		{"hosts/owner-a/notes.txt", `owner host "owner-a": ` + unexpected},
+		{"hosts/owner-a/overrides/agents/notes.txt", `owner host "owner-a" overrides: ` + unknown},
+		{"hosts/owner-a/yards/demo/notes.txt", "yard demo: " + unexpected},
+		{"hosts/owner-a/yards/demo/overrides/notes.txt", "yard demo overrides: " + unexpected},
+		{"hosts/owner-a/yards/demo/overrides/agents/notes.txt", "yard demo overrides: " + unknown},
 	} {
 		t.Run(test.stray, func(t *testing.T) {
 			fixture := newSyncFixture(t, "owner-a")
@@ -1468,7 +1473,7 @@ func TestVersionedConfigSyncUnexpectedSourcePathKeepsEffectiveChecks(t *testing.
 			if err == nil {
 				t.Fatal("unexpected source path was accepted")
 			}
-			for _, text := range []string{test.scope + ": unexpected source path", crossSetting} {
+			for _, text := range []string{test.refusal, crossSetting} {
 				if !strings.Contains(err.Error(), text) {
 					t.Fatalf("missing %q in %v", text, err)
 				}

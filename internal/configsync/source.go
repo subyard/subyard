@@ -317,36 +317,45 @@ func (snapshot *sourceSnapshot) readOverrides(
 	} else if err != nil {
 		return unexpected, err
 	}
-	err = filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, walkErr error) error {
+	// Each asset is checked independently; an unknown file is an unexpected path.
+	var unknown, refusals []error
+	walkFailure := filepath.WalkDir(agentsRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return walkErr
+			refusals = append(refusals, walkErr)
+			return nil
 		}
 		if path == agentsRoot {
 			return nil
 		}
 		relative, err := filepath.Rel(agentsRoot, path)
 		if err != nil || !safeRelative(relative) {
-			return fmt.Errorf("unsafe override path %q", path)
+			refusals = append(refusals, fmt.Errorf("unsafe override path %q", path))
+			return skipEntry(entry)
 		}
 		if forbiddenPath(relative) {
-			return fmt.Errorf("forbidden source role in %q", filepath.ToSlash(relative))
+			refusals = append(refusals, fmt.Errorf("forbidden source role in %q", filepath.ToSlash(relative)))
+			return skipEntry(entry)
 		}
 		if entry.IsDir() {
 			if entry.Type()&os.ModeSymlink != 0 {
-				return fmt.Errorf("override directory is a symlink: %s", path)
+				refusals = append(refusals, fmt.Errorf("override directory is a symlink: %s", path))
+				return filepath.SkipDir
 			}
 			return nil
 		}
 		mapping, ok := allowed[filepath.ToSlash(relative)]
 		if !ok {
-			return fmt.Errorf("unknown file setting %q", filepath.ToSlash(relative))
+			unknown = append(unknown, fmt.Errorf("unknown file setting %q", filepath.ToSlash(relative)))
+			return nil
 		}
 		content, err := readSourceFile(snapshot.root, path, maxAssetBytes, false)
 		if err != nil {
-			return err
+			refusals = append(refusals, err)
+			return nil
 		}
 		if err := config.ValidateNonSecretContent(mapping.Name, string(content)); err != nil {
-			return fmt.Errorf("%s: %w", filepath.ToSlash(relative), err)
+			refusals = append(refusals, fmt.Errorf("%s: %w", filepath.ToSlash(relative), err))
+			return nil
 		}
 		target := filepath.ToSlash(filepath.Join(config.GitSettingsRelativePath, targetRoot, relative))
 		snapshot.files[target] = candidateFile{
@@ -355,10 +364,19 @@ func (snapshot *sourceSnapshot) readOverrides(
 		}
 		return nil
 	})
+	err = domain.CollectRefusals(append(refusals, walkFailure)...)
 	if err == nil {
 		snapshot.assetRoots[targetRoot] = agentsRoot
 	}
-	return unexpected, err
+	return domain.CollectRefusals(append([]error{unexpected}, unknown...)...), err
+}
+
+// skipEntry skips a refused directory's subtree and continues after a refused file.
+func skipEntry(entry os.DirEntry) error {
+	if entry.IsDir() {
+		return filepath.SkipDir
+	}
+	return nil
 }
 
 func validateSourceDirectory(root string) error {
