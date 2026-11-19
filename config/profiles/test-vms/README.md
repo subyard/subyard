@@ -36,8 +36,9 @@ supported updater with the frozen candidate. The owner and lease state survive t
 With no cached base, the candidate's first acquire builds and validates its base, grants a
 singleton, proves SSH and a second boot, releases it, and returns available without pending
 builders or VMs. The fixture reuses `dev/e2e/staging-reliability.sh --supported-upgrade` and its
-marker-owned cleanup. Host-free checks do not establish real package, NetworkManager,
-Incus, systemd or boot behavior.
+marker-owned cleanup on a 50 GiB `android-test` guest: its cold builder needs 34 GiB free
+beside the installed baseline, candidate and owner. Host-free checks do not establish real
+package, NetworkManager, Incus, systemd or boot behavior.
 
 Lease requests accept `debian-13` (the default), `ubuntu-24.04`, or `ubuntu-26.04` with `--image`.
 The broker keeps a current base for each OS and type, and refresh/status identify both.

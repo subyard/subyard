@@ -277,7 +277,8 @@ exit "${CONTROLLER_EXIT:-0}"
         invocations = (self.root / "broker-history").read_text().split("invocation\n")[1:]
         self.assertEqual(len(invocations), 3)
         arguments = invocations[0].splitlines()
-        self.assertEqual(arguments[:8], ["--slot", "2", "--type", "android-test", "--purpose", "broker-cold-upgrade", "--vm", "1"])
+        self.assertEqual(arguments[:10], ["--slot", "2", "--type", "android-test", "--purpose", "broker-cold-upgrade", "--vm", "1",
+                                          "--disk", "50GiB"])
         self.assertEqual(arguments[-2:], ["dev/e2e/staging-reliability.sh", "--supported-upgrade"])
         service_arguments = invocations[1].splitlines()
         self.assertEqual(service_arguments[:8], ["--slot", "2", "--type", "android-test", "--purpose", "service-container", "--vm", "1"])

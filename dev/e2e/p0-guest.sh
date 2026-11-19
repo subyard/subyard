@@ -231,9 +231,9 @@ write_owner_registration() { # <yard> <template> <ssh-port> [slot-count] [vm-cpu
       && grep -Fqx "# $MARKER" "$registration" \
       || die "refusing to replace unrelated registration $registration"
   fi
-  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\n%s\nDEV_UID=%s\nE2E_VM_CPU=%s\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=%s\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
+  printf '# %s\nYARD_TEMPLATE=%s\nSSH_PORT=%s\n%s\nDEV_UID=%s\nE2E_VM_CPU=%s\nE2E_VM_MEMORY=%s\nE2E_VM_DISK=10GiB\nE2E_VM_SLOT_COUNT=%s\nE2E_VM_BOOT_TIMEOUT=%s\nBASE_IMAGE=%s\nBASE_IMAGE_FALLBACK=%s\n' \
     "$MARKER" "$template" "$port" "$selection" "$OWNER_DIAGNOSTIC_DEV_UID" "$cpu" "$OWNER_DIAGNOSTIC_VM_MEMORY" \
-    "${OWNER_DIAGNOSTIC_VM_DISK:-10GiB}" "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
+    "$slots" "$OWNER_DIAGNOSTIC_VM_BOOT_TIMEOUT" \
     "$base_image" "$base_image" \
     > "$registration"
   chmod 0600 "$registration"

@@ -371,14 +371,14 @@ print('broker evidence requires matching installed candidate identity')
 
 # Capacity receipts survive refusal; only the configured broker reserve and known headroom satisfy the guard.
 sample = re.search(r'^sample_cold_capacity\(\) \{\n.*?^\}', fixture, re.MULTILINE | re.DOTALL)[0]
-guard = fixture.split("# A cold builder reserves 27GiB plus this fixture's explicit 4GiB physical reserve.\n", 1)[1].split('\njq -e ', 1)[0]
+guard = fixture.split("# A cold builder reserves 30GiB plus this fixture's explicit 4GiB physical reserve.\n", 1)[1].split('\njq -e ', 1)[0]
 for available, broker, expected in [
-        ('33285996544', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 0),
-        ('33285996543', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 2),
+        ('36507222016', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 0),
+        ('36507222015', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 2),
         ('unknown-private-value', '{"resources":{"budgets":{"disk_reserve_bytes":4294967296}}}', 2),
-        ('33285996544', 'unknown-private-value', 2),
-        ('33285996544', '{"resources":{"budgets":{"disk_reserve_bytes":5368709120}}}', 2),
-        ('33285996544', '{"resources":{}}', 2)]:
+        ('36507222016', 'unknown-private-value', 2),
+        ('36507222016', '{"resources":{"budgets":{"disk_reserve_bytes":5368709120}}}', 2),
+        ('36507222016', '{"resources":{}}', 2)]:
     script = f'''set -euo pipefail
 outer_exec() {{ printf 'Size Used Avail\\n42949672960 100 {available}\\n'; }}
 status() {{ printf '%s\\n' '{broker}'; }}
@@ -389,7 +389,7 @@ die() {{ exit 2; }}
     rows = {line.split('=', 1)[0]: json.loads(line.split('=', 1)[1]) for line in result.stdout.splitlines()}
     assert rows['STAGING_COLD_CAPACITY']['phase'] == 'after_reclaim', rows
     disk = rows['STAGING_STORAGE_CAPACITY']
-    assert disk['required_bytes'] == 31 * 1024**3 and disk['phase'] == 'after_reclaim', disk
+    assert disk['required_bytes'] == 34 * 1024**3 and disk['phase'] == 'after_reclaim', disk
     if available.isdecimal():
         assert disk['available_bytes'] == int(available) and disk['reserve_bytes'] == 4 * 1024**3, disk
     else:
