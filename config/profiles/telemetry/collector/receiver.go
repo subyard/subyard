@@ -331,4 +331,3 @@ func (s *Store) Consumers(p Policy) (consumer.Logs, consumer.Metrics, consumer.T
 	c, err := makeConsumers(s, p)
 	return c.logs, c.metrics, c.traces, err
 }
-

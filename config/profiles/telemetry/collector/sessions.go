@@ -110,35 +110,23 @@ func filterSessionRelation(r *Record, policy Policy) (bool, int64) {
 			}
 		}
 	}
-	relationKind := r.Kind == "session" || r.Kind == "relation"
-	nativeRelation := stringValue(r.Body, "relation") == "native_session"
-	nativeSource := strings.HasPrefix(stringValue(r.Body, "source"), nativeSessionSource)
-	keepRun := slices.Contains(policy.Attributes, "subyard.agent_run.id")
-	keepEvidence := slices.Contains(policy.Attributes, "subyard.agent_run.evidence")
-	names, hasNames := r.Body["session_attributes"]
-	list, hasList := names.([]any)
-	var retained []any
-	allowed := true
-	if hasList {
-		for _, name := range list {
-			if slices.Contains(policy.Attributes, name.(string)) {
-				retained = append(retained, name)
-			}
-		}
-		allowed = len(retained) != 0
-	} else {
-		// Legacy records do not identify the contributing attribute.
-		for _, name := range sessionAttributeNames {
-			if !slices.Contains(policy.Attributes, name) {
-				allowed = false
-				break
-			}
-		}
+	allowedName := func(name any) bool { s, _ := name.(string); return slices.Contains(policy.Attributes, s) }
+	_, hasNames := r.Body["session_attributes"]
+	list, hasList := r.Body["session_attributes"].([]any)
+	retained := slices.DeleteFunc(slices.Clone(list), func(name any) bool { return !allowedName(name) })
+	allowed := len(retained) != 0
+	if !hasList { // Legacy records do not identify the contributing attribute.
+		allowed = !slices.ContainsFunc(sessionAttributeNames, func(name string) bool { return !allowedName(name) })
 	}
 	primary, alias := stringValue(r.Body, "session_id"), stringValue(r.Body, "native_session_id")
 	session := firstNonempty(primary, alias)
-	ambiguous := primary != "" && alias != "" && primary != alias
-	if !relationKind && (!allowed || !keepRun || ambiguous || (session == "" && hasNames)) {
+	allowed = allowed && (primary == "" || alias == "" || primary == alias)
+	nativeRelation := stringValue(r.Body, "relation") == "native_session"
+	nativeSource := strings.HasPrefix(stringValue(r.Body, "source"), nativeSessionSource)
+	keepRun := allowedName("subyard.agent_run.id")
+	relationKind := r.Kind == "session" || r.Kind == "relation"
+	switch {
+	case !relationKind && (!allowed || !keepRun || (session == "" && hasNames)):
 		remove(sessionFields...)
 		if nativeRelation {
 			remove("relation")
@@ -147,14 +135,11 @@ func filterSessionRelation(r *Record, policy Policy) (bool, int64) {
 			remove("source")
 		}
 		return true, removed
-	}
-	if relationKind && session == "" {
+	case relationKind && session == "":
 		return r.Kind != "session" && !nativeRelation && !nativeSource && !hasNames, 0
-	}
-	if !allowed || ambiguous {
+	case !allowed:
 		return false, 0
 	}
-
 	if primary == "" && alias != "" {
 		r.Body["session_id"] = alias
 		delete(r.Body, "native_session_id")
@@ -169,7 +154,7 @@ func filterSessionRelation(r *Record, policy Policy) (bool, int64) {
 		remove("agent_run_id", "parent_run_id", "relation")
 		r.Kind = "session"
 	}
-	if (relationKind || nativeSource) && (!keepRun || !keepEvidence) {
+	if (relationKind || nativeSource) && (!keepRun || !allowedName("subyard.agent_run.evidence")) {
 		if old, exists := r.Body["source"]; exists && old != nativeSessionSource {
 			removed++
 		}
