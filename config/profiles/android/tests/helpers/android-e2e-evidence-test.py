@@ -10,10 +10,12 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zlib
 from types import SimpleNamespace
@@ -84,61 +86,116 @@ with tempfile.TemporaryDirectory(prefix='android-sdk-cleanup-', dir='/tmp') as d
     assert result.stderr.splitlines()[-1] == 'x' * 4096
 
 
-# The connected child captures all sections before run releases its lease. A
-# broken adb query must preserve the test failure and collect the other sections.
+# The connected child captures all sections over run's ADB_SERVER_SOCKET before
+# run releases its lease. A broken adb query or relay must preserve the test
+# failure and collect the other sections; one TCP probe only reports relay health.
 gradle_source = (E2E / 'android-gradle.sh').read_text()
 connected = gradle_source[gradle_source.index('connected() {'):gradle_source.index('not_writable "$work/connected.log"')]
-for child_exit, adb_exit in ((0, 0), (23, 0), (23, 7), (23, 124)):
+
+
+def fake_relay(mode, requests):
+    listener = socket.create_server(('127.0.0.1', 0))
+    listener.settimeout(20)
+
+    def serve():
+        with listener:
+            try:
+                stream, _ = listener.accept()
+            except OSError:
+                return
+            with stream:
+                if mode == 'healthy':
+                    requests.append(stream.recv(16))
+                    stream.sendall(b'OKAY0004002b')
+    threading.Thread(target=serve, daemon=True).start()
+    return listener
+
+
+# (23, 7): a fast adb failure and a relay closed by the UID guard still keep every capture.
+# 137: meminfo ignores TERM and is killed after the grace period.
+for child_exit, adb_exit, relay_mode in ((0, 0, 'healthy'), (23, 0, 'healthy'), (23, 7, 'closed'),
+                                         (23, 124, 'healthy'), (23, 137, 'healthy')):
     with tempfile.TemporaryDirectory(prefix='android-gradle-evidence-', dir='/tmp') as name:
         directory = Path(name)
         tools = directory / 'platform-tools'
         tools.mkdir()
         adb = tools / 'adb'
-        adb.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$CALLS"\n'
+        adb.write_text('#!/bin/bash\nprintf "%s %s\\n" "$ADB_SERVER_SOCKET" "$*" >> "$CALLS"\n'
                        'printf "guest 12:34:56.789 192.0.2.1 2001:db8::1 2001:db8:0:1:2:3:4:5 aa:bb:cc:dd:ee:ff token=canary\\n"\n'
-                       'if [ "$ADB_EXIT" != 124 ]; then printf "1.1.1.1\\n%.0s" {1..10000}; fi\n'
-                       'if [ "$1" = -L ]; then exit 0; fi\n'
-                       'if [ "$ADB_EXIT" = 124 ] && [ "${6:-}" = dumpsys ]; then sleep 30; fi\n'
+                       'case "$ADB_EXIT" in 124|137) ;; *) printf "1.1.1.1\\n%.0s" {1..10000} ;; esac\n'
+                       'if [ "${2:-}" = dumpsys ]; then\n'
+                       '  if [ "$ADB_EXIT" = 137 ]; then trap "" TERM; fi\n'
+                       '  case "$ADB_EXIT" in 124|137) sleep 30 ;; esac\n'
+                       'fi\n'
                        'exit "$ADB_EXIT"\n')
         adb.chmod(0o755)
+        requests = []
+        relay = fake_relay(relay_mode, requests)
         script = ('set -euo pipefail\nwork="$1"; gradle=(bash -c "exit $2"); '
-                  'export ANDROID_SDK_ROOT="$work" ANDROID_ADB_SERVER_PORT=5038 ADB_SERVER_SOCKET=localfilesystem:/fixture.sock\n'
+                  'export ANDROID_SDK_ROOT="$work" ANDROID_ADB_SERVER_PORT="$3" '
+                  'ADB_SERVER_SOCKET=localfilesystem:/fixture.sock\n'
                   'android-broker() { shift 10; local result=0; "$@" || result=$?; '
                   'echo released >> "$CALLS"; return "$result"; }\n' + capture_helper + connected)
         calls = directory / 'calls'
-        result = subprocess.run(['bash', '-c', script, '_', name, str(child_exit)],
-                                env=dict(os.environ, PATH=name + os.pathsep + os.environ['PATH'],
-                                         CALLS=str(calls), ADB_EXIT=str(adb_exit)),
-                                capture_output=True, text=True)
+        started = time.monotonic()
+        try:
+            result = subprocess.run(['bash', '-c', script, '_', name, str(child_exit),
+                                     str(relay.getsockname()[1])],
+                                    env=dict(os.environ, PATH=name + os.pathsep + os.environ['PATH'],
+                                             CALLS=str(calls), ADB_EXIT=str(adb_exit)),
+                                    capture_output=True, text=True, timeout=30)
+        finally:
+            relay.close()
+        elapsed = time.monotonic() - started
         assert result.returncode == child_exit, result.stderr
         evidence = (directory / 'emulator-evidence.log').read_text()
         if child_exit == 0:
-            assert evidence == '' and calls.read_text() == 'released\n'
+            assert evidence == '' and calls.read_text() == 'released\n' and requests == []
+            continue
+        # The hung meminfo capture keeps the 5 s timeout and, ignoring TERM, the 2 s kill grace.
+        bound = {124: 5, 137: 5 + 2}.get(adb_exit, 0)
+        assert bound <= elapsed < bound + 3, elapsed
+        assert len(evidence) < 3 * 66000 + 1000 and 'emulator' not in evidence
+        assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
+                                                      'aa:bb:cc:dd:ee:ff', 'canary'))
+        assert '12:34:56.789' in evidence
+        probe_label = 'android-gradle evidence: relay host:version transport=tcp\n'
+        assert evidence.count(probe_label) == 1, evidence[:500]
+        probe, marker, remainder = evidence.split(probe_label, 1)[1].partition('\ncapture_exit=')
+        if relay_mode == 'healthy':
+            assert requests == [b'000chost:version'] and probe == "relay=healthy reply=b'OKAY0004002b'\n", probe
+            assert marker and remainder.splitlines()[0] == '0'
         else:
-            assert all('android-gradle evidence: ' + section in evidence
-                       for section in ('logcat', 'meminfo', 'lowmemory'))
-            assert len(evidence) < (6 if adb_exit == 124 else 3) * 66000 and 'emulator' not in evidence
-            assert not any(value in evidence for value in ('192.0.2.1', '2001:db8::1', '2001:db8:0:1:2:3:4:5',
-                                                          'aa:bb:cc:dd:ee:ff', 'canary'))
-            assert '12:34:56.789' in evidence
-            for section in ('logcat', 'meminfo', 'lowmemory'):
-                payload = evidence.split(f'android-gradle evidence: {section} transport=tcp\n', 1)[1]
-                payload, marker, remainder = payload.partition('\ncapture_exit=')
-                assert marker and remainder.splitlines()[0] == str(adb_exit)
-                assert len(payload.encode()) <= 65536
-                if adb_exit != 124:
-                    assert len(payload.encode()) >= 65528 and '1.1.1.1' not in payload
-            observed = calls.read_text()
-            assert 'logcat -b main -b system -b crash -d -t 512' in observed
-            assert 'shell dumpsys meminfo' in observed and 'dmesg; logcat' in observed
-            assert observed.count('-H 127.0.0.1 -P 5038 ') == 3
-            assert observed.count('-L localfilesystem:/fixture.sock ') == (3 if adb_exit == 124 else 0)
-            for section in ('logcat', 'meminfo', 'lowmemory'):
-                unix = f'android-gradle evidence: {section} transport=unix'
-                assert (unix in evidence) == (adb_exit == 124)
-                if adb_exit == 124:
-                    assert evidence.split(unix, 1)[1].split('capture_exit=', 1)[1].splitlines()[0] == '0'
-            assert observed.splitlines()[-1] == 'released'
+            assert probe.startswith('relay=unhealthy ') and marker and remainder.splitlines()[0] == '1', probe
+        for section in ('logcat', 'meminfo', 'lowmemory'):
+            payload = evidence.split(f'android-gradle evidence: {section}\n', 1)[1]
+            payload, marker, remainder = payload.partition('\ncapture_exit=')
+            assert marker and remainder.splitlines()[0] == str(adb_exit)
+            assert len(payload.encode()) <= 65536
+            if adb_exit not in (124, 137):
+                assert len(payload.encode()) >= 65528 and '1.1.1.1' not in payload
+        observed = calls.read_text().splitlines()
+        assert observed[-1] == 'released' and len(observed) == 4, observed
+        assert all(line.startswith('localfilesystem:/fixture.sock ') and ' -H ' not in line and ' -L ' not in line
+                   for line in observed[:-1]), observed
+        assert 'logcat -b main -b system -b crash -d -t 512' in observed[0]
+        assert 'shell dumpsys meminfo' in observed[1] and 'dmesg; logcat' in observed[2]
+
+# A failed run labels the first relay refusal before the log tails.
+gradle_cleanup = gradle_source[gradle_source.index('cleanup() {'):gradle_source.index('trap cleanup EXIT')]
+with tempfile.TemporaryDirectory(prefix='android-gradle-cleanup-', dir='/tmp') as directory:
+    work = Path(directory, 'work')
+    work.mkdir(mode=0o700)
+    (work / '.marker').write_text('subyard-android-gradle-v1\n')
+    refusal = 'Android ADB relay: refused a loopback connection owned by another account peer_uid=1001'
+    (work / 'connected.log').write_text(f'start\n{refusal}\n{refusal} again\nend\n')
+    result = subprocess.run(['bash', '-c', 'set -euo pipefail\nwork="$1"\n' + gradle_cleanup
+                             + '\ntrap cleanup EXIT\nstage=connected\nexit 23\n', '_', str(work)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 23 and not work.exists(), result.stderr
+    lines = result.stderr.splitlines()
+    assert lines.count(f'android-gradle: relay refusal: {refusal}') == 1, result.stderr
+    assert lines.index(f'android-gradle: relay refusal: {refusal}') < lines.index('android-gradle: connected.log (last 80 lines)')
 
 
 # After the Gradle exec fails, root cleanup captures the retained journal without

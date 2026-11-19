@@ -33,7 +33,8 @@ cleanup() {
       cat "$work/emulator-evidence.log" >&2 || true
     fi
     if [ -f "$work/connected.log" ]; then
-      grep -m 1 '^Android ADB relay: refused a loopback connection' "$work/connected.log" >&2 || true
+      sed -n '/^Android ADB relay: refused a loopback connection/{s/^/android-gradle: relay refusal: /p;q}' \
+        "$work/connected.log" >&2 || true
     fi
     for log in assemble-37.2.log assemble-35.log assemble-missing.log sdk-install.log assemble-36.1.log connected.log; do
       if [ -f "$work/$log" ]; then
@@ -199,24 +200,35 @@ stage='connected'
 # No --no-daemon: run's GRADLE_OPTS guard keeps Gradle inside the lease.
 # The child's EXIT trap runs while run still owns the emulator and ADB relay.
 connected() {
-  local result=$? section capture_exit adb="$ANDROID_SDK_ROOT/platform-tools/adb"
+  local result=$? section
   local -a command
+  # Only reports relay health; the captures below keep run's ADB_SERVER_SOCKET.
+  local relay_probe='
+import socket, sys
+try:
+    with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=3) as stream:
+        stream.sendall(b"000chost:version")
+        reply = stream.recv(12)
+except (OSError, ValueError) as error:
+    print("relay=unhealthy error=" + type(error).__name__)
+    raise SystemExit(1)
+healthy = reply.startswith(b"OKAY")
+print("relay=" + ("healthy" if healthy else "unhealthy") + " reply=" + repr(reply))
+raise SystemExit(0 if healthy else 1)
+'
   trap - EXIT
   if [ "$result" -ne 0 ]; then
+    printf 'android-gradle evidence: relay host:version transport=tcp\n' >&2
+    android_capture_evidence python3 -c "$relay_probe" "${ANDROID_ADB_SERVER_PORT:-}" || true
     for section in logcat meminfo lowmemory; do
-      printf 'android-gradle evidence: %s transport=tcp\n' "$section" >&2
+      printf 'android-gradle evidence: %s\n' "$section" >&2
       case "$section" in
-        logcat) command=(logcat -b main -b system -b crash -d -t 512 -v threadtime) ;;
-        meminfo) command=(shell dumpsys meminfo) ;;
+        logcat) command=("$ANDROID_SDK_ROOT/platform-tools/adb" logcat -b main -b system -b crash -d -t 512 -v threadtime) ;;
+        meminfo) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell dumpsys meminfo) ;;
         # dmesg may be forbidden on Google APIs images; retain lmkd records too.
-        lowmemory) command=(shell 'dmesg; logcat -b all -d -t 512 -v threadtime -s lmkd lowmemorykiller') ;;
+        lowmemory) command=("$ANDROID_SDK_ROOT/platform-tools/adb" shell 'dmesg; logcat -b all -d -t 512 -v threadtime -s lmkd lowmemorykiller') ;;
       esac
-      capture_exit=0
-      android_capture_evidence "$adb" -H 127.0.0.1 -P "$ANDROID_ADB_SERVER_PORT" "${command[@]}" || capture_exit=$?
-      if [ "$capture_exit" -eq 124 ] || [ "$capture_exit" -eq 137 ]; then
-        printf 'android-gradle evidence: %s transport=unix\n' "$section" >&2
-        android_capture_evidence "$adb" -L "$ADB_SERVER_SOCKET" "${command[@]}" || true
-      fi
+      android_capture_evidence "${command[@]}" || true
     done
   fi
   exit "$result"
