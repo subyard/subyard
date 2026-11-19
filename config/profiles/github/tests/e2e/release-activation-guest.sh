@@ -631,7 +631,7 @@ fi
 
 stage capacity-and-platform
 bash "$ROOT/dev/e2e/p0-guest.sh" capacity-preflight "$TOKEN"
-bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform "$TOKEN"
+bash "$ROOT/dev/e2e/p0-guest.sh" fixture-platform-apparmor "$TOKEN"
 fresh id -nG | tr ' ' '\n' | grep -Fx >/dev/null incus-admin || die 'platform did not establish a usable refreshed Incus operator session'
 CREATION_GID="$(fresh id -g)"
 printf 'release_activation_creation_context uid=%s gid=%s validation_gid=%s\n' "$(id -u)" "$CREATION_GID" "$(id -g)"

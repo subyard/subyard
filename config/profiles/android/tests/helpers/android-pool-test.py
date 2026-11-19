@@ -1799,8 +1799,10 @@ os.write(1, result.stdout)
                         contextlib.redirect_stderr(io.StringIO()) as output:
                     with socket.create_connection(('127.0.0.1', port), timeout=2) as foreign:
                         foreign.settimeout(2)
+                        peer_port = foreign.getsockname()[1]
                         self.assertEqual(foreign.recv(1), b'')
-                self.assertIn('another account', output.getvalue())
+                self.assertIn(f'peer_uid={os.getuid() + 1} expected_uid={os.getuid()}', output.getvalue())
+                self.assertIn(f'peer_port={peer_port} relay_port={port}', output.getvalue())
             finally:
                 relay.shutdown()
                 relay.server_close()

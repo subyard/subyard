@@ -761,33 +761,6 @@ func profileRuntimeFixture(t *testing.T, handler string) Runtime {
 	return profileRuntimeFixtureAt(t, testkit.TempDir(t), handler)
 }
 
-func TestPendingProfileRuntimeIsVisibleAndNeverConverged(t *testing.T) {
-	payload := `{"state":"pending","actual":"` + testRuntimeOldDigest + `","desired":"` + testRuntimeNewDigest + `","diagnostics":[{"parameter":"sample.input.invalid","installed":"changed","desired":"current"}]}`
-	runtime := profileRuntimeFixture(t, "#!/bin/sh\nprintf '%s\\n' '"+payload+"'\n")
-	runtime.Yard.YardName = "default"
-	observations, err := runtime.ObserveProfileRuntimes(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var output bytes.Buffer
-	runtime.Stderr = &output
-	if runtime.profileRuntimesConverged(observations) || strings.Contains(output.String(), "stopped") {
-		t.Fatal("pending input was treated as stopped/converged", output.String())
-	}
-	err = runtime.applyProfileRuntimes(context.Background())
-	var diagnostic interface{ ActivationDiagnostic() (string, string) }
-	if !errors.As(err, &diagnostic) {
-		t.Fatalf("pending repair action missing: %v", err)
-	}
-	message, retry := diagnostic.ActivationDiagnostic()
-	if !strings.Contains(message, "sample.input.invalid") || retry != "run yard -Y default config apply" {
-		t.Fatal(message, retry)
-	}
-	if _, err := decodeProfileRuntimeObservation([]byte(strings.Replace(payload, `,"diagnostics":[{"parameter":"sample.input.invalid","installed":"changed","desired":"current"}]`, "", 1))); err == nil {
-		t.Fatal("pending without diagnostics accepted")
-	}
-}
-
 func TestProfileFailureHintRepairsDeselectedOwner(t *testing.T) {
 	runtime := profileRuntimeFixture(t, "#!/bin/sh\nexit 9\n")
 	runtime.Yard.YardName = "default"

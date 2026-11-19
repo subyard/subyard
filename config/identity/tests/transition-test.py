@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import tempfile
 import sys
 import unittest
@@ -112,6 +113,26 @@ class IdentityTransitionTest(unittest.TestCase):
         self.assertEqual((self.root/'etc/sudoers.d/90-subyard-next').read_text(),'next ALL=(ALL) NOPASSWD:ALL\n')
         self.assertEqual(stat.S_IMODE((self.root/'etc/sudoers.d/90-subyard-next').stat().st_mode),0o440)
         self.transition.apply_account(plan,identity.fingerprint(plan))
+
+    def test_provision_grants_default_sudo_and_removes_it_when_disabled(self):
+        repository = Path(__file__).resolve().parents[3]
+        provision = (repository/'scripts/04-provision-subyard.sh').read_text()
+        start = provision.index('reconcile_dev_sudo() {\n')
+        reconcile = provision[start:provision.index('\n}', start) + 2]
+        sudoers = self.root/'etc/sudoers.d/90-subyard-dev'
+        sudoers.parent.mkdir(mode=0o755)
+        script = reconcile + '''
+. "$1"
+visudo() { [ "$1" = -cf ] && [ "$2" = "$sudoers.tmp" ]; }
+reconcile_dev_sudo "$2"
+'''
+        command = ['bash', '-euc', script, 'fixture', repository/'config/subyard.env', sudoers]
+        environment = {'PATH': os.defpath, 'DEV_USER': 'dev'}
+        subprocess.run(command, env=environment, check=True)
+        self.assertEqual(sudoers.read_text(), 'dev ALL=(ALL) NOPASSWD:ALL\n')
+        self.assertEqual(stat.S_IMODE(sudoers.stat().st_mode), 0o440)
+        subprocess.run(command, env={**environment, 'DEV_SUDO': '0'}, check=True)
+        self.assertFalse(sudoers.exists())
 
     def test_partial_shadow_tool_write_recovers_only_captured_account_rows(self):
         self.write('etc/shadow','dev:locked-old-value:19800:0:99999:7:::\nforeign:!:19800:0:99999:7:::\n',0o640)

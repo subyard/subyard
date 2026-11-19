@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
-"""CAS ownership of native exporter leaves; preserve unrelated settings and analytics intent."""
-import copy
+"""System-managed exporter policy and one-way cleanup of the v0.30 home writer."""
+from contextlib import contextmanager
 import json
 import math
 import os
+import re
 import stat
 import tempfile
-import tomllib
 
 CONFIG_LIMIT = 4*1024*1024
+POLICY_MODE = 0o640
+AGENTS = {
+    'claude': ('claude-code/managed-settings.d/60-subyard-telemetry.json', '.claude/settings.json', 'env'),
+    'codex': ('codex/managed_config.toml', '.codex/config.toml', 'otel'),
+}
+MARKERS = {
+    'claude': b'{\n  "$comment": "Managed by Subyard Telemetry",\n',
+    'codex': b'# Managed by Subyard Telemetry\n',
+}
+MISSING = object()
 
 
 def semantic_equal(left, right):
@@ -35,19 +45,21 @@ def safe(path):
 
 def snapshot(path, max_bytes=CONFIG_LIMIT):
     safe(path)
-    if not path.exists():
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         return None
-    info = path.stat()
-    if info.st_nlink != 1 or info.st_size > max_bytes:
-        raise ValueError('unsafe native file')
-    with path.open('rb') as stream:
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > max_bytes:
+            raise ValueError('unsafe native file')
         content = stream.read(max_bytes+1)
     if len(content) > max_bytes:
         raise ValueError('native file exceeds size bound')
     return content
 
 
-def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT, mode=0o600):
+def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT, mode=0o600, policy_gid=None):
     safe(path)
     if len(content) > max_bytes:
         raise ValueError('native file exceeds size bound')
@@ -55,18 +67,25 @@ def publish(path, content, expected, uid=None, gid=None, max_bytes=CONFIG_LIMIT,
     fd, temporary = tempfile.mkstemp(prefix='.telemetry-', dir=path.parent)
     try:
         with os.fdopen(fd, 'w+b') as output:
-            os.fchmod(output.fileno(), mode)
-            if uid is not None:
-                os.fchown(output.fileno(), uid, gid)
+            if policy_gid is not None:
+                os.fchmod(output.fileno(), 0o600)
             output.write(content)
             output.flush()
-            os.fsync(output.fileno())
+            if uid is not None:
+                os.fchown(output.fileno(), uid, gid)
+            if policy_gid is None:
+                os.fchmod(output.fileno(), mode)
             output.seek(0)
             if output.read() != content:
                 raise ValueError('native payload verification failed')
-        if snapshot(path, max_bytes=max_bytes) != expected:
-            raise ValueError('native configuration changed')
-        os.replace(temporary, path)
+            os.fsync(output.fileno())
+            if snapshot(path, max_bytes=max_bytes) != expected:
+                raise ValueError('native configuration changed')
+            os.replace(temporary, path)
+            if policy_gid is not None:
+                os.fchown(output.fileno(), -1, policy_gid)
+                os.fchmod(output.fileno(), mode)
+                os.fsync(output.fileno())
         directory = os.open(path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             os.fsync(directory)
@@ -82,7 +101,8 @@ def desired(agent, endpoint, token):
         result = {'log_user_prompt': False}
         for key, path in [('exporter', 'logs'), ('metrics_exporter', 'metrics'), ('trace_exporter', 'traces')]:
             result[key] = {'otlp-http': {'endpoint': endpoint+'/v1/'+path, 'protocol': 'binary',
-                                       'headers': {'Authorization': 'Bearer '+token}}}
+                                       'headers': {'Authorization': 'Bearer '+token if token else MISSING},
+                                       'tls': {}}}
         return result
     result = {'CLAUDE_CODE_ENABLE_TELEMETRY': '1', 'CLAUDE_CODE_ENHANCED_TELEMETRY_BETA': '1',
               'OTEL_LOG_USER_PROMPTS': '0', 'OTEL_LOG_TOOL_DETAILS': '0', 'OTEL_LOG_TOOL_CONTENT': '0'}
@@ -90,116 +110,367 @@ def desired(agent, endpoint, token):
         result['OTEL_'+signal+'_EXPORTER'] = 'otlp'
         result['OTEL_EXPORTER_OTLP_'+signal+'_ENDPOINT'] = endpoint+'/v1/'+signal.lower()
         result['OTEL_EXPORTER_OTLP_'+signal+'_PROTOCOL'] = 'http/protobuf'
-        result['OTEL_EXPORTER_OTLP_'+signal+'_HEADERS'] = 'Authorization=Bearer '+token
+        result['OTEL_EXPORTER_OTLP_'+signal+'_HEADERS'] = 'Authorization=Bearer '+token if token else MISSING
     return result
 
 
-def agent_document(home, agent):
-    path = home/('.claude/settings.json' if agent == 'claude' else '.codex/config.toml')
-    before = snapshot(path)
-    cause = 'missing' if before is None else 'empty' if not before.strip() else ''
+def policy(agent, fields, writer):
+    if agent == 'claude':
+        document = {'$comment': 'Managed by Subyard Telemetry', 'env': fields}
+        return (json.dumps(document, indent=2)+'\n').encode()
+    return MARKERS[agent]+writer.dumps({'otel': fields}).encode()
+
+
+def parse(agent, data):
+    import tomllib
+
+    document = json.loads(data) if agent == 'claude' else tomllib.loads(data.decode())
+    if not isinstance(document, dict):
+        raise ValueError('invalid agent configuration object')
+    return document
+
+
+def template_conflicts(template, fields, path):
+    if not isinstance(template, dict) or not isinstance(fields, dict):
+        return [] if fields is not MISSING and semantic_equal(template, fields) else [path]
+    conflicts = []
+    for key, value in fields.items():
+        if key in template:
+            conflicts.extend(template_conflicts(template[key], value, path+'/'+key))
+    return conflicts
+
+
+def policy_snapshot(etc, path, agent):
+    for directory in reversed([p for p in path.parents if p == etc or etc in p.parents]):
+        try:
+            info = directory.lstat()
+        except FileNotFoundError:
+            return None, None
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+            raise ValueError('unsafe policy directory')
+    content = snapshot(path)
+    if content is None:
+        return None, None
+    info = path.lstat()
+    if info.st_uid != os.geteuid() or not content.startswith(MARKERS[agent]):
+        raise ValueError('foreign policy file')
+    return content, info
+
+
+def create_policy_directory(etc, path):
+    # All ancestors have been checked for root ownership and writable bits.
+    for directory in reversed([p for p in path.parents if etc in p.parents]):
+        if not directory.exists():
+            directory.mkdir(mode=0o755)
+            directory.chmod(0o755)
+
+
+@contextmanager
+def developer_files(uid, gid):
+    # The home and its parents can change during migration. Access them with
+    # the developer's privileges, even when the deployment runs as guest root.
+    if os.geteuid() != 0 or uid == 0:
+        yield
+        return
+    groups, old_gid = os.getgroups(), os.getegid()
+    os.setgroups([])
+    os.setegid(gid)
+    os.seteuid(uid)
     try:
-        obj = (json.loads(before) if agent == 'claude' else tomllib.loads(before.decode())) if before and before.strip() else {}
-    except (ValueError, UnicodeError):
-        obj, cause = {}, 'invalid'
-    section = 'env' if agent == 'claude' else 'otel'
-    if not isinstance(obj, dict) or not isinstance(obj.get(section, {}), dict):
-        cause = 'invalid'
-    return path, before, obj, cause
+        yield
+    finally:
+        os.seteuid(0)
+        os.setegid(old_gid)
+        os.setgroups(groups)
 
 
-class AgentConfigRefusal(ValueError):
-    def __init__(self, agent, path):
-        self.agent = agent
-        super().__init__('invalid unmanaged agent configuration '+str(path))
-
-
-def agent_diagnostic(agent, cause):
-    return {'parameter': 'telemetry.agent.'+agent+'.config.'+cause,
-            'installed': 'missing' if cause == 'missing' else 'changed', 'desired': 'current'}
-
-
-def agent_config_diagnostics(home, agents, managed_agents=()):
-    result = []
-    for agent in ('claude', 'codex'):
-        if agent in agents:
-            path, _, _, cause = agent_document(home, agent)
-            if cause == 'invalid' and agent not in managed_agents:
-                raise AgentConfigRefusal(agent, path)
-            if agent in managed_agents and cause in ('missing', 'empty', 'invalid'):
-                result.append(agent_diagnostic(agent, cause))
-    return result
-
-
-def reconcile(home, state, agents, endpoint, token, writer, uid, gid, check=False, diagnostics=None, managed_agents=()):
-    original = snapshot(state)
-    if original is not None:
-        info = state.stat()
-        if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-            raise ValueError('private ownership required')
-        baseline = json.loads(original)
-        if baseline.get('schema') != 1 or not isinstance(baseline.get('agents'), dict):
-            raise ValueError('invalid native ownership')
-        if set(baseline['agents'])-{'claude', 'codex'}:
-            raise ValueError('unknown native ownership')
-    else:
-        baseline = {'schema': 1, 'agents': {}}
-    next_state = copy.deepcopy(baseline)
-    pending = copy.deepcopy(baseline)
-    edits = []
-    unavailable = []
-    for agent in ('claude', 'codex'):
-        section = 'env' if agent == 'claude' else 'otel'
-        owned = baseline['agents'].get(agent, {})
-        enabled = agent in agents
-        if not enabled and not owned:
-            continue
-        path, before, obj, cause = agent_document(home, agent)
-        if cause == 'invalid' and agent not in managed_agents:
-            raise AgentConfigRefusal(agent, path)
-        blocked = agent in managed_agents and (cause in ('empty', 'invalid') or cause == 'missing' and enabled)
-        if blocked:
-            unavailable.append(agent_diagnostic(agent, cause))
-            continue
-        previous = copy.deepcopy(obj)
-        group = obj.setdefault(section, {})
-        want = desired(agent, endpoint, token) if enabled else {}
-        final, transitional = {}, {}
-        for key, value in want.items():
-            old = owned.get(key, {'present': key in group, 'value': group.get(key), 'managed': value})
-            allowed = [old['managed'], *old.get('previous', [])]
-            current = {'present': key in group, 'value': group.get(key)}
-            prior = {'present': old['present'], 'value': old['value']}
-            if key in group and not semantic_equal(current, prior) and not any(semantic_equal(group[key], item) for item in allowed):
-                raise ValueError('native exporter ownership conflict')
-            final[key] = {'present': old['present'], 'value': old['value'], 'managed': value}
-            transitional[key] = {**final[key], 'previous': allowed}
-            group[key] = value
-        for key, old in owned.items():
-            if key not in want and key in group and any(semantic_equal(group[key], item) for item in [old['managed'], *old.get('previous', [])]):
-                if old['present']:
-                    group[key] = old['value']
-                else:
-                    group.pop(key)
-        if not group:
-            obj.pop(section, None)
-        if enabled:
-            next_state['agents'][agent] = final
-            pending['agents'][agent] = transitional
+def restore(current, managed, prior, restored_values):
+    if any(semantic_equal(current, value) for value in managed):
+        restored_values.append(prior)
+        return prior
+    if not isinstance(current, dict) or not current:
+        return current
+    tables = [value for value in managed if isinstance(value, dict)]
+    if not tables:
+        return current
+    keys = set().union(*(value.keys() for value in tables))
+    previous = prior if isinstance(prior, dict) else {}
+    for key in current.keys() & keys:
+        values = [value[key] for value in tables if key in value]
+        restored = restore(current[key], values, previous.get(key, MISSING), restored_values)
+        if restored is MISSING:
+            del current[key]
         else:
-            next_state['agents'].pop(agent, None)
-        if not semantic_equal(previous, obj):
-            content = (json.dumps(obj, indent=2)+'\n').encode() if agent == 'claude' else writer.dumps(obj).encode()
-            edits.append((path, content, before))
+            current[key] = restored
+    for key in previous.keys()-keys:
+        if key not in current:
+            current[key] = previous[key]
+            restored_values.append({key: previous[key]})
+    return MISSING if not current and prior is MISSING else current
+
+
+def scrub_token(value, token):
+    if isinstance(value, dict):
+        return {key: cleaned for key, item in value.items()
+                if token not in key and (cleaned := scrub_token(item, token)) is not MISSING}
+    if isinstance(value, list):
+        return [cleaned for item in value if (cleaned := scrub_token(item, token)) is not MISSING]
+    if isinstance(value, str) and token in value:
+        return MISSING
+    return value
+
+
+def recorded_headers(entries):
+    claude, codex = entries.get('claude', {}), entries.get('codex', {})
+    for signal in ('LOGS', 'METRICS', 'TRACES'):
+        key = 'OTEL_EXPORTER_OTLP_'+signal+'_HEADERS'
+        if key in claude:
+            yield claude[key]['managed'], 'Authorization=Bearer '
+    for key in ('exporter', 'metrics_exporter', 'trace_exporter'):
+        if key in codex:
+            yield codex[key]['managed']['otlp-http']['headers']['Authorization'], 'Bearer '
+
+
+def legacy_receipt(receipt_path):
+    before = snapshot(receipt_path)
+    if before is None:
+        return None, None
+    info = receipt_path.lstat()
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise ValueError('unsafe legacy telemetry receipt')
+    receipt = json.loads(before)
+    entries = receipt.get('agents') if isinstance(receipt, dict) and receipt.get('schema') == 1 else None
+    if not isinstance(entries, dict) or entries.keys()-AGENTS.keys():
+        raise ValueError('invalid legacy telemetry receipt')
+    return before, entries
+
+
+def recorded_token(entries):
+    """The one collector token that every header recorded by v0.30 names, if any."""
+    tokens = set()
+    for value, prefix in recorded_headers(entries):
+        if not isinstance(value, str) or not value.startswith(prefix):
+            return None
+        tokens.add(value.removeprefix(prefix))
+    token = tokens.pop() if len(tokens) == 1 else None
+    return token if token and re.fullmatch('[0-9a-f]{64}', token) else None
+
+
+def legacy_token(receipt_path):
+    """Recover a missing collector token from the root-owned v0.30 receipt."""
+    try:
+        before, entries = legacy_receipt(receipt_path)
+        return recorded_token(entries) if before is not None else None
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        return None
+
+
+def contains_token(path, token):
+    """Scan raw bytes of a home file the receipt never covered.
+
+    v0.30 wrote only regular files it recorded, so an unreadable or irregular
+    file cannot hold its token and is left alone."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    with os.fdopen(fd, 'rb') as stream:
+        try:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return False
+            return token.encode() in stream.read(CONFIG_LIMIT+len(token))
+        except OSError:
+            return False
+
+
+def legacy_edits(receipt_path, home, token, writer, uid, gid, failures):
+    before, entries = legacy_receipt(receipt_path)
+    if before is None:
+        return None, [], token, set()
+    headers = list(recorded_headers(entries))
+    if headers and not token:
+        token = recorded_token(entries)
+    if headers and (not token or any(value != prefix+token for value, prefix in headers)):
+        failures.append(('legacy-token-unverified',))
+    token_bytes = token.encode() if token else None
+    covered = {agent for agent in AGENTS if entries.get(agent)}
+    edits = []
+    with developer_files(uid, gid):
+        for agent, (_, relative, section) in AGENTS.items():
+            path = home/relative
+            if agent not in covered:
+                if token and contains_token(path, token):
+                    failures.append(('legacy-token-remains', agent))
+                continue
+            try:
+                raw = snapshot(path)
+                if raw is None or not raw.strip():
+                    continue
+                document = parse(agent, raw)
+                restored_values = []
+                fields = document.get(section)
+                if isinstance(fields, dict) and fields:
+                    for key, entry in entries.get(agent, {}).items():
+                        if key not in fields:
+                            continue
+                        prior = entry['value'] if entry['present'] else MISSING
+                        managed = (entry['managed'], *entry.get('previous', ()))
+                        value = restore(fields[key], managed, prior, restored_values)
+                        if value is MISSING:
+                            del fields[key]
+                        else:
+                            fields[key] = value
+                    if not fields:
+                        document.pop(section)
+                cleaned = scrub_token(document, token) if token and headers else document
+                payload = raw
+                if not semantic_equal(parse(agent, raw), cleaned):
+                    payload = ((json.dumps(cleaned, indent=2)+'\n') if agent == 'claude' else writer.dumps(cleaned)).encode()
+                # A saved value stays user-owned even if it contains the live
+                # token. Refuse rather than deleting or publishing that value.
+                unsafe_restore = token and any(not semantic_equal(value, scrub_token(value, token))
+                                               for value in restored_values)
+                if unsafe_restore or (token_bytes and token_bytes in payload):
+                    failures.append(('legacy-token-remains', agent))
+                elif payload != raw:
+                    info = path.lstat()
+                    if info.st_uid != uid or info.st_gid != gid:
+                        raise ValueError('foreign home configuration')
+                    # Any rewritten home document can contain user credentials.
+                    edits.append((path, payload, raw, info.st_mode & 0o600))
+            except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+                failures.append(('legacy-config', agent))
+    return before, edits, token, covered
+
+
+class Refusal(ValueError):
+    def __init__(self, reasons):
+        self.reasons = reasons
+        super().__init__('; '.join(refusal_messages(reasons)))
+
+
+def field_paths(fields, prefix=''):
+    for key, value in fields.items():
+        path = prefix+'/'+key
+        yield path
+        if isinstance(value, dict):
+            yield from field_paths(value, path)
+
+
+def refusal_messages(reasons):
+    """Render known identifiers against local policy, without using guest text."""
+    if not isinstance(reasons, (list, tuple)) or not 1 <= len(reasons) <= 10:
+        raise ValueError('invalid telemetry refusal')
+    messages = []
+    for reason in reasons:
+        match reason:
+            case ('legacy-receipt',):
+                messages.append('invalid legacy telemetry receipt')
+            case ('legacy-token-unverified',):
+                messages.append('cannot identify the collector token in the legacy telemetry receipt; '
+                                'write the Bearer token from the legacy home agent configuration to '
+                                '/var/lib/subyard/telemetry/auth.token, then retry')
+            case ('legacy-token-remains', agent) if agent in AGENTS:
+                messages.append('collector token remains in legacy '+agent+' configuration')
+            case ('legacy-config', agent) if agent in AGENTS:
+                messages.append('cannot clean legacy '+agent+' configuration')
+            case ('unsafe-policy', agent) if agent in AGENTS:
+                messages.append('unsafe or foreign telemetry policy /etc/'+AGENTS[agent][0])
+            case ('unreadable-policy', agent) if agent in AGENTS:
+                messages.append('developer cannot read telemetry policy /etc/'+AGENTS[agent][0])
+            case ('invalid-template', agent) if agent in AGENTS:
+                messages.append('invalid '+agent+' telemetry template')
+            case ('template-conflict', agent, *paths) if agent in AGENTS and paths:
+                known = set(field_paths({AGENTS[agent][2]: desired(agent, '', '')}))
+                if len(paths) > len(known) or any(path not in known for path in paths):
+                    raise ValueError('invalid telemetry refusal field')
+                detail = paths[0]
+                if len(paths) > 1:
+                    detail += f' and {len(paths)-1} more field(s)'
+                messages.append('telemetry conflicts with '+agent+' template at '+detail)
+            case _:
+                raise ValueError('invalid telemetry refusal')
+    return messages
+
+
+def policy_readable(path, uid, gid, file_current):
+    with developer_files(uid, gid):
+        # A missing directory can be created with mode 0755, but every
+        # existing ancestor must be searchable by the intended reader.
+        return (all(not directory.exists() or os.access(directory, os.X_OK, effective_ids=True)
+                    for directory in reversed(path.parents))
+                and (not file_current or os.access(path, os.R_OK, effective_ids=True)))
+
+
+def reconcile(etc, home, receipt_path, agents, endpoint, token, writer, uid, gid, templates, check=False):
+    failures = []
+    policies = []
+    for agent, (relative, _, section) in AGENTS.items():
+        path = etc/relative
+        enabled = agent in agents
+        fields = desired(agent, endpoint, token) if enabled else {}
+        if enabled and agent in templates:
+            try:
+                template = parse(agent, templates[agent])
+                # A first install has no collector token to match a template header.
+                conflicts = template_conflicts(template, {section: fields}, '')
+                # An alternative Codex exporter variant makes the merged TOML invalid.
+                if agent == 'codex' and isinstance(template.get(section), dict):
+                    for key, value in fields.items():
+                        supplied = template[section].get(key)
+                        if isinstance(value, dict) and isinstance(supplied, dict) and supplied.keys()-value.keys():
+                            conflicts.append('/otel/'+key)
+                        http = supplied.get('otlp-http') if isinstance(supplied, dict) else None
+                        if isinstance(http, dict) and http.get('tls'):
+                            conflicts.append('/otel/'+key+'/otlp-http/tls')
+                if conflicts:
+                    failures.append(('template-conflict', agent, *dict.fromkeys(conflicts)))
+            except (ValueError, RecursionError):
+                failures.append(('invalid-template', agent))
+        try:
+            before, info = policy_snapshot(etc, path, agent)
+            wanted = policy(agent, fields, writer) if enabled and token else None
+            metadata_current = info is None or (stat.S_IMODE(info.st_mode), info.st_gid) == (POLICY_MODE, gid)
+            if enabled and not policy_readable(path, uid, gid, info is not None and metadata_current):
+                failures.append(('unreadable-policy', agent))
+            if before != wanted or (enabled and not token) or not metadata_current:
+                policies.append((agent, path, before, wanted))
+        except (OSError, ValueError):
+            if enabled:
+                failures.append(('unsafe-policy', agent))
+    try:
+        receipt, edits, legacy, covered = legacy_edits(receipt_path, home, token, writer, uid, gid, failures)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        failures.append(('legacy-receipt',))
+    if failures:
+        raise Refusal(failures)
     if check:
-        if diagnostics is not None:
-            diagnostics.extend(unavailable)
-        return not unavailable and not edits and semantic_equal(baseline, next_state)
-    if unavailable:
-        raise ValueError('agent configuration pending; run yard config apply, then yard migrate')
-    publish(state, (json.dumps(pending)+'\n').encode(), original)
-    for path, content, before in edits:
-        publish(path, content, before, uid, gid)
-        os.chown(path.parent, uid, gid)
-    publish(state, (json.dumps(next_state)+'\n').encode(), snapshot(state))
+        return receipt is None and not policies
+    if agents and not token:
+        raise ValueError('collector token required before writing policy')
+    if receipt is not None:
+        with developer_files(uid, gid):
+            for path, payload, before, mode in edits:
+                publish(path, payload, before, mode=mode)
+            if legacy:
+                for agent, (_, relative, _) in AGENTS.items():
+                    try:
+                        if (legacy.encode() in (snapshot(home/relative) or b'') if agent in covered
+                                else contains_token(home/relative, legacy)):
+                            failures.append(('legacy-token-remains', agent))
+                    except (OSError, ValueError):
+                        failures.append(('legacy-config', agent))
+        if failures:
+            raise Refusal(failures)
+        if snapshot(receipt_path) != receipt:
+            raise ValueError('legacy telemetry receipt changed')
+        receipt_path.unlink()
+    for agent, path, before, wanted in policies:
+        if policy_snapshot(etc, path, agent)[0] != before:
+            raise ValueError('telemetry policy changed')
+        if wanted is None:
+            path.unlink()
+        else:
+            create_policy_directory(etc, path)
+            publish(path, wanted, before, mode=POLICY_MODE, policy_gid=gid)
     return True

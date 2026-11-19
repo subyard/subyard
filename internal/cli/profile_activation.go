@@ -204,8 +204,6 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	// A stale yard whose recorded yard-scoped failure still matches is
 	// converged with a pending finding; any other stale yard is unconverged.
 	var pendingYards []releasetransition.V2PendingConfiguration
-	pendingInputs := false
-	var diagnostics []releasetransition.RedactedDecision
 	disclosed, order := map[string][]string{}, []string{}
 	// A yard whose own configuration is invalid is reported by each yard-scoped
 	// owner; host key tools address only the yards that load.
@@ -244,17 +242,9 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 		entry := observation{Yard: target.Name, Project: target.Loaded.Context.IncusProject,
 			Instance: target.Loaded.Context.YardInstanceName, State: kind, Digest: state.Actual, Desired: state.Desired}
 		actual = append(actual, entry)
-		converged = converged && state.State != "stale" && state.State != ports.RuntimeStatePending
-		if state.State == "stale" || state.State == ports.RuntimeStatePending {
+		converged = converged && state.State != "stale"
+		if state.State == "stale" {
 			yards = append(yards, releasetransition.V2YardAttribution{Yard: target.Name, Kind: releasetransition.YardFindingDrift})
-		}
-		if state.State == ports.RuntimeStatePending {
-			pendingInputs = true
-			if state.Diagnostics != nil {
-				for _, detail := range *state.Diagnostics {
-					diagnostics = append(diagnostics, releasetransition.RedactedDecision{Resource: detail.Parameter, Scope: "yard." + target.Name, Decision: releasetransition.DecisionPreserve, Result: detail.Installed + " -> " + detail.Desired})
-				}
-			}
 		}
 		if state.State == "stale" && state.Consequence != "" {
 			if _, seen := disclosed[state.Consequence]; !seen {
@@ -278,7 +268,7 @@ func (reconciler *profileRuntimeActivationReconciler) Observe(
 	if reconciler.id == "key-tools-runtime" {
 		yards = nil // one host installation: its drift is never one yard's
 	}
-	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, PendingInputs: pendingInputs, Diagnostics: diagnostics, Consequences: runtimeConsequences(order, disclosed), Warnings: warnings, Pending: pendingYards, Yards: yards}, err
+	return releasetransition.V2ActivationObservation{Actual: actualDigest, Desired: desiredDigest, Converged: converged, Consequences: runtimeConsequences(order, disclosed), Warnings: warnings, Pending: pendingYards, Yards: yards}, err
 }
 
 // runtimeConsequences states each owner consequence once with its yards, within the
@@ -376,12 +366,8 @@ func (reconciler *profileRuntimeActivationReconciler) reconcileTarget(ctx contex
 			}
 		}
 		if approved, exists := reconciler.recovery[target.Name]; exists && !reflect.DeepEqual(state, approved) &&
-			!(state.State == ports.RuntimeStateCurrent && state.Desired == approved.Desired) &&
-			!(approved.State == ports.RuntimeStatePending && state.State == ports.RuntimeStateStale && state.Desired == approved.Desired) {
+			!(state.State == ports.RuntimeStateCurrent && state.Desired == approved.Desired) {
 			return reconciler.failure(target.Name, "apply", domain.ErrPlanStale)
-		}
-		if state.State == ports.RuntimeStatePending {
-			return reconciler.failure(target.Name, "apply", reconcileruntime.PendingProfileRuntimeError(target.Name, reconciler.id, state))
 		}
 		if state.State != "stale" {
 			if state.State == ports.RuntimeStateCurrent || state.State == ports.RuntimeStateAbsent {

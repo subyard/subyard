@@ -811,7 +811,7 @@ type profileRuntimeObserver interface {
 
 // pendingRecordStates sorts this yard's pending activation records by a fresh
 // observation of their owner runtime: resolved owners are current or absent;
-// refreshing owners are stale or pending, so this init applies them and their
+// refreshing owners are stale, so this init applies them and their
 // record goes only if they then converge. A deferred owner (a stopped yard or an
 // Incus this init still has to repair) was not observed; its record stays.
 func (execution *initExecution) pendingRecordStates(ctx context.Context, cli *CLI) (resolved, refreshing []string, err error) {
@@ -836,7 +836,7 @@ func (execution *initExecution) pendingRecordStates(ctx context.Context, cli *CL
 		switch observation.State {
 		case ports.RuntimeStateCurrent, ports.RuntimeStateAbsent:
 			resolved = append(resolved, owner)
-		case ports.RuntimeStateStale, ports.RuntimeStatePending:
+		case ports.RuntimeStateStale:
 			refreshing = append(refreshing, owner)
 		}
 	}

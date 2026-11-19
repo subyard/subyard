@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from contextlib import closing, redirect_stdout
+import hashlib
 import importlib.util
 import io
 import http.client
@@ -14,9 +15,11 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 import uuid
 from unittest.mock import patch
@@ -32,6 +35,63 @@ from spool_fixture import prepare
 
 
 class NativeSignalsTest(unittest.TestCase):
+    def test_native_agent_delivery_uses_verified_fixture_archives(self):
+        def package(files):
+            archive = io.BytesIO()
+            with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
+                for name, body in files.items():
+                    member = tarfile.TarInfo(name)
+                    member.size, member.mode = len(body), 0o755
+                    bundle.addfile(member, io.BytesIO(body))
+            return archive.getvalue()
+
+        codex_version = f'codex-cli {fixture.CODEX_FIXTURE_VERSION}'
+        codex = f'#!/bin/sh\nprintf "{codex_version}\\n"\n'.encode()
+        claude = b'#!/bin/sh\nprintf "2.1.287 (Claude Code)\\n"\n'
+        codex_archive = package({'bin/codex': codex, 'bin/fixture-sidecar': b'fixture'})
+        claude_archive = package({'package/claude': claude})
+        download_urls = [
+            f'https://github.com/openai/codex/releases/download/rust-v{fixture.CODEX_FIXTURE_VERSION}/'
+            'codex-package-x86_64-unknown-linux-musl.tar.gz',
+            'https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-/claude-code-linux-x64-2.1.287.tgz',
+        ]
+        run = subprocess.run
+        for corrupted in (False, True):
+            with self.subTest(corrupted=corrupted), tempfile.TemporaryDirectory(dir='/tmp') as directory:
+                root = Path(directory)
+                downloads = []
+
+                def run_fixture_command(argv, **kwargs):
+                    if argv[0] == 'curl':
+                        downloads.append(argv[-1])
+                        body = {download_urls[0]: codex_archive, download_urls[1]: claude_archive}[argv[-1]]
+                        if corrupted and argv[-1] == download_urls[0]:
+                            body += b'corrupt'
+                        Path(argv[argv.index('--output')+1]).write_bytes(body)
+                        return subprocess.CompletedProcess(argv, 0)
+                    self.assertIn(argv, ([str(root/'bin/codex'), '--version'], [str(root/'bin/claude'), '--version']))
+                    return run(argv, **kwargs)
+
+                with patch.object(fixture.os, 'uname', return_value=SimpleNamespace(machine='x86_64')), \
+                        patch.object(fixture.subprocess, 'run', side_effect=run_fixture_command), \
+                        patch.dict(fixture.CODEX_FIXTURE_DIGESTS, x86_64=hashlib.sha256(codex_archive).hexdigest()), \
+                        patch.dict(fixture.CLAUDE_FIXTURE_PACKAGES, x86_64=('linux-x64', hashlib.sha256(claude).hexdigest())):
+                    if corrupted:
+                        with self.assertRaisesRegex(ValueError, 'Codex fixture archive checksum mismatch'):
+                            fixture.install_agents(root)
+                    else:
+                        self.assertEqual(fixture.install_agents(root), root/'bin')
+                if corrupted:
+                    self.assertEqual(downloads, download_urls[:1])
+                    self.assertFalse((root/'codex-native').exists())
+                    self.assertFalse((root/'bin/codex').exists())
+                else:
+                    self.assertEqual(downloads, download_urls)
+                    self.assertEqual((root/'bin/codex').resolve(), root/'codex-native/bin/codex')
+                    self.assertEqual((root/'codex-native/bin/fixture-sidecar').read_bytes(), b'fixture')
+                    versions = json.loads((root/'native-versions.json').read_text())
+                    self.assertEqual(versions['codex'], dict(version=codex_version, sha256=hashlib.sha256(codex).hexdigest()))
+
     def test_fixture_thread_requests_and_checks_effective_permissions(self):
         class App:
             def request(self, method, params):

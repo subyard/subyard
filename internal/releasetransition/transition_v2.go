@@ -122,16 +122,13 @@ type V2ConcurrentActivationObserver interface {
 type V2ActivationObservation struct {
 	// Binding pins native assessment inputs without making created inode IDs
 	// part of the desired recovery scope.
-	Binding   Fingerprint `json:"binding,omitempty"`
-	Actual    Fingerprint `json:"actual"`
-	Desired   Fingerprint `json:"desired"`
-	Converged bool        `json:"converged"`
-	// PendingInputs postpones this owner once while other approved owners repair inputs.
-	PendingInputs bool               `json:"pendingInputs,omitempty"`
-	Diagnostics   []RedactedDecision `json:"diagnostics,omitempty"`
-	Consequences  []string           `json:"consequences,omitempty"`
-	Planned       []string           `json:"planned,omitempty"`
-	Warnings      []string           `json:"warnings,omitempty"`
+	Binding      Fingerprint `json:"binding,omitempty"`
+	Actual       Fingerprint `json:"actual"`
+	Desired      Fingerprint `json:"desired"`
+	Converged    bool        `json:"converged"`
+	Consequences []string    `json:"consequences,omitempty"`
+	Planned      []string    `json:"planned,omitempty"`
+	Warnings     []string    `json:"warnings,omitempty"`
 	// Pending are yard-scoped findings of a converged owner that wait for their
 	// yards' inits. The engine reports them as pending configuration blockers of
 	// completed history, and as warnings while other release work remains.
@@ -3562,14 +3559,8 @@ func (transition *V2Transition) observeActivation(
 			continue
 		}
 		if err := validateActivationObservation(id, actual); err != nil {
-			var capacity pendingDiagnosticCapacityError
-			if errors.As(err, &capacity) {
-				observation.blockers = append(observation.blockers, activationObservationBlocker(ctx, id, err))
-				continue
-			}
 			return err
 		}
-		observation.decisions = append(observation.decisions, actual.Diagnostics...)
 		observation.activationWarnings = canonicalWarnings(append(observation.activationWarnings, actual.Warnings...))
 		if len(observation.activationWarnings) > 64 {
 			return invalid("release transition reported too many activation warnings")
@@ -3594,13 +3585,12 @@ func (transition *V2Transition) observeActivation(
 			observation.activationPending = append(observation.activationPending, v2PendingActivation{id, item})
 		}
 		payload, err := json.Marshal(struct {
-			ID            string                   `json:"id"`
-			Actual        Fingerprint              `json:"actual"`
-			Desired       Fingerprint              `json:"desired"`
-			Binding       Fingerprint              `json:"binding,omitempty"`
-			PendingInputs bool                     `json:"pendingInputs,omitempty"`
-			Pending       []V2PendingConfiguration `json:"pending,omitempty"`
-		}{ID: id, Actual: actual.Actual, Desired: actual.Desired, Binding: actual.Binding, PendingInputs: actual.PendingInputs, Pending: actual.Pending})
+			ID      string                   `json:"id"`
+			Actual  Fingerprint              `json:"actual"`
+			Desired Fingerprint              `json:"desired"`
+			Binding Fingerprint              `json:"binding,omitempty"`
+			Pending []V2PendingConfiguration `json:"pending,omitempty"`
+		}{ID: id, Actual: actual.Actual, Desired: actual.Desired, Binding: actual.Binding, Pending: actual.Pending})
 		if err != nil {
 			return err
 		}
@@ -3819,111 +3809,101 @@ func (transition *V2Transition) reconcileActivationOwners(
 	expected []v2ActivationScope,
 	findings *bool,
 ) (Outcome, error) {
-	pending := map[int]bool{}
-	for pass := 0; pass < 2; pass++ {
-		for index, reconciler := range transition.options.Reconcilers {
-			if pass == 1 && !pending[index] {
-				continue
-			}
-			if reconciler == nil {
-				return Outcome{}, errors.New("nil activation reconciler")
-			}
-			id := reconciler.ID()
-			if err := validateSafeID(id, "activation reconciler ID"); err != nil {
-				return Outcome{}, err
-			}
-			if err := transition.inject(fmt.Sprintf("before-reconciler-%d", index)); err != nil {
-				return Outcome{}, err
-			}
-			links, guardOutcome, guardErr := transition.guardJournalLinks(ctx, journal)
-			if guardErr != nil || guardOutcome.Code != "" {
-				return guardOutcome, guardErr
-			}
-			before, observeErr := reconciler.Observe(ctx, journal.Releases, links)
-			if observeErr != nil {
-				blocker := activationObservationBlocker(ctx, id, observeErr)
-				if blocker.Code == CodeActivationAmbiguous {
-					return v2OperatorOutcome(
-						links, journal.Goal.Target, transactionIDPointer(journal.Transaction),
-						blocker.Code, blocker.Message, blocker.Retry,
-					), nil
-				}
-				outcome := v2RecoveringOutcome(
-					links, journal.Goal.Target, transactionIDPointer(journal.Transaction),
-					blocker.Code, blocker.Message,
-				)
-				outcome.Retry = blocker.Retry
-				return outcome, nil
-			}
-			if err := validateActivationObservation(id, before); err != nil {
+	for index, reconciler := range transition.options.Reconcilers {
+		if reconciler == nil {
+			return Outcome{}, errors.New("nil activation reconciler")
+		}
+		id := reconciler.ID()
+		if err := validateSafeID(id, "activation reconciler ID"); err != nil {
+			return Outcome{}, err
+		}
+		if err := transition.inject(fmt.Sprintf("before-reconciler-%d", index)); err != nil {
+			return Outcome{}, err
+		}
+		links, guardOutcome, guardErr := transition.guardJournalLinks(ctx, journal)
+		if guardErr != nil || guardOutcome.Code != "" {
+			return guardOutcome, guardErr
+		}
+		before, observeErr := reconciler.Observe(ctx, journal.Releases, links)
+		if observeErr != nil {
+			blocker := activationObservationBlocker(ctx, id, observeErr)
+			if blocker.Code == CodeActivationAmbiguous {
 				return v2OperatorOutcome(
 					links, journal.Goal.Target, transactionIDPointer(journal.Transaction),
-					CodeRecoveryAmbiguous,
-					fmt.Sprintf("activation reconciler %q has an invalid observed state", id),
-					"run yard update --check",
+					blocker.Code, blocker.Message, blocker.Retry,
 				), nil
 			}
-			if expected != nil && (index >= len(expected) || expected[index].ID != id || expected[index].Desired != before.Desired) {
-				return sourceActivationStaleOutcome(links, journal), nil
+			outcome := v2RecoveringOutcome(
+				links, journal.Goal.Target, transactionIDPointer(journal.Transaction),
+				blocker.Code, blocker.Message,
+			)
+			outcome.Retry = blocker.Retry
+			return outcome, nil
+		}
+		if err := validateActivationObservation(id, before); err != nil {
+			return v2OperatorOutcome(
+				links, journal.Goal.Target, transactionIDPointer(journal.Transaction),
+				CodeRecoveryAmbiguous,
+				fmt.Sprintf("activation reconciler %q has an invalid observed state", id),
+				"run yard update --check",
+			), nil
+		}
+		if expected != nil && (index >= len(expected) || expected[index].ID != id || expected[index].Desired != before.Desired) {
+			return sourceActivationStaleOutcome(links, journal), nil
+		}
+		if err := reconciler.Reconcile(ctx, links); err != nil {
+			phase := "reconcile"
+			var phased interface{ ActivationPhase() string }
+			if errors.As(err, &phased) && phased.ActivationPhase() != "" {
+				phase = phased.ActivationPhase()
 			}
-			if before.PendingInputs && pass == 0 {
-				pending[index] = true
-				continue
-			}
-			if err := reconciler.Reconcile(ctx, links); err != nil {
-				phase := "reconcile"
-				var phased interface{ ActivationPhase() string }
-				if errors.As(err, &phased) && phased.ActivationPhase() != "" {
-					phase = phased.ActivationPhase()
-				}
-				return transition.reduceActivationReconcilerFailure(
-					ctx, journal, reconciler, id, phase, links, before, err,
-				), nil
-			}
-			actual, err := reconciler.Observe(ctx, journal.Releases, links)
-			links, guardOutcome, guardErr = transition.guardJournalLinks(ctx, journal)
-			if guardErr != nil {
-				guardOutcome = v2OperatorOutcome(ReleaseLinks{}, journal.Goal.Target,
-					transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
-					"release links cannot be observed during activation verification", "run yard update --check")
-				guardErr = nil
-			}
-			if guardErr != nil || guardOutcome.Code != "" {
-				if err != nil {
-					guardOutcome = withPublicFailureCause(guardOutcome, err,
-						fmt.Sprintf("activation reconciler %q failed during verification", id))
-				}
-				return guardOutcome, guardErr
-			}
+			return transition.reduceActivationReconcilerFailure(
+				ctx, journal, reconciler, id, phase, links, before, err,
+			), nil
+		}
+		actual, err := reconciler.Observe(ctx, journal.Releases, links)
+		links, guardOutcome, guardErr = transition.guardJournalLinks(ctx, journal)
+		if guardErr != nil {
+			guardOutcome = v2OperatorOutcome(ReleaseLinks{}, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
+				"release links cannot be observed during activation verification", "run yard update --check")
+			guardErr = nil
+		}
+		if guardErr != nil || guardOutcome.Code != "" {
 			if err != nil {
-				blocker := activationObservationBlocker(ctx, id, err)
-				outcome := v2RecoveringOutcome(links, journal.Goal.Target,
-					transactionIDPointer(journal.Transaction), blocker.Code, blocker.Message)
-				if blocker.Code == CodeActivationAmbiguous {
-					outcome.Status = StatusOperatorActionRequired
-				}
-				outcome.Retry = blocker.Retry
-				return outcome, nil
+				guardOutcome = withPublicFailureCause(guardOutcome, err,
+					fmt.Sprintf("activation reconciler %q failed during verification", id))
 			}
-			if validateActivationObservation(id, actual) != nil {
-				return v2OperatorOutcome(links, journal.Goal.Target,
-					transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
-					fmt.Sprintf("activation reconciler %q reported an invalid state during verification", id),
-					"run yard migrate --check"), nil
+			return guardOutcome, guardErr
+		}
+		if err != nil {
+			blocker := activationObservationBlocker(ctx, id, err)
+			outcome := v2RecoveringOutcome(links, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), blocker.Code, blocker.Message)
+			if blocker.Code == CodeActivationAmbiguous {
+				outcome.Status = StatusOperatorActionRequired
 			}
-			if expected != nil && actual.Desired != expected[index].Desired {
-				return sourceActivationStaleOutcome(links, journal), nil
-			}
-			if !actual.Converged {
-				return v2RecoveringOutcome(links, journal.Goal.Target,
-					transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
-					fmt.Sprintf("activation reconciler %q did not reach its fixed point during verification", id),
-				), nil
-			}
-			*findings = *findings || len(actual.Pending) != 0
-			if err := transition.inject(fmt.Sprintf("after-reconciler-%d", index)); err != nil {
-				return Outcome{}, err
-			}
+			outcome.Retry = blocker.Retry
+			return outcome, nil
+		}
+		if validateActivationObservation(id, actual) != nil {
+			return v2OperatorOutcome(links, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), CodeRecoveryAmbiguous,
+				fmt.Sprintf("activation reconciler %q reported an invalid state during verification", id),
+				"run yard migrate --check"), nil
+		}
+		if expected != nil && actual.Desired != expected[index].Desired {
+			return sourceActivationStaleOutcome(links, journal), nil
+		}
+		if !actual.Converged {
+			return v2RecoveringOutcome(links, journal.Goal.Target,
+				transactionIDPointer(journal.Transaction), CodeDependencyUnavailable,
+				fmt.Sprintf("activation reconciler %q did not reach its fixed point during verification", id),
+			), nil
+		}
+		*findings = *findings || len(actual.Pending) != 0
+		if err := transition.inject(fmt.Sprintf("after-reconciler-%d", index)); err != nil {
+			return Outcome{}, err
 		}
 	}
 	links, guardOutcome, guardErr := transition.guardJournalLinks(ctx, journal)
@@ -4244,33 +4224,7 @@ func boundedFailureText(message string, maximum int) string {
 	return strings.TrimSpace(message[:end]) + "..."
 }
 
-type pendingDiagnosticCapacityError struct{ id string }
-
-func (e pendingDiagnosticCapacityError) Error() string {
-	message, _ := e.ActivationDiagnostic()
-	return message
-}
-func (e pendingDiagnosticCapacityError) ActivationDiagnostic() (string, string) {
-	return fmt.Sprintf("activation reconciler %q exceeds the supported diagnostic capacity of 128 input findings", e.id), "run yard config status --all-local"
-}
-
 func validateActivationObservation(id string, observation V2ActivationObservation) error {
-	if observation.PendingInputs && observation.Converged {
-		return invalid("pending activation inputs cannot be converged")
-	}
-	if len(observation.Diagnostics) > 128 {
-		return pendingDiagnosticCapacityError{id}
-	}
-	if len(observation.Diagnostics) != 0 && !observation.PendingInputs {
-		return invalid("invalid pending activation diagnostics")
-	}
-	for _, diagnostic := range observation.Diagnostics {
-		values := strings.Split(diagnostic.Result, " -> ")
-		if validateSafeID(diagnostic.Resource, "pending input") != nil || !strings.HasPrefix(diagnostic.Scope, "yard.") || !domain.SafeName(strings.TrimPrefix(diagnostic.Scope, "yard.")) || diagnostic.Decision != DecisionPreserve || len(values) != 2 || !domain.ValidRuntimeDiagnosticValue(values[0]) || !domain.ValidRuntimeDiagnosticValue(values[1]) {
-			return invalid("invalid pending activation diagnostic")
-		}
-	}
-
 	if observation.Binding != "" {
 		if err := validateFingerprint(observation.Binding, "activation native binding"); err != nil {
 			return err

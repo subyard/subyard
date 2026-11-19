@@ -30,6 +30,9 @@ PENDING = '.telemetry-archive.pending'
 COLLECTOR = 'subyard-telemetry.service'
 MANAGER = 'subyard-telemetry-runs.service'
 BINARY_LIMIT = 64*1024*1024
+# Inventory key for the other digest an interrupted asset update may leave on
+# disk. Path entries stay single digests, which v0.30 can still read.
+REPLACED = 'replaced'
 
 
 def systemctl(*args):
@@ -43,9 +46,11 @@ def systemctl(*args):
 class Runtime:
     def __init__(self, source, user, selected, agents, control=Path('/var/lib/subyard/telemetry-control'),
                  data=Path('/var/lib/subyard/telemetry'), library=Path('/usr/local/lib/subyard-telemetry'),
-                 units=Path('/etc/systemd/system'), commands=Path('/usr/local/bin'), account=None):
+                 units=Path('/etc/systemd/system'), commands=Path('/usr/local/bin'), account=None, etc=Path('/etc')):
         self.source, self.user, self.selected, self.agents = source, user, selected, agents
-        self.managed_agents = set()
+        self.etc = etc
+        self.templates = {agent: content for agent in agents
+                          if (content := native.snapshot(source/(agent+'.template'))) is not None}
         self.control, self.data, self.library, self.units, self.commands = control, data, library, units, commands
         self.operational = data.with_name(data.name+'-private')
         self.auth = self.operational/'auth.token'
@@ -87,8 +92,7 @@ class Runtime:
 
     def identity_runtime(self,record):
         wanted = Runtime(self.source,record['user'],self.selected,self.agents,self.control,self.data,self.library,self.units,self.commands,
-                       account=SimpleNamespace(pw_uid=record['uid'],pw_gid=record['gid'],pw_dir=record['home']))
-        wanted.managed_agents = set(getattr(self, 'managed_agents', ()))
+                       account=SimpleNamespace(pw_uid=record['uid'],pw_gid=record['gid'],pw_dir=record['home']), etc=self.etc)
         return wanted
 
     def identity_files(self,wanted):
@@ -172,6 +176,15 @@ class Runtime:
             raise ValueError('telemetry skill delivery failed')
         return True
 
+    def recorded_digests(self, saved, path):
+        replaced = saved.get(REPLACED)
+        if not isinstance(replaced, dict) or str(path) not in replaced:
+            return [saved.get(str(path))]
+        return [saved.get(str(path)), replaced[str(path)]]
+
+    def encode_inventory(self, recorded, replaced):
+        return (json.dumps({**recorded, REPLACED: replaced} if replaced else recorded)+'\n').encode()
+
     def retained_current(self, saved):
         """A retained path is absent, or exactly what the inventory recorded with its mode."""
         for path, mode in self.retained.items():
@@ -223,8 +236,10 @@ class Runtime:
         if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != self.uid:
             raise ValueError('foreign telemetry operational directory')
         if not self.auth.exists():
+            # Keep the v0.30 bearer: the analytics copy, else the one its home-config receipt records.
             old = self.data/'auth.token'
-            token = self.token(old) if old.exists() or old.is_symlink() else secrets.token_hex(32)
+            token = (self.token(old) if old.exists() or old.is_symlink()
+                     else native.legacy_token(self.control/'native.json') or secrets.token_hex(32))
             native.publish(self.auth, (token+'\n').encode(), None, self.uid, self.gid)
         return self.token()
 
@@ -263,9 +278,9 @@ class Runtime:
                 if candidate == command or not start.startswith('{ path='+candidate.split()[0]+' ; argv[]='+candidate+' ; ignore_errors=no ; '):
                     continue
                 prior = current.replace(command.encode(), candidate.encode(), 1)
-                content = self.asset_snapshot(path)
-                if content == current or (content == prior and self.saved_inventory().get(str(path)) == hashlib.sha256(prior).hexdigest()):
-                    command = candidate
+                if (self.asset_snapshot(path) in (prior, current)
+                        and hashlib.sha256(prior).hexdigest() in self.recorded_digests(self.saved_inventory(), path)):
+                    command = candidate  # Known previous startup, stale until migrated.
                     break
             valid_start = start.startswith('{ path='+command.split()[0]+' ; argv[]='+command+' ; ignore_errors=no ; ') and start.count('argv[]=') == 1
             nnp = fields.get('NoNewPrivileges')
@@ -304,25 +319,25 @@ class Runtime:
                     'hint': 'run yard migrate to repair; inspect the guest collector services'}
         return {'state': 'ready' if all(state.get('ActiveState') == 'active' and state.get('UnitFileState') == 'enabled' for state in states) else 'drift'}
 
-    def pending_agent_config(self, diagnostics):
-        return {'state': 'pending',
-                'actual': hashlib.sha256(json.dumps(diagnostics, sort_keys=True).encode()).hexdigest(),
-                'desired': self.desired(), 'diagnostics': diagnostics}
+    def reconcile_native(self, check, token=None):
+        receipt = self.control/'native.json'
+        # Before the first apply after v0.30 the bearer is still in the analytics directory.
+        for path in (self.auth, self.data/'auth.token'):
+            if token is None and (self.selected or receipt.exists()) and native.snapshot(path) is not None:
+                token = self.token(path)
+        return native.reconcile(self.etc, self.home, receipt, self.agents if self.selected else [],
+                                self.endpoint, token, tomli_w, self.uid, self.gid, self.templates, check)
 
     def observe(self):
         installed = self.owned()
         if not installed and any(path.exists() or path.is_symlink() for path in [*self.assets, *self.retained]):
             raise ValueError('unmanaged collector assets')
-        unavailable = native.agent_config_diagnostics(self.home, self.agents, getattr(self, 'managed_agents', ())) if self.selected or installed else []
-        if unavailable:
-            return self.pending_agent_config(unavailable)
+        native_current = self.reconcile_native(check=True) if installed or self.selected else True
         if not installed:
             result = {'state': 'stale' if self.selected else 'absent', 'actual': '', 'desired': self.desired() if self.selected else ''}
             if self.selected:
                 result['diagnostics'] = [{'parameter': 'telemetry.runtime', 'installed': 'absent', 'desired': 'present'}]
             return result
-        # Materialization must be able to repair an agent document even when
-        # collector assets also await refresh. No native ownership is inferred.
         files = {str(path): (hashlib.sha256(self.asset_snapshot(path) or b'').hexdigest(), stat.S_IMODE(path.stat().st_mode) if path.exists() else None)
                  for path in [*self.assets, *self.retained]}
         ready = all(self.asset_snapshot(path) == content and stat.S_IMODE(path.stat().st_mode) == mode for path, (content, mode) in self.assets.items())
@@ -344,15 +359,9 @@ class Runtime:
         except (OSError, ValueError):
             token = None
             converged = False
-        native_diagnostics = []
-        native_current = native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, check=True, diagnostics=native_diagnostics, managed_agents=getattr(self, 'managed_agents', ())) if converged else None
-        if native_diagnostics:
-            # Agent document repair belongs to materialization. Do not make its
-            # damaged input block that owner through activation readiness.
-            return self.pending_agent_config(native_diagnostics)
-        converged = converged and native_current is True
+        converged = converged and native_current
         skill_current = not self.selected or self.skill_delivery('check-registered')
-        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': converged, 'skill_current': skill_current, 'policy_current': policy_current}, sort_keys=True).encode()).hexdigest()
+        actual = hashlib.sha256(json.dumps({'files': files, 'inventory_current': inventory_current, 'cutover_pending': cutover_pending, 'states': states, 'native_current': native_current, 'skill_current': skill_current, 'policy_current': policy_current}, sort_keys=True).encode()).hexdigest()
         converged = converged and skill_current and policy_current
         desired = self.desired()
         result = {'state': 'current' if converged else 'stale', 'actual': desired if converged else actual, 'desired': desired}
@@ -372,8 +381,8 @@ class Runtime:
                     diagnostics.append({'parameter': 'telemetry.asset.' + path.name, 'installed': 'missing' if snapshot is None else 'changed', 'desired': 'current'})
                 elif stat.S_IMODE(path.stat().st_mode) != mode:
                     diagnostics.append({'parameter': 'telemetry.mode.' + path.name, 'installed': 'mismatch', 'desired': 'matched'})
-            if native_current is not True:
-                diagnostics.append({'parameter': 'telemetry.native', 'installed': 'unknown' if native_current is None else 'changed', 'desired': 'current'})
+            if not native_current:
+                diagnostics.append({'parameter': 'telemetry.native', 'installed': 'changed', 'desired': 'current'})
             if not skill_current:
                 diagnostics.append({'parameter': 'telemetry.skill', 'installed': 'absent', 'desired': 'registered'})
             for unit in (COLLECTOR, MANAGER):
@@ -391,7 +400,8 @@ class Runtime:
 
     def desired(self):
         value = {'assets': {str(path): [hashlib.sha256(data).hexdigest(), mode] for path, (data, mode) in self.assets.items()},
-                 'selected': self.selected, 'agents': self.agents, 'managed_agents': sorted(getattr(self, 'managed_agents', ()))}
+                 'selected': self.selected, 'agents': self.agents,
+                 'templates': {agent: hashlib.sha256(content).hexdigest() for agent, content in self.templates.items()}}
         if self.retained:
             # Paths and modes only: packaged and source unselected runs agree.
             value['retained'] = {str(path): mode for path, mode in self.retained.items()}
@@ -641,7 +651,7 @@ class Runtime:
         content, mode = self.assets[path]
         before = self.asset_snapshot(path)
         if before != content:
-            if before is not None and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
+            if before is not None and hashlib.sha256(before).hexdigest() not in self.recorded_digests(saved, path):
                 raise ValueError('managed asset changed')
             native.publish(path, content, before, max_bytes=self.asset_limit(path), mode=mode)
         elif stat.S_IMODE(path.stat().st_mode) != mode:
@@ -649,10 +659,9 @@ class Runtime:
 
     def apply(self):
         installed = self.owned()
-        if (self.selected or installed) and native.agent_config_diagnostics(self.home, self.agents, getattr(self, 'managed_agents', ())):
-            raise ValueError('agent configuration pending; run yard config apply, then yard migrate')
         if not self.selected and not installed:
             return
+        self.reconcile_native(check=True)
         before_states = {unit: self.manager(unit) for unit in (COLLECTOR, MANAGER)}
         if not installed:
             if self.library.exists():
@@ -668,19 +677,38 @@ class Runtime:
         os.chmod(self.data, 0o700)
         os.chown(self.data, self.uid, self.gid)
         token = self.prepare_auth()
-        saved = self.saved_inventory()
+        inventory_path = self.control/'assets.json'
+        inventory_before = native.snapshot(inventory_path)
+        saved = json.loads(inventory_before or b'{}')
+        pending = {key: value for key, value in saved.items() if key != REPLACED}
+        replaced = dict(saved.get(REPLACED, {}))
         changed = False
         for path in [*self.assets, *self.retained]:
             before = self.asset_snapshot(path)
-            candidate = self.assets[path][0] if path in self.assets else None
-            if before is not None and before != candidate and saved.get(str(path)) != hashlib.sha256(before).hexdigest():
+            before_digest = hashlib.sha256(before).hexdigest() if before is not None else None
+            wanted_digest = hashlib.sha256(self.assets[path][0]).hexdigest() if path in self.assets else None
+            # Content already equal to the delivery is never an unmanaged edit.
+            if before_digest not in (None, wanted_digest, *self.recorded_digests(saved, path)):
                 raise ValueError('managed asset changed')
-            changed |= path in self.assets and before != candidate
+            if path not in self.assets:
+                continue
+            if before is None:
+                pending[str(path)] = wanted_digest
+                replaced.pop(str(path), None)
+            elif before_digest != wanted_digest:
+                pending[str(path)] = before_digest
+                replaced[str(path)] = wanted_digest
+            changed |= before_digest != wanted_digest
+        # Record both versions before changing any asset, so a retry accepts either.
+        inventory_pending = self.encode_inventory(pending, replaced)
+        if inventory_pending != inventory_before:
+            native.publish(inventory_path, inventory_pending, inventory_before)
+        saved = json.loads(inventory_pending)
         prepared = self.policy_status() == 'present'
         cutover = (installed and not prepared or (self.data/CUTOVER).exists()) and self.cutover_receipt()
         retiring = cutover and not prepared
         old_auth = self.data/'auth.token'
-        native.reconcile(self.home, self.control/'native.json', self.agents if self.selected else [], self.endpoint, token, tomli_w, self.uid, self.gid, managed_agents=getattr(self, 'managed_agents', ()))
+        self.reconcile_native(check=False, token=token)
         stop = [unit for unit, fields in before_states.items() if fields.get('LoadState') == 'loaded'
                 and (retiring or changed or not self.running_no_new_privs(fields)
                      or (unit == COLLECTOR and (old_auth.exists() or (self.selected and not prepared))))]
@@ -713,10 +741,13 @@ class Runtime:
         for path, mode in self.retained.items():
             if self.asset_snapshot(path) is not None:
                 os.chmod(path, mode)
-        inventory_path = self.control/'assets.json'
-        inventory, previous = self.inventory(), native.snapshot(inventory_path)
-        if inventory != previous:
-            native.publish(inventory_path, inventory, previous)
+        # Name the assets now on disk first; only the loaded units may differ.
+        published = json.loads(self.inventory())
+        previous = {path: digest for path, digest in [*replaced.items(), *pending.items()]
+                    if published.get(path) not in (None, digest)}
+        inventory_published = self.encode_inventory(published, previous)
+        if inventory_published != inventory_pending:
+            native.publish(inventory_path, inventory_published, inventory_pending)
         systemctl('daemon-reload')
         if self.selected:
             drain = self.data/'drain.json'
@@ -731,6 +762,10 @@ class Runtime:
                 native.publish(self.data/'drain.json', records.compact_json(drain)+b'\n',
                                native.snapshot(self.data/'drain.json'), self.uid, self.gid)
                 systemctl('start', MANAGER)
+        # Keep the pair until the new units are loaded, so a retry also accepts the old ones.
+        inventory = self.inventory()
+        if inventory != inventory_published:
+            native.publish(inventory_path, inventory, inventory_published)
         self.skill_delivery('apply' if self.selected else 'remove')
         if cutover and self.selected:
             (self.data/CUTOVER).unlink()
@@ -742,11 +777,6 @@ def main():
     if os.getuid() != 0:
         raise ValueError('guest root required')
     mode, selected, user, agents, *bindings = sys.argv[1:]
-    managed_agents = set()
-    if bindings and bindings[0].startswith('managed='):
-        managed_agents = set(filter(None, bindings.pop(0)[8:].split(',')))
-        if not managed_agents <= set(agents.split()) or not managed_agents <= {'claude', 'codex'}:
-            raise ValueError('invalid managed agent binding')
     if mode in ('identity-observe','identity-apply'):
         import authority
         source=bindings[-1]
@@ -754,14 +784,12 @@ def main():
             journal,recipe=authority.load(source,'telemetry')
             account=recipe['original']
             runtime=Runtime(Path(__file__).resolve().parent,account['user'],selected=='1',agents.split(),account=SimpleNamespace(pw_uid=account['uid'],pw_gid=account['gid'],pw_dir=account['home']))
-            runtime.managed_agents = managed_agents
             runtime.identity_rebooted=authority.rebooted(journal)
             phase='rebind' if journal['phase']=='account-ready' else 'quiesce'
             runtime.identity_check(recipe,phase)
         except FileNotFoundError:
             if mode!='identity-observe':raise
             runtime=Runtime(Path(__file__).resolve().parent,user,selected=='1',agents.split())
-            runtime.managed_agents = managed_agents
             target=dict(user=bindings[0],uid=runtime.uid,gid=runtime.gid,home='/home/'+bindings[0],group=bindings[0])
             recipe=runtime.identity_observe(target,source)
         if mode=='identity-observe':print(json.dumps(recipe))
@@ -769,7 +797,6 @@ def main():
         return
     runtime = Runtime(Path(__file__).resolve().parent, user, selected == '1' and mode != 'startup', agents.split())
     runtime.selected = selected == '1'
-    runtime.managed_agents = managed_agents
     if mode == 'pause':
         if runtime.owned() and runtime.manager(COLLECTOR).get('ActiveState') == 'active':
             systemctl('stop', COLLECTOR)
@@ -789,7 +816,7 @@ def main():
         print(json.dumps(observation))
         return
     if mode == 'check':
-        if observation['state'] in ('stale', 'pending'):
+        if observation['state'] == 'stale':
             print('telemetry-drift')
         elif observation['state'] not in ('current', 'absent'):
             raise ValueError('telemetry drift')
@@ -812,7 +839,7 @@ def failure_diagnostic(error):
         if filename in ('guest.py', 'native.py'):
             location = filename+':'+str(trace.tb_lineno)
         trace = trace.tb_next
-    kind = 'ValueError' if isinstance(error, native.AgentConfigRefusal) else type(error).__name__
+    kind = 'ValueError' if isinstance(error, native.Refusal) else type(error).__name__
     return 'telemetry: local reconciliation failed ('+kind+' at '+location+')'
 
 
@@ -820,8 +847,8 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
-        if isinstance(error, native.AgentConfigRefusal):
-            print('telemetry-agent-config-invalid-v1 '+error.agent, file=sys.stderr)
+        if isinstance(error, native.Refusal):
+            print('telemetry-native-refusal-v2 '+json.dumps(error.reasons), file=sys.stderr)
         if sys.argv[1:2] in (['identity-observe'], ['identity-apply']):
             import authority
             print(authority.refusal('Telemetry', error), file=sys.stderr)

@@ -272,10 +272,8 @@ type RuntimePresence struct {
 const (
 	RuntimeStateAbsent   RuntimeState = "absent"
 	RuntimeStateDeferred RuntimeState = "deferred"
-	// Pending is running but waits for another owner to repair an input.
-	RuntimeStatePending RuntimeState = "pending"
-	RuntimeStateCurrent RuntimeState = "current"
-	RuntimeStateStale   RuntimeState = "stale"
+	RuntimeStateCurrent  RuntimeState = "current"
+	RuntimeStateStale    RuntimeState = "stale"
 )
 
 // RuntimeObservation describes a declared profile hook's installed contract.

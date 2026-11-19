@@ -87,7 +87,7 @@ Common portable values may go in `overrides/shared/config.env` only when `config
 `shared` scope. Host-wide values go in `config.env`:
 
 ```sh
-DEV_SUDO=1
+DEV_UID=1000
 ```
 
 Each yard has its own settings, including `default`:
@@ -173,6 +173,34 @@ yard -Y demo init
 
 An unmarked existing instance is preserved; a conflicting definition still requires the
 same explicit yard-scope repair.
+
+### Passwordless sudo inside the yard
+
+`DEV_SUDO` defaults to `1`. The yard's developer account can run commands as guest root without
+a password. Set `DEV_SUDO=0` at shared, host or yard scope, or for one command, and run `yard init`
+to remove the managed grant. Hermes and Amnezia yard presets explicitly set `DEV_SUDO=0`.
+Removing the grant leaves the developer's Docker group access, which can still provide
+root-equivalent access inside the guest.
+
+After an upgrade, an existing yard that inherits the shipped default gets the grant on its next
+`yard init`. Release activation leaves the guest sudoers file alone. `yard config show DEV_SUDO`
+shows the desired value. `yard config status` does not inspect guest sudoers, so it can report a
+clean yard while the grant still awaits `yard init`.
+
+To disable the grant across owner hosts, publish a shared override in the connected private
+configuration repository:
+
+```sh
+yard config set DEV_SUDO 0 --scope shared --git
+```
+
+Run `yard config sync pull` on the other owner hosts, then run `yard init` for each yard where
+you want to apply the change. Host, yard and command values follow the scalar precedence above.
+Restrict write access to the configuration repository to trusted operators.
+
+Upgrade all owner hosts before publishing a shared `DEV_SUDO` assignment. Older runtimes reject
+the shared scope for this field. Before downgrading, remove any shared assignment and, if it was
+Git-backed, sync the removal while the runtime still supports it.
 
 ### Git identity
 
@@ -270,7 +298,8 @@ historical digest in `legacy-config/<destination-basename>.sha256`; it is accept
 confirmed initial adoption with the usual file metadata checks, and is not persisted as ownership.
 
 Subyard serializes its own writes per asset and atomically replaces the destination before updating
-the baseline. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
+the baseline. Replacements preserve the existing file mode. New documents use mode
+`0644`. Retrying an interrupted application converges. Invalid JSON or an invalid baseline
 fails without overwriting it; diagnostics omit configuration contents. Running tools do not share
 Subyard's lock: application reads the current file and verifies its result, but cannot serialize
 arbitrary concurrent third-party writes. Invalid TOML, like invalid JSON, fails without overwriting
@@ -616,11 +645,12 @@ An interactive `codex` from an SSH or VS Code shell prefers upstream's shared ap
 - **Disconnects:** when a plain client's terminal dies during a slow tool, the tool finishes on the daemon
   and its result reaches the model. Under `--no-daemon` the tool stops with the client.
 
-On hosts with AppArmor user namespace restrictions, yard setup runs Bubblewrap as the yard
-developer and checks that it can create user and network namespaces. If the probe fails in a
-container yard, provisioning loads the distribution's `bwrap` and `unpriv_bwrap` profiles in the
-yard's own AppArmor namespace. The host-wide restriction stays enabled. This yard policy applies
-independently of which coding tools are selected, including Codex and Claude Code.
+When Codex or Claude Code is selected, yard setup runs Bubblewrap as the yard developer and checks
+that it can create user and network namespaces. If the probe fails in a container yard on a host
+with AppArmor user namespace restrictions, provisioning loads the distribution's `bwrap` and
+`unpriv_bwrap` profiles in the yard's verified AppArmor namespace. The host-wide restriction stays
+enabled. Setup only creates this policy for a selected Bubblewrap consumer and continues to
+reconcile any existing Subyard-owned policy after that consumer is deselected.
 
 The boot loader verifies the two profiles against the Subyard ownership record in
 `/var/lib/subyard/bwrap-apparmor-ownership` before loading either one. Setup repairs missing boot

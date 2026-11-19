@@ -133,7 +133,8 @@ check_loader() {
     case "$(sha256sum < "$policy/load")" in
       '67af6296afdba16d3511438b80184e5deefe1dfc9bab2d632def0b268a3b1e30  -' | \
       '3a3bfed285a93bd59669f466e65c4ff61802a519820783a45502be7072d77d72  -' | \
-      'ca44357a350eb3d4bb0e9f1746eba3fa2a75918cd26b9986aedd28f359772a0d  -') return 0 ;;
+      'ca44357a350eb3d4bb0e9f1746eba3fa2a75918cd26b9986aedd28f359772a0d  -' | \
+      '958d8e0c45a913ad823e982a4d28a8ca0c4e5c905728dc462c208783650977b5  -') return 0 ;;
       *) return 1 ;;
     esac
 }
@@ -193,6 +194,23 @@ restricted() {
   local enabled
   [ "$kind" != vm ] && read -r enabled 2>/dev/null < /proc/sys/kernel/apparmor_restrict_unprivileged_userns \
     && [ "$enabled" = 1 ]
+}
+
+check_fresh_policy() {
+  local paths_checked=${1:-0} namespace_checked=${2:-0} live_absence_checked=${3:-0}
+  if ! restricted; then
+    problem "the developer's Bubblewrap sandbox could not create user and network namespaces"
+    return
+  fi
+  if [ "$paths_checked" = 0 ]; then
+    check_parent "$policy_parent" || :
+    check_parent "$record_parent" || :
+  fi
+  if [ "$namespace_checked" = 0 ]; then check_namespace; fi
+  check_admin_policy
+  if [ "$paths_checked" = 0 ]; then check_unit; fi
+  if [ "$live_absence_checked" = 0 ] && [ -d "$aa/policy/profiles" ]; then check_live absent; fi
+  [ -w "$aa/.load" ] || problem 'the yard cannot load AppArmor profiles'
 }
 
 load_missing() {
@@ -288,6 +306,9 @@ done
 
 owned=0
 parents_verified=1
+paths_checked=0
+namespace_checked=0
+live_absence_checked=0
 if present "$pending"; then
   if present "$marker"; then problem "both ownership records $marker and $pending exist"; fi
   record=$pending
@@ -296,14 +317,19 @@ if present "$record" || present "$policy" || present "$unit" || present "$link";
   check_parent "$policy_parent" || parents_verified=0
   check_parent "$record_parent" || parents_verified=0
   check_unit
+  paths_checked=1
 fi
 if present "$record"; then
   check_namespace
+  namespace_checked=1
   if [ "$parents_verified" = 1 ]; then
     if [ "$record" = "$pending" ] && ! present "$policy"; then
       check_record || :
       if present "$unit" || present "$link"; then problem "boot registration exists without the policy directory"; fi
-      if [ -d "$aa/policy/profiles" ]; then check_live absent; fi
+      if [ -d "$aa/policy/profiles" ]; then
+        check_live absent
+        live_absence_checked=1
+      fi
     else
       owned=1
       check_files
@@ -317,6 +343,12 @@ elif present "$policy" || present "$unit" || present "$link"; then
 fi
 
 if [ "$owned" = 1 ] && [ "$setting" != off ]; then check_admin_policy; fi
+# A refusal blocks recovery and installation, but an installed Bubblewrap can
+# still tell us whether the independent checks for new policy apply.
+if [ "$refused" = 1 ] && [ "$mode" != boot ] && [ "$setting" != off ] && \
+    [ "$owned" = 0 ] && [ "$need_bwrap" = 1 ] && [ -x /usr/bin/bwrap ] && ! probe >/dev/null 2>&1; then
+  check_fresh_policy "$paths_checked" "$namespace_checked" "$live_absence_checked"
+fi
 check_refusals
 
 if [ "$mode" = boot ]; then
@@ -366,20 +398,17 @@ if [ "$owned" = 0 ] && [ "$record" = "$pending" ]; then
   fi
 fi
 
-eligible=0
-if [ "$setting" != off ] && restricted; then eligible=1; fi
+if [ "$owned" = 0 ] && [ "$need_bwrap" = 0 ]; then exit 0; fi
 packages=()
-if [ "$eligible" = 1 ] || [ "$need_bwrap" = 1 ] || [ "$owned" = 1 ]; then
-  [ -x /usr/bin/bwrap ] || packages+=(bubblewrap)
-  if [ "$need_socat" = 1 ] && [ ! -x /usr/bin/socat ]; then packages+=(socat); fi
-fi
+[ -x /usr/bin/bwrap ] || packages+=(bubblewrap)
+if [ "$need_socat" = 1 ] && [ ! -x /usr/bin/socat ]; then packages+=(socat); fi
 if [ "${#packages[@]}" != 0 ]; then
   if [ "$mode" = observe ]; then
     printf 'bwrap=install\n'
     if [ ! -x /usr/bin/bwrap ]; then
       if [ "$owned" = 1 ]; then
         printf 'bwrap=repair\n'
-      elif [ "$eligible" = 1 ]; then
+      elif [ "$setting" != off ] && restricted; then
         printf 'bwrap=conditional\n'
       fi
       exit 0
@@ -407,19 +436,8 @@ if [ "$owned" = 1 ]; then
   exit 0
 fi
 
-if [ "$eligible" = 0 ] && [ "$need_bwrap" = 0 ]; then exit 0; fi
 if probe >/dev/null 2>&1; then exit 0; fi
-if [ "$eligible" = 0 ]; then
-  problem "the developer's Bubblewrap sandbox could not create user and network namespaces"
-  check_refusals
-fi
-check_parent "$policy_parent" || :
-check_parent "$record_parent" || :
-check_namespace
-check_admin_policy
-check_unit
-check_live absent
-[ -w "$aa/.load" ] || problem 'the yard cannot load AppArmor profiles'
+check_fresh_policy
 check_refusals
 if [ "$mode" = observe ]; then
   printf 'bwrap=enable\n'

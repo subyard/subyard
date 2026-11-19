@@ -3,7 +3,8 @@
 import argparse
 import ast
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import fcntl
@@ -13,7 +14,6 @@ import math
 import os
 from pathlib import Path
 import platform
-import queue
 import re
 import shutil
 import signal
@@ -32,6 +32,40 @@ STOP = threading.Event()
 HEARTBEAT_SECONDS = 60
 TERM_GRACE_SECONDS = 30
 KILL_GRACE_SECONDS = 10
+
+
+SLOT_COUNTS = (1, 2, 3, 4)
+SLOT_POLL_SECONDS = 5
+SLOT_STATES = {"available", "held", "provisioning", "draining", "quarantined", "recovering", "unavailable"}
+
+
+def slot_list(value):
+    names = value.split(",")
+    if any(not re.fullmatch(r"slot-\d{1,3}", name, re.ASCII) for name in names):
+        raise argparse.ArgumentTypeError("use comma-separated slot IDs, e.g. slot-1,slot-2")
+    slots = tuple(int(name[5:]) for name in names)
+    if 0 in slots or len(set(slots)) != len(slots):
+        raise argparse.ArgumentTypeError("slot IDs must be nonzero and unique")
+    return slots
+
+
+class SlotSelection(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        if getattr(namespace, self.dest) is not None:
+            parser.error(f"{option_string} can only be given once")
+        setattr(namespace, self.dest, values)
+
+
+def add_slot_arguments(parser):
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--slots", type=slot_list, action=SlotSelection, metavar="slot-N[,slot-N...]",
+                       help="use exactly these slots")
+    group.add_argument("--slot-count", type=int, choices=SLOT_COUNTS, action=SlotSelection,
+                       help="use slots 1 through N (default: slots 1 through 4)")
+
+
+def selected_slots(args):
+    return SLOT_COUNTS[:args.slot_count] if args.slots is None else args.slots
 
 
 @contextmanager
@@ -1103,19 +1137,7 @@ def is_live(name):
     return name == "p0-release-smoke" or name.startswith(("profile:", "vm:"))
 
 
-def slot_continues_after(result):
-    """A check that failed inside a recorded lease, with its cleanup and lease release witnessed as
-    passing, leaves the slot to the next check. Refusals, interruptions, timeouts, cleanup failures
-    (exit 3), missing cleanup evidence and attempts without a lease stop that slot, so an unusable
-    slot cannot turn later checks into failures. A typed capacity block keeps the slot separately."""
-    cleanup = result.get("cleanup") or {}
-    return (result.get("status") == "failed" and result.get("termination") == "exit"
-            and result.get("exit_code") not in (3, 4) and result.get("environment_evidence") == "recorded"
-            and result.get("cleanup_status") == "recorded" and "lease-release" in cleanup
-            and all(item.get("exit_code") == 0 for item in cleanup.values()))
-
-
-def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=(), types=(), with_vms=False):
+def preflight(output=None, only=(), exclude=(), broker_status=None, external_readiness=None, slots=SLOT_COUNTS, types=(), with_vms=False):
     if len(set(slots)) != len(slots) or any(type(slot) is not int or slot < 1 or slot > 999 for slot in slots):
         raise ValueError("slots must be unique integers from 1 to 999")
     if any(not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", kind) for kind in types):
@@ -1164,7 +1186,7 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
                                                "arm64": "GitHub CI native build and runtime smoke; separate from local physical acceptance"},
               "local_tools": {tool: shutil.which(tool) is not None for tool in
                               ("bash", "python3", "go", "make", "rg", "shellcheck", "git", "jq", "tar", "gzip", "sha256sum", "systemd-analyze", "script")},
-              "physical_prerequisites": ["explicitly approved slots", "available managed test environment; fresh leases per attempt"],
+              "physical_prerequisites": ["available managed test environment; fresh leases per attempt"],
               "broker": public_broker_status(broker_status)}
     broker = report["broker"]
     observed_slots = {int(slot["id"].split("-")[1]): slot for slot in broker.get("slots", [])}
@@ -1193,13 +1215,14 @@ def preflight(output=None, only=(), exclude=(), broker_status=None, external_rea
     summary = report["capacity_summary"]
     slot_text = ",".join(slot["id"] + ":" + slot["state"] + "/" + slot.get("type", "unknown") for slot in selected_slots) or "unknown"
     missing_tools = ",".join(summary["prerequisites"]["missing_local_tools"]) or "none"
+    physical_prerequisites = "managed-environment" if summary["prerequisites"]["physical"] else "none"
     external_unknown = sum(item["readiness"] != "available" for item in report["external_prerequisites"])
     numeric = {key: value if value is not None else "unknown"
                for key, value in {**summary["headroom_bytes"], "age": summary["age_seconds"]}.items()}
     print(f"CAPACITY slots={slot_text} types={','.join(summary['selected_types']) or 'unknown'} "
           f"memory_headroom_bytes={numeric['memory']} disk_headroom_bytes={numeric['disk']} "
           f"observed_at={summary['observed_at'] or 'unknown'} age_seconds={numeric['age']} planning={summary['planning']} "
-          f"prerequisites=approved-slots,managed-environment missing_local_tools={missing_tools} external_not_ready={external_unknown}",
+          f"prerequisites={physical_prerequisites} missing_local_tools={missing_tools} external_not_ready={external_unknown}",
           file=sys.stderr, flush=True)
     print(json.dumps(report, indent=2, sort_keys=True))
     return report
@@ -1314,7 +1337,108 @@ def print_acceptance_summary(output, receipt):
     print(f"ACCEPTANCE reproducible={receipt['reproducible_result']} overall={receipt['result']} receipt={output / 'receipt.json'}", flush=True)
 
 
+def broker_slots(env):
+    try:
+        response = subprocess.check_output(
+            # Broker status includes a resource probe bounded at three seconds.
+            ["timeout", "--kill-after=1", str(SLOT_POLL_SECONDS - 1), "bash", "dev/agent-e2e.sh", "--status", "--json"],
+            cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        value = json.loads(response)
+        if value["schema_version"] == 1 and value["status"] == "ok":
+            pool = value["pool"]
+            if not isinstance(pool, dict):
+                return {}
+            closed = pool.get("admission_closed") is True
+            return {int(slot["slot_id"][5:]): "admission-closed" if closed else slot["state"]
+                    for slot in pool["slots"]
+                    if re.fullmatch(r"slot-[0-9]{1,3}", slot["slot_id"]) and (closed or slot["state"] in SLOT_STATES)}
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        pass
+    return {}
+
+
+def dispatch_live(live, slots, env, attempt, *, recovery_wait_seconds=None):
+    if not live:
+        return
+    pending = deque(live)
+    active = {}
+    retries = deque()
+    retrying = False
+    error = None
+    deadline = None
+    if recovery_wait_seconds is None:
+        duration = re.fullmatch(r"([0-9]{1,6})([sm])", env["SUBYARD_E2E_CAPACITY_WAIT"])
+        recovery_wait_seconds = int(duration[1]) * (60 if duration[2] == "m" else 1) if duration else 0
+
+    with ThreadPoolExecutor(max_workers=len(slots)) as pool:
+        while pending or active or retries:
+            for future in tuple(active):
+                if not future.done():
+                    continue
+                name, _ = active.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    # Finish the first pass before surfacing the recording error.
+                    if error is None:
+                        error = exc
+                    continue
+                if result is None:
+                    continue
+                capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
+                                    and result.get("termination") == "exit"
+                                    and result.get("reason") in ("capacity_memory", "capacity_disk"))
+                if capacity_blocked and not retrying:
+                    retries.append(name)
+
+            if STOP.is_set():
+                if not active:
+                    break
+                wait(active, return_when=FIRST_COMPLETED)
+                continue
+            # Match the first-pass drain on master. Once retries are eligible,
+            # they can use any available slot while other retries run.
+            if not retrying and not pending and not active:
+                if error is not None:
+                    break
+                retrying = True
+            ready = retries if retrying else pending
+            if not active and not ready:
+                break
+            if active:
+                deadline = None
+            busy = {slot for _, slot in active.values()}
+            free = [slot for slot in slots if slot not in busy]
+            if ready and free and (deadline is None or time.monotonic() < deadline):
+                # Select at most one slot from each snapshot. Broker admission
+                # still decides whether the controller can acquire the lease.
+                observed = broker_slots(env)
+                if STOP.is_set():
+                    continue
+                if deadline is None or time.monotonic() < deadline:
+                    slot = next((slot for slot in free if observed.get(slot) == "available"), None)
+                    if slot is not None:
+                        name = ready.popleft()
+                        active[pool.submit(attempt, name, slot)] = (name, slot)
+                        deadline = None
+                        continue
+            if active:
+                timeout = SLOT_POLL_SECONDS if ready and free else None
+                wait(active, timeout=timeout, return_when=FIRST_COMPLETED)
+            else:
+                now = time.monotonic()
+                if deadline is None:
+                    deadline = now + recovery_wait_seconds
+                if now >= deadline:
+                    print("INCOMPLETE: no selected slot returned within the capacity wait", flush=True)
+                    break
+                STOP.wait(min(deadline - now, SLOT_POLL_SECONDS))
+    if error is not None:
+        raise error
+
+
 def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False, previous=()):
+    slots = slots or SLOT_COUNTS
     root, receipt = load_bound(output)
     if receipt.get("superseded"):
         raise ValueError("candidate was explicitly superseded; prepare a new candidate")
@@ -1351,8 +1475,6 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
     live = [name for name in pending if is_live(name)]
     durations = duration_estimates(receipt, previous)
     live.sort(key=lambda name: (name not in prioritized, 0 if name in prioritized else -durations.get(name, 0)))
-    if live and not slots:
-        raise ValueError("live checks require --slots N [N ...]")
     try:
         invocation = Invocation(output, receipt, selected, pending, excluded, requested)
     except OSError:
@@ -1455,38 +1577,17 @@ def run_checks(output, slots, only, rerun, first=(), exclude=(), with_vms=False,
                    SUBYARD_E2E_CANDIDATE_SHA256=receipt["candidate_bundle_sha256"],
                    SUBYARD_E2E_LOCAL_EVIDENCE=str(output),
                    SUBYARD_E2E_CONTROLLER_WORKSPACE=str(ROOT))
-        work = queue.Queue()
-        for name in live:
-            work.put(name)
-        retries = queue.Queue()
-        def collect(slot):
-            while not STOP.is_set():
-                try:
-                    name = work.get_nowait()
-                except queue.Empty:
-                    return slot
-                result = attempt(name, slot)
-                if result is None:
-                    return
+        def collect(name, slot):
+            result = attempt(name, slot)
+            if result is not None:
                 with lock:
                     receipt["checks"][name] = result
                     invocation.record(name, result)
                     save(output, receipt)
                     invocation.write()
-                capacity_blocked = (result["status"] == "blocked" and result.get("exit_code") == 4
-                                    and result.get("termination") == "exit"
-                                    and result.get("reason") in ("capacity_memory", "capacity_disk"))
-                if capacity_blocked and not retrying:
-                    retries.put(name)
-                if result["status"] != "passed" and not capacity_blocked and not slot_continues_after(result):
-                    return
-        with ThreadPoolExecutor(max_workers=max(1, len(slots))) as pool:
-            for retrying in (False, True):
-                futures = [pool.submit(collect, slot) for slot in slots]
-                slots = [slot for future in as_completed(futures) if (slot := future.result()) is not None]
-                # Wait for every first-pass controller to finish before retrying capacity blocks.
-                # Only workers that drained their queue remain safe to reuse.
-                work = retries
+            return result
+
+        dispatch_live(live, slots, env, collect)
         if source_fingerprint(root) != receipt["source_fingerprint"]:
             receipt["checks"]["verify"]["status"] = "failed"
             receipt["error"] = "source changed during acceptance"
@@ -2988,7 +3089,7 @@ def main():
     prep.add_argument("--prepared", type=Path, help="import bound CI sources/assets without rebuilding")
     run = sub.add_parser("run", help="run pending checks; each live retry acquires fresh VMs")
     run.add_argument("--output", type=Path, required=True)
-    run.add_argument("--slots", type=int, nargs="+", default=[])
+    add_slot_arguments(run)
     run.add_argument("--with-vms", action="store_true", help="also run optional VM smoke and profile checks")
     run.add_argument("--only", action="append", default=[])
     run.add_argument("--rerun", action="store_true")
@@ -3001,7 +3102,7 @@ def main():
     pre.add_argument("--exclude", action="append", default=[])
     pre.add_argument("--broker-status", type=Path, help="already-collected public broker JSON; no live query")
     pre.add_argument("--external-readiness", type=Path, help="JSON obligation IDs mapped to available/unavailable/unknown")
-    pre.add_argument("--slots", type=int, nargs="+", default=[], help="explicit slots being considered; does not reserve them")
+    add_slot_arguments(pre)
     pre.add_argument("--types", nargs="+", default=[], help="environment types being considered; planning inputs only")
     imp = sub.add_parser("import", help="explicitly inherit named passing evidence between bound candidates")
     imp.add_argument("--output", type=Path, required=True)
@@ -3032,7 +3133,7 @@ def main():
     args = parser.parse_args()
     if args.action == "preflight":
         report = preflight(args.output.resolve() if args.output else None, args.only, args.exclude,
-                           args.broker_status, args.external_readiness, args.slots, args.types, args.with_vms)
+                           args.broker_status, args.external_readiness, selected_slots(args), args.types, args.with_vms)
         return 1 if report["capacity_summary"]["planning"] == "insufficient" else 0
     output = args.output.resolve()
     if output == ROOT or (ROOT in output.parents and ROOT / ".build" not in output.parents):
@@ -3067,10 +3168,8 @@ def main():
     if args.action == "defer-external":
         with acceptance_lock(output):
             return defer_external(output, args.obligation, args.reason, args.authorization_reference)
-    if len(set(args.slots)) != len(args.slots) or any(slot < 1 or slot > 999 for slot in args.slots):
-        parser.error("slots must be unique integers from 1 to 999")
     with acceptance_lock(output):
-        return run_checks(output, args.slots, args.only, args.rerun, args.first, args.exclude, args.with_vms)
+        return run_checks(output, selected_slots(args), args.only, args.rerun, args.first, args.exclude, args.with_vms)
 
 
 def subprocess_failure_message(error):

@@ -181,8 +181,8 @@ EOF
 }
 install_network_manager() {
   # shellcheck disable=SC2024 # the operator owns the log
-  sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends network-manager \
-    >"$STATE/apt.log" 2>&1 || die 'network-manager install failed'
+  sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends file network-manager \
+    >"$STATE/apt.log" 2>&1 || die 'network-manager or file install failed'
   settle
   evidence "NetworkManager $(NetworkManager --version)"
 }

@@ -32,25 +32,27 @@ verify_smoke_state() {
 
 }
 
+capture_smoke_release_state() {
+  local state="$1" runtime="$OPERATOR_HOME/.subyard/runtime"
+  {
+    sudo -n stat -c '%n:%f:%u:%g:%N' "$runtime/current" "$runtime/previous" &&
+      sudo -n find "$V2_STATE_ROOT" -printf '%P:%y:%m:%U:%G:%l\n'
+  } | LC_ALL=C sort > "$state.metadata" || return
+  sudo -n find "$V2_STATE_ROOT" -type f -exec sha256sum -- {} + \
+    | LC_ALL=C sort > "$state.sha256"
+}
+
 establish_smoke_ownership() {
-  local phase state="$STATE_ROOT/ownership-enrollment" runtime="$OPERATOR_HOME/.subyard/runtime"
+  local state="$STATE_ROOT/ownership-enrollment"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   assert_registered_ownership
   # Historical public installers predate the runtime ownership inventory.
   # Stage the same verified release through the current public installer only
   # after the authentic update is ready; this changes no yard ownership.
-  for phase in before after; do
-    {
-      sudo -n stat -c '%n:%f:%u:%g:%N' "$runtime/current" "$runtime/previous"
-      sudo -n find "$V2_STATE_ROOT" -printf '%P:%y:%m:%U:%G:%l\n'
-    } | LC_ALL=C sort > "$state.$phase.metadata"
-    sudo -n find "$V2_STATE_ROOT" -type f -exec sha256sum -- {} + \
-      | LC_ALL=C sort > "$state.$phase.sha256"
-    if [ "$phase" = before ]; then
-      operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
-        "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --publish-only --yes
-    fi
-  done
+  capture_smoke_release_state "$state.before"
+  operator_env env YARD_RELEASE_BASE_URL="file://$RELEASE_ROOT" \
+    "$RELEASE_ROOT/subyard-install.sh" --version "$CANDIDATE_VERSION" --publish-only --yes
+  capture_smoke_release_state "$state.after"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
   cmp -s "$state.before.metadata" "$state.after.metadata" \
     && cmp -s "$state.before.sha256" "$state.after.sha256" \
@@ -59,19 +61,24 @@ establish_smoke_ownership() {
 }
 
 verify_predecessor_rollback_refusal() {
-  local path
+  local state="$STATE_ROOT/rollback-refusal" path missing=0
   for path in "$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"; do
-    sudo -n install -m 0600 "$path" "$STATE_ROOT/rollback-refusal-${path##*/}"
+    if ! sudo -n test -f "$path"; then
+      printf 'release smoke: required V2 rollback file %s is missing or is not a regular file\n' "${path##*/}" >&2
+      missing=1
+    fi
   done
+  [ "$missing" = 0 ] || die 'release smoke cannot verify predecessor rollback state'
+  capture_smoke_release_state "$state.before"
   if operator_yard update --rollback --yes > "$STATE_ROOT/predecessor-rollback.log" 2>&1; then
     die 'release smoke allowed incompatible published predecessor rollback'
   fi
   classify_epoch_rollback_refusal "$STATE_ROOT/predecessor-rollback.log" 'release smoke predecessor rollback'
+  capture_smoke_release_state "$state.after"
   assert_runtime_links "$CANDIDATE_RELEASE_TARGET" "$OLD_RELEASE_TARGET"
-  for path in "$V2_STATE_ROOT/history-checkpoint.json" "$V2_LEDGER" "$V2_JOURNAL"; do
-    sudo -n cmp -s "$STATE_ROOT/rollback-refusal-${path##*/}" "$path" \
-      || die "refused predecessor rollback changed ${path##*/}"
-  done
+  cmp -s "$state.before.metadata" "$state.after.metadata" \
+    && cmp -s "$state.before.sha256" "$state.after.sha256" \
+    || die 'refused predecessor rollback changed protected history or runtime links'
   ok 'incompatible published predecessor rollback refused without mutation'
 }
 

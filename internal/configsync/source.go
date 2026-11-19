@@ -236,11 +236,7 @@ func (snapshot *sourceSnapshot) readConfig(
 		}
 		return nil
 	}
-	applications, err := settingApplications(snapshot.catalog, source)
-	if err != nil {
-		return err
-	}
-	names, err := config.AssignedSettingNames(source)
+	names, err := config.AssignedSettingNames(source, func(string) ([]byte, error) { return content, nil })
 	if err != nil {
 		return err
 	}
@@ -268,7 +264,7 @@ func (snapshot *sourceSnapshot) readConfig(
 	target = filepath.ToSlash(filepath.Join(config.GitSettingsRelativePath, target))
 	snapshot.files[target] = candidateFile{
 		SourcePath: source, Content: content, Digest: digestBytes(content), Mode: 0o600,
-		Applications: applications,
+		Applications: settingApplications(snapshot.catalog, names),
 	}
 	snapshot.scalarPath[target] = source
 	return nil
@@ -566,11 +562,7 @@ func validateOwnedMode(path string, info os.FileInfo, directory bool) error {
 	return nil
 }
 
-func settingApplications(catalog config.Catalog, path string) ([]config.SettingApplication, error) {
-	names, err := config.AssignedSettingNames(path)
-	if err != nil {
-		return nil, err
-	}
+func settingApplications(catalog config.Catalog, names []string) []config.SettingApplication {
 	seen := map[config.SettingApplication]struct{}{}
 	var result []config.SettingApplication
 	for _, name := range names {
@@ -585,7 +577,7 @@ func settingApplications(catalog config.Catalog, path string) ([]config.SettingA
 		result = append(result, definition.Application)
 	}
 	sort.Slice(result, func(left, right int) bool { return result[left] < result[right] })
-	return result, nil
+	return result
 }
 
 func snapshotDigest(files map[string]candidateFile, manifest []byte) string {
