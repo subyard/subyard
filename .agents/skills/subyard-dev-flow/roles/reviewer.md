@@ -21,7 +21,8 @@ whole passing suite. Justify a needed extra check; request it through the coordi
 when it requires writes. If concurrent edits change the candidate, stop and report
 affected scope; recheck only invalidated claims after writing stops. Do not stash,
 reset or commit other work, bypass approvals or perform operator-only actions.
-In the first round also state whether a simpler approach would meet the requirements.
+In the first round also state whether a simpler approach would meet the requirements, and
+report a hand-written substitute for a shared primitive (SKILL.md, Work step 1) as a finding.
 Separately list the risks you see in the solution for long-term maintenance and future bugs,
 such as complexity, duplicated rules or fragile coupling. They are not findings and do not start
 another round; the coordinator decides what to do with them.
