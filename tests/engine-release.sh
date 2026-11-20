@@ -191,6 +191,7 @@ grep -Fxq './bin/yard' "$bundle_list" \
   && grep -Fxq './config/migrations.json' "$bundle_list" \
   && grep -Fxq './config/retired-components.json' "$bundle_list" \
   && grep -Fxq './config/release-transition.json' "$bundle_list" \
+  && grep -Fxq './config/release-rollback.json' "$bundle_list" \
   && grep -Fxq './config/preview/subyard-preview' "$bundle_list" \
   && grep -Fxq './config/preview/instructions.md' "$bundle_list" \
   && grep -Fxq './config/agents/codex/provision.sh' "$bundle_list" \
@@ -744,6 +745,13 @@ cp "$TMP/full-inventory.before" "$full_inventory"
   jq -e '.domains["power-metadata"] == {"epoch": 4, "applied": ["introduce-owner-publication-state-v1", "complete-registered-guest-disk-tmp-v3", "introduce-nm-device-guard-v4"]}' \
     "$SUBYARD_CONFIG_HOME/release-transition/v2/ledger.json" >/dev/null
   [ -x "$YARD_BIN_DIR/yard" ] || fail 'cold bootstrap did not publish entrypoints'
+  # The sealed engine answers the read-only history verdict without a repository.
+  active_release="$(readlink -f -- "$YARD_RUNTIME_ROOT/current")"
+  (cd / && env -i "PATH=$native_tools" "$active_release/bin/yard-engine" _history-compatibility \
+    "$YARD_RUNTIME_ROOT" "$SUBYARD_CONFIG_HOME" "$active_release") > "$TMP/bootstrap-cold-history.json" \
+    || fail 'sealed engine did not admit its own active history'
+  jq -e '.schemaVersion == 1 and .kind == "identity" and .admitted == true and .refusals == []' \
+    "$TMP/bootstrap-cold-history.json" >/dev/null || fail 'sealed history verdict is not identity'
 )
 # An installed Incus this account cannot reach (no incus-admin, or membership not
 # active in this session) does not block a cold installation: it owns no yard

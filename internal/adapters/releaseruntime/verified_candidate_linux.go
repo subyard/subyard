@@ -35,6 +35,9 @@ type verifiedPublishedCandidate struct {
 	registryDigest        releasetransition.Fingerprint
 	checkpointRaw         []byte
 	checkpointDigest      [sha256.Size]byte
+	rollbackRaw           []byte
+	rollbackDigest        [sha256.Size]byte
+	rollbackBound         bool
 	version               string
 	inventory             map[string]bool // true for directories
 	published             bool
@@ -184,6 +187,13 @@ func verifyOpenCandidateFiles(verified *verifiedPublishedCandidate, expectedDige
 					err = errors.New("published runtime checkpoint capability changed")
 				}
 				verified.checkpointDigest = entry.digest
+			}
+			if err == nil && entry.path == "config/release-rollback.json" {
+				verified.rollbackRaw, err = io.ReadAll(io.NewSectionReader(file, 0, releasetransition.MaxRollbackDeclarationBytes+1))
+				if err == nil && (len(verified.rollbackRaw) > releasetransition.MaxRollbackDeclarationBytes || sha256.Sum256(verified.rollbackRaw) != entry.digest) {
+					err = errors.New("published runtime rollback declaration changed")
+				}
+				verified.rollbackDigest, verified.rollbackBound = entry.digest, true
 			}
 		}
 		file.Close()
