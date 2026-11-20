@@ -176,7 +176,8 @@ func TestInstallationCheckNeverWaitsForAConfigurationWriter(t *testing.T) {
 	started := time.Now()
 	code, findings := reportOf(t, root, environment)
 	if code != 1 || time.Since(started) > 10*time.Second || findings["config.root.lock"].Class != application.FindingBlocker ||
-		findings["release.config"].Class != application.FindingNotInspected || findings["config.permissions.generated%2Fa"].Class != application.FindingDrift {
+		findings["release.config"].Class != application.FindingNotInspected || findings["config.permissions.generated%2Fa"].Class != application.FindingDrift ||
+		findings["host.credentials.config"].Class != application.FindingNotInspected || findings["state.stores.projects.config"].Class != application.FindingNotInspected {
 		t.Fatalf("code=%d findings=%+v", code, findings)
 	}
 }

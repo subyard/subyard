@@ -10,6 +10,7 @@ import (
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
 	"github.com/Subyard/Subyard/internal/uninstall"
+	"golang.org/x/sys/unix"
 )
 
 func TestInstallationObservationNeverWaitsForTheOwnerLock(t *testing.T) {
@@ -22,8 +23,13 @@ func TestInstallationObservationNeverWaitsForTheOwnerLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
+	observed := context.WithValue(ctx, observationKey{}, true)
+	// Selection capture, as in v0.17.3 activation-only recovery, asks for the waiting variant.
+	if unlock, err := runtime.lockReleaseSelection(observed, false); unlock != nil || !errors.Is(err, unix.EWOULDBLOCK) || ctx.Err() != nil {
+		t.Fatalf("observed selection capture waited for or bypassed the held owner lock: %v", err)
+	}
 	request := &releasetransition.ProcessRequest{Mode: releasetransition.ProcessInspect, RuntimeRoot: "/runtime", Target: "1.2.3-abc"}
-	unlock, err := runtime.lockReleaseTransition(context.WithValue(ctx, observationKey{}, true), "", request)
+	unlock, err := runtime.lockReleaseTransition(observed, "", request)
 	if unlock != nil || !errors.Is(err, domain.ErrPlanStale) || ctx.Err() != nil {
 		t.Fatalf("observation waited for or bypassed the held owner lock: %v", err)
 	}

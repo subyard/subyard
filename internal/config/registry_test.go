@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/domain"
+	"github.com/Subyard/Subyard/internal/profile"
 )
 
 func TestHostListenerCollisionsAcrossLocalYards(t *testing.T) {
@@ -221,5 +222,28 @@ func TestLocalYardSettingsCandidatesPreferNestedLayout(t *testing.T) {
 	}
 	if got := LocalYardSettingsCandidates("/operator/config/yards", "demo"); got != want {
 		t.Fatalf("LocalYardSettingsCandidates() = %v, want %v", got, want)
+	}
+}
+
+func TestIntegrationListenerCollisionsCompareParsedPorts(t *testing.T) {
+	metadata, err := profile.DecodeIntegration("synthetic", []byte(`{"schema_version":1,"settings":[{"name":"SYNTHETIC_PORT","type":"port","scopes":["shipped","host"],"application":"yard-init","minimum":1,"maximum":65535,"host_listener":true}],"provision":"missing.sh"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only integration listeners reserve against a stopped profile's listener.
+	stopped, err := profile.Decode("fixture", []byte(`{"schema_version":1,"settings":[{"name":"FIXTURE_PORT","type":"port","scopes":["host"],"application":"next-command","minimum":1024,"maximum":65535,"host_listener":true}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := BuildCatalog([]profile.Metadata{stopped}, []profile.IntegrationMetadata{metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := newSettingTracker()
+	tracker.catalog = catalog
+	collisions := newPortCollisions()
+	addDerivedPortCollisions(environment{"CODING_TOOL_INTEGRATIONS": "synthetic", "SYNTHETIC_PORT": "02222", "FIXTURE_PORT": "2222", "SSH_PORT": "2300"}, tracker, collisions)
+	if len(collisions.refusals) == 0 {
+		t.Fatal("equivalent port spelling evaded the integration listener collision")
 	}
 }

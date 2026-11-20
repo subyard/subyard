@@ -523,10 +523,13 @@ the repository name stays lowercase-safe. These encodings are not project identi
 `yard check` is a read-only installation check. It runs before owner recovery, audit and the
 release gate, with read-only SSH trust, also with `--yes`. It never applies repairs, starts
 yards, requests sudo or fetches release candidates. Readers that normally wait run in an
-observation mode instead: yard configuration is read under a shared configuration lock tried
-for at most two seconds (a writer is a `config.root.lock` blocker), the release inspection
-tries the owner lock once (a holder means release state is changing) and is bounded like
-status release readiness, and the host observation never probes the yard SSH port.
+observation mode instead: yard loads and the release inspection hold a shared configuration
+lock tried for at most two seconds (a writer is a `config.root.lock` blocker, and the readers of
+loaded yards are then `not-inspected`), the release inspection tries the owner lock once (a
+holder means release state is changing) and is bounded like status release readiness, and the
+host observation never probes the yard SSH port. Like `yard status`, it may create owner lock
+coordination files under `/tmp/subyard-owner-locks-<uid>`; it writes nothing in the
+configuration or data homes.
 Configuration is judged from persisted sources, as `config validate` does; host and state
 readers use the command environment. Sections run in a fixed order and each reports every
 independent finding:

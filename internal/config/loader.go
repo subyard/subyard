@@ -697,7 +697,7 @@ func addDerivedPortCollisions(values environment, tracker *settingTracker, colli
 			if other, ok := strings.CutPrefix(peer.Owner, "integration:"); ok && !slices.Contains(strings.Fields(values["CODING_TOOL_INTEGRATIONS"]), other) {
 				continue
 			}
-			if values[peer.Name] == values[definition.Name] {
+			if hostListenerPort(values[peer.Name]) == hostListenerPort(values[definition.Name]) {
 				collisions.add(definition.Name, peer.Name)
 			}
 		}

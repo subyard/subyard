@@ -62,6 +62,7 @@ func (runtime *Runtime) ownerDataHome() string {
 // The installation owner barrier serializes journal and runtime link writers.
 // Borrow it during CLI execution, or acquire it for standalone preparation.
 // The child inherits this barrier and can still acquire its own V2 store lock.
+// An installation observation never waits, whichever variant its caller asks for.
 func (runtime *Runtime) lockReleaseSelection(ctx context.Context, nonblocking bool) (func(), error) {
 	home := runtime.ownerDataHome()
 	if runtime.config.OwnerLockHeld != nil && runtime.config.OwnerLockHeld() {
@@ -74,7 +75,7 @@ func (runtime *Runtime) lockReleaseSelection(ctx context.Context, nonblocking bo
 		}
 		return func() { _ = lock.Close() }, nil
 	}
-	if nonblocking {
+	if nonblocking || observing(ctx) {
 		_, unlock, err := uninstall.TryOwnerLock(ctx, home)
 		return unlock, err
 	}

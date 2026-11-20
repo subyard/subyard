@@ -95,19 +95,26 @@ func installationDataHome(values map[string]string) string {
 
 // inspectInstallation returns the fixed config, release, host and state
 // sections. A section skips only the findings that depend on a failed read.
-// Yard configuration is read under a shared configuration lock that the
-// check never waits for beyond installationLockWait.
+// Yard configuration and the release inspection are read under a shared
+// configuration lock that the check never waits for beyond installationLockWait.
 func (cli *CLI) inspectInstallation(ctx context.Context, sources, command map[string]string) []application.InspectionSection {
 	var configuration, release, host, local []domain.Inspected
 	data := installationDataHome(sources)
 	home, err := config.ResolveConfigHome(sources["SUBYARD_OPERATOR_HOME"], sources)
-	locked := false
+	var unlock func()
+	// Readers of loaded yards are deferred when the configuration is unavailable.
+	deferred := func(cause string) {
+		message := "deferred by config." + cause
+		release = []domain.Inspected{{Key: "config", State: domain.InspectedDeferred, Resource: "release", Message: message}}
+		host = []domain.Inspected{{Key: "credentials.config", State: domain.InspectedDeferred, Resource: "credentials", Message: message}}
+		local = []domain.Inspected{{Key: "stores.projects.config", State: domain.InspectedDeferred, Resource: "projects", Message: message}}
+	}
 	if err != nil {
 		configuration = domain.InspectionRead("root.read", "config", err)
-		release = []domain.Inspected{{Key: "config", State: domain.InspectedDeferred, Resource: "release", Message: "deferred by config.root.read"}}
+		deferred("root.read")
 	} else {
 		lockCtx, cancel := context.WithTimeout(ctx, installationLockWait)
-		unlock, err := config.ObserveRoot(lockCtx, home)
+		unlock, err = config.ObserveRoot(lockCtx, home)
 		cancel()
 		if errors.Is(err, config.ErrConfigRootBusy) {
 			configuration = append(configuration, domain.Inspected{Key: "root.lock", State: domain.InspectedBlocked, Resource: home,
@@ -115,11 +122,9 @@ func (cli *CLI) inspectInstallation(ctx context.Context, sources, command map[st
 		} else {
 			configuration = append(configuration, domain.InspectionRead("root.lock", home, err)...)
 		}
-		if err == nil {
-			defer unlock()
-			locked = true
-		} else {
-			release = []domain.Inspected{{Key: "config", State: domain.InspectedDeferred, Resource: "release", Message: "deferred by config.root.lock"}}
+		if err != nil {
+			unlock = nil
+			deferred("root.lock")
 		}
 	}
 	var names []string
@@ -128,7 +133,7 @@ func (cli *CLI) inspectInstallation(ctx context.Context, sources, command map[st
 		names, err = config.LocalBatchYardNames(home)
 		configuration = append(configuration, domain.InspectionRead("registrations.read", "config", err)...)
 	}
-	if locked {
+	if unlock != nil {
 		for _, name := range names {
 			yard, err := cli.loadInstalledYard(name, sources)
 			if err != nil {
@@ -148,12 +153,13 @@ func (cli *CLI) inspectInstallation(ctx context.Context, sources, command map[st
 			effective = append(effective, yard)
 		}
 		release = cli.inspectInstalledRelease(ctx)
+		unlock()
 	}
 	if home != "" {
 		configuration = append(configuration, inspectConfigurationSources(home, data, loaded)...)
 	}
 	host = append(host, cli.inspectHost(ctx, effective)...)
-	local = inspectLocalState(ctx, home, data, names, effective)
+	local = append(local, inspectLocalState(ctx, home, data, names, effective)...)
 	return []application.InspectionSection{{ID: "config", Items: configuration}, {ID: "release", Items: release}, {ID: "host", Items: host}, {ID: "state", Items: local}}
 }
 
