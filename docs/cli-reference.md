@@ -6,10 +6,14 @@ Options belong to the invocations shown in each help block; a flag for one subco
 
 ## check
 
-verify the host can run a yard (read-only preflight).
+inspect the installation read-only; --host runs the host preflight.
 
 ```text
-Usage: yard check
+Usage: yard check [--json]
+       yard [-Y NAME] check --host
+Inspect the installed release, configuration, host and local state without changing them.
+Yard substrate is not inspected; run yard -Y NAME status and yard -Y NAME security.
+--host runs the host preflight for the selected yard.
 ```
 
 ## security

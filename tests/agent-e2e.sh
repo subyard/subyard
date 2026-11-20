@@ -1838,14 +1838,14 @@ EOF_PEER_INSTALL
           owned) : ;;
           *) fail 'fresh peer init received a fixture-created unmarked project' ;;
         esac ;;
-      check|'start --yes') [ "$state" = owned ] || fail 'peer yard was not initialized' ;;
+      'check --host'|'start --yes') [ "$state" = owned ] || fail 'peer yard was not initialized' ;;
       *) fail "unexpected peer yard command: $*" ;;
     esac
   }
   peer_yard_start
   [ "$(cat "$peer_calls")" = "$(printf '%s\n' \
-    'init --yes absent' 'init --yes owned' 'check owned' 'start --yes owned')" ] \
-    || fail 'peer startup did not preserve fresh init, repeated init, check and start'
+    'init --yes absent' 'init --yes owned' 'check --host owned' 'start --yes owned')" ] \
+    || fail 'peer startup did not preserve fresh init, repeated init, host check and start'
 )
 # End fresh peer init contract.
 
@@ -2154,7 +2154,7 @@ case "$*" in
     printf 'init\n' >> "$CASE_ROOT/calls"
     [ "$SCENARIO" != init-failure ] || exit 23;;
   'service register test-vms --yard test-yard --yes') printf 'service-register\n' >> "$CASE_ROOT/calls";;
-  '-Y test-yard check') printf 'check\n' >> "$CASE_ROOT/calls";;
+  '-Y test-yard check --host') printf 'check\n' >> "$CASE_ROOT/calls";;
   '-Y test-yard start --yes') printf 'start\n' >> "$CASE_ROOT/calls"; touch "$CASE_ROOT/running";;
   '-Y test-yard status') printf 'status\n' >> "$CASE_ROOT/calls";;
   '-Y test-yard _info')
@@ -5281,7 +5281,7 @@ smoke_rollback_fixture_contract() {
       current="$(cat "$STATE_ROOT/current")" previous="$(cat "$STATE_ROOT/previous")"
       case "$*" in
         --version|version) printf 'yard %s\n' "${current#releases/}" | sed 's/-[ab]\{12\}$//' ;;
-        check|"shell $SMOKE_PROJECT --yes -- grep -Fxq $MARKER retained.txt"|"shell $SMOKE_PROJECT --yes -- grep -Fxq guest-change retained.txt") return 0 ;;
+        check|'check --host'|"shell $SMOKE_PROJECT --yes -- grep -Fxq $MARKER retained.txt"|"shell $SMOKE_PROJECT --yes -- grep -Fxq guest-change retained.txt") return 0 ;;
         'init --yes')
           [ -f "$STATE_ROOT/enrollments" ] || die 'ordinary init preceded public inventory enrollment'
           assert_registered_ownership
@@ -6434,7 +6434,7 @@ operator_yard() {
       chmod 0600 "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env"
       if [[ "$scenario" = image-* ]] && [ ! -e "$F/first-install" ]; then touch "$F/first-install"; return 23; fi ;;
 
-    'test-vms status --json'|'-Y test-yard check') : ;;
+    'test-vms status --json'|'-Y test-yard check --host') : ;;
     'migrate --check --json')
       if [ -e "$OPERATOR_HOME/.config/subyard/yards/test-yard/config.env" ]; then
         printf '{"schemaVersion":1,"outcome":{"status":"ready","reachedGoal":true}}\n'

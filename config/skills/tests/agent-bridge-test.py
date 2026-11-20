@@ -96,6 +96,21 @@ elif pid and not (scopes / 'busy').exists():
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+    def running():
+        for stat in Path('/proc').glob('[0-9]*/stat'):
+            try:
+                fields = stat.read_text().rsplit(')', 1)[1].split()
+            except (OSError, IndexError):
+                continue
+            if fields[0] != 'Z' and int(fields[2]) == pid:
+                return True
+        return False
+
+    # Like systemctl stop, return once the scope's processes have exited and released their files.
+    deadline = time.monotonic() + 5
+    while '--no-block' not in args and running() and time.monotonic() < deadline:
+        time.sleep(0.01)
 '''
 FAKE = r'''#!/usr/bin/env python3
 import json

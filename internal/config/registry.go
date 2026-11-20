@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -261,6 +262,26 @@ func NativeTargetCollisions(yards []Loaded, owners map[string]string, selected s
 				}
 				summary := fmt.Sprintf("yards %s and %s share %s (%s). %s", x.Context.YardName, y.Context.YardName, kind.resource, strings.Join(kind.keys, "/"), action)
 				findings = append(findings, &domain.NativeTargetRefusal{Message: message, Summary: summary, Action: action})
+			}
+		}
+	}
+	return domain.CollectRefusals(findings...)
+}
+
+// HostListenerCollisions applies each yard's selected host listener
+// reservations across all local yards; remote owners reserve their own host.
+func HostListenerCollisions(yards []Loaded) error {
+	ordered := slices.DeleteFunc(slices.Clone(yards), func(yard Loaded) bool { return yard.Context.AccessKind == domain.AccessRemote })
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Context.YardName < ordered[j].Context.YardName })
+	var findings []error
+	for index, x := range ordered {
+		for _, y := range ordered[index+1:] {
+			for _, a := range hostListeners(x.Environment, x.Catalog) {
+				for _, b := range hostListeners(y.Environment, y.Catalog) {
+					if port := hostListenerPort(x.Environment[a]); port == hostListenerPort(y.Environment[b]) {
+						findings = append(findings, fmt.Errorf("yards %s %s and %s %s reserve the same host port %s", x.Context.YardName, a, y.Context.YardName, b, port))
+					}
+				}
 			}
 		}
 	}

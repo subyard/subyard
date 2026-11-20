@@ -220,16 +220,31 @@ func (store Connections) validateConnectionLocked(expected Connection) error {
 }
 
 func (store Connections) pendingRecoveryLocked() error {
+	pending, err := store.InspectPendingRecovery()
+	if err != nil {
+		return err
+	}
+	if len(pending) != 0 {
+		return errors.New("owner inventory recovery is pending; retry project execution")
+	}
+	return nil
+}
+
+// InspectPendingRecovery names the pending journals that mutation admission
+// refuses on, without a lock, a store or replay.
+func (store Connections) InspectPendingRecovery() ([]string, error) {
+	var pending []string
+	var failures []error
 	for _, path := range []string{
 		store.registrationPath(), store.connectionRepairPath(), store.hostIDAdoptionPath(), store.removalPath(),
 	} {
 		if _, err := os.Lstat(path); err == nil {
-			return errors.New("owner inventory recovery is pending; retry project execution")
+			pending = append(pending, filepath.Base(path))
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
+			failures = append(failures, err)
 		}
 	}
-	return nil
+	return pending, domain.CollectRefusals(failures...)
 }
 
 // WithAvailableLocalHostID fences registration/adoption of a controller owner

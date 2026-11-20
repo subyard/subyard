@@ -758,7 +758,7 @@ recreate_legacy_test_owner() {
   operator_yard -Y test-yard config set YARD_IMAGE "$image" YARD_IMAGE_FALLBACK "$image" --scope yard --yes
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'fresh test-yard installation changed the ordinary yard'
   operator_yard test-vms status --json
-  operator_yard -Y test-yard check
+  operator_yard -Y test-yard check --host
   operator_yard migrate --check --json | jq -e '
     .schemaVersion == 1 and .outcome.status == "ready" and
     all(.outcome.warnings[]?; contains("requires recreation") | not)' >/dev/null \
@@ -966,7 +966,7 @@ prepare() {
     || die 'runtime upgrade did not recreate test-yard as running'
   [ "$(incus config get "$INSTANCE" user.subyard.desired_power --project "$PROJECT")" = running ] \
     || die 'test-yard migration did not establish desired=running'
-  operator_yard -Y "$YARD_NAME" check
+  operator_yard -Y "$YARD_NAME" check --host
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'repeated init changed the ordinary yard'
   verify_config_workflow
@@ -1083,9 +1083,9 @@ finish() {
   operator_yard start --yes
   operator_yard -Y "$YARD_NAME" start --yes
   operator_yard status >/dev/null
-  operator_yard check
+  operator_yard check --host
   operator_yard -Y "$YARD_NAME" status >/dev/null
-  operator_yard -Y "$YARD_NAME" check
+  operator_yard -Y "$YARD_NAME" check --host
   # The test-vms lifecycle-only declaration has no startup readiness hook.
   # Establish inner broker readiness before binding the intentional config drift.
   wait_for_test_vm_broker || die 'test VM broker did not become ready after yard start'
@@ -1175,7 +1175,7 @@ finish() {
 
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'updates, rollback or reboots changed the ordinary yard'
   p0_retry_init_after_plan_stale operator_yard -Y "$YARD_NAME" init --yes
-  operator_yard -Y "$YARD_NAME" check
+  operator_yard -Y "$YARD_NAME" check --host
   verify_config_workflow
   operator_yard -Y "$YARD_NAME" teardown --yes
   ! incus project show "$PROJECT" >/dev/null 2>&1 \

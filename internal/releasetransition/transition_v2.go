@@ -4038,7 +4038,7 @@ func pendingConfigurationMessage(blockers []Blocker) string {
 
 func pendingConfigurationMessageWithin(blockers []Blocker, limit int) string {
 	for _, blocker := range blockers {
-		if !strings.HasSuffix(blocker.Resource, ".pending-configuration") {
+		if !blocker.PendingConfiguration() {
 			return blockers[0].Message
 		}
 	}

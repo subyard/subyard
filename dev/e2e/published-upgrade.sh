@@ -143,7 +143,7 @@ assert_ready() {
   operator_yard migrate --check --json >"$STATE_ROOT/migrate-check.log" 2>&1 \
     && jq -e '.outcome.status == "ready" and .outcome.reachedGoal == true' "$STATE_ROOT/migrate-check.log" >/dev/null \
     || die 'candidate does not report Ready after update'
-  operator_yard check >"$STATE_ROOT/check.log" 2>&1 || die 'yard check failed after update'
+  operator_yard check --host >"$STATE_ROOT/check.log" 2>&1 || die 'yard check --host failed after update'
   [ "$(instance_uuid)" = "$UUID_BEFORE" ] || die 'update replaced the yard instance'
   guest_marker="$(guest cat "$GUEST_MARKER" </dev/null)" || die 'update lost guest data'
   [ "$guest_marker" = "$MARKER" ] || die "update changed guest data: '$guest_marker'"

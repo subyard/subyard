@@ -50,6 +50,9 @@ coordinator, and do not create or close shared task files or start another full 
    remaining steps current; change the agreed scope only with the user's agreement.
    For a substantial change, first run a read-only design pass listing invariants, failure,
    interruption, upgrade, security and privacy cases and the simplest structure covering them.
+   The developer names the shared primitive for each invariant (writes, private directories,
+   refusal collection, resume); a hand-written substitute is a first-round review finding.
+   The interruption harness and the refusal table test run before review.
 2. Preserve unrelated edits and follow the affected component's architecture.
    Make host fixes reproducible through product setup, including repeat runs.
    For ordinary checks, inherit shared Go caches and developer Cargo/Rustup homes;
@@ -71,6 +74,9 @@ coordinator, and do not create or close shared task files or start another full 
   preparation, and target that base; branch from an unmerged PR branch only with the operator's
   agreement. Commit and push your branch without asking. The operator invokes
   [subyard-private-sync](../subyard-private-sync/SKILL.md) manually to sync the private overlay.
+- By default a change ships as one PR: the first commit adds the mechanism without changing
+  behavior, the second changes behavior, and the first review round goes commit by commit.
+  Moving existing code onto shared primitives goes in separate PRs. There is no line-count threshold.
 - After review accepts the candidate, commit it. A fresh [describer](roles/describer.md) session
   returns the title and body from the diff and your short public brief: problem, expected
   behavior, checks run and known limits, without private details. Save the body outside the

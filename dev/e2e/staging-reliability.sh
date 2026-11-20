@@ -1139,7 +1139,7 @@ PYBASELINE
   timeout --signal=TERM --kill-after=10 30 env -u SUBYARD_E2E_ROLLOUT_YARD \
     SUBYARD_E2E_STATE_DIR="$STATE_PARENT/registration-probe" SUBYARD_E2E_ROUTE_REGISTRY="$SUBYARD_HOME/e2e/routes" "$RUNNER" --status --json \
     | jq -e '.status == "ok"' >/dev/null || die 'agent status without --yard did not discover the broker'
-  runtime_yard -Y test-yard check
+  runtime_yard -Y test-yard check --host
   # Recreation replaced the marked project; mark its unmarked successor for cleanup.
   name="$(incus project get "$PROJECT" user.subyard-e2e.image-cache)"
   [ -z "$name" ] || [ "$name" = "$MARKER" ] || die 'recreated project has a foreign fixture marker'

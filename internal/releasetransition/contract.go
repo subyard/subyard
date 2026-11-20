@@ -5,6 +5,7 @@ package releasetransition
 import (
 	"context"
 	"slices"
+	"strings"
 
 	"github.com/Subyard/Subyard/internal/domain"
 )
@@ -84,6 +85,12 @@ type Blocker struct {
 	Resource string      `json:"resource,omitempty"`
 	Message  string      `json:"message"`
 	Retry    string      `json:"retry"`
+}
+
+// PendingConfiguration reports the engine's typed, expected configuration
+// deferral: activation.<owner>.pending-configuration.
+func (blocker Blocker) PendingConfiguration() bool {
+	return strings.HasSuffix(blocker.Resource, ".pending-configuration")
 }
 
 type Inspection struct {

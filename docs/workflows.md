@@ -57,7 +57,8 @@ normal removal deletes the yard workspace; `--soft` keeps that copy after removi
 
 | Command | Purpose |
 | --- | --- |
-| `yard check` | Verify that the owner host can run a yard. |
+| `yard check` | Inspect the installation read-only; `--json` for scripts. |
+| `yard check --host` | Verify that the owner host can run a yard. |
 | `yard init` | Install or reconcile the yard and its core configuration. |
 | `yard start`, `yard stop` | Manage the selected yard instance. |
 | `yard status` | Summarize every known yard, or show details for an explicitly selected yard. |

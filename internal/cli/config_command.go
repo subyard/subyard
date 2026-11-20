@@ -22,6 +22,7 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
+	"github.com/Subyard/Subyard/internal/shellquote"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
 
@@ -1360,39 +1361,74 @@ func effectiveConfigAssets(loaded config.Loaded) ([]configAsset, error) {
 }
 
 func validateManagedConfigTree(root string) error {
+	return domain.CollectRefusals(inspectManagedConfigTree(root)...)
+}
+
+// configPermissionError is a refused managed config path. Only a group- or
+// world-writable path the operator owns has the exact repair chmod go-w.
+type configPermissionError struct {
+	path      string
+	cause     error
+	writeable bool
+}
+
+func (err *configPermissionError) Error() string { return err.cause.Error() }
+
+func (err *configPermissionError) repair() string {
+	if err.writeable {
+		return "chmod go-w -- " + shellquote.Word(err.path)
+	}
+	return ""
+}
+
+// configReadError is a managed config path that could not be read; no mode
+// repair applies to it.
+type configReadError struct {
+	path  string
+	cause error
+}
+
+func (err *configReadError) Error() string { return err.cause.Error() }
+func (err *configReadError) Unwrap() error { return err.cause }
+
+// inspectManagedConfigTree applies the config status/apply permission
+// predicate and keeps every independent refusal instead of the first one.
+func inspectManagedConfigTree(root string) []error {
 	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return err
+		return []error{err}
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("config root must be a real directory")
+		return []error{errors.New("config root must be a real directory")}
 	}
 	uid := uint32(os.Getuid())
-	if err := validateConfigOwnerMode(root, info, true, uid); err != nil {
-		return err
+	var findings []error
+	check := func(path string, info os.FileInfo, directory bool) {
+		if err := validateConfigOwnerMode(path, info, directory, uid); err != nil {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			kind := directory && info.IsDir() || !directory && info.Mode().IsRegular() && ok && stat.Nlink == 1
+			findings = append(findings, &configPermissionError{path, err, ok && stat.Uid == uid && kind && info.Mode().Perm()&0o022 != 0})
+		}
 	}
+	check(root, info, true)
 	for _, relative := range []string{"config.env", "overrides", "yards", "secrets", "generated"} {
-		path := filepath.Join(root, relative)
-		if err := filepath.WalkDir(path, func(path string, entry os.DirEntry, walkErr error) error {
+		_ = filepath.WalkDir(filepath.Join(root, relative), func(path string, entry os.DirEntry, walkErr error) error {
 			if errors.Is(walkErr, os.ErrNotExist) {
 				return filepath.SkipDir
 			}
-			if walkErr != nil {
-				return walkErr
-			}
 			info, err := os.Lstat(path)
-			if err != nil {
-				return err
+			if walkErr != nil || err != nil {
+				findings = append(findings, &configReadError{path, domain.CollectRefusals(walkErr, err)})
+				return nil
 			}
-			return validateConfigOwnerMode(path, info, entry.IsDir(), uid)
-		}); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+			check(path, info, entry.IsDir())
+			return nil
+		})
 	}
-	return nil
+	return findings
 }
 
 func validateConfigOwnerMode(path string, info os.FileInfo, directory bool, uid uint32) error {
@@ -1422,8 +1458,14 @@ func validateConfigOwnerMode(path string, info os.FileInfo, directory bool, uid 
 }
 
 func legacyConfigInputs(loaded config.Loaded) ([]string, error) {
+	return legacyConfigInputsAt(loaded.Context.Paths.ConfigHome, loaded.Context.Paths.DataHome)
+}
+
+// legacyConfigInputsAt lists legacy inputs relative to configHome; it needs
+// no loaded yard configuration.
+func legacyConfigInputsAt(configHome, dataHome string) ([]string, error) {
 	var result []string
-	legacyRoot := filepath.Join(loaded.Context.Paths.ConfigHome, "secrets", "legacy")
+	legacyRoot := filepath.Join(configHome, "secrets", "legacy")
 	if err := filepath.WalkDir(legacyRoot, func(path string, entry os.DirEntry, err error) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return filepath.SkipDir
@@ -1432,19 +1474,19 @@ func legacyConfigInputs(loaded config.Loaded) ([]string, error) {
 			return err
 		}
 		if !entry.IsDir() {
-			relative, _ := filepath.Rel(loaded.Context.Paths.ConfigHome, path)
+			relative, _ := filepath.Rel(configHome, path)
 			result = append(result, relative)
 		}
 		return nil
 	}); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	flat, _ := filepath.Glob(filepath.Join(loaded.Context.Paths.ConfigHome, "yards", "*.env"))
+	flat, _ := filepath.Glob(filepath.Join(configHome, "yards", "*.env"))
 	for _, path := range flat {
-		relative, _ := filepath.Rel(loaded.Context.Paths.ConfigHome, path)
+		relative, _ := filepath.Rel(configHome, path)
 		result = append(result, relative)
 	}
-	if info, err := os.Lstat(filepath.Join(loaded.Context.Paths.DataHome, "operator-overlay")); err == nil && info.IsDir() {
+	if info, err := os.Lstat(filepath.Join(dataHome, "operator-overlay")); err == nil && info.IsDir() {
 		result = append(result, "legacy-data:operator-overlay (ignored)")
 	}
 	sort.Strings(result)

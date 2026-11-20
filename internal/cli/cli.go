@@ -537,7 +537,7 @@ func (cli *CLI) Run(ctx context.Context) int {
 	}
 	if !readOnlyInvocation && !commandHelpRequested(commandArguments) && (slices.Contains([]string{"@update", "@current-migration", "@host", "@config"}, definition.Handler) || definition.Handler == "@teardown" && slices.Contains(commandArguments, "--full")) {
 		home := firstNonempty(cli.env["SUBYARD_HOME"], filepath.Join(firstNonempty(cli.env["SUBYARD_OPERATOR_HOME"], cli.env["HOME"]), ".subyard"))
-		pending, err := filepath.Glob(filepath.Join(home, "cleanup", "*", "journal.json"))
+		pending, err := hardCleanupJournalPaths(home)
 		if err != nil || len(pending) > 0 {
 			cli.errorf("hard cleanup is pending; finish selected-yard recovery before changing shared owner configuration or runtime")
 			return 1
@@ -583,6 +583,8 @@ func (cli *CLI) Run(ctx context.Context) int {
 		return cli.runSelectionSourceRepair(ctx, yard, admission.earlyArguments, yes)
 	case earlyConfigValidate:
 		return cli.runConfigValidate(yard, admission.earlyArguments)
+	case earlyInstallationCheck:
+		return cli.runInstallationCheck(ctx, explicit, commandArguments)
 	case earlyHelp:
 		if cli.env["SUBYARD_NO_AUDIT"] == "" {
 			cli.audit(name, commandArguments, yard, "")

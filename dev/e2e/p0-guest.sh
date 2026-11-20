@@ -545,7 +545,7 @@ owner_release_contract() {
     || die 'current owner runtime was not installed'
   p0_retry_init_after_plan_stale "$yard" -Y test-yard init --yes
   "$yard" service register test-vms --yard test-yard --yes >/dev/null
-  "$yard" -Y test-yard check
+  "$yard" -Y test-yard check --host
   "$yard" -Y test-yard start --yes
   "$yard" -Y test-yard status >/dev/null
   yard_info="$("$yard" -Y test-yard _info)"
@@ -726,7 +726,7 @@ owner() (
   p0_apply_release_update ./bin/yard "$P0_OWNER_VERSION"
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
-  ./bin/yard -Y test-yard check
+  ./bin/yard -Y test-yard check --host
   p0_retry_init_after_plan_stale ./bin/yard -Y test-yard init --yes
   ./bin/yard service register test-vms --yard test-yard --yes >/dev/null
   ! incus exec yard-test-yard --project subyard-test-yard -- \
@@ -1209,9 +1209,19 @@ peer_yard_start() {
   chmod 0600 "$PEER_ROOT/config/config.env"
   timeout --foreground "${P0_PEER_YARD_TIMEOUT:-1800}" "$PEER_YARD_ENTRY" init --yes
   timeout --foreground "${P0_PEER_YARD_TIMEOUT:-1800}" "$PEER_YARD_ENTRY" init --yes
-  "$PEER_YARD_ENTRY" check
+  "$PEER_YARD_ENTRY" check --host
   "$PEER_YARD_ENTRY" start --yes
   printf 'ok: VM2 release-installed remote yard is running\n'
+}
+
+# The clean release install converges: the read-only installation check is ok.
+peer_installation_check() {
+  local report
+  [ "$SUBYARD_E2E_VM" = 2 ] || die 'peer installation check requires VM2'
+  report="$("$PEER_YARD_ENTRY" check --json </dev/null)" \
+    && jq -e '.status == "ok"' <<<"$report" >/dev/null \
+    || die "installation check of the clean peer install is not ok: $report"
+  printf 'ok: VM2 installation check of the clean install is ok\n'
 }
 
 peer_info() {
@@ -2065,6 +2075,7 @@ capacity_verify_cleanup() {
   peer-authorize) peer_authorize ;;
   peer-probe) peer_probe ;;
   peer-yard-start) peer_yard_start ;;
+  peer-installation-check) peer_installation_check ;;
   peer-projects) peer_projects ;;
   peer-projects-offline) peer_projects_offline ;;
   peer-projects-finish) peer_projects_finish ;;

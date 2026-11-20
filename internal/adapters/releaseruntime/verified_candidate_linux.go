@@ -506,11 +506,7 @@ func (runtime *Runtime) runVerifiedRuntimeEngine(
 		if request == nil || request.RuntimeRoot != runtimeRoot {
 			return staleRetainedSelection(runtimeRoot, engine.candidate.release)
 		}
-		readOnlyGate := grant == "" && journalGateLaunch(ctx, request) != nil
-		unlock, err := runtime.lockReleaseSelection(ctx, readOnlyGate)
-		if readOnlyGate && errors.Is(err, unix.EWOULDBLOCK) {
-			return staleReleaseState(runtimeRoot, request.Target, "release state is changing; retry", "retry the command")
-		}
+		unlock, err := runtime.lockReleaseTransition(ctx, grant, request)
 		if err != nil {
 			return err
 		}
@@ -696,4 +692,16 @@ func (runtime *Runtime) pinCandidateRoot(candidate *verifiedPublishedCandidate) 
 	runtime.pinnedCandidateRoot = os.NewFile(uintptr(descriptor), "pinned-release-root")
 	runtime.pinnedCandidateRelease = candidate.candidate.release
 	return nil
+}
+
+// lockReleaseTransition serializes a release transition launch with owner
+// writers. An unauthorized launch from a journal gate or an installation
+// observation never waits: a held owner lock means release state is changing.
+func (runtime *Runtime) lockReleaseTransition(ctx context.Context, grant releasetransition.Authorization, request *releasetransition.ProcessRequest) (func(), error) {
+	readOnlyGate := grant == "" && (journalGateLaunch(ctx, request) != nil || observing(ctx))
+	unlock, err := runtime.lockReleaseSelection(ctx, readOnlyGate)
+	if readOnlyGate && errors.Is(err, unix.EWOULDBLOCK) {
+		return nil, staleReleaseState(request.RuntimeRoot, request.Target, "release state is changing; retry", "retry the command")
+	}
+	return unlock, err
 }
