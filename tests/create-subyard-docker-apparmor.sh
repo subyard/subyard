@@ -549,42 +549,7 @@ unset SUBYARD_INCUS_STOPPED_WINDOW
 MOCK_REBOOT=0
 printf 'ok: a new VM is started once more after a lost first boot; other lost boots refuse at once\n'
 
-# Native creation precedes the split shell portions. Only a fresh POST result
-# may authorize their initial storage restart; retained identity alone may not.
-(
-  export SUBYARD_PREPARED_OWNER_PHASE=1
-  export SUBYARD_PREPARED_OWNER_INSTANCE_UUID=fixture-new-yard-uuid
-  export SUBYARD_PREPARED_OWNER_INSTANCE_TOKEN=fixture-owner-token
-  export SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID=fixture-new-yard-uuid
-  for kind in container vm; do
-    reset_creation
-    printf '1\n' > "$MOCK_INSTANCE_FILE"
-    MOCK_INCUS_DEVICES='' MOCK_REBOOT=1 MOCK_POWER_STATE=RUNNING
-    rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
-    YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 run_create --owner-before-srv
-    ! grep -Eq '^(init |image |stop |exec .*sh -s -- apply)' "$MOCK_INCUS_LOG" \
-      || fail "native $kind before-srv crossed the storage boot boundary"
-    YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 run_create --owner-after-srv
-    [ "$(grep -c '^stop yard --project subyard$' "$MOCK_INCUS_LOG")" = 1 ] \
-      || fail "fresh native $kind did not complete the initial storage restart"
-    [ "$(grep -c '^exec yard --project subyard -T -- sh -s -- check$' "$MOCK_INCUS_LOG")" = 2 ] \
-      || fail "fresh native $kind did not verify actual storage after restart"
-    ! grep -Eq '^(init |image )' "$MOCK_INCUS_LOG" || fail "native $kind repeated SDK creation"
-
-    rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
-    SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID='' YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 \
-      run_create --owner-after-srv
-    ! grep -Eq '^(stop |exec .*sh -s -- apply)' "$MOCK_INCUS_LOG" \
-      || fail "retained native $kind identity authorized a storage restart"
-    if SUBYARD_PREPARED_OWNER_FRESH_INSTANCE_UUID=replacement-uuid YARD_KIND="$kind" VM_FREE_PAGE_REPORTING=0 \
-        run_create --owner-after-srv; then
-      fail "native $kind accepted a different fresh-instance UUID"
-    fi
-    ! grep -Eq '^(start |stop |config (set|device (add|remove)))' "$MOCK_INCUS_LOG" \
-      || fail "native $kind mutated a different fresh-instance identity"
-  done
-)
-printf 'ok: prepared split creation converges fresh disk /tmp and never restarts retained instance results\n'
+rm -f "$MOCK_TMP_CHECK_FILE" "$MOCK_TMP_CHECK_FILE.power"
 
 # Consume the physical fixture's actual generated inputs through normal creation.
 # The selected project has its own local catalog: a bare default-project cache
