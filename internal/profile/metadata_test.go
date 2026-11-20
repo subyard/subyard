@@ -202,3 +202,24 @@ func TestFailureScopeIsYardOnlyOnYardLocalOwners(t *testing.T) {
 		t.Fatal("integration lifecycle accepted an undeclared failure scope")
 	}
 }
+
+func TestIntegrationMetadataOwnsApprovalSources(t *testing.T) {
+	metadata, err := DecodeIntegration("synthetic", []byte(`{"schema_version":2,"provision":"missing.sh","artifacts":[{"id":"config","kind":"config","source":"base.json","approval_sources":{"git":"git.json","sudo":"sudo.json"},"destination":".synthetic/config.json","format":"destination"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := metadata.Data()
+	if err != nil || len(data.Artifacts) != 1 || data.Artifacts[0].ApprovalSources["sudo"] != "sudo.json" {
+		t.Fatalf("approval sources lost: %#v, %v", data.Artifacts, err)
+	}
+	data.Artifacts[0].ApprovalSources["sudo"] = "consumer.json"
+	definition := metadata.definition()
+	definition.Artifacts[0].ApprovalSources["git"] = "definition.json"
+	clone := definition.Clone()
+	clone.Artifacts[0].ApprovalSources["git"] = "clone.json"
+	again, err := metadata.Data()
+	if err != nil || again.Artifacts[0].ApprovalSources["sudo"] != "sudo.json" || again.Artifacts[0].ApprovalSources["git"] != "git.json" ||
+		definition.Artifacts[0].ApprovalSources["git"] != "definition.json" {
+		t.Fatalf("approval sources alias another copy: %#v", again.Artifacts[0].ApprovalSources)
+	}
+}
