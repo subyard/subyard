@@ -119,7 +119,8 @@ func TestObserveRefusalsAndWriteOnRealGuestPrograms(t *testing.T) {
 			{kind: "fifo", state: "unreadable", step: replace, write: "unreadable"},
 			{kind: "symlinked parent", state: "unreadable", step: replace, write: "unreadable"},
 			{kind: "invalid document", state: "drift", write: "failed"},
-			{kind: "broken baseline", state: "unknown", step: "correct or remove it in the yard, then run %s", write: "failed"},
+			// Nothing the operator does to the file is known to help: only a retry.
+			{kind: "broken baseline", state: "unassessed", step: "run %s", write: "failed"},
 		} {
 			if format == "" && (test.kind == "invalid document" || test.kind == "broken baseline") {
 				// Raw bytes have no document or baseline: an invalid one is drift.
@@ -299,13 +300,60 @@ func TestCompareAndWriteRequests(t *testing.T) {
 	if _, err := Observe(context.Background(), nil, localYard, []Desired{{Destination: "/etc/passwd"}}); err == nil {
 		t.Fatal("observation outside the home accepted")
 	}
-	// A guest refusal renders only a fixed host reason, never guest text.
-	if problem := observationProblem([]byte("config materialization: unowned-invalid-destination-v1 JSON; private document details"), "json"); problem != "the document is not valid JSON and Subyard does not own it" {
+	// A guest refusal is a closed cause, never guest text.
+	if problem := observationProblem([]byte("config materialization: unowned-invalid-destination-v1 JSON; private document details"), "json"); problem != ProblemUnownedInvalid {
 		t.Fatalf("problem %q", problem)
 	}
 	for _, stderr := range []string{"config materialization: changed", "config materialization: guest-chosen text"} {
-		if problem := observationProblem([]byte(stderr), "json"); problem != "structured configuration observation failed" {
-			t.Fatalf("guest text %q rendered as %q", stderr, problem)
+		if problem := observationProblem([]byte(stderr), "json"); problem != ProblemUnassessed {
+			t.Fatalf("guest text %q read as %q", stderr, problem)
+		}
+	}
+}
+
+// A refusal report carries each file's destination, state and InitOnly; the
+// decoded refusal renders as the writer's. Anything else relays nothing.
+func TestRefusalReportRoundTripsOnlyTheClosedVocabulary(t *testing.T) {
+	files := []File{
+		{Label: "private-label", Destination: "/home/dev/.config/agent.md", Token: TokenUnreadable},
+		{Destination: "/home/dev/.config/a.json", Token: PayloadToken([]byte("x")), Problem: ProblemChanged},
+		{Destination: "/home/dev/.config/b.json", Problem: ProblemUnownedInvalid, InitOnly: true},
+		{Destination: "/home/dev/.config/c.toml", Problem: ProblemUnassessed},
+	}
+	written := domain.CollectRefusals(Refusals("named", files)...)
+	payload := EncodeRefusals(written)
+	if !bytes.Contains(payload, []byte(`{"destination":"/home/dev/.config/b.json","state":"unowned-invalid","init_only":true}`)) || bytes.Contains(payload, []byte("private-label")) {
+		t.Fatalf("report %s", payload)
+	}
+	if relayed := domain.CollectRefusals(DecodeRefusals("named", payload)...); relayed == nil || relayed.Error() != written.Error() {
+		t.Fatalf("relayed %v, written %v", relayed, written)
+	}
+	for _, state := range []string{"unreadable", "changed", "unowned-invalid", "unassessed"} {
+		single := []byte(`{"files":[{"destination":"/home/dev/a","state":"` + state + `","init_only":false}]}`)
+		if relayed := DecodeRefusals("named", single); len(relayed) != 1 || relayed[0].(FileRefusal).File.State() != state {
+			t.Fatalf("%s relayed as %v", state, relayed)
+		}
+	}
+	// Only a failure that consists of file refusals has a report.
+	for _, failure := range []error{nil, errors.New("apply agent: failed"), domain.CollectRefusals(FileRefusal{Yard: "named", File: files[0]}, errors.New("other")), fmt.Errorf("wrapped: %w", FileRefusal{Yard: "named", File: files[0]})} {
+		if payload := EncodeRefusals(failure); payload != nil {
+			t.Fatalf("report %s for %v", payload, failure)
+		}
+	}
+	for name, payload := range map[string]string{
+		"empty":             ``,
+		"no files":          `{"files":[]}`,
+		"unknown state":     `{"files":[{"destination":"/home/dev/a","state":"drift","init_only":false}]}`,
+		"unknown field":     `{"files":[{"destination":"/home/dev/a","state":"changed","init_only":false,"message":"guest text"}]}`,
+		"outside the home":  `{"files":[{"destination":"/etc/passwd","state":"changed","init_only":false}]}`,
+		"unclean path":      `{"files":[{"destination":"/home/dev/../root/a","state":"changed","init_only":false}]}`,
+		"trailing value":    `{"files":[]} {}`,
+		"garbage":           `not json`,
+		"oversized":         `{"files":[` + strings.Repeat(`{"destination":"/home/dev/a","state":"changed","init_only":false},`, MaxRefusalReport/60) + `{"destination":"/home/dev/a","state":"changed","init_only":false}]}`,
+		"one invalid entry": `{"files":[{"destination":"/home/dev/a","state":"changed","init_only":false},{"destination":"/home/dev/b","state":"other","init_only":false}]}`,
+	} {
+		if relayed := DecodeRefusals("named", []byte(payload)); len(relayed) != 0 {
+			t.Fatalf("%s relayed %v", name, relayed)
 		}
 	}
 }

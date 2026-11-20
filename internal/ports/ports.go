@@ -201,6 +201,9 @@ type ConfigFileConsent struct {
 	Token       string `json:"token"`
 }
 
+// ConfigApplier refreshes one yard's guest config files. A refresh that
+// refuses files returns the writer's typed file refusals, which name the
+// operator's next step, whether it ran in process or as a child.
 type ConfigApplier interface {
 	ApplyConfig(context.Context, string, *ConfigConsent) error
 }

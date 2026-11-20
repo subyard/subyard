@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Subyard/Subyard/internal/adapters/configmaterial"
 	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
@@ -96,6 +97,7 @@ type initPlatformFixture struct {
 	applyErr                  error
 	configs                   int
 	consents                  []*ports.ConfigConsent
+	refreshErr                error
 	configsConverged          bool
 	configChecks              []bool
 	teardowns                 int
@@ -517,6 +519,62 @@ func TestInitTokenSources(t *testing.T) {
 			if len(platform.consents) != 1 || (want == nil) != (platform.consents[0] == nil) ||
 				want != nil && !reflect.DeepEqual(*platform.consents[0], *want) {
 				t.Fatalf("refresh consents %#v, want %#v", platform.consents, want)
+			}
+		})
+	}
+}
+
+// An init --configs child reports a refresh that failed only with file
+// refusals on the descriptor its parent named and hides the name from
+// its own children; any other outcome reports nothing.
+func TestInitConfigsReportsRefusedFiles(t *testing.T) {
+	refused := domain.CollectRefusals(
+		configmaterial.FileRefusal{Yard: "default", File: configmaterial.File{Destination: "/home/dev/a.md", Token: configmaterial.TokenUnreadable, InitOnly: true}},
+		configmaterial.FileRefusal{Yard: "default", File: configmaterial.File{Destination: "/home/dev/b.json", Problem: configmaterial.ProblemChanged}})
+	for name, test := range map[string]struct {
+		refresh error
+		want    []byte
+	}{
+		"file refusals": {refresh: refused, want: configmaterial.EncodeRefusals(refused)},
+		"other failure": {refresh: errors.Join(refused, errors.New("apply agent: failed"))},
+		"refreshed":     {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root, environment, _ := nativeFixture(t)
+			if err := os.MkdirAll(filepath.Join(root, "state"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeCLIFile(t, filepath.Join(root, "state", "host-id"), "5034c950-74d0-46c4-9428-b7835e602109\n", 0o600)
+			report := filepath.Join(testkit.TempDir(t), "report")
+			testkit.WriteFile(t, report, nil, 0o600)
+			handle, err := os.OpenFile(report, os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer handle.Close()
+			// The child owns, and closes, its own descriptor.
+			fd, err := unix.Dup(int(handle.Fd()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			platform := newInitPlatformFixture()
+			platform.configsConverged, platform.refreshErr = false, test.refresh
+			var stderr bytes.Buffer
+			program, err := New(Options{
+				RepositoryRoot: root, Program: "yard", Arguments: []string{"init", "--configs", "--yes"},
+				Environment: append(slices.Clone(environment), fmt.Sprintf("%s=%d", ConfigRefusalsFDVariable, fd)), WorkingDir: root, InitPlatform: platform, Stderr: &stderr,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, inherited := program.baseEnv[ConfigRefusalsFDVariable]; inherited || program.env[ConfigRefusalsFDVariable] != "" {
+				t.Fatal("children inherit the report descriptor's name")
+			}
+			if code := program.Run(context.Background()); (code == 0) != (test.refresh == nil) || platform.configs != 1 {
+				t.Fatalf("init: code=%d refreshes=%d stderr=%q", code, platform.configs, stderr.String())
+			}
+			if written, err := os.ReadFile(report); err != nil || !bytes.Equal(written, test.want) {
+				t.Fatalf("report %q, want %q (%v)", written, test.want, err)
 			}
 		})
 	}
@@ -991,7 +1049,7 @@ func (fixture *initPlatformFixture) Preflight(_ context.Context, fresh bool) err
 func (fixture *initPlatformFixture) RefreshConfigs(_ context.Context, consent *ports.ConfigConsent) error {
 	fixture.configs++
 	fixture.consents = append(fixture.consents, consent)
-	return nil
+	return fixture.refreshErr
 }
 
 func TestMigrationBrokerReconcileIsBoundedToTestVMStage(t *testing.T) {

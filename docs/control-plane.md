@@ -62,10 +62,13 @@ Subyard-owned skill trees.
 
 Each guest config file is observed once per assessment (`configmaterial.Observe`): raw files
 together in one exec, each structured file through its own observation, which also reports the
-token of its exact bytes. The file's one state is `converged`, `drift`, `unreadable`, `unknown`
-(a completed guest refusal, with a fixed host reason) or, after a refused write, `changed`;
-`configmaterial.Refusals` renders the last three with their next step: replace or remove an
-unreadable file, correct or remove an unknown one, or just rerun for a changed one. The step runs
+token of its exact bytes. The file's one state is `converged`, `drift`, `unreadable`,
+`unowned-invalid` (a structured document that is not valid and that Subyard does not own),
+`unassessed` (a completed guest observation that assessed nothing, such as one over a broken
+Subyard baseline) or, after a refused write, `changed`; guest text never selects or fills a state.
+`configmaterial.Refusals` renders the last four with their next step: replace or remove an
+unreadable file, correct or remove an unowned invalid one, or just rerun for an unassessed or a
+changed one. The step runs
 `config apply`, or `init --configs` for a file outside the config set that `config status` and
 `config apply` cover, such as an instruction file. `init`, `config status`, `config apply` and release readiness use
 this observation and these refusals.
@@ -83,6 +86,14 @@ plans for itself and observes the tokens immediately before writing: a direct `i
 after an update. A release activation repair writes over the tokens its authorized plan read. A yard
 with a refused file, or one that cannot be assessed, is refused at plan time; every other yard of the
 plan is still refreshed, and the plan lists the refused yard instead of reporting no drift.
+
+Only the writer renders a refused file's step. An `init --configs` child of `config apply` (also
+under `config sync --apply`) reports the files it refused on an unlinked inherited file named by
+`SUBYARD_CONFIG_REFUSALS_FD`, which an older release ignores: per file only its destination, state
+and whether only `init --configs` refreshes it, never text. The parent renders those refusals for
+its own yard exactly as an in-process refresh does, in place of the child's exit status. A missing,
+empty, oversized or malformed report, or a state outside that vocabulary, relays nothing, and the
+next step reruns the child: `init --configs`.
 
 Integration selection uses the shared prepared-command boundary, the protected per-yard config
 writer and `reconcileruntime.IntegrationPlan` / `ApplyIntegrations`. The same runtime path is used

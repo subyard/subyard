@@ -320,6 +320,123 @@ func TestDispatcherConfigApplierSelectsDirectAndDriftAwareCommands(t *testing.T)
 	}
 }
 
+// refusalReportDispatcher is an init --configs child that writes the report
+// file $REPORT names, if any, on the descriptor its parent named, and exits
+// with $EXIT.
+const refusalReportDispatcher = `#!/bin/sh
+[ -z "$SUBYARD_CONFIG_REFUSALS_FD" ] || [ ! -f "$REPORT" ] || eval "cat \"\$REPORT\" >&$SUBYARD_CONFIG_REFUSALS_FD"
+exit "${EXIT:-1}"
+`
+
+// testFileRefusals are the refusals of each relayed state of yard named.
+func testFileRefusals() map[string]error {
+	return map[string]error{
+		"unreadable":      configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/CLAUDE.md", Token: configmaterial.TokenUnreadable, InitOnly: true}},
+		"changed":         configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemChanged}},
+		"unowned-invalid": configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemUnownedInvalid}},
+		"unassessed": domain.CollectRefusals(
+			configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.codex/AGENTS.md", Problem: configmaterial.ProblemUnassessed, InitOnly: true}},
+			configmaterial.FileRefusal{Yard: "named", File: configmaterial.File{Destination: "/home/dev/.claude/settings.json", Problem: configmaterial.ProblemUnassessed}}),
+	}
+}
+
+// A failed init --configs child's typed file refusals replace its exit
+// status; no report, a malformed or an oversized one relays nothing.
+func TestDispatcherConfigApplierRelaysOnlyTypedFileRefusals(t *testing.T) {
+	root := testkit.TempDir(t)
+	dispatcher := filepath.Join(root, "yard")
+	writeConfigCommandFile(t, dispatcher, refusalReportDispatcher, 0o700)
+	refusal := testFileRefusals()["unassessed"]
+	reports := map[string][]byte{
+		"report":    configmaterial.EncodeRefusals(refusal),
+		"garbage":   []byte("not a report"),
+		"oversized": append(configmaterial.EncodeRefusals(refusal), bytes.Repeat([]byte(" "), configmaterial.MaxRefusalReport)...),
+	}
+	for _, test := range []struct {
+		name, exit, want string
+		drift            bool
+	}{
+		{name: "report", want: refusal.Error()},
+		{name: "none", want: "exit status 1"},
+		{name: "garbage", want: "exit status 1"},
+		{name: "oversized", want: "exit status 1"},
+		{name: "report", exit: "0"},
+		// A config apply child plans for itself and is named no descriptor.
+		{name: "report", drift: true, want: "exit status 1"},
+	} {
+		t.Run(fmt.Sprint(test.name, test.exit, test.drift), func(t *testing.T) {
+			environment := map[string]string{"EXIT": test.exit}
+			if payload, ok := reports[test.name]; ok {
+				environment["REPORT"] = filepath.Join(testkit.TempDir(t), "report")
+				testkit.WriteFile(t, environment["REPORT"], payload, 0o600)
+			}
+			err := dispatcherConfigApplier{path: dispatcher, environment: environment, applyDrift: test.drift}.ApplyConfig(context.Background(), "named", nil)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || err.Error() != test.want) {
+				t.Fatalf("error %v, want %q", err, test.want)
+			}
+			if relayed := errors.As(err, new(configmaterial.FileRefusal)); relayed != (test.want == refusal.Error()) {
+				t.Fatalf("relayed %v: %v", relayed, err)
+			}
+		})
+	}
+}
+
+// For each relayed state, config apply through an init --configs child and
+// through the in-process refresh print the same final line, which names the
+// writer's step; a child that relays nothing is run again.
+func TestConfigApplyRelayedRefusalMatchesInProcessRefusal(t *testing.T) {
+	root, _, configHome, environment := configCommandFixture(t)
+	writeConfigCommandFile(t, filepath.Join(configHome, "yards", "named", "config.env"), "SSH_PORT=3333\n")
+	loaded := loadConfigCommandContext(t, root, environment, "named")
+	dispatcher := filepath.Join(testkit.TempDir(t), "yard")
+	writeConfigCommandFile(t, dispatcher, refusalReportDispatcher, 0o700)
+	run := func(applier ports.ConfigApplier, report []byte) (string, string) {
+		t.Helper()
+		fake := &testkit.Incus{Instances: map[string]ports.InstanceInfo{loaded.Context.IncusProject + "/" + loaded.Context.YardInstanceName: {
+			Name: loaded.Context.YardInstanceName, Project: loaded.Context.IncusProject, Status: "Running", Config: map[string]string{"volatile.uuid": "named"}}}}
+		childEnvironment := slices.Clone(environment)
+		if report != nil {
+			path := filepath.Join(testkit.TempDir(t), "report")
+			testkit.WriteFile(t, path, report, 0o600)
+			childEnvironment = append(childEnvironment, "REPORT="+path)
+		}
+		var stdout, stderr bytes.Buffer
+		program, err := New(Options{
+			RepositoryRoot: root, Program: "yard", Arguments: []string{"-Y", "named", "config", "apply", "--yes"},
+			Environment: childEnvironment, WorkingDir: root, DispatcherPath: dispatcher, Prompt: &testkit.Prompt{},
+			Incus: fake, Executor: symlinkedSettingsExecutor{}, Config: applier, Stdout: &stdout, Stderr: &stderr,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := program.Run(context.Background()); code == 0 {
+			t.Fatalf("config apply succeeded:\n%s%s", stdout.String(), stderr.String())
+		}
+		lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+		return lines[len(lines)-1], lastNext(lines[len(lines)-1])
+	}
+	for state, step := range map[string]string{
+		"unreadable":      "replace it with a regular file or remove it, then run yard -Y named init --configs",
+		"changed":         "run yard -Y named config apply",
+		"unowned-invalid": "correct or remove it in the yard, then run yard -Y named config apply",
+		"unassessed":      "run yard -Y named config apply",
+	} {
+		t.Run(state, func(t *testing.T) {
+			refusal := testFileRefusals()[state]
+			inProcess, next := run(failingConfigApplier{err: refusal}, nil)
+			relayed, _ := run(nil, configmaterial.EncodeRefusals(refusal))
+			if relayed != inProcess || next != step || !strings.Contains(inProcess, "/home/dev/") {
+				t.Fatalf("relayed %q\nin process %q\nwant step %q", relayed, inProcess, step)
+			}
+		})
+	}
+	for name, report := range map[string][]byte{"no report": nil, "garbage": []byte("{")} {
+		if _, next := run(nil, report); next != "run yard -Y named init --configs" {
+			t.Fatalf("%s: next %q", name, next)
+		}
+	}
+}
+
 func TestConfigStatusDetectsGuestDriftWithoutPrintingContents(t *testing.T) {
 	root, _, _, environment := configCommandFixture(t)
 	loaded := loadConfigCommandContext(t, root, environment, "default")

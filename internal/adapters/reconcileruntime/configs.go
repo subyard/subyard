@@ -330,7 +330,7 @@ func (runtime Runtime) applyPreparedConfigs(ctx context.Context, prepared *Prepa
 		}
 		guest := observed[file.destination]
 		guest.Label, guest.InitOnly = file.label, file.initOnly
-		if state := guest.State(); state == "unreadable" || state == "unknown" {
+		if state := guest.State(); state != "converged" && state != "drift" {
 			err = configmaterial.FileRefusal{Yard: runtime.Yard.YardName, File: guest}
 		} else {
 			err = runtime.applyGuestConfig(ctx, file, payload, guest.Token)

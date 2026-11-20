@@ -615,7 +615,7 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 	for _, approved := range targets {
 		target := approved.Target
 		if err := applier.ApplyConfig(ctx, target.Name, approved.consent()); err != nil {
-			refusals = append(refusals, cli.configApplyFailure(ctx, approved, err))
+			refusals = append(refusals, configApplyFailure(approved, err))
 			continue
 		}
 		refreshed = append(refreshed, target)
@@ -642,33 +642,17 @@ func (cli *CLI) executeConfigApply(ctx context.Context, execution *configApplyEx
 	return nil
 }
 
-// configApplyFailure is a refused refresh of one yard with its one next step,
-// from a fresh observation: the files a refresh cannot replace name theirs,
-// then a file the refresh itself refused that status does not compare, such
-// as an unreadable instruction file; otherwise, as after a file changed since
-// the plan, config apply plans again.
-func (cli *CLI) configApplyFailure(ctx context.Context, approved configTargetAssessment, cause error) error {
+// configApplyFailure is a refused refresh of one yard with its one next step.
+// Only the writer renders a file refusal's step: the first one in cause names
+// it, a changed file included. Otherwise the refresh child runs again and
+// plans over what the guest has then.
+func configApplyFailure(approved configTargetAssessment, cause error) error {
 	name := approved.Target.Name
-	fresh, err := cli.assessConfigTarget(ctx, approved.Target, true)
-	var refused []error
-	if err == nil {
-		refused = configmaterial.Refusals(name, fresh.Files)
+	next := "run " + domain.RenderAction(domain.Action{Verb: domain.VerbInit, Yard: name}) + " --configs"
+	if refusal := new(configmaterial.FileRefusal); errors.As(cause, refusal) {
+		_, next = refusal.ActivationDiagnostic()
 	}
-	if refusal := new(configmaterial.FileRefusal); errors.As(cause, refusal) && refusal.File.State() != "changed" {
-		refused = append(refused, *refusal)
-	}
-	return configApplyRefusal{materializedConfigActivationError{domain.CollectRefusals(append([]error{cause}, refused...)...), name, "materialized config", "config status", "apply", approved.Target.Loaded.Context.Paths.ConfigHome},
-		configApplyNext(name, refused)}
-}
-
-// configApplyNext is the next step after a refused refresh of yard: the first
-// file a refresh cannot replace names its own, otherwise config apply plans again.
-func configApplyNext(yard string, refused []error) string {
-	if len(refused) != 0 {
-		_, next := refused[0].(configmaterial.FileRefusal).ActivationDiagnostic()
-		return next
-	}
-	return "run " + domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: yard})
+	return configApplyRefusal{materializedConfigActivationError{cause, name, "materialized config", "config status", "apply", approved.Target.Loaded.Context.Paths.ConfigHome}, next}
 }
 
 // configApplyRefusal is a refused yard refresh and its one next step.

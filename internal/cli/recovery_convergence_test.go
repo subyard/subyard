@@ -21,7 +21,7 @@ type recoveryWorld struct {
 	yards     map[string]yardGateState
 	everyYard bool
 	source    string // a refused source predicate
-	files     string // "changed" or "unreadable" in filesYard
+	files     string // "changed", "unreadable", "unowned-invalid" or "unassessed" in filesYard
 	filesYard string
 }
 
@@ -63,6 +63,8 @@ func (world recoveryWorld) file() configmaterial.File {
 		file.Token, file.Converged = "sha256:"+strings.Repeat("a", 64), false
 	case "unreadable":
 		file.Token, file.Converged = configmaterial.TokenUnreadable, false
+	case "unowned-invalid", "unassessed":
+		file.Token, file.Converged, file.Problem = "", false, configmaterial.Problem(world.files)
 	}
 	return file
 }
@@ -72,8 +74,7 @@ func (world recoveryWorld) file() configmaterial.File {
 func (world recoveryWorld) filesConverged() bool { return world.file().State() == "converged" }
 
 // refresh is the real effect of init or config apply on the files yard: a
-// changed file is written over its fresh observation, an unreadable one is
-// refused.
+// changed file is written over its fresh observation, any other is refused.
 func (world *recoveryWorld) refresh() {
 	if world.files == "changed" {
 		world.files = ""
@@ -97,7 +98,14 @@ func gateEntry(render func(gate yardGate, yard string, attempted domain.Action) 
 		// A refused refresh of the files yard names its files and next step.
 		files := []configmaterial.File{world.file()}
 		if attempted.Verb == domain.VerbConfigApply && attempted.Yard == world.filesYard && !world.filesConverged() {
-			return world.filesYard, configApplyNext(world.filesYard, configmaterial.Refusals(world.filesYard, files))
+			// The writer refuses a file the guest changed since the plan.
+			written := world.file()
+			if world.files == "changed" {
+				written.Problem = configmaterial.ProblemChanged
+			}
+			cause := domain.CollectRefusals(configmaterial.Refusals(world.filesYard, []configmaterial.File{written})...)
+			_, next := configApplyFailure(configTargetAssessment{Target: configTarget{Name: world.filesYard}}, cause).(configApplyRefusal).ActivationDiagnostic()
+			return world.filesYard, next
 		}
 		// config status names the files a refresh refuses, with their step.
 		if attempted.Verb == domain.VerbConfigStatus && attempted.Yard == world.filesYard {
@@ -177,7 +185,7 @@ func (world *recoveryWorld) operatorStep(text string) {
 			world.yards[name] = state
 		}
 		world.everyYard = false
-	case strings.Contains(text, "replace it with a regular file"):
+	case strings.Contains(text, "replace it with a regular file"), strings.Contains(text, "correct or remove it in the yard"):
 		world.files = "changed" // replaced, so the next apply plans again
 	}
 }
@@ -230,6 +238,8 @@ func TestRecoveryAdviceConvergesFromEveryEntryPoint(t *testing.T) {
 		"stopped mid-batch then drift":            {yards: map[string]yardGateState{"a": {drift: true}, "b": {failed: true}}},
 		"file changed after plan":                 {files: "changed", filesYard: "named", yards: map[string]yardGateState{}},
 		"unreadable peer file":                    {files: "unreadable", filesYard: "named", yards: map[string]yardGateState{}},
+		"unowned invalid peer file":               {files: "unowned-invalid", filesYard: "named", yards: map[string]yardGateState{}},
+		"unassessed peer file":                    {files: "unassessed", filesYard: "named", yards: map[string]yardGateState{}},
 		"ready":                                   {yards: map[string]yardGateState{}},
 		"wrong tooling":                           {yards: map[string]yardGateState{"named": {drift: true}}, source: "tooling-dir"},
 		"unreadable store":                        {yards: map[string]yardGateState{"named": {drift: true}}, source: "store"},
@@ -244,6 +254,9 @@ func TestRecoveryAdviceConvergesFromEveryEntryPoint(t *testing.T) {
 		"wrong tooling":                           "run it with the installed yard command; failed: tooling-dir",
 		"unreadable store":                        "failed: store",
 		"pending owner retry outside the grammar": "run yard update for a fresh plan and confirmation",
+		// Nothing the operator does is known to help a file no observation
+		// assesses; the step is only a retry.
+		"unassessed peer file": "run yard -Y named config apply",
 	}
 	for name, initial := range worlds {
 		for entryName, entry := range recoveryEntries {
@@ -283,6 +296,10 @@ func TestRecoveryAdviceConvergesFromEveryEntryPoint(t *testing.T) {
 						t.Fatalf("advised %q is not admitted", text)
 					}
 					key := fmt.Sprintf("%#v|%#v", world, action)
+					// A terminal retry repeats without changing the world.
+					if want := terminal[name]; seen[key] && want != "" && strings.Contains(text, want) {
+						return
+					}
 					if seen[key] {
 						t.Fatalf("repeated state and action: %q in %#v", text, world)
 					}

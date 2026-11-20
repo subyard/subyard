@@ -1160,7 +1160,11 @@ func (execution *initExecution) run(ctx context.Context, cli *CLI, output io.Wri
 		// like full init on a running, stopped or uninitialized yard, refreshes
 		// under its own confirmation over the bytes it observes right before
 		// writing.
-		return execution.platform.RefreshConfigs(ctx, execution.configConsent)
+		err := execution.platform.RefreshConfigs(ctx, execution.configConsent)
+		if err != nil {
+			cli.reportConfigRefusals(err)
+		}
+		return err
 	}
 	if execution.mode == initReset {
 		if execution.resetBaseline != nil {

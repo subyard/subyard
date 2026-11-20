@@ -343,6 +343,8 @@ func (cli *CLI) refreshReleaseConfig(ctx context.Context, execution *releaseExec
 		if yard == "default" {
 			yard = ""
 		}
+		// Only release targets without activation reconcilers refresh here
+		// (Prepared.RefreshConfigs), through a config apply child.
 		retry := domain.RenderAction(domain.Action{Verb: domain.VerbConfigApply, Yard: yard})
 		refreshErr = errors.Join(refreshErr, fmt.Errorf(
 			"runtime activation completed, but refreshing materialized agent configuration failed: %w; retry with: %s",

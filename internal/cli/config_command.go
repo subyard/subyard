@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -1152,42 +1153,45 @@ type dispatcherConfigApplier struct {
 // ApplyConfig runs the refresh child. A config apply child plans and confirms
 // for itself. An init --configs child receives the confirmed consent through
 // --config-consent-fd, which a binary without compare-and-write rejects as an
-// unknown option before it writes anything.
+// unknown option before it writes anything, and reports the files it refused
+// on the descriptor SUBYARD_CONFIG_REFUSALS_FD names, which an older child
+// ignores.
 func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard string, consent *ports.ConfigConsent) error {
 	arguments := []string{}
 	if yard != "" && yard != "default" {
 		arguments = append(arguments, "-Y", yard)
 	}
-	var consentFile *os.File
+	var consentFile, refusalsFile *os.File
 	if applier.applyDrift {
 		arguments = append(arguments, "config", "apply", "--yes")
 	} else {
 		arguments = append(arguments, "init", "--configs", "--yes")
 		if consent != nil {
 			payload, err := json.Marshal(consent)
+			if err == nil {
+				consentFile, err = unlinkedPrivateFile("subyard-config-consent-*", payload)
+			}
 			if err != nil {
 				return err
 			}
-			// An unlinked private file carries it, so no pipe buffer bounds it.
-			if consentFile, err = os.CreateTemp("", "subyard-config-consent-*"); err != nil {
-				return err
-			}
 			defer consentFile.Close()
-			_, err = consentFile.Write(payload)
-			if err := errors.Join(os.Remove(consentFile.Name()), err); err != nil {
-				return err
-			}
-			if _, err := consentFile.Seek(0, io.SeekStart); err != nil {
-				return err
-			}
 		}
+		var err error
+		if refusalsFile, err = unlinkedPrivateFile("subyard-config-refusals-*", nil); err != nil {
+			return err
+		}
+		defer refusalsFile.Close()
 	}
 	command := exec.CommandContext(ctx, applier.path, arguments...)
 	if consentFile != nil {
 		command.Args = append(command.Args, "--config-consent-fd", fmt.Sprint(3+len(command.ExtraFiles)))
 		command.ExtraFiles = append(command.ExtraFiles, consentFile)
 	}
-	command.Env = environmentList(applier.environment, map[string]string{"ASSUME_YES": "1"})
+	if refusalsFile != nil {
+		command.Env = append(command.Env, fmt.Sprintf("%s=%d", ConfigRefusalsFDVariable, 3+len(command.ExtraFiles)))
+		command.ExtraFiles = append(command.ExtraFiles, refusalsFile)
+	}
+	command.Env = append(environmentList(applier.environment, map[string]string{"ASSUME_YES": "1"}), command.Env...)
 	home := applier.environment["SUBYARD_HOME"]
 	if home == "" {
 		home = filepath.Join(firstNonempty(applier.environment["SUBYARD_OPERATOR_HOME"], applier.environment["HOME"]), ".subyard")
@@ -1205,7 +1209,74 @@ func (applier dispatcherConfigApplier) ApplyConfig(ctx context.Context, yard str
 	command.Stdin = strings.NewReader("")
 	command.Stdout = applier.stdout
 	command.Stderr = applier.stderr
-	return command.Run()
+	err = command.Run()
+	if refusalsFile == nil || !errors.As(err, new(*exec.ExitError)) {
+		return err
+	}
+	// The child's typed file refusals replace its bare exit status; anything
+	// else it reports relays nothing.
+	if _, seekErr := refusalsFile.Seek(0, io.SeekStart); seekErr != nil {
+		return err
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(refusalsFile, configmaterial.MaxRefusalReport+1))
+	if relayed := configmaterial.DecodeRefusals(yard, payload); readErr == nil && len(relayed) != 0 {
+		return domain.CollectRefusals(relayed...)
+	}
+	return err
+}
+
+// ConfigRefusalsFDVariable names the descriptor on which an init --configs
+// child reports the files it refused to its config apply parent.
+const ConfigRefusalsFDVariable = "SUBYARD_CONFIG_REFUSALS_FD"
+
+// CloseConfigRefusalsOnExec keeps the refusal report descriptor that a config
+// apply parent passed out of every subprocess; a process calls it first.
+func CloseConfigRefusalsOnExec() {
+	if fd, err := strconv.Atoi(os.Getenv(ConfigRefusalsFDVariable)); err == nil && fd >= 3 {
+		syscall.CloseOnExec(fd)
+	}
+}
+
+// inheritedConfigRefusals is the report descriptor environment names, which
+// no child of this process inherits by name.
+func inheritedConfigRefusals(environment map[string]string) *os.File {
+	value, inherited := environment[ConfigRefusalsFDVariable]
+	delete(environment, ConfigRefusalsFDVariable)
+	if fd, err := strconv.Atoi(value); inherited && err == nil && fd >= 3 {
+		return os.NewFile(uintptr(fd), "config-refusals")
+	}
+	return nil
+}
+
+// reportConfigRefusals reports, once, the files a failed refresh refused to
+// the config apply parent. A report that is not written relays nothing.
+func (cli *CLI) reportConfigRefusals(err error) {
+	if cli.configRefusals == nil {
+		return
+	}
+	if payload := configmaterial.EncodeRefusals(err); payload != nil {
+		_, _ = cli.configRefusals.Write(payload)
+	}
+	_ = cli.configRefusals.Close()
+}
+
+// unlinkedPrivateFile is a file only its descriptor names, holding payload,
+// so no pipe buffer bounds what passes through it.
+func unlinkedPrivateFile(pattern string, payload []byte) (*os.File, error) {
+	file, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return nil, err
+	}
+	_, err = file.Write(payload)
+	err = errors.Join(os.Remove(file.Name()), err)
+	if err == nil {
+		_, err = file.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	return file, nil
 }
 
 // maxConfigConsentBytes bounds the consent an init --configs child reads.
