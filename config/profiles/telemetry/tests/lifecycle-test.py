@@ -42,6 +42,39 @@ class LifecycleTest(unittest.TestCase):
                     unit = guest.Runtime(source, 'dev', False, [], account=account).assets[Path('/etc/systemd/system')/guest.COLLECTOR][0].decode()
                 self.assertIn('--auth-file /var/lib/subyard/telemetry-private/auth.token'+flag+'\n', unit)
 
+    def test_recorded_collector_startup_with_another_disk_budget_is_stale_not_foreign(self):
+        profile = Path(guest.__file__).parent
+        with tempfile.TemporaryDirectory(dir='/tmp') as name:
+            root = Path(name)
+            source, units = root/'source', root/'units'
+            shutil.copytree(profile, source, ignore=shutil.ignore_patterns('tests', 'collector', 'cmd', 'bin', '__pycache__'))
+            shutil.copyfile(guest.tomli_w.__file__, source/'tomli_w.py')
+            (source/'subyard-telemetry').write_bytes(b'\x7fELF')
+            for directory in ('control', 'units'):
+                (root/directory).mkdir()
+            account = types.SimpleNamespace(pw_uid=os.getuid() or 1000, pw_gid=os.getgid(), pw_dir=name)
+            path = units/guest.COLLECTOR
+            for current, loaded in (('2147483648', ''), ('2147483648', ' --disk-bytes 1073741824'), ('', ' --disk-bytes 1073741824')):
+                with self.subTest(current=current, loaded=loaded), patch.dict(os.environ, SUBYARD_TELEMETRY_DISK_BYTES=current):
+                    runtime = guest.Runtime(source, 'dev', True, ['codex'], root/'control', root/'data', root/'library', units, root/'bin',
+                                            account=account, etc=root/'etc')
+                    desired = runtime.starts[guest.COLLECTOR]
+                    # The v0.30 startup named the analytics token; the loaded one keeps its own budget.
+                    previous = desired.removesuffix(runtime.budget).replace(str(runtime.auth), str(runtime.data/'auth.token'))+loaded
+                    unit = runtime.assets[path][0].replace(desired.encode(), previous.encode(), 1)
+                    path.write_bytes(unit)
+                    fields = dict(LoadState='loaded', FragmentPath=str(path), User='dev', Group=str(account.pw_gid), Type='simple',
+                                  UMask='0077', LimitCORE='0', NoNewPrivileges='yes', DropInPaths='', KillMode='control-group',
+                                  MemoryMax=str(256*1024*1024), TasksMax='64', CPUQuotaPerSecUSec='250ms', ActiveState='active',
+                                  ExecStart='{ path=/usr/bin/setpriv ; argv[]='+previous+' ; ignore_errors=no ; start_time=x ; }')
+                    show = '\n'.join(f'{key}={value}' for key, value in fields.items())
+                    with patch.object(guest, 'systemctl', return_value=show):
+                        (root/'control/assets.json').write_text(json.dumps({str(path): hashlib.sha256(b'other').hexdigest()}))
+                        with self.assertRaisesRegex(ValueError, 'foreign loaded unit envelope'):
+                            runtime.manager(guest.COLLECTOR)
+                        (root/'control/assets.json').write_text(json.dumps({str(path): hashlib.sha256(unit).hexdigest()}))
+                        self.assertEqual(runtime.manager(guest.COLLECTOR)['ExecStart'], fields['ExecStart'])
+
     def test_raw_refusal_is_read_from_a_private_marker_without_sqlite(self):
         profile = Path(guest.__file__).parent
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
@@ -817,7 +850,7 @@ for path, value in (
         with tempfile.TemporaryDirectory(dir='/tmp') as name:
             units=Path(name)
             command='/usr/bin/setpriv --no-new-privs /usr/local/lib/subyard-telemetry/subyard-telemetry serve'
-            runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},
+            runtime=types.SimpleNamespace(units=units,user='dev',gid=1000,starts={guest.COLLECTOR:command},budget='',
                 data=units/'data',auth=units/'data-private/auth.token',
                 assets={units/guest.COLLECTOR:(b'known unit',0o644)})
             fields=dict(LoadState='loaded',FragmentPath=str(units/guest.COLLECTOR),User='dev',Group='1000',
