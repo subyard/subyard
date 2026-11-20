@@ -557,6 +557,7 @@ both-guest checks. See [Test VMs](../test-vms.md).
 
 Release updates recreate a registered test-VM broker whose engine changed, after proving its exact
 registration; its leases, VMs and open sessions end, as the operator consented to by updating.
+Settings and other drift with an unchanged engine are repaired in place.
 Refused, unproven or failed reads never tear anything down. The pre-v0.11 test yard name
 `e2e-yard` is reserved: release activation matches it by name, skips it and warns with its
 recreation commands, so an ordinary yard must not use that name.

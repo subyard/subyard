@@ -1402,6 +1402,20 @@ func (runtime Runtime) testVMHostSinkFailure(ctx context.Context) error {
 	return nil
 }
 
+// StageEngineChanged reports whether a stage's installed engine differs from
+// this release's. Only the test-VM broker carries an engine of its own.
+func (runtime Runtime) StageEngineChanged(ctx context.Context, stage ports.ReconcileStageID) (bool, error) {
+	if stage != ports.ReconcileStageTestVMs {
+		return false, nil
+	}
+	// The engine revision does not depend on desired power.
+	backend, err := runtime.testVMBackend(domain.PowerRunning)
+	if err != nil {
+		return false, err
+	}
+	return backend.EngineChanged(ctx)
+}
+
 func (runtime Runtime) testVMBackend(desired domain.DesiredPower) (*testvmsruntime.Backend, error) {
 	environment := runtimeEnvironment(runtime.Environment)
 	extras, err := runtime.extrasContext()

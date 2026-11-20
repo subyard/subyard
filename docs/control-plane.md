@@ -2821,21 +2821,24 @@ role; ordinary prepared init, power and teardown remain its lifecycle owners. Co
 services from a container or profile name. The test-vms profile owns its broker and allocation semantics.
 
 The optional `registration_activation` binds the service to its declared native stage owner.
-A forward transition, including a same-release gate, recreates a registered runtime whose stage
-drifted instead of updating it in place. After proving the exact registration (owner, yard,
+A forward transition, including a same-release gate, recreates a registered runtime whose engine
+changed, as its stage owner reports, instead of updating it in place; settings and other drift
+with an unchanged engine are repaired in place by the native owner. After proving the exact registration (owner, yard,
 project, instance, UUID and ownership) it interrupts the runtime's open SSH sessions with the
 approved migration stop, runs ordinary `yard -Y YARD teardown --yes`, then
 `yard service install ID --yard YARD [--pool POOL] --yes`. The plan names the interrupted sessions,
 the deleted instance, Incus project and `/srv` volume with their VMs, leases and base images, and the
 shared bridge, storage pool and power reconciler when it is the last managed yard. Yard settings are
 kept; the registration is recreated with the new runtime UUID. A running runtime and a stopped one
-whose desired power is `running` are recreated; a runtime stopped by the operator is left
-untouched. An unproven, foreign, remote or multiply registered runtime keeps its previous engine
+whose desired power is `running` are recreated when their engine changed; a runtime stopped by
+the operator is left untouched. An unproven, foreign, remote or multiply registered runtime keeps its previous engine
 with a warning naming `yard service remove`, then `yard service install`; later gates keep that
 refusal. Failed Incus or registry reads block the stage with a retry. Matching settings without a
 runtime, including after a failed install, warn on every readiness check with
-`yard service install ID --yard YARD`; a registration left by an interrupted teardown adds
-`yard service remove ID` first. An unfinished init warns the same way. Rollback to an older release
+`yard service install ID --yard YARD [--pool POOL]`; a registration left by an interrupted teardown
+adds `yard service remove ID [--pool POOL]` first. An unfinished init warns the same way. Such a
+runtime keeps its declared state in the plan, so a retried update resumes an interrupted
+transition and finishes with that warning. Rollback to an older release
 updates the runtime in place through that release's own activation.
 Without a registration the native owner updates the runtime in place, and registration attaches
 metadata after that owner reconciles. Its conditional plan line names the service

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Subyard/Subyard/internal/adapters/reconcileruntime"
 	"github.com/Subyard/Subyard/internal/application"
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
@@ -20,7 +21,8 @@ import (
 
 // newReleaseActivation reports whether a request activates another release, or
 // resumes the exact incomplete cross-release journal after that activation.
-// Readiness, same-release repair and config gates keep the native owners.
+// Service registration binds only then; recreation instead follows the
+// broker engine identity on every forward gate.
 func (cli *CLI) newReleaseActivation(request releasetransition.ProcessRequest) bool {
 	links, err := releasetransition.NewRuntimeLinkStore(request.RuntimeRoot)
 	if err != nil {
@@ -82,7 +84,7 @@ func (cli *CLI) serviceStageApplicability(ctx context.Context, activation string
 		if err != nil {
 			return activationApplicability{}, err
 		}
-		return activationApplicability{state: "absent", warnings: []string{warning}}, nil
+		return activationApplicability{state: "absent", declared: "active", warnings: []string{warning}}, nil
 	}
 	if err != nil && ports.LocalInstallationAbsent(incus) {
 		return activationApplicability{state: "absent"}, nil
@@ -93,7 +95,12 @@ func (cli *CLI) serviceStageApplicability(ctx context.Context, activation string
 	result := activationApplicability{state: "inactive", target: yard}
 	if instanceUninitialized(configTarget{Name: yard}, instance) {
 		service := definition.InfrastructureService
-		result.warnings = []string{fmt.Sprintf("service %s in yard %s has not finished installing; run %s", service.ID, yard, serviceInstallCommand(service.ID, yard, "default"))}
+		pool, err := cli.serviceYardPool(service.ID, yard)
+		if err != nil {
+			return activationApplicability{}, err
+		}
+		result.warnings = []string{fmt.Sprintf("service %s in yard %s has not finished installing; run %s", service.ID, yard, serviceInstallCommand(service.ID, yard, pool))}
+		result.declared = "active"
 		return result, nil
 	}
 	switch {
@@ -109,23 +116,41 @@ func (cli *CLI) serviceStageApplicability(ctx context.Context, activation string
 
 // serviceRuntimeMissing names the commands that reinstall a service runtime
 // whose settings remain; a registration left by an interrupted teardown is
-// removed first.
+// removed first. Without a registration the pool is no longer recorded, so
+// the default pool is named.
 func (cli *CLI) serviceRuntimeMissing(definition profile.Definition, yard string) (string, error) {
 	service := definition.InfrastructureService
-	home, _, _, err := cli.servicePaths()
+	records, err := cli.serviceYardRecords(service.ID, yard)
 	if err != nil {
 		return "", err
 	}
-	records, err := (ownerservice.Registry{Root: filepath.Join(home, "services")}).List(service.ID)
-	if err != nil {
-		return "", err
-	}
-	for _, record := range records {
-		if record.Yard == yard {
-			return fmt.Sprintf("service %s has no runtime in yard %s but keeps its registration; run %s, then %s", service.ID, yard, serviceRemoveCommand(service.ID, record.Pool), serviceInstallCommand(service.ID, yard, record.Pool)), nil
-		}
+	if len(records) != 0 {
+		pool := records[0].Pool
+		return fmt.Sprintf("service %s has no runtime in yard %s but keeps its registration; run %s, then %s", service.ID, yard, serviceRemoveCommand(service.ID, pool), serviceInstallCommand(service.ID, yard, pool)), nil
 	}
 	return fmt.Sprintf("service %s has no runtime in yard %s; run %s", service.ID, yard, serviceInstallCommand(service.ID, yard, "default")), nil
+}
+
+// serviceYardRecords lists a service's registrations of one yard.
+func (cli *CLI) serviceYardRecords(id, yard string) ([]ownerservice.Registration, error) {
+	home, _, _, err := cli.servicePaths()
+	if err != nil {
+		return nil, err
+	}
+	records, err := (ownerservice.Registry{Root: filepath.Join(home, "services")}).List(id)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(records, func(record ownerservice.Registration) bool { return record.Yard != yard }), nil
+}
+
+// serviceYardPool is the pool of a yard's single registration, or the default.
+func (cli *CLI) serviceYardPool(id, yard string) (string, error) {
+	records, err := cli.serviceYardRecords(id, yard)
+	if err != nil || len(records) != 1 {
+		return "default", err
+	}
+	return records[0].Pool, nil
 }
 
 func serviceInstallArguments(id, yard, pool string) []string {
@@ -167,6 +192,24 @@ type serviceRecreationPlan struct {
 
 // serviceRuntimeStopper stops a runtime whose session loss the approved plan
 // disclosed. The guard still fences new SSH connections first.
+// serviceEngineObserver reports whether a stage's installed engine differs
+// from the target release's. Only an engine change recreates a runtime; any
+// other drift is repaired in place.
+type serviceEngineObserver interface {
+	StageEngineChanged(context.Context, ports.ReconcileStageID) (bool, error)
+}
+
+// The native runtime reports its engine; without it no runtime is recreated.
+var _ serviceEngineObserver = reconcileruntime.Runtime{}
+
+func stageEngineChanged(ctx context.Context, platform ports.ReconcileStageRunner, stage ports.ReconcileStageID) (bool, error) {
+	observer, ok := platform.(serviceEngineObserver)
+	if !ok {
+		return false, nil
+	}
+	return observer.StageEngineChanged(ctx, stage)
+}
+
 type serviceRuntimeStopper interface {
 	RunApprovedMigrationStop(context.Context) error
 }
@@ -181,11 +224,10 @@ func (recreation *serviceRecreation) assess(ctx context.Context, yard string) (s
 		return serviceRecreationPlan{}, err
 	}
 	registry := ownerservice.Registry{Root: filepath.Join(home, "services")}
-	records, err := registry.List(service.ID)
+	records, err := cli.serviceYardRecords(service.ID, yard)
 	if err != nil {
 		return serviceRecreationPlan{}, err
 	}
-	records = slices.DeleteFunc(records, func(record ownerservice.Registration) bool { return record.Yard != yard })
 	if len(records) == 0 {
 		return serviceRecreationPlan{}, nil
 	}
@@ -226,7 +268,11 @@ func (recreation *serviceRecreation) consequence(plan serviceRecreationPlan) str
 
 func (recreation *serviceRecreation) warning(yard string, refusal error) string {
 	id := recreation.definition.InfrastructureService.ID
-	return fmt.Sprintf("service %s in yard %s keeps its previous engine: %v; recreate it with %s, then %s", id, yard, refusal, serviceRemoveCommand(id, "default"), serviceInstallCommand(id, yard, "default"))
+	pool, err := recreation.cli.serviceYardPool(id, yard)
+	if err != nil {
+		pool = "default"
+	}
+	return fmt.Sprintf("service %s in yard %s keeps its previous engine: %v; recreate it with %s, then %s", id, yard, refusal, serviceRemoveCommand(id, pool), serviceInstallCommand(id, yard, pool))
 }
 
 // run rechecks the exact owner, stops the runtime with its disclosed session
@@ -278,9 +324,10 @@ func (failure serviceReinstallError) ActivationDiagnostic() (string, string) {
 }
 
 // bindServiceRecreation lets every forward activation, including readiness
-// and same-release gates, recreate drifted registered service runtimes
-// instead of updating them in place. A refused recreation therefore stays
-// refused. Rollback activates an older engine, which updates in place.
+// and same-release gates, recreate a registered service runtime whose engine
+// differs from the target release's instead of updating it in place; other
+// drift is repaired in place. A refused recreation therefore stays refused.
+// Rollback activates an older engine, which updates in place.
 func (cli *CLI) bindServiceRecreation(request releasetransition.ProcessRequest, reconcilers []releasetransition.V2ActivationReconciler) []releasetransition.V2ActivationReconciler {
 	if request.Direction == releasetransition.DirectionActivatePrevious {
 		return reconcilers

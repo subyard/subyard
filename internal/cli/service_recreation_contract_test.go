@@ -1,7 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -183,5 +187,116 @@ func TestRecreationInstallReadsDesiredContextAfterTeardown(t *testing.T) {
 	}
 	if !slices.Equal(views, []string{"teardown:installed", "service:desired"}) {
 		t.Fatalf("child context views: %v", views)
+	}
+}
+
+// The engine-only transition ingress hands the engine its broker owner with
+// recreation bound.
+func TestReleaseTransitionIngressBindsServiceRecreation(t *testing.T) {
+	fixture, _, _, _, _ := serviceRecreationFixtureFor(t, "test-vm-broker")
+	home := environmentValue(fixture.options.Environment, "SUBYARD_CONFIG_HOME")
+	// The ingress verifies the active release's sealed files before composing.
+	runtimeRoot := testkit.TempDir(t)
+	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeSealedRollbackTarget(t, runtimeRoot, "0.30.0-aaaaaaaaaaaa", "0.30.0", registry)
+	if err := os.Symlink("releases/0.30.0-aaaaaaaaaaaa", filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(releasetransition.ProcessRequest{
+		SchemaVersion: releasetransition.ProcessProtocolSchemaV1, Mode: releasetransition.ProcessInspect,
+		RuntimeRoot: runtimeRoot, ConfigHome: home, Yard: "default",
+		Target: "next-release", Direction: releasetransition.DirectionActivateTarget,
+		ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	program, err := New(Options{RepositoryRoot: fixture.options.RepositoryRoot, Environment: fixture.options.Environment,
+		Incus: fixture.options.Incus, Stdin: bytes.NewReader(payload), Stdout: io.Discard, Stderr: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := releaseTransitionExecutor
+	t.Cleanup(func() { releaseTransitionExecutor = executor })
+	var broker *activationStageReconciler
+	releaseTransitionExecutor = func(_ context.Context, _ string, _ releasetransition.ProcessRequest, _ func(releasetransition.PlanToken, releasetransition.Authorization) bool,
+		reconcilers []releasetransition.V2ActivationReconciler, _ releasetransition.V2OwnerRegistration,
+		_ func(releasetransition.ReleasePair) (releasetransition.V2Ingress, error), _ ...*releasetransition.ActivationOnlyRecoveryRequest,
+	) (releasetransition.ProcessResponse, error) {
+		for _, owner := range reconcilers {
+			if stage, ok := owner.(*activationStageReconciler); ok && stage.ID() == "test-vm-broker" {
+				broker = stage
+			}
+		}
+		return releasetransition.ProcessResponse{}, errors.New("observed participants")
+	}
+	if code := program.runReleaseTransition(context.Background(), nil); code != 1 || !strings.Contains(stderr.String(), "observed participants") {
+		t.Fatalf("transition ingress: code=%d stderr=%q", code, stderr.String())
+	}
+	if broker == nil || broker.recreation == nil {
+		t.Fatalf("ingress broker owner has no recreation: %+v", broker)
+	}
+}
+
+// An update whose reinstall fails reports its next step; retrying the update
+// finishes the release ready and keeps naming the reinstall.
+func TestRetriedUpdateAfterFailedReinstallEndsReadyWithItsNextStep(t *testing.T) {
+	program, _, _, stage, calls := serviceRecreationFixture(t)
+	calls.fail = "service"
+	root := program.options.RepositoryRoot
+	home := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
+	registry, err := os.ReadFile(filepath.Join(repositoryRoot(t), "config", "release-transition.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReleaseTransitionTestFile(t, filepath.Join(root, "config", "release-transition.json"), registry, 0o600)
+	runtimeRoot := testkit.TempDir(t)
+	for _, release := range []string{"release-a", "release-b"} {
+		if err := os.MkdirAll(filepath.Join(runtimeRoot, "releases", release), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("releases/release-a", filepath.Join(runtimeRoot, "current")); err != nil {
+		t.Fatal(err)
+	}
+	request := releasetransition.ProcessRequest{SchemaVersion: releasetransition.ProcessProtocolSchemaV1,
+		RuntimeRoot: runtimeRoot, ConfigHome: home, Target: "release-b", Direction: releasetransition.DirectionActivateTarget,
+		ArtifactDigest: releasetransition.Fingerprint(strings.Repeat("a", 64))}
+	update := func() (releasetransition.ProcessResponse, releasetransition.ProcessResponse) {
+		t.Helper()
+		inspect := request
+		inspect.Mode = releasetransition.ProcessInspect
+		verify := func(releasetransition.PlanToken, releasetransition.Authorization) bool { return true }
+		inspected, err := executeReleaseTransitionRequest(context.Background(), root, inspect, verify,
+			[]releasetransition.V2ActivationReconciler{stage}, releaseTransitionOwnerFixture{}, nil)
+		if err != nil || inspected.Inspection == nil {
+			t.Fatalf("inspect: %#v %v", inspected, err)
+		}
+		converge := request
+		converge.Mode = releasetransition.ProcessConverge
+		converge.Execution = &releasetransition.Execution{Plan: inspected.Inspection.Plan, Authorization: "confirmed"}
+		converged, err := executeReleaseTransitionRequest(context.Background(), root, converge, verify,
+			[]releasetransition.V2ActivationReconciler{stage}, releaseTransitionOwnerFixture{}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return inspected, converged
+	}
+	install := "yard service install fixture-service --yard fixture-runtime"
+	_, failed := update()
+	if failed.Outcome == nil || failed.Outcome.Status == releasetransition.StatusReady || !strings.Contains(fmt.Sprintf("%+v", *failed.Outcome), install) {
+		t.Fatalf("failed reinstall outcome: %+v", failed.Outcome)
+	}
+	_, retried := update()
+	if retried.Outcome == nil || retried.Outcome.Status != releasetransition.StatusReady ||
+		!slices.ContainsFunc(retried.Outcome.Warnings, func(warning string) bool { return strings.Contains(warning, install) }) {
+		t.Fatalf("retried update outcome: %+v", retried.Outcome)
+	}
+	if want := [][]string{{"stop"}, {"-Y", "fixture-runtime", "teardown", "--yes"}, {"-Y", "fixture-runtime", "service", "install", "fixture-service", "--yard", "fixture-runtime", "--yes"}}; !slices.EqualFunc(calls.calls, want, slices.Equal) {
+		t.Fatalf("retry repeated effects: %v", calls.calls)
 	}
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -123,7 +124,7 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 	ownerRegistration := operation.legacyOwnerRegistration(request)
 	ingressFactory := operation.releaseTransitionIngressFactory(request)
 	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
-	response, err := executeReleaseTransitionRequest(
+	response, err := releaseTransitionExecutor(
 		ctx, cli.options.RepositoryRoot, request,
 		func(plan releasetransition.PlanToken, authorization releasetransition.Authorization) bool {
 			return expectedAuthorization != "" && authorization == expectedAuthorization
@@ -245,6 +246,10 @@ type activationApplicability struct {
 	target  string
 	// warnings name operator actions the owner leaves to the operator.
 	warnings []string
+	// declared is the state the yard's settings declare when it differs from
+	// the observed one: a service runtime whose reinstall did not finish is
+	// still declared active, so an authorized plan resumes and completes.
+	declared string
 }
 
 type activationStageReconciler struct {
@@ -258,8 +263,8 @@ type activationStageReconciler struct {
 	authorize            func(context.Context) error
 	planned              func() []string
 	after                func(context.Context) error
-	// recreation replaces the in-place apply of a proven service runtime
-	// during a new-release transition.
+	// recreation replaces the in-place apply of a proven service runtime whose
+	// engine differs from the target release's.
 	recreation *serviceRecreation
 }
 
@@ -315,7 +320,7 @@ func (reconciler *activationStageReconciler) Observe(
 		Stage  ports.ReconcileStageID      `json:"stage"`
 		State  string                      `json:"state"`
 		Target releasetransition.ReleaseID `json:"target"`
-	}{reconciler.id, reconciler.stage, applicability.state, releases.Target})
+	}{reconciler.id, reconciler.stage, cmp.Or(applicability.declared, applicability.state), releases.Target})
 	if err != nil {
 		return releasetransition.V2ActivationObservation{}, err
 	}
@@ -340,7 +345,13 @@ func (reconciler *activationStageReconciler) Observe(
 	// The plan binds the recreation decision through Actual, so a registration
 	// that appears or disappears before convergence makes the plan stale.
 	recreate := false
+	engineChanged := false
 	if !converged && reconciler.recreation != nil {
+		if engineChanged, err = stageEngineChanged(ctx, platform, reconciler.stage); err != nil {
+			return releasetransition.V2ActivationObservation{}, err
+		}
+	}
+	if engineChanged {
 		recreation, err := reconciler.recreation.assess(ctx, applicability.target)
 		if err != nil {
 			return releasetransition.V2ActivationObservation{}, err
@@ -397,7 +408,13 @@ func (reconciler *activationStageReconciler) Reconcile(
 	}
 	if !converged {
 		var recreation serviceRecreationPlan
+		engineChanged := false
 		if reconciler.recreation != nil {
+			if engineChanged, err = stageEngineChanged(ctx, platform, reconciler.stage); err != nil {
+				return reconciler.failure("recreation", err)
+			}
+		}
+		if engineChanged {
 			if recreation, err = reconciler.recreation.assess(ctx, applicability.target); err != nil {
 				return reconciler.failure("recreation", err)
 			}
@@ -1798,6 +1815,10 @@ func (cli *CLI) loadReleaseTransitionContext(yard, configHome string, sources ma
 	}
 	return config.Load(options)
 }
+
+// releaseTransitionExecutor runs the participants the engine-only ingress
+// composed; tests observe that composition through it.
+var releaseTransitionExecutor = executeReleaseTransitionRequest
 
 func executeReleaseTransitionRequest(
 	ctx context.Context,

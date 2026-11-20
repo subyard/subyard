@@ -29,6 +29,9 @@ type serviceRecreationCalls struct {
 	selection *serviceSelection
 	// keepRecord models an interrupted teardown after its native cleanup.
 	keepRecord bool
+	// sameEngine models drift other than an engine change.
+	sameEngine bool
+	engineErr  error
 }
 
 func (fixture *serviceRecreationCalls) run(_ context.Context, yard string, _ io.Writer, arguments ...string) error {
@@ -75,6 +78,16 @@ func (incus *recreationIncus) ReconcileState(ctx context.Context, project, insta
 type recreationPlatform struct {
 	*initPlatformFixture
 	calls *serviceRecreationCalls
+}
+
+func (platform recreationPlatform) StageEngineChanged(_ context.Context, stage ports.ReconcileStageID) (bool, error) {
+	if stage != ports.ReconcileStageTestVMs {
+		return false, errors.New("unexpected engine stage")
+	}
+	if platform.calls.engineErr != nil {
+		return false, platform.calls.engineErr
+	}
+	return !platform.calls.sameEngine, nil
 }
 
 func (platform recreationPlatform) RunApprovedMigrationStop(context.Context) error {
@@ -149,7 +162,7 @@ func TestServiceRecreationReplacesInPlaceUpdateOfProvenRuntime(t *testing.T) {
 	teardown := []string{"-Y", "fixture-runtime", "teardown", "--yes"}
 	install := []string{"-Y", "fixture-runtime", "service", "install", "fixture-service", "--yard", "fixture-runtime", "--yes"}
 	recreated := [][]string{stop, teardown, install}
-	for _, scenario := range []string{"recreate", "pool", "converged", "stopped", "unregistered", "other-yard", "foreign", "UUID", "foreign-UUID", "several", "read-failure", "recheck", "stop-failure", "teardown-failure", "record-left", "install-failure"} {
+	for _, scenario := range []string{"recreate", "pool", "converged", "stopped", "unregistered", "other-yard", "foreign", "UUID", "foreign-UUID", "several", "read-failure", "engine-read-failure", "same-engine", "same-engine-stopped", "same-engine-foreign", "recheck", "stop-failure", "teardown-failure", "record-left", "install-failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			_, incus, selection, stage, calls := serviceRecreationFixture(t)
 			key := selection.record.Project + "/" + selection.record.Instance
@@ -196,6 +209,21 @@ func TestServiceRecreationReplacesInPlaceUpdateOfProvenRuntime(t *testing.T) {
 				incus.Reconcile.Instance.Config["volatile.uuid"] = "replaced-uuid"
 			case "read-failure":
 				calls.incus.reconcileErr = errors.New("injected Incus read failure")
+			case "engine-read-failure":
+				calls.engineErr = errors.New("injected Incus read failure")
+			case "same-engine":
+				// A stale route, host unit or settings drift keeps the engine.
+				calls.sameEngine = true
+			case "same-engine-stopped":
+				// A broker stopped by a host reboot keeps its running intent.
+				calls.sameEngine = true
+				instance := incus.Instances[key]
+				instance.Status = "Stopped"
+				incus.Instances[key] = instance
+			case "same-engine-foreign":
+				// Ownership matters only to a recreation.
+				calls.sameEngine = true
+				replace(func(selection *serviceSelection) { selection.record.Owner = strings.Repeat("f", 32) })
 			case "recheck":
 				// The registration changes after assessment, before any effect.
 				stage.authorize = func(context.Context) error {
@@ -217,7 +245,7 @@ func TestServiceRecreationReplacesInPlaceUpdateOfProvenRuntime(t *testing.T) {
 			}
 			releases := releasetransition.ReleasePair{From: "previous-release", Target: "next-release"}
 			before, err := stage.Observe(context.Background(), releases, releasetransition.ReleaseLinks{Active: releases.From})
-			if scenario == "read-failure" {
+			if scenario == "read-failure" || scenario == "engine-read-failure" {
 				// A failed read blocks the stage; it is never an ownership refusal.
 				if err == nil || !strings.Contains(err.Error(), "injected Incus read failure") {
 					t.Fatalf("failed read observation: %+v %v", before, err)
@@ -231,7 +259,7 @@ func TestServiceRecreationReplacesInPlaceUpdateOfProvenRuntime(t *testing.T) {
 				t.Fatal(err)
 			}
 			refused := scenario == "foreign" || scenario == "UUID" || scenario == "foreign-UUID" || scenario == "several"
-			inPlace := scenario == "unregistered" || scenario == "other-yard"
+			inPlace := scenario == "unregistered" || scenario == "other-yard" || strings.HasPrefix(scenario, "same-engine")
 			proven := !refused && !inPlace && scenario != "converged" && scenario != "stopped"
 			if proven != (len(before.Consequences) == 1 && strings.Contains(before.Consequences[0], "recreate service fixture-service in yard fixture-runtime") && strings.Contains(before.Consequences[0], "SSH sessions are interrupted")) {
 				t.Fatalf("recreation consequence: %+v", before)
@@ -367,6 +395,46 @@ func TestServiceRecreationBindsEveryForwardActivation(t *testing.T) {
 	}
 }
 
+// A same-release gate repairs drift other than an engine change in place:
+// a broker stopped by a reboot, a missing host sink timer or a stale route
+// never recreates it. Only an engine change does.
+func TestSameReleaseGateRecreatesOnlyOnEngineChange(t *testing.T) {
+	recreated := [][]string{{"stop"}, {"-Y", "fixture-runtime", "teardown", "--yes"}, {"-Y", "fixture-runtime", "service", "install", "fixture-service", "--yard", "fixture-runtime", "--yes"}}
+	for _, drift := range []string{"stopped-running-intent", "sink-timer", "route", "engine"} {
+		t.Run(drift, func(t *testing.T) {
+			_, incus, selection, stage, calls := serviceRecreationFixture(t)
+			calls.sameEngine = drift != "engine"
+			if drift == "stopped-running-intent" {
+				key := selection.record.Project + "/" + selection.record.Instance
+				instance := incus.Instances[key]
+				instance.Status = "Stopped"
+				incus.Instances[key] = instance
+			}
+			releases := releasetransition.ReleasePair{From: "next-release", Target: "next-release"}
+			links := releasetransition.ReleaseLinks{Active: releases.Target}
+			observed, err := stage.Observe(context.Background(), releases, links)
+			if err != nil || observed.Converged || len(observed.Warnings) != 0 {
+				t.Fatalf("observation: %+v %v", observed, err)
+			}
+			if recreate := drift == "engine"; recreate != (len(observed.Consequences) == 1) {
+				t.Fatalf("consequences: %v", observed.Consequences)
+			}
+			if err := stage.Reconcile(context.Background(), links); err != nil {
+				t.Fatal(err)
+			}
+			if drift == "engine" {
+				if !reflect.DeepEqual(calls.calls, recreated) || len(calls.platform.applied) != 0 {
+					t.Fatalf("engine change: %v %v", calls.calls, calls.platform.applied)
+				}
+				return
+			}
+			if len(calls.calls) != 0 || !reflect.DeepEqual(calls.platform.applied, []ports.ReconcileStageID{ports.ReconcileStageTestVMs}) {
+				t.Fatalf("%s was not repaired in place: %v %v", drift, calls.calls, calls.platform.applied)
+			}
+		})
+	}
+}
+
 func TestServiceStageApplicabilityLeavesAbsentAndUnfinishedRuntimes(t *testing.T) {
 	program, incus, selection, stage, _ := serviceRecreationFixture(t)
 	key := selection.record.Project + "/" + selection.record.Instance
@@ -398,6 +466,26 @@ func TestServiceStageApplicabilityLeavesAbsentAndUnfinishedRuntimes(t *testing.T
 		}
 		incus.Instances[key] = instance
 	}
+	// A named pool is part of each reinstall command.
+	if err := selection.registry.Remove(selection.record, selection.publication); err != nil {
+		t.Fatal(err)
+	}
+	selection.record.Pool = "gpu"
+	if err := selection.registry.Save(selection.record); err != nil {
+		t.Fatal(err)
+	}
+	unfinished := incus.Instances[key]
+	unfinished.Config["user.subyard.initialized"] = "false"
+	incus.Instances[key] = unfinished
+	if applicability, err := stage.inspectApplicability(context.Background()); err != nil || strings.Join(applicability.warnings, "\n") != "service fixture-service in yard fixture-runtime has not finished installing; run "+install+" --pool gpu" {
+		t.Fatalf("unfinished pool hint: %+v %v", applicability, err)
+	}
+	delete(incus.Instances, key)
+	if applicability, err := stage.inspectApplicability(context.Background()); err != nil || strings.Join(applicability.warnings, "\n") != "service fixture-service has no runtime in yard fixture-runtime but keeps its registration; run yard service remove fixture-service --pool gpu, then "+install+" --pool gpu" {
+		t.Fatalf("missing runtime pool hint: %+v %v", applicability, err)
+	}
+	unfinished.Config["user.subyard.initialized"] = "true"
+	incus.Instances[key] = unfinished
 	instance := incus.Instances[key]
 	instance.Status, instance.Config["user.subyard.initialized"] = "Frozen", "true"
 	incus.Instances[key] = instance

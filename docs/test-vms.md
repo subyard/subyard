@@ -19,8 +19,9 @@ without image metadata retain their Debian behavior. Explicit selection requires
 A Subyard update recreates a registered broker whose engine changed: open SSH sessions through it
 end, its VMs, leases and base images are removed, its yard settings are kept, the registration is
 recreated with the new runtime UUID, and the next acquire builds a fresh base. Agents holding a
-lease acquire a new one. A broker stopped by the operator is not changed; one stopped while its
-desired power is `running` is recreated. Rollback updates the broker in place.
+lease acquire a new one. The engine is the broker's sealed engine, provisioning and recipe files;
+`E2E_*` settings, a stopped broker, host units, routes and other drift are repaired in place. A
+broker stopped by the operator is not changed. Rollback updates the broker in place.
 The pre-v0.11 name `e2e-yard` is not updated; recreate it with
 `yard -Y e2e-yard teardown --reset-config`, then `yard service install test-vms`.
 

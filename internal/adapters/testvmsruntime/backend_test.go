@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -560,4 +561,60 @@ func TestBackendBudgetsAndRecipeChangesRequireReconcile(t *testing.T) {
 		t.Fatal("recipe change did not invalidate convergence")
 	}
 
+}
+
+// Only the engine revision selects recreation; settings fields of the same
+// marker, and every other readiness input, are repaired in place.
+func TestBackendEngineChangedComparesOnlyTheEngineRevision(t *testing.T) {
+	backend := fixtureBackend(t)
+	state, err := backend.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := state.marker
+	var readErr error
+	backend.Runner = &fakeRunner{handler: func(_ string, arguments, _ []string, _ io.Reader) ([]byte, []byte, error) {
+		if strings.Join(arguments, " ") != "config get yard-test user.subyard.test_vms_revision --project subyard-test" {
+			return nil, nil, fmt.Errorf("unexpected incus %v", arguments)
+		}
+		return []byte(installed + "\n"), nil, readErr
+	}}
+	check := func(name string, want bool) {
+		t.Helper()
+		changed, err := backend.EngineChanged(context.Background())
+		if err != nil || changed != want {
+			t.Fatalf("%s: changed=%v err=%v", name, changed, err)
+		}
+	}
+	check("same marker", false)
+	fields := strings.Split(state.marker, ":")
+	settings := slices.Clone(fields)
+	settings[0], settings[2], settings[3], settings[6] = "0", "images:debian/12/cloud", "8", "5"
+	installed = strings.Join(settings, ":")
+	check("settings drift", false)
+	backend.Environment["E2E_VM_SLOT_COUNT"], backend.Environment["E2E_DISK_BUDGET"] = "3", "7GiB"
+	installed = state.marker
+	check("desired settings drift", false)
+	for _, file := range []string{"yard-engine", "scripts/e2e-lab/provision.sh", "scripts/lib/download.sh", recipeFiles[0]} {
+		path := filepath.Join(backend.RepositoryRoot, filepath.FromSlash(file))
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(slices.Clone(before), "changed\n"...), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		check(file+" changed", true)
+		if err := os.WriteFile(path, before, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, marker := range []string{"", "legacy"} {
+		installed = marker
+		check("marker "+marker, true)
+	}
+	readErr = errors.New("injected read failure")
+	if _, err := backend.EngineChanged(context.Background()); err == nil {
+		t.Fatal("an unreadable revision was treated as observed")
+	}
 }
