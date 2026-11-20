@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ownerservice"
+	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/uninstall"
 )
@@ -43,6 +45,11 @@ func (cli *CLI) bindServiceRegistrationActivation(request releasetransition.Proc
 					loaded, err := cli.resolveReleaseTransitionContext(context.Background(), name, request.ConfigHome, nil)
 					if err == nil && !cli.unobservedReleaseYard(name, request.ConfigHome) &&
 						loaded.Context.AccessKind == domain.AccessLocal && service.Matches(loaded.Environment) {
+						// An interrupted recreation leaves the settings without a runtime.
+						incus, _ := cli.statusPorts()
+						if _, err := incus.Instance(context.Background(), loaded.Context.IncusProject, loaded.Context.YardInstanceName); errors.Is(err, ports.ErrInstanceNotFound) {
+							return []string{fmt.Sprintf("service %s has no runtime in yard %s; yard service install %s --yard %s recreates it", service.ID, name, service.ID, name)}
+						}
 						return []string{fmt.Sprintf("register service %s (pool default) when exactly one owned runtime is proven; runtime and leases retained", service.ID)}
 					}
 				}

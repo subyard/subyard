@@ -27,7 +27,6 @@ import (
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/shellquote"
-	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
 const releaseTransitionRequestLimit = 1 << 20
@@ -120,8 +119,8 @@ func (cli *CLI) runReleaseTransition(ctx context.Context, arguments []string) in
 		return 1
 	}
 	operation := cli.releaseActivationOperation(request)
-	reconcilers := operation.bindServiceRegistrationActivation(request, operation.activationReconcilers(request))
-	ownerRegistration := operation.ownerRegistrationTransition(request)
+	reconcilers := operation.bindServiceRecreation(request, operation.bindServiceRegistrationActivation(request, operation.activationReconcilers(request)))
+	ownerRegistration := operation.legacyOwnerRegistration(request)
 	ingressFactory := operation.releaseTransitionIngressFactory(request)
 	ctx = releasetransition.WithMigrationDiagnosticWriter(ctx, cli.options.Stderr)
 	response, err := executeReleaseTransitionRequest(
@@ -182,130 +181,70 @@ func (cli *CLI) nonConfigActivationReconcilers(request releasetransition.Process
 		cli.profileActivationReconciler(request, "core-guest-runtime"),
 		cli.profileActivationReconciler(request, "key-tools-runtime"),
 		cli.brokerActivationReconciler(request),
-		cli.routeConsumerActivationReconciler(request),
 		cli.networkGuardActivationReconciler(request),
 		cli.powerActivationReconciler(request),
 	}...)
 }
 
-type ownerRegistrationTransition struct {
+// legacyOwnerRegistration keeps the compiled pre-v0.11 test-yard owner
+// migration inert. Supported sources completed it; a ledger that still lists
+// it has either no legacy test yard, which needs no migration, or one that is
+// recreated explicitly and never migrated.
+type legacyOwnerRegistration struct {
+	configHome                    string
 	registeredYards, guestDiskTmp []releasetransition.V2ActivationReconciler
 	endpointSettings              []string
-	options                       func() (testyardmigration.Options, error)
 }
 
-func (transition *ownerRegistrationTransition) registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string) {
-	return transition.registeredYards, transition.guestDiskTmp, transition.endpointSettings
+type legacyOwnerRegistrationRefusal struct{}
+
+func (legacyOwnerRegistrationRefusal) Error() string {
+	message, next := legacyOwnerRegistrationRefusal{}.ActivationDiagnostic()
+	return message + "; " + next
+}
+func (legacyOwnerRegistrationRefusal) MigrationRefusal() bool { return true }
+func (legacyOwnerRegistrationRefusal) ActivationDiagnostic() (string, string) {
+	return "the legacy " + legacyTestYardName + " registration is recreated, not migrated", legacyTestYardRecreation
 }
 
-func (transition *ownerRegistrationTransition) Prepare(
-	ctx context.Context,
-	prospective releasetransition.V2SettingsSnapshotView,
-) (releasetransition.OwnerRegistrationObservation, error) {
-	options, err := transition.options()
+func (owner *legacyOwnerRegistration) registeredMigrationOwners() ([]releasetransition.V2ActivationReconciler, []releasetransition.V2ActivationReconciler, []string) {
+	return owner.registeredYards, owner.guestDiskTmp, owner.endpointSettings
+}
+
+func (owner *legacyOwnerRegistration) Prepare(_ context.Context, view releasetransition.V2SettingsSnapshotView) (releasetransition.OwnerRegistrationObservation, error) {
+	names, err := config.YardNames(owner.configHome)
+	if err == nil && view != nil {
+		var prospective []string
+		prospective, err = view.ListYards()
+		names = append(names, prospective...)
+	}
 	if err != nil {
 		return releasetransition.OwnerRegistrationObservation{}, err
 	}
-	var prepared testyardmigration.Prepared
-	if prospective == nil {
-		prepared, err = testyardmigration.Prepare(ctx, options)
-	} else {
-		prepared, err = testyardmigration.PrepareProspective(
-			ctx, options, prospective.ReadSnapshot,
-		)
+	if slices.Contains(names, legacyTestYardName) {
+		return releasetransition.OwnerRegistrationObservation{}, legacyOwnerRegistrationRefusal{}
 	}
-	return releasetransition.OwnerRegistrationObservation{
-		State:        releasetransition.OwnerRegistrationState(prepared.State),
-		Registration: releasetransition.Fingerprint(prepared.RegistrationDigest),
-		Overrides:    releasetransition.Fingerprint(prepared.OverridesDigest),
-		Controller:   releasetransition.Fingerprint(prepared.ControllerDigest),
-		SharedImages: prepared.SharedImages,
-	}, err
+	return releasetransition.OwnerRegistrationObservation{State: releasetransition.OwnerRegistrationAbsent}, nil
 }
 
-// A fresh update leaves a legacy/conflicting test owner for explicit recreation.
-func (transition *ownerRegistrationTransition) FreshWarning(ctx context.Context, view releasetransition.V2SettingsSnapshotView) (string, error) {
-	options, err := transition.options()
-	if err != nil {
-		return "", err
-	}
-	if view != nil {
-		files, err := prospectiveActivationFiles(options.ConfigHome, view)
-		if err != nil {
-			return "", err
-		}
-		options.ProspectiveFiles = files
-	}
-	return testYardRecreation(ctx, options)
+func (*legacyOwnerRegistration) Observe(context.Context, releasetransition.OwnerRegistrationObservation) (releasetransition.OwnerRegistrationProgress, error) {
+	return "", legacyOwnerRegistrationRefusal{}
 }
 
-type testYardRecreateRefusal struct{}
-
-func (err testYardRecreateRefusal) Error() string {
-	message, next := err.ActivationDiagnostic()
-	return message + "; " + next
-}
-func (testYardRecreateRefusal) MigrationRefusal() bool { return true }
-func (err testYardRecreateRefusal) ActivationDiagnostic() (string, string) {
-	return "test-yard registration or routes require recreation; preserve other sessions' VMs and confirm removal explicitly", "run yard update --check for the registered-owner recreation commands"
+func (*legacyOwnerRegistration) Commit(context.Context, releasetransition.OwnerRegistrationObservation) error {
+	return legacyOwnerRegistrationRefusal{}
 }
 
-func (transition *ownerRegistrationTransition) Commit(
-	ctx context.Context,
-	before releasetransition.OwnerRegistrationObservation,
-) error {
-	options, err := transition.options()
-	if err != nil {
-		return err
-	}
-	if !before.TerminalCleanup {
-		ctx = ownerMigrationChildContext(ctx)
-	}
-	options.RecoveryToken = before.RecoveryToken
-	options.TerminalCleanup = before.TerminalCleanup
-	return testyardmigration.Commit(ctx, options, testyardmigration.Prepared{
-		State:              testyardmigration.State(before.State),
-		RegistrationDigest: string(before.Registration),
-		OverridesDigest:    string(before.Overrides),
-		ControllerDigest:   string(before.Controller),
-		SharedImages:       before.SharedImages,
-	})
-}
-
-func (transition *ownerRegistrationTransition) Observe(
-	ctx context.Context,
-	before releasetransition.OwnerRegistrationObservation,
-) (releasetransition.OwnerRegistrationProgress, error) {
-	options, err := transition.options()
-	if err != nil {
-		return "", err
-	}
-	options.RecoveryToken = before.RecoveryToken
-	options.TerminalCleanup = before.TerminalCleanup
-	progress, err := testyardmigration.ObserveProgress(
-		ctx, options, testyardmigration.Prepared{
-			State:              testyardmigration.State(before.State),
-			RegistrationDigest: string(before.Registration),
-			OverridesDigest:    string(before.Overrides),
-			ControllerDigest:   string(before.Controller),
-			SharedImages:       before.SharedImages,
-		},
-	)
-	return releasetransition.OwnerRegistrationProgress(progress), err
-}
-
-func (cli *CLI) ownerRegistrationTransition(
-	request releasetransition.ProcessRequest,
-) releasetransition.V2OwnerRegistration {
-	return &ownerRegistrationTransition{endpointSettings: cli.resources.EndpointSettingNames(), registeredYards: cli.registeredYardMigrations(request, false), guestDiskTmp: cli.registeredYardMigrations(request, true), options: func() (testyardmigration.Options, error) {
-		return cli.releaseTransitionTestYardOptions(request)
-	}}
+func (cli *CLI) legacyOwnerRegistration(request releasetransition.ProcessRequest) releasetransition.V2OwnerRegistration {
+	return &legacyOwnerRegistration{configHome: request.ConfigHome, endpointSettings: cli.resources.EndpointSettingNames(), registeredYards: cli.registeredYardMigrations(request, false), guestDiskTmp: cli.registeredYardMigrations(request, true)}
 }
 
 type activationApplicability struct {
 	state   string
 	applies bool
 	target  string
+	// warnings name operator actions the owner leaves to the operator.
+	warnings []string
 }
 
 type activationStageReconciler struct {
@@ -328,215 +267,6 @@ type activationStageError struct {
 	phase string
 	err   error
 }
-
-type routeConsumerActivationPort interface {
-	PrepareOwner(context.Context) (string, error)
-	Prepare(context.Context) (string, error)
-	Verify(context.Context, string) error
-}
-
-type routeConsumerActivationReconciler struct {
-	configuration    *CLI
-	sourceActivation func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error)
-	port             routeConsumerActivationPort
-}
-
-func (*routeConsumerActivationReconciler) ID() string { return "test-yard-route-consumers" }
-
-func (reconciler *routeConsumerActivationReconciler) ObserveProspective(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks, view releasetransition.V2SettingsSnapshotView) (releasetransition.V2ActivationObservation, error) {
-	port, ok := reconciler.port.(interface {
-		Prospective(releasetransition.V2SettingsSnapshotView) (routeConsumerActivationPort, error)
-	})
-	if !ok || view == nil {
-		return reconciler.Observe(ctx, releases, links)
-	}
-	projected, err := port.Prospective(view)
-	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
-	}
-	return (&routeConsumerActivationReconciler{configuration: reconciler.configuration, port: projected}).Observe(ctx, releases, links)
-}
-
-func (reconciler *routeConsumerActivationReconciler) Observe(
-	ctx context.Context,
-	releases releasetransition.ReleasePair,
-	_ releasetransition.ReleaseLinks,
-) (releasetransition.V2ActivationObservation, error) {
-	if reconciler == nil || reconciler.port == nil {
-		return releasetransition.V2ActivationObservation{}, errors.New("route consumer activation reconciler is unavailable")
-	}
-	warning := ""
-	var err error
-	if probe, ok := reconciler.port.(interface {
-		releaseRecreation(context.Context) (string, error)
-	}); ok {
-		warning, err = probe.releaseRecreation(ctx)
-		if err != nil {
-			return releasetransition.V2ActivationObservation{}, err
-		}
-	}
-	owner := string(testyardmigration.StateAbsent)
-	if warning == "" {
-		owner, err = reconciler.port.PrepareOwner(ctx)
-		if err != nil {
-			return releasetransition.V2ActivationObservation{}, err
-		}
-	}
-	active := owner != string(testyardmigration.StateAbsent)
-	desired, err := activationStageFingerprint(struct {
-		ID     string                      `json:"id"`
-		Target releasetransition.ReleaseID `json:"target"`
-		Active bool                        `json:"active"`
-	}{reconciler.ID(), releases.Target, active})
-	if err != nil {
-		return releasetransition.V2ActivationObservation{}, err
-	}
-	if warning != "" {
-		return releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true, Warnings: []string{warning}}, nil
-	}
-	if !active {
-		return releasetransition.V2ActivationObservation{
-			Actual: desired, Desired: desired, Converged: true,
-		}, nil
-	}
-	if owner != string(testyardmigration.StateCurrent) {
-		return releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true, Warnings: []string{testYardRecreateRefusal{}.Error()}}, nil
-	}
-
-	before, err := reconciler.port.Prepare(ctx)
-	if err == nil {
-		err = reconciler.port.Verify(ctx, before)
-	}
-	if err == nil {
-		return releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true}, nil
-	}
-	var conflict interface{ ActivationConflict() bool }
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &conflict) || !conflict.ActivationConflict() {
-		return releasetransition.V2ActivationObservation{}, err
-	}
-
-	warning = testYardRecreateRefusal{}.Error()
-	if probe, ok := reconciler.port.(interface{ releaseRecreationHint() (string, error) }); ok {
-		warning, err = probe.releaseRecreationHint()
-		if err != nil {
-			return releasetransition.V2ActivationObservation{}, err
-		}
-	}
-	return releasetransition.V2ActivationObservation{Actual: desired, Desired: desired, Converged: true, Warnings: []string{warning}}, nil
-
-}
-
-func (reconciler *routeConsumerActivationReconciler) Reconcile(
-	ctx context.Context,
-	_ releasetransition.ReleaseLinks,
-) error {
-	if reconciler == nil || reconciler.port == nil {
-		return errors.New("route consumer activation reconciler is unavailable")
-	}
-	if probe, ok := reconciler.port.(interface {
-		releaseRecreation(context.Context) (string, error)
-	}); ok {
-		warning, err := probe.releaseRecreation(ctx)
-		if err != nil {
-			return err
-		}
-		if warning != "" {
-			return nil
-		}
-	}
-	ctx = routeMigrationChildContext(ctx)
-	owner, err := reconciler.port.PrepareOwner(ctx)
-	if err != nil {
-		return err
-	}
-	if owner == string(testyardmigration.StateAbsent) {
-		return nil
-	}
-	if owner != string(testyardmigration.StateCurrent) {
-		return testYardRecreateRefusal{}
-	}
-	before, err := reconciler.port.Prepare(ctx)
-	if err != nil {
-		return err
-	}
-	if err := reconciler.port.Verify(ctx, before); err == nil {
-		return nil
-	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return err
-	}
-	return testYardRecreateRefusal{}
-}
-
-type testYardRouteConsumerActivation struct {
-	options testyardmigration.Options
-}
-
-func (activation *testYardRouteConsumerActivation) releaseRecreation(ctx context.Context) (string, error) {
-	return testYardRecreation(ctx, activation.options)
-}
-func (activation *testYardRouteConsumerActivation) releaseRecreationHint() (string, error) {
-	return testyardmigration.RecreationHint(activation.options, false)
-}
-
-func prospectiveActivationFiles(root string, view releasetransition.V2SettingsSnapshotView) (*config.ProspectiveFiles, error) {
-	if view == nil {
-		return nil, nil
-	}
-	yards, err := view.ListYards()
-	if err != nil {
-		return nil, err
-	}
-	return &config.ProspectiveFiles{Root: root, Yards: yards, ReadSnapshot: view.ReadSnapshot}, nil
-}
-
-func (activation *testYardRouteConsumerActivation) Prospective(view releasetransition.V2SettingsSnapshotView) (routeConsumerActivationPort, error) {
-	files, err := prospectiveActivationFiles(activation.options.ConfigHome, view)
-	if err != nil {
-		return nil, err
-	}
-	projected := *activation
-	projected.options.ProspectiveFiles = files
-	return &projected, nil
-}
-
-func (activation *testYardRouteConsumerActivation) PrepareOwner(
-	ctx context.Context,
-) (string, error) {
-	state, err := testyardmigration.PrepareRouteConsumerActivation(ctx, activation.options)
-	return string(state), err
-}
-
-func (activation *testYardRouteConsumerActivation) Prepare(ctx context.Context) (string, error) {
-	return testyardmigration.PrepareRouteConsumersActivation(ctx, activation.options)
-}
-
-func (activation *testYardRouteConsumerActivation) Verify(ctx context.Context, before string) error {
-	return testyardmigration.VerifyRouteConsumersActivation(ctx, activation.options, before)
-}
-
-func (cli *CLI) routeConsumerActivationReconciler(
-	request releasetransition.ProcessRequest,
-) releasetransition.V2ActivationReconciler {
-	options, err := cli.releaseTransitionTestYardOptions(request)
-	if err != nil {
-		return &routeConsumerActivationReconciler{configuration: cli, port: routeConsumerActivationError{err: err}}
-	}
-	return &routeConsumerActivationReconciler{
-		configuration:    cli,
-		sourceActivation: cli.prepareRouteSourceActivation(request),
-		port:             &testYardRouteConsumerActivation{options: options},
-	}
-}
-
-type routeConsumerActivationError struct{ err error }
-
-func (failure routeConsumerActivationError) PrepareOwner(context.Context) (string, error) {
-	return "", failure.err
-}
-func (failure routeConsumerActivationError) Prepare(context.Context) (string, error) {
-	return "", failure.err
-}
-func (failure routeConsumerActivationError) Verify(context.Context, string) error { return failure.err }
 
 func (failure activationStageError) Error() string { return failure.err.Error() }
 
@@ -595,7 +325,7 @@ func (reconciler *activationStageReconciler) Observe(
 	}
 	if !applicability.applies {
 		return releasetransition.V2ActivationObservation{
-			Actual: desired, Desired: desired, Converged: true, Planned: planned,
+			Actual: desired, Desired: desired, Converged: true, Planned: planned, Warnings: applicability.warnings,
 		}, nil
 	}
 	platform, err := reconciler.platform(ctx, applicability)
@@ -607,6 +337,9 @@ func (reconciler *activationStageReconciler) Observe(
 		return releasetransition.V2ActivationObservation{}, err
 	}
 	var consequences []string
+	// The plan binds the recreation decision through Actual, so a registration
+	// that appears or disappears before convergence makes the plan stale.
+	recreate := false
 	if !converged && reconciler.recreation != nil {
 		recreation, err := reconciler.recreation.assess(ctx, applicability.target)
 		if err != nil {
@@ -615,28 +348,31 @@ func (reconciler *activationStageReconciler) Observe(
 		if recreation.refusal != nil {
 			return releasetransition.V2ActivationObservation{
 				Actual: desired, Desired: desired, Converged: true, Planned: planned,
-				Warnings: []string{reconciler.recreation.warning(applicability.target, recreation.refusal)},
+				Warnings: append(applicability.warnings, reconciler.recreation.warning(applicability.target, recreation.refusal)),
 			}, nil
 		}
 		if recreation.selection != nil {
+			recreate = true
 			consequences = []string{reconciler.recreation.consequence(recreation)}
 		}
 	}
 	actual := desired
 	if !converged {
 		actual, err = activationStageFingerprint(struct {
-			ID     string                      `json:"id"`
-			Stage  ports.ReconcileStageID      `json:"stage"`
-			State  string                      `json:"state"`
-			Active releasetransition.ReleaseID `json:"active"`
-			Drift  bool                        `json:"drift"`
-		}{reconciler.id, reconciler.stage, applicability.state, links.Active, true})
+			ID       string                      `json:"id"`
+			Stage    ports.ReconcileStageID      `json:"stage"`
+			State    string                      `json:"state"`
+			Active   releasetransition.ReleaseID `json:"active"`
+			Drift    bool                        `json:"drift"`
+			Recreate bool                        `json:"recreate,omitempty"`
+		}{reconciler.id, reconciler.stage, applicability.state, links.Active, true, recreate})
 		if err != nil {
 			return releasetransition.V2ActivationObservation{}, err
 		}
 	}
 	return releasetransition.V2ActivationObservation{
 		Actual: actual, Desired: desired, Converged: converged, Planned: planned, Consequences: consequences,
+		Warnings: applicability.warnings,
 	}, nil
 }
 
@@ -727,42 +463,40 @@ func (cli *CLI) brokerActivationReconciler(
 }
 
 func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessRequest, files *config.ProspectiveFiles) *activationStageReconciler {
-	options := func() (testyardmigration.Options, error) {
-		values, err := cli.releaseTransitionTestYardOptions(request)
-		values.ProspectiveFiles = files
-		return values, err
-	}
+	const id = "test-vm-broker"
 	return &activationStageReconciler{
 		configuration: cli,
 		prospective: func(view releasetransition.V2SettingsSnapshotView) (*activationStageReconciler, error) {
-			projected, err := prospectiveActivationFiles(request.ConfigHome, view)
+			yards, err := view.ListYards()
 			if err != nil {
 				return nil, err
 			}
-			return cli.brokerActivationWithFiles(request, projected), nil
+			return cli.brokerActivationWithFiles(request, &config.ProspectiveFiles{Root: request.ConfigHome, Yards: yards, ReadSnapshot: view.ReadSnapshot}), nil
 		},
-		sourceActivation: cli.prepareBrokerSourceActivation(request),
-		id:               "test-vm-broker", stage: ports.ReconcileStageTestVMs,
+		sourceActivation: cli.prepareBrokerSourceActivation(request, id),
+		id:               id, stage: ports.ReconcileStageTestVMs,
 		inspectApplicability: func(ctx context.Context) (activationApplicability, error) {
-			values, err := options()
+			names, err := config.YardNames(request.ConfigHome)
 			if err != nil {
 				return activationApplicability{}, err
 			}
-			warning, err := testYardRecreation(ctx, values)
-			if err != nil {
-				return activationApplicability{}, err
+			if files != nil {
+				names = append(names, files.Yards...)
 			}
-			if warning != "" {
-				return activationApplicability{state: string(testyardmigration.BrokerRuntimeAbsent)}, nil
+			// Release repair leaves a deferred broker yard unread and untouched,
+			// like the materialized configuration of that yard.
+			if definition, ok := cli.activationService(id); ok && cli.activation != nil && cli.activation.repair &&
+				slices.Contains(names, definition.InfrastructureService.DefaultYard) &&
+				cli.activation.pending.decided(ctx, releasetransition.ReleasePair{})[definition.InfrastructureService.DefaultYard] {
+				return activationApplicability{state: "deferred", target: definition.InfrastructureService.DefaultYard}, nil
 			}
-			state, yard, err := testyardmigration.PrepareBrokerRuntimeTarget(ctx, values)
-			// Release repair leaves a deferred broker yard untouched; its state
-			// stays in Desired, like the materialized configuration of that yard.
-			deferred := err == nil && cli.activation != nil && cli.activation.repair && cli.activation.pending.decided(ctx, releasetransition.ReleasePair{})[yard]
-			return activationApplicability{
-				state: string(state), applies: state == testyardmigration.BrokerRuntimeActive && !deferred,
-				target: yard,
-			}, err
+			applicability, err := cli.serviceStageApplicability(ctx, id, names, func(name string) (config.Loaded, error) {
+				return cli.resolveReleaseTransitionContext(ctx, name, request.ConfigHome, files)
+			})
+			if err == nil && slices.Contains(names, legacyTestYardName) {
+				applicability.warnings = []string{legacyTestYardWarning}
+			}
+			return applicability, err
 		},
 		platform: func(ctx context.Context, applicability activationApplicability) (ports.ReconcileStageRunner, error) {
 			if applicability.target == "" {
@@ -783,77 +517,6 @@ func (cli *CLI) brokerActivationWithFiles(request releasetransition.ProcessReque
 		},
 		authorize: cli.releaseTransitionPrivilegeAuthorization,
 	}
-}
-
-func (cli *CLI) releaseTransitionTestYardOptions(
-	request releasetransition.ProcessRequest,
-) (testyardmigration.Options, error) {
-	environment := cli.freshMigrationEnvironment(cli.baseEnv, cli.options.RepositoryRoot)
-	dataHome := environment["SUBYARD_HOME"]
-	if dataHome == "" {
-		operatorHome := environment["SUBYARD_OPERATOR_HOME"]
-		if operatorHome == "" {
-			operatorHome = environment["HOME"]
-		}
-		if operatorHome == "" || !filepath.IsAbs(operatorHome) {
-			return testyardmigration.Options{}, errors.New("release transition operator home is unavailable")
-		}
-		dataHome = filepath.Join(operatorHome, ".subyard")
-	}
-	return testyardmigration.Options{
-		Executable:     filepath.Join(cli.options.RepositoryRoot, "bin", "yard-engine"),
-		RepositoryRoot: cli.options.RepositoryRoot,
-		Incus:          "incus",
-		ConfigHome:     request.ConfigHome, DataHome: dataHome,
-		Environment: environmentList(environment, nil),
-		Stdout:      cli.options.Stderr, Stderr: cli.options.Stderr,
-		RunYard: cli.runReleaseTransitionYardCommand,
-		EnsureImageProject: func(ctx context.Context, yard string, shared bool) error {
-			return cli.ensureReleaseTransitionImageProject(ctx, request.ConfigHome, yard, shared)
-		},
-	}, nil
-}
-
-func (cli *CLI) ensureReleaseTransitionImageProject(ctx context.Context, configHome, yard string, shared bool) error {
-	if yard != testyardmigration.CurrentYard && yard != testyardmigration.LegacyYard {
-		return domain.ErrPlanStale
-	}
-	incus, _ := cli.statusPorts()
-	native, ok := incus.(interface {
-		PrepareImageProject(context.Context, string, bool) (ports.PreparedImageProject, error)
-		ApplyPreparedImageProject(context.Context, ports.PreparedImageProject) error
-	})
-	if !ok {
-		return domain.ErrPlanStale
-	}
-	prepared, err := native.PrepareImageProject(ctx, "subyard-"+yard, shared)
-	if err != nil {
-		return err
-	}
-	if !prepared.Absent || !shared {
-		return native.ApplyPreparedImageProject(ctx, prepared)
-	}
-	loaded, err := cli.resolveReleaseTransitionContext(ctx, yard, configHome)
-	if err != nil {
-		return err
-	}
-	if loaded.Context.YardName != yard || loaded.Context.IncusProject != prepared.Project || loaded.Context.AccessKind != domain.AccessLocal || loaded.Context.Paths.ConfigHome != configHome {
-		return domain.ErrPlanStale
-	}
-	runtime, ok := cli.initPlatform(loaded, []domain.Context{loaded.Context}).(reconcileruntime.Runtime)
-	if !ok {
-		return domain.ErrPlanStale
-	}
-	sources, err := runtime.PrepareOwnerRuntimeSources(ctx)
-	if err != nil {
-		return err
-	}
-	defer sources.Close()
-	prepared.InitialConfig, err = runtime.RenderOwnerProjectConfig(ctx, sources)
-	if err != nil {
-		return err
-	}
-	return native.ApplyPreparedImageProject(ctx, prepared)
 }
 
 func (cli *CLI) releaseTransitionIngressFactory(
@@ -2127,29 +1790,7 @@ func (cli *CLI) loadReleaseTransitionContext(yard, configHome string, sources ma
 	if len(files) != 0 {
 		options.ProspectiveFiles = files[0]
 	}
-	loaded, err := config.Load(options)
-	if err == nil || yard != testyardmigration.LegacyYard ||
-		!releaseTransitionRegistrationAbsent(configHome, yard) {
-		return loaded, err
-	}
-	options.YardName = testyardmigration.CurrentYard
 	return config.Load(options)
-}
-
-func releaseTransitionRegistrationAbsent(configHome, yard string) bool {
-	if configHome == "" || !filepath.IsAbs(configHome) || !domain.SafeName(yard) {
-		return false
-	}
-	for _, path := range []string{
-		filepath.Join(configHome, "yards", yard, "config.env"),
-		filepath.Join(configHome, "yards", yard+".env"),
-	} {
-		snapshot, err := config.ReadPersistentFileSnapshot(configHome, path)
-		if err != nil || snapshot.Exists {
-			return false
-		}
-	}
-	return true
 }
 
 func executeReleaseTransitionRequest(

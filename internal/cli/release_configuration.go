@@ -305,7 +305,6 @@ func (r *profileRuntimeActivationReconciler) activationConfiguration() *CLI     
 func (r *materializedConfigActivationReconciler) activationConfiguration() *CLI { return r.cli }
 func (r *installationActivationReconciler) activationConfiguration() *CLI       { return r.cli }
 func (r *activationStageReconciler) activationConfiguration() *CLI              { return r.configuration }
-func (r *routeConsumerActivationReconciler) activationConfiguration() *CLI      { return r.configuration }
 
 // uninitializedLocked is releaseYardUninitialized for a caller that holds the
 // mutex. It reads only the instance, never the guest; a failed read leaves the

@@ -6438,10 +6438,7 @@ operator_yard() {
       else
         if [ "$scenario" = ordinary-change ]; then touch "$F/changed"; fi
         if [ "$scenario" = config-change ]; then printf changed > "$OPERATOR_HOME/.config/subyard/changed"; fi
-        status=ready warning='test-yard requires recreation; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms'
-        if [ ! -e "$F/synced" ]; then
-          warning='test-yard requires recreation; run yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms'
-        fi
+        status=ready warning="e2e-yard requires recreation and is not updated; preserve other sessions' VMs; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"
         [ "$scenario" != wrong-guidance ] || warning='unrelated warning'
         [ "$scenario" != unready ] || status=migration-required
         jq -n --arg status "$status" --arg warning "$warning" \

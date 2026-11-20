@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -75,7 +74,7 @@ func (cli *CLI) serviceStageApplicability(ctx context.Context, activation string
 	}
 	incus, _ := cli.statusPorts()
 	instance, err := incus.Instance(ctx, loaded.Context.IncusProject, loaded.Context.YardInstanceName)
-	if errors.Is(err, ports.ErrInstanceNotFound) || errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, ports.ErrInstanceNotFound) || err != nil && ports.LocalInstallationAbsent(incus) {
 		return activationApplicability{state: "absent"}, nil
 	}
 	if err != nil {
@@ -219,3 +218,11 @@ func (cli *CLI) bindServiceRecreation(request releasetransition.ProcessRequest, 
 	}
 	return reconcilers
 }
+
+// legacyTestYardName is the pre-v0.11 test-yard name. Release work never loads
+// it and its init refuses; the operator recreates it explicitly.
+const (
+	legacyTestYardName       = "e2e-yard"
+	legacyTestYardRecreation = "yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"
+	legacyTestYardWarning    = legacyTestYardName + " requires recreation and is not updated; preserve other sessions' VMs; run " + legacyTestYardRecreation
+)

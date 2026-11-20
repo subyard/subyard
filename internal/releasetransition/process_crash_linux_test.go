@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +20,6 @@ import (
 
 	rt "github.com/Subyard/Subyard/internal/releasetransition"
 	"github.com/Subyard/Subyard/internal/testkit"
-	tm "github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
 type crashTrace struct {
@@ -133,62 +131,101 @@ func crashWrite(path string, body []byte) error {
 	return dir.Sync()
 }
 
+// crashOwner models the retained owner-registration step with file effects:
+// the legacy runtime is removed, its registration moves to the current name and
+// the current runtime is created. Each effect is idempotent for resume.
 type crashOwner struct {
-	options  tm.Options
-	original tm.Prepared
-	trace    *crashTrace
+	home, root, state string
+	trace             *crashTrace
 }
 
-func (owner *crashOwner) Prepare(ctx context.Context, view rt.V2SettingsSnapshotView) (rt.OwnerRegistrationObservation, error) {
-	var before tm.Prepared
-	var err error
-	if view != nil {
-		before, err = tm.PrepareProspective(ctx, owner.options, view.ReadSnapshot)
-	} else {
-		before, err = tm.Prepare(ctx, owner.options)
+func (owner *crashOwner) legacy() string {
+	return filepath.Join(owner.home, "yards/e2e-yard/config.env")
+}
+func (owner *crashOwner) current() string {
+	return filepath.Join(owner.home, "yards/test-yard/config.env")
+}
+
+func (owner *crashOwner) Prepare(_ context.Context, view rt.V2SettingsSnapshotView) (rt.OwnerRegistrationObservation, error) {
+	read := func(path string) ([]byte, bool, error) {
+		if view != nil {
+			snapshot, err := view.ReadSnapshot(path)
+			return snapshot.Content, snapshot.Exists, err
+		}
+		body, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return body, err == nil, err
+	}
+	state := rt.OwnerRegistrationLegacyDirectory
+	body, exists, err := read(owner.legacy())
+	if err == nil && !exists {
+		state = rt.OwnerRegistrationCurrent
+		body, exists, err = read(owner.current())
 	}
 	if err != nil {
 		return rt.OwnerRegistrationObservation{}, err
 	}
-	state := rt.OwnerRegistrationCurrent
-	if before.State == tm.StateLegacyDirectory {
-		state = rt.OwnerRegistrationLegacyDirectory
-		owner.original = before
-	} else if before.State != tm.StateCurrent {
-		return rt.OwnerRegistrationObservation{}, fmt.Errorf("unexpected owner topology %s", before.State)
+	if !exists {
+		return rt.OwnerRegistrationObservation{}, errors.New("unexpected owner topology")
 	}
-	return rt.OwnerRegistrationObservation{State: state, Registration: rt.Fingerprint(before.RegistrationDigest), Overrides: rt.Fingerprint(before.OverridesDigest), Controller: rt.Fingerprint(before.ControllerDigest), SharedImages: before.SharedImages}, nil
+	return rt.OwnerRegistrationObservation{State: state, Registration: crashPin(string(body)), Overrides: crashPin(""), Controller: crashPin("controller"), SharedImages: true}, nil
 }
-func (owner *crashOwner) prepared(before rt.OwnerRegistrationObservation) tm.Prepared {
-	return tm.Prepared{State: tm.StateLegacyDirectory, RegistrationDigest: string(before.Registration), OverridesDigest: string(before.Overrides), ControllerDigest: string(before.Controller), SharedImages: before.SharedImages}
-}
-func (owner *crashOwner) Observe(ctx context.Context, before rt.OwnerRegistrationObservation) (rt.OwnerRegistrationProgress, error) {
-	options := owner.options
-	options.RecoveryToken = before.RecoveryToken
-	options.TerminalCleanup = before.TerminalCleanup
-	progress, err := tm.ObserveProgress(ctx, options, owner.prepared(before))
+
+func (owner *crashOwner) Observe(context.Context, rt.OwnerRegistrationObservation) (rt.OwnerRegistrationProgress, error) {
+	physical, err := os.ReadFile(owner.state)
 	if err != nil {
 		return "", err
 	}
-	if progress == tm.ProgressDesired {
-		return rt.OwnerRegistrationDesired, nil
-	}
-	if progress == tm.ProgressExpected {
+	_, legacyErr := os.Stat(owner.legacy())
+	_, currentErr := os.Stat(owner.current())
+	switch {
+	case string(physical) == "legacy\n" && legacyErr == nil && os.IsNotExist(currentErr):
 		return rt.OwnerRegistrationExpected, nil
+	case string(physical) == "current\n" && os.IsNotExist(legacyErr) && currentErr == nil:
+		return rt.OwnerRegistrationDesired, nil
 	}
 	return rt.OwnerRegistrationInProgress, nil
 }
-func (owner *crashOwner) Commit(ctx context.Context, before rt.OwnerRegistrationObservation) error {
-	options := owner.options
-	options.RecoveryToken = before.RecoveryToken
-	options.TerminalCleanup = before.TerminalCleanup
-	if err := tm.Commit(ctx, options, owner.prepared(before)); err != nil {
+
+func (owner *crashOwner) Commit(_ context.Context, before rt.OwnerRegistrationObservation) error {
+	if before.TerminalCleanup {
+		return nil
+	}
+	if physical, err := os.ReadFile(owner.state); err != nil {
+		return err
+	} else if string(physical) == "legacy\n" {
+		if err := crashPhysicalEffect(owner.root, owner.state, "none\n", "legacy-teardown"); err != nil {
+			return err
+		}
+		if err := owner.trace.hit("native/legacy/teardown"); err != nil {
+			return err
+		}
+	}
+	if body, err := os.ReadFile(owner.legacy()); err == nil {
+		if err := os.MkdirAll(filepath.Dir(owner.current()), 0o700); err != nil {
+			return err
+		}
+		if err := crashWrite(owner.current(), body); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(filepath.Dir(owner.legacy())); err != nil {
+			return err
+		}
+		if err := owner.trace.hit("native/legacy/rename"); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if !before.TerminalCleanup {
-		return owner.trace.hit("native/legacy/commit-return")
+	if err := crashPhysicalEffect(owner.root, owner.state, "current\n", "current-init"); err != nil {
+		return err
 	}
-	return nil
+	if err := owner.trace.hit("native/legacy/init"); err != nil {
+		return err
+	}
+	return owner.trace.hit("native/legacy/commit-return")
 }
 
 type crashActivation struct {
@@ -280,33 +317,7 @@ esac
 		t.Fatal(err)
 	}
 	trace := &crashTrace{store: store, cuts: map[string]bool{}}
-	owner := &crashOwner{trace: trace, options: tm.Options{Executable: "/bin/false", Incus: incus, ConfigHome: home, DataHome: data, Environment: append(os.Environ(), "D12_STATE="+state), Stdout: io.Discard, Stderr: io.Discard}}
-	owner.options.RunYard = func(_ context.Context, yard string, output io.Writer, args ...string) error {
-		command := strings.Join(args, " ")
-		if command == "check" {
-			return nil
-		}
-		if command == "test-vms status" {
-			_, err := io.WriteString(output, "test-vms: down\n")
-			return err
-		}
-		if command == "_migrate reconcile-power-reconciler" {
-			return nil
-		}
-		if command == "teardown --yes" && yard == tm.LegacyYard {
-			if err := crashPhysicalEffect(root, state, "none\n", "legacy-teardown"); err != nil {
-				return err
-			}
-			return trace.hit("native/legacy/teardown")
-		}
-		if command == "init --yes" && yard == tm.CurrentYard {
-			if err := crashPhysicalEffect(root, state, "current\n", "current-init"); err != nil {
-				return err
-			}
-			return trace.hit("native/legacy/init")
-		}
-		return fmt.Errorf("unexpected yard transport %s %s", yard, command)
-	}
+	owner := &crashOwner{home: home, root: root, state: state, trace: trace}
 	payload, err := os.ReadFile("../../config/release-transition.json")
 	if err != nil {
 		t.Fatal(err)

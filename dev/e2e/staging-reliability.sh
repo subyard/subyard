@@ -988,7 +988,7 @@ CLOUDOWNER
 # The normal staging fixture retains its independent synthetic owner history.
 prepare_supported_upgrade_owner() {
   local baseline assets installer name suffix baseline_owner candidate_engine before_owner after_owner before_state after_state info
-  local retained_sha baseline_engine_sha retained_version retained_config_sha installer_sha
+  local installer_sha settings settings_before
   # shellcheck source=tests/helpers/release-candidate.sh
   . "$ROOT/tests/helpers/release-candidate.sh"
   candidate_engine="$(release_candidate_prepare "$ROOT")" || die 'verified frozen candidate required'
@@ -1074,18 +1074,12 @@ PYBASELINE
   printf 'STAGING_UPDATER_PREREQUISITE={"git_configuration_operation":true,"execution_user":"dev"}\n'
   before_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
   [[ "$before_owner" =~ ^[a-f0-9-]{36}$ ]] || die 'predecessor broker owner missing'
-  outer_exec sh -eu -c 'target=/usr/local/libexec/subyard/.service-retained-anchor-worker; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0700 /usr/local/libexec/subyard/test-vms-inner "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:700:1 ]'
-  outer_exec sh -eu -c 'target=/var/lib/subyard/test-vms/.service-retained-anchor.env; if [ -e "$target" ] || [ -L "$target" ]; then exit 1; fi; install -m 0600 /etc/subyard/test-vms.env "$target"; [ -f "$target" ] && [ ! -L "$target" ] && [ "$(stat -c %u:%a:%h "$target")" = 0:600:1 ]'
-  baseline_engine_sha="$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)"
-  retained_sha="$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker | cut -d' ' -f1)"
-  [ "$retained_sha" = "$baseline_engine_sha" ] || die 'retained broker is not the authenticated predecessor engine'
-  retained_version="$("$SUBYARD_HOME/runtime/current/bin/yard-engine" --version)"
-  retained_config_sha="$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-anchor.env | cut -d' ' -f1)"
-  printf 'STAGING_RETAINED_BINARY='
-  jq -cn --arg baseline "$baseline" --arg sha256 "$retained_sha" --arg version "$retained_version" --arg config_sha256 "$retained_config_sha" \
-    '{baseline:$baseline,sha256:$sha256,version:$version,config_sha256:$config_sha256}'
   before_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
   [[ "$before_state" =~ ^[a-f0-9]{64}$ ]] || die 'predecessor lease state missing'
+  settings="$OWNER_CONFIG_HOME/yards/test-yard/config.env"
+  [ -f "$settings" ] || settings="$OWNER_CONFIG_HOME/yards/test-yard.env"
+  # Release settings migrations may canonicalize quoting; recreation keeps values.
+  settings_before="$(grep -v '^#' "$settings" | tr -d "'\"" | sort | sha256sum | cut -d' ' -f1)"
   runtime_yard -Y test-yard test-vms status --json > "$STATE_PARENT/predecessor-status.json" || {
     jq -c '{status,code}' "$STATE_PARENT/predecessor-status.json" >&2 || true
     die 'predecessor public broker status query failed'
@@ -1111,56 +1105,22 @@ PYBASELINE
   verify_broker_installation || die 'activated broker differs from candidate'
   [ "$(sha256sum "$candidate_engine" | cut -d' ' -f1)" = "$(sha256sum "$SUBYARD_HOME/runtime/current/bin/yard-engine" | cut -d' ' -f1)" ] \
     || die 'installed engine differs from frozen candidate'
+  # A new release recreates the registered broker: a new runtime with no
+  # leases, the same yard settings and a registration bound to the new runtime.
   after_owner="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
   after_state="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
-  [ "$before_owner" = "$after_owner" ] && [ "$before_state" = "$after_state" ] \
-    || die 'upgrade replaced retained broker owner or lease state'
-  # Actual predecessor writers must refuse the fenced schema under their normal
-  # lease lock, instead of rewriting it without the admission guard.
-  local fence_binding fenced_before fenced_after old_writer_rc=0
-  outer_exec python3 - <<'PYRETAINED_CONFIG'
-import pathlib,shlex
-def state(path):
-    values={}
-    for line in pathlib.Path(path).read_text().splitlines():
-        line=line.strip()
-        if not line or line.startswith('#'): continue
-        key,separator,value=line.partition('=')
-        if separator and key in {'NESTED_E2E_VMS','E2E_VM_STATE_DIR'}:
-            values[key]=shlex.split(value)[0]
-    assert values.get('NESTED_E2E_VMS')=='1'
-    return values.get('E2E_VM_STATE_DIR','/var/lib/subyard/test-vms')+'/leases.json'
-assert state('/etc/subyard/test-vms.env')==state('/var/lib/subyard/test-vms/.service-retained-anchor.env')=='/var/lib/subyard/test-vms/leases.json'
-PYRETAINED_CONFIG
-  [ "$retained_config_sha" = "$(outer_exec sha256sum /var/lib/subyard/test-vms/.service-retained-anchor.env | cut -d' ' -f1)" ] \
-    && [ "$retained_sha" = "$(outer_exec sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker | cut -d' ' -f1)" ] \
-    || die 'retained predecessor inputs changed during update'
-  fence_binding="$(outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status \
-    | python3 -c 'import json,runpy,sys; helper=runpy.run_path("config/profiles/test-vms/service-binding.py"); print(helper["project_pool"](json.load(sys.stdin))["binding"])')"
-  outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker "fence-pool-expected-$fence_binding"
-  fenced_before="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
-  outer_exec env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-anchor.env \
-    /usr/local/libexec/subyard/.service-retained-anchor-worker _test-vms-worker gc \
-    > "$STATE_PARENT/retained-writer.log" 2>&1 || old_writer_rc=$?
-  fenced_after="$(outer_exec sha256sum /var/lib/subyard/test-vms/leases.json | cut -d' ' -f1)"
-  printf 'STAGING_RETAINED_ATTEMPT='
-  jq -cn --arg command 'env SUBYARD_TEST_VMS_CONFIG=/var/lib/subyard/test-vms/.service-retained-anchor.env /usr/local/libexec/subyard/.service-retained-anchor-worker _test-vms-worker gc' \
-    --arg binary_sha256 "$retained_sha" --arg before_sha256 "$fenced_before" --arg after_sha256 "$fenced_after" \
-    --argjson native_exit "$old_writer_rc" \
-    '{command:$command,binary_sha256:$binary_sha256,before_sha256:$before_sha256,after_sha256:$after_sha256,native_exit:$native_exit}'
-  printf 'STAGING_RETAINED_OUTPUT_BEGIN\n'
-  head -c 4096 "$STATE_PARENT/retained-writer.log"
-  printf '\nSTAGING_RETAINED_OUTPUT_END\n'
-  # The anchor writer already honors the fence; an older one must refuse it. Either
-  # way the fenced lease state stays unchanged.
-  if [ "$old_writer_rc" != 0 ]; then
-    grep -Fq 'unsupported lease state' "$STATE_PARENT/retained-writer.log" \
-      || die 'retained broker writer failed for a reason other than the fenced pool schema'
-  fi
-  [ "$fenced_before" = "$fenced_after" ] || die 'retained writer changed fenced lease state'
-  outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker resume-admission
-  printf 'STAGING_RETAINED_WRITER={"baseline":"%s","fenced_schema":3,"native_exit":%s,"state_retained":true}\n' "$baseline" "$old_writer_rc"
-  printf 'STAGING_SUPPORTED_UPGRADE={"baseline":"%s","candidate":"%s","broker_owner":"%s","lease_state_sha256":"%s","retained_owner":true}\n' \
+  [[ "$after_owner" =~ ^[a-f0-9-]{36}$ ]] && [ "$before_owner" != "$after_owner" ] \
+    || die 'upgrade did not recreate the registered broker'
+  [ "$(jq -er .runtime_uuid "$SUBYARD_HOME/services/test-vms/default.json")" = "$after_owner" ] \
+    || die 'recreated broker registration does not bind the new runtime'
+  [ "$settings_before" = "$(grep -v '^#' "$settings" | tr -d "'\"" | sort | sha256sum | cut -d' ' -f1)" ] \
+    || die 'broker recreation changed the yard settings'
+  info="$(outer_exec /usr/local/libexec/subyard/test-vms-inner _test-vms-worker status)" \
+    || die 'cannot query the recreated broker status'
+  jq -e '.status=="ok" and (.pool.slots | length)==1 and
+      .pool.slots[0].state=="available" and (.resources.bases | length)==0' <<<"$info" >/dev/null \
+    || die 'recreated broker does not start with empty leases and bases'
+  printf 'STAGING_SUPPORTED_UPGRADE={"baseline":"%s","candidate":"%s","broker_owner":"%s","lease_state_sha256":"%s","recreated":true}\n' \
     "$baseline" "$P0_OWNER_VERSION" "$after_owner" "$after_state"
   outer_exec cat /usr/local/libexec/subyard/e2e-recipes/manifest.sha256 \
     | (cd "$ROOT/.subyard-acceptance/runtime" && sha256sum -c - >/dev/null) \

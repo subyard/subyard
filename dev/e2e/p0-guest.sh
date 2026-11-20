@@ -321,7 +321,7 @@ prepare_broker_recovery_update() {
 canonical_broker_release_migration_contract() {
   local runtime_root="${SUBYARD_HOME:-$HOME/.subyard}/runtime"
   local active_old_hash active_new_hash expected_hash inactive_marker
-  local rolled_back_hash
+  local rolled_back_hash old_uuid new_uuid registration_record settings_before
   local current_registration registration_archive old_yard state
 
   [ "$("$runtime_root/current/bin/yard" version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
@@ -377,6 +377,8 @@ canonical_broker_release_migration_contract() {
   "$runtime_root/current/bin/yard" -Y test-yard test-vms status >/dev/null \
     || die 'release migration did not restore broker facade status'
 
+  # Rollback is the previous release's own activation: it updates the
+  # registered broker in place.
   "$runtime_root/current/bin/yard" update \
     --runtime-root "$runtime_root" --rollback --yes >/dev/null
   [ "$("$runtime_root/current/bin/yard" version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
@@ -385,6 +387,42 @@ canonical_broker_release_migration_contract() {
     sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')"
   [ "$rolled_back_hash" = "$active_old_hash" ] \
     || die 'runtime rollback did not restore the previous active broker engine'
+
+  # A new release recreates the registered broker instead of updating it:
+  # a new runtime with no leases, the same yard settings and registration.
+  registration_record="$SUBYARD_HOME/services/test-vms/default.json"
+  old_uuid="$(incus config get yard-test-yard volatile.uuid --project subyard-test-yard)"
+  settings_before="$(sha256sum "$OWNER_YARD_DIR/test-yard/config.env" 2>/dev/null \
+    || sha256sum "$OWNER_YARD_DIR/test-yard.env")"
+  [ "$(jq -er .runtime_uuid "$registration_record")" = "$old_uuid" ] \
+    || die 'registered broker fixture does not bind its runtime'
+  install_owner_runtime
+  new_uuid="$(incus config get yard-test-yard volatile.uuid --project subyard-test-yard)"
+  [ -n "$new_uuid" ] && [ "$new_uuid" != "$old_uuid" ] \
+    || die 'release update did not recreate the registered broker'
+  [ "$(jq -er .runtime_uuid "$registration_record")" = "$new_uuid" ] \
+    && [ "$(jq -er .yard "$registration_record")" = test-yard ] \
+    || die 'recreated broker lost its service registration'
+  [ "$(sha256sum "$OWNER_YARD_DIR/test-yard/config.env" 2>/dev/null \
+    || sha256sum "$OWNER_YARD_DIR/test-yard.env")" = "$settings_before" ] \
+    || die 'broker recreation changed the yard settings'
+  [ "$(incus exec yard-test-yard --project subyard-test-yard -- \
+    sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')" = "$expected_hash" ] \
+    || die 'recreated broker does not run the new engine'
+  incus exec yard-test-yard --project subyard-test-yard -- \
+    systemctl is-active --quiet subyard-test-vms-broker.service \
+    || die 'recreated broker service is not active'
+  "$runtime_root/current/bin/yard" -Y test-yard test-vms status >/dev/null \
+    || die 'recreated broker facade status failed'
+
+  "$runtime_root/current/bin/yard" update \
+    --runtime-root "$runtime_root" --rollback --yes >/dev/null
+  [ "$("$runtime_root/current/bin/yard" version)" = "yard $P0_CURRENT_BASE_VERSION" ] \
+    || die 'recreated fixture did not restore its synthetic base runtime'
+  [ "$(incus config get yard-test-yard volatile.uuid --project subyard-test-yard)" = "$new_uuid" ] \
+    && [ "$(incus exec yard-test-yard --project subyard-test-yard -- \
+      sha256sum /usr/local/libexec/subyard/test-vms-inner | awk '{print $1}')" = "$active_old_hash" ] \
+    || die 'rollback did not update the recreated broker in place'
   old_yard="$runtime_root/current/bin/yard"
   "$old_yard" -Y test-yard teardown --yes
   current_registration="$OWNER_YARD_DIR/test-yard.env"
@@ -403,7 +441,7 @@ canonical_broker_release_migration_contract() {
       || die 'broker migration fixture has an unrelated registration archive'
     find "$registration_archive" -delete
   fi
-  printf 'ok: active broker auto-upgraded and inactive broker stayed inactive\n'
+  printf 'ok: unregistered broker upgraded in place, registered broker recreated, inactive broker stayed inactive\n'
 }
 
 owner_named_yard_contract() (

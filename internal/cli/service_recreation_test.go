@@ -37,6 +37,11 @@ func (fixture *serviceRecreationCalls) run(_ context.Context, yard string, _ io.
 // "fixture-owner" in its default yard, with a drifted stage.
 func serviceRecreationFixture(t *testing.T) (*CLI, *testkit.Incus, *serviceSelection, *activationStageReconciler, *serviceRecreationCalls) {
 	t.Helper()
+	return serviceRecreationFixtureFor(t, "fixture-owner")
+}
+
+func serviceRecreationFixtureFor(t *testing.T, activation string) (*CLI, *testkit.Incus, *serviceSelection, *activationStageReconciler, *serviceRecreationCalls) {
+	t.Helper()
 	root, environment, _ := nativeFixture(t)
 	home := environmentValue(environment, "SUBYARD_CONFIG_HOME")
 	if err := os.MkdirAll(filepath.Join(home, "yards/fixture-runtime"), 0o700); err != nil {
@@ -55,25 +60,25 @@ func serviceRecreationFixture(t *testing.T) (*CLI, *testkit.Incus, *serviceSelec
 	if err != nil {
 		t.Fatal(err)
 	}
-	testkit.WriteFile(t, path, []byte(strings.Replace(string(body), `"id":"fixture-service"`, `"id":"fixture-service","registration_activation":"fixture-owner"`, 1)), 0o644)
-	if program, err = New(Options{RepositoryRoot: root, Environment: environment, Incus: incus}); err != nil {
+	testkit.WriteFile(t, path, []byte(strings.Replace(string(body), `"id":"fixture-service"`, `"id":"fixture-service","registration_activation":"`+activation+`"`, 1)), 0o644)
+	platform := newInitPlatformFixture()
+	platform.converged[ports.ReconcileStageTestVMs] = false
+	if program, err = New(Options{RepositoryRoot: root, Environment: environment, Incus: incus, InitPlatform: platform, Stdout: io.Discard, Stderr: io.Discard}); err != nil {
 		t.Fatal(err)
 	}
 	seedOwnerHostID(t, home)
-	definition, declared := program.activationService("fixture-owner")
+	definition, declared := program.activationService(activation)
 	if !declared {
 		t.Fatal("synthetic service does not bind its native owner")
 	}
-	platform := newInitPlatformFixture()
-	platform.converged[ports.ReconcileStageTestVMs] = false
 	calls := &serviceRecreationCalls{platform: platform}
-	stage := &activationStageReconciler{configuration: program, id: "fixture-owner", stage: ports.ReconcileStageTestVMs,
+	stage := &activationStageReconciler{configuration: program, id: activation, stage: ports.ReconcileStageTestVMs,
 		inspectApplicability: func(ctx context.Context) (activationApplicability, error) {
 			names, err := config.YardNames(home)
 			if err != nil {
 				return activationApplicability{}, err
 			}
-			return program.serviceStageApplicability(ctx, "fixture-owner", names, func(name string) (config.Loaded, error) {
+			return program.serviceStageApplicability(ctx, activation, names, func(name string) (config.Loaded, error) {
 				return program.resolveReleaseTransitionContext(ctx, name, home)
 			})
 		},
@@ -133,6 +138,19 @@ func TestServiceRecreationReplacesInPlaceUpdateOfProvenRuntime(t *testing.T) {
 			}
 			if refused != (len(before.Warnings) == 1 && before.Converged) || before.Converged != (refused || scenario == "converged" || scenario == "stopped") {
 				t.Fatalf("observation: %+v", before)
+			}
+			if scenario == "recreate" {
+				// The plan binds the decision: an in-place update observes another drift.
+				if err := selection.registry.Remove(selection.record, selection.publication); err != nil {
+					t.Fatal(err)
+				}
+				inPlace, err := stage.Observe(context.Background(), releases, releasetransition.ReleaseLinks{Active: releases.From})
+				if err != nil || inPlace.Actual == before.Actual || inPlace.Desired != before.Desired {
+					t.Fatalf("recreation decision is not bound into the plan: %+v %v", inPlace, err)
+				}
+				if err := selection.registry.Save(selection.record); err != nil {
+					t.Fatal(err)
+				}
 			}
 			switch scenario {
 			case "foreign":
@@ -255,5 +273,80 @@ func TestServiceStageApplicabilityLeavesAbsentAndUnfinishedRuntimes(t *testing.T
 	}
 	if applicability, err := stage.inspectApplicability(context.Background()); err != nil || applicability.state != "absent" {
 		t.Fatalf("a yard without the declared settings is not the service runtime: %+v %v", applicability, err)
+	}
+}
+
+func TestLegacyTestYardInitNamesRecreation(t *testing.T) {
+	root, env, _ := nativeFixture(t)
+	home := environmentValue(env, "SUBYARD_CONFIG_HOME")
+	path := filepath.Join(home, "yards", legacyTestYardName, "config.env")
+	writeConfigCommandFile(t, path, "SSH_PORT=2240\n")
+	program, err := New(Options{RepositoryRoot: root, Environment: env})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := program.loadContext(legacyTestYardName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := program.manifest.Lookup("init")
+	prepared := &preparedCommand{CLI: admitPreparedFixture(program), Loaded: loaded, Definition: definition}
+	if err := prepared.prepareInit(context.Background(), nil); err == nil || !strings.Contains(err.Error(), legacyTestYardRecreation) {
+		t.Fatalf("init lost the recreation commands: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "SSH_PORT=2240\n" {
+		t.Fatal("refusal changed registration", err)
+	}
+}
+
+// The native stage owner observes a registration staged by the release exactly
+// as it observes the published one, whatever its ordinary mode.
+func TestServiceStageProspectiveRegistrationPreservesDesired(t *testing.T) {
+	program, _, _, _, _ := serviceRecreationFixtureFor(t, "test-vm-broker")
+	configHome := environmentValue(program.options.Environment, "SUBYARD_CONFIG_HOME")
+	path := filepath.Join(configHome, "yards/fixture-runtime/config.env")
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	actor := program.brokerActivationReconciler(releasetransition.ProcessRequest{ConfigHome: configHome}).(*activationStageReconciler)
+	pair := releasetransition.ReleasePair{From: "a", Target: "a"}
+	ordinary, err := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := prospectiveOwnerSettingsView{yards: []string{"fixture-runtime"}, snapshots: map[string]config.PersistentFileSnapshot{path: {Exists: true, Content: payload}}}
+	projected, err := actor.ObserveProspective(context.Background(), pair, releasetransition.ReleaseLinks{}, view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testkit.WriteFile(t, path, payload, 0o600)
+	published, err := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.Desired == published.Desired || projected.Desired != published.Desired {
+		t.Fatalf("registration desired scope: absent=%s prospective=%s published=%s", ordinary.Desired, projected.Desired, published.Desired)
+	}
+	for _, mode := range []os.FileMode{0o640, 0o644} {
+		t.Run(mode.String(), func(t *testing.T) {
+			testkit.WriteFile(t, path, payload, mode)
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retained, normalErr := actor.Observe(context.Background(), pair, releasetransition.ReleaseLinks{})
+			prospective, projectedErr := actor.ObserveProspective(context.Background(), pair, releasetransition.ReleaseLinks{}, retainedActivationSettingsView{configHome})
+			if normalErr != nil || projectedErr != nil || prospective.Desired != retained.Desired {
+				t.Fatalf("retained registration bridge changed desired: %v/%v", normalErr, projectedErr)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
+				t.Fatal("prospective observation mutated registration")
+			}
+		})
 	}
 }

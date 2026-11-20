@@ -1354,13 +1354,10 @@ relevant deletion; names and an old version alone do not prove ownership.
 
 Full teardown accepts retained producers only from the current approved source. A reserved
 owner name or a former registration does not widen that source's labels; an unproved producer
-refuses removal. A legacy or conflicting test-yard is preserved across release activation,
-with a warning and exact recreation commands; it does not prevent ordinary yards from updating.
-Its own `init` refuses until it is recreated. Registered owners use `yard service remove test-vms`,
-then `yard service install test-vms`. An unregistered legacy owner instead uses
-`yard -Y e2e-yard teardown --reset-config`, then `yard service install test-vms`. These operations retain
-their ownership checks and confirmation; recreation never automatically deletes another
-session's running VMs. Unconflicted test-yard installations continue across updates.
+refuses removal. The pre-v0.11 test yard `e2e-yard` is never loaded or updated by release
+activation; readiness warns with its recreation commands and ordinary yards still update. Its own
+`init` refuses until the operator runs `yard -Y e2e-yard teardown --reset-config`, then
+`yard service install test-vms`.
 
 Legacy installations may lack creation receipts for host directories. Exact native association
 can establish a registered legacy yard's bounded project/instance/volume scope; unrelated native
@@ -2780,8 +2777,18 @@ A shipped profile can declare `infrastructure_service` with a unique `id`, `defa
 role; ordinary prepared init, power and teardown remain its lifecycle owners. Core never identifies
 services from a container or profile name. The test-vms profile owns its broker and allocation semantics.
 
-The optional `registration_activation` attaches metadata registration after the declared native
-owner reconciles during a new-release transition. Its conditional plan line names the service
+The optional `registration_activation` binds the service to its declared native stage owner.
+During a new-release transition a running, registered runtime whose stage drifted is recreated
+instead of updated in place: after proving the exact registration (owner, yard, project, instance,
+UUID and ownership) the transition runs ordinary `yard -Y YARD teardown --yes`, then
+`yard service install ID --yard YARD --yes`. The plan names the removed VMs, leases and base images;
+yard settings are kept. A stopped runtime and an unfinished init are left untouched. An unproven,
+foreign, remote or multiply registered runtime keeps its previous engine with a warning naming
+`yard service remove`, then `yard service install`; failed reads block. When the install does not
+finish, the diagnostic names `yard service install ID --yard YARD`, and the next plan repeats it
+while the settings have no runtime. Rollback is the previous release's own activation.
+Without a registration the native owner updates the runtime in place, and registration attaches
+metadata after that owner reconciles. Its conditional plan line names the service
 and default pool; successful registration reports the exact runtime. Exactly one proven owned
 runtime is registered; several candidates and proof/write failures report guidance without changing
 readiness. Zero runtimes produce a hint only when matching yard settings exist. Observation and

@@ -14,17 +14,15 @@ import (
 	"github.com/Subyard/Subyard/internal/domain"
 	"github.com/Subyard/Subyard/internal/ports"
 	"github.com/Subyard/Subyard/internal/releasetransition"
-	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
 type sourceActivationDraft struct {
-	cli        *CLI
-	home       string
-	view       releasetransition.V2SettingsSnapshotView
-	projection testyardmigration.ActivationProjection
-	inputs     *config.ProspectiveFiles
-	overrides  map[string]string
-	names      []string
+	cli       *CLI
+	home      string
+	view      releasetransition.V2SettingsSnapshotView
+	inputs    *config.ProspectiveFiles
+	overrides map[string]string
+	names     []string
 }
 
 func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition.V2SourceActivationView) (*sourceActivationDraft, error) {
@@ -50,21 +48,6 @@ func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition
 	}
 	names = append(names, actual...)
 	names = append(names, "default")
-	if view.OwnerRegistration != nil {
-		options, err := cli.releaseTransitionTestYardOptions(releasetransition.ProcessRequest{ConfigHome: home})
-		if err != nil {
-			return nil, err
-		}
-		before := view.OwnerRegistration
-		draft.projection, err = testyardmigration.PrepareActivationProjection(options, testyardmigration.Prepared{State: testyardmigration.State(before.State), RegistrationDigest: string(before.Registration), OverridesDigest: string(before.Overrides), ControllerDigest: string(before.Controller), SharedImages: before.SharedImages}, view.Settings.ReadSnapshot)
-		if err != nil {
-			return nil, err
-		}
-		if len(draft.projection.Sources) != 0 {
-			names = slices.DeleteFunc(names, func(name string) bool { return name == testyardmigration.LegacyYard })
-			names = append(names, testyardmigration.CurrentYard)
-		}
-	}
 	slices.Sort(names)
 	names = slices.Compact(names)
 	draft.names = names
@@ -73,10 +56,6 @@ func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition
 			return nil, errors.New("prospective yard name is invalid")
 		}
 	}
-	for path := range draft.projection.Sources {
-		paths = append(paths, path)
-	}
-	paths = append(paths, draft.projection.Removed...)
 	for _, path := range paths {
 		if !filepath.IsAbs(path) || !strings.HasPrefix(path, home+string(filepath.Separator)) {
 			return nil, errors.New("prospective activation input path escapes configuration home")
@@ -84,34 +63,15 @@ func (cli *CLI) prepareSourceActivationDraft(home string, view releasetransition
 		// Preserve logical layer presence without copying or reading its bytes.
 		draft.overrides[path] = path
 	}
-	for _, path := range draft.projection.Removed {
-		draft.overrides[path] = ""
-	}
 	draft.inputs = &config.ProspectiveFiles{Root: home, Yards: names, ReadSnapshot: view.Settings.ReadSnapshot, ReadPreparedInput: draft.readPreparedInput}
 	return draft, nil
 }
 func (draft *sourceActivationDraft) readPreparedInput(path string) (config.PersistentFileSnapshot, bool, error) {
-	if slices.Contains(draft.projection.Removed, path) {
-		return config.PersistentFileSnapshot{}, true, nil
-	}
-	source := path
-	alias, aliased := draft.projection.Sources[path]
-	if aliased {
-		source = alias
-	}
 	if reader, ok := draft.view.(releasetransition.V2PreparedInputReader); ok {
-		snapshot, matched, err := reader.ReadPreparedInput(source)
+		snapshot, matched, err := reader.ReadPreparedInput(path)
 		if matched || err != nil {
-			if aliased {
-				snapshot.Identity = config.PersistentFileIdentity{}
-			}
 			return snapshot, matched, err
 		}
-	}
-	if aliased {
-		snapshot, err := draft.view.ReadSnapshot(source)
-		snapshot.Identity = config.PersistentFileIdentity{}
-		return snapshot, true, err
 	}
 	// Older prospective views cover the whole settings root. Prepared views
 	// explicitly leave uncaptured inputs on the native reader.
@@ -158,9 +118,6 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 		if name == "" {
 			name = "default"
 		}
-		if name == testyardmigration.LegacyYard && len(draft.projection.Sources) != 0 {
-			name = testyardmigration.CurrentYard
-		}
 		names = []string{name}
 	}
 	targets := []config.MaterializationActivationTarget{}
@@ -168,14 +125,8 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 	plans := map[string]reconcileruntime.IntegrationPlan{}
 	unavailable := map[string]projectedIntegrationUnavailable{}
 	for _, name := range names {
-		if name == "test-yard" || name == "e2e-yard" {
-			warning, err := reconciler.cli.releaseTestYardRecreation(ctx, reconciler.configHome, draft.inputs)
-			if err != nil {
-				return releasetransition.V2SourceActivationPlan{}, err
-			}
-			if warning != "" {
-				continue
-			}
+		if name == legacyTestYardName {
+			continue
 		}
 		loaded, err := draft.load(name)
 		if err != nil {
@@ -249,44 +200,15 @@ func (reconciler *materializedConfigActivationReconciler) PrepareSourceActivatio
 	return releasetransition.V2SourceActivationPlan{Desired: releasetransition.Fingerprint(assessed.Desired), Consequences: consequences}, nil
 }
 
-func (cli *CLI) projectedOwnerApplicability(ctx context.Context, request releasetransition.ProcessRequest, view releasetransition.V2SourceActivationView) (testyardmigration.BrokerRuntimeState, testyardmigration.State, error) {
-	options, err := cli.releaseTransitionTestYardOptions(request)
-	if err != nil {
-		return "", "", err
-	}
-	options.ProspectiveFiles = &config.ProspectiveFiles{Root: request.ConfigHome, ReadSnapshot: view.Settings.ReadSnapshot}
-	warning, err := testYardRecreation(ctx, options)
-	if err != nil {
-		return "", "", err
-	}
-	if warning != "" {
-		return testyardmigration.BrokerRuntimeAbsent, testyardmigration.StateAbsent, nil
-	}
-	var before testyardmigration.Prepared
-	if bound := view.OwnerRegistration; bound != nil {
-		before = testyardmigration.Prepared{State: testyardmigration.State(bound.State), RegistrationDigest: string(bound.Registration), OverridesDigest: string(bound.Overrides), ControllerDigest: string(bound.Controller), SharedImages: bound.SharedImages}
-	} else {
-		before, err = testyardmigration.PrepareProspective(ctx, options, view.Settings.ReadSnapshot)
-		if err != nil {
-			return "", "", err
-		}
-	}
-	if before.State == testyardmigration.StateAbsent {
-		return testyardmigration.BrokerRuntimeAbsent, testyardmigration.StateAbsent, nil
-	}
-	draft, err := cli.prepareSourceActivationDraft(request.ConfigHome, view)
-	if err != nil {
-		return "", "", err
-	}
-	loaded, err := draft.load(testyardmigration.CurrentYard)
-	if err != nil {
-		return "", "", err
-	}
-	return testyardmigration.PrepareProjectedActivationApplicability(ctx, options, before, loaded)
-}
-func (cli *CLI) prepareBrokerSourceActivation(request releasetransition.ProcessRequest) func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
+// The broker's projected Desired observes its yard through the prepared
+// settings, exactly as its native observation does after they are imported.
+func (cli *CLI) prepareBrokerSourceActivation(request releasetransition.ProcessRequest, id string) func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
 	return func(ctx context.Context, releases releasetransition.ReleasePair, _ releasetransition.ReleaseLinks, view releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
-		state, _, err := cli.projectedOwnerApplicability(ctx, request, view)
+		draft, err := cli.prepareSourceActivationDraft(request.ConfigHome, view)
+		if err != nil {
+			return releasetransition.V2SourceActivationPlan{}, err
+		}
+		applicability, err := cli.serviceStageApplicability(ctx, id, draft.names, draft.load)
 		if err != nil {
 			return releasetransition.V2SourceActivationPlan{}, err
 		}
@@ -295,32 +217,11 @@ func (cli *CLI) prepareBrokerSourceActivation(request releasetransition.ProcessR
 			Stage  ports.ReconcileStageID      `json:"stage"`
 			State  string                      `json:"state"`
 			Target releasetransition.ReleaseID `json:"target"`
-		}{"test-vm-broker", ports.ReconcileStageTestVMs, string(state), releases.Target})
-		return releasetransition.V2SourceActivationPlan{Desired: desired}, err
-	}
-}
-func (cli *CLI) prepareRouteSourceActivation(request releasetransition.ProcessRequest) func(context.Context, releasetransition.ReleasePair, releasetransition.ReleaseLinks, releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
-	return func(ctx context.Context, releases releasetransition.ReleasePair, _ releasetransition.ReleaseLinks, view releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
-		_, state, err := cli.projectedOwnerApplicability(ctx, request, view)
-		if err != nil {
-			return releasetransition.V2SourceActivationPlan{}, err
-		}
-		desired, err := activationStageFingerprint(struct {
-			ID     string                      `json:"id"`
-			Target releasetransition.ReleaseID `json:"target"`
-			Active bool                        `json:"active"`
-		}{"test-yard-route-consumers", releases.Target, state != testyardmigration.StateAbsent})
+		}{id, ports.ReconcileStageTestVMs, applicability.state, releases.Target})
 		return releasetransition.V2SourceActivationPlan{Desired: desired}, err
 	}
 }
 func (reconciler *activationStageReconciler) PrepareSourceActivation(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks, view releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
-	if reconciler.sourceActivation != nil {
-		return reconciler.sourceActivation(ctx, releases, links, view)
-	}
-	observation, err := reconciler.Observe(ctx, releases, links)
-	return releasetransition.V2SourceActivationPlan{Desired: observation.Desired, Consequences: observation.Consequences}, err
-}
-func (reconciler *routeConsumerActivationReconciler) PrepareSourceActivation(ctx context.Context, releases releasetransition.ReleasePair, links releasetransition.ReleaseLinks, view releasetransition.V2SourceActivationView) (releasetransition.V2SourceActivationPlan, error) {
 	if reconciler.sourceActivation != nil {
 		return reconciler.sourceActivation(ctx, releases, links, view)
 	}

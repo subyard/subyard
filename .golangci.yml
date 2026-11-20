@@ -24,4 +24,3 @@ linters:
       only-types:
         - '.*releasetransition\.(JournalCheckpoint|StepCheckpoint|EvidenceCheckpoint|Direction|PublicStatus|Decision|ProcessMode|SourceIngressRequestKind|RecoveryProcessMode|JournalReplacementReason|RollbackCompatibility|OwnerRegistrationState|OwnerRegistrationProgress)$'
         - '.*migration\.(V1ImportRelease|V1ImportCheckpoint)$'
-        - '.*testyardmigration\.(Progress|BrokerRuntimeState)$'

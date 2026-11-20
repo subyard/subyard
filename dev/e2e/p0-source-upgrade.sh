@@ -715,8 +715,8 @@ recreate_legacy_test_owner() {
   report="$(operator_yard migrate --check --json)"
   jq -e '
     .schemaVersion == 1 and .outcome.status == "ready" and .outcome.reachedGoal == true and
-    any(.outcome.warnings[]?; contains("test-yard requires recreation") and
-      contains("yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"))
+    any(.outcome.warnings[]?; contains("e2e-yard requires recreation") and
+      contains("yard -Y e2e-yard teardown --reset-config, then yard service install test-vms"))
   ' <<<"$report" >/dev/null || {
     printf '%s\n' "$report" >&2
     die 'legacy owner readiness did not name executable recreation commands'
@@ -726,17 +726,10 @@ recreate_legacy_test_owner() {
   [ "$before" = "$after" ] || die 'owner inspection mutated protected configuration or native state'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'owner inspection changed the ordinary yard'
 
-  # Supply the original checkout for the advertised argument; sync's --yes is
-  # fresh consent for its own guarded plan. No --apply or guest refresh is needed.
+  # Release work leaves the legacy yard and its pending settings alone; sync's
+  # --yes is fresh consent for its own guarded plan before the reset.
   operator_yard config sync "$CONFIG_CHECKOUT" --yes
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'settings migration changed the ordinary yard'
-  report="$(operator_yard migrate --check --json)"
-  jq -e '
-    .outcome.status == "ready" and .outcome.reachedGoal == true and
-    any(.outcome.warnings[]?; contains("test-yard requires recreation") and
-      contains("yard -Y e2e-yard teardown --reset-config, then yard service install test-vms") and
-      (contains("config sync") | not))
-  ' <<<"$report" >/dev/null || die 'settings migration did not clear its recreation prerequisite'
   # Direct sync needs no registered checkout for later offline cache use.
   operator_env find "$CONFIG_CHECKOUT" -depth -delete
   CONFIG_CHECKOUT=''
@@ -762,7 +755,7 @@ recreate_legacy_test_owner() {
   operator_yard -Y test-yard check
   operator_yard migrate --check --json | jq -e '
     .schemaVersion == 1 and .outcome.status == "ready" and
-    all(.outcome.warnings[]?; contains("test-yard requires recreation") | not)' >/dev/null \
+    all(.outcome.warnings[]?; contains("requires recreation") | not)' >/dev/null \
     || die 'fresh test-yard is not ready'
 }
 
@@ -946,7 +939,7 @@ prepare() {
     cat "$SHARED_ROOT/first-update.log" >&2
     return "$update_rc"
   fi
-  grep -Fq 'yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
+  grep -Fq 'e2e-yard requires recreation and is not updated; preserve other sessions'"'"' VMs; run yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
     "$SHARED_ROOT/first-update.log" || die 'update did not print its exact recreation commands'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'update changed ordinary yard data, identity or power'
   [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \

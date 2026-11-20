@@ -187,7 +187,7 @@ var goldenCommands = map[string]goldenCommand{
 	"_authorize":          {prepared: false, verbs: map[string]string{"": "write"}, options: map[string]string{}},
 	"_state":              {prepared: false, verbs: map[string]string{"": "write"}, options: map[string]string{}},
 	"_project-state":      {prepared: false, verbs: map[string]string{"": "write"}, options: map[string]string{}},
-	"_migrate":            {prepared: false, verbs: map[string]string{"paths": "write", "check": "write", "reconcile-test-vm-broker": "write", "reconcile-power-reconciler": "write"}, options: map[string]string{}},
+	"_migrate":            {prepared: false, verbs: map[string]string{"paths": "write", "check": "write"}, options: map[string]string{}},
 	"_release-transition": {prepared: false, verbs: map[string]string{"": "write"}, options: map[string]string{}},
 	"_vm-start-policy":    {prepared: false, verbs: map[string]string{"": "write"}, options: map[string]string{}},
 	"_keys-exchange":      {prepared: true, verbs: map[string]string{"": "write"}, options: map[string]string{}},

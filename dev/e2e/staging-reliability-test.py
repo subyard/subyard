@@ -1219,13 +1219,16 @@ printf 'init\n' >> "$PREDECESSOR_CALLS"
     engine.write_bytes(launcher.read_bytes())
     engine.chmod(0o700)
     engine_sha = hashlib.sha256(engine.read_bytes()).hexdigest()
+    settings = root / 'config/yards/test-yard.env'
+    settings.parent.mkdir(parents=True)
+    settings.write_text('YARD_TEMPLATE=test-vms\n')
     leaf = root / '.subyard-acceptance/runtime/config/profiles/github/git_wiring.py'
     leaf.parent.mkdir(parents=True)
     leaf.write_bytes(pathlib.Path('config/profiles/github/git_wiring.py').read_bytes())
     setup_failures = ['init', 'version', 'context', 'project-shape', 'native-owner', 'bridge', 'initialized', 'power', 'identity', 'marker']
     native_failures = ['native-state', 'native-query', 'native-bases-missing', 'native-cached', 'native-registry-error', 'native-builder', 'native-instances']
     public_failures = ['public-query', 'public-bases-missing', 'public-cached', 'public-status-error']
-    for failure in ['', *setup_failures, 'worker', 'registration', 'registration-mutates', *native_failures, 'git-operation', 'retained-worker', 'retained-state', *public_failures]:
+    for failure in ['', *setup_failures, 'worker', 'registration', 'registration-mutates', *native_failures, 'git-operation', 'retained-state', *public_failures]:
         log = root / ('calls-' + (failure or 'success'))
         native_resources = {'bases': []}
         public_status = {'status': 'ok', 'resources': {'bases': []}}
@@ -1259,8 +1262,6 @@ outer_exec() {{
       [ "$PREDECESSOR_FAILURE" != native-query ] || return 1
       printf '%s\n' '{{"status":"ok","pool":{{"resource_type":"agent-e2e","resource_id":"test-vms","slots":[{{"state":"{"held" if failure == "native-state" else "available"}"}}]}},"resources":{json.dumps(native_resources)}}}' ;;
     'incus list --all-projects --format csv -c n') [ "$PREDECESSOR_FAILURE" != native-instances ] || printf 'unexpected-builder\n' ;;
-    'sha256sum /usr/local/libexec/subyard/.service-retained-anchor-worker') printf '%s  retained\\n' '{'b'*64 if failure == 'retained-worker' else engine_sha}' ;;
-    *'install -m 0700'*|*'install -m 0600'*) return 0 ;;
     *sha256sum*)
       if [ "$PREDECESSOR_FAILURE" = registration-mutates ] && [ -f "$PREDECESSOR_CALLS.registered" ]; then printf '%s  leases.json\n' '{'c'*64}'
       else printf '%s  leases.json\n' '{'invalid' if failure == 'retained-state' else 'a'*64}'; fi ;;
@@ -1297,43 +1298,16 @@ die() {{ printf '%s\\n' "$*" >&2; exit 2; }}
                     expected += ['native-state']
                     if failure not in native_failures:
                         expected += ['git-operation']
-                        if failure not in ['git-operation', 'retained-worker', 'retained-state']:
+                        if failure not in ['git-operation', 'retained-state']:
                             expected += ['public-status']
         assert calls == expected, (failure,calls)
-        marker_expected = failure in ['', 'git-operation', 'retained-worker', 'retained-state', *public_failures]
+        marker_expected = failure in ['', 'git-operation', 'retained-state', *public_failures]
         assert ('STAGING_BASELINE_BROKER=' in result.stdout) == marker_expected, result
         if failure in ['public-query', 'public-status-error']:
             assert 'cached base' not in result.stderr, result
         if failure == 'public-query':
             assert 'service_absent' in result.stderr and 'public broker status query failed' in result.stderr, result
 print('authentic predecessor init, explicit service registration and typed cold inventory refuse incomplete setup')
-
-# The retained anchor writer either honors the fence or refuses it as unsupported;
-# it never changes fenced state, and only then may admission resume.
-retained_writer = fixture.split('  outer_exec env SUBYARD_TEST_VMS_CONFIG=', 1)[1].split("  printf 'STAGING_RETAINED_WRITER=", 1)[0]
-retained_writer = 'outer_exec env SUBYARD_TEST_VMS_CONFIG=' + retained_writer
-for fault in ['', 'accepted', 'mutated', 'wrong-error', 'resume']:
-    with tempfile.TemporaryDirectory(prefix='subyard-retained-writer-', dir='/tmp') as directory:
-        script = f'''set -euo pipefail
-STATE_PARENT={directory!r}; retained_sha={'a'*64}; fenced_before={'b'*64}; old_writer_rc=0
-outer_exec() {{
-  case "$*" in
-    'env SUBYARD_TEST_VMS_CONFIG='*)
-      printf '%s\\n' {'unrelated failure' if fault == 'wrong-error' else 'unsupported lease state'!r}
-      return {0 if fault == 'accepted' else 1} ;;
-    'sha256sum '*) printf '%s  leases.json\\n' {'c'*64 if fault == 'mutated' else 'b'*64} ;;
-    *'resume-admission') printf 'RESUMED\\n'; return {1 if fault == 'resume' else 0} ;;
-    *) return 99 ;;
-  esac
-}}
-die() {{ exit 2; }}
-''' + retained_writer
-        result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, timeout=5)
-        assert (result.returncode == 0) == (fault in ['', 'accepted']), (fault, result)
-        assert ('RESUMED' in result.stdout) == (fault in ['', 'accepted', 'resume']), (fault, result)
-        receipt = json.loads(result.stdout.split('STAGING_RETAINED_ATTEMPT=', 1)[1].splitlines()[0])
-        assert receipt['native_exit'] == (0 if fault == 'accepted' else 1), (fault, receipt)
-print('retained anchor writer honors or refuses the fence and keeps leases unchanged before resume')
 
 # Execute the candidate's real Git configuration function as the process user.
 # Physical preflight uses the same leaf's CLI, which drops to native guest dev.

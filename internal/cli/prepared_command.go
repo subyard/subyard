@@ -732,14 +732,8 @@ func (prepared *preparedCommand) prepareInit(ctx context.Context, bootstrap *ini
 	}
 	cli := prepared.CLI
 	prepared.readiness = func() { printIgnoredAssignments(cli.options.Stdout, "  ", "", prepared.Loaded) }
-	if prepared.Loaded.Context.YardName == "e2e-yard" || prepared.Loaded.Context.YardName == "test-yard" {
-		warning, err := cli.releaseTestYardRecreation(ctx, prepared.Loaded.Context.Paths.ConfigHome, prepared.Loaded.ProspectiveFiles)
-		if err != nil {
-			return err
-		}
-		if warning != "" {
-			return errors.New(warning)
-		}
+	if prepared.Loaded.Context.YardName == legacyTestYardName {
+		return errors.New(legacyTestYardWarning)
 	}
 	owners, ownershipErr := cli.observeInitNativeOwner(ctx, prepared.Loaded, prepared.Arguments)
 	if err := domain.CollectRefusals(cli.checkNativeTargets(prepared.Loaded, false, owners), ownershipErr); err != nil {

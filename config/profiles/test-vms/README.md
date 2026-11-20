@@ -32,7 +32,8 @@ which sets `SUBYARD_CORE_INSTALLER_CHECKED=1` after its core suite passed the sa
 Recipe/archive producer, installer or called library, broker activation and release migration
 changes require `tests/e2e/acceptance.sh --slot N --lane broker-cold-upgrade`. It installs the
 checksum-pinned published 0.19.0 runtime, initializes a disposable broker owner, and invokes its
-supported updater with the frozen candidate. The owner and lease state survive the update.
+supported updater with the frozen candidate. The update recreates the registered broker: a new
+runtime with empty leases and the same yard settings.
 With no cached base, the candidate's first acquire builds and validates its base, grants a
 singleton, proves SSH and a second boot, releases it, and returns available without pending
 builders or VMs. The fixture reuses `dev/e2e/staging-reliability.sh --supported-upgrade` and its

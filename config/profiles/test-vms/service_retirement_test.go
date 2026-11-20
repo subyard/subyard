@@ -1,16 +1,18 @@
 package testvms_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/Subyard/Subyard/internal/config"
 	"github.com/Subyard/Subyard/internal/testkit"
-	"github.com/Subyard/Subyard/internal/testyardmigration"
 )
 
+// A removed service leaves no registration, so release admission never selects
+// the broker yard for recreation or update; an unsafe reset marker is a failed
+// read, and nothing in the directory is changed.
 func TestServiceRemovedRuntimeIsAbsentForReleaseAdmission(t *testing.T) {
 	for _, state := range []string{"reset-empty", "unmarked-empty", "reset-unrecognized-file", "unsafe-marker", "symlink"} {
 		t.Run(state, func(t *testing.T) {
@@ -40,14 +42,12 @@ func TestServiceRemovedRuntimeIsAbsentForReleaseAdmission(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			options := testyardmigration.Options{Executable: "/bin/false", RepositoryRoot: root, ConfigHome: home, DataHome: filepath.Join(root, "data"), Incus: "/bin/false"}
-			observed, yard, err := testyardmigration.PrepareBrokerRuntimeTarget(context.Background(), options)
-			if state == "reset-empty" {
-				if err != nil || observed != testyardmigration.BrokerRuntimeAbsent || yard != "" {
-					t.Fatalf("retired owner admission: %s %s %v", observed, yard, err)
-				}
-			} else if err == nil {
-				t.Fatalf("unproven directory became absent: %s", state)
+			names, err := config.YardNames(home)
+			if slices.Contains(names, "test-yard") {
+				t.Fatalf("removed service runtime is admitted: %s %v", state, names)
+			}
+			if (state == "unsafe-marker") != (err != nil) {
+				t.Fatalf("release admission read: %s %v", state, err)
 			}
 			if state == "reset-unrecognized-file" {
 				if b, err := os.ReadFile(filepath.Join(directory, "foreign")); err != nil || string(b) != "preserve" {
