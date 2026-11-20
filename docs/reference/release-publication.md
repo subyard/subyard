@@ -387,7 +387,8 @@ Paths resolve relative to the declaration. Repeat `--operator-acceptance` for se
 checks. Keep the original frozen source, runtime, bundle and full asset inventory. Original and target
 commands and versions must match. Evidence must prove a terminal nonzero exit (not a signal or
 timeout such as 124, 130, 137 or 143), complete launch/timing, VM identities, and that every lease
-of the lane ended cleanly under the [lane lease rule](#one-release-candidate). Interrupted, incomplete, changed
+of the lane ended cleanly under the [lane lease rule](#lane-lease-rule). The launcher carries
+`SUBYARD_E2E_LANE` as for standalone evidence, and the cleanup summary lists the cleaned staged VMs. Interrupted, incomplete, changed
 or ambiguous evidence is refused. Only pending/uncollected or matching failed entries qualify;
 passing or inherited entries cannot use this path. Publication reports `native_status=failed` and
 the original exit and log hash without claiming a PASS.
@@ -626,7 +627,7 @@ cleanup phase does not change a preceding failure into a pass.
 Terminal results retain the native exit, classified termination (`exit`, `signal`, `timeout` or
 `unknown`), last successful operation phase and separate cleanup phase exits/durations.
 Exit 124 is a timeout; known signal exits retain the signal number. A `blocked` capacity result
-is an environment failure; otherwise cause stays unknown unless the fixture emits the bounded
+(see the [lane lease rule](#lane-lease-rule)) is an environment failure; otherwise cause stays unknown unless the fixture emits the bounded
 `E2E_FAILURE class=product|fixture|environment|timeout|unknown` marker. Do not infer a product
 cause from an unexplained nonzero result. Guest worktree deletion has a 120-second transport
 budget, lease release 180 seconds, each with a five-second TERM-to-KILL allowance. The GitHub
@@ -639,29 +640,26 @@ the lease release budget, elapsed time and native status separately from aggrega
 Use `supersede --output DIR` to retire an idle candidate while preserving its original evidence.
 Only one mutating collector may use an output directory at a time.
 
-**Lane lease rule.** One rule (`lane_status`) decides whether a result counts as PASS or a capacity block. The
-collector, reuse of a recorded PASS, import, transfer, standalone evidence, hosted collection and
-operator acceptance all apply it to one ordered read of the bound log. Only the lane's own lines
-count: lines inside a guest window (`E2E_PHASE phase=guest` start to end) come from clients nested
-in the guest, except guest cleanup ends of concurrent VMs. A PASS needs exit 0 and every lease of
-the lane closed cleanly:
+#### Lane lease rule
 
-- each `E2E lease request: slot=… run=…` is for the lane slot and ends in a grant for the same
-  slot and run or a typed capacity refusal for that slot;
-- each grant is for the lane slot and is released for the same slot and run before the next
-  grant; `E2E lease had already ended` does not count as a release;
-- each VM with transport or guest work has a successful guest cleanup after its last work and
-  before the release. A VM's cleanup counts only after its own transport and guest windows
-  ended; one inside them belongs to a nested client. Direct controllers that stage through
-  `prepare_guest` record that staging as a transport phase;
-- no nonzero lease release, allocation, cleanup/release or guest cleanup end, no explicit
-  unconfirmed acquire or cleanup diagnostic, no direct controller result line
-  (`NAME_RESULT … cleanup_exit_code=N`) with a nonzero cleanup exit, and no final capacity refusal.
+The collector gives each slot lane a random 32-hex ID: the log's first line is `E2E_LANE id=ID`,
+and the lane process gets `SUBYARD_E2E_LANE=ID`, which guests never receive. The lane's own client
+and runner then print `E2E_LEASE lane=ID run=RUN slot=slot-NNN event=EVENT` with `request`, `grant`,
+`refused resource=memory|disk`, `work vm=N` (a run directory was staged), `cleaned vm=N exit_code=N`
+and `release exit_code=N`. One rule (`lane_status`) decides PASS and capacity blocks for collection,
+reuse of a recorded PASS, import, transfer, standalone evidence, hosted collection and operator
+acceptance; it reads only records with the lane's ID. A slot lane passes with exit 0 when:
 
-Exit 4 is `blocked/capacity_memory|disk` only when the last lease event is the typed refusal for
-the lane slot and every earlier lease closed cleanly; otherwise it is `failed`. A recorded PASS
-that fails the rule, for example from an older collector, is read as `failed` with the rule's
-reason and runs again. Its immutable attempt record is kept.
+- every record names the lane slot and is well formed;
+- each run's request ends in a grant or a typed refusal, and each grant in a release with exit 0;
+- every staged VM has a `cleaned` record with exit 0 before its lease's release (`--ssh` and raw
+  guest commands stage nothing);
+- at least one lease completed and the final record is not a refusal.
+
+Exit 4 with a final typed refusal and no other issue is `blocked/capacity_memory|disk`; otherwise
+the result is `failed` with the rule's reason. A log without the `E2E_LANE` header never counts:
+a recorded PASS from an earlier collector reads as `failed` and runs again (its immutable attempt
+record is kept), and such evidence is refused as an import or transfer source.
 
 Explicit `import --output NEW --from OLD --check CHECK` copies passing command-bound evidence
 between bound candidates with matching source and release assets, retaining inherited provenance.
@@ -749,21 +747,22 @@ An uncollected physical controller PASS may instead supply `standalone` with exa
 `native`, `launch` and `log`, each containing `path` and `sha256` for ORIGINAL evidence.
 Relative paths resolve beside the review declaration. The original collector entry stays
 pending. The native terminal object must have a final integer exit zero, and the complete
-controller log must retain the VM base, successful cleanup of every VM and lease release.
-Only the lane's own grants are its environments, so a standalone transfer committed earlier
-whose log has a nested grant is read as `failed` on reload and runs again.
+controller log must retain the VM base, a cleanup/release end and lane records that pass the
+[lane lease rule](#lane-lease-rule) for the launcher's lane ID.
 The frozen source, release assets and exact launcher bind the checksum-verified tested bundle;
 native exit zero proves controller completion. Transport and guest phase timing may be absent
 for direct controllers and stays unknown; any observed failed phase rejects the transfer, except
-allocation, guest cleanup and release ends, which the lane lease rule decides.
+an allocation end with exit 4 from a typed capacity refusal that the lane rule decides.
 Rich launch records contain `cwd`, `argv`, `source_fingerprint`, `runtime_sha256`, `bundle_sha256`,
 `acceptance_script_sha256` and optional `launched_at_utc`. Original raw records with `cwd`, `argv`
 and timezone-aware `started_at` are also supported. Their checksum-bound bundle must exactly match
 the frozen source, executable modes, candidate metadata and complete release inventory; do not
 add hashes to original records. Contradictory bindings or malformed timestamps/clocks are refused.
 The command must be the exact check plus `--slot N`, in the supported
-`timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR` and the three
-controller/transport assignments. Unmeasured duration and execution environment stay unknown;
+`timeout --signal=TERM --kill-after=300s 90m env` wrapper with only `TMPDIR`, the three
+controller/transport assignments and `SUBYARD_E2E_LANE=ID`, a fresh random 32-hex ID per launch, for
+example `SUBYARD_E2E_LANE="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"`. A launcher without it, as
+before lane records, never counts. Unmeasured duration and execution environment stay unknown;
 preparation environment and final-poll duration cannot substitute for them.
 
 Single and batch transfers stage and validate evidence before replacing the receipt. A copy failure

@@ -84,7 +84,11 @@ class ProfilePreflightTests(unittest.TestCase):
                     m.STOP.set()
                     return {"status": "interrupted", "exit_code": -15}
             code = 9 if local_failure and name == "verify" else outcomes.get(name, 0)
-            return native_execute(name, [sys.executable, "-c", f"raise SystemExit({code})"], root, output, env, slot)
+            # A live lane completes one clean lease of its own before it exits.
+            lease = ("import os, sys\nfor event in ('request', 'grant', 'release exit_code=0'):\n"
+                     "    print(f\"E2E_LEASE lane={os.environ['SUBYARD_E2E_LANE']} run=0123abcd slot=slot-001 event={event}\", file=sys.stderr)\n"
+                     if slot else "")
+            return native_execute(name, [sys.executable, "-c", lease + f"raise SystemExit({code})"], root, output, env, slot)
         stdout = io.StringIO()
         with patch.object(m, "load_bound", return_value=(self.root, receipt)), \
              patch.object(m, "commands", return_value=checks), \

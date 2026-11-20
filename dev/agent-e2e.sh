@@ -200,13 +200,17 @@ cleanup_guest() {
   [ -n "$directory" ] || return 0
   phase_start guest-cleanup "$vm"
   printf 'E2E_BUDGET phase=guest-cleanup budget_seconds=120 grace_seconds=5 vm=%s\n' "$vm" >&2 || true
-  case "$directory" in /var/tmp/subyard-worktree.*) ;; *) phase_end 1; return 1 ;; esac
+  case "$directory" in
+    /var/tmp/subyard-worktree.*) ;;
+    *) phase_end 1; lane_record "$LEASE_SLOT" cleaned "vm=$vm" exit_code=1; return 1 ;;
+  esac
   if [ "${2:-}" = quiet ]; then
     E2E_GUEST_TIMEOUT=120 guest "$vm" sudo -n find "$directory" -depth -delete </dev/null >/dev/null 2>&1 || rc=$?
   else
     E2E_GUEST_TIMEOUT=120 guest "$vm" sudo -n find "$directory" -depth -delete </dev/null || rc=$?
   fi
   phase_end "$rc"
+  lane_record "$LEASE_SLOT" cleaned "vm=$vm" "exit_code=$rc"
   [ "$rc" = 0 ] || return "$rc"
   unset 'GUEST_DIRS[$vm]'
 }
@@ -314,18 +318,7 @@ write_guest_command() {
 	printf '\n'
 }
 
-# Direct controllers stage without run_guest; the transport phase then records which VM has
-# a run directory that needs guest cleanup.
 prepare_guest() {
-  local rc=0
-  [ -z "$E2E_ACTIVE_PHASE" ] || { stage_guest "$@"; return; }
-  phase_start transport "$1"
-  stage_guest "$@" || rc=$?
-  phase_end "$rc"
-  return "$rc"
-}
-
-stage_guest() {
   local vm="$1" bundle="$2" expected_hash="$3" directory actual_hash fstype
   # Release assets and native build outputs must not consume the guest's RAM reserve.
   fstype="$(guest "$vm" findmnt -n -o FSTYPE -T /var/tmp </dev/null)" \
@@ -343,6 +336,8 @@ stage_guest() {
     *) printf 'agent-e2e: VM%s returned an unsafe run directory\n' "$vm" >&2; return 2 ;;
   esac
   GUEST_DIRS[$vm]="$directory"
+  # The only staging point: release acceptance requires this VM's guest cleanup before release.
+  lane_record "$LEASE_SLOT" work "vm=$vm"
 
   info "VM$vm: streaming current worktree" >&2
   guest "$vm" dd "of=$directory/worktree.tar.gz" status=none < "$bundle" \

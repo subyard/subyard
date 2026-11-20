@@ -390,6 +390,18 @@ new_run_id() {
   od -An -N4 -tx1 /dev/urandom | tr -d ' \n'
 }
 
+# Release acceptance counts a lane's leases only from records with its own random lane ID.
+# Guests never receive SUBYARD_E2E_LANE, so nested clients print none.
+lane_record() {
+  local slot="$1" event="$2" record
+  shift 2
+  [[ "${SUBYARD_E2E_LANE:-}" =~ ^[0-9a-f]{32}$ ]] || return 0
+  printf -v record 'E2E_LEASE lane=%s run=%s slot=%s event=%s' "$SUBYARD_E2E_LANE" "$LEASE_RUN" "$slot" "$event"
+  [ "$#" = 0 ] || printf -v record '%s %s' "$record" "$*"
+  # One write: concurrent VM output cannot split the record.
+  printf '%s\n' "$record" >&2 || true
+}
+
 lease_acquire_request() {
   local client="$1" fingerprint="$2" key_type="$3" key_blob="$4"
   [ -n "$LEASE_REQUESTED_SLOT" ] || die "an exact --slot is required before acquiring an E2E lease"
@@ -852,8 +864,7 @@ acquire_lease() {
   IFS=$'\t' read -r LEASE_YARD LEASE_PROJECT <<<"$workspace_context"
   [ -n "$LEASE_RUN" ] || LEASE_RUN="$(new_run_id)"
   [[ "$LEASE_RUN" =~ ^[0-9a-f]{8}$ ]] || die "invalid E2E run identity"
-  # Release acceptance requires each request to end in a grant or a typed refusal.
-  printf 'E2E lease request: slot=%s run=%s\n' "$LEASE_REQUESTED_SLOT" "$LEASE_RUN" >&2
+  lane_record "$LEASE_REQUESTED_SLOT" request
   [ -n "$LEASE_PURPOSE" ] || LEASE_PURPOSE=agent-e2e
   telemetry_correlation request
   if ! status_response="$(facade_request status)"; then
@@ -939,6 +950,7 @@ acquire_lease() {
       printf 'E2E lease: yard=%s project=%s run=%s purpose=%s slot=%s' \
         "$LEASE_YARD" "$LEASE_PROJECT" "$LEASE_RUN" "$LEASE_PURPOSE" "$LEASE_SLOT" >&2
       printf ' type=%s vms=%s base=%s\n' "$ENVIRONMENT_TYPE" "$VM_COUNT" "$BASE_FINGERPRINT" >&2
+      lane_record "$LEASE_SLOT" grant
       return 0
     fi
     if [ -n "$LEASE_ACQUIRE_PID" ]; then
@@ -981,6 +993,7 @@ acquire_lease() {
       fi
       printf '%s: retryable capacity refusal for %s: resource=%s; retry after resources become available\n' "$E2E_PROGRAM" \
         "$LEASE_REQUESTED_SLOT" "$reason" >&2
+      lane_record "$LEASE_REQUESTED_SLOT" refused "resource=$reason"
       local admission_snapshot
       if [ "$reason" = memory ] && admission_snapshot="$(capacity_refusal_snapshot "$response")"; then
         printf '%s: memory admission=%s\n' "$E2E_PROGRAM" "$admission_snapshot" >&2
@@ -1047,6 +1060,7 @@ lease_release_request() {
   fi
   printf 'E2E_RELEASE state=end duration_seconds=%s budget_seconds=180 grace_seconds=5 exit_code=%s\n' \
     "$((SECONDS - started))" "$rc" >&2 || true
+  lane_record "$LEASE_SLOT" release "exit_code=$rc"
 }
 
 release_lease() {

@@ -565,7 +565,7 @@ def validate_operator_acceptance(document, name, command, identity):
             or type(item["vm_count"]) is not int or not 1 <= item["vm_count"] <= 100 or not sha(item["base_fingerprint"])):
             raise ValueError("invalid operator acceptance physical environment")
         counts.add(item["vm_count"])
-    # Guest cleanup lists the VMs that were cleaned; a VM without guest work needs none.
+    # Guest cleanup lists the VMs that were cleaned; a VM without a staged run directory needs none.
     cleaned = document["cleanup"].get("guest_cleanup") if isinstance(document["cleanup"], dict) else None
     vms = [item.get("vm") for item in cleaned] if isinstance(cleaned, list) and all(isinstance(item, dict) for item in cleaned) else None
     if (vms is None or any(type(vm) is not int or not 1 <= vm <= max(counts) for vm in vms) or vms != sorted(set(vms))
@@ -620,13 +620,16 @@ def operator_acceptances(paths, identity, root, receipt):
         prefix = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp"]
         argv = launch.get("argv")
         if (launch.get("cwd") != str(source_root) or not isinstance(argv, list) or not all(isinstance(value, str) for value in argv)
-            or argv[:6] != prefix or len(argv) != len(prefix) + 3 + len(command) + 2):
+            or argv[:6] != prefix or len(argv) != len(prefix) + 4 + len(command) + 2):
             raise ValueError("operator acceptance original launcher differs")
-        assignments = dict(value.split("=", 1) for value in argv[6:9] if "=" in value)
-        if (set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE", "SUBYARD_E2E_CANDIDATE_SHA256"}
+        # The launcher's lane ID selects the lane's own lease records in the log.
+        lane = a.launcher_lane(argv[6:10])
+        assignments = dict(value.split("=", 1) for value in argv[6:10] if "=" in value)
+        if (not lane or set(assignments) != {"SUBYARD_E2E_CONTROLLER_WORKSPACE", "SUBYARD_E2E_CANDIDATE_BUNDLE",
+                                            "SUBYARD_E2E_CANDIDATE_SHA256", "SUBYARD_E2E_LANE"}
             or assignments["SUBYARD_E2E_CANDIDATE_BUNDLE"] != str(source_output / "candidate-bundle.tar.gz")
             or assignments["SUBYARD_E2E_CANDIDATE_SHA256"] != original["candidate_bundle_sha256"]
-            or a.command_identity(argv[9:-2], source_root) != command or argv[-2] != "--slot"
+            or a.command_identity(argv[10:-2], source_root) != command or argv[-2] != "--slot"
             or not re.fullmatch(r"[1-9][0-9]{0,2}", argv[-1])):
             raise ValueError("operator acceptance original transport or command differs")
         duration = timing.get("whole_duration_seconds")
@@ -637,11 +640,11 @@ def operator_acceptances(paths, identity, root, receipt):
             or any(type(value) not in (int, float) or not math.isfinite(value) for value in clocks)
             or not math.isclose(clocks[1] - clocks[0], duration, rel_tol=1e-9, abs_tol=1e-6)):
             raise ValueError("operator acceptance original complete timing differs")
-        evidence = a.lane_leases(files["log"], argv[-1])
+        evidence = a.lane_leases(files["log"], lane, argv[-1])
         issue = a.lease_issue(evidence)
         if issue or not evidence.environments:
             raise ValueError("operator acceptance original cleanup or release unconfirmed" + (": " + issue if issue else ""))
-        environments, cleaned = set(evidence.environments), evidence.cleaned
+        environments = set(evidence.environments)
         for original_result in (original["checks"][name], receipt["checks"][name]):
             if (original_result.get("status") not in ("pending", "failed") or original_result.get("inherited")
                 or "evidence_transfer" in original_result or original_result.get("status") == "failed" and
@@ -655,7 +658,7 @@ def operator_acceptances(paths, identity, root, receipt):
                   "target_status": receipt["checks"][name]["status"], "native_status": "failed", "exit_code": native["exit_code"],
                   "duration_seconds": duration, "launched_at_utc": launch.get("started_at"), "ended_at_utc": timing.get("ended_at"),
                   "environments": [{"type": kind, "vm_count": count, "base_fingerprint": base} for kind, count, base in sorted(environments)],
-                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in cleaned],
+                  "cleanup": {"guest_cleanup": [{"vm": vm, "exit_code": 0} for vm in evidence.cleaned],
                               "release_exit_code": 0, "lease_released": True}}
         validate_operator_acceptance(public, name, command, identity)
         accepted[name] = public
@@ -1618,7 +1621,7 @@ def collect_ci(github, directory, identity):
             a.validate_attempt(record, manifest, name, a.command_identity(commands[name], root), result.get("log_sha256"))
             result.update(execution="ci-hosted", ci_hosted=metadata)
             a.validate_hosted_binding(name, result, a.transfer_candidate(receipt), manifest)
-            counts, reason = a.pass_counts(cached, result)
+            counts, reason = a.pass_counts(cached, name, result)
             if not counts:
                 raise ValueError("hosted evidence is not a complete PASS: " + reason)
             # Persist the immutable original evidence before publishing the result reference.

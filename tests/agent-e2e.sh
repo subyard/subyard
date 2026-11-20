@@ -3892,6 +3892,39 @@ for phase_scenario in success guest-failure transfer-failure direct-failure rele
   assert_phase_markers "$phase_output" "$phase_expected"
 done
 
+# With the collector's lane ID, the lane's own client and runner record each lease event.
+lane_id=0123456789abcdef0123456789abcdef
+lane_records() { sed -n "s/^E2E_LEASE lane=$lane_id run=[0-9a-f]\{8\} slot=slot-002 event=//p" "$1"; }
+for lane_case in phase-success:--vm:1 phase-direct-failure:--ssh:1 capacity:--wait:1s; do
+  IFS=: read -r lane_scenario lane_mode lane_value <<<"$lane_case"
+  new_runner_fixture "lane-$lane_scenario"
+  set +e
+  SUBYARD_E2E_LANE="$lane_id" SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" \
+    run_runner_fixture "$lane_scenario" --slot 2 "$lane_mode" "$lane_value" -- true >"$TMP/lane-$lane_scenario.log" 2>&1
+  set -e
+  case "$lane_scenario" in
+    # Staging records its VM; the guest cleanup closes it before the release.
+    phase-success) lane_expected=$'request\ngrant\nwork vm=1\ncleaned vm=1 exit_code=0\nrelease exit_code=0' ;;
+    # A raw guest command stages nothing.
+    phase-direct-failure) lane_expected=$'request\ngrant\nrelease exit_code=0' ;;
+    capacity) lane_expected=$'request\nrefused resource=memory' ;;
+  esac
+  [ "$(lane_records "$TMP/lane-$lane_scenario.log")" = "$lane_expected" ] \
+    || fail "lane records of $lane_scenario differ: $(cat "$TMP/lane-$lane_scenario.log")"
+done
+# Without a valid lane ID nothing is recorded, and guests never receive the ID.
+new_runner_fixture lane-absent
+SUBYARD_E2E_LANE=short SUBYARD_E2E_CANDIDATE_BUNDLE="$candidate_bundle" SUBYARD_E2E_CANDIDATE_SHA256="$candidate_hash" \
+  run_runner_fixture phase-success --slot 2 --vm 1 -- true >"$TMP/lane-absent.log" 2>&1 \
+  && ! grep -q '^E2E_LEASE ' "$TMP/lane-absent.log" || fail 'an invalid lane ID was recorded'
+SUBYARD_E2E_LANE="$lane_id" write_guest_command 1 "$command_root" true > "$TMP/lane-command.sh"
+! grep -q SUBYARD_E2E_LANE "$TMP/lane-command.sh" || fail 'the guest command forwards the lane ID'
+# A cleanup that cannot run on an unsafe run directory is recorded as failed.
+lane_cleanup="$(GUEST_DIRS=([1]=/unsafe) LEASE_SLOT=slot-002 LEASE_RUN=0123abcd SUBYARD_E2E_LANE="$lane_id"
+  cleanup_guest 1 2>&1 >/dev/null || true)"
+grep -Fxq "E2E_LEASE lane=$lane_id run=0123abcd slot=slot-002 event=cleaned vm=1 exit_code=1" <<<"$lane_cleanup" \
+  || fail "unsafe guest cleanup was not recorded as failed: $lane_cleanup"
+
 # Model direct guest SSH and cleanup locally.
 guest() {
   local argument directory

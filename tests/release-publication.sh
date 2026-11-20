@@ -29,11 +29,32 @@ spec = importlib.util.spec_from_file_location("publication", ROOT / "dev/release
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
+# A fixture lane controller: one clean lease recorded with the collector's lane ID, as the real client prints it.
+LANE_CONTROLLER = r"""#!/bin/bash
+slot="$(printf 'slot-%03d' "${@: -1}")"
+record() { printf 'E2E_LEASE lane=%s run=0123abcd slot=%s event=%s\n' "$SUBYARD_E2E_LANE" "$slot" "$*"; }
+record request
+printf 'E2E lease: yard=sample project=p run=0123abcd purpose=t slot=%s type=subyard-pair vms=2 base=%064d\n' "$slot" 0
+record grant
+record release exit_code=0
+"""
+FIXTURE_LANE = "0123456789abcdef" * 2
 
-def direct_staging(mode, failed=""):
-    """The real staging (stage) or guest cleanup (cleanup) lines of a direct controller for VMs 1 and 2."""
-    return subprocess.run(["bash", str(ROOT / "tests/helpers/direct-staging.sh"), str(ROOT), mode, failed],
-                          check=True, capture_output=True, text=True).stdout
+
+def lease_record(event, run="0f1c7e00", slot=2):
+    return f"E2E_LEASE lane={FIXTURE_LANE} run={run} slot=slot-{slot:03d} event={event}\n"
+
+
+# A collected lane log: the collector's lane header and the lane's own clean lease on slot 1.
+LANE_LOG = (f"E2E_LANE id={FIXTURE_LANE}\n" + "".join(lease_record(event, "0123abcd", 1) for event in ("request", "grant", "release exit_code=0"))
+            + "synthetic passing evidence fixture\n")
+
+
+def clean_lease(run="0f1c7e00", staged=(1, 2), base="b" * 64, middle=""):
+    """A standalone controller's own lease on slot 2 with every staged VM cleaned before release."""
+    return (lease_record("request", run) + f"E2E lease: yard=y project=p run={run} purpose=t slot=slot-002 type=subyard-pair vms=2 base={base}\n"
+            + lease_record("grant", run) + "".join(lease_record(f"work vm={vm}", run) for vm in staged) + middle
+            + "".join(lease_record(f"cleaned vm={vm} exit_code=0", run) for vm in staged) + lease_record("release exit_code=0", run))
 
 
 def fixture(directory, lanes=(), external_required=None, inventory_entries=0, optional_vms=False, current_contract=True,
@@ -60,7 +81,7 @@ def fixture(directory, lanes=(), external_required=None, inventory_entries=0, op
     (root / "dev/test-profiles.sh").write_text("#!/bin/bash\nprintf 'runner\\tsample\\tconfig/profiles/sample/tests/e2e/acceptance.sh\\n'\n")
     profile = root / "config/profiles/sample/tests/e2e"
     profile.mkdir(parents=True)
-    (profile / "acceptance.sh").write_text("#!/bin/bash\nexit 0\n")
+    (profile / "acceptance.sh").write_text(LANE_CONTROLLER)
     if lanes:
         (profile / "acceptance-lanes.json").write_text(json.dumps({"schema_version": 1, "lanes": [
             {"id": lane, "arguments": ["--lane", lane]} for lane in lanes]}))
@@ -121,12 +142,12 @@ def accepted(directory, prepared, identity, external_passed=True, with_vms=True)
     for name, command in m.a.commands(root, identity["version"], receipt["profiles"]).items():
         if command and (with_vms or name == "p0-release-smoke" or not m.a.is_live(name)):
             log = output / (name.replace(":", "-").replace("/", "-") + ".log")
-            log.write_text("synthetic passing evidence fixture\n")
+            log.write_text(LANE_LOG if m.a.is_live(name) else "synthetic passing evidence fixture\n")
             receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name,
                 "log_sha256": m.a.digest(log), "command": m.a.command_identity(command, root),
                 "execution_environment": receipt["environment"]}
             if m.a.is_live(name):
-                receipt["checks"][name]["environments"] = [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]
+                receipt["checks"][name].update(slot=1, environments=[{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}])
     if external_passed:
         for item in receipt["external_obligations"].values():
             item.update({"status": "passed", "evidence_sha256": "c" * 64})
@@ -330,11 +351,11 @@ class Contracts(unittest.TestCase):
                 self.assertEqual((result["status"], result["command"]), ("passed", ["ci-prepared", "r123-a1", m.a.CI_PREPARED_CHECKS[name]]))
             elif name != "package" and result["status"] == "pending":
                 log = output / (name.replace(":", "-").replace("/", "-") + ".log")
-                log.write_text("synthetic passing evidence fixture\n")
+                log.write_text(LANE_LOG if m.a.is_live(name) else "synthetic passing evidence fixture\n")
                 receipt["checks"][name] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
                     "command": m.a.command_identity(m.a.commands(root, receipt["version"], receipt["profiles"])[name], root),
                     "execution_environment": receipt["environment"],
-                    **({"environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]} if m.a.is_live(name) else {})}
+                    **({"slot": 1, "environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]} if m.a.is_live(name) else {})}
         for item in receipt["external_obligations"].values():
             item.update({"status": "passed", "evidence_sha256": "c" * 64})
         m.a.save(output, receipt)
@@ -598,8 +619,8 @@ class Contracts(unittest.TestCase):
             output, root, identity = self.split_candidate(Path(temporary), with_vms=False)
             _, receipt = m.a.load_bound(output)
             log = output / "vm-p0-full.log"
-            log.write_text("synthetic passing evidence fixture\n")
-            receipt["checks"]["vm:p0-full"] = {"status": "passed", "exit_code": 0, "log": log.name, "log_sha256": m.a.digest(log),
+            log.write_text(LANE_LOG)
+            receipt["checks"]["vm:p0-full"] = {"status": "passed", "exit_code": 0, "slot": 1, "log": log.name, "log_sha256": m.a.digest(log),
                 "command": m.a.command_identity(m.a.commands(root, identity["version"], receipt["profiles"])["vm:p0-full"], root),
                 "execution_environment": receipt["environment"],
                 "environments": [{"type": "subyard-pair", "vm_count": 2, "base_fingerprint": "b" * 64}]}
@@ -1170,8 +1191,6 @@ class Contracts(unittest.TestCase):
         for name, result in source["checks"].items():
             if name != "package":
                 result["duration_seconds"] = 123.5
-                if m.a.is_live(name):
-                    result["slot"] = 2
         m.a.save(source_output, source)
         _, source = capture_attempts(source_output)
         state_dir = self.directory / "publication"
@@ -1383,7 +1402,8 @@ class Contracts(unittest.TestCase):
         argv = ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE=" + str(self.directory / "controller"),
                 "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
-                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], *command, "--slot", "2"]
+                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], "SUBYARD_E2E_LANE=" + FIXTURE_LANE,
+                *command, "--slot", "2"]
         launch = {"argv": argv, "cwd": str(original_root), "started_at": "2026-10-12T00:00:00+00:00", "started_monotonic": 1000.0}
         timing = {**launch, "ended_at": "2026-10-12T00:02:03.500000+00:00", "ended_monotonic": 1123.5,
                   "whole_duration_seconds": 123.5, "exit_code": 1}
@@ -1392,12 +1412,8 @@ class Contracts(unittest.TestCase):
         for role, data in (("native", native), ("launch", launch), ("timing", timing)):
             m.write_json(files[role], data)
         files["log"] = self.directory / "failure.log"
-        files["log"].write_text("E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
-            "  [fail] phase=fixture/init\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n"
-            "E2E lease released: slot=2 run=fixture\n"
-            "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
+        files["log"].write_text(clean_lease(middle="  [fail] phase=fixture/init\n")
+            + "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
         declaration = {"schema_version": 1, "check": name, "target": self.identity, "tested": m.a.transfer_candidate(original),
             "command": command, "decision": {"reason": "Accept this known failure for this exact release",
                 "authorization_reference": "operator-decision:fixture", "repair_reference": "p0-repair:fixture"},
@@ -1572,12 +1588,9 @@ class Contracts(unittest.TestCase):
             "argv": ["timeout", "--signal=TERM", "--kill-after=300s", "90m", "env", "TMPDIR=/tmp",
                 "SUBYARD_E2E_CONTROLLER_WORKSPACE=/fixture/controller",
                 "SUBYARD_E2E_CANDIDATE_BUNDLE=" + str(original_output / "candidate-bundle.tar.gz"),
-                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], *command, "--slot", "2"]}))
-        log.write_text("E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n"
-            "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n"
-            "E2E lease released: slot=2 run=fixture\n")
+                "SUBYARD_E2E_CANDIDATE_SHA256=" + original["candidate_bundle_sha256"], "SUBYARD_E2E_LANE=" + FIXTURE_LANE,
+                *command, "--slot", "2"]}))
+        log.write_text(clean_lease() + "E2E_PHASE phase=cleanup/release state=end duration_seconds=1 exit_code=0\n")
         standalone = {role: {"path": str(path), "sha256": m.a.digest(path)} for role, path in
                       (("native", native), ("launch", launch), ("log", log))}
         request = {"schema_version": 1, "target": m.a.transfer_candidate(receipt), "checks": []}
@@ -1676,10 +1689,7 @@ class Contracts(unittest.TestCase):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
         originals = {role: file.read_bytes() for role, file in files.items()}
-        second = ("E2E lease: slot=2 run=second type=subyard-pair vms=1 base=" + "b" * 64 + "\n"
-                  "E2E_PHASE phase=transport state=start duration_seconds=0 exit_code=0 vm=1\n")
-        for change in ("nonterminal", "pass", "signal", "timeout", "kill", "timing", "transport", "cleanup", "release",
-                       "second-unclosed", "second-cleanup"):
+        for change in ("nonterminal", "pass", "signal", "timeout", "kill", "timing", "transport", "cleanup", "release", "second", "second-cleanup"):
             for role, content in originals.items():
                 files[role].write_bytes(content)
             if change in ("nonterminal", "pass", "signal", "timeout", "kill"):
@@ -1687,10 +1697,6 @@ class Contracts(unittest.TestCase):
                 data.update({"session_id": 99} if change == "nonterminal" else
                             {"exit_code": {"pass": 0, "signal": 143, "timeout": 124, "kill": 137}[change]})
                 m.write_json(files["native"], data)
-                m.write_json(files["timing"], dict(json.loads(files["timing"].read_text()), exit_code=data["exit_code"]))
-            elif change.startswith("second"):
-                files["log"].write_text(originals["log"].decode() + second
-                                        + ("E2E lease released: slot=2 run=second\n" if change == "second-cleanup" else ""))
             elif change in ("timing", "transport"):
                 role = "timing" if change == "timing" else "launch"
                 data = json.loads(files[role].read_text())
@@ -1700,7 +1706,16 @@ class Contracts(unittest.TestCase):
                     data["argv"][8] = "SUBYARD_E2E_CANDIDATE_SHA256=" + "f" * 64
                 m.write_json(files[role], data)
             else:
-                content = originals["log"].decode().replace("exit_code=0 vm=2", "exit_code=1 vm=2") if change == "cleanup" else originals["log"].decode().replace("E2E lease released:", "missing release:")
+                content = originals["log"].decode()
+                if change == "cleanup":
+                    content = content.replace("cleaned vm=2 exit_code=0", "cleaned vm=2 exit_code=1")
+                elif change == "release":
+                    content = content.replace(lease_record("release exit_code=0"), "")
+                elif change == "second":
+                    # A later lease of the same lane that was never released.
+                    content += lease_record("request", "5ec0d000") + lease_record("grant", "5ec0d000")
+                else:
+                    content += clean_lease("5ec0d000", staged=(1,)).replace(lease_record("cleaned vm=1 exit_code=0", "5ec0d000"), "")
                 files["log"].write_text(content)
             declaration["artifacts"] = {role: {"path": str(file), "sha256": m.a.digest(file)} for role, file in files.items()}
             m.write_json(path, declaration)
@@ -1711,20 +1726,17 @@ class Contracts(unittest.TestCase):
         path, files, _ = self.operator_failure()
         declaration = json.loads(path.read_text())
         log = files["log"].read_text()
-        # Guest work on the second lease's VM ends in a clean guest cleanup before its release.
-        files["log"].write_text(log + "E2E lease: slot=2 run=second type=subyard-pair vms=1 base=" + "c" * 64 + "\n"
-            "E2E_PHASE phase=guest state=start duration_seconds=0 exit_code=0 vm=1\n"
-            "E2E lease: slot=1 run=nested type=subyard-pair vms=1 base=" + "d" * 64 + "\n"
-            "E2E_PHASE phase=guest state=end duration_seconds=1 exit_code=0 vm=1\n"
-            "E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=1\n"
-            "E2E lease released: slot=2 run=second\n")
+        nested = "fedcba9876543210" * 2
+        # The second lease's staged VM is cleaned before its release; a nested client's lease belongs to another lane.
+        second = clean_lease("5ec0d000", staged=(1,), base="c" * 64, middle=(
+            "E2E lease: yard=y project=p run=0e57ed00 purpose=t slot=slot-001 type=subyard-pair vms=1 base=" + "d" * 64 + "\n"
+            + f"E2E_LEASE lane={nested} run=0e57ed00 slot=slot-001 event=grant\n"))
+        files["log"].write_text(log + second)
         declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
         m.write_json(path, declaration)
         decision = m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
-        # The nested guest client's lease is not an environment of this lane.
-        self.assertEqual([(item["vm_count"], item["base_fingerprint"][0]) for item in decision["environments"]], [(1, "c"), (2, "b")])
-        self.assertEqual(decision["cleanup"], {"guest_cleanup": [{"vm": 1, "exit_code": 0}, {"vm": 2, "exit_code": 0}],
-                                               "release_exit_code": 0, "lease_released": True})
+        self.assertEqual(sorted((item["vm_count"], item["base_fingerprint"][0]) for item in decision["environments"]), [(2, "b"), (2, "c")])
+        self.assertEqual(decision["cleanup"]["guest_cleanup"], [{"vm": 1, "exit_code": 0}, {"vm": 2, "exit_code": 0}])
         for code in (124, 137):
             with self.subTest(code=code), self.assertRaises(ValueError):
                 m.validate_operator_acceptance(dict(decision, exit_code=code), "profile:sample", decision["command"], self.identity)
@@ -1734,35 +1746,12 @@ class Contracts(unittest.TestCase):
             invalid = dict(decision, cleanup=dict(decision["cleanup"], guest_cleanup=cleaned))
             with self.subTest(cleaned=cleaned), self.assertRaises(ValueError):
                 m.validate_operator_acceptance(invalid, "profile:sample", decision["command"], self.identity)
-        # A VM without guest work has no cleanup to claim.
-        files["log"].write_text(log.replace("E2E_PHASE phase=guest-cleanup state=end duration_seconds=1 exit_code=0 vm=2\n", ""))
+        # A VM without staged work has no cleanup to claim.
+        files["log"].write_text(clean_lease(staged=(1,)) + "E2E_PHASE phase=cleanup/release state=end duration_seconds=12 exit_code=0\n")
         declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
         m.write_json(path, declaration)
         decision = m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
         self.assertEqual(decision["cleanup"]["guest_cleanup"], [{"vm": 1, "exit_code": 0}])
-
-    def test_operator_acceptance_needs_cleanup_of_every_directly_staged_vm(self):
-        path, files, _ = self.operator_failure()
-        declaration = json.loads(path.read_text())
-        grant = "E2E lease: slot=2 run=fixture type=subyard-pair vms=2 base=" + "b" * 64 + "\n"
-        release = ("E2E_RELEASE state=start duration_seconds=0 budget_seconds=180 grace_seconds=5 exit_code=0\n"
-                   "E2E_RELEASE state=end duration_seconds=1 budget_seconds=180 grace_seconds=5 exit_code=0\n"
-                   "E2E lease released: slot=2 run=fixture\n")
-        result = "SAMPLE_RESULT original_exit_code=1 capture_exit_code=0 cleanup_exit_code={} duration_seconds=1 evidence=x\n"
-        staged = direct_staging("stage")
-        def attest(log):
-            files["log"].write_text(log)
-            declaration["artifacts"]["log"]["sha256"] = m.a.digest(files["log"])
-            m.write_json(path, declaration)
-            return m.attestation(self.output, self.identity, [path])["checks"]["profile:sample"]["operator_acceptance"]
-        decision = attest(grant + staged + "  [fail] phase=fixture/init\n" + direct_staging("cleanup") + release + result.format(0))
-        self.assertEqual(decision["cleanup"]["guest_cleanup"], [{"vm": 1, "exit_code": 0}, {"vm": 2, "exit_code": 0}])
-        for label, log in (("failed guest cleanup", grant + staged + direct_staging("cleanup", "2") + release + result.format(3)),
-                           ("staged VM without cleanup", grant + staged + release + result.format(0)),
-                           # An older direct controller printed no staging or cleanup markers, only its result.
-                           ("explicit failed controller cleanup", grant + "  [ .. ] VM1: streaming current worktree\n" + release + result.format(3))):
-            with self.subTest(label), self.assertRaisesRegex(ValueError, "cleanup or release unconfirmed"):
-                attest(log)
 
     def test_operator_acceptance_cannot_waive_other_gates_or_remote_binding(self):
         path, _, _ = self.operator_failure()
@@ -2595,13 +2584,13 @@ class HostedChecks(unittest.TestCase):
 
     def test_hosted_pass_that_fails_the_lane_rule_stays_open(self):
         counts = m.a.pass_counts
-        def hosted(directory, result):
-            return (False, "lease slot-001 has no confirmed release") if result.get("execution") == "ci-hosted" else counts(directory, result)
+        def hosted(directory, name, result):
+            return (False, "granted lease has no confirmed release") if result.get("execution") == "ci-hosted" else counts(directory, name, result)
         with patch.object(m.a, "pass_counts", side_effect=hosted) as counted:
             result, report = self.collect()
         self.assertEqual(result, {"status": "pending"})
-        self.assertIn("CI-HOSTED-SKIP profile:sample: hosted evidence is not a complete PASS: lease slot-001", report)
-        self.assertTrue(any(call.args[1].get("execution") == "ci-hosted" for call in counted.call_args_list))
+        self.assertIn("profile:sample: hosted evidence is not a complete PASS: granted lease has no confirmed release", report)
+        self.assertTrue(any(call.args[2].get("execution") == "ci-hosted" for call in counted.call_args_list))
 
     def test_publication_rechecks_job_and_refuses_tampered_hosted_policy_or_runner(self):
         self.collect()
