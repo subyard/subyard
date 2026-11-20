@@ -221,7 +221,8 @@ def active(identity):
     try:
         fields = Path(f"/proc/{identity[0]}/stat").read_text().rsplit(") ", 1)[1].split()
         return fields[19] == identity[1] and fields[0] not in ("Z", "X")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # Reading an exiting process's stat fails with ESRCH after the open.
         return False
 
 
