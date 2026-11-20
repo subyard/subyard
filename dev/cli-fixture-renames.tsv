@@ -1,0 +1,10 @@
+# Reviewed rename rules for proof 2 of dev/cli-fixture-slice-check.sh: Python regex<TAB>replacement.
+# They apply in order to a base assertion unit without an unchanged match; the result must
+# be a candidate unit of the same function. Each rule is a fixture field replacing a local.
+runInstallationCheck(With)?\(t, root, environment	runInstallationCheck\1(t, fixture, fixture.Environment
+environmentValue\(environment, "SUBYARD_HOME"\)	fixture.DataHome
+environmentValue\(environment, "SUBYARD_CONFIG_HOME"\)	fixture.ConfigHome
+(?<![\w."])root\b(?!")	fixture.Root
+(?<![\w."])home\b(?!")	fixture.Home
+(?<![\w."])configHome\b	fixture.ConfigHome
+(?<![\w."])environment\b(?!")	fixture.Environment
