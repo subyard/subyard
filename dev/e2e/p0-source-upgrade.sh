@@ -939,11 +939,12 @@ prepare() {
   seed_installed_shapes
   local update_rc=0 legacy_before
   legacy_before="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
-  # The candidate accepts only yes, no or prompt; the operator replaces the baseline's
-  # DEV_SUDO 1 before updating, as the release notes ask.
-  operator_env sed -i -E "s/^DEV_SUDO='?1'?\$/DEV_SUDO=yes/" "$OPERATOR_HOME/.config/subyard/config.env"
-  operator_env grep -Eqx 'DEV_SUDO=yes' "$OPERATOR_HOME/.config/subyard/config.env" \
-    || die 'baseline DEV_SUDO assignment was not replaced'
+  # No DEV_SUDO value is valid on both runtimes. As the release notes ask, the operator
+  # removes the assignment with the old engine (absent means sudo on for both) and updates.
+  operator_yard config unset DEV_SUDO --scope host --yes
+  if operator_env grep -q '^DEV_SUDO=' "$OPERATOR_HOME/.config/subyard/config.env"; then
+    die 'baseline DEV_SUDO assignment was not removed'
+  fi
   if bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
     cat "$SHARED_ROOT/first-update.log"
   else
@@ -953,6 +954,8 @@ prepare() {
   fi
   grep -Fq 'yard config sync <checkout>, then yard -Y e2e-yard teardown --reset-config, then yard service install test-vms' \
     "$SHARED_ROOT/first-update.log" || die 'update did not print its exact recreation commands'
+  operator_yard config show DEV_SUDO | grep -Fxq 'effective: yes' \
+    || die 'updated runtime does not default DEV_SUDO to yes'
   [ "$(ordinary_yard_facts)" = "$ORDINARY_BEFORE" ] || die 'update changed ordinary yard data, identity or power'
   [ "$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")" = "$legacy_before" ] \
     && [ "$(incus list "$INSTANCE" --project "$PROJECT" -f csv -c s)" = STOPPED ] \

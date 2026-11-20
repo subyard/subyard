@@ -5,8 +5,14 @@
 - `DEV_SUDO` now takes `yes` (default), `no` or `prompt`. `prompt` keeps the passwordless
   grant and makes Claude, Codex and OpenCode ask before `sudo`, `su`, `doas`, `pkexec`,
   `sudoedit` and `run0`; it is a guardrail, not a boundary. The values `1` and `0` are
-  refused and not migrated: replace them with `yes` and `no` in each named file.
-  See [passwordless sudo inside the yard](configuration.md#passwordless-sudo-inside-the-yard).
+  refused and not migrated, and older runtimes refuse the new values. Before `yard update`,
+  remove every `DEV_SUDO` assignment with the older runtime; after it, set `no` or `prompt`
+  again before the next `yard init`. Publish a shared value only after every owner host is
+  updated. See [passwordless sudo inside the yard](configuration.md#passwordless-sudo-inside-the-yard).
+- With `CODING_TOOL_GIT_APPROVAL=prompt`, the Claude and Codex hook now also rejects
+  `git commit` and `git push` behind a wrapper such as `env`, `command`, `exec`, `nohup`,
+  `nice`, `time` or `timeout`, in `xargs`, `find -exec` or `eval`, after a compound-command
+  keyword, in a subshell, and inside a substitution. Run the direct command instead.
 - Claude, Codex, and OpenCode now default to running Git commits and pushes
   without a managed approval prompt. Existing yards keep their installed policy
   until the next `yard init`. Set `CODING_TOOL_GIT_APPROVAL=prompt` to keep or

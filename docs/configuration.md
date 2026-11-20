@@ -205,33 +205,63 @@ same explicit yard-scope repair.
 | Value | Effect after `yard init` |
 | --- | --- |
 | `yes` (default) | The yard's developer account runs commands as guest root without a password. |
-| `no` | Subyard removes its managed grant and installs no sudo approval rules. |
+| `no` | Subyard removes its managed sudoers grant and installs no sudo approval rules. Docker group access remains; see below. |
 | `prompt` | The grant stays as with `yes`. Claude, Codex and OpenCode ask for approval before `sudo`, `su`, `doas`, `pkexec`, `sudoedit` and `run0`. |
 
 Set `DEV_SUDO` at shared, host or yard scope, or for one command, and run `yard init` to apply it.
-Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`. Removing the grant leaves the
-developer's Docker group access, which can still provide root-equivalent access inside the guest.
+Hermes and Amnezia yard presets explicitly set `DEV_SUDO=no`.
 
-The earlier values `1` and `0` are not migrated. Commands refuse them with a message that names
-the file, the line and the new values, and `yard config set` cannot replace such an assignment.
-Edit each named assignment yourself: `1` becomes `yes` and `0` becomes `no`.
+The earlier values `1` and `0` are not migrated, and no value is accepted by both an older runtime
+and this one: older runtimes refuse `yes`, `no` and `prompt`, and this runtime refuses `1` and `0`
+with a message that names the file, the line and the new values. Absent `DEV_SUDO` means sudo on
+for both. To update:
+
+1. With the older runtime, remove every assignment, for example
+   `yard config unset DEV_SUDO --scope host --yes`, at each scope that sets it. Add `--git` for a
+   synced assignment and push it. Note which yards set `0` on purpose.
+2. Run `yard update`.
+3. With the new runtime, set `no` (or `prompt`) again where you need it, for example
+   `yard -Y <yard> config set DEV_SUDO no --scope yard --yes`, before the next `yard init`.
+   Release activation does not touch the guest grant, but a `yard init` without the assignment
+   applies the default `yes`.
+
+With shared configuration, remove the shared assignment while every owner host still runs an
+older runtime, and publish `no` or `prompt` at shared scope only after all owner hosts are
+updated. Until then, keep `no` at host or yard scope on the updated hosts.
 
 `prompt` is a guardrail against casual escalation, not a security boundary. It covers commands
 an agent writes directly. Scripts, Make targets, aliases, setuid binaries and access to the
-Docker or Incus socket bypass it. Use `no` when the agent must not become root. Provisioning
-writes the prompt rules to the same root-owned policies as
-[Git approval](#commit-and-push-approval-prompts):
+Docker or Incus socket bypass it. `no` removes only Subyard's managed sudoers grant: the developer
+account stays in the guest's `docker` group, which is root-equivalent inside the guest, so remove
+that access as well when the agent must not become root. Provisioning writes the prompt rules to
+the same policies as [Git approval](#commit-and-push-approval-prompts):
 
-- Claude: `permissions.ask` entries in the managed drop-in, plus the managed hook's `sudo` gate.
-- Codex: `prompt` prefix rules in `/etc/codex/requirements.toml`, plus the managed hook's `sudo` gate.
-- OpenCode: `ask` entries for `permission.bash` in the shipped home template.
+- Claude: `permissions.ask` entries in the root-owned managed drop-in, plus the managed hook's
+  `sudo` gate.
+- Codex: `prompt` prefix rules in the root-owned `/etc/codex/requirements.toml`, plus the
+  managed hook's `sudo` gate.
+- OpenCode: `ask` entries for `permission.bash` in the shipped home template
+  `~/.config/opencode/opencode.jsonc`. This policy lives in the developer's home, not a root-owned
+  file. A custom `AGENT_opencode_CONFIG` source gets no sudo ask entries, and OpenCode's project,
+  agent and UI permissions, including an `always` answer, can allow sudo again.
 - pi: unsupported; it has no per-command approval gate.
 
-For Claude and Codex, the hook rejects other literal spellings of the escalation commands: an
-executable path such as `/usr/bin/sudo`, a quoted command word, an assignment prefix, a wrapper
-such as `env`, `command`, `exec`, `nohup`, `nice`, `time` or `timeout`, and literal shell `-c`
-commands such as `bash -c 'sudo …'`. Use the bare command, such as `sudo apt-get install …`, to
-reach the approval prompt. OpenCode has no hook; its ask patterns match only the bare command.
+On a yard that had no grant, `yard init` publishes the `prompt` grant only after the selected
+agents' approval policies are installed and verified, so an interrupted init leaves the yard
+without sudo rather than with sudo and no prompts.
+
+For Claude and Codex, the hook rejects other literal spellings of the escalation commands, as it
+does for [Git](#commit-and-push-approval-prompts): an executable path such as `/usr/bin/sudo`, a
+quoted command word, an assignment prefix, a wrapper, `xargs`, `find -exec`, `eval`, a
+compound-command keyword, a subshell or function body, a `$(…)` or backtick substitution, and
+literal shell `-c` commands such as `bash -c 'sudo …'`. Use the bare command, such as
+`sudo apt-get install …`, to reach the approval prompt; a direct command after `&&`, `;` or `|`
+also prompts. The Git approval limits apply here too. In addition:
+
+- Claude blocks a Bash call if the hook fails or times out. Codex continues its normal
+  permission flow on hook failures and timeouts, so only its direct sudo prompt rules remain.
+- OpenCode has no hook; its ask patterns match only the bare command.
+
 `yard status` names the configured mode, and its Codex rules line reports the installed sudo
 prompts; `claude-policy-check` reports the installed Claude rules. Existing sessions keep their
 loaded policy until restarted.
@@ -832,7 +862,11 @@ With prompts off, the remaining boundary for pushed changes is the remote's bran
 
 In `prompt` mode, Claude and Codex use a managed Bash `PreToolUse` hook that rejects alternate literal spellings of
 `git commit` and `git push`, including Git global options such as `-C` and `-c`, quoted command
-words, executable paths, and literal shell `-c` commands. Use a direct `git commit` or `git push`
+words, executable paths, assignment prefixes, and literal shell `-c` commands. It also rejects them
+behind a wrapper (`env`, `command`, `exec`, `nohup`, `nice`, `time`, `timeout`, `setsid`,
+`stdbuf`, `xargs`), as a `find -exec`, `-execdir`, `-ok` or `-okdir` command, in `eval`, after a
+compound-command keyword such as `if`, `then`, `do`, `{` or `!`, in a subshell or function body,
+and inside `$(…)` or backtick substitutions. Use a direct `git commit` or `git push`
 to reach the normal approval prompt. For another directory, use `cd <directory> && git commit`
 or `cd <directory> && git push`. Commands such as `git stash push`, `git log --grep commit`
 and `git rebase` continue through the normal permission flow.
@@ -845,8 +879,10 @@ usual precedence. Use `opencode-permission-check` in the project to inspect the 
 Limits:
 
 - The hook is a client guardrail. It inspects literal shell command words without running or
-  expanding them. Aliases, computed commands, complex shell syntax such as heredocs, scripts,
-  Make targets, subprocesses and direct writes to `.git` are outside its coverage. Other Git
+  expanding them. It skips quoted heredoc bodies and resumes after their terminator. Aliases,
+  computed commands such as `$cmd push`, `case` arms, process launchers it does not know (for
+  example `flock`, `watch`, `script -c`, `parallel` or `ssh`), scripts, Make targets, subprocesses
+  and direct writes to `.git` are outside its coverage. Other Git
   subcommands such as `merge`, `cherry-pick`, `commit-tree` and `update-ref` retain existing behavior.
 - Claude is configured to block a Bash call if the hook fails or times out. Codex continues
   its normal permission flow on hook failures and timeouts, including its direct Git prompt rules.
