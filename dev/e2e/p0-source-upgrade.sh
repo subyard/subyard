@@ -526,6 +526,19 @@ bootstrap_candidate() {
     || die 'standalone installer invoked Go'
 }
 
+# The documented route from the hop is a plain yard update; the candidate is packaged locally.
+update_candidate() { # <release> <version>
+  local release="$1" version="$2" status=0
+  operator_no_go env YARD_RELEASE_BASE_URL="file://$release" \
+    "$OPERATOR_HOME/.local/bin/yard" update --version "$version" --yes || status=$?
+  if [ "$status" -ne 0 ]; then
+    bootstrap_failure_diagnostics || true
+    return "$status"
+  fi
+  operator_env test ! -e "$OPERATOR_HOME/go-invoked" \
+    || die 'release update invoked Go'
+}
+
 verify_v2_release_transition() { # <version>
   local expected="$1"
   [ "$(operator_yard version)" = "yard $expected" ] \
@@ -947,7 +960,7 @@ prepare() {
   seed_installed_shapes
   local update_rc=0 legacy_before
   legacy_before="$(incus config get "$INSTANCE" volatile.uuid --project "$PROJECT")"
-  if bootstrap_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
+  if update_candidate "$RELEASE_ROOT/a" "$VERSION_A" > "$SHARED_ROOT/first-update.log" 2>&1; then
     cat "$SHARED_ROOT/first-update.log"
   else
     update_rc=$?
