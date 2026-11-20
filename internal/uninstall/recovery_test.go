@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -451,15 +452,32 @@ func completedStore(t *testing.T) RecoveryStore {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)
 		}
-		testkit.WriteFile(t, path, []byte(file), 0700)
+		body := []byte(file)
+		if file == "runtime/bin/yard" {
+			body = []byte("#!/bin/sh\nexit 0\n")
+		}
+		testkit.WriteFile(t, path, body, 0700)
 	}
 	return store
 }
 
 // Final store removal keeps the plan until last: an interruption at any
 // observation leaves the store absent, empty or still readable, and the
-// printed retry names an existing retained launcher or any newer engine.
+// printed retry runs as printed or first says to install a compatible release.
 func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
+	for _, onPath := range []bool{false, true} {
+		t.Run(fmt.Sprintf("yard-on-path=%v", onPath), func(t *testing.T) {
+			tools := testkit.TempDir(t)
+			if onPath {
+				testkit.WriteFile(t, filepath.Join(tools, "yard"), []byte("#!/bin/sh\nexit 0\n"), 0700)
+			}
+			t.Setenv("PATH", tools)
+			storeRemovalInterruptions(t)
+		})
+	}
+}
+
+func storeRemovalInterruptions(t *testing.T) {
 	t.Cleanup(func() { statAt = factAt })
 	for limit := 1; ; limit++ {
 		store := completedStore(t)
@@ -482,12 +500,19 @@ func TestStoreRemovalInterruptionNeverStrandsContentWithoutAPlan(t *testing.T) {
 			}
 			return
 		}
-		command := strings.Fields(store.ResumeCommand())
+		hint := store.ResumeHint()
+		lines := strings.Split(strings.TrimSuffix(hint, "\n"), "\n")
+		command := strings.Fields(lines[len(lines)-1])
 		if len(command) != 3 || command[1] != "_uninstall-resume" || command[2] != store.Directory {
-			t.Fatalf("observation %d: printed retry %q", limit, command)
+			t.Fatalf("observation %d: printed retry %q", limit, hint)
 		}
-		if info, err := os.Stat(command[0]); command[0] != "yard" && (err != nil || info.Mode()&0100 == 0) {
-			t.Fatalf("observation %d: printed retry names a missing launcher: %v", limit, err)
+		install := strings.Contains(hint, "install a compatible Subyard version")
+		if executable, lookErr := exec.LookPath(command[0]); lookErr != nil {
+			if !install {
+				t.Fatalf("observation %d: printed retry is not runnable: %v", limit, lookErr)
+			}
+		} else if install || exec.Command(executable, command[1:]...).Run() != nil {
+			t.Fatalf("observation %d: runnable retry %q did not run as printed", limit, hint)
 		}
 		if err := store.Remove(); err != nil {
 			t.Fatalf("observation %d: exact retry failed: %v", limit, err)

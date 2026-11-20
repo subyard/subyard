@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -321,12 +322,16 @@ func (store RecoveryStore) Remove() error {
 	return whole.Remove()
 }
 
-// ResumeCommand is the exact retry of an incomplete removal. Once the retained
-// launcher is gone, any engine of this or a newer release resumes the store.
-func (store RecoveryStore) ResumeCommand() string {
+// ResumeHint is the diagnostic of an incomplete removal with its exact retry.
+// Once the retained launcher is gone, any engine of this or a newer release
+// resumes the store; without one on PATH, the operator installs it first.
+func (store RecoveryStore) ResumeHint() string {
 	launcher := filepath.Join(store.Directory, "runtime", "bin", "yard")
-	if _, err := os.Lstat(launcher); err != nil {
-		launcher = "yard"
+	if _, err := os.Lstat(launcher); err == nil {
+		return fmt.Sprintf("Full removal is incomplete. Retain %s and resume with:\n  %s _uninstall-resume %s\n", store.Directory, launcher, store.Directory)
 	}
-	return launcher + " _uninstall-resume " + store.Directory
+	if _, err := exec.LookPath("yard"); err != nil {
+		return fmt.Sprintf("Full removal is incomplete. Retain %s, install a compatible Subyard version, then resume with:\n  yard _uninstall-resume %s\n", store.Directory, store.Directory)
+	}
+	return fmt.Sprintf("Full removal is incomplete. Retain %s and resume with:\n  yard _uninstall-resume %s\n", store.Directory, store.Directory)
 }
